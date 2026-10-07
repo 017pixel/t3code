@@ -41,8 +41,11 @@ extension EnvironmentStore {
         guard !label.isEmpty else { throw SavedConnectionEditError.emptyLabel }
         var current = try savedConnection(matching: expected)
         current.label = label
-        current.httpBaseURL = httpBaseURL
-        current.webSocketBaseURL = webSocketBaseURL
+        var route = current.selectedRoute
+        guard !route.isLearned else { throw SavedConnectionEditError.unsupportedConnection }
+        route.httpBaseURL = httpBaseURL
+        route.webSocketBaseURL = webSocketBaseURL
+        current = current.mergingRoute(route, select: true)
         current.descriptor = descriptor
         try upsert(current)
         return current
@@ -52,7 +55,8 @@ extension EnvironmentStore {
         guard expected.kind == .bearer else { throw SavedConnectionEditError.unsupportedConnection }
         guard let current = try load().first(where: { $0.id == expected.id }),
               current.kind == expected.kind, current.httpBaseURL == expected.httpBaseURL,
-              current.webSocketBaseURL == expected.webSocketBaseURL, current.label == expected.label else {
+              current.webSocketBaseURL == expected.webSocketBaseURL, current.label == expected.label,
+              current.activeRouteID == expected.activeRouteID, current.credentialID == expected.credentialID else {
             throw SavedConnectionEditError.changedConnection
         }
         return current
@@ -75,5 +79,89 @@ extension Environment {
             components.port = nil
         }
         return components.url
+    }
+}
+
+extension EnvironmentStore {
+    /// Merge on this actor so pairing never replaces routes or preferences
+    /// saved while the one-time credential exchange was in progress.
+    @discardableResult
+    public func savePairedRoute(
+        _ route: EnvironmentRoute, descriptor: EnvironmentDescriptor,
+        expected: Environment?
+    ) throws -> Environment {
+        let current = try load().first { $0.id == descriptor.environmentId }
+        if expected != nil && current == nil { throw EnvironmentRouteError.changedEnvironment }
+        var environment = current ?? Environment(
+            id: descriptor.environmentId, label: descriptor.label,
+            httpBaseURL: route.httpBaseURL, webSocketBaseURL: route.webSocketBaseURL,
+            kind: route.kind, descriptor: descriptor, routes: [route]
+        )
+        environment.descriptor = descriptor
+        environment = environment.mergingRoute(route, select: true)
+        try upsert(environment)
+        return environment
+    }
+
+    @discardableResult
+    public func selectRoute(environmentID: String, route: EnvironmentRoute) throws -> Environment {
+        guard let current = try load().first(where: { $0.id == environmentID }) else {
+            throw EnvironmentRouteError.missingEnvironment
+        }
+        guard current.routes.contains(route), current.isEnabled else {
+            throw EnvironmentRouteError.changedEnvironment
+        }
+        let updated = current.selectingRoute(route)
+        try upsert(updated)
+        return updated
+    }
+
+    @discardableResult
+    public func reorderRoutes(environmentID: String, routeIDs: [String]) throws -> Environment {
+        guard var current = try load().first(where: { $0.id == environmentID }) else {
+            throw EnvironmentRouteError.missingEnvironment
+        }
+        guard routeIDs.count == current.routes.count,
+              Set(routeIDs) == Set(current.routes.map(\.id)) else { throw EnvironmentRouteError.invalidOrder }
+        let byID = Dictionary(uniqueKeysWithValues: current.routes.map { ($0.id, $0) })
+        current.routes = routeIDs.compactMap { byID[$0] }
+        try upsert(current)
+        return current
+    }
+
+    @discardableResult
+    public func removeRoute(environmentID: String, routeID: String) throws -> Environment {
+        guard let current = try load().first(where: { $0.id == environmentID }) else {
+            throw EnvironmentRouteError.missingEnvironment
+        }
+        let updated = try current.removingRoute(id: routeID)
+        try upsert(updated)
+        return updated
+    }
+
+    /// The caller must have obtained hints from a verified, authenticated route.
+    @discardableResult
+    public func mergeDiscoveredEndpoints(
+        environmentID: String, endpoints: [EnvironmentDirectEndpoint]?, verifiedRoute: EnvironmentRoute
+    ) throws -> Environment {
+        guard let current = try load().first(where: { $0.id == environmentID }) else {
+            throw EnvironmentRouteError.missingEnvironment
+        }
+        guard current.routes.contains(verifiedRoute) else { throw EnvironmentRouteError.changedEnvironment }
+        let updated = current.mergingDiscoveredEndpoints(endpoints, credentialOwnerID: verifiedRoute.credentialOwnerID)
+        if updated != current { try upsert(updated) }
+        return updated
+    }
+
+    /// Drop only cloud access. Independent pairings retain their cache identity.
+    @discardableResult
+    public func removeManagedRoutes() throws -> [Environment] {
+        let previous = try load()
+        let updated = previous.compactMap { $0.removingManagedRoutes() }
+        try save(updated)
+        if let active = try activeEnvironmentID(), !updated.contains(where: { $0.id == active }) {
+            try setActiveEnvironment(id: updated.first(where: \.isEnabled)?.id)
+        }
+        return updated
     }
 }

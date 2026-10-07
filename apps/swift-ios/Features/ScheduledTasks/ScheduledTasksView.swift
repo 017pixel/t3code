@@ -153,6 +153,7 @@ private struct ScheduledTasksEnvironmentView: View {
     }
     private var canManage: Bool {
         environment.isEnabled && environment.connectionState != .disconnected && environment.connectionState != .needsPairing
+            && environment.permissions?.grants("orchestration:operate") == true
     }
 
     private func row(_ task: ScheduledTask) -> some View {
@@ -190,8 +191,10 @@ private struct ScheduledTasksEnvironmentView: View {
                 Button(task.enabled ? "Pause" : "Resume", systemImage: task.enabled ? "pause" : "play") {
                     Task { await model.setEnabled(task, enabled: !task.enabled) }
                 }
-                Button("Run now", systemImage: "play.fill") { Task { await model.runNow(task) } }
-                    .disabled(task.lastRunStatus == .running)
+                if !task.schedule.isWebhook {
+                    Button("Run now", systemImage: "play.fill") { Task { await model.runNow(task) } }
+                        .disabled(task.lastRunStatus == .running)
+                }
                 Button(role: .destructive) { deleting = task } label: { Label("Delete", systemImage: "trash") }
             } label: {
                 Image(systemName: "ellipsis").frame(width: 44, height: 44)

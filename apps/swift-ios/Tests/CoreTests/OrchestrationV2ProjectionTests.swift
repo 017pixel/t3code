@@ -3,6 +3,126 @@ import XCTest
 @testable import T3Code
 
 final class OrchestrationV2ProjectionTests: XCTestCase {
+    func testUnknownItemsAreSkippedInSnapshotsAndHistoryWithoutLosingCursors() throws {
+        let known = V2Fixture.assistant("answer", ordinal: 2)
+        // No known base fields are needed on an unknown variant.
+        let unknown: JSONValue = .object(["type": .string("future_item")])
+        let state = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(items: [unknown, known]))
+        XCTAssertEqual(state.projection.turnItems.map(\.id), ["answer"])
+        XCTAssertEqual(state.projection.visibleTurnItems.map(\.sourceItemId), ["answer"])
+        XCTAssertEqual(state.normalizedSnapshot().thread.messages.first?.text, "Answer")
+        for rows in [[V2Fixture.row(unknown)], [V2Fixture.row(unknown), V2Fixture.row(known)]] {
+            let page = try JSONValue.object([
+                "snapshotSequence": .number(12), "items": .array(rows),
+                "nextCursor": .string("older"), "hasMoreHistory": .bool(true),
+            ]).decode(OrchestrationV2ThreadHistoryPage.self)
+            XCTAssertEqual(page.items.count, rows.count - 1)
+            XCTAssertEqual(page.nextCursor, "older")
+            XCTAssertTrue(page.hasMoreHistory)
+            XCTAssertEqual(page.snapshotSequence, 12)
+        }
+    }
+
+    func testAllUnknownHistoryPageAdvancesHistoryCursorButNotLiveSequence() throws {
+        var state = try OrchestrationV2ThreadState(snapshot: V2Fixture.patch(V2Fixture.snapshot(), [
+            "historyCursor": .string("cursor"), "hasMoreHistory": .bool(true),
+        ]))
+        let page: JSONValue = .object([
+            "snapshotSequence": .number(9),
+            "items": .array([.object(["item": .object(["type": .string("future_item")])])]),
+            "nextCursor": .string("older"), "hasMoreHistory": .bool(true),
+        ])
+        XCTAssertTrue(try state.appendHistory(page, beforeCursor: "cursor"))
+        XCTAssertEqual(state.historyCursor, "older")
+        XCTAssertTrue(state.hasMoreHistory)
+        XCTAssertEqual(state.snapshotSequence, 10)
+        XCTAssertTrue(state.projection.visibleTurnItems.isEmpty)
+        let final = V2Fixture.patch(page, ["nextCursor": .null, "hasMoreHistory": .bool(false)])
+        XCTAssertTrue(try state.appendHistory(final, beforeCursor: "older"))
+        XCTAssertNil(state.historyCursor)
+        XCTAssertFalse(state.hasMoreHistory)
+    }
+
+    func testMalformedKnownItemsAndDiscriminatorsFailEveryArrayBoundary() throws {
+        let malformed = V2Fixture.patch(V2Fixture.assistant("bad", ordinal: 1), ["text": .number(2)])
+        for item in [malformed, .object([:]), .object(["type": .null]), .object(["type": .number(4)])] {
+            for key in ["turnItems", "visibleTurnItems"] {
+                let rows = key == "turnItems" ? [item] : [V2Fixture.row(item)]
+                XCTAssertThrowsError(try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(fields: [key: .array(rows)])))
+            }
+            XCTAssertThrowsError(try JSONValue.object([
+                "snapshotSequence": .number(10), "items": .array([V2Fixture.row(item)]),
+                "nextCursor": .null, "hasMoreHistory": .bool(false),
+            ]).decode(OrchestrationV2ThreadHistoryPage.self))
+        }
+    }
+
+    func testUnknownLiveItemConsumesSequenceAndLaterKnownItemStillApplies() throws {
+        var state = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot())
+        let result = state.apply([
+            V2Fixture.event("turn-item.updated", payload: .object(["type": .string("future_item")]), sequence: 11),
+            V2Fixture.event("turn-item.updated", payload: V2Fixture.assistant("answer", ordinal: 1), sequence: 12),
+        ])
+        XCTAssertFalse(result.refreshRequired)
+        XCTAssertEqual(state.snapshotSequence, 12)
+        XCTAssertEqual(state.projection.turnItems.map(\.id), ["answer"])
+        for bad in [V2Fixture.patch(V2Fixture.assistant("bad", ordinal: 2), ["text": .null]),
+                    .object([:]), .object(["type": .number(1)])] {
+            XCTAssertTrue(state.apply([V2Fixture.event("turn-item.updated", payload: bad, sequence: 13)]).refreshRequired)
+            XCTAssertEqual(state.snapshotSequence, 12)
+        }
+        let unknown = V2Fixture.event("turn-item.updated", payload: .object(["type": .string("future_item")]), sequence: 13)
+        let wrongThread = V2Fixture.patch(unknown, ["event": V2Fixture.patch(unknown["event"] ?? .null, ["threadId": .string("other")])])
+        XCTAssertTrue(state.apply([wrongThread]).refreshRequired)
+        XCTAssertEqual(state.snapshotSequence, 12)
+        var badEnvelope = try XCTUnwrap(unknown["event"]).v2Object
+        badEnvelope.removeValue(forKey: "id")
+        XCTAssertTrue(state.apply([V2Fixture.patch(unknown, ["event": .object(badEnvelope)])]).refreshRequired)
+        XCTAssertEqual(state.snapshotSequence, 12)
+    }
+
+    func testSecretRequestsDecodeAndUpdateWithoutRuntimeRequests() throws {
+        var state = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(items: [V2Fixture.assistant("answer", ordinal: 1)]))
+        for (index, status) in ["pending", "saved", "declined", "cancelled"].enumerated() {
+            let secret = V2Fixture.item("secret", type: "secret_request", ordinal: 2, fields: [
+                "label": .string("API key"), "reason": .string("Authenticate the service"),
+                "placeholder": .string("Paste key"), "secretStatus": .string(status),
+            ])
+            let snapshot = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(items: [secret]))
+            guard case let .secretRequest(request) = snapshot.projection.turnItems.first?.content else {
+                return XCTFail("Expected typed secret metadata")
+            }
+            XCTAssertEqual(request.status.rawValue, status)
+            XCTAssertEqual(request.label, "API key")
+            XCTAssertFalse(state.apply([V2Fixture.event("turn-item.updated", payload: secret, sequence: 11 + index)]).refreshRequired)
+            let activity = try XCTUnwrap(state.normalizedSnapshot().thread.activities.first { $0.kind == "secret.request" })
+            XCTAssertEqual(activity.v2Item?["secretStatus"], .string(status))
+            XCTAssertEqual(activity.v2Timeline?.sourceThreadID, "thread")
+            XCTAssertEqual(activity.v2Timeline?.itemID, "secret")
+            XCTAssertEqual(state.normalizedSnapshot().thread.messages.first?.text, "Answer")
+        }
+        let bad = V2Fixture.item("bad", type: "secret_request", ordinal: 3, fields: [
+            "label": .string("API key"), "reason": .string("Required"), "secretStatus": .string("unknown"),
+        ])
+        XCTAssertThrowsError(try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(items: [bad])))
+    }
+
+    func testInheritedAndSyntheticSecretRowsRetainSourceIdentityAndStatus() throws {
+        let secret = V2Fixture.item("secret", type: "secret_request", ordinal: 1, fields: [
+            "threadId": .string("parent"), "label": .string("API key"),
+            "reason": .string("Connect"), "secretStatus": .string("pending"),
+        ])
+        for visibility in ["inherited", "synthetic"] {
+            let snapshot = V2Fixture.snapshot(fields: ["visibleTurnItems": .array([V2Fixture.row(secret, visibility: visibility)])])
+            let activity = try XCTUnwrap(OrchestrationV2ThreadState(snapshot: snapshot).normalizedSnapshot().thread.activities.first)
+            XCTAssertEqual(activity.kind, "secret.request")
+            XCTAssertEqual(activity.v2Timeline?.sourceThreadID, "parent")
+            XCTAssertEqual(activity.v2Timeline?.itemID, "secret")
+            XCTAssertEqual(activity.v2Timeline?.visibility, visibility)
+            XCTAssertEqual(activity.v2Item?["secretStatus"], .string("pending"))
+        }
+    }
+
     func testRealContractFixturesMatchClientRuntimeProjectionAndHistory() throws {
         var state = try OrchestrationV2ThreadState(snapshot: V2Fixture.load("v2-thread-bounded-snapshot"))
         let frames = try XCTUnwrap(try V2Fixture.load("v2-thread-stream-events").v2Array)
@@ -186,6 +306,17 @@ enum V2Fixture {
             "forkedFrom": .null, "createdBy": .string("user"), "creationSource": .string("mobile"),
             "createdAt": .string(now), "updatedAt": .string(now), "archivedAt": .null,
             "settledOverride": .null, "settledAt": .null, "lastVisitedAt": .null, "deletedAt": .null,
+        ])
+    }
+    static func watchedPullRequest(_ number: Int = 1, source: String = "manual") -> JSONValue {
+        .object([
+            "host": .string("github.com"), "repository": .string("example/repo"), "number": .number(Double(number)),
+            "url": .string("https://github.com/example/repo/pull/\(number)"), "source": .string(source),
+            "linkedAt": .string(now), "snapshot": .null, "stack": .null,
+            "watch": .object([
+                "startedAt": .string(now), "headSha": .null, "failedChecks": .array([]), "passed": .bool(false),
+                "remarksThrough": .string(now), "remarkIds": .array([]), "conflicting": .bool(false), "wakes": .number(0),
+            ]),
         ])
     }
     static func snapshot(items: [JSONValue] = [], fields: [String: JSONValue] = [:]) -> JSONValue {

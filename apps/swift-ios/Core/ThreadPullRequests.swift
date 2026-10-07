@@ -64,6 +64,34 @@ public struct ThreadPullRequestStack: Codable, Hashable, Sendable {
     public let layers: [Layer]
 }
 
+public struct ThreadPullRequestWatch: Codable, Hashable, Sendable {
+    public let startedAt: String
+    public let headSha: String?
+    public let failedChecks: [String]
+    public let passed: Bool
+    public let passedChecks: [String]
+    public let remarksThrough: String
+    public let remarkIds: [String]
+    public let conflicting: Bool
+    public let wakes: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case startedAt, headSha, failedChecks, passed, passedChecks, remarksThrough, remarkIds, conflicting, wakes
+    }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        startedAt = try c.decode(String.self, forKey: .startedAt)
+        headSha = try c.decodeIfPresent(String.self, forKey: .headSha)
+        failedChecks = try c.decode([String].self, forKey: .failedChecks)
+        passed = try c.decode(Bool.self, forKey: .passed)
+        passedChecks = c.contains(.passedChecks) ? try c.decode([String].self, forKey: .passedChecks) : []
+        remarksThrough = try c.decode(String.self, forKey: .remarksThrough)
+        remarkIds = try c.decode([String].self, forKey: .remarkIds)
+        conflicting = try c.decode(Bool.self, forKey: .conflicting)
+        wakes = try c.decode(Int.self, forKey: .wakes)
+    }
+}
+
 public struct ThreadPullRequestLink: Codable, Hashable, Sendable, Identifiable {
     public let host: String
     public let repository: String
@@ -74,6 +102,7 @@ public struct ThreadPullRequestLink: Codable, Hashable, Sendable, Identifiable {
     public let linkedAt: String
     public var snapshot: ThreadPullRequestSnapshot?
     public var stack: ThreadPullRequestStack?
+    public var watch: ThreadPullRequestWatch? = nil
 
     public var id: ThreadPullRequestKey {
         let parsed = URL(string: url)
@@ -85,6 +114,7 @@ public struct ThreadPullRequestLink: Codable, Hashable, Sendable, Identifiable {
         return ThreadPullRequestKey(host: authority, repository: repository, number: number)
     }
     public var isVisible: Bool { source != "stack-dismissed" }
+    public var isWatched: Bool { isVisible && watch != nil }
     public var isOpen: Bool { snapshot == nil || snapshot?.state == .open }
 }
 

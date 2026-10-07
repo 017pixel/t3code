@@ -34,29 +34,35 @@ public actor PairingService {
     @discardableResult
     public func pair(
         url pairingURL: String,
-        label clientLabel: String? = nil
+        label clientLabel: String? = nil,
+        expectedEnvironmentID: String? = nil
     ) async throws -> Environment {
-        try await pair(target: PairingURL.resolve(pairingURL), clientLabel: clientLabel)
+        try await pair(target: PairingURL.resolve(pairingURL), clientLabel: clientLabel,
+                       expectedEnvironmentID: expectedEnvironmentID)
     }
 
     @discardableResult
     public func pair(
         host: String,
         code: String,
-        label clientLabel: String? = nil
+        label clientLabel: String? = nil,
+        expectedEnvironmentID: String? = nil
     ) async throws -> Environment {
         try await pair(
             target: PairingURL.resolve(host: host, pairingCode: code),
-            clientLabel: clientLabel
+            clientLabel: clientLabel, expectedEnvironmentID: expectedEnvironmentID
         )
     }
 
     private func pair(
         target: PairingTarget,
-        clientLabel: String?
+        clientLabel: String?, expectedEnvironmentID: String?
     ) async throws -> Environment {
         let api = EnvironmentAPI(transport: transport, credentials: credentialStore)
         let descriptor = try await api.descriptor(at: target.httpBaseURL)
+        if let expectedEnvironmentID, descriptor.environmentId != expectedEnvironmentID {
+            throw EnvironmentRouteError.identityMismatch
+        }
         let previousEnvironment = try await environmentStore.load()
             .first { $0.id == descriptor.environmentId }
         let preference = previousEnvironment?.orchestrationProtocolPreference ?? .auto
@@ -71,13 +77,16 @@ public actor PairingService {
                 traceID: nil
             )
         }
-        let environment = Environment(
-            id: descriptor.environmentId,
-            label: descriptor.label,
-            httpBaseURL: target.httpBaseURL,
-            webSocketBaseURL: target.webSocketBaseURL,
-            descriptor: descriptor,
-            orchestrationProtocolPreference: preference
+        let sameOrigin = previousEnvironment?.routes.first {
+            !$0.isLearned && $0.kind == .bearer
+                && $0.normalizedOrigin == EnvironmentRoute.normalizedOrigin(target.httpBaseURL)
+        }
+        let route = EnvironmentRoute(
+            id: sameOrigin?.id ?? (previousEnvironment == nil ? "direct" : UUID().uuidString),
+            httpBaseURL: target.httpBaseURL, webSocketBaseURL: target.webSocketBaseURL,
+            kind: .bearer,
+            credentialOwnerID: sameOrigin?.credentialOwnerID
+                ?? (previousEnvironment == nil ? descriptor.environmentId : "route:\(UUID().uuidString)")
         )
         let credential = EnvironmentCredential(
             accessToken: access.accessToken,
@@ -89,10 +98,13 @@ public actor PairingService {
         // the same actor operation so a concurrent refresh cannot be lost.
         let previousCredential = try await credentialStore.swapCredential(
             credential,
-            for: environment.id
+            for: route.credentialOwnerID
         )
+        let environment: Environment
         do {
-            try await environmentStore.upsert(environment)
+            environment = try await environmentStore.savePairedRoute(
+                route, descriptor: descriptor, expected: previousEnvironment
+            )
             if try await environmentStore.activeEnvironmentID() == nil {
                 try await environmentStore.setActiveEnvironment(id: environment.id)
             }
@@ -101,12 +113,12 @@ public actor PairingService {
                 _ = try? await credentialStore.replaceCredential(
                     previousCredential,
                     ifMatching: credential,
-                    for: environment.id
+                    for: route.credentialOwnerID
                 )
             } else {
                 _ = try? await credentialStore.removeCredential(
                     ifMatching: credential,
-                    for: environment.id
+                    for: route.credentialOwnerID
                 )
             }
             throw error

@@ -52,6 +52,11 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				RemoteDevices/generate-stream.mjs,
+				Chat/generate-embedded.mjs,
+				Chat/embedded-content.browser.ts,
+				Browser/generate-stream.mjs,
+				Browser/browser-stream.browser.ts,
+				Browser/browser-stream.test.ts,
 			);
 			target = A50000000000000000000001 /* T3Code */;
 		};
@@ -457,7 +462,7 @@
 			outputPaths = ("$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/T3DeviceStream.js", );
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\nexport PATH=\"$PATH:$HOME/.vite-plus/bin:${VOLTA_HOME:-$HOME/.volta}/bin:${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims:${ASDF_DATA_DIR:-$HOME/.asdf}/shims:${FNM_DIR:-$HOME/Library/Application Support/fnm}/aliases/default/bin:$HOME/.local/share/fnm/aliases/default/bin:$HOME/.fnm/aliases/default/bin:${NVM_DIR:-$HOME/.nvm}/current/bin:/opt/homebrew/bin:/usr/local/bin\"\nDEVICE_STREAM_NODE=\"${NODE_BINARY:-node}\"\nif ! command -v \"$DEVICE_STREAM_NODE\" >/dev/null 2>&1 || ! \"$DEVICE_STREAM_NODE\" --version >/dev/null 2>&1; then\n  echo \"error: Bundle Device Stream requires Node.js. Install the version in package.json or set the NODE_BINARY build setting to its executable path (for example, from command -v node in your terminal).\" >&2\n  exit 1\nfi\n\"$DEVICE_STREAM_NODE\" \"$SRCROOT/Features/RemoteDevices/generate-stream.mjs\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\n";
+			shellScript = "set -eu\nexport PATH=\"$PATH:$HOME/.vite-plus/bin:${VOLTA_HOME:-$HOME/.volta}/bin:${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims:${ASDF_DATA_DIR:-$HOME/.asdf}/shims:${FNM_DIR:-$HOME/Library/Application Support/fnm}/aliases/default/bin:$HOME/.local/share/fnm/aliases/default/bin:$HOME/.fnm/aliases/default/bin:${NVM_DIR:-$HOME/.nvm}/current/bin:/opt/homebrew/bin:/usr/local/bin\"\nDEVICE_STREAM_NODE=\"${NODE_BINARY:-node}\"\nif ! command -v \"$DEVICE_STREAM_NODE\" >/dev/null 2>&1 || ! \"$DEVICE_STREAM_NODE\" --version >/dev/null 2>&1; then\n  echo \"error: Bundle Device Stream requires Node.js. Install the version in package.json or set the NODE_BINARY build setting to its executable path (for example, from command -v node in your terminal).\" >&2\n  exit 1\nfi\n\"$DEVICE_STREAM_NODE\" \"$SRCROOT/Features/RemoteDevices/generate-stream.mjs\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\n\"$DEVICE_STREAM_NODE\" \"$SRCROOT/Features/Chat/generate-embedded.mjs\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\n\"$DEVICE_STREAM_NODE\" \"$SRCROOT/Features/Browser/generate-stream.mjs\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -652,7 +657,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Extensions/Shared/T3Code.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Resources/Info.plist;
@@ -710,7 +715,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Extensions/Shared/T3Code.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "T3 Code SwiftUI";
@@ -800,7 +805,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Extensions/Widgets/T3CodeWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Extensions/Widgets/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -831,7 +836,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Extensions/Widgets/T3CodeWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Extensions/Widgets/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -864,7 +869,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Extensions/Share/T3CodeShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Extensions/Share/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -895,7 +900,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Extensions/Share/T3CodeShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Extensions/Share/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;

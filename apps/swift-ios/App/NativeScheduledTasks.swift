@@ -44,21 +44,31 @@ extension NativeFeatureClient: FeatureScheduledTaskManaging {
 
     func upsertScheduledTask(environmentID: String, input: ScheduledTaskUpsertInput) async throws -> ScheduledTask {
         let client = try await environmentServiceClient(environmentID: environmentID)
+        try await requireScope("orchestration:operate", client: client)
         return try await client.upsertScheduledTask(input)
     }
 
     func setScheduledTaskEnabled(_ target: FeatureScheduledTaskTarget, enabled: Bool) async throws -> ScheduledTask {
         let client = try await environmentServiceClient(environmentID: target.environmentID)
+        try await requireScope("orchestration:operate", client: client)
         return try await client.setScheduledTaskEnabled(id: target.taskID, enabled: enabled)
     }
 
     func runScheduledTaskNow(_ target: FeatureScheduledTaskTarget) async throws -> ScheduledTask {
         let client = try await environmentServiceClient(environmentID: target.environmentID)
+        try await requireScope("orchestration:operate", client: client)
         return try await client.runScheduledTaskNow(id: target.taskID)
+    }
+
+    func rotateScheduledTaskWebhookToken(_ target: FeatureScheduledTaskTarget) async throws -> ScheduledTask {
+        let client = try await environmentServiceClient(environmentID: target.environmentID)
+        try await requireScope("orchestration:operate", client: client)
+        return try await client.rotateScheduledTaskWebhookToken(id: target.taskID)
     }
 
     func deleteScheduledTask(_ target: FeatureScheduledTaskTarget) async throws {
         let client = try await environmentServiceClient(environmentID: target.environmentID)
+        try await requireScope("orchestration:operate", client: client)
         try await client.deleteScheduledTask(id: target.taskID)
     }
 }

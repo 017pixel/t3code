@@ -27,7 +27,12 @@ public struct FeatureFilesView: View {
 
     public var body: some View {
         Group {
-            if let initialPath {
+            if client.permissions(forThreadID: threadID)?.grants("filesystem:read") != true {
+                ContentUnavailableView(
+                    "Files unavailable", systemImage: "folder.badge.questionmark",
+                    description: Text("This connection needs the filesystem:read permission.")
+                )
+            } else if let initialPath {
                 FeatureFilePreviewView(
                     client: client,
                     threadID: threadID,
@@ -207,6 +212,8 @@ private struct FeatureFileDirectoryView: View {
         await search.search(searchRequest, debounce: {
             if debounce { try await Task.sleep(for: .milliseconds(200)) }
         }) { query, limit in
+            try (client.permissions(forThreadID: threadID) ?? EnvironmentPermissionState())
+                .require("filesystem:read")
             if let searchClient = client as? any FeatureWorkspaceSearching {
                 return try await searchClient.searchWorkspaceFiles(threadID: threadID, query: query, limit: limit)
             }
@@ -217,7 +224,9 @@ private struct FeatureFileDirectoryView: View {
 
     private func loadDirectory(refresh: Bool = false) async {
         await browser.load(directory, refresh: refresh) {
-            try await client.listFiles(threadID: threadID, path: path)
+            try (client.permissions(forThreadID: threadID) ?? EnvironmentPermissionState())
+                .require("filesystem:read")
+            return try await client.listFiles(threadID: threadID, path: path)
         }
     }
 }
@@ -444,7 +453,13 @@ private struct FeatureFilePreviewView: View {
         )
     }
 
+    private func requireRead() throws {
+        try (client.permissions(forThreadID: threadID) ?? EnvironmentPermissionState())
+            .require("filesystem:read")
+    }
+
     private func resolveAssetURL() async throws -> URL {
+        try requireRead()
         guard let resolver = client as? any FeatureWorkspaceAssetResolving else {
             throw FeatureCapabilityUnavailable("Native file previews")
         }
@@ -455,6 +470,7 @@ private struct FeatureFilePreviewView: View {
 
     private func copyContents() async {
         do {
+            try requireRead()
             let text: String
             if let content { text = content.text }
             else { text = try await client.readFile(threadID: threadID, path: entry.path).text }
@@ -481,6 +497,7 @@ private struct FeatureFilePreviewView: View {
             if loadIdentity == identity { isLoading = false }
         }
         do {
+            try requireRead()
             if mode == .preview, previewKind != .markdown {
                 let resolvedURL = try await resolveAssetURL()
                 try Task.checkCancellation()

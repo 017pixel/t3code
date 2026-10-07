@@ -29,6 +29,10 @@ struct PlatformRootView: View {
             }
         )
         .environment(\.openURL, OpenURLAction { url in
+            if PlatformDeepLinkParser.isThreadLink(url) {
+                handle(url: url, letOnboardingConfirmConnection: false)
+                return .handled
+            }
             // Links tapped inside the app (message Markdown above all) would
             // otherwise leave for Safari or be rejected by an unregistered
             // scheme, so keep the ones this device can already show.
@@ -140,6 +144,16 @@ struct PlatformRootView: View {
     ) -> Bool {
         guard !isSigningOut, let previousAccountID else { return false }
         return previousAccountID != accountID
+    }
+
+    private func resolveRoutedThread(environmentID: String?, id: String) async -> FeatureThread? {
+        if let loaded = PlatformRouteResolver.thread(in: model.snapshot, environmentID: environmentID, id: id) {
+            return loaded
+        }
+        guard let environmentID,
+              model.snapshot.environments.contains(where: { $0.id == environmentID && $0.isEnabled }) else { return nil }
+        let scopedID = FeatureScopedID.thread(environmentID: environmentID, wireID: id)
+        return await model.detail(for: scopedID, force: true, fresh: true)?.thread
     }
 
     private var subscriptionUsageKey: PlatformSubscriptionUsageObservationKey {
@@ -306,11 +320,7 @@ struct PlatformRootView: View {
             )
         case let .thread(environmentID, threadID):
             guard await enableEnvironmentIfNeeded(environmentID),
-                  let thread = PlatformRouteResolver.thread(
-                      in: model.snapshot,
-                      environmentID: environmentID,
-                      id: threadID
-                  )
+                  let thread = await resolveRoutedThread(environmentID: environmentID, id: threadID)
             else {
                 if model.errorMessage == nil { model.errorMessage = "That thread is not available on this device." }
                 return
@@ -323,9 +333,7 @@ struct PlatformRootView: View {
             )
         case let .threadDestination(environmentID, threadID, destination):
             guard await enableEnvironmentIfNeeded(environmentID),
-                  let thread = PlatformRouteResolver.thread(
-                      in: model.snapshot, environmentID: environmentID, id: threadID
-                  ) else {
+                  let thread = await resolveRoutedThread(environmentID: environmentID, id: threadID) else {
                 if model.errorMessage == nil { model.errorMessage = "That thread is not available on this device." }
                 return
             }

@@ -125,6 +125,7 @@ public struct PullRequestComment: Codable, Equatable, Sendable, Identifiable {
     public let author: PullRequestActor?
     public let body: String
     public let createdAt: String
+    public var editedAt: String? = nil
     public let url: String?
     public let path: String?
     public let reviewState: String?
@@ -147,6 +148,7 @@ public struct PullRequestThreadComment: Codable, Equatable, Sendable, Identifiab
     public let author: PullRequestActor?
     public let body: String
     public let createdAt: String
+    public var editedAt: String? = nil
     public let url: String?
     public let reactions: [PullRequestReaction]?
 }

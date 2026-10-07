@@ -1,7 +1,7 @@
 import Foundation
 
 struct FeatureScheduledTaskDraft: Equatable {
-    enum ScheduleMode: String, CaseIterable { case fixedTime, interval }
+    enum ScheduleMode: String, CaseIterable { case fixedTime, interval, webhook }
     enum Workspace: String, CaseIterable { case worktree, root, existingWorktree }
 
     let environmentID: String
@@ -17,6 +17,7 @@ struct FeatureScheduledTaskDraft: Equatable {
     var timeOfDay = "09:00"
     var weekdays: Set<Int> = [1, 2, 3, 4, 5]
     var intervalMinutes = "15"
+    var maxDeliveryAgeMinutes = ""
     var workspace = Workspace.worktree
     var baseRef = "main"
     var checkoutPath = ""
@@ -43,6 +44,9 @@ struct FeatureScheduledTaskDraft: Equatable {
         runtimeMode = task.runtimeMode
         interactionMode = task.interactionMode
         switch task.schedule {
+        case let .webhook(_, maxAge):
+            scheduleMode = .webhook
+            maxDeliveryAgeMinutes = maxAge.map(String.init) ?? ""
         case let .interval(everyMs):
             scheduleMode = .interval
             intervalMinutes = String(Double(everyMs) / 60_000)
@@ -65,11 +69,12 @@ struct FeatureScheduledTaskDraft: Equatable {
         }
     }
 
-    func input(projects: [FeatureProject]) throws -> ScheduledTaskUpsertInput {
+    func input(projects: [FeatureProject], latestTask: ScheduledTask? = nil) throws -> ScheduledTaskUpsertInput {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw invalid("Add a task name.")
         }
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let prompt = self.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty || scheduleMode == .webhook else {
             throw invalid("Add a prompt.")
         }
         guard let project = projects.first(where: { $0.id == projectID && $0.environmentID == environmentID }) else {
@@ -108,16 +113,36 @@ struct FeatureScheduledTaskDraft: Equatable {
         return ScheduledTaskUpsertInput(
             id: original?.id, requireExisting: original == nil ? nil : true, commandId: commandID,
             title: title.trimmingCharacters(in: .whitespacesAndNewlines),
-            prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines), enabled: enabled,
-            schedule: try schedule(), projectId: wireProjectID, threadId: original?.threadId,
+            prompt: prompt.isEmpty ? "Handle this webhook:\n{{body}}" : prompt, enabled: enabled,
+            schedule: try schedule(latestTask: latestTask), projectId: wireProjectID, threadId: original?.threadId,
             workspaceStrategy: try workspaceStrategy(), modelSelection: model,
             runtimeMode: runtimeMode, interactionMode: interactionMode,
             createdBy: original?.createdBy ?? .user, creationSource: original?.creationSource ?? .mobile
         )
     }
 
-    func schedule() throws -> ScheduledTaskSchedule {
+    func schedule(latestTask: ScheduledTask? = nil) throws -> ScheduledTaskSchedule {
         switch scheduleMode {
+        case .webhook:
+            let age = maxDeliveryAgeMinutes.trimmingCharacters(in: .whitespacesAndNewlines)
+            let minutes: Int?
+            if age.isEmpty { minutes = nil }
+            else {
+                guard age.allSatisfy({ $0.isASCII && $0.isNumber }),
+                      let value = Int(age), (1...1440).contains(value) else {
+                    throw invalid("Enter a whole number from 1 to 1440 minutes, or leave it empty.")
+                }
+                minutes = value
+            }
+            let signature: ScheduledTaskWebhookSignature?
+            if let original {
+                guard let latestTask, latestTask.id == original.id else {
+                    throw invalid("Refresh this task before saving its webhook settings.")
+                }
+                if case let .webhook(current, _) = latestTask.schedule { signature = current }
+                else { signature = nil }
+            } else { signature = nil }
+            return .webhook(signature: signature, maxDeliveryAgeMinutes: minutes)
         case .interval:
             guard let minutes = Double(intervalMinutes), minutes.isFinite, minutes >= 1 else {
                 throw invalid("Set an interval of at least one minute.")
@@ -172,6 +197,7 @@ struct FeatureScheduledTaskDraft: Equatable {
 extension ScheduledTaskSchedule {
     var summary: String {
         switch self {
+        case .webhook: return "On webhook"
         case let .interval(everyMs):
             let units: [(Int, String)] = [(604_800_000, "week"), (86_400_000, "day"), (3_600_000, "hour"),
                                         (60_000, "minute"), (1_000, "second"), (1, "millisecond")]

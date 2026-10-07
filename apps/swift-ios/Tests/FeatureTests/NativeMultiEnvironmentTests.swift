@@ -440,6 +440,67 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         }
     }
 
+    func testPassiveHomeMonitorsDoNotStarveActiveViewsAndReleaseIndependentDemand() async throws {
+        let server = MultiEnvironmentConfigurationServer()
+        let fixture = try await Self.makeFixture(
+            webSocketConnector: MultiEnvironmentConfigurationConnector(server: server)
+        )
+        let client = fixture.client
+        let directory = fixture.directory
+        addTeardownBlock {
+            await client.disconnect()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let snapshot = try await client.initialSnapshot()
+        let thread = try XCTUnwrap(snapshot.threads.first { $0.environmentID == "two" })
+        let other = try XCTUnwrap(snapshot.threads.first { $0.environmentID == "one" })
+
+        let home = client.sourceControlStatusEvents(threadID: thread.id, intent: .passive)
+        let homeTask = Task { for await _ in home {} }
+        defer { homeTask.cancel() }
+        let passive = await server.nextSourceControlDirectory()
+        XCTAssertEqual(passive.host, "two.example")
+        XCTAssertEqual(passive.includeRemote, false)
+
+        // Several home rows sharing a workspace must share one passive monitor.
+        let homeStreams = (0..<4).map { _ in
+            client.sourceControlStatusEvents(threadID: thread.id, intent: .passive)
+        }
+        let homeTasks = homeStreams.map { stream in Task { for await _ in stream {} } }
+        defer { homeTasks.forEach { $0.cancel() } }
+        let detail = client.sourceControlStatusEvents(threadID: thread.id, intent: .active)
+        let detailTask = Task { for await _ in detail {} }
+        defer { detailTask.cancel() }
+        let active = await server.nextSourceControlDirectory()
+        XCTAssertEqual(active.host, passive.host)
+        XCTAssertEqual(active.cwd, passive.cwd)
+        XCTAssertEqual(active.includeRemote, true)
+
+        let otherHome = client.sourceControlStatusEvents(threadID: other.id, intent: .passive)
+        let otherTask = Task { for await _ in otherHome {} }
+        defer { otherTask.cancel() }
+        let otherRequest = await server.nextSourceControlDirectory()
+        XCTAssertEqual(otherRequest.host, "one.example")
+        XCTAssertEqual(otherRequest.includeRemote, false)
+
+        detailTask.cancel()
+        await detailTask.value
+        let interrupted = await server.nextSourceControlInterruption()
+        XCTAssertEqual(interrupted, active)
+        let remaining = await server.activeSourceControlRequests()
+        XCTAssertEqual(Set(remaining), [passive, otherRequest])
+
+        for task in homeTasks { task.cancel(); await task.value }
+        homeTask.cancel()
+        await homeTask.value
+        let passiveInterrupted = await server.nextSourceControlInterruption()
+        XCTAssertEqual(passiveInterrupted, passive)
+        otherTask.cancel()
+        await otherTask.value
+        let otherInterrupted = await server.nextSourceControlInterruption()
+        XCTAssertEqual(otherInterrupted, otherRequest)
+    }
+
     func testProviderCatalogueUsesStableProviderAndModelIdentities() {
         let normalized = NativeFeatureClient.normalizedProviders([
             FeatureProvider(
@@ -2080,6 +2141,17 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
             }
             throw URLError(.cannotConnectToHost)
         }
+        if path == "/api/auth/session" {
+            let permissions = [
+                "orchestration:read", "orchestration:operate", "filesystem:read",
+                "settings:write", "providers:manage", "source-control:write",
+            ]
+            let session = AuthSessionState(
+                authenticated: true, scopes: permissions, sessionMethod: "bearer-access-token",
+                permissions: permissions, auth: .init(serverUpdateScope: "environment:maintain")
+            )
+            return (try JSONEncoder.t3.encode(session), multiEnvironmentResponse(request))
+        }
         if path == "/.well-known/t3/environment",
            let environment = environments.first(where: { $0.httpBaseURL.host == host }) {
             return (try legacyEnvironmentDescriptorData(for: environment), multiEnvironmentResponse(request))
@@ -2169,9 +2241,18 @@ private struct UnavailableMultiEnvironmentWebSocketConnector: WebSocketConnectin
     }
 }
 
+private struct SourceControlSubscriptionRecord: Hashable, Sendable {
+    let host: String
+    let cwd: String
+    let includeRemote: Bool?
+}
+
 private actor MultiEnvironmentConfigurationServer {
-    private var sourceControlDirectories: [(host: String, cwd: String)] = []
-    private var sourceControlWaiters: [CheckedContinuation<(host: String, cwd: String), Never>] = []
+    private var sourceControlDirectories: [SourceControlSubscriptionRecord] = []
+    private var sourceControlWaiters: [CheckedContinuation<SourceControlSubscriptionRecord, Never>] = []
+    private var sourceControlSubscriptions: [String: SourceControlSubscriptionRecord] = [:]
+    private var sourceControlInterruptions: [SourceControlSubscriptionRecord] = []
+    private var sourceControlInterruptionWaiters: [CheckedContinuation<SourceControlSubscriptionRecord, Never>] = []
     private var settingsByHost: [String: [String: JSONValue]] = [:]
     private var settingsUpdateHosts: [String] = []
     private var scratchRequestHosts: [String] = []
@@ -2210,15 +2291,29 @@ private actor MultiEnvironmentConfigurationServer {
 
     func updatedHosts() -> [String] { settingsUpdateHosts }
     func scratchHosts() -> [String] { scratchRequestHosts }
-    func nextSourceControlDirectory() async -> (host: String, cwd: String) {
+    func nextSourceControlDirectory() async -> SourceControlSubscriptionRecord {
         if !sourceControlDirectories.isEmpty { return sourceControlDirectories.removeFirst() }
         return await withCheckedContinuation { sourceControlWaiters.append($0) }
+    }
+    func activeSourceControlRequests() -> [SourceControlSubscriptionRecord] {
+        Array(sourceControlSubscriptions.values)
+    }
+    func nextSourceControlInterruption() async -> SourceControlSubscriptionRecord {
+        if !sourceControlInterruptions.isEmpty { return sourceControlInterruptions.removeFirst() }
+        return await withCheckedContinuation { sourceControlInterruptionWaiters.append($0) }
     }
     func settings(host: String) -> [String: JSONValue] { settingsByHost[host] ?? [:] }
     func fileRequests() -> [(host: String, input: JSONValue)] { directoryRequests }
     func pullRequestRequests() -> [(host: String, method: String, input: JSONValue)] { prRequests }
 
     func response(to request: JSONValue, host: String) throws -> JSONValue? {
+        if request["_tag"]?.stringValue == "Interrupt",
+           case let .number(id)? = request["requestId"],
+           let record = sourceControlSubscriptions.removeValue(forKey: "\(host):\(id)") {
+            if sourceControlInterruptionWaiters.isEmpty { sourceControlInterruptions.append(record) }
+            else { sourceControlInterruptionWaiters.removeFirst().resume(returning: record) }
+            return nil
+        }
         guard let tag = request["tag"]?.stringValue,
               case let .number(id)? = request["id"] else { return nil }
         let value: JSONValue
@@ -2262,10 +2357,14 @@ private actor MultiEnvironmentConfigurationServer {
             guard let cwd = request["payload"]?["cwd"]?.stringValue else {
                 throw URLError(.badServerResponse)
             }
+            let record = SourceControlSubscriptionRecord(
+                host: host, cwd: cwd, includeRemote: request["payload"]?["includeRemote"]?.boolValue
+            )
+            sourceControlSubscriptions["\(host):\(id)"] = record
             if sourceControlWaiters.isEmpty {
-                sourceControlDirectories.append((host, cwd))
+                sourceControlDirectories.append(record)
             } else {
-                sourceControlWaiters.removeFirst().resume(returning: (host, cwd))
+                sourceControlWaiters.removeFirst().resume(returning: record)
             }
             return nil
         case RPCMethod.subscribeServerConfig.rawValue:

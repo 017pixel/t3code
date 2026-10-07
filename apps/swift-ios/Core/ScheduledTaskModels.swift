@@ -4,15 +4,24 @@ import Foundation
 public enum ScheduledTaskSchedule: Equatable, Sendable, Codable {
     case interval(everyMs: Int)
     case fixedTime(timeOfDay: String, weekdays: [Int]?)
+    case webhook(signature: ScheduledTaskWebhookSignature?, maxDeliveryAgeMinutes: Int?)
 
-    private enum CodingKeys: String, CodingKey { case type, everyMs, timeOfDay, weekdays }
-    private enum Kind: String, Codable { case interval, fixedTime = "fixed_time" }
+    public var isWebhook: Bool {
+        if case .webhook = self { return true }
+        return false
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, everyMs, timeOfDay, weekdays, signature, maxDeliveryAgeMinutes }
+    private enum Kind: String, Codable { case interval, fixedTime = "fixed_time", webhook }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(Kind.self, forKey: .type) {
         case .interval:
             self = .interval(everyMs: try c.decode(Int.self, forKey: .everyMs))
+        case .webhook:
+            self = .webhook(signature: try c.decodeIfPresent(ScheduledTaskWebhookSignature.self, forKey: .signature),
+                            maxDeliveryAgeMinutes: try c.decodeIfPresent(Int.self, forKey: .maxDeliveryAgeMinutes))
         case .fixedTime:
             self = .fixedTime(timeOfDay: try c.decode(String.self, forKey: .timeOfDay),
                               weekdays: try c.decodeIfPresent([Int].self, forKey: .weekdays))
@@ -25,12 +34,29 @@ public enum ScheduledTaskSchedule: Equatable, Sendable, Codable {
         case let .interval(everyMs):
             try c.encode(Kind.interval, forKey: .type)
             try c.encode(everyMs, forKey: .everyMs)
+        case let .webhook(signature, maxDeliveryAgeMinutes):
+            try c.encode(Kind.webhook, forKey: .type)
+            try c.encode(signature, forKey: .signature)
+            try c.encode(maxDeliveryAgeMinutes, forKey: .maxDeliveryAgeMinutes)
         case let .fixedTime(timeOfDay, weekdays):
             try c.encode(Kind.fixedTime, forKey: .type)
             try c.encode(timeOfDay, forKey: .timeOfDay)
             try c.encodeIfPresent(weekdays, forKey: .weekdays)
         }
     }
+}
+
+/// Only public verification settings belong on the phone; omit the secret to preserve it on save.
+public struct ScheduledTaskWebhookSignature: Codable, Equatable, Sendable {
+    public let header: String
+    public let encoding: String
+    public let prefix: String
+}
+
+public struct ScheduledTaskWebhookEndpoint: Codable, Equatable, Sendable {
+    public let path: String
+    public let url: String?
+    public let hasSecret: Bool
 }
 
 public enum ScheduledTaskWorkspaceStrategy: Equatable, Sendable, Codable {
@@ -102,10 +128,11 @@ public struct ScheduledTask: Codable, Equatable, Identifiable, Sendable {
     public let lastRunStatus: ScheduledTaskRunStatus
     public let lastRunError: String?
     public let runCount: Int
+    public var webhook: ScheduledTaskWebhookEndpoint? = nil
 }
 
 public struct ScheduledTaskListResult: Codable, Equatable, Sendable {
-    public let tasks: [ScheduledTask]
+    @ForwardCompatibleArray public var tasks: [ScheduledTask]
 }
 
 public struct ScheduledTaskMutationResult: Codable, Equatable, Sendable {

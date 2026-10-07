@@ -19,22 +19,6 @@ struct FeatureWorkspaceNavigationRequest: Equatable, Sendable {
     }
 }
 
-struct WorkspaceThreadSelection: Equatable {
-    private(set) var selectedID: String?
-    private(set) var lastOpenedID: String?
-
-    var highlightedID: String? { selectedID ?? lastOpenedID }
-
-    mutating func open(_ id: String) {
-        selectedID = id
-        lastOpenedID = id
-    }
-
-    mutating func close() {
-        selectedID = nil
-    }
-}
-
 public struct WorkspaceView: View {
     @SwiftUI.Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -119,6 +103,11 @@ public struct WorkspaceView: View {
             detail
         }
         .navigationSplitViewStyle(.balanced)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            PermissionUpdateNotice(environments: model.snapshot.environments.filter(\.isEnabled).map {
+                PermissionNoticeEnvironment(id: $0.id, label: $0.name, permissions: $0.permissions)
+            })
+        }
         .sheet(item: $newTaskPresentation, onDismiss: finishWorkspaceDismissal) { presentation in
             NewThreadView(
                 model: model,
@@ -446,22 +435,43 @@ public struct WorkspaceView: View {
         .background(T3Colors.background)
     }
 
-    @ViewBuilder
     private var detail: some View {
-        if let id = selectedThreadID,
+        NavigationStack(path: Binding(
+            get: { threadSelection.navigationPath },
+            set: {
+                let previousID = selectedThreadID
+                threadSelection.pop(to: $0, availableIDs: availableThreadIDs)
+                if selectedThreadID != previousID {
+                    requestedThreadDestination = nil
+                    requestedThreadDestinationID = nil
+                    activeToolDestination = nil
+                }
+            }
+        )) {
+            threadDetail(threadSelection.rootID)
+                .navigationDestination(for: String.self) { id in
+                    threadDetail(id)
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func threadDetail(_ id: String?) -> some View {
+        if let id,
            let thread = model.snapshot.threads.first(where: { $0.id == id }) {
             ThreadDetailView(
                 model: model,
                 thread: thread,
                 submitMessage: submitMessage,
-                onNavigateBack: closeSelectedThread,
-                onOpenThread: openThread,
+                onNavigateBack: { if selectedThreadID == id { closeSelectedThread() } },
+                onOpenThread: { if selectedThreadID == id { openRelatedThread($0) } },
                 onNewTaskFromThread: openNewTaskOnBranch,
-                initialDestination: requestedThreadDestination,
-                initialDestinationID: requestedThreadDestinationID,
-                onToolDestinationChange: { activeToolDestination = $0 },
-                rootNavigationDismissalID: rootNavigationDismissalID,
-                onRootNavigationDismissed: finishThreadNavigationDismissal
+                initialDestination: id == selectedThreadID ? requestedThreadDestination : nil,
+                initialDestinationID: id == selectedThreadID ? requestedThreadDestinationID : nil,
+                onToolDestinationChange: { if id == selectedThreadID { activeToolDestination = $0 } },
+                rootNavigationDismissalID: id == selectedThreadID ? rootNavigationDismissalID : nil,
+                onRootNavigationDismissed: finishThreadNavigationDismissal,
+                isPresentedThread: id == selectedThreadID
             )
             .id(id)
         } else {
@@ -862,6 +872,8 @@ public struct WorkspaceView: View {
 
     private var selectedThreadID: String? { threadSelection.selectedID }
 
+    private var availableThreadIDs: Set<String> { Set(model.snapshot.threads.map(\.id)) }
+
     private var selectedProjectIsAvailable: Bool {
         guard let selectedProjectID else { return true }
         return model.snapshot.projects.contains { $0.id == selectedProjectID }
@@ -879,8 +891,17 @@ public struct WorkspaceView: View {
         requestedThreadDestination = nil
         requestedThreadDestinationID = nil
         activeToolDestination = nil
-        threadSelection.close()
-        preferredCompactColumn = .sidebar
+        threadSelection.back(availableIDs: availableThreadIDs)
+        preferredCompactColumn = selectedThreadID == nil ? .sidebar : .detail
+    }
+
+    private func openRelatedThread(_ id: String) {
+        guard availableThreadIDs.contains(id) else { return }
+        requestedThreadDestination = nil
+        requestedThreadDestinationID = nil
+        activeToolDestination = nil
+        threadSelection.push(id)
+        preferredCompactColumn = .detail
     }
 
     @MainActor
@@ -944,6 +965,7 @@ public struct WorkspaceView: View {
     }
 
     private func applyNavigationRequest(_ navigationRequest: FeatureWorkspaceNavigationRequest) {
+        threadSelection.resetHistory()
         switch navigationRequest.destination {
         case .usageLimits:
             showingUsageLimits = true
@@ -1761,7 +1783,7 @@ struct FeatureThreadRow: View {
             return
         }
 
-        for await status in projectFaviconClient.sourceControlStatusEvents(threadID: thread.id) {
+        for await status in projectFaviconClient.sourceControlStatusEvents(threadID: thread.id, intent: .passive) {
             guard !Task.isCancelled else { return }
             let next = HomeThreadPullRequestPresentation.resolve(
                 thread: thread,
@@ -1881,6 +1903,12 @@ private struct ProjectBadge: View {
         Group {
             if let icon, icon.kind == "emoji", let emoji = icon.emoji {
                 Text(emoji).font(.system(size: 14))
+            } else if let text = icon?.monogramDisplayText {
+                Text(text)
+                    .font(.system(size: 8, weight: .heavy))
+                    .minimumScaleFactor(0.5)
+                    .lineLimit(1)
+                    .foregroundStyle(ProjectIconPresentation.color(icon?.color))
             } else if let icon, icon.kind == "lucide" {
                 Image(systemName: ProjectIconPresentation.symbol(icon.name))
                     .font(.system(size: 13))

@@ -52,7 +52,7 @@ enum FeatureV2ItemDetail {
                 return nonempty([stdout, stderr].filter { !$0.isEmpty }.joined(separator: "\n"))
             }
             return output
-        case "dynamic_tool": return valueText(raw["output"])
+        case "dynamic_tool": return raw["output"].flatMap { valueText(FeatureToolOutputImages.textOutput($0)) }
         case "file_search":
             return nonempty(raw["results"]?.v2Array?.map { result in
                 let location = (result["fileName"]?.stringValue ?? "")
@@ -71,6 +71,9 @@ enum FeatureV2ItemDetail {
     static func body(_ raw: JSONValue) -> String? {
         switch raw["type"]?.stringValue {
         case "command_execution", "dynamic_tool", "file_search", "web_search": return nil
+        case "secret_request":
+            return [raw["label"]?.stringValue, raw["reason"]?.stringValue, raw["secretStatus"]?.stringValue]
+                .compactMap(nonempty).joined(separator: "\n")
         case "reasoning": return nonempty(raw["text"]?.stringValue)
         case "error":
             return [raw["failure"]?["message"]?.stringValue,
@@ -133,7 +136,7 @@ enum FeatureV2ItemDetail {
     }
 
     static func exitLabel(_ raw: JSONValue) -> String? {
-        raw["exitCode"]?.v2Int.flatMap { $0 == 0 ? nil : "Exit code: \($0)" }
+        raw["type"]?.stringValue == "secret_request" ? nil : raw["exitCode"]?.v2Int.flatMap { $0 == 0 ? nil : "Exit code: \($0)" }
     }
 
     static func valueText(_ value: JSONValue?) -> String? {
@@ -159,7 +162,7 @@ enum FeatureV2ItemDetail {
             }
             let keys = Set(fields.keys).subtracting(["isError", "is_error"])
             if keys == ["content"] || keys == ["content", "structuredContent"], let content = fields["content"] {
-                return nonempty(textBlocks(content, depth: depth + 1))
+                return textBlocks(content, depth: depth + 1)
             }
             return nil
         default: return nil

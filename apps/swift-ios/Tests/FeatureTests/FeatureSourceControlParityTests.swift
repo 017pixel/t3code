@@ -50,6 +50,21 @@ struct FeatureSourceControlParityTests {
         #expect(unknown.availableActions == [.commit])
     }
 
+    @Test func passiveSnapshotWithoutRemoteDataRemainsUnknown() throws {
+        var accumulator = NativeSourceControlStatusAccumulator()
+        let local = VCSLocalStatus(isRepo: true, sourceControlProvider: nil,
+            hasPrimaryRemote: true, isDefaultRef: false, refName: "feature/fix", hasWorkingTreeChanges: false,
+            workingTree: .init(files: [], insertions: 0, deletions: 0))
+        let passiveValue = accumulator.consume(.snapshot(local: local, remote: nil))
+        let passive = try #require(passiveValue)
+        #expect(!passive.isRemoteKnown)
+        #expect(!accumulator.isComplete)
+        let resolvedValue = accumulator.consume(.remoteUpdated(nil))
+        let resolved = try #require(resolvedValue)
+        #expect(resolved.isRemoteKnown)
+        #expect(accumulator.isComplete)
+    }
+
     @Test func commitDestinationOpensFromLocalStatusBeforeRemoteStatusArrives() {
         let local = VCSLocalStatus(isRepo: true, sourceControlProvider: nil,
             hasPrimaryRemote: true, isDefaultRef: false, refName: "feature/fix", hasWorkingTreeChanges: true,

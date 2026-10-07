@@ -544,6 +544,14 @@ private struct ConnectionDetailView: View {
                     }
                 }
 
+                if let routes = model.client as? any FeatureEnvironmentRoutesManaging {
+                    Section {
+                        NavigationLink("Routes") {
+                            EnvironmentRoutesView(environmentID: environmentID, manager: routes)
+                        }
+                    }
+                }
+
                 Section("Server") {
                     NavigationLink("Software updates") {
                         EnvironmentUpdatesView(model: model, environmentID: environmentID)

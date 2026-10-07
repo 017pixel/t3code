@@ -45,7 +45,7 @@ enum FeatureV2TurnFolding {
         for message in messages {
             let key = runKey(message)
             let plainWork = message.role == .tool && message.v2WorkItems?.allSatisfy {
-                ["reasoning", "command_execution", "dynamic_tool", "file_change", "file_search", "web_search", "compaction"].contains($0.source.itemType)
+                !$0.isStandaloneContent && ["reasoning", "command_execution", "dynamic_tool", "file_change", "file_search", "web_search", "compaction"].contains($0.source.itemType)
             } == true
             let intermediateAssistant = message.role == .assistant && key.map {
                 firstAssistant[$0] != message.id && lastAssistant[$0] != message.id

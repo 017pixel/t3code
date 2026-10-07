@@ -41,7 +41,7 @@ public enum ResponseStreamingMode: String, Codable, CaseIterable, Sendable {
 /// Keys the native settings controls can change. Other override keys stay intact.
 public enum ServerProjectSettingKey: String, Sendable {
     case defaultModelSelection, defaultRuntimeMode, defaultThreadEnvMode, newWorktreesStartFromOrigin
-    case defaultAutoPull, sidebarAutoSettleOnMerge, sidebarAutoSettleAfterDays
+    case defaultAutoPull, sidebarAutoSettleOnMerge, sidebarAutoSettleAfterDays, removeAgentCreditsOnMerge
     case branchNamingMode, branchNamePrefix, branchNameInstructions, enableAgentBrowserAccess
     case continueThreadsAfterServerUpdate, responseStreamingMode, worktreeSubmodules, worktreeCleanup
 }
@@ -120,6 +120,7 @@ public extension ServerSettingsSnapshot {
         if let value = entry["worktreeSubmodules"]?.stringValue.flatMap(WorktreeSubmodules.init(rawValue:)) {
             resolved.worktreeSubmodules = value
         }
+        if let value = entry["removeAgentCreditsOnMerge"]?.boolValue { resolved.removeAgentCreditsOnMerge = value }
         if let value = entry["defaultAutoPull"]?.boolValue { resolved.defaultAutoPull = value }
         if let value = entry["sidebarAutoSettleOnMerge"]?.boolValue { resolved.sidebarAutoSettleOnMerge = value }
         if let value = entry["sidebarAutoSettleAfterDays"] {

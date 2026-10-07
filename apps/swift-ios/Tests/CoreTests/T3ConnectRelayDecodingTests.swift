@@ -23,6 +23,19 @@ final class T3ConnectRelayDecodingTests: XCTestCase {
         XCTAssertEqual(status.traceId, "trace-1")
     }
 
+    func testOfflineTunnelRecoveryReasonIsActionableAndFutureSafe() throws {
+        for reason in ["tunnel_released", "future_reason"] {
+            let data = Data("""
+            {"environmentId":"env-1","endpoint":{"httpBaseUrl":"https://studio.example","wsBaseUrl":"wss://studio.example","providerKind":"t3_relay"},"status":"offline","checkedAt":"2026-10-07T12:00:00Z","offlineReason":"\(reason)"}
+            """.utf8)
+            let status = try JSONDecoder.t3.decode(T3ConnectRelayEnvironmentStatus.self, from: data)
+            XCTAssertEqual(status.offlineReason, reason)
+            XCTAssertEqual(status.offlineMessage, reason == "tunnel_released"
+                ? "Start or update T3 Code on this computer to reconnect its tunnel."
+                : "Offline")
+        }
+    }
+
     func testRelayTokensAndLinkResponsesDecodeSnakeCaseAndOptionalRuntime() throws {
         let token = try JSONDecoder.t3.decode(
             T3ConnectRelayAccessToken.self,

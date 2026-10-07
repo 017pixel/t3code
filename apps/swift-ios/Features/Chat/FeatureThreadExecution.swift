@@ -108,6 +108,13 @@ public struct FeatureThreadExecution: Sendable, Equatable, Codable {
     public let canSteer: Bool
     public let canRestart: Bool
     public let canInterrupt: Bool
+    /// Separate from a run interrupt: a never-run thread can still watch PRs.
+    public var watchedPullRequests: [ThreadPullRequestLink]? = nil
+    public var canStopThread: Bool {
+        // Watching is thread work even when queue editing is unavailable. The
+        // caller checks the destination environment's permission before Stop.
+        canInterrupt || watchedPullRequests?.isEmpty == false
+    }
     /// A timeline error must also have the workspace failure code before showing Retry.
     public var failedWorkspaceRunIDs: Set<String>? = nil
 
@@ -132,6 +139,7 @@ public struct FeatureThreadExecution: Sendable, Equatable, Codable {
             })
         }
         let projection = try JSONValue.object(fields).decode(Projection.self)
+        watchedPullRequests = projection.thread.pullRequests?.filter(\.isWatched)
         failedWorkspaceRunIDs = Set(projection.runs.filter {
             $0.status == .failed && $0.workspacePreparation != nil
         }.map(\.id))
@@ -297,6 +305,7 @@ private extension FeatureThreadExecution {
         let deletedAt: String?
         let creationSource: String?
         let lineage: Lineage?
+        let pullRequests: [ThreadPullRequestLink]?
     }
 
     struct Lineage: Decodable, Sendable {

@@ -418,6 +418,12 @@ private struct DeliveryHTTPTransport: HTTPTransport {
         let url = try XCTUnwrap(request.url)
         let data: Data
         switch url.path {
+        case "/api/auth/session":
+            data = try JSONEncoder.t3.encode(AuthSessionState(
+                authenticated: true, scopes: ["orchestration:read", "orchestration:operate"],
+                sessionMethod: "bearer-access-token", permissions: ["orchestration:read", "orchestration:operate"],
+                auth: .init(serverUpdateScope: "environment:maintain")
+            ))
         case "/.well-known/t3/environment":
             data = try JSONEncoder.t3.encode(JSONValue.object([
                 "environmentId": .string(environment.id), "label": .string(environment.label),

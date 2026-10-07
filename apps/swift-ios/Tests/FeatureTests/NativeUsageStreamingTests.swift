@@ -135,6 +135,14 @@ private struct UsageStreamingFixture {
 
 private struct UsageStreamingHTTPTransport: HTTPTransport {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if let url = request.url, url.path == "/api/auth/session" {
+            let permissions = ["orchestration:read", "orchestration:operate", "providers:manage"]
+            let data = try JSONEncoder.t3.encode(AuthSessionState(
+                authenticated: true, scopes: permissions, sessionMethod: "bearer-access-token",
+                permissions: permissions, auth: .init(serverUpdateScope: "environment:maintain")
+            ))
+            return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
         if let url = request.url, url.path == "/.well-known/t3/environment",
            let host = url.host, ["fast.example", "slow.example"].contains(host) {
             let id = String(host.prefix { $0 != "." })

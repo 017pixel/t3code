@@ -9,6 +9,68 @@ final class OrchestrationV2ThreadLifecycleTests: XCTestCase {
         return try OrchestrationV2ThreadShell(json: V2Fixture.patch(original, changes))
     }
 
+    func testWatchOnlyThreadHoldsCompletionWithoutAnyRunOrProviderThread() throws {
+        for runs in [[], [V2Fixture.run(status: "completed")]] {
+            for source in ["manual", "stack-dismissed"] {
+                let link = V2Fixture.watchedPullRequest(source: source)
+                let raw = V2Fixture.snapshot(fields: [
+                    "thread": V2Fixture.patch(V2Fixture.thread, ["pullRequests": .array([link]), "archivedAt": .string(V2Fixture.now)]),
+                    "runs": .array(runs),
+                ])
+                var projection = try raw.decode(OrchestrationV2ThreadSnapshot.self).projection
+                let facts = OrchestrationV2ThreadLifecycle(projection: projection)
+                XCTAssertEqual(facts.runtimeStatus, source == "manual" ? "idle" : (runs.isEmpty ? nil : "completed"))
+                XCTAssertNil(facts.activeRunID)
+                let normalized = try OrchestrationV2ThreadState(snapshot: raw).normalizedSnapshot()
+                let carried = try XCTUnwrap(normalized.thread.orchestrationV2Control?["lifecycle"])
+                    .decode(OrchestrationV2ThreadLifecycle.self)
+                XCTAssertEqual(carried, facts)
+                projection.thread = try OrchestrationV2AppThread(json: V2Fixture.patch(projection.thread.raw, ["pullRequests": .array([])]))
+                XCTAssertEqual(OrchestrationV2ThreadLifecycle(projection: projection).runtimeStatus, runs.isEmpty ? nil : "completed")
+            }
+        }
+        let watched = try shell([
+            "latestRunId": .null, "activeProviderThreadId": .null, "activeRunId": .null, "status": .string("idle"),
+            "pendingBackgroundTasks": .array([]), "pullRequests": .array([V2Fixture.watchedPullRequest()]),
+        ])
+        XCTAssertEqual(OrchestrationV2ThreadLifecycle(shell: watched).runtimeStatus, "idle")
+        XCTAssertEqual(OrchestrationV2Presentation.shellThread(watched).backgroundLiveness, .monitoring)
+    }
+
+    func testGoalSurvivesShellAndProviderUpdatesAndExplicitNullClearsIt() throws {
+        let goal: JSONValue = .object(["objective": .string("Finish the task"), "status": .string("active")])
+        XCTAssertNil(try shell().goal)
+        let value = try shell(["goal": goal, "status": .string("completed"), "activityRunStatus": .null, "activeRunId": .null, "pendingBackgroundTasks": .array([])])
+        XCTAssertEqual(value.goal?.objective, "Finish the task")
+        XCTAssertEqual(OrchestrationV2Presentation.shellThread(value).v2Lifecycle?.goal, value.goal)
+        XCTAssertEqual(OrchestrationV2ThreadLifecycle(shell: value).runtimeStatus, "completed")
+        let frame: JSONValue = .object([
+            "kind": .string("thread.updated"), "sequence": .number(11), "location": .string("active"),
+            "thread": V2Fixture.patch(value.raw, ["goal": .null]),
+        ])
+        guard case let .threadUpserted(_, updated) = OrchestrationV2Presentation.shellStreamItem(frame) else {
+            return XCTFail("Expected shell update")
+        }
+        XCTAssertNil(updated.v2Lifecycle?.goal)
+        let fixture = try V2Fixture.load("v2-thread-bounded-snapshot")
+        let original = try XCTUnwrap(fixture["projection"]?["providerThreads"]?.v2Array?.first)
+        let provider = V2Fixture.patch(original, ["id": .string("provider-thread"), "appThreadId": .string("thread")])
+        let raw = V2Fixture.snapshot(fields: [
+            "thread": V2Fixture.patch(V2Fixture.thread, ["activeProviderThreadId": .string("provider-thread")]),
+            "providerThreads": .array([provider]), "runs": .array([V2Fixture.run(status: "interrupted")]),
+        ])
+        var state = try OrchestrationV2ThreadState(snapshot: raw)
+        for (index, next) in [goal, V2Fixture.patch(goal, ["status": .string("complete")]), .null].enumerated() {
+            XCTAssertFalse(state.apply([V2Fixture.event("provider-thread.updated", payload: V2Fixture.patch(provider, ["goal": next]), sequence: 11 + index)]).refreshRequired)
+            let lifecycle = OrchestrationV2ThreadLifecycle(projection: state.projection)
+            XCTAssertEqual(lifecycle.goal?.status.rawValue, next["status"]?.stringValue)
+            XCTAssertEqual(lifecycle.runtimeStatus, "interrupted", "A goal never implies active work")
+            let control = try XCTUnwrap(state.normalizedSnapshot().thread.orchestrationV2Control?["lifecycle"])
+                .decode(OrchestrationV2ThreadLifecycle.self)
+            XCTAssertEqual(control.goal, lifecycle.goal)
+        }
+    }
+
     func testQueuedLatestRunDoesNotReplaceTheActiveRuntimeOrLoseWaiting() throws {
         let shell = try shell([
             "status": .string("queued"), "latestRunId": .string("queued-run"),

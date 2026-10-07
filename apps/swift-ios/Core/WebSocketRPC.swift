@@ -1074,14 +1074,28 @@ public actor WebSocketRPCClient {
         request.resume(result)
     }
 
-    private func remoteError(_ exit: RPCResponseEnvelope.Exit) -> RPCError {
+    private func remoteError(_ exit: RPCResponseEnvelope.Exit) -> any Error {
         let cause = exit.cause?.first
         let value = cause?.error ?? cause?.defect
+        if cause?._tag == "Fail", value?["_tag"]?.stringValue == "SecretRequestError" {
+            let reason = value?["reason"]?.stringValue ?? ""
+            return RPCError.remote(SecretRequestFailure.messagesByReason[reason] ?? SecretRequestFailure.generic)
+        }
         let message = value?.stringValue
             ?? value?["message"]?.stringValue
             ?? value?["detail"]?.stringValue
             ?? "The environment rejected the RPC request."
-        return cause?._tag == "Die" ? .remoteDefect(message) : .remote(message)
+        if cause?._tag == "Fail",
+           value?["_tag"]?.stringValue == "EnvironmentAuthorizationError",
+           let requiredScope = value?["requiredScope"]?.stringValue {
+            return EnvironmentPermissionDeniedError(
+                message: value?["message"]?.stringValue,
+                requiredScope: requiredScope,
+                requiredPermission: value?["requiredPermission"]?.stringValue,
+                traceID: value?["traceId"]?.stringValue
+            )
+        }
+        return cause?._tag == "Die" ? RPCError.remoteDefect(message) : RPCError.remote(message)
     }
 
     private func allocateRequestID() -> Int {

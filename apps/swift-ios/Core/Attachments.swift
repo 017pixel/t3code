@@ -218,7 +218,8 @@ public struct AttachmentCreateUploadURLResult: Codable, Equatable, Sendable {
 public enum AssetResource: Equatable, Sendable {
     case workspaceFile(threadID: String, path: String)
     case mediaFile(threadID: String, path: String)
-    case attachment(id: String, fileName: String? = nil, mimeType: String? = nil)
+    case attachment(id: String, fileName: String? = nil, mimeType: String? = nil, disposition: AssetDisposition? = nil)
+    case toolOutputImage(threadID: String, itemID: String, index: Int)
     case projectFavicon(cwd: String)
     case nativeAppIcon(ToolNativeAppReference)
 
@@ -241,13 +242,19 @@ public enum AssetResource: Equatable, Sendable {
                 "threadId": .string(threadID),
                 "path": .string(path),
             ])
-        case let .attachment(id, fileName, mimeType):
+        case let .toolOutputImage(threadID, itemID, index):
+            return .object([
+                "_tag": .string("tool-output-image"), "threadId": .string(threadID),
+                "itemId": .string(itemID), "index": .number(Double(index)),
+            ])
+        case let .attachment(id, fileName, mimeType, disposition):
             var value: [String: JSONValue] = [
                 "_tag": .string("attachment"),
                 "attachmentId": .string(id),
             ]
             if let fileName { value["fileName"] = .string(fileName) }
             if let mimeType { value["mimeType"] = .string(mimeType) }
+            if let disposition { value["disposition"] = .string(disposition.rawValue) }
             return .object(value)
         case let .projectFavicon(cwd):
             return .object([
@@ -256,6 +263,11 @@ public enum AssetResource: Equatable, Sendable {
             ])
         }
     }
+}
+
+public enum AssetDisposition: String, Sendable {
+    case inline
+    case attachment
 }
 
 public struct AssetImageDimensions: Codable, Equatable, Sendable {

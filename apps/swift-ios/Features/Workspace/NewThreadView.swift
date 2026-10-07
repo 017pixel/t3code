@@ -98,10 +98,8 @@ public struct NewThreadView: View {
         .environment(\.providerSetupContext, selectedProject.map {
             ProviderSetupContext(model: model, environmentID: $0.environmentID)
         })
-        .task(id: "\(selectedProject?.id ?? ""):\(selection?.providerID ?? "")") {
-            if let project = selectedProject, let instanceID = selection?.providerID {
-                await model.refreshWorkspaceProviders(environmentID: project.environmentID, cwd: project.path, instanceID: instanceID)
-            }
+        .task(id: workspaceCatalogKey) {
+            await refreshWorkspaceCatalog()
         }
         .onDisappear {
             guard !submittedSuccessfully else { return }
@@ -313,7 +311,10 @@ public struct NewThreadView: View {
                         interactionMode: interactionMode,
                         onInteractionModeChange: offersInteractionMode ? { draftInteractionMode = $0 } : nil,
                         isSendEnabled: canSubmit,
-                        composerEnterBehavior: model.snapshot.settings.composerEnterBehavior
+                        composerEnterBehavior: model.snapshot.settings.composerEnterBehavior,
+                        onCommandMenuUse: {
+                            Task { await refreshWorkspaceCatalog() }
+                        }
                     )
                 }
                 .background(T3Colors.background)
@@ -1026,6 +1027,31 @@ public struct NewThreadView: View {
         .padding(.horizontal, 18)
     }
 
+    private var workspaceCatalogPath: String? {
+        guard let project = selectedProject else { return nil }
+        if workspaceMode == .local,
+           let path = NewTaskWorkspaceDefaults.normalizedWorktreePath(
+                for: selectedBranch, projectPath: project.path
+           ) {
+            return path
+        }
+        return project.path
+    }
+
+    private var workspaceCatalogKey: FeatureWorkspaceProviderFreshness.Key? {
+        guard let environmentID = selectedProject?.environmentID,
+              let cwd = workspaceCatalogPath,
+              let instanceID = selection?.providerID else { return nil }
+        return .init(environmentID: environmentID, cwd: cwd, instanceID: instanceID)
+    }
+
+    private func refreshWorkspaceCatalog() async {
+        guard let key = workspaceCatalogKey else { return }
+        await model.refreshWorkspaceProviders(
+            environmentID: key.environmentID, cwd: key.cwd, instanceID: key.instanceID
+        )
+    }
+
     private var composerPowerFeatures: FeatureComposerPowerFeatures {
         let provider = creationProviders.first {
             $0.id == selection?.providerID
@@ -1037,8 +1063,8 @@ public struct NewThreadView: View {
             )
         }
         return FeatureComposerPowerFeatures(
-            slashCommands: provider?.workspaceCatalog(cwd: project.path).slashCommands ?? [],
-            skills: provider?.workspaceCatalog(cwd: project.path).skills ?? [],
+            slashCommands: provider?.workspaceCatalog(cwd: workspaceCatalogPath).slashCommands ?? [],
+            skills: provider?.workspaceCatalog(cwd: workspaceCatalogPath).skills ?? [],
             pathSearchScopeID: project.id,
             searchPaths: { query in
                 try await model.client.searchProjectFiles(

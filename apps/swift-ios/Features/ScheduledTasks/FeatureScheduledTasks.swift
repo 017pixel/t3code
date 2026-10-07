@@ -27,6 +27,7 @@ public protocol FeatureScheduledTaskManaging: AnyObject {
     func upsertScheduledTask(environmentID: String, input: ScheduledTaskUpsertInput) async throws -> ScheduledTask
     func setScheduledTaskEnabled(_ target: FeatureScheduledTaskTarget, enabled: Bool) async throws -> ScheduledTask
     func runScheduledTaskNow(_ target: FeatureScheduledTaskTarget) async throws -> ScheduledTask
+    func rotateScheduledTaskWebhookToken(_ target: FeatureScheduledTaskTarget) async throws -> ScheduledTask
     func deleteScheduledTask(_ target: FeatureScheduledTaskTarget) async throws
 }
 
@@ -116,8 +117,24 @@ final class FeatureScheduledTaskListModel {
     }
 
     func runNow(_ task: ScheduledTask) async {
-        guard task.lastRunStatus != .running else { return }
+        guard !task.schedule.isWebhook, task.lastRunStatus != .running else { return }
         await mutate(task.id) { _ = try await self.client.runScheduledTaskNow(self.target(task.id)) }
+    }
+
+    func task(id: String) -> ScheduledTask? { tasks?.first { $0.id == id } }
+
+    func rotateWebhookToken(_ task: ScheduledTask) async {
+        guard task.schedule.isWebhook else { return }
+        await mutate(task.id) {
+            let revision = self.snapshotRevision
+            let updated = try await self.client.rotateScheduledTaskWebhookToken(self.target(task.id))
+            // A stream update or deletion received during rotation takes precedence.
+            if self.snapshotRevision == revision,
+               let index = self.tasks?.firstIndex(where: { $0.id == task.id }) {
+                self.tasks?[index] = updated
+                self.snapshotRevision += 1
+            }
+        }
     }
 
     func delete(_ task: ScheduledTask) async {

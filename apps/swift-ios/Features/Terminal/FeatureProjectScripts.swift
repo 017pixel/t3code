@@ -67,7 +67,12 @@ struct FeatureProjectScriptLaunch: Equatable, Sendable {
 }
 
 extension ProjectScript {
-    var menuLabel: String { runOnWorktreeCreate ? "\(name) (setup)" : name }
+    var menuLabel: String {
+        var roles: [String] = []
+        if runOnWorktreeCreate { roles.append("setup") }
+        if runOnSettle == true { roles.append("on settle") }
+        return roles.isEmpty ? name : "\(name) (\(roles.joined(separator: ", ")))"
+    }
 
     var menuSymbol: String {
         switch icon {

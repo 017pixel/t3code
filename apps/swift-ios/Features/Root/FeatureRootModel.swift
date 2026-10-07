@@ -264,28 +264,17 @@ public final class FeatureRootModel {
         guard let capability = client as? any T3ConnectCapable else { return }
         isSigningOutT3Connect = true
         defer { isSigningOutT3Connect = false }
-        let removedEnvironmentIDs = snapshot.environments
-            .filter { $0.source == .t3Connect }
-            .map(\.id)
-        let removedEnvironmentIDSet = Set(removedEnvironmentIDs)
-        let groupedProjects = Dictionary(
-            grouping: snapshot.projects.filter { $0.repositoryIdentity != nil },
-            by: \.environmentID
-        )
-        let retainedLogicalProjectIDs = Set<String>(snapshot.projects.compactMap { project in
-            guard project.repositoryIdentity != nil,
-                  !removedEnvironmentIDSet.contains(project.environmentID) else {
-                return nil
+        let removedEnvironmentIDs: [String]
+        if let routes = client as? any FeatureEnvironmentRoutesManaging {
+            do { removedEnvironmentIDs = try await routes.managedOnlyEnvironmentIDs() }
+            catch {
+                errorMessage = "Could not read saved routes: \(error.localizedDescription)"
+                return
             }
-            return DailyUXCreationContext.logicalProjectID(for: project, in: snapshot)
-        })
-        let logicalProjectIDs = removedEnvironmentIDs.reduce(into: [String: Set<String>]()) {
-            result, environmentID in
-            let projectIDs = Set((groupedProjects[environmentID] ?? []).map {
-                DailyUXCreationContext.logicalProjectID(for: $0, in: snapshot)
-            })
-            result[environmentID] = projectIDs.subtracting(retainedLogicalProjectIDs)
+        } else {
+            removedEnvironmentIDs = snapshot.environments.filter { $0.source == .t3Connect }.map(\.id)
         }
+        let logicalProjectIDs = logicalDraftCleanupIDs(removing: removedEnvironmentIDs)
 
         await stopOutboxDrain()
         await capability.signOutT3Connect()
@@ -314,13 +303,65 @@ public final class FeatureRootModel {
         scheduleOutboxDrain()
     }
 
-    func removeManagedEnvironmentsAfterAccountChange() async {
-        let managedIDs = snapshot.environments
-            .filter { $0.source == .t3Connect }
-            .map(\.id)
-        for id in managedIDs {
-            await removeEnvironment(id)
+    /// Capture before removing routes, which can publish a snapshot without these projects.
+    private func logicalDraftCleanupIDs(removing removedEnvironmentIDs: [String]) -> [String: Set<String>] {
+        let removedEnvironmentIDSet = Set(removedEnvironmentIDs)
+        let groupedProjects = Dictionary(
+            grouping: snapshot.projects.filter { $0.repositoryIdentity != nil },
+            by: \.environmentID
+        )
+        let retainedLogicalProjectIDs = Set<String>(snapshot.projects.compactMap { project in
+            guard project.repositoryIdentity != nil,
+                  !removedEnvironmentIDSet.contains(project.environmentID) else {
+                return nil
+            }
+            return DailyUXCreationContext.logicalProjectID(for: project, in: snapshot)
+        })
+        return removedEnvironmentIDs.reduce(into: [String: Set<String>]()) {
+            result, environmentID in
+            let projectIDs = Set((groupedProjects[environmentID] ?? []).map {
+                DailyUXCreationContext.logicalProjectID(for: $0, in: snapshot)
+            })
+            result[environmentID] = projectIDs.subtracting(retainedLogicalProjectIDs)
         }
+    }
+
+    func removeManagedEnvironmentsAfterAccountChange() async {
+        if let routes = client as? any FeatureEnvironmentRoutesManaging {
+            await stopOutboxDrain()
+            do {
+                let removedIDs = try await routes.managedOnlyEnvironmentIDs()
+                let logicalProjectIDs = logicalDraftCleanupIDs(removing: removedIDs)
+                try await routes.removeManagedEnvironmentRoutes()
+                for id in removedIDs {
+                    var cleanupError: (any Error)?
+                    do {
+                        try await outboxStore.removeAll(environmentID: id)
+                        removePendingSubmissions(environmentID: id)
+                    } catch {
+                        markPendingSubmissionsForDiscard(environmentID: id)
+                        cleanupError = error
+                    }
+                    do {
+                        try await draftStore.removeDrafts(
+                            environmentID: id,
+                            logicalProjectIDs: logicalProjectIDs[id] ?? []
+                        )
+                    } catch {
+                        cleanupError = cleanupError ?? error
+                    }
+                    if let cleanupError {
+                        errorMessage = "Could not clear saved T3 Connect data: \(cleanupError.localizedDescription)"
+                    }
+                }
+                clearDetails()
+                await reload()
+            } catch { errorMessage = error.localizedDescription }
+            scheduleOutboxDrain()
+            return
+        }
+        let managedIDs = snapshot.environments.filter { $0.source == .t3Connect }.map(\.id)
+        for id in managedIDs { await removeEnvironment(id) }
     }
 
     @discardableResult
@@ -2336,6 +2377,7 @@ public final class FeatureRootModel {
         environmentID: String,
         snapshot: FeatureSnapshot
     ) -> Bool {
+        if error is EnvironmentPermissionDeniedError { return false }
         if error is CancellationError || error is URLError { return true }
         if let rpcError = error as? RPCError {
             switch rpcError {

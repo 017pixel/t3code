@@ -105,7 +105,15 @@ enum PlatformDeepLinkParser {
         "www.t3.codes",
     ]
 
+    /// These links belong to the app even when their destination is unavailable.
+    static func isThreadLink(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "t3-thread"
+    }
+
     static func parse(_ url: URL) throws -> PlatformRoute {
+        if isThreadLink(url) {
+            return try threadLinkRoute(url.absoluteString)
+        }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased()
         else {
@@ -152,10 +160,34 @@ enum PlatformDeepLinkParser {
     }
 
     static func parse(_ value: String) throws -> PlatformRoute {
-        guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Parse before Foundation can repair malformed percent escapes in a URL.
+        if value.lowercased().hasPrefix("t3-thread:") {
+            return try threadLinkRoute(value)
+        }
+        guard let url = URL(string: value) else {
             throw PlatformDeepLinkError.unsupportedURL
         }
         return try parse(url)
+    }
+
+    private static func threadLinkRoute(_ value: String) throws -> PlatformRoute {
+        let prefix = "t3-thread://v1/"
+        guard value.hasPrefix(prefix), !value.contains("?"), !value.contains("#") else {
+            throw PlatformDeepLinkError.unsupportedURL
+        }
+        let segments = value.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false)
+        guard segments.count == 2 else { throw PlatformDeepLinkError.invalidIdentifier }
+        let ids = try segments.map { segment in
+            guard let id = String(segment).removingPercentEncoding,
+                  !id.isEmpty,
+                  id.utf8.count <= 1_024,
+                  id.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+                throw PlatformDeepLinkError.invalidIdentifier
+            }
+            return id
+        }
+        return .thread(environmentID: ids[0], threadID: ids[1])
     }
 
     private static func navigationRoute(
@@ -237,6 +269,8 @@ enum PlatformDeepLinkParser {
             destination = .terminal(sessionID: try (query["session"] ?? query["sessionid"] ?? query["terminalid"]).map(validatedIdentifier))
         case "review" where suffix.count == 1: destination = .review
         case "devices" where suffix.count == 1: destination = .devices
+        case "browser" where suffix.count == 1:
+            destination = .browser(tabID: try query["tab"].map(validatedIdentifier))
         case "git" where suffix.count == 1: destination = .git
         case "git" where suffix == ["git", "commit"]: destination = .gitCommit
         case "git" where suffix == ["git", "branches"]: destination = .gitBranches
@@ -381,6 +415,7 @@ private extension FeatureThreadDestination {
         case .terminal: "/terminal"
         case .review: "/review"
         case .devices: "/devices"
+        case .browser: "/browser"
         case .git: "/git"
         case .gitCommit: "/git/commit"
         case .gitBranches: "/git/branches"
@@ -392,6 +427,8 @@ private extension FeatureThreadDestination {
         case let .files(path, line):
             [path.map { URLQueryItem(name: "path", value: $0) },
              line.map { URLQueryItem(name: "line", value: String($0)) }].compactMap { $0 }
+        case let .browser(tabID):
+            tabID.map { [URLQueryItem(name: "tab", value: $0)] } ?? []
         case let .terminal(sessionID):
             sessionID.map { [URLQueryItem(name: "session", value: $0)] } ?? []
         default: []

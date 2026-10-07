@@ -23,14 +23,37 @@ actor ClientReadCache {
         let environmentID: String
         let endpointFingerprint: String
         let preference: OrchestrationProtocolPreference
+        private var legacyEndpointFingerprints: Set<String>?
 
         init(_ environment: Environment) {
             environmentID = environment.id
             preference = environment.orchestrationProtocolPreference
-            let identity = [environment.httpBaseURL.absoluteString,
-                            environment.webSocketBaseURL.absoluteString, environment.kind.rawValue]
-                .joined(separator: "\u{0}")
-            endpointFingerprint = Self.fingerprint(identity)
+            let selected = environment.selectedRoute
+            let verifiedCatalog = environment.descriptor?.environmentId == environment.id
+                && selected.httpBaseURL == environment.httpBaseURL
+                && selected.webSocketBaseURL == environment.webSocketBaseURL && selected.kind == environment.kind
+            endpointFingerprint = verifiedCatalog ? Self.fingerprint("environment:" + environment.id)
+                : Self.fingerprint([environment.httpBaseURL.absoluteString, environment.webSocketBaseURL.absoluteString,
+                                    environment.kind.rawValue].joined(separator: "\u{0}"))
+            // Only explicitly paired, identity-checked origins may import a
+            // pre-route cache. Learned hints have not proved identity yet.
+            if verifiedCatalog {
+                legacyEndpointFingerprints = Set(environment.routes.filter { !$0.isLearned }.map {
+                    Self.fingerprint([$0.httpBaseURL.absoluteString,
+                                      $0.webSocketBaseURL.absoluteString, $0.kind.rawValue].joined(separator: "\u{0}"))
+                })
+            }
+
+        }
+
+        static func == (lhs: Scope, rhs: Scope) -> Bool {
+            lhs.environmentID == rhs.environmentID && lhs.preference == rhs.preference
+                && lhs.endpointFingerprint == rhs.endpointFingerprint
+        }
+
+        func acceptsLegacy(_ saved: Scope) -> Bool {
+            environmentID == saved.environmentID && preference == saved.preference
+                && legacyEndpointFingerprints?.contains(saved.endpointFingerprint) == true
         }
 
         static func fingerprint(_ value: String) -> String {
@@ -91,7 +114,10 @@ actor ClientReadCache {
         if let lease = leases[scope.environmentID], lease.scope == scope { return lease }
         let id = scope.environmentID
         writes.removeValue(forKey: id)?.cancel()
-        let saved = readDocument(id)
+        var saved = readDocument(id)
+        if let legacy = saved, legacy.scope != scope, scope.acceptsLegacy(legacy.scope) {
+            saved = Document(scope: scope, shell: legacy.shell, histories: legacy.histories, savedAt: legacy.savedAt)
+        }
         if saved?.scope != scope { try removeFile(id) }
         documents[id] = saved?.scope == scope ? saved : Document(scope: scope)
         receivedLiveShell.remove(id)

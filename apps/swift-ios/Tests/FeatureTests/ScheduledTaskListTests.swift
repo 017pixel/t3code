@@ -3,6 +3,23 @@ import XCTest
 
 @MainActor
 final class ScheduledTaskListTests: XCTestCase {
+    func testRotationReplacesLiveURLAndDeletionRemovesIt() async throws {
+        let task = try ScheduledWebhookFixtures.row(url: "https://hooks.example/old").decode(ScheduledTask.self)
+        let updated = try ScheduledWebhookFixtures.row(url: "https://hooks.example/new").decode(ScheduledTask.self)
+        let client = ScheduledTaskFeatureClient(tasks: [task])
+        client.rotatedTask = updated
+        let model = FeatureScheduledTaskListModel(environmentID: "remote", client: client)
+        await model.refresh()
+        await model.runNow(task)
+        XCTAssertTrue(client.actions.isEmpty)
+        await model.rotateWebhookToken(task)
+        XCTAssertEqual(model.task(id: task.id)?.webhook?.url, "https://hooks.example/new")
+        XCTAssertEqual(client.actions, [.init(target: .init(environmentID: "remote", taskID: task.id), kind: "rotate")])
+        client.snapshots = [.init(tasks: [], receivesLiveUpdates: true)]
+        await model.observe()
+        XCTAssertNil(model.task(id: task.id)?.webhook)
+    }
+
     func testCompleteSnapshotsReplaceDeletedTasks() async throws {
         let task = try ScheduledTaskTestFixtures.task()
         let client = ScheduledTaskFeatureClient(tasks: [task])
@@ -68,6 +85,7 @@ final class ScheduledTaskListTests: XCTestCase {
 @MainActor
 private final class ScheduledTaskFeatureClient: FeatureScheduledTaskManaging {
     struct Action: Equatable { let target: FeatureScheduledTaskTarget; let kind: String }
+    var rotatedTask: ScheduledTask?
     var tasks: [ScheduledTask]
     var snapshots: [FeatureScheduledTaskSnapshot] = []
     var listError: (any Error)?
@@ -103,6 +121,13 @@ private final class ScheduledTaskFeatureClient: FeatureScheduledTaskManaging {
     func runScheduledTaskNow(_ target: FeatureScheduledTaskTarget) async throws -> ScheduledTask {
         actions.append(.init(target: target, kind: "run"))
         return try XCTUnwrap(tasks.first)
+    }
+
+    func rotateScheduledTaskWebhookToken(_ target: FeatureScheduledTaskTarget) async throws -> ScheduledTask {
+        actions.append(.init(target: target, kind: "rotate"))
+        let task = try XCTUnwrap(rotatedTask)
+        tasks = [task]
+        return task
     }
 
     func deleteScheduledTask(_ target: FeatureScheduledTaskTarget) async throws {

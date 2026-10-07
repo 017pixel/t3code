@@ -95,7 +95,8 @@ public enum OrchestrationV2Presentation {
             hasPendingApprovals: shell.pendingRuntimeRequest?.isApproval == true,
             hasPendingUserInput: shell.pendingRuntimeRequest?.isUserInput == true,
             hasActionableProposedPlan: shell.hasActionableProposedPlan,
-            backgroundLiveness: backgroundLiveness(shell.pendingBackgroundTasks),
+            backgroundLiveness: backgroundLiveness(shell.pendingBackgroundTasks)
+                ?? (t.pullRequests?.contains(where: \.isWatched) == true ? .monitoring : nil),
             latestUserAuthoredMessageAt: shell.raw["latestUserAuthoredMessageAt"]?.stringValue,
             latestUserAuthoredMessageAtIsPresent: shell.raw["latestUserAuthoredMessageAt"] != nil,
             v2Lifecycle: OrchestrationV2ThreadLifecycle(shell: shell)
@@ -347,6 +348,8 @@ public enum OrchestrationV2Presentation {
                 result.activities.append(activity("user-input.answer-submitted", "Question answer submitted", fields: fields,
                     idSuffix: "answer", occurredAt: item.completedAt ?? request?.resolvedAt ?? item.updatedAt))
             }
+        case let .secretRequest(request):
+            result.activities = [activity("secret.request", request.label)]
         case let .approval(requestID, requestKind, prompt):
             let request = row.isLocal ? p.runtimeRequests.first { $0.id == requestID } : nil
             let pending = request?.status == "pending"
@@ -543,5 +546,47 @@ public enum OrchestrationV2Presentation {
         if let text = json.stringValue { return text }
         guard let data = try? JSONEncoder.t3Intermediate.encode(json) else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+}
+
+public struct OrchestrationV2ProviderGoalPresentation: Equatable, Sendable {
+    public let title: String
+    public let objective: String
+    public let usage: String?
+    /// The UI also checks the provider before offering Codex pause/resume commands.
+    public let canResume: Bool
+}
+
+extension OrchestrationV2Presentation {
+    public static func providerGoal(
+        _ goal: OrchestrationV2ProviderGoal, working: Bool
+    ) -> OrchestrationV2ProviderGoalPresentation {
+        let title: String
+        switch goal.status {
+        case .active: title = working ? "Pursuing goal" : "Goal set"
+        case .paused: title = "Goal paused"
+        case .blocked: title = "Goal blocked"
+        case .usageLimited: title = "Goal hit a usage limit"
+        case .budgetLimited: title = "Goal reached its token budget"
+        case .complete: title = "Goal complete"
+        }
+        func tokens(_ count: Int) -> String {
+            if count < 1_000 { return String(count) }
+            if count < 1_000_000 { return "\(Int((Double(count) / 1_000).rounded()))k" }
+            let value = String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), Double(count) / 1_000_000)
+            return "\(value.hasSuffix(".0") ? String(value.dropLast(2)) : value)m"
+        }
+        var usage: [String] = []
+        if let used = goal.tokensUsed, used > 0 {
+            usage.append(goal.tokenBudget.map { "\(tokens(used)) / \(tokens($0)) tokens" } ?? "\(tokens(used)) tokens")
+        }
+        if let seconds = goal.timeUsedSeconds, seconds >= 60 {
+            let minutes = seconds / 60
+            usage.append(minutes < 60 ? "\(minutes)m" : "\(minutes / 60)h \(minutes % 60)m")
+        }
+        if let checks = goal.checks, checks > 0 { usage.append("\(checks) \(checks == 1 ? "check" : "checks")") }
+        return OrchestrationV2ProviderGoalPresentation(title: title, objective: goal.objective,
+            usage: usage.isEmpty ? nil : usage.joined(separator: " · "),
+            canResume: goal.status != .active && goal.status != .complete)
     }
 }

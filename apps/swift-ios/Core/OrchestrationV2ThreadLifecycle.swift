@@ -2,6 +2,7 @@ import Foundation
 
 /// The shell owns list lifecycle state. Do not reconstruct this from V1 session/turn labels.
 public struct OrchestrationV2ThreadLifecycle: Codable, Equatable, Sendable {
+    public let goal: OrchestrationV2ProviderGoal?
     public let runtimeStatus: String?
     public let runtimeUpdatedAt: String
     public let activeRunID: String?
@@ -22,12 +23,13 @@ public struct OrchestrationV2ThreadLifecycle: Codable, Equatable, Sendable {
     public let hasActionableProposedPlan: Bool
 
     public init(shell: OrchestrationV2ThreadShell) {
+        goal = shell.goal
         // Match client-runtime shellRuntime: commands do not hold completion,
         // but background tasks, monitors and subagents do. Failure wins over both.
         let holdsCompletion = shell.pendingBackgroundTasks.contains {
             ["subagent", "monitor", "background_task"].contains($0["kind"]?.stringValue ?? "")
-        }
-        runtimeStatus = shell.latestRunId == nil && shell.thread.activeProviderThreadId == nil
+        } || shell.thread.pullRequests?.contains(where: \.isWatched) == true
+        runtimeStatus = !holdsCompletion && shell.latestRunId == nil && shell.thread.activeProviderThreadId == nil
             ? nil : (holdsCompletion && shell.status != "failed" ? "idle" : shell.activityRunStatus ?? shell.status)
         runtimeUpdatedAt = shell.thread.updatedAt
         activeRunID = shell.activeRunId
@@ -59,6 +61,7 @@ public struct OrchestrationV2ThreadLifecycle: Codable, Equatable, Sendable {
     /// Full-detail fallback for archived/related threads without a shell. Encode
     /// this small record in native controls before discarding the full projection.
     public init(projection p: OrchestrationV2ThreadProjection) {
+        goal = p.providerThreads.first { $0.id == p.thread.activeProviderThreadId }?.goal
         let session = p.providerSessions.filter { $0.providerInstanceId == p.thread.providerInstanceId }
             .max { Self.timestamp($0.updatedAt) < Self.timestamp($1.updatedAt) }
         let executed = p.runs.filter { $0.status != "queued" && !($0.status == "cancelled" && $0.startedAt == nil) }
@@ -78,7 +81,7 @@ public struct OrchestrationV2ThreadLifecycle: Codable, Equatable, Sendable {
         let activity = p.runs.filter { ["preparing", "starting", "running", "waiting"].contains($0.status) }
             .max { $0.ordinal < $1.ordinal }
         let holdsCompletion = active == nil && Self.backgroundWorkHoldsCompletion(after: latest, in: p)
-        runtimeStatus = latest == nil && p.thread.activeProviderThreadId == nil ? nil
+        runtimeStatus = !holdsCompletion && latest == nil && p.thread.activeProviderThreadId == nil ? nil
             : limitOwnsLatest ? "failed"
             : holdsCompletion && latest?.status != "failed" ? "idle"
             : activity?.status ?? latest?.status ?? "idle"
@@ -125,6 +128,7 @@ public struct OrchestrationV2ThreadLifecycle: Codable, Equatable, Sendable {
     private static func backgroundWorkHoldsCompletion(
         after latest: OrchestrationV2Run?, in projection: OrchestrationV2ThreadProjection
     ) -> Bool {
+        if projection.thread.pullRequests?.contains(where: \.isWatched) == true { return true }
         guard let latest, ["cancelled", "completed", "failed", "interrupted", "waiting"].contains(latest.status) else {
             return false
         }

@@ -704,7 +704,7 @@ enum DailyUXProjectGrouping {
         mode: FeatureEnvironmentPreferences.ProjectGroupingMode
     ) -> String {
         if mode == .separate { return physicalKey(project) }
-        guard let key = project.repositoryIdentity?.canonicalKey.trimmingCharacters(
+        guard let key = project.repositoryIdentity?.groupingKey.trimmingCharacters(
             in: .whitespacesAndNewlines
         ), !key.isEmpty else {
             return physicalKey(project)
@@ -759,7 +759,7 @@ enum DailyUXProjectGrouping {
     }
 
     private static func groupName(projects: [FeatureProject]) -> String {
-        let displayNames = uniqueNonEmpty(projects.compactMap(\.repositoryIdentity?.displayName))
+        let displayNames = uniqueNonEmpty(projects.compactMap(\.repositoryIdentity?.groupingDisplayName))
         if displayNames.count == 1, let name = displayNames.first { return name }
         let repositoryNames = uniqueNonEmpty(projects.compactMap(\.repositoryIdentity?.name))
         if repositoryNames.count == 1, let name = repositoryNames.first { return name }
@@ -1249,7 +1249,7 @@ extension FeatureThread {
         switch homeStatus {
         case .approval: "Approval"
         case .input: "Input"
-        case .working: "Working"
+        case .working: goal?.status == .active ? "Goal" : "Working"
         case .monitoring: isWaitingForBackgroundWork ? "Waiting" : "Monitoring"
         case .failed: isUsageLimited ? "Limited" : "Failed"
         case .done: "Done"

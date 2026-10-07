@@ -1,5 +1,13 @@
 import Foundation
 
+/// Home rows observe cached remote data. Visible repository views retain remote refreshes.
+public enum FeatureSourceControlMonitorIntent: Sendable, Hashable {
+    case passive
+    case active
+
+    public var includeRemote: Bool { self == .active }
+}
+
 public struct FeatureSourceControlRequest: Sendable, Equatable {
     public var action: FeatureSourceControlAction
     public var message: String?

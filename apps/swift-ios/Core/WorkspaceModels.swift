@@ -119,29 +119,55 @@ public enum SourceControlProviderAuthStatus: String, Codable, Sendable {
     case unknown
 }
 
+/// Stored CLI logins and environment-token overrides reported by the server.
+public struct SourceControlProviderAccount: Decodable, Equatable, Sendable {
+    public let host: String
+    public let account: String
+    public let active: Bool
+    public let authenticated: Bool
+    public let error: String?
+    public let environmentVariable: String?
+
+    public init(
+        host: String, account: String, active: Bool, authenticated: Bool,
+        error: String? = nil, environmentVariable: String? = nil
+    ) {
+        self.host = host
+        self.account = account
+        self.active = active
+        self.authenticated = authenticated
+        self.error = error
+        self.environmentVariable = environmentVariable
+    }
+}
+
 public struct SourceControlProviderAuth: Decodable, Equatable, Sendable {
     public let status: SourceControlProviderAuthStatus
     public let account: String?
     public let host: String?
     public let detail: String?
+    public let accounts: [SourceControlProviderAccount]?
 
     private enum CodingKeys: String, CodingKey {
         case status
         case account
         case host
         case detail
+        case accounts
     }
 
     public init(
         status: SourceControlProviderAuthStatus,
         account: String? = nil,
         host: String? = nil,
-        detail: String? = nil
+        detail: String? = nil,
+        accounts: [SourceControlProviderAccount]? = nil
     ) {
         self.status = status
         self.account = account
         self.host = host
         self.detail = detail
+        self.accounts = accounts
     }
 
     public init(from decoder: any Decoder) throws {
@@ -150,6 +176,7 @@ public struct SourceControlProviderAuth: Decodable, Equatable, Sendable {
         account = try container.decodeEffectOptionalString(forKey: .account)
         host = try container.decodeEffectOptionalString(forKey: .host)
         detail = try container.decodeEffectOptionalString(forKey: .detail)
+        accounts = try container.decodeIfPresent([SourceControlProviderAccount].self, forKey: .accounts)
     }
 }
 
@@ -336,6 +363,7 @@ public struct VCSChangeRequest: Codable, Equatable, Sendable {
     public let headRef: String
     public let state: String
     public var updatedAt: String? = nil
+    public var headSha: String? = nil
 }
 
 public struct VCSLocalStatus: Codable, Equatable, Sendable {

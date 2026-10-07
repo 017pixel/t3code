@@ -220,6 +220,9 @@ public protocol FeatureClient: AnyObject {
         threadID: String
     ) async throws -> AsyncThrowingStream<FeatureSourceControlStatus, Error>
     func sourceControlStatusEvents(threadID: String) -> AsyncStream<FeatureSourceControlStatus>
+    func sourceControlStatusEvents(threadID: String, intent: FeatureSourceControlMonitorIntent) -> AsyncStream<FeatureSourceControlStatus>
+    func permissions(forThreadID threadID: String) -> EnvironmentPermissionState?
+    func updateGitHubSettings(environmentID: String, change: FeatureGitHubSettingsChange) async throws
     /// Completes at the mutation boundary. Callers refresh status separately so a refresh
     /// failure cannot make an already-completed non-idempotent action retryable.
     func performSourceControlAction(
@@ -545,6 +548,16 @@ public extension FeatureClient {
         continuation.yield(status)
         continuation.finish()
         return stream
+    }
+
+    func permissions(forThreadID threadID: String) -> EnvironmentPermissionState? { nil }
+
+    func updateGitHubSettings(environmentID: String, change: FeatureGitHubSettingsChange) async throws {
+        throw FeatureCapabilityUnavailable("GitHub settings")
+    }
+
+    func sourceControlStatusEvents(threadID: String, intent: FeatureSourceControlMonitorIntent) -> AsyncStream<FeatureSourceControlStatus> {
+        sourceControlStatusEvents(threadID: threadID)
     }
 
     func sourceControlStatusEvents(threadID: String) -> AsyncStream<FeatureSourceControlStatus> {

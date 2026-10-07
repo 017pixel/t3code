@@ -43,6 +43,15 @@ public struct T3ConnectRelayEnvironmentStatus: Codable, Equatable, Sendable {
     public let descriptor: EnvironmentDescriptor?
     public let error: String?
     public let traceId: String?
+    /// Keep unknown reasons decodable for future relay versions.
+    public var offlineReason: String? = nil
+
+    public var offlineMessage: String {
+        if offlineReason == "tunnel_released" {
+            return "Start or update T3 Code on this computer to reconnect its tunnel."
+        }
+        return error ?? "Offline"
+    }
 }
 
 public struct T3ConnectManagedEnvironmentCredential: Codable, Equatable, Sendable {

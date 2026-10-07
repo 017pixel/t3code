@@ -39,6 +39,9 @@ actor OrchestrationConnection {
         }
         do {
             let descriptor = try await read.task.value
+            guard descriptor.environmentId == environment.id else {
+                throw EnvironmentRouteError.identityMismatch
+            }
             try Task.checkCancellation()
             guard pending?.id == read.id else {
                 // Another waiter already accepted this response. A newer

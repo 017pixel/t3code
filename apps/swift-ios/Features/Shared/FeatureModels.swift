@@ -52,6 +52,9 @@ public struct FeatureEnvironment: Identifiable, Sendable, Equatable, Hashable, C
     public var supportsScratch: Bool? = nil
     public var newProjectsRoot: String? = nil
     public var canCustomizeIcon: Bool? = nil
+    public var supportsWorktreesDirectory: Bool? = nil
+    public var supportsServerBrowser: Bool? = nil
+    public var permissions: EnvironmentPermissionState? = nil
 
     public var systemImage: String {
         switch machineIcon {
@@ -95,7 +98,7 @@ public struct FeatureEnvironment: Identifiable, Sendable, Equatable, Hashable, C
         case connectionDetail
         case machineIcon
         case supportsScratch, newProjectsRoot
-        case canCustomizeIcon
+        case canCustomizeIcon, supportsWorktreesDirectory, supportsServerBrowser, permissions
     }
 
     public init(from decoder: any Decoder) throws {
@@ -115,6 +118,10 @@ public struct FeatureEnvironment: Identifiable, Sendable, Equatable, Hashable, C
         newProjectsRoot = try container.decodeIfPresent(String.self, forKey: .newProjectsRoot)
         supportsScratch = try container.decodeIfPresent(Bool.self, forKey: .supportsScratch)
         canCustomizeIcon = try container.decodeIfPresent(Bool.self, forKey: .canCustomizeIcon)
+        supportsWorktreesDirectory = try container.decodeIfPresent(Bool.self, forKey: .supportsWorktreesDirectory)
+        supportsServerBrowser = try container.decodeIfPresent(Bool.self, forKey: .supportsServerBrowser)
+        // Permissions come from the current connection, never a restored display cache.
+        permissions = nil
     }
 }
 
@@ -123,13 +130,19 @@ public struct FeatureRepositoryIdentity: Sendable, Equatable, Hashable, Codable 
     public var rootPath: String?
     public var displayName: String?
     public var name: String?
+    public var origin: RepositoryIdentity.Origin?
+
+    public var groupingKey: String { origin?.canonicalKey ?? canonicalKey }
+    public var groupingDisplayName: String { origin.map { $0.displayName ?? $0.canonicalKey } ?? displayName ?? name ?? canonicalKey }
 
     public init(
         canonicalKey: String,
         rootPath: String? = nil,
         displayName: String? = nil,
-        name: String? = nil
+        name: String? = nil,
+        origin: RepositoryIdentity.Origin? = nil
     ) {
+        self.origin = origin
         self.canonicalKey = canonicalKey
         self.rootPath = rootPath
         self.displayName = displayName
@@ -333,6 +346,7 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
     public var inboxFacts: FeatureThreadInboxFacts?
     /// Root-model overlay from the local outbox; never changes the server's settlement.
     public var hasPendingLocalMessages: Bool? = nil
+    public var goal: OrchestrationV2ProviderGoal? = nil
     public var runtimeMode: FeatureRuntimeMode
     public var interactionMode: FeatureInteractionMode
 
@@ -387,8 +401,10 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
         settlementFacts: FeatureThreadSettlementFacts? = nil,
         inboxFacts: FeatureThreadInboxFacts? = nil,
         runtimeMode: FeatureRuntimeMode = .fullAccess,
-        interactionMode: FeatureInteractionMode = .standard
+        interactionMode: FeatureInteractionMode = .standard,
+        goal: OrchestrationV2ProviderGoal? = nil
     ) {
+        self.goal = goal
         self.id = id
         self.wireID = wireID
         self.relationshipToParent = relationshipToParent

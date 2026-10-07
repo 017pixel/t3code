@@ -403,6 +403,53 @@ public struct OrchestrationV2ProviderSession: OrchestrationV2Record, Identifiabl
     }
 }
 
+/// Provider-owned goal state. Sending /goal uses the normal message path.
+public struct OrchestrationV2ProviderGoal: Codable, Equatable, Hashable, Sendable {
+    public enum Status: String, Codable, Hashable, Sendable {
+        case active, paused, blocked, complete
+        case usageLimited = "usage_limited"
+        case budgetLimited = "budget_limited"
+    }
+    public let objective: String
+    public let status: Status
+    public let tokensUsed: Int?
+    public let tokenBudget: Int?
+    public let timeUsedSeconds: Int?
+    public let checks: Int?
+    public let lastCheck: String?
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: V2Key.self)
+        objective = try c.decode(String.self, forKey: V2Key("objective"))
+        status = try c.decode(Status.self, forKey: V2Key("status"))
+        tokensUsed = try c.decodeIfPresent(Int.self, forKey: V2Key("tokensUsed"))
+        tokenBudget = try c.decodeIfPresent(Int.self, forKey: V2Key("tokenBudget"))
+        timeUsedSeconds = try c.decodeIfPresent(Int.self, forKey: V2Key("timeUsedSeconds"))
+        checks = try c.decodeIfPresent(Int.self, forKey: V2Key("checks"))
+        lastCheck = try c.decodeIfPresent(String.self, forKey: V2Key("lastCheck"))
+        guard !objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              [tokensUsed, tokenBudget, timeUsedSeconds, checks].compactMap({ $0 }).allSatisfy({ $0 >= 0 }) else {
+            throw OrchestrationV2StateError.invalidPayload("goal")
+        }
+    }
+}
+
+/// Request metadata only. A secret value never belongs in a projected item.
+public struct OrchestrationV2SecretRequest: Codable, Equatable, Sendable {
+    public enum Status: String, Codable, Sendable {
+        case pending, saved, declined, cancelled
+    }
+    public let label: String
+    public let reason: String
+    public let placeholder: String?
+    public let status: Status
+
+    private enum CodingKeys: String, CodingKey {
+        case label, reason, placeholder
+        case status = "secretStatus"
+    }
+}
+
 public struct OrchestrationV2ProviderThread: OrchestrationV2Record, Identifiable {
     public let raw: JSONValue
     public let id: String
@@ -419,6 +466,7 @@ public struct OrchestrationV2ProviderThread: OrchestrationV2Record, Identifiable
     public let handoffIds: [String]
     public let forkedFrom: JSONValue?
     public let pendingBackgroundTasks: [JSONValue]
+    public let goal: OrchestrationV2ProviderGoal?
     public let contextUsage: JSONValue?
     public let nativeMetadata: JSONValue?
     public let createdAt: String
@@ -441,6 +489,7 @@ public struct OrchestrationV2ProviderThread: OrchestrationV2Record, Identifiable
         handoffIds = try c.decode([String].self, forKey: V2Key("handoffIds"))
         forkedFrom = try c.decode(JSONValue?.self, forKey: V2Key("forkedFrom"))
         pendingBackgroundTasks = try c.decodeIfPresent([JSONValue].self, forKey: V2Key("pendingBackgroundTasks")) ?? []
+        goal = try c.decodeIfPresent(OrchestrationV2ProviderGoal.self, forKey: V2Key("goal"))
         contextUsage = try c.decodeIfPresent(JSONValue.self, forKey: V2Key("contextUsage"))
         nativeMetadata = try c.decodeIfPresent(JSONValue.self, forKey: V2Key("nativeMetadata"))
         createdAt = try c.decode(String.self, forKey: V2Key("createdAt"))
@@ -834,6 +883,7 @@ public enum OrchestrationV2TurnItemContent: Equatable, Sendable {
     case todoList(planID: String, steps: [OrchestrationV2PlanStep], explanation: String?)
     case userInput(requestID: String, questions: [OrchestrationV2InputQuestion], responseMode: String?)
     case approval(requestID: String, requestKind: String, prompt: String?)
+    case secretRequest(OrchestrationV2SecretRequest)
     case fileChange(fileName: String)
     case command(input: String, output: String?, exitCode: Int?)
     case fileSearch(pattern: String?)
@@ -869,6 +919,18 @@ public struct OrchestrationV2TurnItem: OrchestrationV2Record, Identifiable {
     public let updatedAt: String
     public let type: String
     public let content: OrchestrationV2TurnItemContent
+
+    /// Only unknown string tags are skippable. Missing or malformed tags are errors.
+    static func isKnownType(_ type: String) -> Bool {
+        knownTypes.contains(type)
+    }
+    private static let knownTypes: Set<String> = [
+        "user_message", "assistant_message", "reasoning", "proposed_plan", "todo_list",
+        "user_input_request", "approval_request", "secret_request", "file_change",
+        "command_execution", "file_search", "web_search", "checkpoint", "run_interrupt_request",
+        "run_interrupt_result", "system_notice", "error", "compaction", "handoff", "fork",
+        "thread_created", "subagent", "dynamic_tool", "notification",
+    ]
 
     public var isActive: Bool { ["pending", "running", "waiting"].contains(status) }
     public var requestID: String? {
@@ -924,6 +986,7 @@ public struct OrchestrationV2TurnItem: OrchestrationV2Record, Identifiable {
             content = try .userInput(requestID: required("requestId"), questions: required("questions"), responseMode: optional("responseMode"))
         case "approval_request":
             content = try .approval(requestID: required("requestId"), requestKind: required("requestKind"), prompt: optional("prompt"))
+        case "secret_request": content = .secretRequest(try OrchestrationV2SecretRequest(from: decoder))
         case "file_change": content = try .fileChange(fileName: required("fileName"))
         case "command_execution": content = try .command(input: required("input"), output: optional("output"), exitCode: optional("exitCode"))
         case "file_search": content = try .fileSearch(pattern: optional("pattern"))
@@ -988,6 +1051,14 @@ public struct OrchestrationV2ThreadHistoryPage: Decodable, Sendable {
     public let items: [OrchestrationV2ProjectedTurnItem]
     public let nextCursor: String?
     public let hasMoreHistory: Bool
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: V2Key.self)
+        snapshotSequence = try c.decode(Int.self, forKey: V2Key("snapshotSequence"))
+        items = try decodeKnownV2Items(c, key: "items", projected: true)
+        nextCursor = try c.decodeIfPresent(String.self, forKey: V2Key("nextCursor"))
+        hasMoreHistory = try c.decode(Bool.self, forKey: V2Key("hasMoreHistory"))
+    }
 }
 
 public struct OrchestrationV2ThreadProjection: Codable, Equatable, Sendable {
@@ -1032,12 +1103,12 @@ public struct OrchestrationV2ThreadProjection: Codable, Equatable, Sendable {
         runtimeRequests = try c.decode([OrchestrationV2RuntimeRequest].self, forKey: V2Key("runtimeRequests"))
         messages = try c.decode([OrchestrationV2ConversationMessage].self, forKey: V2Key("messages"))
         plans = try c.decode([OrchestrationV2PlanArtifact].self, forKey: V2Key("plans"))
-        turnItems = try c.decode([OrchestrationV2TurnItem].self, forKey: V2Key("turnItems"))
+        turnItems = try decodeKnownV2Items(c, key: "turnItems", projected: false)
         checkpointScopes = try c.decode([OrchestrationV2CheckpointScope].self, forKey: V2Key("checkpointScopes"))
         checkpoints = try c.decode([OrchestrationV2Checkpoint].self, forKey: V2Key("checkpoints"))
         contextHandoffs = try c.decode([OrchestrationV2ContextHandoff].self, forKey: V2Key("contextHandoffs"))
         contextTransfers = try c.decode([OrchestrationV2ContextTransfer].self, forKey: V2Key("contextTransfers"))
-        visibleTurnItems = try c.decode([OrchestrationV2ProjectedTurnItem].self, forKey: V2Key("visibleTurnItems"))
+        visibleTurnItems = try decodeKnownV2Items(c, key: "visibleTurnItems", projected: true)
         updatedAt = try c.decode(String.self, forKey: V2Key("updatedAt"))
     }
 
@@ -1102,6 +1173,7 @@ public struct OrchestrationV2ThreadShell: OrchestrationV2Record, Identifiable {
     public let latestUserMessageAt: String?
     public let hasActionableProposedPlan: Bool
     public let pendingBackgroundTasks: [JSONValue]
+    public let goal: OrchestrationV2ProviderGoal?
     public let itemCount: Int
     public let visibleItemCount: Int
 
@@ -1123,6 +1195,7 @@ public struct OrchestrationV2ThreadShell: OrchestrationV2Record, Identifiable {
         latestUserMessageAt = try c.decode(String?.self, forKey: V2Key("latestUserMessageAt"))
         hasActionableProposedPlan = try c.decode(Bool.self, forKey: V2Key("hasActionableProposedPlan"))
         pendingBackgroundTasks = try c.decodeIfPresent([JSONValue].self, forKey: V2Key("pendingBackgroundTasks")) ?? []
+        goal = try c.decodeIfPresent(OrchestrationV2ProviderGoal.self, forKey: V2Key("goal"))
         itemCount = try c.decode(Int.self, forKey: V2Key("itemCount"))
         visibleItemCount = try c.decode(Int.self, forKey: V2Key("visibleItemCount"))
     }
@@ -1160,4 +1233,23 @@ public struct OrchestrationV2ShellSnapshot: Decodable, Sendable {
         archivedThreads = container.contains(.archivedThreads)
             ? try container.decode([OrchestrationV2ThreadShell].self, forKey: .archivedThreads) : []
     }
+}
+
+/// Inspect only the discriminator before decoding the full known row. Do not use
+/// lossy array decoding: a corrupt known row must still trigger a refresh.
+private func decodeKnownV2Items<Item: Decodable>(
+    _ container: KeyedDecodingContainer<V2Key>, key: String, projected: Bool
+) throws -> [Item] {
+    var rows = try container.nestedUnkeyedContainer(forKey: V2Key(key))
+    var result: [Item] = []
+    while !rows.isAtEnd {
+        let decoder = try rows.superDecoder()
+        let row = try decoder.container(keyedBy: V2Key.self)
+        let item = projected ? try row.nestedContainer(keyedBy: V2Key.self, forKey: V2Key("item")) : row
+        let type = try item.decode(String.self, forKey: V2Key("type"))
+        if OrchestrationV2TurnItem.isKnownType(type) {
+            result.append(try Item(from: decoder))
+        }
+    }
+    return result
 }

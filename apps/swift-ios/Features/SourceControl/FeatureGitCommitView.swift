@@ -4,13 +4,15 @@ struct FeatureGitCommitView: View {
     @SwiftUI.Environment(\.dismiss) private var dismiss
     let status: FeatureSourceControlStatus
     let action: FeatureSourceControlAction
+    let canCreateBranch: Bool
     let submit: (FeatureSourceControlRequest) -> Void
     @State private var message = ""
     @State private var selection: FeatureCommitSelection
 
-    init(status: FeatureSourceControlStatus, action: FeatureSourceControlAction, submit: @escaping (FeatureSourceControlRequest) -> Void) {
+    init(status: FeatureSourceControlStatus, action: FeatureSourceControlAction, canCreateBranch: Bool = true, submit: @escaping (FeatureSourceControlRequest) -> Void) {
         self.status = status
         self.action = action
+        self.canCreateBranch = canCreateBranch
         self.submit = submit
         _selection = State(initialValue: FeatureCommitSelection(files: status.files))
     }
@@ -53,6 +55,7 @@ struct FeatureGitCommitView: View {
                 Section {
                     Button(action.title) { commit(featureBranch: false) }
                     Button("Commit on new branch") { commit(featureBranch: true) }
+                        .disabled(!canCreateBranch)
                 }
                 .disabled(selection.paths.isEmpty || message.utf16.count > 10_000)
                 if message.utf16.count > 10_000 {

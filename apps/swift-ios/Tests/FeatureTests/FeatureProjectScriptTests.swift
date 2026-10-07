@@ -128,3 +128,27 @@ struct FeatureProjectScriptTests {
         #expect(writes.first?.hasSuffix("\r") == false)
     }
 }
+
+extension FeatureProjectScriptTests {
+    @Test func settleScriptRolesSurviveProjectResolution() throws {
+        let base: [String: JSONValue] = [
+            "id": .string("cleanup"), "name": .string("Clean"), "command": .string("cleanup"),
+            "icon": .string("play"), "runOnWorktreeCreate": .bool(false),
+        ]
+        let legacy = try JSONValue.object(base).decode(ProjectScript.self)
+        #expect(legacy.runOnSettle == nil)
+        #expect(legacy.menuLabel == "Clean")
+        for setup in [false, true] {
+            var fields = base
+            fields["runOnWorktreeCreate"] = .bool(setup)
+            fields["runOnSettle"] = .bool(true)
+            fields["async"] = .bool(true)
+            var settings = ServerSettingsSnapshot()
+            settings.projectSettingsOverrides["project"] = ["defaultProjectScripts": .array([.object(fields)])]
+            let script = try #require(FeatureProjectScriptSettings.resolve(settings: settings, projectID: "project", scripts: []).first)
+            #expect(script.runOnSettle == true)
+            #expect(script.async == true)
+            #expect(script.menuLabel == (setup ? "Clean (setup, on settle)" : "Clean (on settle)"))
+        }
+    }
+}

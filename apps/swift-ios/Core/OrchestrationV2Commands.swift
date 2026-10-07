@@ -129,7 +129,23 @@ public enum OrchestrationV2Commands {
                                                        serverResolved: serverResolvedCommandContext))
         case "thread.turn.interrupt":
             let state = try requireProjection(projection)
-            let runID = try interruptRunID(value, projection: state)
+            let runID: String
+            do {
+                runID = try interruptRunID(value, projection: state)
+            } catch AdapterError.unavailableIdentity("active run") {
+                let links = try (state["thread"]?["pullRequests"] ?? .null).decode([ThreadPullRequestLink]?.self) ?? []
+                let watched = links.filter(\.isWatched)
+                guard !watched.isEmpty else { throw AdapterError.unavailableIdentity("active run") }
+                return Plan(requests: watched.enumerated().map { index, link in
+                    var unwatch = base("thread.pull-request.watch", threadID: threadID,
+                        commandID: "\(commandID):unwatch:\(index)")
+                    unwatch["host"] = .string(link.host)
+                    unwatch["repository"] = .string(link.repository)
+                    unwatch["number"] = .number(Double(link.number))
+                    unwatch["watching"] = .bool(false)
+                    return dispatch(unwatch)
+                })
+            }
             value = base("run.interrupt", threadID: threadID, commandID: commandID)
             value["runId"] = .string(runID)
             value["holdQueue"] = command["holdQueue"] ?? .bool(true)
@@ -495,7 +511,7 @@ public enum OrchestrationV2Commands {
     }
 
     private static func interruptRunID(_ value: [String: JSONValue], projection: JSONValue) throws -> String {
-        let runs = values(projection["runs"])
+        let runs = values(projection["runs"]).sorted { ($0["ordinal"]?.v2Int ?? 0) < ($1["ordinal"]?.v2Int ?? 0) }
         if let explicit = value["runId"]?.stringValue ?? value["turnId"]?.stringValue {
             if runs.contains(where: { $0["id"]?.stringValue == explicit }) { return explicit }
             // A V1-shaped display turn may name the provider turn. Resolve through its attempt.
@@ -511,7 +527,9 @@ public enum OrchestrationV2Commands {
             }
             return id
         }
-        if let active = activeRun(projection) { return try string(active["id"], field: "activeRun.id") }
+        if let active = runs.last(where: { ["preparing", "starting", "running", "waiting"].contains($0["status"]?.stringValue ?? "") }) {
+            return try string(active["id"], field: "activeRun.id")
+        }
         if let latest = runs.last, hasPendingBackgroundWork(projection, latestRun: latest) {
             return try string(latest["id"], field: "latestRun.id")
         }

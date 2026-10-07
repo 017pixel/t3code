@@ -25,7 +25,7 @@ struct PlatformNestedDeepLinkTests {
     func nestedDestinationsSurviveMailboxAndURLRoundTrip() throws {
         let destinations: [FeatureThreadDestination] = [
             .files(path: nil, line: nil), .files(path: "src/a#b%.swift", line: 2),
-            .terminal(sessionID: "terminal 2"), .review, .devices, .git, .gitCommit, .gitBranches,
+            .terminal(sessionID: "terminal 2"), .review, .devices, .browser(tabID: "tab 2"), .git, .gitCommit, .gitBranches,
         ]
         let suite = "NestedDeepLinks.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))

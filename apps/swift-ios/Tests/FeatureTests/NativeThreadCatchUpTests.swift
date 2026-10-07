@@ -1463,6 +1463,11 @@ private actor CatchUpHTTPTransport: HTTPTransport {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let value: JSONValue
         switch request.url!.path {
+        case "/api/auth/session":
+            value = try .encode(AuthSessionState(
+                authenticated: true, scopes: ["orchestration:read"], sessionMethod: "bearer-access-token",
+                permissions: ["orchestration:read"], auth: .init(serverUpdateScope: "environment:maintain")
+            ))
         case "/.well-known/t3/environment":
             value = .object([
                 "environmentId": .string("one"), "label": .string("Computer"),

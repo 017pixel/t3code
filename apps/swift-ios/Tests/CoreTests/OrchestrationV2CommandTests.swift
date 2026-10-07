@@ -199,6 +199,50 @@ final class OrchestrationV2CommandTests: XCTestCase {
         }
     }
 
+    func testWatchOnlyStopUsesPublicUnwatchCommandsWithStableDistinctIDs() throws {
+        for runs in [[], [run("done", status: "completed")]] {
+            let original = projection(runs: runs)
+            let state = V2Fixture.patch(original, ["thread": V2Fixture.patch(original["thread"] ?? .null, [
+                "pullRequests": .array([V2Fixture.watchedPullRequest(1), V2Fixture.watchedPullRequest(2),
+                    V2Fixture.watchedPullRequest(3, source: "stack-dismissed")]),
+            ])])
+            let command = JSONValue.object(intent("thread.turn.interrupt"))
+            let plan = try OrchestrationV2Commands.plan(command, projection: state)
+            XCTAssertEqual(plan.requests.count, 2)
+            XCTAssertEqual(Set(plan.requests.compactMap { $0.payload["commandId"]?.stringValue }).count, 2)
+            XCTAssertEqual(plan, try OrchestrationV2Commands.plan(command, projection: state))
+            for request in plan.requests {
+                XCTAssertEqual(request.payload["type"], .string("thread.pull-request.watch"))
+                XCTAssertEqual(request.payload["watching"], .bool(false))
+                XCTAssertEqual(request.payload["host"], .string("github.com"))
+                XCTAssertEqual(request.payload["repository"], .string("example/repo"))
+                XCTAssertNil(request.payload["runId"])
+            }
+            let active = V2Fixture.patch(state, ["runs": .array([run("active", status: "running")])])
+            let activePlan = try OrchestrationV2Commands.plan(command, projection: active)
+            XCTAssertEqual(activePlan.requests.count, 1)
+            XCTAssertEqual(activePlan.requests.first?.payload["type"], .string("run.interrupt"))
+            XCTAssertEqual(activePlan.requests.first?.payload["holdQueue"], .bool(true))
+        }
+    }
+
+    func testGoalTurnInterruptResolvesTheCurrentProviderTurnInsideOneRun() throws {
+        let original = projection(runs: [run("goal-run", status: "running")])
+        let state = V2Fixture.patch(original, [
+            "attempts": .array([.object(["id": .string("attempt"), "runId": .string("goal-run")])]),
+            "providerTurns": .array(["first", "current"].map { id in .object([
+                "id": .string(id), "runAttemptId": .string("attempt"),
+                "nativeTurnRef": .object(["nativeId": .string("native-\(id)")]),
+                "status": .string(id == "current" ? "running" : "completed"),
+            ]) }),
+        ])
+        var command = intent("thread.turn.interrupt")
+        command["turnId"] = .string("native-current")
+        let request = try XCTUnwrap(OrchestrationV2Commands.plan(.object(command), projection: state).requests.first)
+        XCTAssertEqual(request.payload["runId"], .string("goal-run"))
+        XCTAssertEqual(request.payload["holdQueue"], .bool(true))
+    }
+
     func testInterruptResolvesActiveRunAndNeverTreatsNativeTurnIDAsRunID() throws {
         var state = try object(projection(runs: [run("older", status: "completed"), run("active", status: "running")]))
         state["providerTurns"] = .array([.object([

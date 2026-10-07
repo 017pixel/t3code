@@ -4,6 +4,57 @@ import XCTest
 
 @MainActor
 final class ScheduledTaskClientTests: XCTestCase {
+    func testNativeTaskMutationChecksCurrentDestinationPermission() async throws {
+        for allowed in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = EnvironmentStore(fileURL: directory.appendingPathComponent("environments.json"))
+            try await store.upsert(Self.environment)
+            let connection = ScheduledTaskTestConnection()
+            let runtime = EnvironmentRuntime(environmentStore: store, credentialStore: Self.credentials(),
+                httpTransport: ScheduledTaskTicketTransport(version: 2,
+                    permissions: allowed ? ["orchestration:operate"] : []),
+                webSocketConnector: ScheduledTaskTestConnector(connection: connection))
+            let native = NativeFeatureClient(runtime: runtime)
+            do {
+                _ = try await native.setScheduledTaskEnabled(.init(environmentID: Self.environment.id,
+                    taskID: "task-local"), enabled: false)
+                XCTAssertTrue(allowed)
+            } catch is EnvironmentPermissionDeniedError {
+                XCTAssertFalse(allowed)
+            }
+            let calls = await connection.requests
+            XCTAssertEqual(calls.map(\.method), allowed ? ["scheduledTasks.setEnabled"] : [])
+            let client = await runtime.client(for: Self.environment)
+            await client.disconnect()
+        }
+    }
+
+    func testWebhookStreamAndRotationWorkOnBothProtocolsWithFutureRows() async throws {
+        for version in [1, 2] {
+            let connection = ScheduledTaskTestConnection(
+                task: ScheduledWebhookFixtures.row(url: "https://hooks.example/old"),
+                extraTasks: [ScheduledTaskTestFixtures.taskJSON,
+                    ScheduledWebhookFixtures.row(id: "future", schedule: .object(["type": .string("future")]))])
+            let client = T3Client(environment: Self.environment, credentialStore: Self.credentials(),
+                httpTransport: ScheduledTaskTicketTransport(version: version),
+                webSocketConnector: ScheduledTaskTestConnector(connection: connection))
+            let list = try await client.listScheduledTasks()
+            XCTAssertEqual(list.tasks.map(\.id), ["webhook", "task-local"])
+            var updates = await client.scheduledTaskUpdates().makeAsyncIterator()
+            let initial = try await updates.next()
+            XCTAssertEqual(initial, list)
+            let rotated = try await client.rotateScheduledTaskWebhookToken(id: "webhook")
+            XCTAssertEqual(rotated.webhook?.url, "https://hooks.example/new")
+            let update = try await updates.next()
+            XCTAssertEqual(update?.tasks.first?.webhook?.url, "https://hooks.example/new")
+            let calls = await connection.requests
+            XCTAssertEqual(calls.last?.method, "scheduledTasks.rotateWebhookToken")
+            XCTAssertEqual(calls.last?.payload, .object(["id": .string("webhook")]))
+            await client.disconnect()
+        }
+    }
+
     func testSharedServicesAndLiveListWorkWithBothOrchestrationVersions() async throws {
         for version in [1, 2] {
             let connection = ScheduledTaskTestConnection()
@@ -94,9 +145,13 @@ final class ScheduledTaskClientTests: XCTestCase {
 
 private struct ScheduledTaskTicketTransport: HTTPTransport {
     let version: Int
+    var permissions: [String] = []
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let value: JSONValue
-        if request.url?.path == "/.well-known/t3/environment" {
+        if request.url?.path == "/api/auth/session" {
+            value = .object(["authenticated": .bool(true), "scopes": .array([.string("orchestration:operate")]),
+                             "permissions": .array(permissions.map(JSONValue.string))])
+        } else if request.url?.path == "/.well-known/t3/environment" {
             value = .object([
                 "environmentId": .string("scheduled-env"), "label": .string("Scheduled host"),
                 "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
@@ -120,12 +175,18 @@ private actor ScheduledTaskTestConnection: WebSocketConnection {
     struct Request: Sendable { let method: String; let payload: JSONValue }
     private(set) var requests: [Request] = []
     private let subscriptionFailure: String?
-    private var task: JSONValue? = ScheduledTaskTestFixtures.taskJSON
+    private var task: JSONValue?
+    private let extraTasks: [JSONValue]
     private var subscriptionID: Int?
     private var responses: [Data] = []
     private var receiver: CheckedContinuation<Data, any Error>?
 
-    init(subscriptionFailure: String? = nil) { self.subscriptionFailure = subscriptionFailure }
+    init(subscriptionFailure: String? = nil, task: JSONValue = ScheduledTaskTestFixtures.taskJSON,
+         extraTasks: [JSONValue] = []) {
+        self.subscriptionFailure = subscriptionFailure
+        self.task = task
+        self.extraTasks = extraTasks
+    }
 
     func send(_ data: Data) throws {
         let request = try JSONDecoder.t3.decode(JSONValue.self, from: data)
@@ -147,9 +208,12 @@ private actor ScheduledTaskTestConnection: WebSocketConnection {
                 subscriptionID = id
                 try pushList()
             }
-        case "scheduledTasks.upsert", "scheduledTasks.setEnabled", "scheduledTasks.runNow":
+        case "scheduledTasks.upsert", "scheduledTasks.setEnabled", "scheduledTasks.runNow", "scheduledTasks.rotateWebhookToken":
             guard let current = task, case .object(var fields) = current else { throw RPCError.remote("Task not found") }
-            if method == "scheduledTasks.runNow" {
+            if method == "scheduledTasks.rotateWebhookToken" {
+                fields["webhook"] = .object(["path": .string("/api/webhooks/new"),
+                    "url": .string("https://hooks.example/new"), "hasSecret": .bool(false)])
+            } else if method == "scheduledTasks.runNow" {
                 fields["lastRunStatus"] = .string("running")
             } else if case let .object(changes) = payload {
                 fields.merge(changes) { _, new in new }
@@ -172,7 +236,7 @@ private actor ScheduledTaskTestConnection: WebSocketConnection {
 
     func close() { receiver?.resume(throwing: CancellationError()); receiver = nil }
 
-    private var list: JSONValue { .object(["tasks": .array(task.map { [$0] } ?? [])]) }
+    private var list: JSONValue { .object(["tasks": .array((task.map { [$0] } ?? []) + extraTasks)]) }
 
     private func pushList() throws {
         guard let subscriptionID else { return }

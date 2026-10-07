@@ -242,7 +242,7 @@ public actor InMemoryCredentialStore: CredentialStore {
 
 public actor EnvironmentStore {
     private struct Document: Codable {
-        let version: Int
+        var version: Int
         var environments: [Environment]
         var activeEnvironmentID: String?
     }
@@ -347,7 +347,7 @@ public actor EnvironmentStore {
     private func loadDocument() throws -> Document {
         if let cached { return cached }
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            return Document(version: 1, environments: [], activeEnvironmentID: nil)
+            return Document(version: 2, environments: [], activeEnvironmentID: nil)
         }
         let data = try Data(contentsOf: fileURL)
         let document = try JSONDecoder.t3.decode(Document.self, from: data)
@@ -356,6 +356,8 @@ public actor EnvironmentStore {
     }
 
     private func save(_ document: Document) throws {
+        var document = document
+        document.version = 2
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true

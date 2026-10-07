@@ -2,6 +2,25 @@ import XCTest
 @testable import T3Code
 
 final class ThreadPullRequestsTests: XCTestCase {
+    func testWatchWithoutHeadSHARoundTripsThroughCacheEncoding() throws {
+        let link = try V2Fixture.watchedPullRequest().decode(ThreadPullRequestLink.self)
+        XCTAssertNil(link.watch?.headSha)
+        let data = try JSONEncoder.t3.encode(link)
+        XCTAssertEqual(try JSONDecoder.t3.decode(ThreadPullRequestLink.self, from: data), link)
+    }
+
+    func testOldLinksAndWatchBookkeepingRemainCompatible() throws {
+        let watched = try V2Fixture.watchedPullRequest().decode(ThreadPullRequestLink.self)
+        XCTAssertTrue(watched.isWatched)
+        XCTAssertEqual(watched.watch?.passedChecks, [])
+        var older = V2Fixture.watchedPullRequest().v2Object
+        older.removeValue(forKey: "watch")
+        XCTAssertFalse(try JSONValue.object(older).decode(ThreadPullRequestLink.self).isWatched)
+        let dismissed = try V2Fixture.watchedPullRequest(source: "stack-dismissed").decode(ThreadPullRequestLink.self)
+        XCTAssertNotNil(dismissed.watch)
+        XCTAssertFalse(dismissed.isWatched)
+    }
+
     func testStackOrderSelectsHighestOpenLayerAndHidesDismissedMembers() throws {
         var first = link(1, head: "one", base: "main")
         let second = link(2, head: "two", base: "one")

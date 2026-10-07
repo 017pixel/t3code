@@ -191,7 +191,7 @@ public struct FeatureTerminalView: View {
                 lifecycleVersion: terminal?.lifecycleVersion ?? 0,
                 buffer: terminal?.buffer ?? "",
                 fontSize: CGFloat(fontSize),
-                isRunning: isRunning,
+                isRunning: isRunning && canOperate,
                 hostPlatform: TerminalHostPlatform(os: client.terminalHostOS(threadID: threadID)),
                 focusRequest: focusRequest,
                 onInput: { data in
@@ -269,6 +269,7 @@ public struct FeatureTerminalView: View {
         }
         .onAppear { inputSession.attach(to: inputTarget) }
         .onDisappear { inputSession.detach() }
+        .onChange(of: canOperate) { _, _ in inputSession.updateTarget(inputTarget) }
         .onChange(of: threadID) { _, _ in
             updateTerminal(nil)
             sessions = []
@@ -308,7 +309,7 @@ public struct FeatureTerminalView: View {
                 let shouldSyncGrid = !isRunning
                     && (update.state == .running || update.state == .starting)
                 guard updateTerminal(update) else { continue }
-                if shouldSyncGrid {
+                if shouldSyncGrid, canOperate {
                     try? await client.resizeTerminal(
                         threadID: threadID,
                         terminalID: terminalID,
@@ -359,6 +360,7 @@ public struct FeatureTerminalView: View {
         Menu {
             Section {
                 Label(statusLabel, systemImage: statusSymbol)
+                if !canOperate { Text("Read only") }
                 if let workingDirectory = terminal?.workingDirectory {
                     Text(workingDirectory)
                 }
@@ -383,6 +385,7 @@ public struct FeatureTerminalView: View {
                 } label: {
                     Label("Open new terminal", systemImage: "plus")
                 }
+                .disabled(!canOperate)
             }
 
             FeatureProjectScriptsMenu(
@@ -393,6 +396,7 @@ public struct FeatureTerminalView: View {
                 // A script can restart the selected, previously closed session.
                 terminalAttachmentVersion += 1
             }
+            .disabled(!canOperate)
 
             Section {
                 Menu {
@@ -425,7 +429,7 @@ public struct FeatureTerminalView: View {
                 } label: {
                     Label("Clear", systemImage: "eraser")
                 }
-                .disabled(terminal == nil)
+                .disabled(terminal == nil || !canOperate)
             }
 
             Section {
@@ -435,19 +439,29 @@ public struct FeatureTerminalView: View {
                     } label: {
                         Label("Stop terminal", systemImage: "stop.fill")
                     }
+                    .disabled(!canOperate)
                 } else {
                     Button {
                         Task { await open() }
                     } label: {
                         Label("Start terminal", systemImage: "play.fill")
                     }
-                    .disabled(isLoading || isOpening)
+                    .disabled(isLoading || isOpening || !canOperate)
                 }
             }
         } label: {
             Image(systemName: "terminal")
         }
         .accessibilityLabel("Terminal options")
+    }
+
+    private var canOperate: Bool {
+        client.permissions(forThreadID: threadID)?.grants("terminal:operate") == true
+    }
+
+    private func requireOperate() throws {
+        try (client.permissions(forThreadID: threadID) ?? EnvironmentPermissionState())
+            .require("terminal:operate")
     }
 
     private var fontSize: Double {
@@ -463,7 +477,7 @@ public struct FeatureTerminalView: View {
     }
 
     private var inputTarget: TerminalInputSession.Target? {
-        guard let terminal, isRunning,
+        guard canOperate, let terminal, isRunning,
               terminal.threadID == threadID, terminal.terminalID == activeTerminalID else {
             return nil
         }
@@ -546,6 +560,7 @@ public struct FeatureTerminalView: View {
     }
 
     private func openNewTerminal() {
+        guard canOperate else { return }
         let nextID = TerminalSessionList.nextID(
             occupiedIDs: sessions.map(\.terminalID) + [activeTerminalID]
         )
@@ -558,10 +573,11 @@ public struct FeatureTerminalView: View {
         guard nextColumns != columns || nextRows != rows else { return }
         columns = nextColumns
         rows = nextRows
-        guard isRunning else { return }
+        guard isRunning, canOperate else { return }
         let terminalID = activeTerminalID
         Task {
             do {
+                try requireOperate()
                 try await client.resizeTerminal(
                     threadID: threadID,
                     terminalID: terminalID,
@@ -587,7 +603,7 @@ public struct FeatureTerminalView: View {
             )
             guard !Task.isCancelled, terminalID == activeTerminalID else { return }
             guard updateTerminal(snapshot) else { return }
-            if snapshot.state == .stopped || snapshot.state == .exited {
+            if canOperate, snapshot.state == .stopped || snapshot.state == .exited {
                 try await openTerminal(terminalID: terminalID)
             }
             errorMessage = nil
@@ -610,6 +626,7 @@ public struct FeatureTerminalView: View {
     }
 
     private func openTerminal(terminalID: String) async throws {
+        try requireOperate()
         inputSession.updateTarget(nil)
         try await client.openTerminal(
             threadID: threadID,
@@ -634,6 +651,7 @@ public struct FeatureTerminalView: View {
             excluding: terminalID
         )
         do {
+            try requireOperate()
             try await client.closeTerminal(threadID: threadID, terminalID: terminalID)
             guard terminalID == activeTerminalID else { return }
             if let fallbackID {
@@ -658,13 +676,12 @@ public struct FeatureTerminalView: View {
     private func clear(terminalID: String) async {
         let target = inputTarget
         do {
-            if terminalID == activeTerminalID {
-                terminal?.buffer = ""
-            }
+            try requireOperate()
             try await client.clearTerminal(
                 threadID: threadID,
                 terminalID: terminalID
             )
+            if terminalID == activeTerminalID { terminal?.buffer = "" }
             if let target, target.terminalID == terminalID {
                 guard let task = enqueueInput("\u{0C}", target: target), await task.value else { return }
             }
@@ -692,6 +709,7 @@ public struct FeatureTerminalView: View {
     private func write(_ data: String, target: TerminalInputSession.Target) async -> Bool {
         guard target == inputTarget else { return false }
         do {
+            try requireOperate()
             try await client.writeTerminal(
                 threadID: target.threadID,
                 terminalID: target.terminalID,

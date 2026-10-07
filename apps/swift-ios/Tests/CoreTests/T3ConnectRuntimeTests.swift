@@ -17,6 +17,11 @@ final class T3ConnectRuntimeTests: XCTestCase {
         XCTAssertEqual(saved?.accessToken, "fresh-environment-token")
         let requests = await fixture.transport.requests
         XCTAssertEqual(requests.filter { $0.url?.path == "/oauth/token" }.count, 1)
+        XCTAssertEqual(saved?.scopes, ["orchestration:read", "environment:maintain", "providers:manage"])
+        let exchange = try XCTUnwrap(requests.first { $0.url?.path == "/oauth/token" })
+        var form = URLComponents()
+        form.percentEncodedQuery = String(data: try XCTUnwrap(exchange.httpBody), encoding: .utf8)
+        XCTAssertFalse(form.queryItems?.contains { $0.name == "scope" } == true)
     }
 
     func testManagedEnvironmentReplacesIncompatibleSavedCredential() async throws {
@@ -235,6 +240,7 @@ final class T3ConnectRuntimeTests: XCTestCase {
         let fields = try XCTUnwrap(form.queryItems)
         XCTAssertEqual(fields.first { $0.name == "subject_token" }?.value, "bootstrap+once")
         XCTAssertEqual(fields.first { $0.name == "client_label" }?.value, "Alex + iPhone")
+        XCTAssertFalse(fields.contains { $0.name == "scope" })
     }
 
     func testSixtySecondMarginRefreshesAndPersistsBeforeFirstRequest() async throws {
@@ -871,7 +877,9 @@ final class T3ConnectRuntimeTests: XCTestCase {
             Data.token(accessToken: "", scopes: validScopes),
             Data.token(issuedTokenType: "wrong", scopes: validScopes),
             Data.token(expiresIn: 0, scopes: validScopes),
-            Data.token(scopes: "orchestration:read"),
+            Data.token(scopes: ""),
+            Data.token(tokenType: "Bearer", scopes: validScopes),
+            Data.token(expiresIn: -1, scopes: validScopes),
         ]
 
         for body in invalidBodies {
@@ -1142,6 +1150,156 @@ final class T3ConnectRuntimeTests: XCTestCase {
         }
     }
 
+    func testDefaultExchangeAcceptsActualCurrentLegacyAndRestrictedGrants() async throws {
+        let signer = try testSigner()
+        let bootstrap = try await bootstrapCredential(signer: signer)
+        let grants = [
+            "orchestration:read settings:write providers:manage environment:maintain filesystem:read",
+            "orchestration:read orchestration:operate terminal:operate review:write relay:read",
+            "environment:maintain",
+        ]
+        for grant in grants {
+            let transport = T3ConnectScriptedHTTPTransport { _, _ in (.token(scopes: grant), 200) }
+            let authorizer = T3ConnectManagedEnvironmentAuthorizer(transport: transport, signer: signer)
+            let authorization = try await authorizer.exchange(bootstrap)
+            XCTAssertEqual(authorization.scopes, grant.split(separator: " ").map(String.init))
+            let requests = await transport.requests
+            let body = try XCTUnwrap(requests.first?.httpBody)
+            var form = URLComponents()
+            form.percentEncodedQuery = try XCTUnwrap(String(data: body, encoding: .utf8))
+            XCTAssertFalse(form.queryItems?.contains { $0.name == "scope" } == true)
+        }
+        let transport = T3ConnectScriptedHTTPTransport { _, _ in (.token(scopes: "orchestration:read"), 200) }
+        let authorizer = T3ConnectManagedEnvironmentAuthorizer(transport: transport, signer: signer)
+        let restricted = try await authorizer.exchange(bootstrap, scopes: ["orchestration:read", "filesystem:read"])
+        XCTAssertEqual(restricted.scopes, ["orchestration:read"])
+    }
+
+    func testManagedExchangeRejectsWrongProofKeyBeforeSendingBootstrap() async throws {
+        let signer = try testSigner()
+        let original = try await bootstrapCredential(signer: signer)
+        let mismatched = T3ConnectManagedEnvironmentCredential(
+            environmentID: original.environmentID, label: original.label, endpoint: original.endpoint,
+            bootstrapCredential: original.bootstrapCredential,
+            bootstrapExpiresAt: original.bootstrapExpiresAt, proofKeyThumbprint: "another-key"
+        )
+        let transport = T3ConnectScriptedHTTPTransport { _, _ in
+            throw T3ConnectTestError.unexpectedRefresh
+        }
+        let authorizer = T3ConnectManagedEnvironmentAuthorizer(transport: transport, signer: signer)
+        do {
+            _ = try await authorizer.exchange(mismatched)
+            XCTFail("A bootstrap bound to another proof key must not be sent")
+        } catch let error as T3ConnectRelayError {
+            guard case .invalidConfiguration = error else { throw error }
+        }
+        let requests = await transport.requests
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    func testManagedLANRefreshKeepsSelectedOriginAndCredentialOwner() async throws {
+        let signer = try testSigner()
+        let thumbprint = try await signer.thumbprint()
+        let originalRelay = managedEnvironment(descriptor: descriptor())
+        let relay = originalRelay.mergingRoute(EnvironmentRoute(
+            id: "relay", httpBaseURL: originalRelay.httpBaseURL,
+            webSocketBaseURL: originalRelay.webSocketBaseURL,
+            kind: .managedDPoP, credentialOwnerID: "cloud-credential"
+        ))
+        let lanRoute = EnvironmentRoute(
+            id: "lan", httpBaseURL: URL(string: "http://192.168.1.42:3773")!,
+            webSocketBaseURL: URL(string: "ws://192.168.1.42:3773/ws")!,
+            kind: .managedDPoP, credentialOwnerID: "cloud-credential", isLearned: true
+        )
+        let environment = relay.mergingRoute(lanRoute, select: true)
+        let stale = EnvironmentCredential.managedDPoP(
+            accessToken: "stale-token", expiresAt: .distantPast, scopes: ["orchestration:read"],
+            environmentID: environment.id, proofKeyThumbprint: thumbprint
+        )
+        let credentials = InMemoryCredentialStore(credentials: [environment.credentialID: stale])
+        let bootstrap = try await bootstrapCredential(signer: signer)
+        let transport = T3ConnectScriptedHTTPTransport { request, _ in
+            switch request.url?.path {
+            case "/.well-known/t3/environment":
+                XCTAssertEqual(request.url?.host, "managed.example")
+                return (.descriptor, 200)
+            case "/oauth/token":
+                XCTAssertEqual(request.url?.host, "managed.example")
+                return (.token(scopes: "orchestration:read environment:maintain"), 200)
+            case "/api/auth/session":
+                XCTAssertEqual(request.url?.host, "192.168.1.42")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "DPoP fresh-environment-token")
+                return (.authSession, 200)
+            case "/api/auth/websocket-ticket":
+                XCTAssertEqual(request.url?.host, "192.168.1.42")
+                return (.webSocketTicket("lan-ticket"), 200)
+            default: throw T3ConnectTestError.unexpectedPath(request.url?.path)
+            }
+        }
+        let authorizer = T3ConnectManagedEnvironmentAuthorizer(transport: transport, signer: signer)
+        let runtime = T3ConnectRuntimeAuthorization(authorizer: authorizer, bootstrapProvider: { _ in bootstrap })
+        let api = EnvironmentAPI(transport: transport, credentials: credentials, managedAuthorization: runtime)
+        _ = try await api.session(for: environment)
+        _ = try await api.webSocketTicket(for: environment)
+        let saved = await credentials.credential(for: environment.credentialID)
+        let identityCredential = await credentials.credential(for: environment.id)
+        XCTAssertEqual(saved?.scopes, ["orchestration:read", "environment:maintain"])
+        XCTAssertNil(identityCredential)
+        XCTAssertEqual(environment.httpBaseURL, lanRoute.httpBaseURL)
+        let requests = await transport.requests
+        XCTAssertEqual(requests.filter { $0.url?.path == "/oauth/token" }.count, 1)
+        for request in requests where request.url?.host == "192.168.1.42" {
+            let proof = try XCTUnwrap(request.value(forHTTPHeaderField: "DPoP"))
+            let encoded = String(proof.split(separator: ".")[1])
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let padded = encoded + String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+            let payload = try JSONDecoder.t3.decode(JSONValue.self, from: XCTUnwrap(Data(base64Encoded: padded)))
+            XCTAssertEqual(payload["htu"]?.stringValue, request.url?.absoluteString)
+        }
+        let ticketURL = try await authorizer.webSocketURL(using: .init(
+            environmentID: environment.id, label: environment.label,
+            endpoint: .init(httpBaseUrl: lanRoute.httpBaseURL.absoluteString,
+                            wsBaseUrl: lanRoute.webSocketBaseURL.absoluteString, providerKind: .manual),
+            accessToken: try XCTUnwrap(saved?.accessToken), expiresAt: .distantFuture,
+            scopes: try XCTUnwrap(saved?.scopes), proofKeyThumbprint: thumbprint
+        ))
+        XCTAssertEqual(ticketURL.scheme, "ws")
+        XCTAssertEqual(ticketURL.host, "192.168.1.42")
+        XCTAssertEqual(ticket(in: ticketURL), "lan-ticket")
+    }
+
+    func testPermissionDenialDoesNotRefreshManagedCredential() async throws {
+        let signer = try testSigner()
+        let environment = managedEnvironment(descriptor: descriptor())
+        let original = EnvironmentCredential.managedDPoP(
+            accessToken: "valid-token", expiresAt: .distantFuture, scopes: ["orchestration:read"],
+            environmentID: environment.id, proofKeyThumbprint: try await signer.thumbprint()
+        )
+        let credentials = InMemoryCredentialStore(credentials: [environment.credentialID: original])
+        let transport = T3ConnectScriptedHTTPTransport { _, _ in
+            (Data(#"{"_tag":"EnvironmentScopeRequiredError","code":"insufficient_scope","requiredScope":"orchestration:read","requiredPermission":"filesystem:read","traceId":"trace-denied"}"#.utf8), 403)
+        }
+        let runtime = T3ConnectRuntimeAuthorization(
+            authorizer: .init(transport: transport, signer: signer),
+            bootstrapProvider: { _ in throw T3ConnectTestError.unexpectedRefresh }
+        )
+        let api = EnvironmentAPI(transport: transport, credentials: credentials, managedAuthorization: runtime)
+        do {
+            _ = try await api.session(for: environment)
+            XCTFail("Expected permission denial")
+        } catch let denial as EnvironmentPermissionDeniedError {
+            XCTAssertEqual(denial.requiredScope, "orchestration:read")
+            XCTAssertEqual(denial.requiredPermission, "filesystem:read")
+            XCTAssertEqual(denial.traceID, "trace-denied")
+            XCTAssertFalse(denial.isRejectedAuthorization)
+        }
+        let requests = await transport.requests
+        let saved = await credentials.credential(for: environment.credentialID)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(saved, original)
+    }
+
     private func testDeviceRegistration() -> T3ConnectDeviceRegistration {
         T3ConnectDeviceRegistration(
             deviceID: "phone-1",
@@ -1177,8 +1335,7 @@ final class T3ConnectRuntimeTests: XCTestCase {
             case "/.well-known/t3/environment":
                 return (.descriptor, 200)
             case "/oauth/token":
-                return (.token(scopes: T3ConnectManagedEnvironmentAuthorizer.standardScopes
-                    .joined(separator: " ")), 200)
+                return (.token(scopes: "orchestration:read environment:maintain providers:manage"), 200)
             case "/api/auth/session":
                 if let sessionFailure { throw sessionFailure }
                 return (sessionResponse, 200)
@@ -1599,6 +1756,7 @@ private extension Data {
     static func token(
         accessToken: String = "fresh-environment-token",
         issuedTokenType: String = "urn:ietf:params:oauth:token-type:access_token",
+        tokenType: String = "DPoP",
         expiresIn: Double = 300,
         scopes: String
     ) -> Data {
@@ -1607,7 +1765,7 @@ private extension Data {
             {
               "access_token": "\(accessToken)",
               "issued_token_type": "\(issuedTokenType)",
-              "token_type": "DPoP",
+              "token_type": "\(tokenType)",
               "expires_in": \(expiresIn),
               "scope": "\(scopes)"
             }

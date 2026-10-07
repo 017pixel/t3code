@@ -16,6 +16,12 @@ public struct FeatureGitBranchesView: View {
         self.threadID = threadID
     }
 
+    private var canChangeWorkspace: Bool {
+        let permissions = client.permissions(forThreadID: threadID)
+        return permissions?.grants("source-control:write") == true
+            && permissions?.grants("orchestration:operate") == true
+    }
+
     public var body: some View {
         List {
             if let errorMessage {
@@ -23,7 +29,7 @@ public struct FeatureGitBranchesView: View {
                     Text(errorMessage).foregroundStyle(T3Colors.danger)
                     if let pendingWorkspace {
                         Button("Retry thread update") { Task { await sync(pendingWorkspace) } }
-                            .disabled(busy)
+                            .disabled(busy || client.permissions(forThreadID: threadID)?.grants("orchestration:operate") != true)
                     } else {
                         Button("Reload branches") { Task { await load() } }.disabled(busy)
                     }
@@ -85,7 +91,7 @@ public struct FeatureGitBranchesView: View {
                         }
                     }
                 }
-                .disabled(busy || pendingWorkspace != nil)
+                .disabled(busy || pendingWorkspace != nil || !canChangeWorkspace)
             }
         }
         .scrollContentBackground(.hidden)
@@ -113,7 +119,7 @@ public struct FeatureGitBranchesView: View {
     }
 
     private func change(_ action: FeatureSourceControlWorkspaceAction) async {
-        guard !busy, pendingWorkspace == nil else { return }
+        guard !busy, pendingWorkspace == nil, canChangeWorkspace else { return }
         busy = true
         defer { busy = false }
         do {
@@ -123,6 +129,7 @@ public struct FeatureGitBranchesView: View {
             await refresh()
         } catch let error as FeatureSourceControlWorkspaceSyncError {
             pendingWorkspace = error.workspace
+            await refresh()
             errorMessage = error.localizedDescription
         } catch is CancellationError {} catch { errorMessage = error.localizedDescription }
     }

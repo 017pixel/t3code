@@ -5,6 +5,39 @@ import Testing
 @Suite("V2 thread execution and queue")
 struct FeatureThreadExecutionTests {
     @Test
+    func watchOnlyStopDoesNotRequireAnInterruptibleRun() throws {
+        for runs in [[], [run("done", ordinal: 1, status: .completed)]] {
+            for source in ["manual", "stack-dismissed"] {
+                let execution = try FeatureThreadExecution(projection: projection(runs: runs, threadFields: [
+                    "pullRequests": .array([V2Fixture.watchedPullRequest(source: source)]),
+                ]))
+                #expect(execution.interruptibleRun == nil)
+                #expect(!execution.canInterrupt)
+                #expect(execution.canStopThread == (source == "manual"))
+            }
+            let removed = try FeatureThreadExecution(projection: projection(runs: runs, threadFields: ["pullRequests": .array([])]))
+            #expect(!removed.canStopThread)
+            let archived = try FeatureThreadExecution(projection: projection(runs: runs, threadFields: [
+                "pullRequests": .array([V2Fixture.watchedPullRequest()]), "archivedAt": .string(V2Fixture.now),
+            ]))
+            #expect(!archived.canManageQueue)
+            #expect(archived.canStopThread)
+        }
+    }
+
+    @Test
+    func goalCanAdvanceProviderTurnsWithinTheSameRun() throws {
+        // The completed provider turn can arrive after the new running turn.
+        let execution = try FeatureThreadExecution(projection: projection(
+            runs: [run("goal", ordinal: 1, status: .running)],
+            turns: [turn(attempt: "attempt-goal", status: "running"), turn(attempt: "attempt-goal", status: "completed")]
+        ))
+        #expect(execution.canInterrupt)
+        #expect(execution.canStopThread)
+        #expect(execution.interruptibleRun?.id == "goal")
+    }
+
+    @Test
     func newerQueuedRunDoesNotReplaceActiveWork() throws {
         let execution = try FeatureThreadExecution(projection: projection(
             runs: [

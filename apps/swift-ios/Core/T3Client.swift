@@ -1489,12 +1489,12 @@ public actor T3Client {
         )
     }
 
-    public func vcsStatusEvents(cwd: String) async
+    public func vcsStatusEvents(cwd: String, includeRemote: Bool = true) async
         -> AsyncThrowingStream<VCSStatusEvent, Error>
     {
         await rpc.subscribe(
             RPCMethod.subscribeVCSStatus.rawValue,
-            payload: .object(["cwd": .string(cwd)]),
+            payload: .object(["cwd": .string(cwd), "includeRemote": .bool(includeRemote)]),
             as: VCSStatusEvent.self
         )
     }
@@ -1995,6 +1995,9 @@ public actor EnvironmentRuntime {
     private let managedAuthorization: (any ManagedEnvironmentAuthorizing)?
     private let rpcConnectionWaitTimeout: Duration
     private var clients: [String: T3Client] = [:]
+    private let routeResolver: EnvironmentRouteResolver
+    private var routeTasks: [String: Task<T3Client, Error>] = [:]
+    private var routeGenerations: [String: Int] = [:]
 
     public init(
         environmentStore: EnvironmentStore = EnvironmentStore(),
@@ -2007,6 +2010,7 @@ public actor EnvironmentRuntime {
         self.environmentStore = environmentStore
         self.credentialStore = credentialStore
         self.httpTransport = httpTransport
+        self.routeResolver = EnvironmentRouteResolver(transport: httpTransport)
         self.webSocketConnector = webSocketConnector
         self.managedAuthorization = managedAuthorization
         self.rpcConnectionWaitTimeout = rpcConnectionWaitTimeout
@@ -2039,6 +2043,7 @@ public actor EnvironmentRuntime {
     }
 
     public func setEnabled(id: String, enabled: Bool) async throws {
+        invalidateRouteResolution(id: id)
         let environments = try await environmentStore.setEnabled(id: id, enabled: enabled)
         guard environments.contains(where: { $0.id == id }) else {
             throw RPCError.remote("Environment \(id) is not saved.")
@@ -2086,9 +2091,8 @@ public actor EnvironmentRuntime {
         return try await api.descriptor(at: httpBaseURL)
     }
 
-    /// Persists a fully validated managed environment. Both the environment
-    /// metadata and the tagged DPoP credential must agree before either can
-    /// replace an existing manual connection with the same server identity.
+    /// Adds a validated relay route without replacing independent pairings.
+    /// The managed credential has its own owner when other routes already exist.
     @discardableResult
     public func saveManagedEnvironment(
         _ environment: Environment,
@@ -2104,13 +2108,22 @@ public actor EnvironmentRuntime {
 
         let previousEnvironment = try await environmentStore.load()
             .first(where: { $0.id == environment.id })
+        invalidateRouteResolution(id: environment.id)
         let previousActiveID = try await environmentStore.activeEnvironmentID()
-        let previousCredential = try await credentialStore.swapCredential(
-            credential,
-            for: environment.id
+        let route = EnvironmentRoute(
+            id: "relay", httpBaseURL: environment.httpBaseURL,
+            webSocketBaseURL: environment.webSocketBaseURL, kind: .managedDPoP,
+            credentialOwnerID: previousEnvironment?.routes.first(where: { $0.id == "relay" })?.credentialOwnerID
+                ?? (previousEnvironment == nil ? environment.id : "route:\(UUID().uuidString)")
         )
+        let previousCredential = try await credentialStore.swapCredential(
+            credential, for: route.credentialOwnerID
+        )
+        let saved: Environment
         do {
-            try await environmentStore.upsert(environment)
+            saved = try await environmentStore.savePairedRoute(
+                route, descriptor: environment.descriptor!, expected: previousEnvironment
+            )
             try await environmentStore.setActiveEnvironment(id: environment.id)
         } catch {
             let operationError = error
@@ -2120,12 +2133,12 @@ public actor EnvironmentRuntime {
                     _ = try await credentialStore.replaceCredential(
                         previousCredential,
                         ifMatching: credential,
-                        for: environment.id
+                        for: route.credentialOwnerID
                     )
                 } else {
                     _ = try await credentialStore.removeCredential(
                         ifMatching: credential,
-                        for: environment.id
+                        for: route.credentialOwnerID
                     )
                 }
             } catch {
@@ -2159,21 +2172,44 @@ public actor EnvironmentRuntime {
             }
             throw operationError
         }
-        return await client(for: environment)
+        return await client(for: saved)
     }
 
     public func remove(id: String) async throws {
+        invalidateRouteResolution(id: id)
         let previousEnvironment = try await environmentStore.load()
             .first(where: { $0.id == id })
         let previousActiveID = try await environmentStore.activeEnvironmentID()
-        // Never leave a catalog entry pointing at a credential that was
-        // already destroyed when the catalog write itself fails.
+        // Managed access is revoked even if catalog cleanup fails. Independent
+        // paired credentials remain transactional with the catalog update.
+        let routes = previousEnvironment?.routes ?? []
+        let pairedOwners = Set(routes.filter { $0.kind == .bearer }.map(\.credentialOwnerID))
+        let managedOwners = Set(routes.filter { $0.kind == .managedDPoP }.map(\.credentialOwnerID))
+            .subtracting(pairedOwners)
+        for ownerID in managedOwners { try await credentialStore.removeCredential(for: ownerID) }
+        if let client = clients[id], managedOwners.contains(await client.environment.credentialID) {
+            clients[id] = nil
+            await client.disconnect()
+        }
+        var savedCredentials: [String: EnvironmentCredential] = [:]
+        for ownerID in previousEnvironment?.credentialOwnerIDs ?? [id] {
+            if let credential = try await credentialStore.credential(for: ownerID) {
+                savedCredentials[ownerID] = credential
+            }
+        }
         try await environmentStore.remove(id: id)
         do {
-            try await credentialStore.removeCredential(for: id)
+            for ownerID in previousEnvironment?.credentialOwnerIDs ?? [id] {
+                try await credentialStore.removeCredential(for: ownerID)
+            }
         } catch {
             let operationError = error
             var rollbackErrors: [String] = []
+            for (ownerID, credential) in savedCredentials {
+                do {
+                    _ = try await credentialStore.replaceCredential(credential, ifMatching: nil, for: ownerID)
+                } catch { rollbackErrors.append("credential: \(error.localizedDescription)") }
+            }
             if let previousEnvironment {
                 do {
                     _ = try await environmentStore.upsert(previousEnvironment)
@@ -2203,6 +2239,7 @@ public actor EnvironmentRuntime {
     /// sign-out uses this so a failed file write cannot leave a managed DPoP
     /// credential usable.
     public func revokeCredential(id: String) async throws {
+        invalidateRouteResolution(id: id)
         try await credentialStore.removeCredential(for: id)
         if let client = clients.removeValue(forKey: id) {
             await client.disconnect()
@@ -2215,9 +2252,7 @@ public actor EnvironmentRuntime {
         if let existing = clients[environment.id] {
             // Labels are local catalog metadata. Renaming must not interrupt a
             // live socket or replace the client on the next catalog refresh.
-            var connectionEnvironment = environment
-            connectionEnvironment.label = existing.environment.label
-            if existing.environment == connectionEnvironment {
+            if Self.sameTransport(existing.environment, environment) {
                 return existing
             }
             // Publish the replacement before disconnecting the stale client.
@@ -2247,6 +2282,153 @@ public actor EnvironmentRuntime {
         return client
     }
 
+    /// Resolves once per environment. Candidates authenticate and connect before
+    /// the live client is replaced; pending commands on the old socket fail.
+    public func resolveClient(
+        for environment: Environment, promote: Bool = false, forceCheck: Bool = false, connectSocket: Bool = true
+    ) async throws -> T3Client {
+        if let pending = routeTasks[environment.id] { return try await pending.value }
+        guard let current = try await selectedEnvironment(id: environment.id), current.isEnabled else {
+            throw EnvironmentRouteError.missingEnvironment
+        }
+        if !promote, let existing = clients[current.id],
+           Self.sameTransport(existing.environment, current), await existing.liveConnectionActive() {
+            return existing
+        }
+        let generation = routeGenerations[current.id, default: 0]
+        let task = Task { try await self.resolve(current, promote: promote, forceCheck: forceCheck, generation: generation, connectSocket: connectSocket) }
+        routeTasks[current.id] = task
+        defer {
+            if routeGenerations[current.id, default: 0] == generation { routeTasks.removeValue(forKey: current.id) }
+        }
+        return try await task.value
+    }
+
+    public func selectedEnvironment(id: String) async throws -> Environment? {
+        try await environmentStore.load().first { $0.id == id }
+    }
+
+    private func resolve(
+        _ environment: Environment, promote: Bool, forceCheck: Bool, generation: Int, connectSocket: Bool
+    ) async throws -> T3Client {
+        let credentials = credentialStore
+        let transport = httpTransport
+        let connector = webSocketConnector
+        let authorization = managedAuthorization
+        let timeout = rpcConnectionWaitTimeout
+        let authenticate: @Sendable (Environment) async throws -> T3Client = { candidate in
+            let client = T3Client(
+                environment: candidate, credentialStore: credentials, httpTransport: transport,
+                webSocketConnector: connector, managedAuthorization: authorization,
+                rpcConnectionWaitTimeout: timeout
+            )
+            do {
+                if connectSocket {
+                    await client.connect()
+                    _ = try await client.waitForConnection(after: nil)
+                } else {
+                    let session = try await client.authSession()
+                    guard session.authenticated else { throw HTTPError.missingCredential }
+                }
+                try Task.checkCancellation()
+                return client
+            } catch {
+                await client.disconnect()
+                throw error
+            }
+        }
+        let resolved: ResolvedEnvironmentRoute<T3Client>?
+        if promote, let existing = clients[environment.id],
+           Self.sameTransport(existing.environment, environment), await existing.liveConnectionActive() {
+            resolved = try await routeResolver.promote(
+                environment: environment, forceCheck: forceCheck, authenticate: authenticate
+            )
+            if resolved == nil { return existing }
+        } else {
+            resolved = try await routeResolver.connect(environment: environment, authenticate: authenticate)
+        }
+        guard let resolved else { throw EnvironmentRouteError.noAvailableRoute }
+        do {
+            try Task.checkCancellation()
+            guard routeGenerations[environment.id, default: 0] == generation else {
+                throw EnvironmentRouteError.changedEnvironment
+            }
+            _ = try await environmentStore.selectRoute(environmentID: environment.id, route: resolved.environment.selectedRoute)
+            try Task.checkCancellation()
+            guard routeGenerations[environment.id, default: 0] == generation else {
+                throw EnvironmentRouteError.changedEnvironment
+            }
+        } catch {
+            await resolved.connection.disconnect()
+            throw error
+        }
+        let previous = clients.updateValue(resolved.connection, forKey: environment.id)
+        if let previous { await previous.disconnect() }
+        return resolved.connection
+    }
+
+    public func recordDiscoveredEndpoints(
+        environmentID: String, endpoints: [EnvironmentDirectEndpoint]?, verifiedRoute: EnvironmentRoute
+    ) async throws {
+        _ = try await environmentStore.mergeDiscoveredEndpoints(
+            environmentID: environmentID, endpoints: endpoints, verifiedRoute: verifiedRoute
+        )
+    }
+
+    public func addRoute(environmentID: String, pairingURL: String) async throws -> Environment {
+        guard try await selectedEnvironment(id: environmentID) != nil else { throw EnvironmentRouteError.missingEnvironment }
+        invalidateRouteResolution(id: environmentID)
+        let service = PairingService(transport: httpTransport, environmentStore: environmentStore, credentialStore: credentialStore)
+        return try await service.pair(url: pairingURL, expectedEnvironmentID: environmentID)
+    }
+
+    public func reorderRoutes(environmentID: String, routeIDs: [String]) async throws {
+        invalidateRouteResolution(id: environmentID)
+        _ = try await environmentStore.reorderRoutes(environmentID: environmentID, routeIDs: routeIDs)
+    }
+
+    public func removeRoute(environmentID: String, routeID: String) async throws -> Environment {
+        invalidateRouteResolution(id: environmentID)
+        guard let previous = try await selectedEnvironment(id: environmentID) else { throw EnvironmentRouteError.missingEnvironment }
+        let updated = try await environmentStore.removeRoute(environmentID: environmentID, routeID: routeID)
+        if let client = clients[environmentID], !Self.sameTransport(client.environment, updated) {
+            clients.removeValue(forKey: environmentID)
+            await client.disconnect()
+        }
+        for ownerID in previous.credentialOwnerIDs.subtracting(updated.credentialOwnerIDs) {
+            try await credentialStore.removeCredential(for: ownerID)
+        }
+        return updated
+    }
+
+    /// Used by account sign-out and account replacement, never whole-environment
+    /// removal. Paired routes and all environment-scoped data remain available.
+    public func removeManagedRoutes() async throws -> [Environment] {
+        let previous = try await environmentStore.load()
+        for environment in previous where environment.hasManagedRoutes {
+            invalidateRouteResolution(id: environment.id)
+            let owners = Set(environment.routes.filter { $0.kind == .managedDPoP }.map(\.credentialOwnerID))
+            for owner in owners { try await credentialStore.removeCredential(for: owner) }
+            if let client = clients[environment.id], client.environment.kind == .managedDPoP {
+                clients.removeValue(forKey: environment.id)
+                await client.disconnect()
+            }
+        }
+        return try await environmentStore.removeManagedRoutes()
+    }
+
+    public func cancelRouteResolution(id: String) { invalidateRouteResolution(id: id) }
+
+    private func invalidateRouteResolution(id: String) {
+        routeGenerations[id, default: 0] += 1
+        routeTasks.removeValue(forKey: id)?.cancel()
+    }
+
+    private static func sameTransport(_ lhs: Environment, _ rhs: Environment) -> Bool {
+        lhs.id == rhs.id && lhs.selectedRoute == rhs.selectedRoute
+            && lhs.orchestrationProtocolPreference == rhs.orchestrationProtocolPreference
+    }
+
     /// Creates an uncached client for bounded one-shot WebSocket RPCs. Passive
     /// environment probes must not stop or mutate the shared client if that
     /// environment becomes active while the probe is in flight.
@@ -2263,6 +2445,7 @@ public actor EnvironmentRuntime {
 }
 
 public enum RPCMethod: String, Sendable {
+    case secretsAnswerRequest = "secrets.answerRequest"
     case serverProbe = "server.probe"
     case serverGetConfig = "server.getConfig"
     case serverRefreshProviders = "server.refreshProviders"

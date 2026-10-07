@@ -16,6 +16,7 @@
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>$(T3CODE_URL_SCHEME)</string>
+                <string>t3-thread</string>
             </array>
         </dict>
     </array>

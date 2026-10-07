@@ -112,6 +112,7 @@ public struct ServerProviderWorkspaceSnapshot: Codable, Equatable, Sendable {
     public let checkedAt: String
     public let slashCommands: [ServerProviderSlashCommandSnapshot]
     public let skills: [ServerProviderSkillSnapshot]
+    public var slashCommandsPending: Bool? = nil
 }
 
 public struct ServerProviderSnapshot: Codable, Identifiable, Equatable, Sendable {
@@ -189,12 +190,19 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
     public var projectSettingsFolded = false
     public var environmentIcon: String? = nil
     public var sourceControlWritingStyle: JSONValue? = nil
+    public var worktreesDirectory: String? = nil
+    public var previousWorktreesDirectories: [String]? = nil
+    public var removeAgentCreditsOnMerge: Bool? = nil
+    public var github: ServerGitHubSettings? = nil
 
     /// Optional fields indicate support on older servers. Do not send a newer
     /// preference to an environment that has not advertised it.
     var unsupportedPreferenceKeys: Set<String> {
         var keys = Set<String>()
         if !supportsDefaultRuntimeMode { keys.insert("defaultRuntimeMode") }
+        if worktreesDirectory == nil { keys.insert("worktreesDirectory") }
+        if removeAgentCreditsOnMerge == nil { keys.insert("removeAgentCreditsOnMerge") }
+        if github == nil { keys.insert("github") }
         if branchNamingMode == nil { keys.insert("branchNamingMode") }
         if branchNamePrefix == nil { keys.insert("branchNamePrefix") }
         if branchNameInstructions == nil { keys.insert("branchNameInstructions") }
@@ -226,6 +234,7 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
         if let enableProviderUpdateChecks { fields["enableProviderUpdateChecks"] = .bool(enableProviderUpdateChecks) }
         if let autoResumeLimitedThreads { fields["autoResumeLimitedThreads"] = .bool(autoResumeLimitedThreads) }
         if let snoozeLimitedThreads { fields["snoozeLimitedThreads"] = .bool(snoozeLimitedThreads) }
+        if let removeAgentCreditsOnMerge { fields["removeAgentCreditsOnMerge"] = .bool(removeAgentCreditsOnMerge) }
         if let sourceControlWritingStyle { fields["sourceControlWritingStyle"] = sourceControlWritingStyle }
         if supportsRestartContinuation {
             fields["continueThreadsAfterServerUpdate"] = .bool(continueThreadsAfterServerUpdate)
@@ -263,6 +272,7 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
         case continueThreadsAfterServerUpdate
         case environmentIcon
         case sourceControlWritingStyle
+        case worktreesDirectory, previousWorktreesDirectories, removeAgentCreditsOnMerge, github
         case worktreeSubmodules, storageCleanup, worktreeCleanup
         case defaultAutoPull, responseStreamingMode, projectSettingsOverrides, projectSettingsFolded
         case defaultProjectScripts, projectScriptOverrides
@@ -286,6 +296,10 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
         snoozeLimitedThreads = try container.decodeIfPresent(Bool.self, forKey: .snoozeLimitedThreads)
         environmentIcon = try container.decodeIfPresent(String.self, forKey: .environmentIcon)
         sourceControlWritingStyle = try container.decodeIfPresent(JSONValue.self, forKey: .sourceControlWritingStyle)
+        worktreesDirectory = try container.decodeIfPresent(String.self, forKey: .worktreesDirectory)
+        previousWorktreesDirectories = try container.decodeIfPresent([String].self, forKey: .previousWorktreesDirectories)
+        removeAgentCreditsOnMerge = try container.decodeIfPresent(Bool.self, forKey: .removeAgentCreditsOnMerge)
+        github = try container.decodeIfPresent(ServerGitHubSettings.self, forKey: .github)
         storageCleanup = try container.decodeIfPresent([String: JSONValue].self, forKey: .storageCleanup)
         worktreeCleanup = try container.decodeIfPresent(JSONValue.self, forKey: .worktreeCleanup)
         worktreeSubmodules = try? container.decodeIfPresent(WorktreeSubmodules.self, forKey: .worktreeSubmodules)
@@ -332,6 +346,8 @@ public enum ServerSettingsChange: Equatable, Sendable {
     case defaultRuntimeMode(RuntimeMode)
     case defaultThreadEnvMode(ServerThreadEnvironmentMode?)
     case defaultAutoPull(Bool)
+    case worktreesDirectory(String)
+    case removeAgentCreditsOnMerge(Bool)
     case branchNamingMode(BranchNamingMode)
     case branchNamePrefix(String)
     case branchNameInstructions(String)
@@ -353,6 +369,8 @@ public enum ServerSettingsChange: Equatable, Sendable {
         switch self {
         case let .defaultRuntimeMode(value): .object(["defaultRuntimeMode": .string(value.rawValue)])
         case let .defaultThreadEnvMode(value): .object(["defaultThreadEnvMode": value.map { .string($0.rawValue) } ?? .null])
+        case let .worktreesDirectory(value): .object(["worktreesDirectory": .string(value)])
+        case let .removeAgentCreditsOnMerge(value): .object(["removeAgentCreditsOnMerge": .bool(value)])
         case let .defaultAutoPull(value): .object(["defaultAutoPull": .bool(value)])
         case let .branchNamingMode(value): .object(["branchNamingMode": .string(value.rawValue)])
         case let .branchNamePrefix(value): .object(["branchNamePrefix": .string(value)])
@@ -382,6 +400,8 @@ public enum ServerSettingsChange: Equatable, Sendable {
 
 /// Narrow decode view of the much larger `ServerConfig` RPC result.
 public struct ServerConfigSnapshot: Codable, Equatable, Sendable {
+    public var auth: EnvironmentAuthMetadata? = nil
+    public var directEndpoints: [EnvironmentDirectEndpoint]? = nil
     public var providers: [ServerProviderSnapshot]
     public var settings: ServerSettingsSnapshot?
     public var scratchWorkspaceRoot: String? = nil
@@ -398,8 +418,12 @@ public struct ServerConfigSnapshot: Codable, Equatable, Sendable {
         threadResumeCompletionMarker: Bool? = nil,
         environment: EnvironmentDescriptor? = nil,
         usageLimitSources: [UsageLimitSourceSnapshot] = [],
-        scratchWorkspaceRoot: String? = nil
+        scratchWorkspaceRoot: String? = nil,
+        auth: EnvironmentAuthMetadata? = nil,
+        directEndpoints: [EnvironmentDirectEndpoint]? = nil
     ) {
+        self.auth = auth
+        self.directEndpoints = directEndpoints
         self.providers = providers
         self.settings = settings
         self.threadSnapshotPagination = threadSnapshotPagination
@@ -411,11 +435,15 @@ public struct ServerConfigSnapshot: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case providers, settings, threadSnapshotPagination, threadResumeCompletionMarker, environment
-        case usageLimitSources, scratchWorkspaceRoot, newProjectsRoot
+        case usageLimitSources, scratchWorkspaceRoot, newProjectsRoot, auth, directEndpoints
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        auth = try container.decodeIfPresent(EnvironmentAuthMetadata.self, forKey: .auth)
+        directEndpoints = try container.decodeIfPresent(
+            [LossyDecodableElement<EnvironmentDirectEndpoint>].self, forKey: .directEndpoints
+        )?.compactMap(\.value)
         newProjectsRoot = try container.decodeIfPresent(String.self, forKey: .newProjectsRoot)
         scratchWorkspaceRoot = try container.decodeIfPresent(String.self, forKey: .scratchWorkspaceRoot)
         providers = try container.decode(
@@ -439,6 +467,10 @@ public struct ServerConfigSnapshot: Codable, Equatable, Sendable {
 
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(auth, forKey: .auth)
+        try container.encodeIfPresent(directEndpoints, forKey: .directEndpoints)
+        try container.encodeIfPresent(scratchWorkspaceRoot, forKey: .scratchWorkspaceRoot)
+        try container.encodeIfPresent(newProjectsRoot, forKey: .newProjectsRoot)
         try container.encode(providers, forKey: .providers)
         try container.encodeIfPresent(settings, forKey: .settings)
         try container.encodeIfPresent(
@@ -516,5 +548,42 @@ public struct ServerRefreshProvidersResult: Codable, Equatable, Sendable {
 
     public init(providers: [ServerProviderSnapshot]) {
         self.providers = providers
+    }
+}
+
+/// Saved token values are server redaction markers, never credentials to use on the phone.
+public struct ServerGitHubSettings: Codable, Equatable, Sendable {
+    public var hosts: [String: ServerGitHubHostSettings]
+    public var tokens: [String: String]
+
+    public init(hosts: [String: ServerGitHubHostSettings] = [:], tokens: [String: String] = [:]) {
+        self.hosts = hosts
+        self.tokens = tokens
+    }
+
+    private enum CodingKeys: String, CodingKey { case hosts, tokens }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hosts = try container.decodeIfPresent([String: ServerGitHubHostSettings].self, forKey: .hosts) ?? [:]
+        tokens = try container.decodeIfPresent([String: String].self, forKey: .tokens) ?? [:]
+    }
+}
+
+public struct ServerGitHubHostSettings: Codable, Equatable, Sendable {
+    public var account: String?
+    public var enabled: Bool
+
+    public init(account: String? = nil, enabled: Bool = true) {
+        self.account = account
+        self.enabled = enabled
+    }
+
+    private enum CodingKeys: String, CodingKey { case account, enabled }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        account = try container.decodeIfPresent(String.self, forKey: .account)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
     }
 }

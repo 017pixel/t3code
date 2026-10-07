@@ -54,6 +54,14 @@ public struct FeatureSourceControlView: View {
         self.initialDestination = initialDestination
     }
 
+    private var canWrite: Bool {
+        client.permissions(forThreadID: threadID)?.grants("source-control:write") == true
+    }
+
+    private var canChangeWorkspace: Bool {
+        canWrite && client.permissions(forThreadID: threadID)?.grants("orchestration:operate") == true
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             if let failure = recovery.failure {
@@ -105,7 +113,7 @@ public struct FeatureSourceControlView: View {
             }
         }) {
             if let action = pendingCommitAction, let status {
-                FeatureGitCommitView(status: status, action: action) { request in
+                FeatureGitCommitView(status: status, action: action, canCreateBranch: canChangeWorkspace) { request in
                     commitSubmission = request
                     pendingCommitAction = nil
                 }
@@ -128,6 +136,7 @@ public struct FeatureSourceControlView: View {
                     branchChoice = nil
                     Task { await run(.action(next)) }
                 }
+                .disabled(!canChangeWorkspace)
                 Button("Cancel", role: .cancel) { branchChoice = nil }
             }
         }
@@ -193,7 +202,8 @@ public struct FeatureSourceControlView: View {
                         .frame(minHeight: T3Metrics.minimumTapTarget)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(failure.isRetrying || runState.isBusy)
+                .disabled(failure.isRetrying || runState.isBusy
+                    || recovery.retryOperation.map { !canRun($0) } == true)
                 .accessibilityLabel(failure.retryAccessibilityLabel)
                 .accessibilityIdentifier("source-control-failure-retry")
 
@@ -283,7 +293,11 @@ public struct FeatureSourceControlView: View {
                         Label(action.title, systemImage: action.icon)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .disabled(runState.isBusy)
+                    .disabled(runState.isBusy || !canWrite)
+                }
+                if !canWrite {
+                    Text("This connection has read-only source control.")
+                        .foregroundStyle(T3Colors.textSecondary)
                 }
             }
 
@@ -335,6 +349,7 @@ public struct FeatureSourceControlView: View {
     }
 
     private func begin(_ action: FeatureSourceControlAction) {
+        guard canWrite else { return }
         if action.includesCommit {
             pendingCommitAction = action
         } else {
@@ -348,6 +363,16 @@ public struct FeatureSourceControlView: View {
             branchChoice = request
         } else {
             Task { await run(.action(request)) }
+        }
+    }
+
+    private func canRun(_ operation: FeatureGitOperation) -> Bool {
+        switch operation {
+        case .load: true
+        case let .action(request): canWrite && (!request.featureBranch || canChangeWorkspace)
+        case let .syncWorkspace(_, pending):
+            client.permissions(forThreadID: threadID)?.grants("orchestration:operate") == true
+                && (pending == nil || canWrite)
         }
     }
 
@@ -404,7 +429,7 @@ public struct FeatureSourceControlView: View {
             }
             guard !force, status?.isRemoteKnown == false else { return }
             if loadID == loadGeneration { isLoading = false }
-            for await recoveredStatus in client.sourceControlStatusEvents(threadID: threadID) {
+            for await recoveredStatus in client.sourceControlStatusEvents(threadID: threadID, intent: .active) {
                 guard statusID == statusGeneration else { return }
                 status = recoveredStatus
                 if recoveredStatus.isRemoteKnown {
@@ -456,6 +481,9 @@ public struct FeatureSourceControlView: View {
         case let .failure(error):
             if let syncError = error as? FeatureSourceControlWorkspaceSyncError {
                 recovery.recordFollowUpFailure(.syncWorkspace(syncError.workspace, then: syncError.pendingRequest), afterCompletionOf: operation, error: error)
+                // Git succeeded. Keep its actual state visible while metadata can be retried.
+                do { status = try await client.sourceControlStatus(threadID: threadID) }
+                catch { errorMessage = error.localizedDescription }
             } else if let retry = error as? FeatureSourceControlActionRetryError {
                 recovery.recordFollowUpFailure(.action(retry.request), afterCompletionOf: operation, error: error)
             } else if let choice = error as? FeatureSourceControlBranchChoiceRequired,

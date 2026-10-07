@@ -25,9 +25,13 @@ public struct FeatureV2WorkItem: Identifiable, Codable, Equatable, Hashable, Sen
         return FeatureThreadAgent(projectedItem: projected, environmentID: environmentID)
     }
 
+    var isStandaloneContent: Bool {
+        source.itemType == "secret_request" || FeatureEmbeddedContent.reference(raw: raw) != nil
+    }
+
     var groupingKey: GroupingKey? {
         guard ["command_execution", "dynamic_tool", "file_change", "file_search", "web_search", "reasoning"].contains(source.itemType),
-              !FeatureV2ItemDetail.indicatesFailure(raw) else { return nil }
+              !isStandaloneContent, !FeatureV2ItemDetail.indicatesFailure(raw) else { return nil }
         return GroupingKey(sourceThreadID: source.sourceThreadID, visibility: source.visibility,
                            runID: source.runID, providerTurnID: source.providerTurnID, attemptID: source.attemptID)
     }

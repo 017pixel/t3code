@@ -49,6 +49,8 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
     public var kind: EnvironmentKind
     public var descriptor: EnvironmentDescriptor?
     public var isEnabled: Bool
+    public var routes: [EnvironmentRoute]
+    public var activeRouteID: String?
     public var orchestrationProtocolPreference: OrchestrationProtocolPreference
 
     public init(
@@ -59,7 +61,8 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
         kind: EnvironmentKind = .bearer,
         descriptor: EnvironmentDescriptor? = nil,
         isEnabled: Bool = true,
-        orchestrationProtocolPreference: OrchestrationProtocolPreference = .auto
+        orchestrationProtocolPreference: OrchestrationProtocolPreference = .auto,
+        routes: [EnvironmentRoute]? = nil, activeRouteID: String? = nil
     ) {
         self.id = id
         self.label = label
@@ -69,9 +72,18 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
         self.descriptor = descriptor
         self.isEnabled = isEnabled
         self.orchestrationProtocolPreference = orchestrationProtocolPreference
+        self.routes = routes ?? []
+        self.activeRouteID = activeRouteID
+        if self.routes.isEmpty { self.routes = [legacyRoute] }
+        let route = selectedRoute
+        self.activeRouteID = route.id
+        self.httpBaseURL = route.httpBaseURL
+        self.webSocketBaseURL = route.webSocketBaseURL
+        self.kind = route.kind
     }
 
     private enum CodingKeys: String, CodingKey {
+        case routes, activeRouteID
         case id
         case label
         case httpBaseURL
@@ -95,6 +107,14 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
             OrchestrationProtocolPreference.self,
             forKey: .orchestrationProtocolPreference
         ) ?? .auto
+        routes = try container.decodeIfPresent([EnvironmentRoute].self, forKey: .routes) ?? []
+        activeRouteID = try container.decodeIfPresent(String.self, forKey: .activeRouteID)
+        if routes.isEmpty { routes = [legacyRoute] }
+        let route = selectedRoute
+        self.activeRouteID = route.id
+        self.httpBaseURL = route.httpBaseURL
+        self.webSocketBaseURL = route.webSocketBaseURL
+        self.kind = route.kind
     }
 }
 
@@ -138,6 +158,8 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
         public var projectSettingsOverrides: Bool? = nil
         public var inlineMessageContext: Bool? = nil
         public var projectCloneTracking: Bool? = nil
+        public var worktreesDirectory: Bool? = nil
+        public var serverBrowser: Bool? = nil
 
         private enum CodingKeys: String, CodingKey {
             case repositoryIdentity
@@ -165,7 +187,7 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
             case questionAttachments
             case projectSettingsOverrides
             case inlineMessageContext
-            case projectCloneTracking
+            case projectCloneTracking, worktreesDirectory, serverBrowser
             case serverResolvedCommandContext
         }
 
@@ -176,6 +198,8 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
             questionAttachments = try container.decodeIfPresent(Bool.self, forKey: .questionAttachments)
             projectSettingsOverrides = try container.decodeIfPresent(Bool.self, forKey: .projectSettingsOverrides)
             inlineMessageContext = try container.decodeIfPresent(Bool.self, forKey: .inlineMessageContext)
+            worktreesDirectory = try container.decodeIfPresent(Bool.self, forKey: .worktreesDirectory)
+            serverBrowser = try container.decodeIfPresent(Bool.self, forKey: .serverBrowser)
             projectCloneTracking = try container.decodeIfPresent(Bool.self, forKey: .projectCloneTracking)
             serverResolvedCommandContext = try container.decodeIfPresent(Bool.self, forKey: .serverResolvedCommandContext)
             repositoryIdentity =
@@ -420,6 +444,11 @@ public struct ModelSelection: Codable, Equatable, Sendable {
 }
 
 public struct RepositoryIdentity: Codable, Equatable, Sendable {
+    public struct Origin: Codable, Hashable, Sendable {
+        public let canonicalKey: String
+        public let displayName: String?
+    }
+
     public struct Locator: Codable, Equatable, Sendable {
         public let source: String
         public let remoteName: String
@@ -433,6 +462,8 @@ public struct RepositoryIdentity: Codable, Equatable, Sendable {
     public let provider: String?
     public let owner: String?
     public let name: String?
+    public var origin: Origin? = nil
+    public var webUrl: String? = nil
 }
 
 public struct ProjectScript: Codable, Identifiable, Equatable, Sendable {
@@ -441,6 +472,8 @@ public struct ProjectScript: Codable, Identifiable, Equatable, Sendable {
     public let command: String
     public let icon: String
     public let runOnWorktreeCreate: Bool
+    public var runOnSettle: Bool? = nil
+    public var async: Bool? = nil
     public let previewUrl: String?
     public let autoOpenPreview: Bool?
 }
@@ -464,6 +497,18 @@ public struct ProjectIconOverride: Codable, Equatable, Hashable, Sendable {
     public var name: String? = nil
     public var color: String? = nil
     public var emoji: String? = nil
+    public var text: String? = nil
+    public var monogramText: String? = nil
+    public var monogram: String? = nil
+
+    /// Old servers represented monograms as lucide icons with an extra text field.
+    public var monogramDisplayText: String? {
+        switch kind {
+        case "monogram": text
+        case "lucide": monogramText ?? monogram
+        default: nil
+        }
+    }
 }
 
 public enum RuntimeMode: String, Codable, CaseIterable, Sendable {

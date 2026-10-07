@@ -192,6 +192,8 @@ struct EnvironmentErrorBody: Decodable {
     let message: String?
     let reason: String?
     let dpopFailureReason: DPoPFailureReason?
+    let requiredScope: String?
+    let requiredPermission: String?
     let traceId: String?
 }
 
@@ -423,7 +425,7 @@ public actor EnvironmentAPI {
         )
     }
 
-    private func authorized<Result: Decodable & Sendable>(
+    func authorized<Result: Decodable & Sendable>(
         environment: Environment,
         path: String,
         queryItems: [URLQueryItem] = [],
@@ -434,7 +436,7 @@ public actor EnvironmentAPI {
         isUnauthorizedResponse: (@Sendable (Result) -> Bool)? = nil,
         as type: Result.Type
     ) async throws -> Result {
-        let credential = try await credentials.credential(for: environment.id)
+        let credential = try await credentials.credential(for: environment.credentialID)
 
         switch environment.kind {
         case .bearer, .local:
@@ -593,7 +595,7 @@ public actor EnvironmentAPI {
         guard try await credentials.replaceCredential(
             refreshed,
             ifMatching: credential,
-            for: environment.id
+            for: environment.credentialID
         ) else {
             if let current = try await newestUsableManagedCredential(
                 replacing: credential,
@@ -612,7 +614,7 @@ public actor EnvironmentAPI {
         environment: Environment,
         using managedAuthorization: any ManagedEnvironmentAuthorizing
     ) async throws -> EnvironmentCredential? {
-        guard let saved = try await credentials.credential(for: environment.id),
+        guard let saved = try await credentials.credential(for: environment.credentialID),
               saved != credential,
               saved.authorizationMethod == .dpop,
               saved.managedEnvironmentID == environment.id,
@@ -643,6 +645,14 @@ public actor EnvironmentAPI {
         }
         guard (200..<300).contains(response.statusCode) else {
             let body = try? JSONDecoder.t3.decode(EnvironmentErrorBody.self, from: data)
+            if response.statusCode == 403, let requiredScope = body?.requiredScope {
+                throw EnvironmentPermissionDeniedError(
+                    message: body?.message,
+                    requiredScope: requiredScope,
+                    requiredPermission: body?.requiredPermission,
+                    traceID: body?.traceId
+                )
+            }
             let message: String
             if response.statusCode == 401,
                request.value(forHTTPHeaderField: "DPoP") != nil,
@@ -696,11 +706,29 @@ public struct WebSocketTicket: Codable, Equatable, Sendable {
     public let expiresAt: String
 }
 
-public struct AuthSessionState: Codable, Equatable, Sendable {
+public struct AuthSessionState: Codable, Hashable, Sendable {
     public let authenticated: Bool
     public let scopes: [String]?
     public let sessionMethod: String?
     public let expiresAt: String?
+    public let permissions: [String]?
+    public let auth: EnvironmentAuthMetadata?
+
+    public init(
+        authenticated: Bool,
+        scopes: [String]? = nil,
+        sessionMethod: String? = nil,
+        expiresAt: String? = nil,
+        permissions: [String]? = nil,
+        auth: EnvironmentAuthMetadata? = nil
+    ) {
+        self.authenticated = authenticated
+        self.scopes = scopes
+        self.sessionMethod = sessionMethod
+        self.expiresAt = expiresAt
+        self.permissions = permissions
+        self.auth = auth
+    }
 }
 
 public struct AuthClientMetadata: Codable, Equatable, Sendable {
@@ -725,6 +753,7 @@ public struct AuthClientSession: Codable, Identifiable, Equatable, Sendable {
     public let lastConnectedAt: String?
     public let connected: Bool
     public let current: Bool
+    public var permissions: [String]? = nil
 }
 
 public struct AuthClientSessionRevokeResult: Codable, Equatable, Sendable {

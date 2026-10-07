@@ -1,15 +1,8 @@
-import * as NodeCrypto from "node:crypto";
+import * as Crypto from "effect/Crypto";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
-import * as Schema from "effect/Schema";
-import {
-  ProviderConsumeResetCreditInput,
-  ProviderConsumeResetCreditResult,
-  ServerProviderResetCredits,
-} from "../packages/contracts/src/providerUsageLimits.ts";
+import { applyOrchestrationV2ProjectionEvent } from "@t3tools/client-runtime/state/orchestration-v2-projection";
+import { mergeOlderHistoryIntoProjection } from "@t3tools/client-runtime/state/thread-history-merge";
 import {
   OrchestrationV2Command,
   OrchestrationV2ShellSnapshot,
@@ -18,9 +11,14 @@ import {
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadLaunchInput,
   OrchestrationV2ThreadStreamItem,
-} from "../packages/contracts/src/orchestrationV2.ts";
-import { applyOrchestrationV2ProjectionEvent } from "../packages/client-runtime/src/state/orchestrationV2Projection.ts";
-import { mergeOlderHistoryIntoProjection } from "../packages/client-runtime/src/state/threadHistoryMerge.ts";
+  ProviderConsumeResetCreditInput,
+  ProviderConsumeResetCreditResult,
+  ServerProviderResetCredits,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 const check = process.argv.includes("--check");
 const timestamp = "2026-08-07T12:00:00.000Z";
@@ -954,14 +952,17 @@ const generateSwiftWireFixtures = Effect.gen(function* () {
   const manifest = yield* decodeFrozenV1Manifest(
     yield* fs.readFileString(path.resolve(outputDirectory, "frozen-v1-manifest.json")),
   );
+  const crypto = yield* Crypto.Crypto;
   const staleFixtures: string[] = [];
   for (const [name, digest] of Object.entries(manifest.sha256)) {
     const contents = yield* fs
       .readFileString(path.resolve(outputDirectory, name))
-      .pipe(Effect.catch(() => Effect.succeed(undefined)));
+      .pipe(Effect.orElseSucceed(() => undefined));
     if (
       contents === undefined ||
-      NodeCrypto.createHash("sha256").update(contents).digest("hex") !== digest
+      Array.from(yield* crypto.digest("SHA-256", new TextEncoder().encode(contents)), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("") !== digest
     ) {
       yield* Effect.logError(
         `[swift-wire-fixtures] frozen V1 sample changed: ${name} (restore from ${manifest.baseline})`,
@@ -976,7 +977,7 @@ const generateSwiftWireFixtures = Effect.gen(function* () {
     if (check) {
       const current = yield* fs
         .readFileString(filePath)
-        .pipe(Effect.catch(() => Effect.succeed(undefined)));
+        .pipe(Effect.orElseSucceed(() => undefined));
       if (current !== contents) {
         yield* Effect.logError(`[swift-wire-fixtures] stale: ${name}`);
         staleFixtures.push(name);

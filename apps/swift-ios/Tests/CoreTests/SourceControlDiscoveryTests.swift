@@ -88,4 +88,21 @@ struct SourceControlDiscoveryTests {
         #expect(provider.auth.account == nil)
         #expect(provider.auth.detail == "Not installed")
     }
+    @Test func decodesPlainAccountsAlongsideEffectOptionSummary() throws {
+        let auth = try JSONDecoder.t3.decode(SourceControlProviderAuth.self, from: Data(#"""
+        {"status":"authenticated","account":{"_tag":"Some","value":"theo"},
+         "host":{"_tag":"Some","value":"github.com"}, "accounts":[
+          {"host":"github.com","account":"theo","active":true,"authenticated":true},
+          {"host":"work.example","account":"old","active":false,"authenticated":false,"error":"Expired"},
+          {"host":"github.com","account":"token","active":true,"authenticated":true,"environmentVariable":"GH_TOKEN"}
+        ]}
+        """#.utf8))
+        #expect(auth.account == "theo")
+        #expect(auth.accounts?.count == 3)
+        #expect(auth.accounts?[1].error == "Expired")
+        #expect(auth.accounts?[2].environmentVariable == "GH_TOKEN")
+        let older = try JSONDecoder.t3.decode(SourceControlProviderAuth.self, from: Data(#"{"status":"unknown"}"#.utf8))
+        #expect(older.accounts == nil)
+    }
+
 }

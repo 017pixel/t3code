@@ -79,6 +79,7 @@ struct FeatureV2ItemInspectionContext {
     let threadID: String
     let client: any FeatureV2ItemInspecting
     let state: FeatureV2TimelineState
+    var toolImages: FeatureToolOutputImageContext? = nil
     var providers: [FeatureProvider] = []
     /// Wire IDs; the parent scopes navigation to this context's environment.
     var onOpenThread: ((String) -> Void)? = nil
@@ -260,6 +261,7 @@ private struct FeatureV2ExpandedItem: View {
         return item.raw
     }
     private var complete: Bool { !FeatureV2ItemDetail.needsFetch(shown) }
+    private var outputImages: [FeatureToolOutputImage] { FeatureToolOutputImages.images(shown) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -270,6 +272,7 @@ private struct FeatureV2ExpandedItem: View {
                 } else { textBlock(body, label: nil) }
             }
             if let output = formatted?.output { textBlock(output, label: "Output") }
+            FeatureToolOutputImagesView(images: outputImages, source: item.source, context: context.toolImages)
             if let exit = formatted?.exitLabel { Text(exit).foregroundStyle(T3Colors.danger) }
             if item.raw["responseCapability"]?["type"]?.stringValue == "not_resumable" {
                 Text(item.raw["responseCapability"]?["reason"]?.stringValue ?? "This request can no longer receive a response.")
@@ -281,7 +284,7 @@ private struct FeatureV2ExpandedItem: View {
                 case let .failed(message): retryLabel("Could not load output: \(message)")
                 case .loaded: retryLabel("The server still reports omitted content.")
                 }
-            } else if ["command_execution", "dynamic_tool"].contains(item.source.itemType), formatted != nil, formatted?.output == nil {
+            } else if ["command_execution", "dynamic_tool"].contains(item.source.itemType), formatted != nil, formatted?.output == nil, outputImages.isEmpty {
                 Text("No output.")
             }
             if let path = shown["viewedImagePath"]?.stringValue {

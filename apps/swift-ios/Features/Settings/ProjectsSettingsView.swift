@@ -121,6 +121,11 @@ struct ProjectPreferencesView: View {
     @State private var errorMessage: String?
 
     private var project: FeatureProject? { model.snapshot.projects.first { $0.id == projectID } }
+    private var canWriteSettings: Bool {
+        guard let project else { return false }
+        return model.snapshot.environments.first { $0.id == project.environmentID }?
+            .permissions?.grants("settings:write") == true
+    }
     private var wireID: String { project?.wireID ?? projectID }
     private var providers: [FeatureProvider] {
         DailyUXCreationContext.providers(for: project, in: model.snapshot)
@@ -227,6 +232,14 @@ struct ProjectPreferencesView: View {
                 projectSetting(.defaultAutoPull) {
                     Toggle("Automatically pull default branch", isOn: booleanBinding(.defaultAutoPull, value: effective.defaultAutoPull))
                 }
+                if let removeCredits = effective.removeAgentCreditsOnMerge, settings?.removeAgentCreditsOnMerge != nil {
+                    projectSetting(.removeAgentCreditsOnMerge) {
+                        Toggle("Remove agent credits on merge", isOn: booleanBinding(
+                            .removeAgentCreditsOnMerge, value: removeCredits
+                        ))
+                        .accessibilityIdentifier("project-remove-agent-credits")
+                    }
+                }
                 if let mode = effective.branchNamingMode, settings?.branchNamingMode != nil {
                     projectSetting(.branchNamingMode) {
                         Picker("Branch naming", selection: Binding(
@@ -293,6 +306,7 @@ struct ProjectPreferencesView: View {
             } else if errorMessage == nil {
                 Text("Loading preferences...")
             }
+            if !canWriteSettings { Text("This connection cannot change settings.") }
             if let errorMessage {
                 Section {
                     Text(errorMessage)
@@ -327,6 +341,7 @@ struct ProjectPreferencesView: View {
                 Text("Token streaming updates more often and can use more battery.")
             }
         }
+        .disabled(!canWriteSettings)
         .listRowBackground(T3Colors.background)
     }
 
@@ -360,6 +375,7 @@ struct ProjectPreferencesView: View {
     }
 
     private func save(_ key: ServerProjectSettingKey, value: JSONValue?) {
+        guard !busy, canWriteSettings else { return }
         busy = true
         Task {
             defer { busy = false }
@@ -368,7 +384,7 @@ struct ProjectPreferencesView: View {
                     projectID: projectID, change: .init(key: key, value: value)
                 )
                 await load()
-            } catch { errorMessage = "Could not save project settings. Check this connection and try again." }
+            } catch { errorMessage = error.localizedDescription }
         }
     }
 }

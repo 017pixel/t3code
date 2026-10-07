@@ -168,6 +168,59 @@ final class FeatureV2TimelineTests: XCTestCase {
         XCTAssertEqual(thread.orchestrationV2Control?["lifecycle"]?["lastErrorClass"], .string("usage_limit"))
     }
 
+    func testRichRowsBreakWorkGroupsAndRemainVisibleOutsideCompletedTurnFolds() throws {
+        let html = V2Fixture.item("html", type: "dynamic_tool", ordinal: 2, fields: [
+            "status": .string("completed"), "toolName": .string("mcp__t3_code__html_render"),
+            "input": .object([:]), "outputOmitted": .bool(true),
+            "output": .object(["htmlRender": .object([
+                "attachmentId": .string("page"), "title": .string("Page"), "height": .number(300),
+            ])]),
+        ])
+        let mcp = V2Fixture.item("app", type: "dynamic_tool", ordinal: 4, fields: [
+            "status": .string("completed"), "toolName": .string("maps.show"), "input": .object([:]),
+            "output": .object(["t3McpApp": .object([
+                "attachmentId": .string("app-page"), "server": .string("maps"), "tool": .string("show"),
+                "resourceUri": .string("ui://maps/view"),
+            ]), "result": .object(["content": .array([])])]),
+        ])
+        let secret = V2Fixture.item("secret", type: "secret_request", ordinal: 6, fields: [
+            "status": .string("completed"), "label": .string("Key"), "reason": .string("Connect"),
+            "secretStatus": .string("saved"),
+        ])
+        let items = [command("before", ordinal: 1), html, command("middle", ordinal: 3), mcp,
+                     command("after", ordinal: 5), secret]
+        let thread = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(items: items, fields: [
+            "runs": .array([V2Fixture.run(status: "completed")]),
+        ])).normalizedSnapshot().thread
+        let messages = render(thread, renderer: FeatureV2TimelineRenderer())
+        XCTAssertEqual(messages.map { $0.v2Timeline?.itemID }, ["before", "html", "middle", "app", "after", "secret"])
+        let folded = FeatureV2TurnFolding.messages(messages, expandedIDs: [])
+        XCTAssertEqual(folded.filter { $0.v2FoldID == nil }.map { $0.v2Timeline?.itemID }, ["html", "app", "secret"])
+        let expanded = FeatureV2TurnFolding.messages(messages, expandedIDs: Set(folded.compactMap(\.v2FoldID)))
+        XCTAssertEqual(expanded.filter { $0.v2FoldID == nil }.map(\.id), messages.map(\.id))
+    }
+
+    func testInheritedHTMLRemainsBetweenWorkRowsWithOriginalSource() throws {
+        let html = V2Fixture.item("page", type: "dynamic_tool", ordinal: 2, fields: [
+            "threadId": .string("origin"), "status": .string("completed"),
+            "toolName": .string("mcp__t3_code__html_render"), "input": .object([:]),
+            "output": .object(["htmlRender": .object([
+                "attachmentId": .string("page"), "title": .string("Page"), "height": .number(300),
+            ])]),
+        ])
+        let before = command("before", ordinal: 1)
+        let after = command("after", ordinal: 3)
+        let snapshot = V2Fixture.snapshot(items: [before, after], fields: [
+            "visibleTurnItems": .array([V2Fixture.row(before), V2Fixture.row(html, visibility: "inherited", position: 1), V2Fixture.row(after, position: 2)]),
+        ])
+        let thread = try OrchestrationV2ThreadState(snapshot: snapshot).normalizedSnapshot().thread
+        let messages = render(thread, renderer: FeatureV2TimelineRenderer())
+        XCTAssertEqual(messages.map { $0.v2Timeline?.itemID }, ["before", "page", "after"])
+        XCTAssertEqual(messages[1].v2Timeline?.sourceThreadID, "origin")
+        XCTAssertEqual(messages[1].v2Timeline?.visibility, "inherited")
+        XCTAssertTrue(messages[1].v2WorkItems?.first?.isStandaloneContent == true)
+    }
+
     private func command(_ id: String, ordinal: Int) -> JSONValue {
         V2Fixture.item(id, type: "command_execution", ordinal: ordinal, fields: [
             "input": .string("echo \(id)"), "output": .string(String(repeating: "complete output\n", count: 30)),

@@ -545,6 +545,8 @@ private actor ConcurrentBootstrapHTTPTransport: HTTPTransport {
 
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         switch request.url?.path {
+        case "/api/auth/session":
+            (try retryAuthSessionData(), retryHTTPResponse(request))
         case "/.well-known/t3/environment":
             (try legacyEnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
         case "/api/orchestration/shell" where acceptsShellReads:
@@ -623,6 +625,9 @@ private actor RetryIdentityHTTPTransport: HTTPTransport {
 
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         let path = request.url?.path ?? ""
+        if path == "/api/auth/session" {
+            return (try retryAuthSessionData(), retryHTTPResponse(request))
+        }
         if path == "/.well-known/t3/environment" {
             return (try legacyEnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
         }
@@ -679,6 +684,9 @@ private actor PartialBootstrapHTTPTransport: HTTPTransport {
 
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         let path = request.url?.path ?? ""
+        if path == "/api/auth/session" {
+            return (try retryAuthSessionData(), retryHTTPResponse(request))
+        }
         if path == "/.well-known/t3/environment" {
             return (try legacyEnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
         }
@@ -920,6 +928,15 @@ private func retryEmptyThreadDetail(
             session: nil
         )
     )
+}
+
+private func retryAuthSessionData() throws -> Data {
+    let permissions = ["orchestration:read", "orchestration:operate", "source-control:write"]
+    return try JSONEncoder.t3.encode(AuthSessionState(
+        authenticated: true, scopes: permissions,
+        sessionMethod: "bearer-access-token", permissions: permissions,
+        auth: .init(serverUpdateScope: "environment:maintain")
+    ))
 }
 
 private func retryHTTPResponse(_ request: URLRequest) -> HTTPURLResponse {

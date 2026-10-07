@@ -242,6 +242,13 @@ public struct OrchestrationV2ThreadState: Sendable {
                 throw OrchestrationV2StateError.invalidPayload("rollback request")
             }
         case "turn-item.updated":
+            guard let itemType = payload["type"]?.stringValue else {
+                throw OrchestrationV2StateError.invalidPayload("turn item type")
+            }
+            guard OrchestrationV2TurnItem.isKnownType(itemType) else {
+                result.changed = false
+                return result
+            }
             let item = try OrchestrationV2TurnItem(json: payload)
             guard item.threadId == projection.thread.id else { throw OrchestrationV2StateError.wrongThread }
             if partialTimeline && itemIndices[item.id] == nil && shouldDropMissing(item) {

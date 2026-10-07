@@ -18,6 +18,7 @@ public struct ThreadDetailView: View {
     let initialDestination: FeatureThreadDestination?
     let initialDestinationID: UUID?
     let onToolDestinationChange: (FeatureThreadDestination?) -> Void
+    let isPresentedThread: Bool
     let rootNavigationDismissalID: UUID?
     let onRootNavigationDismissed: (UUID) -> Void
     private let draftStore: FeatureComposerDraftStore
@@ -66,6 +67,7 @@ public struct ThreadDetailView: View {
     @State private var linkedMediaPreviewError: String?
     @State private var scriptLaunchError: String?
     @State private var remoteDeviceCount = 0
+    @State private var browserObserver: FeatureServerBrowserModel?
     @State private var showsThreadQueue = false
     @State private var isUpdatingQueue = false
     @State private var queueActionError: String?
@@ -93,8 +95,10 @@ public struct ThreadDetailView: View {
         onToolDestinationChange: @escaping (FeatureThreadDestination?) -> Void = { _ in },
         rootNavigationDismissalID: UUID? = nil,
         onRootNavigationDismissed: @escaping (UUID) -> Void = { _ in },
-        draftStore: FeatureComposerDraftStore = .shared
+        draftStore: FeatureComposerDraftStore = .shared,
+        isPresentedThread: Bool = true
     ) {
+        self.isPresentedThread = isPresentedThread
         self.model = model
         self.thread = thread
         self.submitMessage = submitMessage
@@ -250,6 +254,8 @@ public struct ThreadDetailView: View {
                         )
                     case let .sourceControl(destination):
                         FeatureSourceControlView(client: model.client, threadID: thread.id, initialDestination: destination)
+                    case let .browser(tabID):
+                        FeatureServerBrowserView(threadID: thread.id, client: model.client, initialTabID: tabID)
                     case .devices:
                         if let client = model.client as? any FeatureRemoteDeviceManaging {
                             FeatureRemoteDevicesView(threadID: thread.id, client: client)
@@ -411,9 +417,31 @@ public struct ThreadDetailView: View {
                 remoteDeviceCount = 0
             }
         }
+        .task(id: FeatureThreadDeviceObservation(
+            threadID: currentThread.id, connection: threadConnectionState,
+            foreground: scenePhase == .active && isPresentedThread && supportsServerBrowser
+        )) {
+            browserObserver?.suspend()
+            guard scenePhase == .active, isPresentedThread, supportsServerBrowser,
+                  threadConnectionState == .connected,
+                  let browser = model.client as? any FeatureServerBrowserManaging else { return }
+            let observer = FeatureServerBrowserModel(threadID: currentThread.id, client: browser)
+            browserObserver = observer
+            defer { observer.suspend() }
+            await observer.watch()
+        }
+        .onChange(of: browserObserver?.revealRequest) { _, request in
+            guard let request, isPresentedThread, scenePhase == .active else { return }
+            if toolSurface == nil || request.force { presentTool(.browser(request.tabID)) }
+            browserObserver?.consumeReveal()
+        }
         .environment(\.providerSetupContext, currentThread.environmentID.map {
             ProviderSetupContext(model: model, environmentID: $0)
         })
+    }
+
+    private var supportsServerBrowser: Bool {
+        model.snapshot.environments.first { $0.id == currentThread.environmentID }?.supportsServerBrowser == true
     }
 
     private var baseThreadContent: some View {
@@ -539,7 +567,7 @@ public struct ThreadDetailView: View {
             // issued before it presents is lost by the time it dismisses.
             Button("OK") { composerFocused = true }
         } message: {
-            Text("Your draft is still here. Check your connection and try again.")
+            Text("Your draft is still here. Try again when this conversation is ready.")
         }
         .confirmationDialog("Edit from here?", isPresented: Binding(
             get: { pendingRewindMessageID != nil },
@@ -919,9 +947,9 @@ public struct ThreadDetailView: View {
                             Label("Queued messages", systemImage: "text.line.first.and.arrowtriangle.forward")
                         }
                     }
-                    if execution.interruptibleRun != nil {
-                        Button("Stop and pause queue", systemImage: "stop.fill", action: stopThreadWork)
-                            .disabled(!queueControlsAvailable || isUpdatingQueue || !execution.canInterrupt)
+                    if execution.canStopThread {
+                        Button("Stop", systemImage: "stop.fill", action: stopThreadWork)
+                            .disabled(!queueControlsAvailable || isUpdatingQueue)
                     }
                 }
                 Button(action: reloadThread) {
@@ -956,6 +984,11 @@ public struct ThreadDetailView: View {
                 FeatureProjectScriptsMenu(client: model.client, threadID: thread.id,
                     onError: { scriptLaunchError = $0 }) {
                     toolSurface = .terminal($0)
+                }
+                if supportsServerBrowser {
+                    Button("Browser (\(browserObserver?.count ?? 0))", systemImage: "globe") {
+                        presentTool(.browser(nil))
+                    }
                 }
                 if remoteDeviceCount > 0 {
                     Button("Devices (\(remoteDeviceCount))", systemImage: "iphone") { toolSurface = .devices }
@@ -1093,6 +1126,7 @@ public struct ThreadDetailView: View {
     private var queueControlsAvailable: Bool {
         model.client is any FeatureThreadQueueManaging
             && threadConnectionState == .connected && refreshPresentation == nil
+            && model.client.permissions(forThreadID: thread.id)?.grants("orchestration:operate") == true
             && !isSending && !isRewinding && !isRestarting && !isTransferringDraft && !isUpdatingRecovery
     }
 
@@ -1130,10 +1164,47 @@ public struct ThreadDetailView: View {
 
     private func stopThreadWork() {
         if let execution = detail?.execution {
-            guard let run = execution.interruptibleRun, execution.canInterrupt else { return }
-            Task { _ = await updateThreadQueue(.interrupt(runID: run.id, holdQueue: true)) }
+            guard execution.canStopThread else { return }
+            if let run = execution.interruptibleRun, execution.canInterrupt {
+                Task { _ = await updateThreadQueue(.interrupt(runID: run.id, holdQueue: true)) }
+            } else {
+                Task { await model.cancelTurn(threadID: thread.id) }
+            }
         } else {
             Task { await model.cancelTurn(threadID: thread.id) }
+        }
+    }
+
+    @ViewBuilder
+    private var providerGoalStatus: some View {
+        if let goal = currentThread.goal {
+            let presentation = OrchestrationV2Presentation.providerGoal(goal, working: currentThread.state == .working)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "target")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(presentation.title).font(T3Typography.supporting)
+                    Text(presentation.objective).font(.caption).lineLimit(2)
+                    if let usage = presentation.usage { Text(usage).font(.caption).foregroundStyle(T3Colors.textSecondary) }
+                }
+                Spacer(minLength: 4)
+                Menu {
+                    if threadProviders.first(where: { $0.id == (currentThread.sessionProviderID ?? currentThread.providerID) })?.driver == "codex" {
+                        if presentation.canResume { Button("Resume goal") { sendGoalCommand("/goal resume") } }
+
+                    }
+                    Button("Clear goal") { sendGoalCommand("/goal clear") }
+                } label: { Image(systemName: "ellipsis") }
+                .disabled(currentThread.state == .working || isSending || model.client.permissions(forThreadID: thread.id)?.grants("orchestration:operate") != true)
+            }
+            .padding(.horizontal, 18).padding(.vertical, 8)
+        }
+    }
+
+    private func sendGoalCommand(_ command: String) {
+        Task {
+            _ = await submitMessage(FeatureMessageSubmission(threadID: thread.id, text: command,
+                selection: currentSelection, runtimeMode: currentThread.runtimeMode,
+                interactionMode: currentThread.interactionMode))
         }
     }
 
@@ -1272,6 +1343,8 @@ public struct ThreadDetailView: View {
                     },
                     skills: threadProviderSkills,
                     v2Inspection: v2InspectionContext,
+                    secretContext: secretRequestContext,
+                    embeddedContext: embeddedContentContext,
                     workflows: detail.workflows ?? .unavailable,
                     isWorkflowBusy: isUpdatingWorkflow,
                     onFork: { source in
@@ -1304,6 +1377,7 @@ public struct ThreadDetailView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 refreshStatus
+                providerGoalStatus
                 threadQueueControls
                 submissionRecoveryControls
                 if let recovery = detail.recovery?.usageLimit {
@@ -1386,7 +1460,7 @@ public struct ThreadDetailView: View {
                         threadSelection: currentSelection,
                         materializesDefaultSelection: false,
                         isSending: isSending || isRewinding || !didRestoreDraft || isUpdatingQueue || isTransferringDraft,
-                        isWorking: queuedEdit == nil && (detail.execution.map { $0.canInterrupt && queueControlsAvailable }
+                        isWorking: queuedEdit == nil && (detail.execution.map { $0.canStopThread && queueControlsAvailable }
                             ?? (detail.thread.state == .working || detail.thread.state == .queued || isCompacting)),
                         focused: $composerFocused,
                         onSend: { send() },
@@ -1429,7 +1503,16 @@ public struct ThreadDetailView: View {
                         composerEnterBehavior: model.snapshot.settings.composerEnterBehavior,
                         retainedAttachmentCount: queuedEdit?.existingAttachments.count ?? 0,
                         submitLabel: queuedEdit == nil ? nil : "Save message",
-                        isModelSelectionEnabled: queuedEdit == nil
+                        isModelSelectionEnabled: queuedEdit == nil,
+                        onCommandMenuUse: {
+                            Task {
+                                if let environmentID = currentThread.environmentID,
+                                   let cwd = workspaceCatalogPath,
+                                   let instanceID = selection?.providerID ?? currentSelection?.providerID {
+                                    await model.refreshWorkspaceProviders(environmentID: environmentID, cwd: cwd, instanceID: instanceID)
+                                }
+                            }
+                        }
                     )
                     .disabled(isRewinding || isTransferringDraft || isUpdatingQueue)
                 }
@@ -1615,11 +1698,36 @@ public struct ThreadDetailView: View {
         )
     }
 
+    private var secretRequestContext: FeatureSecretRequestContext? {
+        (model.client as? any FeatureSecretRequestAnswering).map {
+            FeatureSecretRequestContext(threadID: thread.id, client: $0,
+                canAnswer: model.client.permissions(forThreadID: thread.id)?.grants("orchestration:operate"))
+        }
+    }
+
+    private var embeddedContentContext: FeatureEmbeddedContentContext? {
+        guard let client = model.client as? any FeatureEmbeddedContentClient else { return nil }
+        return FeatureEmbeddedContentContext(threadID: thread.id, client: client, sendMessage: { text in
+            guard model.client.permissions(forThreadID: thread.id)?.grants("orchestration:operate") == true else {
+                throw EnvironmentPermissionDeniedError(requiredScope: "orchestration:operate")
+            }
+            let sent = await submitMessage(FeatureMessageSubmission(
+                threadID: thread.id, text: text, selection: selection ?? currentSelection,
+                attachments: [], runtimeMode: effectiveRuntimeMode, interactionMode: effectiveInteractionMode
+            ))
+            guard sent else { throw FeatureCapabilityUnavailable("Message delivery") }
+        }, canEnterFullscreen: scenePhase == .active && isPresentedThread
+            && detail?.approvals.isEmpty != false && detail?.userInputs.isEmpty != false)
+    }
+
     private var v2InspectionContext: FeatureV2ItemInspectionContext? {
         guard let client = model.client as? any FeatureV2ItemInspecting,
               detail?.workflows?.isAvailable == true else { return nil }
         return FeatureV2ItemInspectionContext(threadID: thread.id, client: client,
-            state: v2TimelineState, providers: threadProviders,
+            state: v2TimelineState,
+            toolImages: (model.client as? any FeatureToolOutputImageResolving).map {
+                FeatureToolOutputImageContext(threadID: thread.id, resolver: $0)
+            }, providers: threadProviders,
             onOpenThread: { wireID in
                 guard let environmentID = currentThread.environmentID else { return }
                 openRelatedThread(FeatureScopedID.thread(environmentID: environmentID, wireID: wireID))
@@ -1786,7 +1894,7 @@ public struct ThreadDetailView: View {
                 attachments = pendingAttachments + attachments.filter {
                     !pendingIDs.contains($0.id)
                 }
-                sendFailed = true
+                sendFailed = model.errorMessage == nil
             }
             submittingCompaction = false
             isSending = false
@@ -1869,6 +1977,9 @@ public struct ThreadDetailView: View {
     }
 
     private var canSubmitComposer: Bool {
+        if let environment = model.snapshot.environments.first(where: { $0.id == currentThread.environmentID }),
+           environment.connectionState == .connected,
+           environment.permissions?.grants("orchestration:operate") != true { return false }
         guard didRestoreQueuedEdit else { return false }
         guard let edit = currentQueuedEdit else { return true }
         guard queueControlsAvailable, edit.validationMessage == nil,
@@ -2293,7 +2404,8 @@ public struct ThreadDetailView: View {
         OpenURLAction { url in
             if handleArtifactTemplateURL(url) { return .handled }
             if handleTypedMediaPreviewURL(url) { return .handled }
-            if PlatformInAppLinkRouter.route(for: url, in: model.snapshot) != nil {
+            if PlatformDeepLinkParser.isThreadLink(url)
+                || PlatformInAppLinkRouter.route(for: url, in: model.snapshot) != nil {
                 parentOpenURL(url)
                 return .handled
             }
@@ -2452,6 +2564,7 @@ private enum FeatureThreadToolSurface: Identifiable, Equatable {
     case sourceControl(FeatureThreadDestination)
     case terminal(String?)
     case devices
+    case browser(String?)
 
     init(_ destination: FeatureThreadDestination) {
         switch destination {
@@ -2460,6 +2573,7 @@ private enum FeatureThreadToolSurface: Identifiable, Equatable {
         case let .terminal(sessionID): self = .terminal(sessionID)
         case .review: self = .review
         case .devices: self = .devices
+        case let .browser(tabID): self = .browser(tabID)
         case .git, .gitCommit, .gitBranches: self = .sourceControl(destination)
         }
     }
@@ -2472,6 +2586,7 @@ private enum FeatureThreadToolSurface: Identifiable, Equatable {
         case let .sourceControl(destination): destination
         case let .terminal(sessionID): .terminal(sessionID: sessionID)
         case .devices: .devices
+        case let .browser(tabID): .browser(tabID: tabID)
         }
     }
 
@@ -2656,6 +2771,8 @@ private struct FeatureTranscriptCollectionView: UIViewRepresentable {
     let attachmentContext: FeatureAttachmentContext?
     let skills: [FeatureProviderSkill]
     let v2Inspection: FeatureV2ItemInspectionContext?
+    let secretContext: FeatureSecretRequestContext?
+    let embeddedContext: FeatureEmbeddedContentContext?
     let workflows: FeatureThreadWorkflows
     let isWorkflowBusy: Bool
     let onFork: (FeatureThreadWorkflowSource) -> Void
@@ -2707,7 +2824,12 @@ private struct FeatureTranscriptCollectionView: UIViewRepresentable {
         context.coordinator.onEditPendingMessage = onEditPendingMessage
         context.coordinator.inspectionChanged = context.coordinator.currentV2Inspection?.retryableRunIDs != v2Inspection?.retryableRunIDs
             || context.coordinator.currentV2Inspection?.providers != v2Inspection?.providers
+        context.coordinator.inspectionChanged = context.coordinator.inspectionChanged
+            || context.coordinator.currentEmbeddedContext?.canEnterFullscreen != embeddedContext?.canEnterFullscreen
+            || context.coordinator.currentSecretContext?.canAnswer != secretContext?.canAnswer
         context.coordinator.currentV2Inspection = v2Inspection
+        context.coordinator.currentSecretContext = secretContext
+        context.coordinator.currentEmbeddedContext = embeddedContext
         context.coordinator.onFork = onFork
         context.coordinator.onOpenThread = onOpenThread
         context.coordinator.update(
@@ -2780,6 +2902,8 @@ private struct FeatureTranscriptCollectionView: UIViewRepresentable {
         var canEditPendingMessage: ((String) -> Bool)?
         var onEditPendingMessage: ((String) -> Void)?
         var currentV2Inspection: FeatureV2ItemInspectionContext?
+        var currentSecretContext: FeatureSecretRequestContext?
+        var currentEmbeddedContext: FeatureEmbeddedContentContext?
         var inspectionChanged = false
         var onFork: ((FeatureThreadWorkflowSource) -> Void)?
         var onOpenThread: ((String) -> Void)?
@@ -2876,6 +3000,8 @@ private struct FeatureTranscriptCollectionView: UIViewRepresentable {
                             attachmentContext: self?.currentAttachmentContext,
                             skills: self?.currentSkills ?? [],
                             v2Inspection: self?.currentV2Inspection,
+                            secretContext: self?.currentSecretContext,
+                            embeddedContext: self?.currentEmbeddedContext,
                             environmentID: self?.currentEnvironmentID,
                             agents: self?.currentWorkflows.agents ?? [],
                             onOpenThread: { self?.onOpenThread?($0) }
@@ -4002,6 +4128,8 @@ struct FeatureMessageView: View {
     var attachmentContext: FeatureAttachmentContext? = nil
     var skills: [FeatureProviderSkill] = []
     var v2Inspection: FeatureV2ItemInspectionContext? = nil
+    var secretContext: FeatureSecretRequestContext? = nil
+    var embeddedContext: FeatureEmbeddedContentContext? = nil
     var environmentID: String? = nil
     var agents: [FeatureThreadAgent] = []
     var onOpenThread: ((String) -> Void)? = nil
@@ -4186,7 +4314,13 @@ struct FeatureMessageView: View {
                     .foregroundStyle(T3Colors.textTertiary)
             }
         case .tool:
-            if let agent = transcriptAgent, let onOpenThread {
+            if let items = message.v2WorkItems, items.count == 1, let item = items.first,
+               item.source.itemType == "secret_request" {
+                FeatureSecretRequestCard(item: item, context: secretContext).id(item.id)
+            } else if let items = message.v2WorkItems, items.count == 1, let item = items.first,
+                      FeatureEmbeddedContent.reference(raw: item.raw) != nil, let embeddedContext {
+                FeatureEmbeddedContentView(item: item, context: embeddedContext).id(item.id)
+            } else if let agent = transcriptAgent, let onOpenThread {
                 FeatureThreadAgentRow(agent: agent, onOpenThread: onOpenThread)
                 if let item = message.v2WorkItems?.first, let v2Inspection {
                     FeatureV2ItemInspector(item: item, context: v2Inspection,

@@ -333,7 +333,7 @@ public struct T3ConnectView: View {
                         || item.status?.status == .offline
                 )
                 .accessibilityLabel("Connect to \(item.environment.label)")
-                .accessibilityHint(item.status?.status == .offline ? "Environment is offline" : "")
+                .accessibilityHint(item.status?.status == .offline ? item.status?.offlineMessage ?? "Environment is offline" : "")
                 .accessibilityIdentifier("t3-connect-environment-\(item.id)")
             }
         }
@@ -373,7 +373,7 @@ public struct T3ConnectView: View {
         if let error = item.statusError { return error }
         switch item.status?.status {
         case .online: return "Online"
-        case .offline: return item.status?.error ?? "Offline"
+        case .offline: return item.status?.offlineMessage ?? "Offline"
         case nil: return "Checking"
         }
     }

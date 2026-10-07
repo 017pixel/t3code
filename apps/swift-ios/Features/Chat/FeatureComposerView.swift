@@ -148,6 +148,7 @@ struct FeatureComposerView: View {
     private let onApprovalDecision: ((String, FeatureApprovalDecision) -> Void)?
     private let onUserInputSubmit: ((String, [String: FeatureInputAnswer], [String: [FeatureUploadAttachment]]) async -> Void)?
     private let onUserInputDismiss: ((String) async -> Void)?
+    private let onCommandMenuUse: () -> Void
 
     init(
         text: Binding<String>,
@@ -194,7 +195,8 @@ struct FeatureComposerView: View {
         composerEnterBehavior: FeatureComposerEnterBehavior = .send,
         retainedAttachmentCount: Int = 0,
         submitLabel: String? = nil,
-        isModelSelectionEnabled: Bool = true
+        isModelSelectionEnabled: Bool = true,
+        onCommandMenuUse: @escaping () -> Void = {}
     ) {
         _text = text
         _selection = selection
@@ -241,6 +243,7 @@ struct FeatureComposerView: View {
         self.onApprovalDecision = onApprovalDecision
         self.onUserInputSubmit = onUserInputSubmit
         self.onUserInputDismiss = onUserInputDismiss
+        self.onCommandMenuUse = onCommandMenuUse
     }
 
     var body: some View {
@@ -267,6 +270,7 @@ struct FeatureComposerView: View {
                     )
                     .onAppear {
                         presentationDismissal.onPresentationChange(commandPresentationID, true)
+                        onCommandMenuUse()
                     }
                     .onDisappear {
                         presentationDismissal.onPresentationChange(commandPresentationID, false)
@@ -289,7 +293,10 @@ struct FeatureComposerView: View {
                 .ignoresSafeArea()
             }
             .onChange(of: focused) {
-                if focused { commandMenuDismissed = false }
+                if focused {
+                    commandMenuDismissed = false
+                    onCommandMenuUse()
+                }
                 if FeatureComposerCollapsePolicy.shouldCollapse(
                     isFocused: focused,
                     textIsEmpty: textIsEmpty,

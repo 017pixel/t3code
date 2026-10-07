@@ -3,6 +3,33 @@ import XCTest
 @testable import T3Code
 
 final class OrchestrationV2PresentationTests: XCTestCase {
+    func testGoalPresentationUsesProviderAccountingAndActualWorkingState() throws {
+        let raw: JSONValue = .object([
+            "objective": .string("Ship the fix"), "status": .string("budget_limited"),
+            "tokensUsed": .number(12_000), "tokenBudget": .number(50_000), "timeUsedSeconds": .number(240),
+        ])
+        let goal = try raw.decode(OrchestrationV2ProviderGoal.self)
+        let budget = OrchestrationV2Presentation.providerGoal(goal, working: false)
+        XCTAssertEqual(budget.title, "Goal reached its token budget")
+        XCTAssertEqual(budget.usage, "12k / 50k tokens · 4m")
+        XCTAssertTrue(budget.canResume)
+        let paused = try V2Fixture.patch(raw, ["status": .string("paused"), "tokenBudget": .null]).decode(OrchestrationV2ProviderGoal.self)
+        XCTAssertEqual(OrchestrationV2Presentation.providerGoal(paused, working: false).title, "Goal paused")
+        XCTAssertEqual(OrchestrationV2Presentation.providerGoal(paused, working: false).usage, "12k tokens · 4m")
+        let claude = try JSONValue.object([
+            "objective": .string("Ship the fix"), "status": .string("active"),
+            "checks": .number(2), "lastCheck": .string("Tests remain"),
+        ]).decode(OrchestrationV2ProviderGoal.self)
+        XCTAssertEqual(OrchestrationV2Presentation.providerGoal(claude, working: false).title, "Goal set")
+        XCTAssertEqual(OrchestrationV2Presentation.providerGoal(claude, working: true).title, "Pursuing goal")
+        XCTAssertEqual(OrchestrationV2Presentation.providerGoal(claude, working: false).usage, "2 checks")
+        XCTAssertFalse(OrchestrationV2Presentation.providerGoal(claude, working: false).canResume)
+        XCTAssertEqual(claude.lastCheck, "Tests remain")
+        for field in ["tokensUsed", "tokenBudget", "timeUsedSeconds", "checks"] {
+            XCTAssertThrowsError(try V2Fixture.patch(raw, [field: .number(-1)]).decode(OrchestrationV2ProviderGoal.self))
+        }
+    }
+
     func testCompletedDelegateKeepsLineageAndTerminalStatusAcrossShellAndDetail() throws {
         let lineage: JSONValue = .object([
             "parentThreadId": .string("parent"), "rootThreadId": .string("parent"),

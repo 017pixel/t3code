@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ScheduledTaskEditorView: View {
     @SwiftUI.Environment(\.dismiss) private var dismiss
@@ -9,6 +10,8 @@ struct ScheduledTaskEditorView: View {
     let client: any FeatureScheduledTaskManaging
     @State private var draft: FeatureScheduledTaskDraft
     @State private var saving = false
+    @State private var confirmRotation = false
+    @State private var cloudState: EnvironmentCloudLinkState?
     @State private var saveError: String?
     @State private var confirmDiscard = false
     @State private var isPickingModel = false
@@ -37,6 +40,7 @@ struct ScheduledTaskEditorView: View {
                 }
                 taskSection
                 scheduleSection
+                if draft.scheduleMode == .webhook { webhookSection }
                 workspaceSection
                 executionSection
             }
@@ -56,10 +60,25 @@ struct ScheduledTaskEditorView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(saving ? "Saving…" : "Save") { Task { await save() } }
-                        .disabled(saving || taskMissing || environmentUnavailable)
+                        .disabled(saving || taskMissing || environmentUnavailable || !canManage)
                         .accessibilityIdentifier("scheduled-task-save")
                 }
             }
+            .task(id: environmentID) {
+                guard let cloudClient = root.client as? any FeatureCloudPreferencesManaging else { return }
+                cloudState = try? await cloudClient.cloudLinkState(environmentID: environmentID)
+            }
+            .onChange(of: draft.scheduleMode) {
+                if draft.scheduleMode == .webhook, draft.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    draft.prompt = "Handle this webhook:\n{{body}}"
+                }
+            }
+            .confirmationDialog("Rotate webhook URL?", isPresented: $confirmRotation, titleVisibility: .visible) {
+                Button("Rotate URL", role: .destructive) {
+                    guard canManage, let task = liveTask else { return }
+                    Task { await listModel.rotateWebhookToken(task) }
+                }
+            } message: { Text("The current URL will stop working. Update the sender with the new URL.") }
             .onChange(of: draft.projectID) {
                 guard initialDraft.original == nil else { return }
                 draft.selection = DailyUXCreationContext.selection(
@@ -119,12 +138,13 @@ struct ScheduledTaskEditorView: View {
             Picker("Schedule", selection: $draft.scheduleMode) {
                 Text("Fixed time").tag(FeatureScheduledTaskDraft.ScheduleMode.fixedTime)
                 Text("Interval").tag(FeatureScheduledTaskDraft.ScheduleMode.interval)
+                Text("On webhook").tag(FeatureScheduledTaskDraft.ScheduleMode.webhook)
             }
             if draft.scheduleMode == .interval {
                 TextField("Every (minutes)", text: $draft.intervalMinutes)
                     .keyboardType(.decimalPad)
                     .accessibilityLabel("Interval in minutes")
-            } else {
+            } else if draft.scheduleMode == .fixedTime {
                 TextField("Time (HH:MM)", text: $draft.timeOfDay)
                     .keyboardType(.numbersAndPunctuation)
                     .accessibilityLabel("Time in the environment's time zone")
@@ -150,7 +170,41 @@ struct ScheduledTaskEditorView: View {
         } footer: {
             Text(draft.scheduleMode == .fixedTime
                  ? "Uses the environment's local time zone."
-                 : "Runs at most once per minute.")
+                 : draft.scheduleMode == .interval ? "Runs at most once per minute." : "Runs when the webhook receives a request.")
+        }
+        .listRowBackground(Color.black)
+    }
+
+    private var webhookSection: some View {
+        Section("Webhook") {
+            Text("Use {{body.a.b}}, {{headers.name}}, {{query.name}}, {{body}}, or {{request}} in the prompt.")
+                .font(.footnote).foregroundStyle(.secondary)
+            TextField("Maximum delivery age (minutes)", text: $draft.maxDeliveryAgeMinutes)
+                .keyboardType(.numberPad)
+            Text("Leave empty to run every held request. Set 1–1440 minutes to skip older requests. Offline delivery is a separate T3 Connect setting.")
+                .font(.footnote).foregroundStyle(.secondary)
+            if let task = liveTask, task.schedule.isWebhook, let endpoint = task.webhook {
+                let address = FeatureWebhookAddress(endpoint: endpoint, httpBaseURL: environment?.endpoint)
+                Text(address.address).font(.footnote.monospaced()).textSelection(.enabled)
+                if address.copyable {
+                    Button("Copy URL", systemImage: "doc.on.doc") { UIPasteboard.general.string = address.address }
+                }
+                if let note = address.note { Text(note).font(.footnote).foregroundStyle(.secondary) }
+                if endpoint.url != nil, let held = cloudState?.holdWebhooksWhileOffline {
+                    Text(held ? "T3 Connect holds requests for up to 24 hours while offline."
+                              : "Requests are delivered only while this environment is online.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if endpoint.hasSecret {
+                    Text("Signature verification is enabled. Saving keeps the current signature settings and secret.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Button("Rotate URL", role: .destructive) { confirmRotation = true }
+                    .disabled(!canManage || listModel.pendingIDs.contains(task.id))
+            } else if initialDraft.original == nil {
+                Text("Save the task to create its webhook URL.").font(.footnote).foregroundStyle(.secondary)
+            }
+            if let error = listModel.actionError { Text(error).font(.footnote).foregroundStyle(.red) }
         }
         .listRowBackground(Color.black)
     }
@@ -204,6 +258,13 @@ struct ScheduledTaskEditorView: View {
         root.snapshot.providersByEnvironment?[environmentID]
             ?? DailyUXCreationContext.providers(for: selectedProject, in: root.snapshot)
     }
+    private var environment: FeatureEnvironment? { root.snapshot.environments.first { $0.id == environmentID } }
+    private var canManage: Bool {
+        !environmentUnavailable && environment?.permissions?.grants("orchestration:operate") == true
+    }
+    private var liveTask: ScheduledTask? {
+        initialDraft.original.flatMap { listModel.task(id: $0.id) }
+    }
     private var taskMissing: Bool {
         guard let original = initialDraft.original, let tasks = listModel.tasks else { return false }
         return !tasks.contains { $0.id == original.id }
@@ -214,10 +275,10 @@ struct ScheduledTaskEditorView: View {
     }
 
     private func save() async {
-        guard !saving, !taskMissing, !environmentUnavailable else { return }
+        guard !saving, !taskMissing, !environmentUnavailable, canManage else { return }
         saving = true
         do {
-            let input = try draft.input(projects: projects)
+            let input = try draft.input(projects: projects, latestTask: liveTask)
             _ = try await client.upsertScheduledTask(environmentID: environmentID, input: input)
             await listModel.refresh()
             dismiss()
