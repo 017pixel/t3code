@@ -29,7 +29,7 @@ struct PlatformRootView: View {
             }
         )
         .environment(\.openURL, OpenURLAction { url in
-            if PlatformDeepLinkParser.isThreadLink(url) {
+            if PlatformDeepLinkParser.isThreadLink(url) || url.scheme == PlatformRoute.nativeScheme {
                 handle(url: url, letOnboardingConfirmConnection: false)
                 return .handled
             }

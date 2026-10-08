@@ -530,17 +530,17 @@ struct FeatureComposerUserInputPanel: View {
 
     private func answerBinding(for question: FeatureInputQuestion) -> Binding<String> {
         Binding(
-            get: { answers[question.id]?.customAnswer ?? "" },
+            get: { (answers[question.id] ?? FeatureInputDraftAnswer(question: question)).customAnswer },
             set: {
                 guard input.canRespond else { return }
-                answers[question.id, default: FeatureInputDraftAnswer()].setCustomAnswer($0, for: question)
+                answers[question.id, default: FeatureInputDraftAnswer(question: question)].setCustomAnswer($0, for: question)
             }
         )
     }
 
     private func select(_ value: String, for question: FeatureInputQuestion) {
         guard input.canRespond else { return }
-        answers[question.id, default: FeatureInputDraftAnswer()].toggleOption(value, for: question)
+        answers[question.id, default: FeatureInputDraftAnswer(question: question)].toggleOption(value, for: question)
         if question.allowsMultiple {
             return
         }
@@ -615,7 +615,7 @@ struct FeatureComposerUserInputPanel: View {
 
     private func normalizedAnswer(for questionID: String) -> FeatureInputAnswer? {
         guard let question = input.questions.first(where: { $0.id == questionID }) else { return nil }
-        return answers[questionID]?.normalized(for: question)
+        return (answers[questionID] ?? FeatureInputDraftAnswer(question: question)).normalized(for: question)
     }
 }
 

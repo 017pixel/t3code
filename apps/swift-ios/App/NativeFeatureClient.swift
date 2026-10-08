@@ -7782,6 +7782,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 allowsMultiple: allowsMultiple
             )
             if case let .bool(value)? = question["allowCustomAnswer"] { mapped.allowCustomAnswer = value }
+            mapped.initialAnswer = question["initialAnswer"]?.stringValue
             return mapped
         }
     }

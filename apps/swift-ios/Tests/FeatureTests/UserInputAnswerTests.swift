@@ -5,6 +5,37 @@ import Testing
 @Suite("User input answers")
 struct UserInputAnswerTests {
     @Test
+    func editorAnswersPreserveWhitespaceAndPermitDeletingThePrefill() throws {
+        let wire = try JSONDecoder().decode(OrchestrationV2InputQuestion.self, from: Data(
+            #"{"id":"edit","header":"Edit","question":"Update text","options":[],"initialAnswer":"  first\nsecond\n"}"#.utf8
+        ))
+        var question = FeatureInputQuestion(id: wire.id, header: wire.header, question: wire.question)
+        question.initialAnswer = wire.initialAnswer
+        var draft = FeatureInputDraftAnswer(question: question)
+        #expect(draft.customAnswer == "  first\nsecond\n")
+        #expect(draft.normalized(for: question) == .text("  first\nsecond\n"))
+        draft.setCustomAnswer("", for: question)
+        #expect(draft.normalized(for: question) == .text(""))
+        draft.setCustomAnswer("  replacement\n", for: question)
+        #expect(draft.normalized(for: question) == .text("  replacement\n"))
+        question.allowCustomAnswer = false
+        #expect(draft.normalized(for: question) == nil)
+        #expect(FeatureInputDraftAnswer(question: question).customAnswer == "")
+    }
+
+    @Test
+    func selectingAnOptionReplacesTheEditorPrefill() {
+        var question = valueQuestion()
+        question.initialAnswer = "Seed"
+        var draft = FeatureInputDraftAnswer(question: question)
+        draft.toggleOption("existing_branch", for: question)
+        #expect(draft.normalized(for: question) == .text("existing_branch"))
+        draft.setCustomAnswer("", for: question)
+        #expect(draft.selectedOptionValues.isEmpty)
+        #expect(draft.normalized(for: question) == .text(""))
+    }
+
+    @Test
     func attachmentDraftsKeepEachFileWithItsQuestion() async throws {
         let first = FeatureDraftAttachment(data: Data([1]), filename: "one.png", mimeType: "image/png")
         let second = FeatureDraftAttachment(data: Data([2]), filename: "two.png", mimeType: "image/png")

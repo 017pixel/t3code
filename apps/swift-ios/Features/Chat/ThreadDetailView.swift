@@ -2404,8 +2404,18 @@ public struct ThreadDetailView: View {
         OpenURLAction { url in
             if handleArtifactTemplateURL(url) { return .handled }
             if handleTypedMediaPreviewURL(url) { return .handled }
-            if PlatformDeepLinkParser.isThreadLink(url)
-                || PlatformInAppLinkRouter.route(for: url, in: model.snapshot) != nil {
+            if PlatformDeepLinkParser.isThreadLink(url) {
+                if let environmentID = currentThread.environmentID,
+                   let route = try? PlatformDeepLinkParser.threadLinkRoute(
+                    url, environmentID: environmentID, in: model.snapshot
+                ), let scopedURL = route.url {
+                    parentOpenURL(scopedURL)
+                } else {
+                    parentOpenURL(url)
+                }
+                return .handled
+            }
+            if PlatformInAppLinkRouter.route(for: url, in: model.snapshot) != nil {
                 parentOpenURL(url)
                 return .handled
             }

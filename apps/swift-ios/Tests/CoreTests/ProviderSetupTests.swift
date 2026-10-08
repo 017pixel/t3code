@@ -2,6 +2,17 @@ import Testing
 @testable import T3Code
 
 struct ProviderSetupTests {
+    @Test func defaultAntigravityToggleUsesOnlySupportedSettings() {
+        let current: JSONValue = .object(["providerInstances": .object([:])])
+        let patch = ProviderSettingsPatch.enabled(settings: current, instanceID: "antigravity", driver: "antigravity", enabled: true)
+        #expect(patch["providers"] == nil)
+        #expect(patch["providerInstances"]?["antigravity"]?["enabled"] == .bool(true))
+        let legacy: JSONValue = .object(["providers": .object(["antigravity": .object(["gcpProject": .string("work")])])])
+        let migrated = ProviderSettingsPatch.enabled(settings: legacy, instanceID: "antigravity", driver: "antigravity", enabled: true)
+        #expect(migrated["providers"]?["antigravity"]?["enabled"] == .bool(false))
+        #expect(migrated["providerInstances"]?["antigravity"]?["config"]?["gcpProject"] == .string("work"))
+    }
+
     @Test func logoutCapabilityPreservesFalseAndOlderServerAbsence() throws {
         let legacy = try JSONValue.object(["status": .string("authenticated")]).decode(ServerProviderAuthSnapshot.self)
         #expect(legacy.canLogout == nil)

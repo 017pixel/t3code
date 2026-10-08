@@ -171,12 +171,49 @@ enum PlatformDeepLinkParser {
         return try parse(url)
     }
 
+    /// New agent links resolve inside the environment that owns the message.
+    /// Prefer the literal ID: delegated task IDs can contain percent escapes.
+    static func threadLinkRoute(_ url: URL, environmentID: String, in snapshot: FeatureSnapshot) throws -> PlatformRoute {
+        let value = url.absoluteString
+        let prefix = "t3-thread://v1/"
+        guard value.hasPrefix(prefix), !value.contains("?"), !value.contains("#") else {
+            throw PlatformDeepLinkError.unsupportedURL
+        }
+        let id = String(value.dropFirst(prefix.count))
+        guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              id.utf8.count <= 1_024,
+              id.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+            throw PlatformDeepLinkError.invalidIdentifier
+        }
+        if PlatformRouteResolver.thread(in: snapshot, environmentID: environmentID, id: id) != nil {
+            return .thread(environmentID: environmentID, threadID: id)
+        }
+        if let decoded = id.removingPercentEncoding, decoded != id,
+           PlatformRouteResolver.thread(in: snapshot, environmentID: environmentID, id: decoded) != nil {
+            return .thread(environmentID: environmentID, threadID: decoded)
+        }
+        // Keep links from older servers usable when they name a known environment.
+        if case let .thread(legacyEnvironment?, legacyID) = try? threadLinkRoute(value),
+           snapshot.environments.contains(where: { $0.id == legacyEnvironment }) {
+            return .thread(environmentID: legacyEnvironment, threadID: legacyID)
+        }
+        return .thread(environmentID: environmentID, threadID: id)
+    }
+
     private static func threadLinkRoute(_ value: String) throws -> PlatformRoute {
         let prefix = "t3-thread://v1/"
         guard value.hasPrefix(prefix), !value.contains("?"), !value.contains("#") else {
             throw PlatformDeepLinkError.unsupportedURL
         }
         let segments = value.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false)
+        if segments.count == 1, let segment = segments.first {
+            let id = String(segment)
+            guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, id.utf8.count <= 1_024,
+                  id.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+                throw PlatformDeepLinkError.invalidIdentifier
+            }
+            return .thread(environmentID: nil, threadID: id)
+        }
         guard segments.count == 2 else { throw PlatformDeepLinkError.invalidIdentifier }
         let ids = try segments.map { segment in
             guard let id = String(segment).removingPercentEncoding,

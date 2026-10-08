@@ -154,7 +154,7 @@ enum ProviderSettingsPatch {
         instance["enabled"] = .bool(enabled)
         instances[instanceID] = .object(instance)
         var patch: [String: JSONValue] = ["providerInstances": .object(instances)]
-        if instanceID == "antigravity" {
+        if instanceID == "antigravity", settings["providers"] != nil {
             // The explicit instance now owns these settings. Clear the legacy copy.
             patch["providers"] = .object(["antigravity": .object([
                 "enabled": .bool(false), "authMethod": .string("oauth-personal"),

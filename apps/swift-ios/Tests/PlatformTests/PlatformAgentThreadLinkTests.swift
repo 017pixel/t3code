@@ -5,6 +5,30 @@ import Testing
 @Suite("Agent thread links")
 struct PlatformAgentThreadLinkTests {
     @Test
+    func currentLinksKeepLiteralIDsAndResolveInTheMessageEnvironment() throws {
+        let id = "thread:delegated-task:mcp%3A1"
+        let left = FeatureThread(id: "left-scoped", wireID: id, projectID: "p", environmentID: "left", title: "Left")
+        let right = FeatureThread(id: "right-scoped", wireID: id, projectID: "p", environmentID: "right", title: "Right")
+        let decoded = FeatureThread(id: "decoded", wireID: "thread:delegated-task:mcp:1", projectID: "p", environmentID: "right", title: "Other")
+        let url = try #require(URL(string: "t3-thread://v1/" + id))
+        #expect(try PlatformDeepLinkParser.parse(url) == .thread(environmentID: nil, threadID: id))
+        #expect(try PlatformDeepLinkParser.threadLinkRoute(url, environmentID: "right", in: .init(threads: [left, right, decoded]))
+            == .thread(environmentID: "right", threadID: id))
+        #expect(try PlatformDeepLinkParser.threadLinkRoute(url, environmentID: "right", in: .init(threads: [left, decoded]))
+            == .thread(environmentID: "right", threadID: decoded.wireID!))
+        #expect(try PlatformDeepLinkParser.threadLinkRoute(url, environmentID: "right", in: .init(threads: [left]))
+            == .thread(environmentID: "right", threadID: id))
+    }
+
+    @Test
+    func unloadedCurrentLinkKeepsTheOwningEnvironmentForHydration() throws {
+        let url = try #require(URL(string: "t3-thread://v1/archived:task"))
+        let route = try PlatformDeepLinkParser.threadLinkRoute(url, environmentID: "remote", in: .init())
+        #expect(route == .thread(environmentID: "remote", threadID: "archived:task"))
+        #expect(try PlatformDeepLinkParser.parse(#require(route.url)) == route)
+    }
+
+    @Test
     func escapedIDsAreDecodedOnceWithoutChangingIdentity() throws {
         for (link, environment, thread) in [
             ("t3-thread://v1/remote%2Fone/task%20%281%29", "remote/one", "task (1)"),
@@ -30,9 +54,9 @@ struct PlatformAgentThreadLinkTests {
     }
 
     @Test
-    func requiresExactlyTwoNonemptySegmentsAndTheSupportedVersion() {
+    func rejectsInvalidLegacyLinksAndUnsupportedVersions() {
         for link in [
-            "t3-thread://v1/env", "t3-thread://v1/env/thread/extra",
+            "t3-thread://v1/", "t3-thread://v1/env/thread/extra",
             "t3-thread://v1/env/thread/", "t3-thread://v1//thread",
             "t3-thread://v1/env/", "t3-thread://v1///",
             "t3-thread://v2/env/thread", "t3-thread://v1:80/env/thread",

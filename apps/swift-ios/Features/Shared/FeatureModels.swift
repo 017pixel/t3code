@@ -816,10 +816,16 @@ struct FeatureInputDraftAnswer: Equatable {
     private(set) var selectedOptionValues: [String] = []
     private(set) var customAnswer = ""
 
+    init(question: FeatureInputQuestion? = nil) {
+        if let question, question.canWriteCustomAnswer {
+            customAnswer = question.initialAnswer ?? ""
+        }
+    }
+
     mutating func setCustomAnswer(_ text: String, for question: FeatureInputQuestion) {
         guard question.canWriteCustomAnswer else { return }
         customAnswer = text
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if question.initialAnswer != nil || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             selectedOptionValues = []
         }
     }
@@ -838,11 +844,15 @@ struct FeatureInputDraftAnswer: Equatable {
     }
 
     func normalized(for question: FeatureInputQuestion) -> FeatureInputAnswer? {
-        let text = customAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
-        if question.canWriteCustomAnswer, !text.isEmpty { return .text(text) }
         let values = validSelectedValues(for: question)
-        guard let first = values.first else { return nil }
-        return question.allowsMultiple ? .selections(values) : .text(first)
+        if let first = values.first {
+            return question.allowsMultiple ? .selections(values) : .text(first)
+        }
+        guard question.canWriteCustomAnswer else { return nil }
+        // Editor requests allow deleting all text and preserve indentation/newlines.
+        if question.initialAnswer != nil { return .text(customAnswer) }
+        let text = customAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : .text(text)
     }
 
     private func validSelectedValues(for question: FeatureInputQuestion) -> [String] {
@@ -858,6 +868,7 @@ public struct FeatureInputQuestion: Identifiable, Sendable, Equatable, Hashable,
     public var options: [FeatureInputOption]
     public var allowsMultiple: Bool
     public var allowCustomAnswer: Bool? = nil
+    public var initialAnswer: String? = nil
 
     public var canWriteCustomAnswer: Bool { allowCustomAnswer != false }
 

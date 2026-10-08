@@ -839,6 +839,7 @@ public struct OrchestrationV2InputQuestion: OrchestrationV2Record, Identifiable 
     public let options: [OrchestrationV2InputOption]
     public let multiSelect: Bool?
     public let allowCustomAnswer: Bool?
+    public let initialAnswer: String?
     public let required: Bool?
 
     public init(from decoder: any Decoder) throws {
@@ -850,6 +851,7 @@ public struct OrchestrationV2InputQuestion: OrchestrationV2Record, Identifiable 
         options = try c.decode([OrchestrationV2InputOption].self, forKey: V2Key("options"))
         multiSelect = try c.decodeIfPresent(Bool.self, forKey: V2Key("multiSelect"))
         allowCustomAnswer = try c.decodeIfPresent(Bool.self, forKey: V2Key("allowCustomAnswer"))
+        initialAnswer = try c.decodeIfPresent(String.self, forKey: V2Key("initialAnswer"))
         required = try c.decodeIfPresent(Bool.self, forKey: V2Key("required"))
     }
 }
