@@ -10,6 +10,13 @@ import XCTest
 @Suite("Feature root model")
 struct FeatureRootModelTests {
     @Test
+    func threadScreenBodyKeepsInlineStorageBelowDeviceStackBudget() {
+        // iPhones have a roughly 1 MiB main-thread stack. SwiftUI construction
+        // needs several simultaneous copies of the body and its modifiers.
+        #expect(MemoryLayout<ThreadDetailView.Body>.size < 4_096)
+    }
+
+    @Test
     func readOnlyV2ConversationRejectsSendBeforeOutboxInsertion() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

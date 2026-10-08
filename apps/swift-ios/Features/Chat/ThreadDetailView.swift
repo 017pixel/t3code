@@ -113,8 +113,11 @@ public struct ThreadDetailView: View {
         self.draftStore = draftStore
     }
 
-    private var threadContent: some View {
-        observedThreadContent
+    // Bound the size of each modifier group. Keeping the whole screen inline
+    // exhausts the device main-thread stack while constructing its toolbar.
+    // These stable boundaries leave transcript row identity and diffing intact.
+    private var threadContent: AnyView {
+        let content = observedThreadContent
         .featureKeyboardScope(
             id: "thread:\(thread.id)",
             isActive: scenePhase == .active && toolSurface == nil && !showsAgents
@@ -132,6 +135,7 @@ public struct ThreadDetailView: View {
             toolView(.devices)
                 .onAppear { rootNavigationDismissal.presentationDidAppear() }
         }
+        return AnyView(content)
     }
 
     private var sheetToolSurface: Binding<FeatureThreadToolSurface?> {
@@ -298,8 +302,8 @@ public struct ThreadDetailView: View {
             )
     }
 
-    private var observedThreadContent: some View {
-        loadedThreadContent
+    private var observedThreadContent: AnyView {
+        let content = loadedThreadContent
         .onChange(of: thread.id) { v2TimelineState.reset() }
         .onChange(of: draft) { scheduleDraftSave() }
         .onChange(of: selection) { scheduleDraftSave() }
@@ -331,10 +335,11 @@ public struct ThreadDetailView: View {
             model.releaseThread(thread.id)
             persistDraftBeforeLeaving()
         }
+        return AnyView(content)
     }
 
-    private var loadedThreadContent: some View {
-        baseThreadContent
+    private var loadedThreadContent: AnyView {
+        let content = baseThreadContent
         .task(id: thread.id) {
             isLoading = true
             _ = await model.detail(for: thread.id, force: true)
@@ -438,14 +443,15 @@ public struct ThreadDetailView: View {
         .environment(\.providerSetupContext, currentThread.environmentID.map {
             ProviderSetupContext(model: model, environmentID: $0)
         })
+        return AnyView(content)
     }
 
     private var supportsServerBrowser: Bool {
         model.snapshot.environments.first { $0.id == currentThread.environmentID }?.supportsServerBrowser == true
     }
 
-    private var baseThreadContent: some View {
-        Group {
+    private var baseThreadContent: AnyView {
+        let content = Group {
             if let detail {
                 timeline(detail)
             } else if isLoading {
@@ -484,6 +490,7 @@ public struct ThreadDetailView: View {
                 threadActionsMenu
             }
         }
+        return AnyView(content)
     }
 
     public var body: some View {
