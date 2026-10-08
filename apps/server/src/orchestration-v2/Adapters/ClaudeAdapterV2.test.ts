@@ -1265,6 +1265,7 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
             attachmentsDir,
             fileSystem,
             path,
+            crypto: yield* Crypto.Crypto,
             idAllocator,
             queryRunner: {
               allocateSessionId: Effect.succeed("native-thread-claude-bypass-policy"),
@@ -1397,6 +1398,7 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
           attachmentsDir,
           fileSystem,
           path,
+          crypto: yield* Crypto.Crypto,
           idAllocator,
           queryRunner: {
             allocateSessionId: Effect.succeed("native-thread-claude-bypass-policy-cwd-change"),
@@ -1531,6 +1533,7 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
             attachmentsDir,
             fileSystem,
             path,
+            crypto: yield* Crypto.Crypto,
             idAllocator,
             queryRunner: {
               allocateSessionId: Effect.succeed("native-thread-claude-bypass-policy-notice-once"),
@@ -1702,6 +1705,7 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
           attachmentsDir,
           fileSystem,
           path,
+          crypto: yield* Crypto.Crypto,
           idAllocator,
           queryRunner: {
             // A fresh native id per call: two sibling app threads sharing
@@ -1876,6 +1880,7 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
             attachmentsDir,
             fileSystem,
             path,
+            crypto: yield* Crypto.Crypto,
             idAllocator,
             queryRunner: {
               allocateSessionId: Effect.succeed("native-thread-claude-bypass-inherited-env"),
@@ -1972,6 +1977,7 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
             attachmentsDir,
             fileSystem,
             path,
+            crypto: yield* Crypto.Crypto,
             idAllocator,
             queryRunner: {
               allocateSessionId: Effect.succeed("native-thread-claude-bypass-custom-home"),
@@ -2060,6 +2066,7 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
             attachmentsDir,
             fileSystem,
             path,
+            crypto: yield* Crypto.Crypto,
             idAllocator,
             queryRunner: {
               allocateSessionId: Effect.succeed(
@@ -2148,6 +2155,7 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
             attachmentsDir,
             fileSystem,
             path,
+            crypto: yield* Crypto.Crypto,
             idAllocator,
             queryRunner: {
               allocateSessionId: Effect.succeed("native-thread-claude-bypass-custom-home-open"),
