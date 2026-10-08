@@ -1940,18 +1940,16 @@ const readClaudeHomeBypassAvailability = Effect.fn(
 ): Effect.fn.Return<ClaudeBypassAvailability, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const contents = yield* fileSystem
-    .readFileString(path.join(homePath, "settings.json"))
-    .pipe(Effect.orElseSucceed(() => undefined));
-  if (contents === undefined) {
-    return CLAUDE_BYPASS_FULLY_AVAILABLE;
-  }
-  return yield* decodeClaudeHomeBypassSettings(contents).pipe(
+  return yield* fileSystem.readFileString(path.join(homePath, "settings.json")).pipe(
+    Effect.flatMap(decodeClaudeHomeBypassSettings),
     Effect.map((parsed): ClaudeBypassAvailability => ({
       bypassDisabled: parsed.permissions?.disableBypassPermissionsMode === "disable",
       autoDisabled:
         parsed.permissions?.disableAutoMode === "disable" || parsed.disableAutoMode === "disable",
     })),
+    Effect.catchReason("PlatformError", "NotFound", () =>
+      Effect.succeed(CLAUDE_BYPASS_FULLY_AVAILABLE),
+    ),
     Effect.catch(() => Effect.succeed(CLAUDE_BYPASS_DISABLED_FAIL_CLOSED)),
   );
 });

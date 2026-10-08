@@ -2032,6 +2032,96 @@ describe("ClaudeAdapterV2 Claude policy bypass downgrade", () => {
   );
 
   it.effect(
+    "fails closed when a configured Claude home's settings.json exists but can't be read",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const idAllocator = yield* IdAllocator.IdAllocatorV2;
+          const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-bypass-policy-custom-home-unreadable-",
+          });
+          const customHome = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-bypass-policy-custom-home-unreadable-dir-",
+          });
+          // A directory where the file should be: present, but reading it fails
+          // with something other than NotFound.
+          yield* fileSystem.makeDirectory(path.join(customHome, "settings.json"));
+          const cwd = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-bypass-policy-custom-home-unreadable-cwd-",
+          });
+
+          let openedOptions: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
+          const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
+            instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+            settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: customHome },
+            environment: {},
+            attachmentsDir,
+            fileSystem,
+            path,
+            idAllocator,
+            queryRunner: {
+              allocateSessionId: Effect.succeed(
+                "native-thread-claude-bypass-custom-home-unreadable",
+              ),
+              open: (input) =>
+                Effect.sync(() => {
+                  openedOptions = input.options;
+                  return {
+                    messages: Stream.never,
+                    offer: () => Effect.void,
+                    setModel: () => Effect.void,
+                    setPermissionMode: () => Effect.void,
+                    interrupt: Effect.void,
+                    close: Effect.void,
+                  };
+                }),
+              forkSession: () => Effect.die("unused"),
+              subagentLaunchToolUseId: () => Effect.succeed(null),
+              assertComplete: Effect.void,
+            },
+          });
+
+          const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd,
+          });
+          const threadId = ThreadId.make("thread-claude-bypass-policy-custom-home-unreadable");
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make(
+              "provider-session-claude-bypass-policy-custom-home-unreadable",
+            ),
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy,
+          });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy,
+          });
+          const now = yield* DateTime.now;
+
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-bypass-policy-custom-home-unreadable"),
+              text: "touch file.txt",
+              attachments: [],
+              runtimePolicy,
+            }),
+          );
+
+          assert.equal(openedOptions?.permissionMode, "auto");
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect(
     "keeps bypassPermissions for a configured Claude home with no restricting settings.json",
     () =>
       Effect.scoped(
