@@ -66,7 +66,11 @@ import {
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import { configureClientTracing } from "../observability/clientTracing";
-import { resolveInitialServerAuthGateState } from "../environments/primary";
+import {
+  peekPairingTokenFromUrl,
+  resolveInitialServerAuthGateState,
+} from "../environments/primary";
+import { discardBootSnapshot, readBootSnapshot } from "../bootSnapshot";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { useAtomValue } from "@effect/atom-react";
@@ -131,7 +135,9 @@ export const Route = createRootRoute({
 
     const authGate = resolveInitialServerAuthGateState();
     prefetchPrimaryEnvironmentDescriptor();
-    const authGateState = await authGate;
+    const authGateState = shouldRenderBeforeAuthGate(location.pathname)
+      ? renderBeforeAuthGate(authGate)
+      : await authGate;
     // Connect and read cached shells while the route chunks still load.
     if (authGateState.status === "authenticated") startEnvironmentShells();
     if (
@@ -153,6 +159,41 @@ export const Route = createRootRoute({
     meta: [{ name: "title", content: APP_DISPLAY_NAME }],
   }),
 });
+
+type InitialAuthGateState = Awaited<ReturnType<typeof resolveInitialServerAuthGateState>>;
+
+// "pending" while a render that skipped the session check waits for it.
+let earlyAuthGate: "unused" | "pending" | "settled" = "unused";
+
+/**
+ * A browser that booted with a snapshot of this server's workspace paints it
+ * while the session check runs, and navigations do not wait for it either.
+ * Pairing links and first visits wait for the check.
+ */
+function shouldRenderBeforeAuthGate(pathname: string): boolean {
+  if (pathname === "/pair" || peekPairingTokenFromUrl() !== null) return false;
+  if (earlyAuthGate !== "unused") return earlyAuthGate === "pending";
+  return readBootSnapshot()?.catalog.some((entry) => entry.kind === "primary") === true;
+}
+
+function renderBeforeAuthGate(authGate: Promise<InitialAuthGateState>): InitialAuthGateState {
+  if (earlyAuthGate === "unused") {
+    earlyAuthGate = "pending";
+    // A rejected session drops the snapshot and boots again into pairing. A
+    // check that keeps failing leaves the connection's own status on screen.
+    void authGate.then((state) => {
+      if (state.status === "authenticated") {
+        earlyAuthGate = "settled";
+        return;
+      }
+      discardBootSnapshot();
+      window.location.reload();
+    }, ignoreAuthGateFailure);
+  }
+  return { status: "authenticated" };
+}
+
+function ignoreAuthGateFailure() {}
 
 function RootRouteNotFoundView() {
   return (
