@@ -2161,6 +2161,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderEntry?.instanceId ?? NO_PROVIDER_MODEL_SELECTION.instanceId;
   const noProviderAvailable =
     selectedProviderEntry === undefined && multipleModelSelections === null;
+  // A first connection attempt is connecting, not disconnected.
+  const environmentConnecting = environmentUnavailable?.connection.phase === "connecting";
   // Before the catalog arrives, every thread resolves to "no provider". Send
   // stays blocked either way; only the chrome waits, keeping the picker with
   // the thread's own selection instead of swapping in the setup button and
@@ -6865,9 +6867,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               promptHasText={false}
                               isSendBusy={isSendBusy}
                               sendDisabledReason={sendDisabledReason}
-                              isConnecting={isConnecting}
+                              isConnecting={isConnecting || environmentConnecting}
                               isEnvironmentUnavailable={
-                                environmentUnavailable !== null ||
+                                (environmentUnavailable !== null && !environmentConnecting) ||
                                 noProviderAvailable ||
                                 projectSelectionRequired
                               }
@@ -7552,9 +7554,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       promptHasText={false}
                       isSendBusy={isSendBusy}
                       sendDisabledReason={sendDisabledReason}
-                      isConnecting={isConnecting}
+                      isConnecting={isConnecting || environmentConnecting}
                       isEnvironmentUnavailable={
-                        environmentUnavailable !== null ||
+                        (environmentUnavailable !== null && !environmentConnecting) ||
                         noProviderAvailable ||
                         projectSelectionRequired
                       }
@@ -7678,9 +7680,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     promptHasText={prompt.trim().length > 0}
                     isSendBusy={isSendBusy}
                     sendDisabledReason={sendDisabledReason}
-                    isConnecting={isConnecting}
+                    isConnecting={isConnecting || environmentConnecting}
                     isEnvironmentUnavailable={
-                      environmentUnavailable !== null ||
+                      (environmentUnavailable !== null && !environmentConnecting) ||
                       noProviderAvailable ||
                       projectSelectionRequired
                     }
