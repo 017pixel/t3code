@@ -9,6 +9,7 @@ import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchRea
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
+import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentHttpApi, type RepositoryIdentity } from "@t3tools/contracts";
@@ -20,7 +21,7 @@ import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as Schedule from "effect/Schedule";
-import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
+import { Etag, FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
@@ -36,6 +37,7 @@ import { fixPath } from "./os-jank.ts";
 import * as Ws from "./ws.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import * as SpawnHost from "./process/SpawnHost.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import * as PullRequestHttp from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
@@ -288,7 +290,9 @@ const layerHttpServer = Layer.unwrap(
     const config = yield* ServerConfig.ServerConfig;
     const createServer = () =>
       holdRequestsUntilServing(guardHttpResponseWriteErrors(NodeHttp.createServer()));
-    return NodeHttpServer.layer(createServer, {
+    // `NodeHttpServer.layer` would also re-export the stock Node platform services,
+    // replacing the spawn host's `ChildProcessSpawner` for everything built on it.
+    const layerServer = NodeHttpServer.layerServer(createServer, {
       host: config.host ?? "127.0.0.1",
       port: config.port,
       gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
@@ -300,10 +304,12 @@ const layerHttpServer = Layer.unwrap(
       // `threshold` when context takeover is disabled).
       websocket: { perMessageDeflate: true },
     });
+    return Layer.mergeAll(layerServer, NodeHttpPlatform.layer, Etag.layerWeak);
   }),
 );
 
-const layerPlatformServices = NodeServices.layer;
+// Children start from the spawn host, so forking never blocks this event loop.
+const layerPlatformServices = SpawnHost.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
 const layerPersistence = Layer.empty.pipe(Layer.provideMerge(SqlitePersistence.layerConfig));
 
