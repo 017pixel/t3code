@@ -1,9 +1,10 @@
 import { createRouter, RouterHistory } from "@tanstack/react-router";
 
+import { preloadSpeculatively } from "./lib/chunkReloadGuard";
 import { routeTree } from "./routeTree.gen";
 
 export function getRouter(history: RouterHistory) {
-  return createRouter({
+  const router = createRouter({
     routeTree,
     history,
     context: {},
@@ -12,6 +13,13 @@ export function getRouter(history: RouterHistory) {
     // settings or pull-request navigation.
     defaultPreload: "intent",
   });
+  // Intent preloads are speculative: a chunk they fail to fetch reloads the
+  // page only once a navigation renders it (the split route component keeps
+  // the failure and reloads on render).
+  const preloadRoute = router.preloadRoute;
+  router.preloadRoute = ((options: Parameters<typeof preloadRoute>[0]) =>
+    preloadSpeculatively(() => preloadRoute(options))) as typeof preloadRoute;
+  return router;
 }
 
 export type AppRouter = ReturnType<typeof getRouter>;

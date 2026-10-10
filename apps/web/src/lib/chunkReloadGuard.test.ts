@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { reloadOnceForChunkLoadError } from "./chunkReloadGuard";
+import {
+  isSpeculativeLoadPending,
+  preloadSpeculatively,
+  reloadOnceForChunkLoadError,
+} from "./chunkReloadGuard";
 
 function createStorageStub(): Storage {
   const store = new Map<string, string>();
@@ -117,5 +121,27 @@ describe("reloadOnceForChunkLoadError", () => {
       false,
     );
     expect(reload).not.toHaveBeenCalled();
+  });
+});
+
+describe("preloadSpeculatively", () => {
+  it("marks a failure reported during the preload as its own and swallows it", async () => {
+    let fail: (error: Error) => void = () => undefined;
+    const preload = preloadSpeculatively(
+      () =>
+        new Promise<never>((_, reject) => {
+          fail = reject;
+        }),
+    );
+
+    expect(isSpeculativeLoadPending()).toBe(true);
+    fail(new TypeError(failedImport("CommandPalette-1.js")));
+    await expect(preload).resolves.toBeUndefined();
+    expect(isSpeculativeLoadPending()).toBe(false);
+  });
+
+  it("stops claiming failures once the preload has loaded", async () => {
+    await expect(preloadSpeculatively(async () => "module")).resolves.toBe("module");
+    expect(isSpeculativeLoadPending()).toBe(false);
   });
 });

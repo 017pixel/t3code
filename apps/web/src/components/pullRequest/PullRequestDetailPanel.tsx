@@ -66,6 +66,7 @@ import { primaryServerKeybindingsAtom } from "~/state/server";
 import { usePullRequestDefaultMergeMethodResolver } from "./usePullRequestActions";
 import { changeRequestRepositoryUrl, gitHubPullRequestBrowserUrl } from "~/lib/openPullRequestLink";
 import { usePreparePullRequestThreadAction } from "~/lib/sourceControlActions";
+import { preloadSpeculatively } from "~/lib/chunkReloadGuard";
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "~/localApi";
 import type { ReviewCommentContext } from "~/reviewCommentContext";
@@ -2540,7 +2541,7 @@ export function PullRequestDetailPanel({
             value={tab}
             onValueChange={setTab}
             onTabIntent={(item) => {
-              if (item === "code") void loadCodeTab();
+              if (item === "code") void preloadSpeculatively(loadCodeTab);
             }}
           >
             {tab === "summary" ? (

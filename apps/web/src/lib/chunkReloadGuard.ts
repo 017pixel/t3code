@@ -46,3 +46,39 @@ export function reloadOnceForChunkLoadError(
   reload();
   return true;
 }
+
+let speculativeLoads = 0;
+
+/**
+ * Runs a load nothing waits on yet (an idle or hover preload). A chunk it
+ * fails to fetch, say on a network blip, does not reload the page: the first
+ * real use requests the chunk again and gets the reload if it still fails.
+ * Resolves to undefined on failure.
+ */
+export function preloadSpeculatively<T>(load: () => Promise<T>): Promise<T | undefined> {
+  speculativeLoads += 1;
+  let pending = true;
+  const settle = () => {
+    if (!pending) return;
+    pending = false;
+    speculativeLoads -= 1;
+  };
+  return new Promise<T>((resolve) => resolve(load())).then(
+    (value) => {
+      settle();
+      return value;
+    },
+    () => {
+      settle();
+      return undefined;
+    },
+  );
+}
+
+/**
+ * Whether a speculative load is in flight. A chunk failure reported now may
+ * be its own, so the `vite:preloadError` listener leaves it to the caller.
+ */
+export function isSpeculativeLoadPending(): boolean {
+  return speculativeLoads > 0;
+}

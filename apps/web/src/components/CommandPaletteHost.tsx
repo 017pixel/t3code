@@ -21,6 +21,7 @@ import {
 import { ComposerHandleContext } from "../composerHandleContext";
 import { useTheme } from "../hooks/useTheme";
 import { resolveShortcutCommand } from "../keybindings";
+import { preloadSpeculatively } from "../lib/chunkReloadGuard";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
@@ -134,7 +135,7 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
   useEffect(() => {
     let idleCallback: number | null = null;
     const timeout = window.setTimeout(() => {
-      const preload = () => void loadCommandPalette().catch(() => undefined);
+      const preload = () => void preloadSpeculatively(loadCommandPalette);
       if (typeof window.requestIdleCallback === "function") {
         idleCallback = window.requestIdleCallback(preload);
       } else {
