@@ -236,16 +236,19 @@ const serveDesktopAsset = Effect.fn("desktop.protocol.serveAsset")(function* (
   if (assetPath !== root && !assetPath.startsWith(root + path.sep)) {
     return new Response(null, { status: 404 });
   }
-  const stat = yield* fileSystem.stat(assetPath).pipe(Effect.orElseSucceed(() => null));
-  let filePath = assetPath;
-  if (stat?.type !== "File") {
+  // One filesystem round trip per startup request: the root is the SPA entry,
+  // and anything else is read directly, falling back only when that read fails.
+  const indexPath = path.join(root, "index.html");
+  let filePath = assetPath === root ? indexPath : assetPath;
+  let contents = yield* fileSystem.readFile(filePath).pipe(Effect.orElseSucceed(() => null));
+  if (contents === null && filePath !== indexPath) {
     const wantsHtml = request.headers.get("accept")?.includes("text/html") ?? false;
     if (path.extname(assetPath) !== "" && !wantsHtml) {
       return new Response(null, { status: 404 });
     }
-    filePath = path.join(root, "index.html");
+    filePath = indexPath;
+    contents = yield* fileSystem.readFile(filePath).pipe(Effect.orElseSucceed(() => null));
   }
-  const contents = yield* fileSystem.readFile(filePath).pipe(Effect.orElseSucceed(() => null));
   if (contents === null) return new Response(null, { status: 404 });
   return new Response(request.method === "HEAD" ? null : new Uint8Array(contents), {
     headers: {
