@@ -15,6 +15,9 @@ import * as Stream from "effect/Stream";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PreviewManager from "./Manager.ts";
+import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
+import { resolveRootCliCommand } from "../cli/invocation.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { cacheInOwnerScope } from "@t3tools/shared/lazyService";
 export class ServerBrowserTabNotFoundError extends Schema.TaggedError<ServerBrowserTabNotFoundError>()(
   "ServerBrowserTabNotFoundError",
@@ -194,6 +197,19 @@ const make = Effect.gen(function* () {
     ),
     Effect.forkScoped,
   );
+  // Whoever runs the server learns the fix before anyone opens a tab, without loading the browser.
+  yield* Effect.gen(function* () {
+    if (
+      PreviewBrowserHost.sandboxDisabled(yield* HostProcess.Environment) ||
+      !(yield* PreviewBrowserHost.sandboxBlocked)
+    ) {
+      return;
+    }
+    const setupCommand = yield* resolveRootCliCommand(PreviewBrowserHost.SETUP_SUBCOMMAND);
+    yield* Effect.logWarning(
+      `This host blocks the sandbox T3's browser runs in, so browser tabs and HTML previews will not start. Run \`${setupCommand}\` once to allow it.`,
+    );
+  }).pipe(Effect.ignoreCause({ log: true }), Effect.forkScoped);
   return ServerBrowser.of({
     attachViewer: (input) =>
       live.pipe(Effect.flatMap((value) => value.service.attachViewer(input))),

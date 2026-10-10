@@ -2243,15 +2243,6 @@ export const make = Effect.gen(function* () {
       } satisfies ServerBrowserViewer;
     });
 
-  // Whoever runs the server learns the fix before anyone opens a tab.
-  if (
-    !PreviewBrowserHost.sandboxDisabled(yield* HostProcess.Environment) &&
-    (yield* PreviewBrowserHost.sandboxBlocked)
-  ) {
-    yield* Effect.logWarning(
-      `This host blocks the sandbox T3's browser runs in, so browser tabs and HTML previews will not start. Run \`${setupCommand}\` once to allow it.`,
-    );
-  }
   // The desktop took its page back (closed, swapped, crashed, or devtools opened).
   // The session stays; the next viewer or agent reconnects when it re-attaches.
   yield* desktopChannel.detached.pipe(
