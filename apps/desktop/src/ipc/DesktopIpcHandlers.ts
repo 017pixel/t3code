@@ -98,7 +98,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
             Effect.andThen(() => method.handler(raw, event)),
           ),
       }),
-    // For handlers the renderer awaits while it boots that never spawn.
+    // For handlers that spawn nothing and read no login shell variables. The
+    // connection catalog's safeStorage ignores a D-Bus address set after startup.
     handleWithoutShell: desktopIpc.handle,
     handleSync: desktopIpc.handleSync,
   };
@@ -121,7 +122,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
 
   yield* ipc.handleWithoutShell(getClientSettings);
   yield* ipc.handle(setClientSettings);
-  yield* ipc.handle(getConnectionCatalog);
+  yield* ipc.handleWithoutShell(getConnectionCatalog);
   yield* ipc.handle(getSnapShotState);
   yield* ipc.handle(setupSnapShot);
   yield* ipc.handle(previewSnapShotConfig);
@@ -134,8 +135,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setSnapShotAnimationDestination);
   yield* ipc.handle(dismissSnapShotAnimation);
   yield* ipc.handle(acknowledgeSnapShot);
-  yield* ipc.handle(setConnectionCatalog);
-  yield* ipc.handle(clearConnectionCatalog);
+  yield* ipc.handleWithoutShell(setConnectionCatalog);
+  yield* ipc.handleWithoutShell(clearConnectionCatalog);
 
   yield* ipc.handle(discoverSshHosts);
   yield* ipc.handle(resolveSshHost);
@@ -161,7 +162,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(pickProjectFavicon);
   yield* ipc.handle(pickThemeFiles);
   yield* ipc.handleWithoutShell(setTheme);
-  yield* ipc.handle(showContextMenu);
+  yield* ipc.handleWithoutShell(showContextMenu);
   yield* ipc.handle(openExternal);
   yield* ipc.handle(receiveProviderAuthCallback);
   yield* ipc.handle(cancelProviderAuthCallback);
