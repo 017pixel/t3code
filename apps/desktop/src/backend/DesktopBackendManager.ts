@@ -25,6 +25,7 @@
 
 import * as Brand from "effect/Brand";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -67,6 +68,10 @@ const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
 const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(2);
 const DEFAULT_BACKEND_OUTPUT_DRAIN_TIMEOUT = Duration.seconds(5);
+const STOPPED_BEFORE_SPAWN: BackendProcessExit = {
+  code: Option.none(),
+  reason: "stopped before spawn",
+};
 const BACKEND_READINESS_PATH = "/.well-known/t3/environment";
 const { logWarning: logBackendProcessWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-process");
@@ -300,6 +305,10 @@ export interface BackendInstanceSpec {
   // between "fired onReady" and "currentConfig already advanced".
   readonly onReady?: (httpBaseUrl: URL) => Effect.Effect<void>;
   readonly onShutdown?: () => Effect.Effect<void>;
+  // Awaited after a run's config is published and before its process spawns.
+  // The primary waits here for the login shell environment, so its endpoint
+  // and bootstrap token are readable while the shell is still starting.
+  readonly beforeSpawn?: Effect.Effect<void>;
   // Fired once when a fatal or bounded preflight failure has exhausted its
   // retries. Returns true when the callback changed configuration and the
   // manager should resolve once more; false stops the failed instance.
@@ -727,6 +736,21 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
     });
   });
 
+  // Waits for spec.beforeSpawn, or reports false once stop closes the run's
+  // scope first, so a stopped run never spawns.
+  const awaitBeforeSpawn = (runScope: Scope.Scope): Effect.Effect<boolean> => {
+    const beforeSpawn = spec.beforeSpawn;
+    if (beforeSpawn === undefined) return Effect.succeed(true);
+    return Effect.gen(function* () {
+      const stopped = yield* Deferred.make<void>();
+      yield* Scope.addFinalizer(runScope, Deferred.succeed(stopped, undefined));
+      return yield* Effect.raceFirst(
+        beforeSpawn.pipe(Effect.as(true)),
+        Deferred.await(stopped).pipe(Effect.as(false)),
+      );
+    });
+  };
+
   const start: Effect.Effect<void> = Effect.suspend(() =>
     mutex.withPermits(1)(
       Effect.gen(function* () {
@@ -943,7 +967,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           );
         });
 
-        const program = runBackendProcess({
+        const spawnProcess = runBackendProcess({
           ...config.value,
           desktopTelemetryStream: desktopTelemetryPublisher.encoded,
           // Only a bootstrap that names the browser fds (the local primary) gets them.
@@ -1007,7 +1031,9 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
             },
           ),
           onOutput: (streamName, chunk) => backendOutputLog.writeOutputChunk(streamName, chunk),
-        }).pipe(
+        });
+        const program = awaitBeforeSpawn(runScope).pipe(
+          Effect.flatMap((spawn) => (spawn ? spawnProcess : Effect.succeed(STOPPED_BEFORE_SPAWN))),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Scope.provide(runScope),

@@ -64,6 +64,7 @@ export class DesktopShellEnvironmentCommandTimeoutError extends Schema.TaggedErr
 export class DesktopShellEnvironment extends Context.Service<
   DesktopShellEnvironment,
   {
+    /** Imports the login shell's environment into process.env once; later calls wait for that run. */
     readonly installIntoProcess: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/shell/DesktopShellEnvironment") {}
@@ -515,7 +516,9 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const installIntoProcess: DesktopShellEnvironment["Service"]["installIntoProcess"] =
+  // Runs once. Startup begins it without waiting so the window can open while the
+  // login shell starts, and the local backend awaits the same run before it spawns.
+  const installIntoProcess = yield* Effect.cached(
     installShellEnvironment({
       env: process.env,
       platform: environment.platform,
@@ -523,7 +526,8 @@ export const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       Effect.withSpan("desktop.shellEnvironment.installIntoProcess"),
-    );
+    ),
+  );
 
   return DesktopShellEnvironment.of({ installIntoProcess });
 });
