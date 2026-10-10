@@ -16,7 +16,12 @@ import {
 import { flushSync } from "react-dom";
 
 import ChatView from "./ChatView";
-import { createKeptViewLifetimes, KeptViewFrame, KeptViewLifetimeContext } from "./keptView";
+import {
+  createKeptViewLifetimes,
+  KeptViewFrame,
+  KeptViewLifetimeContext,
+  setUrlRouteTargetKey,
+} from "./keptView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
 import { waitForDraftHeroTransition } from "./chat/draftHeroTransition";
 import { SidebarInset } from "./ui/sidebar";
@@ -517,6 +522,8 @@ export function KeptChatSurface() {
   // Coming back from a full page there is no thread on screen to keep
   // showing, so the kept one is revealed with the click.
   const shownKey = reveal && deferredTargetKey !== null ? deferredTargetKey : targetKey;
+  // Keys typed before a deferred reveal lands go to the URL's thread.
+  useLayoutEffect(() => setUrlRouteTargetKey(targetKey), [targetKey]);
   // Start loading the thread with the click, ahead of its view.
   useEffect(() => {
     const urgentTarget = threadRouteTargetFromKey(targetKey);

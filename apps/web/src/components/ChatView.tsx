@@ -165,7 +165,12 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { KeptViewWarmingContext } from "./keptView";
+import {
+  holdTextForUrlRouteTarget,
+  isUrlRouteTargetElsewhere,
+  KeptViewWarmingContext,
+  takeHeldText,
+} from "./keptView";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { assistantCitationFromLocation } from "../lib/assistantCitationNavigation";
 import { isMacPlatform } from "../lib/utils";
@@ -847,6 +852,16 @@ function shouldTypeToFocusComposer(event: KeyboardEvent): boolean {
   if (!shouldRedirectInputToComposer(event)) return false;
 
   return true;
+}
+
+/** A character typed into the chat composer itself. */
+function isComposerTextKey(event: KeyboardEvent): boolean {
+  if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return false;
+  return (
+    event.key.length === 1 &&
+    event.target instanceof Element &&
+    event.target.closest('[data-testid="composer-editor"]') !== null
+  );
 }
 
 /**
@@ -1663,6 +1678,9 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, threadId],
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
+  // This view's route target, as `threadRouteTargetKey` names it.
+  const viewRouteTargetKey =
+    routeKind === "server" ? `server:${routeThreadKey}` : `draft:${draftId}`;
   const currentRouteThreadKeyRef = useRef<string | null>(routeThreadKey);
   useLayoutEffect(() => {
     currentRouteThreadKeyRef.current = routeThreadKey;
@@ -8139,12 +8157,25 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const shortcutContext = getShortcutContext(event.target);
-
-      if (
+      const typesToComposer =
         !shortcutContext.terminalFocus &&
         !shortcutContext.modelPickerOpen &&
-        shouldTypeToFocusComposer(event)
+        shouldTypeToFocusComposer(event);
+
+      // A kept thread the user just switched to is revealed in a transition;
+      // text typed meanwhile, into this view's composer or to focus it, goes
+      // to the thread the URL names.
+      if (
+        isUrlRouteTargetElsewhere(viewRouteTargetKey) &&
+        (typesToComposer || isComposerTextKey(event)) &&
+        holdTextForUrlRouteTarget(viewRouteTargetKey, event.key)
       ) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
+      if (typesToComposer) {
         if (composerRef.current?.insertTextAtEnd(event.key)) {
           event.preventDefault();
           event.stopPropagation();
@@ -8487,7 +8518,14 @@ export default function ChatView(props: ChatViewProps) {
     hasMultipleEnvironments,
     logicalProjectEnvironments,
     onEnvironmentChange,
+    viewRouteTargetKey,
   ]);
+
+  // Text typed on the way to this view, while the view the user left was still shown.
+  useEffect(() => {
+    const text = takeHeldText(viewRouteTargetKey);
+    if (text !== null) composerRef.current?.insertTextAtEnd(text);
+  }, [composerRef, viewRouteTargetKey]);
 
   // A focused desktop browser page forwards these chords as menu actions.
   useEffect(() => {

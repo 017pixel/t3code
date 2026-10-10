@@ -311,3 +311,49 @@ export function KeptViewFrame({
     </div>
   );
 }
+
+// ── Keys typed on the way to a kept thread ────────────────────────────────
+
+/** The route target (`threadRouteTargetKey`) the URL names, as of its last commit. */
+let urlRouteTargetKey: string | null = null;
+let heldText: { readonly targetKey: string; readonly text: string; readonly at: number } | null =
+  null;
+const HELD_TEXT_MAX_AGE_MS = 2_000;
+
+/** Set by KeptChatSurface on each commit. */
+export function setUrlRouteTargetKey(key: string | null): void {
+  urlRouteTargetKey = key;
+}
+
+/**
+ * Revealing a kept thread follows the click in a transition, so for a moment
+ * the view the user left is still shown and gets their keys. Text it would
+ * type into its own composer is held for the view the URL names instead.
+ * Returns whether the text was held.
+ */
+export function holdTextForUrlRouteTarget(viewTargetKey: string, text: string): boolean {
+  const targetKey = urlRouteTargetKey;
+  if (targetKey === null || targetKey === viewTargetKey) return false;
+  const now = performance.now();
+  const earlier =
+    heldText !== null &&
+    heldText.targetKey === targetKey &&
+    now - heldText.at < HELD_TEXT_MAX_AGE_MS
+      ? heldText.text
+      : "";
+  heldText = { targetKey, text: earlier + text, at: now };
+  return true;
+}
+
+/** Text typed for this view while the view the user left was still shown. */
+export function takeHeldText(viewTargetKey: string): string | null {
+  const held = heldText;
+  if (held === null || held.targetKey !== viewTargetKey) return null;
+  heldText = null;
+  return performance.now() - held.at < HELD_TEXT_MAX_AGE_MS ? held.text : null;
+}
+
+/** Whether the URL names another route target than this view's. */
+export function isUrlRouteTargetElsewhere(viewTargetKey: string): boolean {
+  return urlRouteTargetKey !== null && urlRouteTargetKey !== viewTargetKey;
+}
