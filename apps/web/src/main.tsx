@@ -24,10 +24,13 @@ restoreStackTraces();
 prepareProviderAuthDelivery();
 if (readBootSnapshot() !== null) {
   // The first-run gate renders nothing until saved settings load, and project
-  // icons read their cache synchronously; start both now so a first screen
-  // painted from the boot snapshot already has them.
-  void ensureClientSettingsHydrated().catch(() => undefined);
-  void projectFaviconCache.hydrate();
+  // icons read their cache synchronously; start both right after this module
+  // runs, in their own task, so a first screen painted from the boot snapshot
+  // already has them.
+  setTimeout(() => {
+    void ensureClientSettingsHydrated().catch(() => undefined);
+    void projectFaviconCache.hydrate();
+  }, 0);
 }
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
