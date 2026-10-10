@@ -6,6 +6,7 @@ import "./index.css";
 
 import { prepareProviderAuthDelivery } from "./providerAuthDelivery";
 import { ensureClientSettingsHydrated } from "./hooks/useSettings";
+import { projectFaviconCache } from "./assets/projectFaviconCache";
 import { isElectron } from "./env";
 import { hasCloudPublicConfig } from "./cloud/publicConfig";
 import { getRouter, preloadInitialRouteChunks } from "./router";
@@ -23,6 +24,9 @@ prepareProviderAuthDelivery();
 // The first-run gate renders nothing until saved settings load; start now so
 // the first commit already has them.
 void ensureClientSettingsHydrated().catch(() => undefined);
+// Project icons read this cache synchronously, so a sidebar painted from the
+// boot snapshot shows them instead of placeholders that swap later.
+void projectFaviconCache.hydrate();
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
