@@ -86,7 +86,7 @@ on its host. The command saves a database backup, rewrites equivalent legacy
 PR-sync and visit events, and reclaims unused space. It reports progress and
 refuses event changes if replay differs from the current projections. It never
 runs automatically. Keep the printed backup path until you have checked the
-environment after restarting. Interruption leaves a valid database and the backup.
+environment after restarting. Interruption leaves a valid database; completed backups are retained.
 
 ## Mobile updates
 
