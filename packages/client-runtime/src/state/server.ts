@@ -596,6 +596,41 @@ function serverWelcomeStateChanges(environmentId: EnvironmentId) {
   );
 }
 
+/**
+ * Plain data compares by value, sharing an object short-circuits, and values
+ * with their own equality, such as DateTime and Option, use it. Hashing or a
+ * schema equivalence walks a whole config several times over on a cold boot.
+ */
+function sameConfigValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
+    return false;
+  }
+  if (Array.isArray(left)) {
+    if (!Array.isArray(right) || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index++) {
+      if (!sameConfigValue(left[index], right[index])) return false;
+    }
+    return true;
+  }
+  if (
+    Object.getPrototypeOf(left) !== Object.prototype ||
+    Object.getPrototypeOf(right) !== Object.prototype
+  ) {
+    return Equal.equals(left, right);
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const keys = Object.keys(leftRecord);
+  if (keys.length !== Object.keys(rightRecord).length) return false;
+  for (const key of keys) {
+    if (!Object.hasOwn(rightRecord, key) || !sameConfigValue(leftRecord[key], rightRecord[key])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function resolveServerConfigValue(
   projection: ServerConfigProjection | null,
   initialConfig: ServerConfig | null,
@@ -674,7 +709,7 @@ export function createServerEnvironmentAtoms<R, E>(
       // Boot hands the same config over from the cache, the session, and the
       // live projection. An equal config keeps its identity, so settings,
       // keybindings, and every reader do not rerender for each handoff.
-      Atom.withEquality(Equal.equals),
+      Atom.withEquality(sameConfigValue),
       Atom.withLabel(`environment-data:server:config:${environmentId}`),
     );
   });
