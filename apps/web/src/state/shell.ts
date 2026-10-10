@@ -18,7 +18,6 @@ import { AsyncResult, Atom } from "effect/reactivity";
 
 import { readBootSnapshot } from "../bootSnapshot";
 import {
-  afterBootHold,
   bootHoldAtom,
   environmentCatalog,
   readBootCatalogState,
@@ -164,6 +163,20 @@ export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
   return true;
 }).pipe(Atom.withLabel("web-all-environment-shells-bootstrapped"));
 
+/**
+ * Keeps every enabled environment's live shell subscribed, which is what
+ * connects it. Unlike the boot-aware atoms above, it reads the live atoms even
+ * while the first screen paints from the boot snapshot, so connecting runs
+ * alongside that paint instead of after it.
+ */
+const liveEnvironmentShellsAtom = Atom.make((get) => {
+  const catalog = AsyncResult.value(get(environmentCatalog.catalogAtom));
+  if (Option.isNone(catalog)) return;
+  for (const environmentId of enabledEnvironmentIds(catalog.value)) {
+    get(liveEnvironmentShell.stateAtom(environmentId));
+  }
+}).pipe(Atom.withLabel("web-live-environment-shells"));
+
 let environmentShellsStarted = false;
 
 /**
@@ -175,11 +188,9 @@ let environmentShellsStarted = false;
 export function startEnvironmentShells(): void {
   if (environmentShellsStarted) return;
   environmentShellsStarted = true;
-  // A boot painting from its snapshot connects after the first frame.
-  afterBootHold(() => {
-    appAtomRegistry.mount(allEnvironmentShellsBootstrappedAtom);
-    startBootCatalogRecorder();
-  });
+  appAtomRegistry.mount(liveEnvironmentShellsAtom);
+  appAtomRegistry.mount(allEnvironmentShellsBootstrappedAtom);
+  startBootCatalogRecorder();
 }
 
 /** Cached or missing snapshots cannot establish that a saved project no longer exists. */

@@ -92,31 +92,24 @@ function hasPrimaryEntry(catalog: EnvironmentCatalogState): boolean {
 
 /**
  * True from a boot with a snapshot until its first screen is painted. While
- * held, the boot-aware atoms serve only snapshot data and never touch the
- * live ones, so the first frames render before connecting, IndexedDB and
- * server decoding compete with them for the main thread.
+ * held, the boot-aware atoms serve only snapshot data, so connection replies
+ * arriving meanwhile do not re-render or restart the first screen's renders;
+ * the screen switches to live data once, after it has painted. Connecting
+ * itself does not wait for it.
  */
 export const bootHoldAtom = Atom.make(readBootSnapshot() !== null).pipe(
   Atom.keepAlive,
   Atom.withLabel("web-boot-hold"),
 );
-const bootHoldListeners: Array<() => void> = [];
 let bootHoldRetainers = 0;
 
 export function isBootHeld(): boolean {
   return appAtomRegistry.get(bootHoldAtom);
 }
 
-/** Runs `start` once the boot hold is released, or now when there is none. */
-export function afterBootHold(start: () => void): void {
-  if (isBootHeld()) bootHoldListeners.push(start);
-  else start();
-}
-
 function releaseBootHold(): void {
   if (!isBootHeld()) return;
   appAtomRegistry.set(bootHoldAtom, false);
-  for (const start of bootHoldListeners.splice(0)) start();
 }
 
 /**

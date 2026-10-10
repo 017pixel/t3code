@@ -16,6 +16,7 @@ import {
   useComposerDraftStore,
 } from "./composerDraftStore";
 import { resolveNewDraftStartFromOrigin } from "./lib/chatThreadActions";
+import { readT3ProjectFile } from "./lib/t3ProjectFileDefaults";
 import { newDraftId, newThreadId } from "./lib/utils";
 import { ensureClientSettingsHydrated, getClientSettings } from "./hooks/useSettings";
 import {
@@ -95,5 +96,9 @@ export async function resolveLandingDraft(): Promise<DraftId | null> {
   const draft = useComposerDraftStore.getState().getDraftSession(draftId);
   if (draft === null) return null;
   setPendingLandingDraft({ draftId, projectRef, openedWith: landingDraftContext(draft) });
+  // The defaults read t3.json once the session is ready; asking now lets the
+  // query go out with the session instead of after the first render, and the
+  // query cache answers the later read.
+  void readT3ProjectFile(project.environmentId, project.workspaceRoot).catch(() => undefined);
   return draftId;
 }

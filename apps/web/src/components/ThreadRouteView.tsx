@@ -1,5 +1,5 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Activity,
@@ -8,6 +8,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -37,6 +38,7 @@ import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { flushSync } from "react-dom";
+import { environmentSession } from "../state/session";
 import { isBootHeld, releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   buildThreadRouteParams,
@@ -77,13 +79,22 @@ let bootChatViewDeferred = false;
 /**
  * On a boot painting from its snapshot, the first frame shows the sidebar and
  * this view's frame, and the chat view renders right after it, so its large
- * first render does not hold back that frame. It renders in one task ahead of
- * the connection's work: rendering it as a sliced transition let decoding
- * interleave and made the composer later.
+ * first render does not hold back that frame.
+ *
+ * If the environment's session is already live by then, the screen switches
+ * to live data and the chat view renders with it at once. Otherwise it
+ * renders from the snapshot as a transition, which yields so the connection
+ * keeps making progress, and the switch to live data waits until it has
+ * painted.
  */
-function useBootDeferredChatView(): boolean {
+function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
   const [ready, setReady] = useState(() => bootChatViewDeferred || !isBootHeld());
   const pendingReleaseRef = useRef<(() => void) | null>(null);
+  const sessionLive = useEffectEvent(
+    () =>
+      environmentId !== null &&
+      appAtomRegistry.get(environmentSession.initialConfigValueAtom(environmentId)) !== null,
+  );
   useEffect(() => {
     if (ready) return;
     bootChatViewDeferred = true;
@@ -92,9 +103,15 @@ function useBootDeferredChatView(): boolean {
     const mount = () => {
       if (mounted) return;
       mounted = true;
+      if (sessionLive()) {
+        // Nothing left to wait for: render it now, in one task.
+        release();
+        flushSync(() => setReady(true));
+        return;
+      }
       // Released after the chat view's own commit paints, or on unmount.
       pendingReleaseRef.current = release;
-      flushSync(() => setReady(true));
+      startTransition(() => setReady(true));
     };
     const frame = requestAnimationFrame(() => setTimeout(mount, 0));
     const timer = setTimeout(mount, 100);
@@ -145,7 +162,11 @@ export const ThreadRouteView = memo(function ThreadRouteView({
   const draftSession = useComposerDraftStore((store) =>
     draftId === null ? null : store.getDraftSession(draftId),
   );
-  const chatViewReady = useBootDeferredChatView();
+  const chatViewReady = useBootDeferredChatView(
+    target.kind === "server"
+      ? target.threadRef.environmentId
+      : (draftSession?.environmentId ?? null),
+  );
   const threadRefs = useThreadRefs();
   // The server thread this view is about: the route's own ref, or the draft's
   // reserved ref once the server knows it.
