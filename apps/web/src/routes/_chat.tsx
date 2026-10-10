@@ -217,7 +217,7 @@ function ChatRouteGlobalShortcuts() {
 function ChatRouteLayout() {
   // The thread routes render nothing here: the root layout hosts their view
   // (see KeptChatSurface) so it outlives the route swaps around it.
-  useLayoutEffect(() => registerChatSurface(KeptChatSurface), []);
+  useLayoutEffect(() => registerChatSurface(<KeptChatSurface />), []);
   return (
     <>
       <ChatRouteGlobalShortcuts />

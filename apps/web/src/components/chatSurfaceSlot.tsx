@@ -1,6 +1,6 @@
-import { useSyncExternalStore, type ComponentType } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 
-let surface: ComponentType | null = null;
+let surface: ReactNode = null;
 const listeners = new Set<() => void>();
 
 function subscribe(listener: () => void) {
@@ -16,13 +16,12 @@ function subscribe(listener: () => void) {
  * chat for a full page hides the thread view instead of unmounting it, while
  * routes that never open a thread do not load the chat code.
  */
-export function registerChatSurface(component: ComponentType) {
-  if (surface === component) return;
-  surface = component;
+export function registerChatSurface(element: ReactNode) {
+  if (surface !== null) return;
+  surface = element;
   for (const listener of listeners) listener();
 }
 
 export function ChatSurfaceSlot() {
-  const Surface = useSyncExternalStore(subscribe, () => surface);
-  return Surface ? <Surface /> : null;
+  return useSyncExternalStore(subscribe, () => surface);
 }

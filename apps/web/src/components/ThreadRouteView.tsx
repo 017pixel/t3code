@@ -198,7 +198,7 @@ export const ThreadRouteView = memo(function ThreadRouteView({
   }
   // One lifetime per kept view, released once the view is gone for good.
   const lifetimesRef = useRef(new Map<string, ReturnType<typeof createKeptViewLifetime>>());
-  const pendingUnmountDisposeRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const insetRef = useRef<HTMLElement | null>(null);
   const lifetimeFor = (key: string) => {
     let lifetime = lifetimesRef.current.get(key);
     if (lifetime === undefined) {
@@ -217,10 +217,12 @@ export const ThreadRouteView = memo(function ThreadRouteView({
   }, [keptViews]);
   useEffect(() => {
     const lifetimes = lifetimesRef.current;
-    if (pendingUnmountDisposeRef.current !== null) clearTimeout(pendingUnmountDisposeRef.current);
+    const inset = insetRef.current;
     return () => {
-      // A task later, so StrictMode's simulated remount can cancel it.
-      pendingUnmountDisposeRef.current = setTimeout(() => {
+      // Hidden behind a full page, the views stay in the document and keep their
+      // lifetimes; only an unmount releases them.
+      setTimeout(() => {
+        if (inset?.isConnected) return;
         for (const lifetime of lifetimes.values()) lifetime.dispose();
         lifetimes.clear();
       }, 0);
@@ -236,7 +238,10 @@ export const ThreadRouteView = memo(function ThreadRouteView({
         )?.key ?? null);
 
   return (
-    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh">
+    <SidebarInset
+      ref={insetRef}
+      className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
+    >
       {nextKeptViews.map((view) => (
         <Activity key={view.key} mode={view.key === activeViewKey ? "visible" : "hidden"}>
           <KeptViewLifetimeContext value={lifetimeFor(view.key)}>
