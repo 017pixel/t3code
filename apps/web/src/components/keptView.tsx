@@ -6,6 +6,7 @@ import {
   memo,
   useContext,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useReducer,
   useRef,
@@ -47,6 +48,29 @@ export function createKeptViewLifetime(): KeptViewLifetime & { dispose(): void }
       const releases = [...held];
       held.clear();
       for (const release of releases) release();
+    },
+  };
+}
+
+/** One lifetime per kept view key, made on first use. */
+export function createKeptViewLifetimes() {
+  const lifetimes = new Map<string, ReturnType<typeof createKeptViewLifetime>>();
+  return {
+    get(key: string): KeptViewLifetime {
+      let lifetime = lifetimes.get(key);
+      if (lifetime === undefined) {
+        lifetime = createKeptViewLifetime();
+        lifetimes.set(key, lifetime);
+      }
+      return lifetime;
+    },
+    /** Releases every view whose key is not in `keys`. */
+    retain(keys: ReadonlySet<string>) {
+      for (const [key, lifetime] of lifetimes) {
+        if (keys.has(key)) continue;
+        lifetimes.delete(key);
+        lifetime.dispose();
+      }
     },
   };
 }
@@ -261,19 +285,18 @@ export function KeptViewFrame({
   onWarm: (viewKey: string) => void;
   children: ReactNode;
 }) {
-  const onWarmRef = useRef(onWarm);
-  onWarmRef.current = onWarm;
+  const warmed = useEffectEvent(() => onWarm(viewKey));
   useLayoutEffect(() => {
     if (!warming) return;
     let second = 0;
     const first = requestAnimationFrame(() => {
-      second = requestAnimationFrame(() => onWarmRef.current(viewKey));
+      second = requestAnimationFrame(warmed);
     });
     return () => {
       cancelAnimationFrame(first);
       cancelAnimationFrame(second);
     };
-  }, [viewKey, warming]);
+  }, [warming]);
   return (
     <div
       className={

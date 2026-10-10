@@ -5,7 +5,6 @@ import {
   Activity,
   memo,
   startTransition,
-  useCallback,
   useDeferredValue,
   useEffect,
   useEffectEvent,
@@ -14,9 +13,10 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 
 import ChatView from "./ChatView";
-import { createKeptViewLifetime, KeptViewFrame, KeptViewLifetimeContext } from "./keptView";
+import { createKeptViewLifetimes, KeptViewFrame, KeptViewLifetimeContext } from "./keptView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
 import { waitForDraftHeroTransition } from "./chat/draftHeroTransition";
 import { SidebarInset } from "./ui/sidebar";
@@ -62,15 +62,55 @@ let keptThreadKeys: ReadonlySet<string> = new Set();
 const WARM_UP_QUIET_MS = 1_000;
 let lastUserInputAt = 0;
 let trackingUserInput = false;
+/**
+ * Hides the view that is laying out out of sight. Its effects are live then,
+ * so its window shortcut and paste listeners would answer input along with
+ * the shown view's.
+ */
+let interruptWarmUp: (() => void) | null = null;
 function trackUserInput() {
   if (trackingUserInput || typeof window === "undefined") return;
   trackingUserInput = true;
+  // Added before any warming view's listeners, so it runs first and the
+  // hidden view's listeners are already removed when the event reaches them.
   const record = () => {
     lastUserInputAt = performance.now();
+    interruptWarmUp?.();
   };
-  for (const type of ["keydown", "pointerdown", "wheel"] as const) {
+  for (const type of ["keydown", "pointerdown", "wheel", "paste"] as const) {
     window.addEventListener(type, record, { capture: true, passive: true });
   }
+}
+
+/**
+ * Runs `callback` once the user has left the app alone for WARM_UP_QUIET_MS
+ * and the browser is idle. Returns a function that cancels it.
+ */
+function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => void {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let idle: number | undefined;
+  const attempt = () => {
+    const quietFor = performance.now() - lastUserInputAt;
+    if (quietFor < WARM_UP_QUIET_MS) {
+      timeout = setTimeout(attempt, WARM_UP_QUIET_MS - quietFor);
+    } else if (typeof requestIdleCallback === "function") {
+      idle = requestIdleCallback(
+        () => {
+          idle = undefined;
+          if (performance.now() - lastUserInputAt < WARM_UP_QUIET_MS) attempt();
+          else callback();
+        },
+        { timeout: 2_000 },
+      );
+    } else {
+      callback();
+    }
+  };
+  timeout = setTimeout(attempt, initialDelayMs);
+  return () => {
+    clearTimeout(timeout);
+    if (idle !== undefined) cancelIdleCallback(idle);
+  };
 }
 
 let bootChatViewDeferred = false;
@@ -334,77 +374,67 @@ export const ThreadRouteView = memo(function ThreadRouteView({
   }
   // A first open took over the shown view. The thread it showed gets a view
   // of its own again, which warms up out of sight (see KeptViewFrame) so a
-  // revisit only reveals it. Mounting it is a long task, so it waits until
-  // the shown thread has loaded and the user has left the app alone.
+  // revisit only reveals it. Mounting it is long work, so it waits until the
+  // shown thread has loaded and the user has left the app alone. The view
+  // first renders hidden, which React does at idle priority in small slices;
+  // only laying it out (its effects and measurements) is one task, and that
+  // waits for the next quiet, idle moment.
   const shownThreadStatus = useThreadStatus(target.kind === "server" ? target.threadRef : null);
   const shownThreadLoaded =
     target.kind !== "server" || shownThreadStatus === "live" || shownThreadStatus === "deleted";
   useEffect(trackUserInput, []);
   useEffect(() => {
     if (releasedView === null || !shownThreadLoaded) return;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let idle: number | undefined;
-    const keep = () =>
-      startTransition(() => {
-        setKeptViews((current) => keepReleasedThreadView(current, releasedView));
-        setReleasedView(null);
-      });
-    const attempt = () => {
-      const quietFor = performance.now() - lastUserInputAt;
-      if (quietFor < WARM_UP_QUIET_MS) {
-        timeout = setTimeout(attempt, WARM_UP_QUIET_MS - quietFor);
-      } else if (typeof requestIdleCallback === "function") {
-        idle = requestIdleCallback(keep, { timeout: 2_000 });
-      } else {
-        keep();
-      }
-    };
-    timeout = setTimeout(attempt, WARM_UP_QUIET_MS);
-    return () => {
-      clearTimeout(timeout);
-      if (idle !== undefined) cancelIdleCallback(idle);
-    };
+    return whenQuietAndIdle(
+      () =>
+        startTransition(() => {
+          setKeptViews((current) => keepReleasedThreadView(current, releasedView));
+          setReleasedView(null);
+        }),
+      WARM_UP_QUIET_MS,
+    );
   }, [releasedView, shownThreadLoaded]);
-  const finishWarming = useCallback((viewKey: string) => {
+  const [laidOutWarmKey, setLaidOutWarmKey] = useState<string | null>(null);
+  const warmingKey = keptViews.find((view) => view.warming === true)?.key ?? null;
+  const layingOutKey = warmingKey !== null && warmingKey === laidOutWarmKey ? warmingKey : null;
+  useEffect(() => {
+    if (warmingKey === null || layingOutKey !== null) return;
+    return whenQuietAndIdle(() => startTransition(() => setLaidOutWarmKey(warmingKey)), 0);
+  }, [layingOutKey, warmingKey]);
+  // Input while the view lays out hides it again; it lays out at the next
+  // quiet moment.
+  useLayoutEffect(() => {
+    if (layingOutKey === null) return;
+    interruptWarmUp = () => flushSync(() => setLaidOutWarmKey(null));
+    return () => {
+      interruptWarmUp = null;
+    };
+  }, [layingOutKey]);
+  const finishWarming = (viewKey: string) => {
     setKeptViews((current) => finishWarmingThreadView(current, viewKey));
-  }, []);
+    setLaidOutWarmKey(null);
+  };
   useLayoutEffect(() => {
     keptThreadKeys = new Set(
       keptViews.flatMap((view) => (view.draftId === null ? [view.threadKey] : [])),
     );
   }, [keptViews]);
   // One lifetime per kept view, released once the view is gone for good.
-  const lifetimesRef = useRef(new Map<string, ReturnType<typeof createKeptViewLifetime>>());
+  const [lifetimes] = useState(createKeptViewLifetimes);
   const insetRef = useRef<HTMLElement | null>(null);
-  const lifetimeFor = (key: string) => {
-    let lifetime = lifetimesRef.current.get(key);
-    if (lifetime === undefined) {
-      lifetime = createKeptViewLifetime();
-      lifetimesRef.current.set(key, lifetime);
-    }
-    return lifetime;
-  };
   useLayoutEffect(() => {
-    const keys = new Set(keptViews.map((view) => view.key));
-    for (const [key, lifetime] of lifetimesRef.current) {
-      if (keys.has(key)) continue;
-      lifetimesRef.current.delete(key);
-      lifetime.dispose();
-    }
-  }, [keptViews]);
+    lifetimes.retain(new Set(keptViews.map((view) => view.key)));
+  }, [keptViews, lifetimes]);
   useEffect(() => {
-    const lifetimes = lifetimesRef.current;
     const inset = insetRef.current;
     return () => {
       // Hidden behind a full page, the views stay in the document and keep their
       // lifetimes; only an unmount releases them.
       setTimeout(() => {
-        if (inset?.isConnected) return;
-        for (const lifetime of lifetimes.values()) lifetime.dispose();
-        lifetimes.clear();
+        if (!inset?.isConnected) lifetimes.retain(new Set());
       }, 0);
     };
-  }, []);
+  }, [lifetimes]);
   const activeViewKey =
     activeView === null
       ? null
@@ -423,6 +453,7 @@ export const ThreadRouteView = memo(function ThreadRouteView({
         if (!media.paused) media.pause();
       }
     };
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Each change of the shown view pauses the one it hid.
   }, [activeViewKey]);
 
   return (
@@ -434,14 +465,14 @@ export const ThreadRouteView = memo(function ThreadRouteView({
         nextKeptViews.map((view) => (
           <Activity
             key={view.key}
-            mode={view.key === activeViewKey || view.warming === true ? "visible" : "hidden"}
+            mode={view.key === activeViewKey || view.key === layingOutKey ? "visible" : "hidden"}
           >
             <KeptViewFrame
               viewKey={view.key}
               warming={view.warming === true && view.key !== activeViewKey}
               onWarm={finishWarming}
             >
-              <KeptViewLifetimeContext value={lifetimeFor(view.key)}>
+              <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
                 {view.draftId === null ? (
                   <KeptChatView
                     environmentId={view.environmentId}
