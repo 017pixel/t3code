@@ -8,7 +8,7 @@ import * as EventLoopMonitor from "./EventLoopMonitor.ts";
 
 const ms = (value: number) => value * 1e6;
 
-// Node reports a stall of S as a gap of up to S + 1 s, the histogram resolution.
+// Node reports a stall of S as a gap of up to S + 100 ms, the histogram resolution.
 const stalled: EventLoopMonitor.EventLoopReadings = {
   delayMaxNs: ms(5_950),
   activeMs: 6_200,
@@ -23,7 +23,7 @@ const stalled: EventLoopMonitor.EventLoopReadings = {
   rssBytes: 1536 * 1024 * 1024,
 };
 // Over the threshold as read, but not once the resolution is subtracted.
-const quiet: EventLoopMonitor.EventLoopReadings = { ...stalled, delayMaxNs: ms(2_950) };
+const quiet: EventLoopMonitor.EventLoopReadings = { ...stalled, delayMaxNs: ms(300) };
 
 describe("EventLoopMonitor", () => {
   it.effect("records a warning span only for samples that saw a stall", () =>
@@ -36,25 +36,26 @@ describe("EventLoopMonitor", () => {
           return span;
         },
       });
-      // The first sample covers startup, so the monitor discards it.
       const samples = [stalled, quiet, stalled];
 
       yield* Effect.gen(function* () {
         yield* Layer.build(
           EventLoopMonitor.layerWith(Effect.succeed(Effect.sync(() => samples.shift() ?? quiet))),
         );
-        yield* TestClock.adjust("60 seconds");
-        assert.lengthOf(spans, 0);
-        yield* TestClock.adjust("30 seconds");
+        yield* TestClock.adjust("1 second");
+        assert.lengthOf(spans, 1);
+        yield* TestClock.adjust("1 second");
+        assert.lengthOf(spans, 1);
+        yield* TestClock.adjust("1 second");
       }).pipe(Effect.scoped, Effect.withTracer(tracer));
 
       assert.deepStrictEqual(
         spans.map((span) => span.name),
-        ["server.eventLoop.stall"],
+        ["server.eventLoop.stall", "server.eventLoop.stall"],
       );
       const [span] = spans;
       assert.deepStrictEqual(Object.fromEntries(span!.attributes), {
-        delayMaxMs: 4_950,
+        delayMaxMs: 5_850,
         utilization: 0.18,
         cpuUserMs: 310,
         cpuSystemMs: 96,
@@ -65,19 +66,19 @@ describe("EventLoopMonitor", () => {
       });
       assert.deepStrictEqual(
         span!.events.map(([name, , attributes]) => [name, attributes["effect.logLevel"]]),
-        [["event loop stalled for 4950 ms", "WARN"]],
+        [["event loop stalled for 5850 ms", "WARN"]],
       );
     }),
   );
 
-  it("ignores delay the loop spent idle, such as a system sleep", () => {
-    // Waking from sleep reads as a long gap, but the loop was idle in poll for it.
-    const asleep: EventLoopMonitor.EventLoopReadings = {
+  it("reports short stalls even when ELU active time lags the delay reading", () => {
+    const short: EventLoopMonitor.EventLoopReadings = {
       ...stalled,
-      delayMaxNs: ms(600_000),
-      activeMs: 900,
+      delayMaxNs: ms(850),
+      activeMs: 100,
     };
-    assert.isUndefined(EventLoopMonitor.stallMs(asleep));
-    assert.strictEqual(EventLoopMonitor.stallMs({ ...asleep, activeMs: 600_000 }), 599_000);
+    assert.strictEqual(EventLoopMonitor.stallMs(short), 750);
+    assert.strictEqual(EventLoopMonitor.stallMs({ ...quiet, tickDelayMs: 53_000 }), 53_000);
+    assert.isUndefined(EventLoopMonitor.stallMs(quiet));
   });
 });

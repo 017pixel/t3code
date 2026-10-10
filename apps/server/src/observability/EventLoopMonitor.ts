@@ -8,15 +8,17 @@ import type * as Scope from "effect/Scope";
 // Node's delay histogram wakes a native timer every RESOLUTION_MS and records the
 // gap between wakeups, so an idle loop reads about RESOLUTION_MS and a stall of S
 // reads between S and S + RESOLUTION_MS. We subtract the resolution, so a delay can
-// undercount a stall by up to RESOLUTION_MS. With these values every stall over 3 s
-// is caught, at 1 wakeup per second that never enters JS.
-const RESOLUTION_MS = 1000;
-const STALL_THRESHOLD_MS = 2000;
-const SAMPLE_INTERVAL = "30 seconds";
+// undercount a stall by up to RESOLUTION_MS. Ten native wakeups per second catch
+// short stalls without scheduling JS work at that frequency.
+const RESOLUTION_MS = 100;
+const STALL_THRESHOLD_MS = 250;
+const SAMPLE_INTERVAL_MS = 1000;
 
 /** One sample interval as Node reports it. Delay in ns, active time in ms, CPU in µs. */
 export interface EventLoopReadings {
   readonly delayMaxNs: number;
+  /** Timer drift also covers startup and the histogram's first gap after reset. */
+  readonly tickDelayMs?: number;
   readonly activeMs: number;
   readonly utilization: number;
   readonly usage: Pick<
@@ -44,14 +46,26 @@ const makeNodeSampler = Effect.gen(function* () {
   );
   let elu = NodePerfHooks.performance.eventLoopUtilization();
   let usage = process.resourceUsage();
+  let sampledAt = NodePerfHooks.performance.now();
+  // The native histogram needs one wakeup before it can record a gap. One
+  // startup probe covers a stall that finishes before the first one-second tick.
+  const armedAt = sampledAt;
+  let startupDelayMs = 0;
+  // @effect-diagnostics-next-line globalTimersInEffect:off -- The native boot probe must arm before Effect scheduling can run startup work.
+  const startupProbe = setTimeout(() => {
+    startupDelayMs = Math.max(0, NodePerfHooks.performance.now() - armedAt - RESOLUTION_MS);
+  }, RESOLUTION_MS);
+  yield* Effect.addFinalizer(() => Effect.sync(() => clearTimeout(startupProbe)));
 
   // @effect-diagnostics-next-line returnEffectInGen:off - the read effect is the result.
   return Effect.sync(() => {
     const nextElu = NodePerfHooks.performance.eventLoopUtilization();
     const nextUsage = process.resourceUsage();
+    const now = NodePerfHooks.performance.now();
     const loop = NodePerfHooks.performance.eventLoopUtilization(nextElu, elu);
     const readings: EventLoopReadings = {
       delayMaxNs: histogram.max,
+      tickDelayMs: Math.max(startupDelayMs, now - sampledAt - SAMPLE_INTERVAL_MS, 0),
       activeMs: loop.active,
       utilization: loop.utilization,
       usage: {
@@ -65,8 +79,10 @@ const makeNodeSampler = Effect.gen(function* () {
       rssBytes: process.memoryUsage.rss(),
     };
     histogram.reset();
+    startupDelayMs = 0;
     elu = nextElu;
     usage = nextUsage;
+    sampledAt = now;
     return readings;
   });
 });
@@ -74,18 +90,17 @@ const makeNodeSampler = Effect.gen(function* () {
 /**
  * Returns the stall to report for one sample in ms, or undefined when there was none.
  */
-export const stallMs = ({ delayMaxNs, activeMs }: EventLoopReadings) => {
-  const delayMs = Math.round(delayMaxNs / 1e6) - RESOLUTION_MS;
-  // A stall is time the loop spent running code, so it counts as active time. libuv's
-  // clock keeps running while the system sleeps on macOS and Windows, so a sleep also
-  // reads as delay, but the loop spent it idle in poll.
-  if (delayMs <= STALL_THRESHOLD_MS || activeMs < delayMs) return undefined;
+export const stallMs = ({ delayMaxNs, tickDelayMs = 0 }: EventLoopReadings) => {
+  const delayMs = Math.round(Math.max(delayMaxNs / 1e6 - RESOLUTION_MS, tickDelayMs));
+  // ELU's active time can lag the histogram, especially across startup and resets.
+  // Keep it as diagnostic context rather than letting it suppress an observed gap.
+  if (delayMs <= STALL_THRESHOLD_MS) return undefined;
   return delayMs;
 };
 
 /**
- * Samples event loop health every 30 s and records a `server.eventLoop.stall` span
- * with a warning when the loop stalled for more than 2 s, so stalls land in
+ * Samples event loop health every second and records a `server.eventLoop.stall` span
+ * with a warning when the loop stalled for more than 250 ms, so stalls land in
  * the local trace file and Settings > Diagnostics without OTLP. Takes the sampler
  * so tests can inject readings.
  */
@@ -119,16 +134,9 @@ export const layerWith = (
           }),
         );
       });
-      const wait = Effect.sleep(SAMPLE_INTERVAL);
-      // The layer builds before the rest of the server, so the first sample covers
-      // startup work such as migrations and projection bootstrap. That can block the
-      // loop for seconds on a large database, so skip it rather than warn at every
-      // launch. Layers build outside any span, so this fiber retains no parent span.
-      yield* wait.pipe(
-        Effect.andThen(sample),
-        Effect.andThen(wait.pipe(Effect.andThen(tick), Effect.forever)),
-        Effect.forkScoped,
-      );
+      const wait = Effect.sleep(SAMPLE_INTERVAL_MS);
+      // Include the first sample: startup stalls are particularly costly on a large DB.
+      yield* wait.pipe(Effect.andThen(tick), Effect.forever, Effect.forkScoped);
     }),
   );
 
