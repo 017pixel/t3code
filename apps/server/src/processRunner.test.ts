@@ -409,7 +409,7 @@ describe("runProcess", () => {
   );
 });
 
-const hostPlatform = HostProcessPlatform.defaultValue();
+const hostPlatform = HostProcess.Platform.defaultValue();
 
 describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", () => {
   const hostFailures: Array<SpawnHost.SpawnHostFailure> = [];

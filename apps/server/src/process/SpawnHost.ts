@@ -18,7 +18,7 @@ import type * as NodeStream from "node:stream";
 import * as NodeChildProcessSpawner from "@effect/platform-node-shared/NodeChildProcessSpawner";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
 
 import type { SpawnHostError, SpawnHostEvent, SpawnHostSpawnRequest } from "./spawnHostProcess.ts";
@@ -366,7 +366,7 @@ export const layerHost = (
 
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
-    if ((yield* HostProcessPlatform) !== "linux") return NodeChildProcessSpawner.layer;
+    if ((yield* HostProcess.Platform) !== "linux") return NodeChildProcessSpawner.layer;
     const invocation = yield* resolveSelfInvocation();
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
     return layerHost(
