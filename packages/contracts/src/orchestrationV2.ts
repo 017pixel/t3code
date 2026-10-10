@@ -1864,6 +1864,13 @@ export const OrchestrationV2LatestVisibleMessageSummary = Schema.Struct({
 export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
+/** Opted-in shells reference an earlier link's identical native stack. */
+export const OrchestrationV2ShellPullRequestLink = Schema.Struct({
+  ...ThreadPullRequestLink.fields,
+  stackReference: Schema.optionalKey(NonNegativeInt),
+});
+export type OrchestrationV2ShellPullRequestLink = typeof OrchestrationV2ShellPullRequestLink.Type;
+
 export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -1877,7 +1884,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   /** Pull request the user linked to this thread (#8160). */
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
-  pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
+  pullRequests: Schema.optional(Schema.Array(OrchestrationV2ShellPullRequestLink)),
   /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   lineage: OrchestrationV2AppThreadLineage,

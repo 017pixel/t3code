@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 import { rpcInitialItems } from "./rpcInitialItems.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import { subscribeCodexAuthCallback } from "./provider/CodexAuthCallback.ts";
+import { compactShellPullRequestStacks } from "./orchestration-v2/ThreadReadPayload.ts";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AcpRegistryOperationError,
@@ -1020,7 +1021,13 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       );
       const enriched = yield* enrichProjectShells(base.projects);
       return {
-        snapshot: { ...base, projects: enriched.projects } as OrchestrationV2ShellSnapshot,
+        snapshot: {
+          ...base,
+          projects: enriched.projects,
+          threads: input.compactPullRequests
+            ? base.threads.map(compactShellPullRequestStacks)
+            : base.threads,
+        } as OrchestrationV2ShellSnapshot,
         resolvedRepositoryIdentityRoots: enriched.resolvedRepositoryIdentityRoots,
       };
     });
@@ -1066,7 +1073,13 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             const shell = yield* threadManagement.getThreadShell(stored.event.threadId, {
               compactPullRequests: input.compactPullRequests === true,
             });
-            return shellStreamItemFromThreadShell({ stored, shell });
+            return shellStreamItemFromThreadShell({
+              stored,
+              shell:
+                shell !== null && input.compactPullRequests
+                  ? compactShellPullRequestStacks(shell)
+                  : shell,
+            });
           }),
         { concurrency: 8 },
       );

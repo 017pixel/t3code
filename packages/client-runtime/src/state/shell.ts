@@ -29,7 +29,7 @@ import { runCachePersistence } from "./cachePersistence.ts";
 import { subscribeDynamic } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import * as ShellSnapshotLoader from "./shellSnapshotHttp.ts";
-import type { DeferredShellSnapshot } from "./shellPullRequests.ts";
+import { type DeferredShellSnapshot, restoreShellPullRequestStacks } from "./shellPullRequests.ts";
 import {
   applyShellStreamEvent,
   mergeShellSnapshotProjects,
@@ -192,7 +192,22 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     let waiting = yield* Ref.get(awaitingCompletion);
     let next = initial;
     let receivedSnapshot = false;
-    for (const item of items) {
+    for (const received of items) {
+      const item =
+        received.kind === "snapshot"
+          ? {
+              ...received,
+              snapshot: {
+                ...received.snapshot,
+                threads: received.snapshot.threads.map(restoreShellPullRequestStacks),
+                archivedThreads: received.snapshot.archivedThreads.map(
+                  restoreShellPullRequestStacks,
+                ),
+              },
+            }
+          : received.kind === "thread.updated"
+            ? { ...received, thread: restoreShellPullRequestStacks(received.thread) }
+            : received;
       if (item.kind === "synchronized") {
         waiting = false;
         if (Option.isSome(next.snapshot)) {

@@ -43,6 +43,7 @@ import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   compactThreadPullRequests,
+  compactShellPullRequestStacks,
   decodeThreadReadPayload,
   encodeThreadReadPayload,
 } from "./ThreadReadPayload.ts";
@@ -4963,6 +4964,13 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         compact.pullRequests,
       );
       assert.deepEqual((yield* store.getThread(threadId)).pullRequests, rich.pullRequests);
+      const shell = yield* store.getThreadShell(threadId, { compactPullRequests: true });
+      assert.isNotNull(shell);
+      const wire = compactShellPullRequestStacks(shell!);
+      assert.equal(wire.pullRequests?.[1]?.stackReference, 0);
+      assert.isNull(wire.pullRequests?.[1]?.stack);
+      assert.equal(wire.pullRequests?.[2]?.stack?.base, "older-base");
+      assert.isUndefined(wire.pullRequests?.[2]?.stackReference);
       yield* syncPullRequests("restore", synced.pullRequests ?? []);
       assert.equal(yield* phase, "running");
       assert.equal((yield* store.getThreadsWithPullRequests()).length, 1);

@@ -31,6 +31,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import { buildActiveShellSnapshot, loadShellSnapshotParts } from "./ShellStream.ts";
 import { boundedSnapshotResponseFields } from "./ThreadStream.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
+import { compactShellPullRequestStacks } from "./ThreadReadPayload.ts";
 
 function isThreadNotFound(error: unknown): boolean {
   return (
@@ -75,17 +76,28 @@ export const layer = HttpApiBuilder.group(
         ),
     );
 
-    const loadShellSnapshot = Effect.fn("http.orchestration.loadShellSnapshot")(function* (compactPullRequests: boolean) {
+    const loadShellSnapshot = Effect.fn("http.orchestration.loadShellSnapshot")(function* (
+      compactPullRequests: boolean,
+    ) {
       const base = buildActiveShellSnapshot(
         yield* loadShellSnapshotParts({
           sql,
-          readThreads: threadManagement.readShellSnapshot({ location: "active", compactPullRequests }),
+          readThreads: threadManagement.readShellSnapshot({
+            location: "active",
+            compactPullRequests,
+          }),
           listProjects: projectStore.listShells(),
           latestSequence: applicationEvents.latestApplicationSequence,
         }),
       );
       const projects = yield* enrichProjectShells(base.projects);
-      return { ...base, projects };
+      return {
+        ...base,
+        projects,
+        threads: compactPullRequests
+          ? base.threads.map(compactShellPullRequestStacks)
+          : base.threads,
+      };
     });
 
     const loadThreadSnapshot = Effect.fn("http.orchestration.loadThreadSnapshot")(function* (
