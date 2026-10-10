@@ -13,6 +13,8 @@ import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
 
 import * as ServerSettings from "../serverSettings.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -129,6 +131,12 @@ it.effect("reports implemented tools separately from locally available executabl
     },
   } satisfies Partial<VcsProcess.VcsProcess["Service"]>;
   const layerTest = SourceControlDiscovery.layer.pipe(
+    Layer.provideMerge(
+      ServerSettings.layer.pipe(
+        Layer.provide(ServerSecretStore.layer),
+        Layer.provide(SqlitePersistence.layerMemory),
+      ),
+    ),
     Layer.provide(
       ServerConfig.layerTest(process.cwd(), {
         prefix: "t3-source-control-discovery-",
@@ -165,6 +173,17 @@ it.effect("reports implemented tools separately from locally available executabl
     yield* TestClock.adjust("1 minute");
     yield* discovery.discover;
     assert.isAbove(probeCount, refreshedProbeCount);
+    // Credentials are saved through settings, so a settings change starts a new run.
+    const cachedProbeCount = probeCount;
+    yield* discovery.discover;
+    assert.strictEqual(probeCount, cachedProbeCount);
+    yield* (yield* ServerSettings.ServerSettingsService).updateSettings({
+      responseStreamingMode: "turn",
+    });
+    // Let the change subscription see the published settings.
+    yield* Effect.yieldNow;
+    yield* discovery.discover;
+    assert.isAbove(probeCount, cachedProbeCount);
 
     assert.deepStrictEqual(
       result.versionControlSystems.map((item) => ({
@@ -289,6 +308,7 @@ Logged in to gitlab.com as gitlab-user
     },
   } satisfies Partial<VcsProcess.VcsProcess["Service"]>;
   const layerTest = SourceControlDiscovery.layer.pipe(
+    Layer.provide(ServerSettings.ServerSettingsService.layerTest()),
     Layer.provide(
       ServerConfig.layerTest(process.cwd(), {
         prefix: "t3-source-control-auth-discovery-",
