@@ -65,11 +65,19 @@ class TestRow {
   });
 }
 
-function fixture(rows: TestRow[]) {
+function fixture(rows: TestRow[], frames?: FrameRequestCallback[]) {
   const media = { matches: false };
   const parent = {
     children: rows,
-    ownerDocument: { defaultView: { matchMedia: () => media } },
+    ownerDocument: {
+      defaultView: {
+        matchMedia: () => media,
+        ...(frames && {
+          requestAnimationFrame: (callback: FrameRequestCallback) => frames.push(callback),
+          cancelAnimationFrame: () => {},
+        }),
+      },
+    },
     getBoundingClientRect: () => ({ top: 0 }),
     append(node: TestRow) {
       parent.children.push(node);
@@ -524,6 +532,20 @@ describe("sidebar list motion", () => {
     motion.update(true);
     expect(removed!.clones).toHaveLength(1);
     expect(rest.every((row) => row.animations.length === 1)).toBe(true);
+  });
+
+  it("reads a non-animating commit's baseline in the next frame", () => {
+    const frames: FrameRequestCallback[] = [];
+    const [a, b] = [new TestRow("a"), new TestRow("b")];
+    const { motion, layout } = fixture([a, b], frames);
+    motion.update(false);
+    expect(frames).toHaveLength(1);
+    layout([b, a]);
+    frames.shift()!(0);
+    layout([a, b]);
+    motion.update(true);
+    expectMove(a, 83);
+    expectMove(b, -83);
   });
 
   it("respects reduced motion while keeping the next baseline fresh", () => {
