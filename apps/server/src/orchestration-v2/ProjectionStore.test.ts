@@ -5090,6 +5090,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         SET payload_json = json_set(payload_json, '$.pullRequests', json('[]'))
         WHERE thread_id = ${threadId}`;
       assert.deepEqual(yield* store.getThreadsWithPullRequests(), []);
+      // Its write marks the read projection stale, so shells read the payload it wrote.
+      assert.deepEqual(
+        (yield* store.getThreadShell(threadId, { compactPullRequests: true }))?.pullRequests,
+        [],
+      );
       yield* sql`UPDATE orchestration_v2_projection_threads
         SET payload_json = ${stored!.payload_json} WHERE thread_id = ${threadId}`;
       assert.equal((yield* store.getThreadsWithPullRequests()).length, 1);
