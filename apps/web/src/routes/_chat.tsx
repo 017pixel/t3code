@@ -18,7 +18,6 @@ import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread, useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { clearPendingLandingDraft, usePendingLandingDraft } from "../bootLanding";
-import { bootHoldAtom } from "../connection/catalog";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
@@ -226,17 +225,20 @@ function LandingDraftDefaults() {
       ? NO_LIVE_CONFIG_ATOM
       : environmentSession.initialConfigValueAtom(landing.projectRef.environmentId),
   );
-  // Held boot screens still read the snapshot's settings; the defaults need the server's.
-  const bootHeld = useAtomValue(bootHoldAtom);
   const startedDraftIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (landing === null || liveConfig === null || bootHeld) return;
+    if (landing === null || liveConfig === null) return;
     if (startedDraftIdRef.current === landing.draftId) return;
     startedDraftIdRef.current = landing.draftId;
-    void handleNewThread(landing.projectRef, { replace: true, landing })
+    // The screen may still show the snapshot's settings; the defaults use the server's.
+    void handleNewThread(landing.projectRef, {
+      replace: true,
+      landing,
+      serverSettings: liveConfig.settings,
+    })
       .catch(() => undefined)
       .finally(() => clearPendingLandingDraft(landing.draftId));
-  }, [bootHeld, handleNewThread, landing, liveConfig]);
+  }, [handleNewThread, landing, liveConfig]);
   return null;
 }
 

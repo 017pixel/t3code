@@ -4,7 +4,12 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { DEFAULT_SERVER_SETTINGS, type ScopedProjectRef, type ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  type ScopedProjectRef,
+  type ServerSettings,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
@@ -83,6 +88,8 @@ export function useNewThreadHandler() {
          * text stays, and a workspace context the user changed meanwhile wins.
          */
         landing?: PendingLandingDraft;
+        /** The server's settings when the caller holds them before this view does. */
+        serverSettings?: ServerSettings;
       },
       // Which draft the thread ended up in, so a caller that has something to put in it — a
       // prepared checkout, a task to write — addresses that one rather than looking the project
@@ -90,7 +97,9 @@ export function useNewThreadHandler() {
     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
       const projects = readProjects();
       const targetServerSettings =
-        environmentServerConfigs.get(projectRef.environmentId)?.settings ?? DEFAULT_SERVER_SETTINGS;
+        options?.serverSettings ??
+        environmentServerConfigs.get(projectRef.environmentId)?.settings ??
+        DEFAULT_SERVER_SETTINGS;
       const {
         getComposerDraft,
         getDraftSessionByLogicalProjectKey,
