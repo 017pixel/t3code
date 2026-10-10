@@ -42,6 +42,14 @@
     "./server/CursorSdk": {
       "types": "./src/server/CursorSdk.ts",
       "import": "./src/server/CursorSdk.ts"
+    },
+    "./server/driver": {
+      "types": "./src/server/driver.ts",
+      "import": "./src/server/driver.ts"
+    },
+    "./server/keychainToken": {
+      "types": "./src/server/keychainToken.ts",
+      "import": "./src/server/keychainToken.ts"
     }
   },
   "scripts": {

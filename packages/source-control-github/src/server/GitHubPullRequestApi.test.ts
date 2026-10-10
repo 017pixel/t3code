@@ -503,17 +503,16 @@ it.effect(
           }),
         ),
       );
-      const cli = yield* GitHubPullRequestApi.make.pipe(
-        Effect.provide(
-          GitHubApi.layer.pipe(
-            Layer.provide(Layer.mergeAll(credentials, http)),
-            Layer.provide(GitHubQuota.layer),
-            Layer.provide(SourceControlRateLimit.layer),
-            Layer.merge(TestSourceControlHost.layer()),
-            Layer.provideMerge(NodeServices.layer),
-          ),
+      const dependencies = yield* Layer.build(
+        GitHubApi.layer.pipe(
+          Layer.provide(Layer.mergeAll(credentials, http)),
+          Layer.provide(GitHubQuota.layer),
+          Layer.provide(SourceControlRateLimit.layer),
+          Layer.merge(TestSourceControlHost.layer()),
+          Layer.provideMerge(NodeServices.layer),
         ),
       );
+      const cli = yield* GitHubPullRequestApi.make.pipe(Effect.provideContext(dependencies));
       const input = { cwd: "/repo", host: "github.com" };
       const first = yield* cli.withVerifiedCredential(input, (identity) =>
         Effect.gen(function* () {

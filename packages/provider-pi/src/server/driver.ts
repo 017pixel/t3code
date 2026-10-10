@@ -1,3 +1,4 @@
+import { makeLazyAdapter } from "@t3tools/provider-core/server/lazyAdapter";
 /**
  * PiDriver — v1 `ProviderDriver` for the Pi coding agent, composing the
  * orchestrator-v2 adapter (`PiAdapterV2`), the snapshot/probe layer
@@ -18,7 +19,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makePiTextGeneration } from "./textGeneration.ts";
-import { PiAdapterV2Driver, type PiAdapterV2DriverEnv } from "./adapter.ts";
+import type { PiAdapterV2DriverEnv } from "./adapter.ts";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import {
   buildInitialPiProviderSnapshot,
@@ -120,22 +121,30 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         ),
       );
 
-      const orchestrationAdapter = yield* PiAdapterV2Driver.create({
+      const orchestrationAdapter = yield* makeLazyAdapter(
         instanceId,
-        displayName,
-        accentColor,
-        environment,
-        enabled,
-        config,
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
+        DRIVER_KIND,
+        Effect.promise(() => import("./adapter.ts")).pipe(
+          Effect.flatMap(({ PiAdapterV2Driver }) =>
+            PiAdapterV2Driver.create({
               instanceId,
-              detail: "Failed to build Pi orchestration adapter.",
-              cause,
-            }),
+              displayName,
+              accentColor,
+              environment,
+              enabled,
+              config,
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderDriverError({
+                    driver: DRIVER_KIND,
+                    instanceId,
+                    detail: "Failed to build Pi orchestration adapter.",
+                    cause,
+                  }),
+              ),
+            ),
+          ),
         ),
       );
       const textGeneration = yield* makePiTextGeneration(effectiveConfig, processEnv);

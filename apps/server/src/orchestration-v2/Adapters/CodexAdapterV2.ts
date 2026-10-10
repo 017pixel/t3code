@@ -1,3 +1,4 @@
+import { CodexAppServerClientFactory } from "../../provider/CodexAppServerClientFactory.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -67,7 +68,6 @@ import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import * as Cause from "effect/Cause";
-import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -1270,26 +1270,6 @@ type CodexSubAgentActivityItem = Extract<
   { readonly type: "subAgentActivity" }
 >;
 
-export interface CodexAppServerClientFactoryShape {
-  readonly open: (input: {
-    readonly instanceId: ProviderInstanceId;
-    readonly threadId: ThreadId;
-    readonly providerSessionId: OrchestrationV2ProviderSession["id"];
-    readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
-    readonly settings: CodexSettings;
-    readonly environment: NodeJS.ProcessEnv;
-  }) => Effect.Effect<
-    CodexClient.CodexAppServerClient["Service"],
-    ProviderAdapter.ProviderAdapterOpenSessionError,
-    Scope.Scope
-  >;
-}
-
-export class CodexAppServerClientFactory extends Context.Service<
-  CodexAppServerClientFactory,
-  CodexAppServerClientFactoryShape
->()("t3/orchestration-v2/Adapters/CodexAdapterV2/CodexAppServerClientFactory") {}
-
 /**
  * Config overrides sent with every `thread/start`, `thread/resume` and `thread/fork`.
  * Codex 0.152 made the `update_plan` checklist tool opt-in; T3 renders it as the
@@ -1656,7 +1636,7 @@ export interface CodexAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: CodexSettings;
   readonly environment: NodeJS.ProcessEnv;
-  readonly clientFactory: CodexAppServerClientFactoryShape;
+  readonly clientFactory: CodexAppServerClientFactory["Service"];
   readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
   /**
    * Resolves launch settings when each session opens, replacing `settings` and

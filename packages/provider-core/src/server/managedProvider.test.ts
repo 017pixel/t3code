@@ -1,3 +1,7 @@
+import * as Exit from "effect/Exit";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as ProviderAdapter from "./ProviderAdapter.ts";
+import { makeLazyAdapter } from "./lazyAdapter.ts";
 import { describe, it, assert } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -685,3 +689,73 @@ describe("makeManagedServerProvider", () => {
     ).pipe(Effect.provide(layerAlwaysRunTest)),
   );
 });
+
+it.effect(
+  "constructs a lazy adapter once in its instance scope across concurrent request scopes",
+  () =>
+    Effect.gen(function* () {
+      let constructed = 0;
+      let finalized = 0;
+      let owner: string | undefined;
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const driver = ProviderDriverKind.make("codex");
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const adapter = yield* makeLazyAdapter(
+            ProviderInstanceId.make("lazy"),
+            driver,
+            Effect.gen(function* () {
+              constructed++;
+              owner = (yield* HostProcessEnvironment).OWNER;
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  finalized++;
+                }),
+              );
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(release);
+              return ProviderAdapter.ProviderAdapterV2.of({
+                instanceId: ProviderInstanceId.make("lazy"),
+                driver,
+                getCapabilities: () =>
+                  Effect.fail(
+                    new ProviderAdapter.ProviderAdapterCapabilitiesError({
+                      driver,
+                      cause: "probe refused",
+                    }),
+                  ),
+                planSelectionTransition: () => Effect.die("unused"),
+                openSession: () => Effect.die("unused"),
+              });
+            }),
+          );
+          assert.equal(constructed, 0);
+          const abandoned = yield* adapter.getCapabilities().pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          yield* Fiber.interrupt(abandoned);
+          const requests = yield* Effect.all(
+            [
+              adapter.getCapabilities().pipe(Effect.scoped, Effect.exit),
+              adapter.getCapabilities().pipe(Effect.scoped, Effect.exit),
+            ],
+            { concurrency: "unbounded" },
+          ).pipe(
+            Effect.provideService(HostProcessEnvironment, { OWNER: "request" }),
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(started);
+          assert.equal(constructed, 1);
+          yield* Deferred.succeed(release, undefined);
+          const exits = yield* Fiber.join(requests);
+          assert.isTrue(exits.every(Exit.isFailure));
+          assert.equal(owner, "instance");
+          assert.equal(finalized, 0);
+          yield* adapter.getCapabilities().pipe(Effect.scoped, Effect.exit);
+          assert.equal(constructed, 1);
+          assert.equal(finalized, 0);
+        }).pipe(Effect.provideService(HostProcessEnvironment, { OWNER: "instance" })),
+      );
+      assert.equal(finalized, 1);
+    }),
+);

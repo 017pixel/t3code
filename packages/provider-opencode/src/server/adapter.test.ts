@@ -164,7 +164,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   }).pipe(
     Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, {
       connectToOpenCodeServer: () => Effect.succeed({ url: "http://test.invalid", external: true }),
-      createOpenCodeSdkClient: () => client,
+      createOpenCodeSdkClient: () => Effect.succeed(client),
     } as unknown as OpenCodeRuntime.OpenCodeRuntime["Service"]),
     Effect.provideService(ProviderHost.ProviderHost, {
       paths: { cwd: "/workspace" },
@@ -1537,7 +1537,7 @@ describe("OpenCodeAdapterV2", () => {
         Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, {
           connectToOpenCodeServer: () =>
             Effect.succeed({ url: "http://test.invalid", external: true }),
-          createOpenCodeSdkClient: () => client,
+          createOpenCodeSdkClient: () => Effect.succeed(client),
         } as unknown as OpenCodeRuntime.OpenCodeRuntime["Service"]),
         Effect.provideService(ProviderHost.ProviderHost, {
           paths: { cwd: "/workspace" },
@@ -1834,7 +1834,7 @@ describe("OpenCodeAdapterV2", () => {
         Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, {
           connectToOpenCodeServer: () =>
             Effect.succeed({ url: "http://test.invalid", external: true }),
-          createOpenCodeSdkClient: () => client,
+          createOpenCodeSdkClient: () => Effect.succeed(client),
         } as unknown as OpenCodeRuntime.OpenCodeRuntime["Service"]),
         Effect.provideService(ProviderHost.ProviderHost, {
           paths: { cwd: "/workspace" },
@@ -2517,7 +2517,7 @@ describe("OpenCodeAdapterV2", () => {
             external: true,
           }),
         runOpenCodeCommand: unused("runOpenCodeCommand"),
-        createOpenCodeSdkClient: () => fakeClient,
+        createOpenCodeSdkClient: () => Effect.succeed(fakeClient),
         loadOpenCodeInventory: unused("loadOpenCodeInventory"),
         loadInventoryFromCli: unused("loadInventoryFromCli"),
         loadOpenCodeSkills: unused("loadOpenCodeSkills"),

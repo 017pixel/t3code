@@ -1,3 +1,4 @@
+import { makeLazyAdapter } from "@t3tools/provider-core/server/lazyAdapter";
 /**
  * CodexDriver — first concrete `ProviderDriver` in the new per-instance model.
  *
@@ -36,10 +37,7 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as ServerConfig from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import {
-  createCodexAdapterV2,
-  type CodexAdapterV2DriverEnv,
-} from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import type { CodexAdapterV2DriverEnv } from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
 import {
@@ -196,25 +194,33 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
         ),
       );
 
-      const orchestrationAdapter = yield* createCodexAdapterV2(
-        {
-          instanceId,
-          displayName,
-          accentColor,
-          environment,
-          enabled,
-          config,
-        },
-        { onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
-      ).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to build Codex orchestration adapter.",
-              cause,
-            }),
+      const orchestrationAdapter = yield* makeLazyAdapter(
+        instanceId,
+        DRIVER_KIND,
+        Effect.promise(() => import("../../orchestration-v2/Adapters/CodexAdapterV2.ts")).pipe(
+          Effect.flatMap(({ createCodexAdapterV2 }) =>
+            createCodexAdapterV2(
+              {
+                instanceId,
+                displayName,
+                accentColor,
+                environment,
+                enabled,
+                config,
+              },
+              { onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderDriverError({
+                    driver: DRIVER_KIND,
+                    instanceId,
+                    detail: "Failed to build Codex orchestration adapter.",
+                    cause,
+                  }),
+              ),
+            ),
+          ),
         ),
       );
 

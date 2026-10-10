@@ -58,7 +58,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
   withAccess?: CursorAuth["withAccess"],
 ) {
   const fs = yield* FileSystem.FileSystem;
-  const { Agent } = yield* CursorSdk.CursorSdk;
+  const sdk = yield* CursorSdk.CursorSdk;
   const resolvedEnvironment = environment ?? process.env;
 
   const resolveCursorApiKey = (operation: TextGenerationOperations.Operation) =>
@@ -112,7 +112,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       } satisfies AgentOptions;
       const createCursorAgent = (sandboxEnabled: boolean) =>
         Effect.tryPromise((signal) =>
-          Agent.create(
+          sdk.Agent.create(
             sandboxEnabled
               ? agentOptions
               : {

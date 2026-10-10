@@ -1,6 +1,5 @@
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
-import { makeThreadFind, findProjectedThreadItems } from "./ThreadFind.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -4935,9 +4934,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ),
       );
 
-    const { searchThread, searchThreadStream } = yield* makeThreadFind((threadId) =>
-      readTimelineIndex(threadId, new Set()).pipe(Effect.map((index) => index.visible)),
+    const threadFind = yield* Effect.cached(
+      Effect.promise(() => import("./ThreadFind.ts")).pipe(
+        Effect.flatMap(({ makeThreadFind }) =>
+          makeThreadFind((threadId) =>
+            readTimelineIndex(threadId, new Set()).pipe(Effect.map((index) => index.visible)),
+          ),
+        ),
+        Effect.provideService(SqlClient.SqlClient, sql),
+      ),
     );
+    const searchThread: ProjectionStoreV2Shape["searchThread"] = (input) =>
+      threadFind.pipe(Effect.flatMap((find) => find.searchThread(input)));
+    const searchThreadStream: ProjectionStoreV2Shape["searchThreadStream"] = (input) =>
+      Stream.unwrap(threadFind.pipe(Effect.map((find) => find.searchThreadStream(input))));
 
     const getThreadHistoryPage: ProjectionStoreV2Shape["getThreadHistoryPage"] = (
       threadId,
@@ -6554,13 +6564,15 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           Effect.flatMap(({ projection, snapshotSequence }) =>
             projection.thread.deletedAt !== null
               ? Effect.fail(new ProjectionStoreThreadNotFoundError({ threadId: input.threadId }))
-              : Effect.succeed(
-                  // This store has no project records, so only worktree paths resolve labels.
-                  findProjectedThreadItems(
-                    projection.visibleTurnItems,
-                    input,
-                    snapshotSequence,
-                    projection.thread.worktreePath ?? undefined,
+              : Effect.promise(() => import("./ThreadFind.ts")).pipe(
+                  Effect.map(({ findProjectedThreadItems }) =>
+                    // This store has no project records, so only worktree paths resolve labels.
+                    findProjectedThreadItems(
+                      projection.visibleTurnItems,
+                      input,
+                      snapshotSequence,
+                      projection.thread.worktreePath ?? undefined,
+                    ),
                   ),
                 ),
           ),

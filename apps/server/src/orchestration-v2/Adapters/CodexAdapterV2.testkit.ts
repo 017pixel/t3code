@@ -1,3 +1,4 @@
+import * as CodexAppServerClientFactoryService from "../../provider/CodexAppServerClientFactory.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -189,25 +190,28 @@ export function layer(input: {
     input.driver === undefined
       ? CodexReplay.layerReplay(input.transcript)
       : CodexReplay.layerReplayWithDriver(input.driver);
-  const layerReplayClientFactory = Layer.succeed(CodexAdapterV2.CodexAppServerClientFactory, {
-    open: (openInput) =>
-      Effect.gen(function* () {
-        const context = yield* Layer.build(layerReplay).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapter.ProviderAdapterOpenSessionError({
-                driver: CodexAdapterV2.CODEX_DRIVER_KIND,
-                providerSessionId: openInput.providerSessionId,
-                cause,
-              }),
-          ),
-        );
-        return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-          Effect.map((client) => withCodexReplayChildMetadata(client, input.transcript)),
-          Effect.provide(context),
-        );
-      }),
-  });
+  const layerReplayClientFactory = Layer.succeed(
+    CodexAppServerClientFactoryService.CodexAppServerClientFactory,
+    {
+      open: (openInput) =>
+        Effect.gen(function* () {
+          const context = yield* Layer.build(layerReplay).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                  providerSessionId: openInput.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
+          return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+            Effect.map((client) => withCodexReplayChildMetadata(client, input.transcript)),
+            Effect.provide(context),
+          );
+        }),
+    },
+  );
   const layerServerConfig = Layer.effect(
     ServerConfig.ServerConfig,
     makeReplayServerConfig(input.transcript.scenario).pipe(Effect.orDie),

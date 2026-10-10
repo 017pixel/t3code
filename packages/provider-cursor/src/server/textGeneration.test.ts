@@ -28,8 +28,10 @@ const cursorSdkMock = vi.hoisted(() => ({
 }));
 
 vi.mock("./sdk.ts", () => ({
-  Agent: { create: cursorSdkMock.create },
-  createAgentPlatform: vi.fn(),
+  loadCursorSdk: () => ({
+    Agent: { create: cursorSdkMock.create },
+    createAgentPlatform: vi.fn(),
+  }),
 }));
 
 let hasCustomPolicy = false;

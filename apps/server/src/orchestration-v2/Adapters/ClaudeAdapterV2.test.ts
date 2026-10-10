@@ -1,3 +1,4 @@
+import * as ClaudeAgentSdkQueryRunnerService from "../../provider/ClaudeAgentSdkQueryRunner.ts";
 import * as NodeOS from "node:os";
 
 import type {
@@ -1105,7 +1106,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
         prefix: "t3-claude-binary-path-",
       }),
     ),
-    Effect.provideService(ClaudeAdapterV2.ClaudeAgentSdkQueryRunner, {
+    Effect.provideService(ClaudeAgentSdkQueryRunnerService.ClaudeAgentSdkQueryRunner, {
       allocateSessionId: Effect.succeed("native-thread-claude-binary-path"),
       open: (input) =>
         Effect.sync(() => {

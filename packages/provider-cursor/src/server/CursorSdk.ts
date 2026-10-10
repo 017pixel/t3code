@@ -3,7 +3,8 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { Agent, createAgentPlatform } from "./sdk.ts";
+import { loadCursorSdk } from "./sdk.ts";
+import type { Agent, createAgentPlatform } from "@cursor/sdk";
 
 /**
  * The Cursor Agent SDK runs in this process and spawns a shell for tool
@@ -79,5 +80,16 @@ export const layer = Layer.effect(
       Effect.sync(() => {
         process.off("unhandledRejection", onUnhandledRejection);
       }),
-  ).pipe(Effect.as(CursorSdk.of({ Agent, createAgentPlatform }))),
+  ).pipe(
+    Effect.as(
+      CursorSdk.of({
+        get Agent() {
+          return loadCursorSdk().Agent;
+        },
+        get createAgentPlatform() {
+          return loadCursorSdk().createAgentPlatform;
+        },
+      }),
+    ),
+  ),
 );
