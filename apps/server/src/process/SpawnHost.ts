@@ -272,6 +272,7 @@ class SpawnHostClient {
     }
     this.#host = host;
     host.unref();
+    this.#syncChannelRef();
     this.#readyTimer = setTimeout(() => {
       host.kill("SIGKILL");
       this.#lose(host, new Error("The spawn host did not start in time."));
