@@ -4325,8 +4325,10 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  // A view warming up out of sight is not the timeline the user last saw.
   useLayoutEffect(() => {
     if (
+      keptViewWarming ||
       threadDetailLoading ||
       timelineEntries.length === 0 ||
       timelineHasEphemeralPreviewUrls(timelineEntries)
@@ -4339,7 +4341,14 @@ export default function ChatView(props: ChatViewProps) {
       markdownCwd: gitCwd,
       workspaceRoot: activeWorkspaceRoot ?? null,
     });
-  }, [activeThreadKey, activeWorkspaceRoot, gitCwd, threadDetailLoading, timelineEntries]);
+  }, [
+    activeThreadKey,
+    activeWorkspaceRoot,
+    gitCwd,
+    keptViewWarming,
+    threadDetailLoading,
+    timelineEntries,
+  ]);
   const heldPaintContext = paintOnlyDisplayedTimeline
     ? peekHeldThreadTimeline<typeof timelineEntries>()
     : null;
