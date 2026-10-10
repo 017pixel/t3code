@@ -76,48 +76,76 @@ function trackUserInput() {
 
 let bootChatViewDeferred = false;
 
+// How long the chat view waits for the session before rendering from the
+// snapshot. A local server answers well within it; a starting desktop backend
+// or a slow tunnel does not, and the composer appears without it.
+const BOOT_SESSION_WAIT_MS = 750;
+
 /**
  * On a boot painting from its snapshot, the first frame shows the sidebar and
- * this view's frame, and the chat view renders right after it, so its large
- * first render does not hold back that frame.
+ * this view's frame, and the chat view renders after it, so its large first
+ * render does not hold back that frame.
  *
- * If the environment's session is already live by then, the screen switches
- * to live data and the chat view renders with it at once. Otherwise it
- * renders from the snapshot as a transition, which yields so the connection
- * keeps making progress, and the switch to live data waits until it has
- * painted.
+ * If the environment's session answers within BOOT_SESSION_WAIT_MS, the
+ * screen switches to live data and the chat view renders with it in one
+ * task, with nothing left to redo. Otherwise it renders from the snapshot as
+ * a transition, which yields so the connection keeps making progress, and the
+ * switch to live data waits until it has painted.
  */
 function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
   const [ready, setReady] = useState(() => bootChatViewDeferred || !isBootHeld());
   const pendingReleaseRef = useRef<(() => void) | null>(null);
-  const sessionLive = useEffectEvent(
-    () =>
-      environmentId !== null &&
-      appAtomRegistry.get(environmentSession.initialConfigValueAtom(environmentId)) !== null,
+  const sessionConfigAtom = useEffectEvent(() =>
+    environmentId === null ? null : environmentSession.initialConfigValueAtom(environmentId),
   );
   useEffect(() => {
     if (ready) return;
     bootChatViewDeferred = true;
     const release = retainBootHold();
     let mounted = false;
-    const mount = () => {
+    let stopWaiting = () => {};
+    const renderLive = () => {
       if (mounted) return;
       mounted = true;
-      if (sessionLive()) {
-        // Nothing left to wait for: render it now, in one task.
-        release();
-        flushSync(() => setReady(true));
-        return;
-      }
+      stopWaiting();
+      release();
+      flushSync(() => setReady(true));
+    };
+    const renderFromSnapshot = () => {
+      if (mounted) return;
+      mounted = true;
+      stopWaiting();
       // Released after the chat view's own commit paints, or on unmount.
       pendingReleaseRef.current = release;
       startTransition(() => setReady(true));
     };
-    const frame = requestAnimationFrame(() => setTimeout(mount, 0));
-    const timer = setTimeout(mount, 100);
+    const afterFirstFrame = () => {
+      const configAtom = sessionConfigAtom();
+      if (configAtom === null) return renderFromSnapshot();
+      if (appAtomRegistry.get(configAtom) !== null) return renderLive();
+      // A task later, so the requests the session sends as it starts go out
+      // before this render instead of queuing behind it.
+      const unsubscribe = appAtomRegistry.subscribe(configAtom, (config) => {
+        if (config !== null) setTimeout(renderLive, 0);
+      });
+      const timeout = setTimeout(renderFromSnapshot, BOOT_SESSION_WAIT_MS);
+      stopWaiting = () => {
+        unsubscribe();
+        clearTimeout(timeout);
+      };
+    };
+    let started = false;
+    const start = () => {
+      if (started) return;
+      started = true;
+      afterFirstFrame();
+    };
+    const frame = requestAnimationFrame(() => setTimeout(start, 0));
+    const timer = setTimeout(start, 100);
     return () => {
       cancelAnimationFrame(frame);
       clearTimeout(timer);
+      stopWaiting();
       if (!mounted) release();
     };
   }, [ready]);
