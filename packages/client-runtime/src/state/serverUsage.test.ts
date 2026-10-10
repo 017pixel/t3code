@@ -190,8 +190,11 @@ const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
       type: "settingsUpdated",
       payload: { settings },
     });
+    // An update equal to the current settings keeps the current object.
     yield* AtomRegistry.toStream(registry, atoms.settingsValueAtom(TARGET.environmentId)).pipe(
-      Stream.filter((current) => current === next),
+      Stream.filter(
+        (current) => current === next || canonicalJson(current) === canonicalJson(next),
+      ),
       Stream.runHead,
     );
   });
@@ -204,6 +207,15 @@ const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
     summary: (input = INPUT) => atoms.usageSummary({ environmentId: TARGET.environmentId, input }),
   };
 });
+
+/** JSON with object keys sorted, so key order does not matter. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, nested: unknown) =>
+    nested !== null && typeof nested === "object" && !Array.isArray(nested)
+      ? Object.fromEntries(Object.entries(nested).toSorted(([a], [b]) => a.localeCompare(b)))
+      : nested,
+  );
+}
 
 function settledSummary<E>(
   registry: AtomRegistry.AtomRegistry,
