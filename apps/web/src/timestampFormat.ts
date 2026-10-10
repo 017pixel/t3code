@@ -79,8 +79,17 @@ export function resolveWeekStartsOn(locale: string | undefined): WeekdayIndex | 
   }
 }
 
-/** Week start for calendars, from the same locale timestamps are shown in. */
-export const weekStartsOn = resolveWeekStartsOn(timestampLocale);
+let cachedWeekStartsOn: { readonly value: WeekdayIndex | undefined } | null = null;
+
+/**
+ * Week start for calendars, from the same locale timestamps are shown in.
+ * Resolved on first use: reading locale week data costs a few milliseconds
+ * that startup does not need.
+ */
+export function getWeekStartsOn(): WeekdayIndex | undefined {
+  cachedWeekStartsOn ??= { value: resolveWeekStartsOn(timestampLocale) };
+  return cachedWeekStartsOn.value;
+}
 
 const timestampFormatterCache = new Map<string, Intl.DateTimeFormat>();
 

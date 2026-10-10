@@ -8,21 +8,25 @@ import { UsageDay, type UsageResolution, type UsageSummaryInput } from "@t3tools
 
 import type { UsageContractMismatch } from "./usageMerge.ts";
 
-const CURRENCY = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
+// Created on first use: the first Intl.NumberFormat loads ICU number data, which
+// app startup imports this module without needing.
+let currency: Intl.NumberFormat | undefined;
+let integer: Intl.NumberFormat | undefined;
 
-const INTEGER = new Intl.NumberFormat("en-US");
+const integerFormat = () => (integer ??= new Intl.NumberFormat("en-US"));
 
 export function formatUsd(value: number): string {
-  return CURRENCY.format(value);
+  currency ??= new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return currency.format(value);
 }
 
 export function formatCount(value: number): string {
-  return INTEGER.format(Math.round(value));
+  return integerFormat().format(Math.round(value));
 }
 
 /**
@@ -35,7 +39,7 @@ export function formatTokens(value: number): string {
   if (abs >= 1e9) return `${trim(value / 1e9)}B`;
   if (abs >= 1e6) return `${trim(value / 1e6)}M`;
   if (abs >= 1e3) return `${trim(value / 1e3)}K`;
-  return INTEGER.format(Math.round(value));
+  return integerFormat().format(Math.round(value));
 }
 
 function trim(value: number): string {
