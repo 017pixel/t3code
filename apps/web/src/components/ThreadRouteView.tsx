@@ -179,7 +179,11 @@ export const ThreadRouteView = memo(function ThreadRouteView({
     if (draftSession) {
       activeView = {
         key: target.draftId,
-        threadKey: scopedThreadKey(draftSession),
+        // Only the thread fields: a draft session also carries a projectId.
+        threadKey: scopedThreadKey({
+          environmentId: draftSession.environmentId,
+          threadId: draftSession.threadId,
+        }),
         environmentId: draftSession.environmentId,
         threadId: draftSession.threadId,
         draftId: target.draftId,
