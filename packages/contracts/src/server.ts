@@ -869,12 +869,16 @@ export const ServerConfigStreamEvent = Schema.Union([
     providerChanges: Schema.Array(
       Schema.Struct({
         instanceId: ProviderInstanceId,
-        // Snapshot defaults must not turn absent patch fields into clears.
-        changes: Schema.Struct({
-          ...ServerProvider.mapFields(Struct.map(Schema.optionalKey)).fields,
-          slashCommands: Schema.optionalKey(Schema.Array(ServerProviderSlashCommand)),
-          skills: Schema.optionalKey(Schema.Array(ServerProviderSkill)),
-        }),
+        // Snapshot defaults must not turn absent patch fields into clears. A patch with a
+        // value this build cannot read decodes to undefined, and the client drops that
+        // provider, as the snapshot's forward-compatible provider array does.
+        changes: Schema.UndefinedOr(
+          Schema.Struct({
+            ...ServerProvider.mapFields(Struct.map(Schema.optionalKey)).fields,
+            slashCommands: Schema.optionalKey(Schema.Array(ServerProviderSlashCommand)),
+            skills: Schema.optionalKey(Schema.Array(ServerProviderSkill)),
+          }),
+        ).pipe(Schema.catchDecoding(() => Effect.succeedSome(undefined))),
         removed: Schema.Array(Schema.String),
       }),
     ),

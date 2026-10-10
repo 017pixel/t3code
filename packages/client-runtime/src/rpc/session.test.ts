@@ -314,7 +314,7 @@ describe("RpcSessionFactory", () => {
       providers: [other, { ...withoutName, checkedAt: "2026-08-28T00:00:00.000Z" }],
     };
     const delta = diffServerConfig(previous, next, "changed");
-    expect(delta.providerChanges[0]?.changes.models).toBeUndefined();
+    expect(delta.providerChanges[0]?.changes?.models).toBeUndefined();
     const wire = decodeServerConfigStreamEvent(encodeServerConfigStreamEvent(delta));
     expect(wire.type).toBe("configDelta");
     if (wire.type !== "configDelta") return;
@@ -326,6 +326,36 @@ describe("RpcSessionFactory", () => {
     expect(applyServerConfigDelta(removed, diffServerConfig(removed, previous, "added"))).toEqual(
       previous,
     );
+
+    // A newer server's provider value this client cannot read drops that provider, as a
+    // snapshot does, instead of failing the stream.
+    const future = encodeServerConfigStreamEvent(
+      diffServerConfig(
+        previous,
+        { ...previous, providers: [provider, { ...other, version: "2" }] },
+        "f",
+      ),
+    );
+    const futurePatch = (
+      future as unknown as { providerChanges: Array<{ changes: Record<string, unknown> }> }
+    ).providerChanges[0]!;
+    futurePatch.changes.status = "a-later-state";
+    const futureWire = decodeServerConfigStreamEvent(future);
+    if (futureWire.type !== "configDelta") throw new Error("expected a config delta");
+    expect(applyServerConfigDelta(previous, futureWire).providers).toEqual([provider]);
+    // So is a later patch for it, and its id in the provider order.
+    const ghost = ProviderInstanceId.make("ghost");
+    const late = applyServerConfigDelta(previous, {
+      ...diffServerConfig(previous, previous, "late"),
+      providerChanges: [{ instanceId: ghost, changes: { checkedAt: "x" }, removed: [] }],
+      providerOrder: [ghost, other.instanceId, provider.instanceId],
+    });
+    expect(late.providers).toEqual([other, provider]);
+    // Fields and providers a delta leaves alone keep their identity.
+    expect(late.settings).toBe(previous.settings);
+    expect(late.providers[0]).toBe(other);
+    const unchangedOrder = applyServerConfigDelta(previous, diffServerConfig(previous, next, "x"));
+    expect(unchangedOrder.settings).toBe(previous.settings);
   });
 
   it.effect("deduplicates discovery calls and invalidates on explicit refresh", () =>
