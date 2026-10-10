@@ -78,7 +78,28 @@ describe("EventLoopMonitor", () => {
       activeMs: 100,
     };
     assert.strictEqual(EventLoopMonitor.stallMs(short), 750);
-    assert.strictEqual(EventLoopMonitor.stallMs({ ...quiet, tickDelayMs: 53_000 }), 53_000);
+    // Before the loop starts, ELU reads 0 and CPU time shows the loop was busy.
+    const busyBeforeLoop = {
+      ...quiet,
+      activeMs: 0,
+      usage: { ...quiet.usage, userCPUTime: 52_000_000, systemCPUTime: 900_000 },
+    };
+    assert.strictEqual(
+      EventLoopMonitor.stallMs({ ...busyBeforeLoop, tickDelayMs: 53_000 }),
+      53_000,
+    );
     assert.isUndefined(EventLoopMonitor.stallMs(quiet));
+  });
+
+  it("ignores a long gap the loop spent idle, such as a system sleep", () => {
+    // Waking from sleep reads as a long gap, but the loop was idle in poll for it.
+    const asleep: EventLoopMonitor.EventLoopReadings = {
+      ...stalled,
+      delayMaxNs: ms(600_000),
+      activeMs: 900,
+    };
+    assert.isUndefined(EventLoopMonitor.stallMs(asleep));
+    assert.isUndefined(EventLoopMonitor.stallMs({ ...quiet, tickDelayMs: 7_200_000 }));
+    assert.strictEqual(EventLoopMonitor.stallMs({ ...asleep, activeMs: 600_000 }), 599_900);
   });
 });

@@ -12,6 +12,8 @@ import type * as Scope from "effect/Scope";
 // short stalls without scheduling JS work at that frequency.
 const RESOLUTION_MS = 100;
 const STALL_THRESHOLD_MS = 250;
+/** Longer gaps must show the loop was busy for most of them, or they were a system sleep. */
+const SLEEP_CHECK_MS = 5000;
 const SAMPLE_INTERVAL_MS = 1000;
 
 /** One sample interval as Node reports it. Delay in ns, active time in ms, CPU in µs. */
@@ -90,11 +92,15 @@ const makeNodeSampler = Effect.gen(function* () {
 /**
  * Returns the stall to report for one sample in ms, or undefined when there was none.
  */
-export const stallMs = ({ delayMaxNs, tickDelayMs = 0 }: EventLoopReadings) => {
+export const stallMs = ({ delayMaxNs, tickDelayMs = 0, activeMs, usage }: EventLoopReadings) => {
   const delayMs = Math.round(Math.max(delayMaxNs / 1e6 - RESOLUTION_MS, tickDelayMs));
-  // ELU's active time can lag the histogram, especially across startup and resets.
-  // Keep it as diagnostic context rather than letting it suppress an observed gap.
   if (delayMs <= STALL_THRESHOLD_MS) return undefined;
+  // libuv's clock keeps running while the system sleeps on macOS and Windows, so waking
+  // reads as a long gap the loop spent idle. A stall runs code: ELU counts it as active
+  // once the loop has started, and CPU time counts it before that (ELU reads 0 there).
+  // Short gaps are reported as read, so startup stalls are never lost to that lag.
+  const busyMs = Math.max(activeMs, (usage.userCPUTime + usage.systemCPUTime) / 1000);
+  if (delayMs > SLEEP_CHECK_MS && busyMs < delayMs / 2) return undefined;
   return delayMs;
 };
 
