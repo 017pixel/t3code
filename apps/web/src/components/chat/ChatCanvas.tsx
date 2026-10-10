@@ -7,7 +7,6 @@ import {
   type ComponentProps,
   type CSSProperties,
 } from "react";
-import { flushSync } from "react-dom";
 import { useElementState } from "../../hooks/useElementState";
 import { ChatCanvasContext } from "./ChatCanvasContext";
 import { resolveChatCanvasLayout, type ChatCanvasPreview } from "./chatCanvasLayout";
@@ -117,6 +116,7 @@ export function ChatCanvas({
     detailsCard,
     reportPreview,
     clearPreview,
+    registerTimeline,
     reportDetailsCard,
     detailsCardTopInset,
   ]);

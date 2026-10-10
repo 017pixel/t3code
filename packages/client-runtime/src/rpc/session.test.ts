@@ -41,6 +41,8 @@ import { applyServerConfigProjection } from "../state/serverConfigProjection.ts"
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 import { applyServerConfigDelta, diffServerConfig } from "@t3tools/shared/serverConfigDelta";
 
+const decodeServerConfigStreamEvent = Schema.decodeSync(ServerConfigStreamEvent);
+
 type SocketEventType = "open" | "message" | "close" | "error";
 type SocketEvent = {
   readonly code?: number;
@@ -313,7 +315,7 @@ describe("RpcSessionFactory", () => {
     };
     const delta = diffServerConfig(previous, next, "changed");
     expect(delta.providerChanges[0]?.changes.models).toBeUndefined();
-    const wire = Schema.decodeSync(ServerConfigStreamEvent)(encodeServerConfigStreamEvent(delta));
+    const wire = decodeServerConfigStreamEvent(encodeServerConfigStreamEvent(delta));
     expect(wire.type).toBe("configDelta");
     if (wire.type !== "configDelta") return;
     expect(applyServerConfigDelta(previous, wire)).toEqual(next);

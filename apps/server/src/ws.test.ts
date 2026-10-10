@@ -87,7 +87,7 @@ it.effect("sends config deltas and a conditional reconnect acknowledgement", () 
     if (first[0]?.type !== "snapshot" || first[0].configVersion === undefined) return;
     const reordered = {
       ...snapshot,
-      config: Object.fromEntries(Object.entries(config).reverse()) as ServerConfig,
+      config: Object.fromEntries(Object.entries(config).toReversed()) as ServerConfig,
     };
     const reconnect = yield* withConfigDeltas(Stream.make(reordered), first[0].configVersion).pipe(
       Stream.runCollect,
