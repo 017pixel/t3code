@@ -1,3 +1,4 @@
+import * as ProjectLayers from "./orchestration-v2/projectLayers.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
@@ -181,7 +182,6 @@ import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
-import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 import * as ServerActivation from "./serverActivation.ts";
 
 // MCP handoff thread IDs include escaped provenance and can exceed find-my-way's
@@ -501,7 +501,7 @@ const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
     RunFinalizationService.layerObserver.pipe(
       Layer.provide(ProjectionStoreV2.layer),
       Layer.provide(layerPullRequestService),
-      Layer.provide(RuntimeLayer.layerProjectService),
+      Layer.provide(ProjectLayers.layerProjectService),
     ),
   ),
 );
@@ -589,7 +589,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
 ).pipe(
   // Core Services
   Layer.provideMerge(layerOrchestrationApplication),
-  Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
+  Layer.provideMerge(ProjectLayers.layerEventInfrastructure),
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(layerServerSettings),
   // The asset route uses the registry's GitHub credential for private PR media, which the
@@ -815,6 +815,9 @@ const layerMakeServer = Layer.unwrap(
               }
 
               const localPort = address.port;
+              const { ensureTailscaleServe } = yield* Effect.promise(
+                () => import("@t3tools/tailscale"),
+              );
               return yield* ensureTailscaleServe({
                 localPort,
                 servePort: config.tailscaleServePort,
@@ -838,19 +841,25 @@ const layerMakeServer = Layer.unwrap(
             }),
             (configured) =>
               configured
-                ? disableTailscaleServe({ servePort: configured.servePort }).pipe(
-                    Effect.tap(() =>
-                      Effect.logInfo("Tailscale Serve disabled", {
-                        servePort: configured.servePort,
-                      }),
-                    ),
-                    Effect.catch((cause) =>
-                      Effect.logWarning("Failed to disable Tailscale Serve", {
-                        cause,
-                        servePort: configured.servePort,
-                      }),
-                    ),
-                  )
+                ? Effect.promise(() => import("@t3tools/tailscale"))
+                    .pipe(
+                      Effect.flatMap(({ disableTailscaleServe }) =>
+                        disableTailscaleServe({ servePort: configured.servePort }),
+                      ),
+                    )
+                    .pipe(
+                      Effect.tap(() =>
+                        Effect.logInfo("Tailscale Serve disabled", {
+                          servePort: configured.servePort,
+                        }),
+                      ),
+                      Effect.catch((cause) =>
+                        Effect.logWarning("Failed to disable Tailscale Serve", {
+                          cause,
+                          servePort: configured.servePort,
+                        }),
+                      ),
+                    )
                 : Effect.void,
           ),
         )

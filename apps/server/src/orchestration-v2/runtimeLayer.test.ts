@@ -1,3 +1,4 @@
+import * as ProjectLayers from "./projectLayers.ts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -266,7 +267,7 @@ const moveProject = (projectId: ProjectId, workspaceRoot: string, updatedAt: str
 
 const layerTest = Layer.mergeAll(
   RuntimeLayer.layer,
-  RuntimeLayer.layerEventSink,
+  ProjectLayers.layerEventSink,
   ProjectStore.layer,
   ProjectionStore.layer,
   EffectOutbox.layer,
@@ -298,9 +299,9 @@ const layerLegacyImportTest = RuntimeLayer.layer.pipe(
 );
 
 const layerProjectDeletionTest = Layer.mergeAll(
-  RuntimeLayer.layer.pipe(Layer.provide(RuntimeLayer.layerProjectService)),
-  RuntimeLayer.layerProjectService,
-  RuntimeLayer.layerEventSink,
+  RuntimeLayer.layer.pipe(Layer.provide(ProjectLayers.layerProjectService)),
+  ProjectLayers.layerProjectService,
+  ProjectLayers.layerEventSink,
   ThreadCommandExecutor.layer,
 ).pipe(
   Layer.provide(
@@ -441,10 +442,10 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
 });
 
 const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
-  RuntimeLayer.layer.pipe(Layer.provide(RuntimeLayer.layerProjectService)),
-  RuntimeLayer.layerProjectService,
-  RuntimeLayer.layerEventSink,
-  RuntimeLayer.layerEventInfrastructure,
+  RuntimeLayer.layer.pipe(Layer.provide(ProjectLayers.layerProjectService)),
+  ProjectLayers.layerProjectService,
+  ProjectLayers.layerEventSink,
+  ProjectLayers.layerEventInfrastructure,
 ).pipe(
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({

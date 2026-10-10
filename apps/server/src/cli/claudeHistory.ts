@@ -1,8 +1,6 @@
 import * as Effect from "effect/Effect";
 import { Argument, Command } from "effect/cli";
 
-import { runClaudeHistoryWorker } from "../claudeHistoryWorker.ts";
-
 /**
  * Hosts the Claude history worker inside the CLI executable. The npm bundle
  * runs it as a sibling `claudeHistoryWorker.mjs` under the host Node; the
@@ -16,12 +14,13 @@ export const claudeHistoryCommand = Command.make("__claude-history", {
 }).pipe(
   Command.unlisted,
   Command.withHandler(({ method, sessionId, options }) =>
-    Effect.promise(() =>
-      runClaudeHistoryWorker(
+    Effect.promise(async () => {
+      const { runClaudeHistoryWorker } = await import("../claudeHistoryWorker.ts");
+      return runClaudeHistoryWorker(
         method,
         sessionId,
         options._tag === "Some" ? options.value : undefined,
-      ),
-    ),
+      );
+    }),
   ),
 );

@@ -1,8 +1,14 @@
+import {
+  layerEventInfrastructure,
+  layerEventSink,
+  layerProjectService,
+  layerStores,
+  layerCommandReceiptStoreProvided,
+  layerLegacyV1ThreadImporterProvided,
+} from "./projectLayers.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
-import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
-import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
 import * as McpAppRequests from "../mcpApps/McpAppRequests.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
@@ -10,21 +16,16 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as AgentSessionImporter from "../project/AgentSessionImporter.ts";
 import * as AgentSessionScanner from "../project/AgentSessionScanner.ts";
-import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as CheckpointCaptureService from "./CheckpointCaptureService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CommandPolicy from "./CommandPolicy.ts";
-import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
-import * as EventSink from "./EventSink.ts";
-import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
@@ -48,56 +49,16 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadLifecycleService from "./ThreadLifecycleService.ts";
 import * as ThreadForkService from "./ThreadForkService.ts";
-import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
-
-/** The shared application event log and its command receipts. */
-export const layerEventInfrastructure = Layer.mergeAll(
-  OrchestrationEventStore.layer,
-  OrchestrationCommandReceipts.layer,
-);
 
 const layerRuntimePolicyProvided = RuntimePolicy.layerFromProjectStore.pipe(
   Layer.provide(ProjectStore.layer),
 );
 
-const layerEventStoreProvided = EventStore.layerFromOrchestrationEventStore.pipe(
-  Layer.provide(layerEventInfrastructure),
-);
-const layerCommandReceiptStoreProvided = CommandReceiptStore.layerFromApplicationReceipts.pipe(
-  Layer.provide(layerEventInfrastructure),
-);
-
-const layerStores = Layer.mergeAll(
-  layerEventInfrastructure,
-  layerEventStoreProvided,
-  ProjectionStore.layer,
-  ProjectStore.layer,
-  layerCommandReceiptStoreProvided,
-  EffectOutbox.layer,
-  TurnItemPositionStore.layer,
-);
-
-export const layerEventSink = EventSink.layerFromStores.pipe(Layer.provide(layerStores));
 const layerEventSinkProvided = layerEventSink;
 const layerProjectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
   Layer.provide(layerStores),
-);
-const layerLegacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
-  Layer.provide(layerEventSinkProvided),
-);
-
-export const layerProjectService = ProjectService.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      ProjectStore.layer,
-      ProjectionStore.layer,
-      layerEventSinkProvided,
-      IdAllocator.layer,
-      layerLegacyV1ThreadImporterProvided,
-    ),
-  ),
 );
 
 const layerProviderEventIngestorProvided = ProviderEventIngestor.layer.pipe(

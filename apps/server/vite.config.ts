@@ -1,4 +1,6 @@
 import "vite-plus/test/config";
+import * as Effect from "effect/Effect";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { defineConfig, mergeConfig } from "vite-plus";
 
 import baseConfig from "../../vite.config.ts";
@@ -34,12 +36,15 @@ const packExecutable = process.env.T3CODE_PACK_EXE === "1";
 // `<platform>-<arch>` in nodejs.org naming (darwin-x64, linux-arm64, win-x64).
 // When set, tsdown injects the bundle into a downloaded Node of that target
 // instead of the host Node, which is how the arm64 macOS runner produces the
-// x64 archive. Cross-building is safe because the code cache is off.
+// x64 archive. Cross-building disables the architecture-specific code cache.
 //
 // The Node inside the executable is pinned here rather than taken from the
 // build host, so every archive of a release embeds the same runtime no matter
 // which Node happens to run the build.
 const SEA_NODE_VERSION = "26.8.2";
+const [hostPlatform, hostArch] = Effect.runSync(
+  Effect.all([HostProcessPlatform, HostProcessArchitecture]),
+);
 const SEA_TARGETS = {
   "darwin-arm64": { platform: "darwin", arch: "arm64" },
   "darwin-x64": { platform: "darwin", arch: "x64" },
@@ -88,11 +93,16 @@ export default mergeConfig(
               fileName: "t3",
               outDir: "dist-exe",
               ...(packExecutableTargets ? { targets: packExecutableTargets } : {}),
-              // Node's SEA docs: `import()` does not work when useCodeCache is
-              // true, and the server reaches several modules that way. The
-              // cache is also platform-bound, so leaving it off keeps the
-              // build correct on any host.
-              seaConfig: { useCodeCache: false },
+              // Node 26's module SEA supports dynamic builtin imports with code cache.
+              // Release archives build natively; retain uncached cross-build support.
+              seaConfig: {
+                useCodeCache:
+                  !packExecutableTarget ||
+                  (SEA_TARGETS[packExecutableTarget as keyof typeof SEA_TARGETS].platform ===
+                    (hostPlatform === "win32" ? "win" : hostPlatform) &&
+                    SEA_TARGETS[packExecutableTarget as keyof typeof SEA_TARGETS].arch ===
+                      hostArch),
+              },
             },
           }
         : {}),
