@@ -182,20 +182,22 @@ function renderBeforeAuthGate(authGate: Promise<InitialAuthGateState>): InitialA
   if (earlyAuthGate === "unused") {
     earlyAuthGate = "pending";
     // A rejected session drops the snapshot and boots again into pairing. A
-    // check that keeps failing leaves the connection's own status on screen.
+    // check that failed after its retries (the server is gone) boots again
+    // without the snapshot, which waits for the check and shows its error.
+    const bootWithoutSnapshot = () => {
+      discardBootSnapshot();
+      window.location.reload();
+    };
     void authGate.then((state) => {
       if (state.status === "authenticated") {
         earlyAuthGate = "settled";
         return;
       }
-      discardBootSnapshot();
-      window.location.reload();
-    }, ignoreAuthGateFailure);
+      bootWithoutSnapshot();
+    }, bootWithoutSnapshot);
   }
   return { status: "authenticated" };
 }
-
-function ignoreAuthGateFailure() {}
 
 function RootRouteNotFoundView() {
   return (

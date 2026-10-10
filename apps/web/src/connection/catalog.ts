@@ -21,6 +21,7 @@ import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { isHostedStaticApp } from "../hostedPairing";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { primaryEnvironmentMissingAtom } from "./platform";
 import { connectionAtomRuntime } from "./runtime";
 
 const liveCatalog = createEnvironmentCatalogAtoms(connectionAtomRuntime);
@@ -155,7 +156,9 @@ let lastMerged: {
 /**
  * Shows the boot catalog until the live one can stand on its own: the
  * registry has loaded the saved environments and, where there is one,
- * platform discovery has registered the primary environment.
+ * platform discovery has registered the primary environment. A discovery
+ * that ends without the primary drops the boot one, so the workspace settles
+ * as it does without a snapshot.
  */
 const catalogValueAtom = Atom.make((get): EnvironmentCatalogState => {
   const boot = readBootCatalogState();
@@ -163,7 +166,7 @@ const catalogValueAtom = Atom.make((get): EnvironmentCatalogState => {
   const live = get(liveCatalog.catalogValueAtom);
   if (boot === null) return live;
   if (!live.isReady) return boot;
-  if (hasPrimaryEntry(live)) return live;
+  if (hasPrimaryEntry(live) || get(primaryEnvironmentMissingAtom)) return live;
   let bootPrimary: [EnvironmentId, ConnectionCatalogEntry] | null = null;
   for (const entry of boot.entries) {
     if (entry[1].target._tag === "PrimaryConnectionTarget") bootPrimary = entry;
@@ -195,7 +198,13 @@ const stateAtom = Atom.family((environmentId: EnvironmentId) =>
     const bootEntry = readBootCatalogState()?.entries.has(environmentId) === true;
     if (bootEntry && get(bootHoldAtom)) return CONNECTING_RESULT;
     const live = get(liveCatalog.stateAtom(environmentId));
-    if (!bootEntry || get(liveCatalog.catalogValueAtom).entries.has(environmentId)) return live;
+    if (
+      !bootEntry ||
+      get(primaryEnvironmentMissingAtom) ||
+      get(liveCatalog.catalogValueAtom).entries.has(environmentId)
+    ) {
+      return live;
+    }
     return CONNECTING_RESULT;
   }).pipe(Atom.withLabel(`web-environment-connection-state:${environmentId}`)),
 );
