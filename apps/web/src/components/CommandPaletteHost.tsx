@@ -24,6 +24,7 @@ import { resolveShortcutCommand } from "../keybindings";
 import { preloadSpeculatively } from "../lib/chunkReloadGuard";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
+import { isMacPlatform } from "../lib/utils";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
@@ -56,6 +57,24 @@ const OVERLAY_MODE_BY_COMMAND = {
   "filePicker.toggle": "files",
   "projectSearch.toggle": "content",
 } as const satisfies Partial<Record<string, SearchOverlayMode>>;
+
+/** Whether the open view has rendered its text input, which then takes the keys. */
+function paletteTextInputMounted(): boolean {
+  const palette = document.getElementById(COMMAND_PALETTE_ELEMENT_ID);
+  return palette?.querySelector("input, textarea, [contenteditable='true']") != null;
+}
+
+/**
+ * The text a key types, or null for shortcuts and keys that type nothing.
+ * Option on macOS and AltGr elsewhere type characters.
+ */
+function typedText(event: globalThis.KeyboardEvent): string | null {
+  if ([...event.key].length !== 1 || event.metaKey) return null;
+  const altGraph = event.getModifierState("AltGraph");
+  if (event.ctrlKey && !altGraph) return null;
+  if (event.altKey && !altGraph && !isMacPlatform(navigator.platform)) return null;
+  return event.key;
+}
 
 function overlayModeForCommand(command: string | null): SearchOverlayMode | null {
   if (command === null) return null;
@@ -148,8 +167,10 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // While the chunk loads, the app behind the palette is inert and nothing has
-  // focus. Text typed then becomes the palette's query, and Escape closes it.
+  // While a view's chunk loads (the palette, or content search inside it), the
+  // app behind it is inert and nothing has focus. Text typed then becomes the
+  // view's query, and Escape closes the palette (content and file search
+  // handle their own Escape below).
   const loadingQuery =
     state.openIntent === null
       ? ""
@@ -157,20 +178,22 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
         ? state.openIntent.query
         : null;
   useLayoutEffect(() => {
-    if (!state.open || state.mode !== "command" || loadingQuery === null) return;
+    if (!state.open || loadingQuery === null) return;
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (document.getElementById(COMMAND_PALETTE_ELEMENT_ID) !== null) return;
-      if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key !== "Escape" && event.key !== "Backspace" && event.key.length !== 1) return;
-      event.preventDefault();
-      event.stopPropagation();
+      if (paletteTextInputMounted() || event.isComposing) return;
+      const text = typedText(event);
+      if (text === null && event.key !== "Backspace" && event.key !== "Escape") return;
       if (event.key === "Escape") {
+        if (state.mode !== "command") return;
+        event.preventDefault();
+        event.stopPropagation();
         setOpen(false);
         return;
       }
-      const query =
-        event.key === "Backspace" ? loadingQuery.slice(0, -1) : loadingQuery + event.key;
-      dispatch({ _tag: "OpenSearch", query });
+      event.preventDefault();
+      event.stopPropagation();
+      const query = text === null ? loadingQuery.slice(0, -1) : loadingQuery + text;
+      dispatch({ _tag: "TypeAhead", query });
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
