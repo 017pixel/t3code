@@ -14,7 +14,10 @@ import {
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 import { reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+import { restoreStackTraces } from "./lib/bootStackTraces";
 
+// Every import above has evaluated; startup code runs with full stacks.
+restoreStackTraces();
 prepareProviderAuthDelivery();
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
