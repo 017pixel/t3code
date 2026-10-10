@@ -95,14 +95,16 @@ function useRunScopedPlan() {
             appAtomRegistry.get(environmentServerConfigsAtom).get(request.environmentId)
               ?.settings ?? null,
           );
-          let saved = false;
-          try {
-            const result = await persistServer(request);
-            saved = result._tag === "Success";
-            return result;
-          } finally {
-            settle(saved);
-          }
+          return persistServer(request).then(
+            (result) => {
+              settle(result._tag === "Success");
+              return result;
+            },
+            (error: unknown) => {
+              settle(false);
+              throw error;
+            },
+          );
         },
         persistClientSettingsPatch,
       ).then(({ failedEnvironments, savedEnvironments, savedEnvironmentCount }) => {

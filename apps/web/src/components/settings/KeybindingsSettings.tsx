@@ -1245,26 +1245,29 @@ interface KeybindingsGroupsProps extends KeybindingRowActions {
 function KeybindingsGroups(props: KeybindingsGroupsProps) {
   const { groups, anchorIds, savingCommand, ...rowActions } = props;
   const rowLimit = useProgressiveRowLimit(INITIAL_KEYBINDING_ROWS);
-  let rowsBefore = 0;
-  return groups.map((group) => {
-    const budget = rowLimit - rowsBefore;
-    rowsBefore += group.rows.length;
-    if (budget <= 0) return null;
-    const rows = group.rows.length > budget ? group.rows.slice(0, budget) : group.rows;
-    return (
-      <SettingsSection key={group.id} id={`keybindings-${group.id}`} title={group.title}>
-        {rows.map((row) => (
-          <KeybindingSettingsRow
-            key={row.id}
-            row={row}
-            anchorId={anchorIds.get(row.id)}
-            isSaving={savingCommand === row.command}
-            {...rowActions}
-          />
-        ))}
-      </SettingsSection>
-    );
-  });
+  const shownGroups: Array<{ group: KeybindingGroup; rows: KeybindingGroup["rows"] }> = [];
+  let budget = rowLimit;
+  for (const group of groups) {
+    if (budget <= 0) break;
+    shownGroups.push({
+      group,
+      rows: group.rows.length > budget ? group.rows.slice(0, budget) : group.rows,
+    });
+    budget -= group.rows.length;
+  }
+  return shownGroups.map(({ group, rows }) => (
+    <SettingsSection key={group.id} id={`keybindings-${group.id}`} title={group.title}>
+      {rows.map((row) => (
+        <KeybindingSettingsRow
+          key={row.id}
+          row={row}
+          anchorId={anchorIds.get(row.id)}
+          isSaving={savingCommand === row.command}
+          {...rowActions}
+        />
+      ))}
+    </SettingsSection>
+  ));
 }
 
 /** Enough rows to fill a tall window; the rest render right after the first paint. */
