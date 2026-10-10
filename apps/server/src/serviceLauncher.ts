@@ -135,43 +135,6 @@ async function backupDatabaseOnce(baseDir: string, pending: PendingServiceUpdate
   }
 }
 
-/** Ask the target executable, whose migration manifest may differ from this launcher. */
-async function targetNeedsDatabaseBackup(baseDir: string, pending: PendingServiceUpdate) {
-  const target = runtimePaths(baseDir, pending.targetVersion);
-  return new Promise<boolean | undefined>((resolve) => {
-    NodeChildProcess.execFile(
-      target.entryPath,
-      [
-        "__service-preflight",
-        "--database-path",
-        pending.dbPath,
-        "--launcher-protocol",
-        String(SERVICE_LAUNCHER_PROTOCOL),
-      ],
-      { timeout: 30_000, maxBuffer: 64 * 1024 },
-      (error, stdout) => {
-        if (error !== null) {
-          resolve(undefined);
-          return;
-        }
-        try {
-          const result = JSON.parse(stdout);
-          resolve(
-            result.status === "ready" &&
-              result.version === pending.targetVersion &&
-              result.launcherProtocol === SERVICE_LAUNCHER_PROTOCOL &&
-              typeof result.needsDatabaseBackup === "boolean"
-              ? result.needsDatabaseBackup
-              : undefined,
-          );
-        } catch {
-          resolve(undefined);
-        }
-      },
-    );
-  });
-}
-
 const restoreMarkerPath = (baseDir: string, updateId: string) =>
   NodePath.join(databaseBackupDir(baseDir, updateId), RESTORE_MARKER);
 
@@ -438,12 +401,10 @@ export class Launcher {
     await this.#startTrial(update);
   }
 
-  async #startTrial(pending: PendingServiceUpdate, needsBackup?: boolean): Promise<void> {
+  async #startTrial(pending: PendingServiceUpdate): Promise<void> {
     // The previous child is dead here, so all three SQLite files are quiescent.
     try {
-      if ((needsBackup ?? (await targetNeedsDatabaseBackup(this.#baseDir, pending))) !== false) {
-        await backupDatabaseOnce(this.#baseDir, pending);
-      }
+      await backupDatabaseOnce(this.#baseDir, pending);
     } catch {
       await this.#returnToPrevious(pending, "failed", "db-backup-failed");
       return;
@@ -572,14 +533,14 @@ export class Launcher {
       return;
     }
     this.#timer = undefined;
-    // Old targets without the preflight field retain the original stopped-copy
-    // path. New targets copy online while the active child continues serving.
-    const needsBackup = await targetNeedsDatabaseBackup(this.#baseDir, pending);
+    // Copy online while the active child continues serving. Every update keeps a backup:
+    // the trial can write payloads this version cannot read without any migration. A
+    // database the online copy cannot read takes the stopped copy in #startTrial.
     const backupDir = databaseBackupDir(this.#baseDir, pending.id);
     const stagingDir = `${backupDir}.staging`;
     let prepared: Awaited<ReturnType<typeof prepareServiceDatabaseBackup>> | undefined;
     try {
-      if (needsBackup === true && !(await pathExists(backupDir))) {
+      if (!(await pathExists(backupDir))) {
         prepared = await prepareServiceDatabaseBackup(pending.dbPath, stagingDir);
       }
     } catch {
@@ -607,7 +568,7 @@ export class Launcher {
     } finally {
       prepared?.close();
     }
-    await this.#startTrial(pending, needsBackup);
+    await this.#startTrial(pending);
   }
 
   async #handlePrepared(child: ManagedChild, updateId: string): Promise<void> {

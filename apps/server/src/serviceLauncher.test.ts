@@ -114,9 +114,11 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
         "PRAGMA journal_mode=WAL; CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT); INSERT INTO records VALUES(1,'before'); PRAGMA wal_checkpoint(TRUNCATE)",
       );
       const prepared = yield* Effect.acquireRelease(
-        Effect.tryPromise(() =>
-          prepareServiceDatabaseBackup(sourcePath, path.join(root, "backup")),
-        ),
+        Effect.tryPromise(async () => {
+          const backup = await prepareServiceDatabaseBackup(sourcePath, path.join(root, "backup"));
+          if (backup === undefined) throw new Error("A WAL database is copied online.");
+          return backup;
+        }),
         (backup) => Effect.sync(() => backup.close()),
       );
       writer.exec(
@@ -364,10 +366,6 @@ if (context.update?.status === "pending") {
       original.close();
       const childSource = `
 import { DatabaseSync } from "node:sqlite";
-if (process.argv[2] === "__service-preflight") {
-  console.log(JSON.stringify({status:"ready",version:"1.1.0",launcherProtocol:3,needsDatabaseBackup:true}));
-  process.exit(0);
-}
 const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
 if (context.update?.status === "pending") {
   const db = new DatabaseSync(context.update.dbPath);

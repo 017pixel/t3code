@@ -1,6 +1,4 @@
 import packageJson from "../../package.json" with { type: "json" };
-import * as NodeSqlite from "node:sqlite";
-import { migrationManifest } from "../persistence/Migrations.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 export type ServicePreflightResult =
@@ -8,7 +6,6 @@ export type ServicePreflightResult =
       readonly status: "ready";
       readonly version: string;
       readonly launcherProtocol: typeof SERVICE_LAUNCHER_PROTOCOL;
-      readonly needsDatabaseBackup?: boolean;
     }
   | {
       readonly status: "blocked";
@@ -32,25 +29,7 @@ export function runServicePreflight(input: {
     };
   }
 
-  let needsDatabaseBackup = true;
-  try {
-    const database = new NodeSqlite.DatabaseSync(input.databasePath, { readOnly: true });
-    try {
-      const rows = database.prepare("SELECT migration_id, name FROM effect_sql_migrations").all();
-      const recorded = new Map(rows.map((row) => [row.migration_id, row.name]));
-      needsDatabaseBackup = migrationManifest.some(([id, name]) => recorded.get(id) !== name);
-    } finally {
-      database.close();
-    }
-  } catch {
-    // Missing/unreadable ledgers must take the conservative backup path.
-  }
-  return {
-    status: "ready",
-    version,
-    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
-    needsDatabaseBackup,
-  };
+  return { status: "ready", version, launcherProtocol: SERVICE_LAUNCHER_PROTOCOL };
 }
 
 export function decodeServicePreflightResult(value: unknown): ServicePreflightResult | undefined {
@@ -67,9 +46,6 @@ export function decodeServicePreflightResult(value: unknown): ServicePreflightRe
       status: "ready",
       version: record.version,
       launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
-      ...(typeof record.needsDatabaseBackup === "boolean"
-        ? { needsDatabaseBackup: record.needsDatabaseBackup }
-        : {}),
     };
   }
   if (

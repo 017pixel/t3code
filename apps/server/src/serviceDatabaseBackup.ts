@@ -3,6 +3,21 @@ import * as NodeSqlite from "node:sqlite";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
+/** A read transaction on a WAL database, or undefined for a file the online copy cannot read. */
+function openWalReader(databasePath: string) {
+  let source: NodeSqlite.DatabaseSync | undefined;
+  try {
+    source = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+    source.exec("PRAGMA busy_timeout = 5000; BEGIN");
+    source.prepare("SELECT name FROM sqlite_schema LIMIT 1").get();
+    if (source.prepare("PRAGMA journal_mode").get()?.journal_mode === "wal") return source;
+  } catch {
+    // Not a database this copy can read; closed below.
+  }
+  source?.close();
+  return undefined;
+}
+
 /**
  * Hold the source read transaction until the stopped server's WAL is captured.
  * A WAL reader prevents checkpoint/reset from discarding frames newer than its
@@ -11,16 +26,12 @@ import * as NodePath from "node:path";
  * Copying just an online snapshot would lose those acknowledged writes on rollback.
  */
 export async function prepareServiceDatabaseBackup(databasePath: string, stagingDir: string) {
+  const source = openWalReader(databasePath);
+  // Anything else takes the stopped copy.
+  if (source === undefined) return undefined;
   await NodeFSP.rm(stagingDir, { recursive: true, force: true });
   await NodeFSP.mkdir(stagingDir, { recursive: true, mode: 0o700 });
-  const source = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
   try {
-    source.exec("PRAGMA busy_timeout = 5000; BEGIN");
-    source.prepare("SELECT name FROM sqlite_schema LIMIT 1").get();
-    const mode = source.prepare("PRAGMA journal_mode").get();
-    if (mode?.journal_mode !== "wal") {
-      throw new Error("Online update backup requires a WAL database.");
-    }
     const destination = NodePath.join(stagingDir, "database");
     await NodeSqlite.backup(source, destination, { rate: 256 });
     // SQLite backup produces a standalone database. Enable WAL before installing
