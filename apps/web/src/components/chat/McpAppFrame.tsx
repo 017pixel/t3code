@@ -250,6 +250,32 @@ export function McpAppFrame(props: {
       cancelled = true;
     };
   }, [props.environmentId, props.threadId, props.itemId, app.tool]);
+  // A hidden kept thread view keeps its DOM while React runs its effect
+  // cleanups, so the host below is torn down but the app would keep running
+  // (and playing sound) and never initialize again. The frame stops while
+  // hidden and loads a new document when shown, as when leaving the thread
+  // unmounted it.
+  const [parked, setParked] = useState(false);
+  useEffect(() => {
+    if (parked) {
+      minting.current = false;
+      // oxlint-disable-next-line react/set-state-in-effect -- A kept view shown again loads a new document.
+      setSrc(null);
+      setNavigatedAway(false);
+      setDisplayMode("inline");
+      setDocumentGeneration((value) => value + 1);
+      setParked(false);
+      return;
+    }
+    const box = boxRef.current;
+    return () => {
+      if (!box?.isConnected) return;
+      const frame = frameRef.current;
+      if (frame !== null) frame.src = "about:blank";
+      setParked(true);
+    };
+  }, [parked]);
+
   // The bridge belongs to the captured document. A frame that navigates keeps
   // its window, so a second load stops the app rather than letting a page T3
   // never served pose as it. This is not a confidentiality boundary: a frame
@@ -499,7 +525,7 @@ export function McpAppFrame(props: {
         // the frame to another parent would reload the app, and the timeline's
         // rows contain fixed positioning, which the top layer escapes.
         {...(fullscreenSupported ? { popover: "manual" as const } : {})}
-        data-mcp-app-fullscreen={fullscreen ? "" : undefined}
+        data-mcp-app-fullscreen={fullscreen && !parked ? "" : undefined}
         className={cn(
           "relative size-full overflow-hidden",
           app.prefersBorder === true && !fullscreen && "rounded-lg border border-border",
@@ -526,7 +552,7 @@ export function McpAppFrame(props: {
           <p className="flex size-full items-center justify-center text-muted-foreground text-xs">
             The {app.server} app left its page and was stopped
           </p>
-        ) : src !== null ? (
+        ) : src !== null && !parked ? (
           <iframe
             ref={frameRef}
             src={src}
