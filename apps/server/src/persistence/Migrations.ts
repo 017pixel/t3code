@@ -75,7 +75,9 @@ import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
 import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_ProjectionThreadSweepIndexes.ts";
-import Migration0062 from "./Migrations/062_ProjectionThreadReadPayload.ts";
+import Migration0062, {
+  ensureThreadReadProjection,
+} from "./Migrations/062_ProjectionThreadReadPayload.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -238,6 +240,10 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     yield* Effect.logWarning(
       "Migrations of this build never ran on this database: the migrator skips ids at or below its latest recorded migration.",
     ).pipe(Effect.annotateLogs({ skipped }));
+  }
+  // ProjectionStore reads this table, so it must exist even when its migration was skipped.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 62) {
+    yield* ensureThreadReadProjection;
   }
   return executedMigrations;
 });

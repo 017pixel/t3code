@@ -222,6 +222,36 @@ layer("055_OrchestrationV2", (it) => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
+  // Another build's migration at 62 or above makes the migrator skip this build's 62.
+  it.effect("creates the thread read projection when another build took its migration id", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 61 });
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (63, 'OtherBuild')`;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(
+        yield* sql`
+          SELECT name FROM sqlite_master
+          WHERE name LIKE 'orchestration_v2_projection_thread_reads%'
+          ORDER BY name
+        `,
+        [
+          { name: "orchestration_v2_projection_thread_reads" },
+          { name: "orchestration_v2_projection_thread_reads_stale_on_insert" },
+          { name: "orchestration_v2_projection_thread_reads_stale_on_update" },
+        ],
+      );
+      // A later pass leaves the existing projection alone.
+      yield* sql`INSERT INTO orchestration_v2_projection_thread_reads
+        (thread_id, compact_payload_json, payload_json) VALUES ('kept', '{}', '{}')`;
+      yield* runMigrations();
+      assert.deepStrictEqual(
+        yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
+        [{ thread_id: "kept" }],
+      );
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   // Published previews ran PeerLinks as 61, so they never run this build's 61.
   it.effect("keeps sweeps correct on a preview database that ran PeerLinks as 61", () => {
     const skippedWarnings: Array<unknown> = [];
