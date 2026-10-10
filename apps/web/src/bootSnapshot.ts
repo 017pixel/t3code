@@ -15,8 +15,15 @@ import * as Duration from "effect/Duration";
 
 const STORAGE_KEY = "t3code:boot-snapshot:v1";
 const FORMAT = 1;
-// localStorage holds about 5M characters per origin and drafts share it.
-const MAX_DOCUMENT_LENGTH = 2_500_000;
+// localStorage allows 5 MB per origin. Safari and Firefox count it as UTF-16,
+// about 2.5M characters; Chromium and Electron allow 10 MB and store ASCII at
+// a byte per character. Drafts keep image attachments there too, so the
+// snapshot only takes room the rest of the app leaves free.
+const ORIGIN_CHARACTER_BUDGET =
+  typeof navigator !== "undefined" && /\bChrom(?:e|ium)\//.test(navigator.userAgent)
+    ? 4_500_000
+    : 2_000_000;
+const RESERVED_FOR_OTHER_KEYS = 500_000;
 const DATE_MARKER = "$t3date";
 const DURATION_MARKER = "$t3duration";
 
@@ -83,7 +90,7 @@ function decodeDuration(encoded: unknown): Duration.Duration | null {
 }
 
 /**
- * JSON with DateTime and Duration support. Values the reviver could not
+ * JSON with DateTime and Duration support. Values the reader could not
  * rebuild exactly (class instances, Options, bigints) abort the write instead
  * of coming back as plain objects.
  */
@@ -110,15 +117,33 @@ function replacer(this: Record<string, unknown>, key: string, value: unknown): u
   return value;
 }
 
-function reviver(_key: string, value: unknown): unknown {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
-  if (DATE_MARKER in value) {
-    const millis = (value as Record<string, unknown>)[DATE_MARKER];
-    if (typeof millis === "number" && Object.keys(value).length === 1) {
-      return DateTime.makeUnsafe(millis);
+function hasSingleKey(value: object): boolean {
+  let count = 0;
+  for (const _key in value) if (++count > 1) return false;
+  return count === 1;
+}
+
+/**
+ * Rebuilds DateTime and Duration values in place. A walk over the parsed
+ * tree is several times faster than a JSON.parse reviver, which is called
+ * for every primitive too.
+ */
+function revive(value: object): unknown {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      const item: unknown = value[index];
+      if (item !== null && typeof item === "object") value[index] = revive(item);
     }
-  } else if (DURATION_MARKER in value && Object.keys(value).length === 1) {
-    return decodeDuration((value as Record<string, unknown>)[DURATION_MARKER]) ?? value;
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  const millis = record[DATE_MARKER];
+  if (typeof millis === "number" && hasSingleKey(record)) return DateTime.makeUnsafe(millis);
+  const duration = record[DURATION_MARKER];
+  if (duration !== undefined && hasSingleKey(record)) return decodeDuration(duration) ?? value;
+  for (const key in record) {
+    const item = record[key];
+    if (item !== null && typeof item === "object") record[key] = revive(item);
   }
   return value;
 }
@@ -161,7 +186,8 @@ function isCatalogEntry(value: unknown): value is BootCatalogEntry {
 }
 
 function parseDocument(raw: string): BootSnapshot | null {
-  const parsed: unknown = JSON.parse(raw, reviver);
+  const plain: unknown = JSON.parse(raw);
+  const parsed = plain !== null && typeof plain === "object" ? revive(plain) : plain;
   if (
     !isRecord(parsed) ||
     parsed.format !== FORMAT ||
@@ -253,6 +279,49 @@ function encode(value: object): string | null {
   return json;
 }
 
+/**
+ * Live updates replace a few rows and reuse the rest, so each project and
+ * thread row is encoded once and cached by identity.
+ */
+function encodeShell(snapshot: OrchestrationV2ShellSnapshot): string | null {
+  const cached = encoded.get(snapshot);
+  if (cached !== undefined) return cached;
+  const fields: string[] = [];
+  let json: string | null = null;
+  try {
+    for (const [key, value] of Object.entries(snapshot)) {
+      if (value === undefined) continue;
+      if (Array.isArray(value)) {
+        const rows: string[] = [];
+        for (const row of value as ReadonlyArray<object>) {
+          const encodedRow = encode(row);
+          if (encodedRow === null) throw new UnsupportedBootValue(`row in ${key}`);
+          rows.push(encodedRow);
+        }
+        fields.push(`${JSON.stringify(key)}:[${rows.join(",")}]`);
+      } else {
+        fields.push(`${JSON.stringify(key)}:${JSON.stringify(value, replacer)}`);
+      }
+    }
+    json = `{${fields.join(",")}}`;
+  } catch {
+    json = null;
+  }
+  encoded.set(snapshot, json);
+  return json;
+}
+
+/** Characters every other localStorage key of this origin holds. */
+function otherKeysLength(store: Storage): number {
+  let total = 0;
+  for (let index = 0; index < store.length; index++) {
+    const key = store.key(index);
+    if (key === null || key === STORAGE_KEY) continue;
+    total += key.length + (store.getItem(key)?.length ?? 0);
+  }
+  return total;
+}
+
 function flush() {
   if (flushTimer !== null) {
     clearTimeout(flushTimer);
@@ -268,7 +337,7 @@ function flush() {
   const parts: string[] = [];
   for (const [environmentId, snapshot] of shells) {
     if (!known.has(environmentId)) continue;
-    const json = encode(snapshot);
+    const json = encodeShell(snapshot);
     if (json !== null) parts.push(`${JSON.stringify(environmentId)}:${json}`);
   }
   const configParts: string[] = [];
@@ -277,16 +346,19 @@ function flush() {
     const json = encode(config);
     if (json !== null) configParts.push(`${JSON.stringify(environmentId)}:${json}`);
   }
-  const document =
+  const serialized =
     `{"format":${FORMAT},"build":${JSON.stringify(BUILD_ID)},"savedAt":${Date.now()},` +
     `"catalog":${JSON.stringify(catalog)},"shells":{${parts.join(",")}},` +
     `"serverConfigs":{${configParts.join(",")}}}`;
   try {
-    if (parts.length === 0 || document.length > MAX_DOCUMENT_LENGTH) {
+    if (
+      parts.length === 0 ||
+      otherKeysLength(store) + RESERVED_FOR_OTHER_KEYS + serialized.length > ORIGIN_CHARACTER_BUDGET
+    ) {
       store.removeItem(STORAGE_KEY);
       return;
     }
-    store.setItem(STORAGE_KEY, document);
+    store.setItem(STORAGE_KEY, serialized);
   } catch {
     // Quota or a disabled store: an older document must not outlive this one.
     try {
@@ -306,6 +378,8 @@ function scheduleFlush() {
       if (document.visibilityState === "hidden") flush();
     });
   }
+  // Shell saves are already throttled to one per 10 s; this only batches the
+  // shell, config and catalog that change together.
   if (flushTimer === null) flushTimer = setTimeout(flush, 1_500);
 }
 
