@@ -21,7 +21,8 @@ if (
   })
 ) {
   const command = process.argv[2];
-  if (!(process.argv.length === 3 && command === "--version")) {
+  // The spawn host loads only Node builtins and has no --base-dir to place a cache under.
+  if (!(process.argv.length === 3 && command === "--version") && command !== "__spawn-host") {
     enableCliCompileCache({
       bundled: NodeSea.isSea() || import.meta.url.endsWith(".mjs"),
       argv: process.argv.slice(2),
