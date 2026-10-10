@@ -98,6 +98,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
             Effect.andThen(() => method.handler(raw, event)),
           ),
       }),
+    // For handlers the renderer awaits while it boots that never spawn.
+    handleWithoutShell: desktopIpc.handle,
     handleSync: desktopIpc.handleSync,
   };
   yield* installNotificationBadge();
@@ -115,9 +117,9 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleSync(getLocalEnvironmentBootstraps);
   yield* ipc.handleSync(getLocalEnvironmentEnabled);
   yield* ipc.handle(setLocalEnvironmentEnabled);
-  yield* ipc.handle(getLocalEnvironmentBearerToken);
+  yield* ipc.handleWithoutShell(getLocalEnvironmentBearerToken);
 
-  yield* ipc.handle(getClientSettings);
+  yield* ipc.handleWithoutShell(getClientSettings);
   yield* ipc.handle(setClientSettings);
   yield* ipc.handle(getConnectionCatalog);
   yield* ipc.handle(getSnapShotState);
@@ -158,7 +160,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(pickFolder);
   yield* ipc.handle(pickProjectFavicon);
   yield* ipc.handle(pickThemeFiles);
-  yield* ipc.handle(setTheme);
+  yield* ipc.handleWithoutShell(setTheme);
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);
   yield* ipc.handle(receiveProviderAuthCallback);
