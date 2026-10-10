@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 
 import { receiveProviderAuthCallback, cancelProviderAuthCallback } from "./methods/providerAuth.ts";
 import * as DesktopIpc from "./DesktopIpc.ts";
+import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import { installNotificationBadge } from "./methods/notificationBadge.ts";
 import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
 import {
@@ -83,7 +84,22 @@ import {
 } from "./methods/cliCommand.ts";
 
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
-  const ipc = yield* DesktopIpc.DesktopIpc;
+  const desktopIpc = yield* DesktopIpc.DesktopIpc;
+  const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
+  // The window opens while the login shell is still starting. Invoke handlers
+  // can spawn processes (ssh, editors, the system opener) that need its
+  // environment, so they wait for it; sync handlers only read state.
+  const ipc = {
+    handle: <E, R>(method: DesktopIpc.DesktopIpcMethod<E, R>) =>
+      desktopIpc.handle({
+        channel: method.channel,
+        handler: (raw, event) =>
+          shellEnvironment.installIntoProcess.pipe(
+            Effect.andThen(() => method.handler(raw, event)),
+          ),
+      }),
+    handleSync: desktopIpc.handleSync,
+  };
   yield* installNotificationBadge();
   yield* PreviewIpc.installPreviewEventForwarding();
 

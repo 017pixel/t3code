@@ -119,7 +119,8 @@ The main window opens before the login shell's environment is imported, because 
 can take seconds to start. Anything the main process spawns must first await
 `DesktopShellEnvironment.installIntoProcess` (it runs once; later calls wait for that run), or the
 child inherits the GUI launch's PATH instead of the user's. The primary backend waits in its
-`beforeSpawn` hook, after its endpoint and bootstrap token are published for the renderer.
+`beforeSpawn` hook, after its endpoint and bootstrap token are published for the renderer, and
+renderer invoke handlers wait in `installDesktopIpcHandlers`.
 
 Native modules never load in the Electron main process on the startup path, and the two the
 snapshot feature keeps are isolated: `@crowecawcaw/xa11y` runs only in forked Node-mode children
