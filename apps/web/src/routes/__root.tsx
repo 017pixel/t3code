@@ -1,4 +1,5 @@
 import { PermissionUpdateNotice } from "../components/PermissionUpdateNotice";
+import { NightlyMobileBetaNotice } from "../components/NightlyMobileBetaNotice";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
@@ -95,11 +96,6 @@ const renderNothing = () => null;
 const ConnectOnboardingDialog = lazy(() =>
   import("../components/cloud/ConnectOnboardingDialog")
     .then((module) => ({ default: module?.ConnectOnboardingDialog ?? renderNothing }))
-    .catch(() => ({ default: renderNothing })),
-);
-const NightlyMobileBetaNotice = lazy(() =>
-  import("../components/NightlyMobileBeta")
-    .then((module) => ({ default: module?.NightlyMobileBetaNotice ?? renderNothing }))
     .catch(() => ({ default: renderNothing })),
 );
 
@@ -285,9 +281,7 @@ function RootRouteView() {
           ) : null}
           {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
           {/* Hosted Nightly is "hosted-static", not authenticated, and needs it too. */}
-          <Suspense fallback={null}>
-            <NightlyMobileBetaNotice />
-          </Suspense>
+          <NightlyMobileBetaNotice />
           {appShell}
           {/* Above the router: a theme draft is judged by walking the app, so the
               editor has to survive navigation away from settings. */}
