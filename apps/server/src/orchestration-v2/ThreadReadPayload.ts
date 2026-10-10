@@ -8,7 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { normalizeThreadPullRequestKey } from "@t3tools/shared/threadPullRequests";
 
-/** Keep shell badges, search and chain order; PR views read canonical snapshots. */
+/** Keep shell badges, search, chain order and settlement dates; PR views read canonical snapshots. */
 export const compactThreadPullRequests = (
   thread: OrchestrationV2AppThread,
 ): OrchestrationV2AppThread => {
@@ -41,6 +41,8 @@ export const compactThreadPullRequests = (
               isDraft: link.snapshot.isDraft,
               updatedAt: link.snapshot.updatedAt,
               syncedAt: link.snapshot.syncedAt,
+              ...(link.snapshot.mergedAt == null ? {} : { mergedAt: link.snapshot.mergedAt }),
+              ...(link.snapshot.closedAt == null ? {} : { closedAt: link.snapshot.closedAt }),
             },
       stack:
         link.stack === null

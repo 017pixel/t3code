@@ -41,6 +41,7 @@ import ProjectionThreadSweepIndexes from "../persistence/Migrations/061_Projecti
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { resolveAutoSettlementAt } from "./ThreadSettlementService.ts";
 import {
   compactThreadPullRequests,
   compactShellPullRequestStacks,
@@ -4971,6 +4972,32 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.isNull(wire.pullRequests?.[1]?.stack);
       assert.equal(wire.pullRequests?.[2]?.stack?.base, "older-base");
       assert.isUndefined(wire.pullRequests?.[2]?.stackReference);
+      const terminalAt = DateTime.formatIso(DateTime.add(at, { seconds: 1 }));
+      for (const state of ["merged", "closed"] as const) {
+        yield* syncPullRequests(`terminal-${state}`, [
+          {
+            ...rich.pullRequests[0]!,
+            watch: undefined,
+            snapshot: {
+              ...snapshot,
+              state,
+              ...(state === "merged" ? { mergedAt: terminalAt } : { closedAt: terminalAt }),
+            },
+          },
+        ]);
+        const candidate = (yield* store.getSettlementCandidates(threadId))[0];
+        assert.isDefined(candidate);
+        assert.deepEqual(
+          resolveAutoSettlementAt({
+            thread: candidate!,
+            pullRequest: null,
+            nowMs: DateTime.toEpochMillis(DateTime.add(at, { seconds: 2 })),
+            autoSettleAfterDays: null,
+            autoSettleOnMerge: true,
+          }),
+          candidate!.latestRunCompletedAt,
+        );
+      }
       yield* syncPullRequests("restore", synced.pullRequests ?? []);
       assert.equal(yield* phase, "running");
       assert.equal((yield* store.getThreadsWithPullRequests()).length, 1);
