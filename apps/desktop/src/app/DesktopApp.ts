@@ -35,7 +35,6 @@ import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
 const MAX_TCP_PORT = 65_535;
@@ -303,45 +302,24 @@ const startup = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const previewPasskeys = yield* PreviewPasskeys.PreviewPasskeys;
 
-  const hasCommandLinePasswordStore =
-    preReadyElectronOptions.linuxPasswordStoreCommandLine !== null;
-  const configureLinuxPasswordStore = Effect.gen(function* () {
-    const linuxElectronOptions =
-      environment.platform === "linux" && !hasCommandLinePasswordStore
-        ? DesktopPreReadyPlatform.resolveEarlyLinuxElectronOptionsFromProcess(
-            yield* HostProcess.HomeDirectory,
-          )
-        : preReadyElectronOptions.linux;
-    if (linuxElectronOptions === null) return;
-    if (!hasCommandLinePasswordStore) {
-      if (
-        linuxElectronOptions.passwordStore !== null ||
-        preReadyElectronOptions.linux?.passwordStore !== null
-      ) {
-        yield* electronApp.removeCommandLineSwitch("password-store");
-      }
-      if (linuxElectronOptions.passwordStore !== null) {
-        yield* electronApp.appendCommandLineSwitch(
-          "password-store",
-          linuxElectronOptions.passwordStore,
-        );
-      }
-    }
+  // Chromium picks the secret storage backend from --password-store and the
+  // inherited desktop variables before any asynchronous work runs, so the
+  // pre-ready layer's synchronous choice is the one in effect.
+  const linuxElectronOptions = preReadyElectronOptions.linux;
+  if (linuxElectronOptions !== null) {
     yield* logStartupInfo("linux password store configured", {
-      passwordStore: hasCommandLinePasswordStore
-        ? "command-line"
-        : (linuxElectronOptions.passwordStore ?? "electron-default"),
+      passwordStore:
+        preReadyElectronOptions.linuxPasswordStoreCommandLine !== null
+          ? "command-line"
+          : (linuxElectronOptions.passwordStore ?? "electron-default"),
       xdgCurrentDesktop: process.env.XDG_CURRENT_DESKTOP ?? null,
       xdgSessionDesktop: process.env.XDG_SESSION_DESKTOP ?? null,
     });
-  });
+  }
   // A login shell can take seconds to start, and only spawned processes need
   // its environment. The window opens without it; the backend and bootstrap's
   // spawning work wait for this same run.
-  yield* shellEnvironment.installIntoProcess.pipe(
-    Effect.andThen(configureLinuxPasswordStore),
-    Effect.forkScoped,
-  );
+  yield* Effect.forkScoped(shellEnvironment.installIntoProcess);
   const userDataPath = yield* appIdentity.resolveUserDataPath;
   yield* electronApp.setPath("userData", userDataPath);
   yield* logStartupInfo("runtime logging configured", { logDir: environment.logDir });
