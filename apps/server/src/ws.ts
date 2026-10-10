@@ -1,4 +1,7 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - config stream deduplication needs a synchronous content digest.
+import * as NodeCrypto from "node:crypto";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import { diffServerConfig } from "@t3tools/shared/serverConfigDelta";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 
@@ -356,6 +359,74 @@ export const withLateEditorConfig = <E, R>(
     ),
   );
 };
+
+/** Opted-in clients retain catalogs and acknowledge unchanged reconnects. */
+export const withConfigDeltas = <E, R>(
+  events: Stream.Stream<ServerConfigStreamEvent, E, R>,
+  knownVersion?: string,
+) =>
+  events.pipe(
+    Stream.mapAccum(
+      () => null as ClientServerConfig | null,
+      (
+        current,
+        event,
+      ): readonly [ClientServerConfig | null, ReadonlyArray<ServerConfigStreamEvent>] => {
+        if (
+          event.type === "environmentThemesUpdated" ||
+          event.type === "usageLimitSourcesUpdated"
+        ) {
+          return [current, [event]];
+        }
+        const next =
+          event.type === "snapshot"
+            ? event.config
+            : current === null
+              ? null
+              : event.type === "keybindingsUpdated"
+                ? { ...current, ...event.payload }
+                : event.type === "providerStatuses"
+                  ? { ...current, providers: event.payload.providers }
+                  : event.type === "settingsUpdated"
+                    ? { ...current, settings: event.payload.settings }
+                    : current;
+        if (next === null) return [current, []];
+        const configVersion = NodeCrypto.createHash("sha256")
+          // Late editor discovery reconstructs objects in a different key
+          // order. The same config must still acknowledge a reconnect.
+          .update(
+            JSON.stringify(next, (_key, value: unknown) =>
+              value !== null && typeof value === "object" && !Array.isArray(value)
+                ? Object.fromEntries(
+                    Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
+                  )
+                : value,
+            ),
+          )
+          .digest("hex");
+        if (current === null) {
+          return [
+            next,
+            [
+              configVersion === knownVersion
+                ? { version: 1, type: "configUnchanged", configVersion }
+                : { version: 1, type: "snapshot", config: next, configVersion },
+            ],
+          ];
+        }
+        const delta = diffServerConfig(current, next, configVersion);
+        return [
+          next,
+          Object.keys(delta.changes).length === 0 &&
+          delta.removed.length === 0 &&
+          delta.providerChanges.length === 0 &&
+          delta.providerOrder === undefined
+            ? []
+            : [delta],
+        ];
+      },
+    ),
+  );
 
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
@@ -1734,23 +1805,42 @@ const layerWsRpc = (
           ),
         );
 
-      const loadServerConfig = (options: { readonly usageLimitsCommand: boolean }) =>
+      const loadServerConfig = (options: {
+        readonly usageLimitsCommand: boolean;
+        readonly deferEditors?: boolean;
+        readonly deferCatalogs?: boolean;
+      }) =>
         Effect.gen(function* () {
           const keybindingsConfig = yield* keybindings.loadConfigState;
           const currentProviders = yield* providerRegistry.getProviders;
-          const providers = options.usageLimitsCommand
+          const completeProviders = options.usageLimitsCommand
             ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
             : currentProviders;
+          const providers =
+            options.deferCatalogs === true
+              ? completeProviders.map(({ workspaceSnapshots: _workspaces, ...provider }) => ({
+                  ...provider,
+                  skills: [],
+                  slashCommands: [],
+                }))
+              : completeProviders;
           const settings = ServerSettings.redactServerSettingsForClient(
             yield* serverSettings.getSettings,
           );
           const environment = yield* serverEnvironment.getDescriptor;
           const auth = yield* serverAuth.getDescriptor();
           const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
-          const editorConfig = yield* resolveEditorConfig(
-            yield* resolveAvailableEditorsForConfig(externalLauncher.resolveAvailableEditors()),
-            resolveFileManagerRevealKindForConfig(externalLauncher.resolveFileManagerRevealKind()),
-          );
+          const editorConfig =
+            options.deferEditors === true
+              ? { availableEditors: [] }
+              : yield* resolveEditorConfig(
+                  yield* resolveAvailableEditorsForConfig(
+                    externalLauncher.resolveAvailableEditors(),
+                  ),
+                  resolveFileManagerRevealKindForConfig(
+                    externalLauncher.resolveFileManagerRevealKind(),
+                  ),
+                );
 
           return {
             environment,
@@ -2460,7 +2550,8 @@ const layerWsRpc = (
               : serverSettings.updateProviderInstance(providerInstanceMutation, nextPatch);
             return ServerSettings.redactServerSettingsForClient(settings);
           }),
-        [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,
+        [WS_METHODS.serverDiscoverSourceControl]: (input) =>
+          input.refresh === true ? sourceControlDiscovery.refresh : sourceControlDiscovery.discover,
         [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
           TraceDiagnostics.readTraceDiagnostics({
             traceFilePath: config.serverTracePath,
@@ -3010,7 +3101,13 @@ const layerWsRpc = (
           Stream.unwrap(
             Effect.gen(function* () {
               const usageLimitsCommand = input.usageLimitsCommand === true;
-              const config = yield* loadServerConfig({ usageLimitsCommand });
+              const config = yield* loadServerConfig({
+                usageLimitsCommand,
+                // Reconnects must match the previous late-editor version.
+                deferEditors: input.configDeltas === true && input.knownConfigVersion === undefined,
+                deferCatalogs:
+                  input.configDeltas === true && input.knownConfigVersion === undefined,
+              });
               yield* ServerActivation.markClientServed;
               const keybindingsUpdates = keybindings.streamChanges.pipe(
                 Stream.map((event) => ({
@@ -3103,10 +3200,13 @@ const layerWsRpc = (
                 ),
               );
 
-              return Stream.concat(
+              const events = Stream.concat(
                 rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
                 withLateEditorConfig(config, liveUpdates, externalLauncher),
               );
+              return input.configDeltas === true
+                ? withConfigDeltas(events, input.knownConfigVersion)
+                : events;
             }),
           ),
         [WS_METHODS.subscribeServerLifecycle]: (_input) =>

@@ -1208,6 +1208,14 @@ export default function GitActionsControl({
         })
       : null,
   );
+  const gitFilesQuery = useEnvironmentQuery(
+    isCommitDialogOpen && activeEnvironmentId !== null && gitCwd !== null
+      ? vcsEnvironment.status({
+          environmentId: activeEnvironmentId,
+          input: { cwd: gitCwd, includeFiles: true },
+        })
+      : null,
+  );
   const refreshVcsStatus = useAtomCommand(vcsEnvironment.refreshStatus, {
     reportFailure: false,
   });
@@ -1221,11 +1229,13 @@ export default function GitActionsControl({
   // Default to true while loading so we don't flash init controls.
   const isRepo = gitStatus?.isRepo ?? true;
   const hasPrimaryRemote = gitStatus?.hasPrimaryRemote ?? false;
-  const gitStatusForActions = gitStatus;
+  const gitStatusForActions = gitFilesQuery.data ?? gitStatus;
   // Matches the diff panel's Changes view. Older servers only report uncommitted totals.
   const changesTotals = gitStatusForActions?.branchChanges ?? gitStatusForActions?.workingTree;
 
   const allFiles = gitStatusForActions?.workingTree.files ?? [];
+  const areCommitFilesLoading =
+    gitFilesQuery.data === null && gitFilesQuery.isPending && allFiles.length === 0;
   const selectedFiles = allFiles.filter((f) => !excludedFiles.has(f.path));
   const allSelected = excludedFiles.size === 0;
   const noneSelected = selectedFiles.length === 0;
@@ -2043,7 +2053,11 @@ export default function GitActionsControl({
                     </Button>
                   )}
                 </div>
-                {!gitStatusForActions || allFiles.length === 0 ? (
+                {gitFilesQuery.error !== null ? (
+                  <p className="text-destructive">{gitFilesQuery.error}</p>
+                ) : areCommitFilesLoading ? (
+                  <p className="text-muted-foreground">Loading files...</p>
+                ) : !gitStatusForActions || allFiles.length === 0 ? (
                   <p className="font-medium">none</p>
                 ) : (
                   <div className="space-y-2">

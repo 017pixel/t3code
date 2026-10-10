@@ -39,6 +39,7 @@ import * as RpcSession from "./session.ts";
 import { makeEnvironmentServerConfigState } from "../state/server.ts";
 import { applyServerConfigProjection } from "../state/serverConfigProjection.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
+import { applyServerConfigDelta, diffServerConfig } from "@t3tools/shared/serverConfigDelta";
 
 type SocketEventType = "open" | "message" | "close" | "error";
 type SocketEvent = {
@@ -262,7 +263,7 @@ const completeInitialConfig = Effect.fn("TestRpcSessionFactory.completeInitialCo
   expect(request).toMatchObject({
     _tag: "Request",
     tag: WS_METHODS.subscribeServerConfig,
-    payload,
+    payload: { ...(payload as object), configDeltas: true },
   });
   socket.serverMessage(
     encodeJson({
@@ -288,6 +289,120 @@ const publishConfigEvents = Effect.fn("TestRpcSessionFactory.publishConfigEvents
 });
 
 describe("RpcSessionFactory", () => {
+  it("roundtrips provider deltas without resending catalogs and handles removal and order", () => {
+    const provider: ServerConfigType["providers"][number] = {
+      instanceId: ProviderInstanceId.make("codex"),
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-08-27T00:00:00.000Z",
+      models: [{ slug: "model", name: "Model", isCustom: false, capabilities: null }],
+      skills: [{ name: "skill", path: "/skill", enabled: true }],
+      slashCommands: [{ name: "compact" }],
+      displayName: "Custom name",
+    };
+    const other = { ...provider, instanceId: ProviderInstanceId.make("other") };
+    const previous = { ...SERVER_CONFIG, providers: [provider, other] };
+    const { displayName: _name, ...withoutName } = provider;
+    const next = {
+      ...previous,
+      providers: [other, { ...withoutName, checkedAt: "2026-08-28T00:00:00.000Z" }],
+    };
+    const delta = diffServerConfig(previous, next, "changed");
+    expect(delta.providerChanges[0]?.changes.models).toBeUndefined();
+    const wire = Schema.decodeSync(ServerConfigStreamEvent)(encodeServerConfigStreamEvent(delta));
+    expect(wire.type).toBe("configDelta");
+    if (wire.type !== "configDelta") return;
+    expect(applyServerConfigDelta(previous, wire)).toEqual(next);
+    const removed = { ...next, providers: [next.providers[1]!] };
+    expect(applyServerConfigDelta(next, diffServerConfig(next, removed, "removed"))).toEqual(
+      removed,
+    );
+    expect(applyServerConfigDelta(removed, diffServerConfig(removed, previous, "added"))).toEqual(
+      previous,
+    );
+  });
+
+  it.effect("deduplicates discovery calls and invalidates on explicit refresh", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory();
+      const session = yield* factory.connect(PREPARED);
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      yield* completeInitialConfig(socket);
+      yield* session.ready;
+      const discover = session.client[WS_METHODS.serverDiscoverSourceControl];
+      const first = yield* Effect.all([discover({}), discover({})], { concurrency: 2 }).pipe(
+        Effect.forkChild,
+      );
+      const reply = (request: typeof RpcRequest.Type) =>
+        socket.serverMessage(
+          encodeJson({
+            _tag: "Exit",
+            requestId: request.id,
+            exit: {
+              _tag: "Success",
+              value: { versionControlSystems: [], sourceControlProviders: [] },
+            },
+          }),
+        );
+      reply(yield* awaitRequest(socket, 1));
+      expect(yield* Fiber.join(first)).toHaveLength(2);
+      yield* discover({});
+      expect(socket.sent.map((message) => decodeJson(message)).filter(isRpcRequest)).toHaveLength(
+        2,
+      );
+      const refreshed = yield* discover({ refresh: true }).pipe(Effect.forkChild);
+      const request = yield* awaitRequest(socket, 2);
+      expect(request.payload).toEqual({ refresh: true });
+      reply(request);
+      yield* Fiber.join(refreshed);
+      const next = yield* discover({}).pipe(Effect.forkChild);
+      reply(yield* awaitRequest(socket, 3));
+      yield* Fiber.join(next);
+    }),
+  );
+
+  it.effect("restores only acknowledged config versions and applies later deltas", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* factory.connect(PREPARED);
+          const socket = yield* awaitSocket(sockets);
+          socket.open();
+          yield* publishConfigEvents(socket, [
+            { version: 1, type: "snapshot", config: SERVER_CONFIG, configVersion: "first" },
+          ]);
+          yield* session.ready;
+          const next = { ...SERVER_CONFIG, cwd: "/changed" };
+          const delta = diffServerConfig(SERVER_CONFIG, next, "second");
+          expect(applyServerConfigDelta(SERVER_CONFIG, delta)).toEqual(next);
+          const observed = yield* Queue.unbounded<ServerConfigStreamEventType>();
+          yield* session.subscribeServerConfig({}).pipe(
+            Stream.runForEach((event) => Queue.offer(observed, event)),
+            Effect.forkScoped,
+          );
+          expect((yield* Queue.take(observed)).type).toBe("snapshot");
+          yield* publishConfigEvents(socket, [delta]);
+          expect((yield* Queue.take(observed)).type).toBe("configDelta");
+        }),
+      );
+      const session = yield* factory.connect(PREPARED);
+      const socket = yield* awaitSocket(sockets, 1);
+      socket.open();
+      const request = yield* awaitRequest(socket);
+      expect(request.payload).toEqual({ configDeltas: true, knownConfigVersion: "second" });
+      yield* publishConfigEvents(socket, [
+        { version: 1, type: "configUnchanged", configVersion: "second" },
+      ]);
+      yield* session.ready;
+      expect((yield* session.initialConfig).cwd).toBe("/changed");
+    }),
+  );
   it.effect("owns one scoped websocket attempt and exposes readiness and closure", () =>
     Effect.gen(function* () {
       const { factory, sockets } = yield* makeFactory();

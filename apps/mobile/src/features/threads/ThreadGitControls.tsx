@@ -51,7 +51,7 @@ function compactMenuStatus(gitStatus: VcsStatusResult | null): string {
 
   const parts: string[] = [];
   if (gitStatus.hasWorkingTreeChanges) {
-    parts.push(`${gitStatus.workingTree.files.length} changed`);
+    parts.push(`${gitStatus.workingTree.fileCount ?? gitStatus.workingTree.files.length} changed`);
   } else if (gitStatus.aheadCount === 0 && gitStatus.behindCount === 0) {
     parts.push("Clean");
   }

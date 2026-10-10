@@ -1,4 +1,5 @@
 import type { ServerConfig, ServerConfigStreamEvent } from "@t3tools/contracts";
+import { applyServerConfigDelta } from "@t3tools/shared/serverConfigDelta";
 import * as Option from "effect/Option";
 
 export interface ServerConfigProjection {
@@ -26,6 +27,18 @@ export function applyServerConfigProjection(
   event: ServerConfigStreamEvent,
 ): Option.Option<ServerConfigProjection> {
   switch (event.type) {
+    case "configUnchanged":
+      return Option.map(current, (projection) => ({
+        ...projection,
+        latestEvent: event,
+        source: "live",
+      }));
+    case "configDelta":
+      return Option.map(current, (projection) => ({
+        config: applyServerConfigDelta(projection.config, event),
+        latestEvent: event,
+        source: "live",
+      }));
     case "snapshot": {
       // Wire snapshots never contain published themes. Keep the previous set
       // until a capable server sends its authoritative theme event. A legacy

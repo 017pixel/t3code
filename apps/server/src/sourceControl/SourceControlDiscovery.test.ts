@@ -7,6 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
@@ -87,8 +88,10 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonEffect = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 it.effect("reports implemented tools separately from locally available executables", () => {
+  let probeCount = 0;
   const processMock = {
     run: (input: VcsProcess.VcsProcessInput) => {
+      probeCount += 1;
       if (input.command === "git") {
         return Effect.succeed(processOutput("git version 2.51.0\n"));
       }
@@ -153,6 +156,15 @@ it.effect("reports implemented tools separately from locally available executabl
   return Effect.gen(function* () {
     const discovery = yield* SourceControlDiscovery.SourceControlDiscovery;
     const result = yield* discovery.discover;
+    const firstProbeCount = probeCount;
+    yield* Effect.all([discovery.discover, discovery.discover], { concurrency: 2 });
+    assert.strictEqual(probeCount, firstProbeCount);
+    yield* discovery.refresh;
+    assert.isAbove(probeCount, firstProbeCount);
+    const refreshedProbeCount = probeCount;
+    yield* TestClock.adjust("1 minute");
+    yield* discovery.discover;
+    assert.isAbove(probeCount, refreshedProbeCount);
 
     assert.deepStrictEqual(
       result.versionControlSystems.map((item) => ({

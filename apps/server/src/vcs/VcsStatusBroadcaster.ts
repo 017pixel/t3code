@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - stream deduplication needs a synchronous content digest.
+import * as NodeCrypto from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -21,7 +23,7 @@ import type {
   VcsStatusStreamEvent,
   VcsStatusSubscriptionInput,
 } from "@t3tools/contracts";
-import { mergeGitStatusParts } from "@t3tools/shared/git";
+import { applyGitStatusStreamEvent, mergeGitStatusParts } from "@t3tools/shared/git";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
@@ -733,7 +735,63 @@ export const make = Effect.gen(function* () {
             Stream.filter((event) => event.cwd === cwd),
             Stream.map((event) => event.event),
           ),
-        ).pipe(Stream.ensuring(release));
+        ).pipe(
+          (stream) =>
+            input.compact !== true
+              ? stream
+              : stream.pipe(
+                  Stream.mapAccum(
+                    () => ({ status: null as VcsStatusResult | null, version: input.knownVersion }),
+                    (
+                      current,
+                      event,
+                    ): readonly [
+                      { status: VcsStatusResult | null; version: string | undefined },
+                      ReadonlyArray<VcsStatusStreamEvent>,
+                    ] => {
+                      const status = applyGitStatusStreamEvent(current.status, event);
+                      const {
+                        hasUpstream,
+                        aheadCount,
+                        behindCount,
+                        aheadOfDefaultCount,
+                        pr,
+                        ...local
+                      } = status;
+                      const summary =
+                        input.includeFiles === true
+                          ? local
+                          : {
+                              ...local,
+                              workingTree: {
+                                ...local.workingTree,
+                                fileCount: local.workingTree.files.length,
+                                files: [],
+                              },
+                            };
+                      const remote = {
+                        hasUpstream,
+                        aheadCount,
+                        behindCount,
+                        aheadOfDefaultCount,
+                        pr,
+                      };
+                      const version = NodeCrypto.createHash("sha256")
+                        .update(JSON.stringify([summary, remote]))
+                        .digest("hex");
+                      const next = { status, version };
+                      if (version === current.version) {
+                        return [
+                          next,
+                          current.status === null ? [{ _tag: "unchanged", version }] : [],
+                        ];
+                      }
+                      return [next, [{ _tag: "snapshot", local: summary, remote, version }]];
+                    },
+                  ),
+                ),
+          Stream.ensuring(release),
+        );
       }),
     );
 

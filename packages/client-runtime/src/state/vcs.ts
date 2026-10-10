@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom, AtomRegistry } from "effect/reactivity";
@@ -24,7 +25,7 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import * as Persistence from "../platform/persistence.ts";
-import { request, subscribe, type EnvironmentRpcInput } from "../rpc/client.ts";
+import { request, subscribeDynamic, type EnvironmentRpcInput } from "../rpc/client.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import { vcsCommandConcurrency, vcsCommandScheduler } from "./vcsCommandScheduler.ts";
 import {
@@ -243,6 +244,9 @@ function cachedVcsRefsChanges(
 export function createVcsEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Persistence.EnvironmentCacheStore | R, E>,
 ) {
+  // Replay survives atom disposal without extending the stream lifetime.
+  const statuses = new Map<string, { status: VcsStatusResult; version: string | undefined }>();
+  const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
   /**
    * One flat family on purpose: families hold entries via WeakRef, so a nested
    * per-environment family can be collected between lookups, dropping every
@@ -284,14 +288,38 @@ export function createVcsEnvironmentAtoms<R, E>(
       label: "environment-data:vcs:status",
       idleTtlMs: VCS_STATUS_IDLE_TTL_MS,
       subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) =>
-        subscribe(WS_METHODS.subscribeVcsStatus, input).pipe(
-          Stream.mapAccum(
-            () => null as VcsStatusResult | null,
-            (current, event) => {
-              const next = applyGitStatusStreamEvent(current, event);
-              return [next, [next]] as const;
-            },
-          ),
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+            const key = encodeKey([supervisor.target.environmentId, input]);
+            const cached = statuses.get(key);
+            let current = cached?.status ?? null;
+            const changes = subscribeDynamic(WS_METHODS.subscribeVcsStatus, () =>
+              Effect.sync(() => {
+                const knownVersion = statuses.get(key)?.version;
+                return {
+                  ...input,
+                  compact: true,
+                  ...(knownVersion === undefined ? {} : { knownVersion }),
+                };
+              }),
+            ).pipe(
+              Stream.filterMap((event) => {
+                if (event._tag === "unchanged") return Result.failVoid;
+                current = applyGitStatusStreamEvent(current, event);
+                statuses.delete(key);
+                statuses.set(key, {
+                  status: current,
+                  version: event._tag === "snapshot" ? event.version : undefined,
+                });
+                if (statuses.size > 128) statuses.delete(statuses.keys().next().value!);
+                return Result.succeed(current);
+              }),
+            );
+            return cached === undefined
+              ? changes
+              : Stream.concat(Stream.succeed(cached.status), changes);
+          }),
         ),
     }),
     pull: createEnvironmentRpcCommand(runtime, {

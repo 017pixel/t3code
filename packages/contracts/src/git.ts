@@ -115,6 +115,10 @@ export const VcsStatusSubscriptionInput = Schema.Struct({
   ...VcsStatusInput.fields,
   /** Passive observers receive cached remote status without retaining its refresh loop. */
   includeRemote: Schema.optional(Schema.Boolean),
+  /** Opt-in summary/ETag stream. Older servers ignore these fields. */
+  compact: Schema.optionalKey(Schema.Boolean),
+  includeFiles: Schema.optionalKey(Schema.Boolean),
+  knownVersion: Schema.optionalKey(TrimmedNonEmptyStringSchema),
 });
 export type VcsStatusSubscriptionInput = typeof VcsStatusSubscriptionInput.Type;
 
@@ -232,6 +236,8 @@ const VcsStatusLocalShape = {
   refName: Schema.NullOr(TrimmedNonEmptyStringSchema),
   hasWorkingTreeChanges: Schema.Boolean,
   workingTree: Schema.Struct({
+    /** Present on summaries, whose file list is intentionally omitted. */
+    fileCount: Schema.optionalKey(NonNegativeInt),
     files: Schema.Array(
       Schema.Struct({
         path: TrimmedNonEmptyStringSchema,
@@ -279,7 +285,9 @@ export const VcsStatusStreamEvent = Schema.Union([
   Schema.TaggedStruct("snapshot", {
     local: VcsStatusLocalResult,
     remote: Schema.NullOr(VcsStatusRemoteResult),
+    version: Schema.optionalKey(TrimmedNonEmptyStringSchema),
   }),
+  Schema.TaggedStruct("unchanged", { version: TrimmedNonEmptyStringSchema }),
   Schema.TaggedStruct("localUpdated", {
     local: VcsStatusLocalResult,
   }),

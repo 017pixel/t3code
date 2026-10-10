@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./serverConfigDelta": {
+      "types": "./src/serverConfigDelta.ts",
+      "import": "./src/serverConfigDelta.ts"
+    },
     "./authScopeOptions": {
       "types": "./src/authScopeOptions.ts",
       "import": "./src/authScopeOptions.ts"

@@ -31,8 +31,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
   const gitState = useSelectedThreadGitState();
   const gitActions = useSelectedThreadGitActions();
   const { canWriteSourceControl, canChangeThreadBranch } = gitActions;
-
-  const gitStatus = useEnvironmentQuery(
+  const summary = useEnvironmentQuery(
     selectedThread !== null && selectedThreadCwd !== null
       ? vcsEnvironment.status({
           environmentId: selectedThread.environmentId,
@@ -41,8 +40,18 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
       : null,
   );
 
+  const gitStatus = useEnvironmentQuery(
+    selectedThread !== null && selectedThreadCwd !== null
+      ? vcsEnvironment.status({
+          environmentId: selectedThread.environmentId,
+          input: { cwd: selectedThreadCwd, includeFiles: true },
+        })
+      : null,
+  );
+
   const busy = gitState.gitOperationLabel !== null;
-  const isDefaultRef = gitStatus.data?.isDefaultRef ?? false;
+  const status = gitStatus.data ?? summary.data;
+  const isDefaultRef = status?.isDefaultRef ?? false;
   const allFiles = gitStatus.data?.workingTree?.files ?? [];
 
   const [dialogCommitMessage, setDialogCommitMessage] = useState("");
@@ -117,7 +126,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
             <View className="android:gap-1 ios:flex-row ios:items-center ios:justify-between ios:gap-3">
               <Text className="text-foreground-muted text-sm font-medium">Branch</Text>
               <Text className="text-foreground text-base android:font-t3-medium ios:font-t3-bold">
-                {gitStatus.data?.refName ?? "(detached HEAD)"}
+                {status?.refName ?? "(detached HEAD)"}
               </Text>
             </View>
             {isDefaultRef ? (
@@ -134,7 +143,9 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
                   Files
                 </Text>
                 <Text className="text-foreground-muted text-xs leading-normal">
-                  {selectedFiles.length} selected · +{selectedInsertions} / -{selectedDeletions}
+                  {gitStatus.isPending && gitStatus.data === null
+                    ? "Loading files..."
+                    : `${selectedFiles.length} selected · +${selectedInsertions} / -${selectedDeletions}`}
                 </Text>
               </View>
               <View className="flex-row items-center gap-2">
@@ -161,7 +172,10 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
 
             {allFiles.length === 0 ? (
               <Text className="text-foreground-secondary text-sm leading-normal">
-                No changed files are available to commit.
+                {gitStatus.error ??
+                  (gitStatus.isPending
+                    ? "Loading files..."
+                    : "No changed files are available to commit.")}
               </Text>
             ) : !isEditingFiles ? (
               <View className="gap-2">

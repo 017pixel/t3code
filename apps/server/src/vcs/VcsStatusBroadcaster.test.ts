@@ -69,6 +69,51 @@ const baseStatus: VcsStatusResult = {
   ...baseRemoteStatus,
 };
 
+it.effect("summarizes passive VCS subscriptions and acknowledges unchanged versions", () => {
+  const state = {
+    currentLocalStatus: {
+      ...baseLocalStatus,
+      hasWorkingTreeChanges: true,
+      workingTree: {
+        insertions: 1,
+        deletions: 0,
+        files: [{ path: "changed.ts", insertions: 1, deletions: 0 }],
+      },
+    },
+    currentRemoteStatus: null,
+    localStatusCalls: 0,
+    remoteStatusCalls: 0,
+    localInvalidationCalls: 0,
+    remoteInvalidationCalls: 0,
+  };
+  return Effect.gen(function* () {
+    const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+    const read = (options: { compact?: boolean; includeFiles?: boolean; knownVersion?: string }) =>
+      broadcaster
+        .streamStatus({ cwd: "/repo", includeRemote: false, ...options })
+        .pipe(Stream.runHead);
+    const initial = Option.getOrThrow(yield* read({ compact: true }));
+    assert.strictEqual(initial._tag, "snapshot");
+    if (initial._tag !== "snapshot") return;
+    assert.strictEqual(initial.local.workingTree.fileCount, 1);
+    assert.deepStrictEqual(initial.local.workingTree.files, []);
+    assert.isDefined(initial.version);
+    const replay = Option.getOrThrow(
+      yield* read({ compact: true, knownVersion: initial.version! }),
+    );
+    assert.deepStrictEqual(replay, { _tag: "unchanged", version: initial.version });
+    for (const options of [{}, { compact: true, includeFiles: true }]) {
+      const full = Option.getOrThrow(yield* read(options));
+      assert.strictEqual(full._tag, "snapshot");
+      if (full._tag === "snapshot")
+        assert.deepStrictEqual(
+          full.local.workingTree.files,
+          state.currentLocalStatus.workingTree.files,
+        );
+    }
+  }).pipe(Effect.provide(layerTestFor(state)));
+});
+
 function layerTestFor(state: {
   currentLocalStatus: VcsStatusLocalResult;
   currentRemoteStatus: VcsStatusRemoteResult | null;

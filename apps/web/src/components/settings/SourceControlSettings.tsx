@@ -532,7 +532,7 @@ export function SourceControlSettingsPanel() {
       ? null
       : sourceControlEnvironment.discovery({
           environmentId,
-          input: {},
+          input: { refresh: true },
         }),
   );
   const result = discovery.data ?? EMPTY_DISCOVERY_RESULT;

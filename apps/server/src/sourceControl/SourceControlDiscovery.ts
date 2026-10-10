@@ -61,6 +61,7 @@ export class SourceControlDiscovery extends Context.Service<
   SourceControlDiscovery,
   {
     readonly discover: Effect.Effect<SourceControlDiscoveryResult>;
+    readonly refresh: Effect.Effect<SourceControlDiscoveryResult>;
   }
 >()("t3/sourceControl/SourceControlDiscovery") {}
 
@@ -129,14 +130,19 @@ export const make = Effect.gen(function* () {
       );
   };
 
-  return SourceControlDiscovery.of({
-    discover: Effect.all({
+  const [discover, invalidate] = yield* Effect.cachedInvalidateWithTTL(
+    Effect.all({
       versionControlSystems: Effect.all(
         VCS_PROBES.map((entry) => probe(entry)) as ReadonlyArray<Effect.Effect<VcsDiscoveryItem>>,
         { concurrency: "unbounded" },
       ),
       sourceControlProviders: sourceControlProviders.discover,
     }),
+    "1 minute",
+  );
+  return SourceControlDiscovery.of({
+    discover,
+    refresh: invalidate.pipe(Effect.andThen(discover)),
   });
 });
 

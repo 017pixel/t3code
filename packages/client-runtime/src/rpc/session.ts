@@ -158,6 +158,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     ...(options.usageLimitSources === true ? { usageLimitSources: true } : {}),
     ...(options.usageLimitsCommand === true ? { usageLimitsCommand: true } : {}),
   };
+  const configCache = new Map<string, { config: ServerConfig; version: string }>();
 
   const connect = Effect.fnUntraced(function* (connection: PreparedConnection) {
     const networkHint =
@@ -217,21 +218,52 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     const protocolContext = yield* Layer.build(layerProtocol).pipe(
       Effect.withSpan("environment.websocket.connect"),
     );
-    const protocolClient = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
+    const rawClient = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
+    const [discoverSourceControl, invalidateDiscovery] = yield* Effect.cachedInvalidateWithTTL(
+      rawClient[WS_METHODS.serverDiscoverSourceControl]({}),
+      "30 seconds",
+    );
+    type DiscoveryMethod = WsRpcProtocolClient[typeof WS_METHODS.serverDiscoverSourceControl];
+    const discover = (
+      input: Parameters<DiscoveryMethod>[0],
+      options?: Parameters<DiscoveryMethod>[1],
+    ) =>
+      options !== undefined
+        ? rawClient[WS_METHODS.serverDiscoverSourceControl](input, options)
+        : input.refresh === true
+          ? invalidateDiscovery.pipe(
+              Effect.andThen(rawClient[WS_METHODS.serverDiscoverSourceControl](input)),
+            )
+          : discoverSourceControl;
+    const protocolClient: WsRpcProtocolClient = {
+      ...rawClient,
+      // Options retain the raw generic discard/header behavior. Only calls
+      // without options use the shared ordinary response.
+      [WS_METHODS.serverDiscoverSourceControl]: discover as DiscoveryMethod,
+    };
     const initialConfigDeferred = yield* Deferred.make<ServerConfig>();
     const serverConfigExit = yield* Deferred.make<void, ServerConfigSubscriptionError>();
     const configSubscriptionClosed = yield* Deferred.make<never, ConnectionAttemptError>();
+    const cachedConfig = configCache.get(connection.environmentId);
     const serverConfigState = yield* Ref.make(Option.none<ServerConfigReplayState>());
     const serverConfigUpdates = yield* PubSub.sliding<BufferedServerConfigEvent>(64);
     const configSubscriptionEndedError = new ConnectionTransientErrorClass({
       reason: "remote-unavailable",
       detail: `${connection.label} config subscription ended.`,
     });
-    const serverConfigSource = protocolClient[WS_METHODS.subscribeServerConfig](
-      serverConfigInput,
-    ).pipe(
-      Stream.runForEach((event) =>
+    const serverConfigSource = protocolClient[WS_METHODS.subscribeServerConfig]({
+      ...serverConfigInput,
+      configDeltas: true,
+      ...(cachedConfig === undefined ? {} : { knownConfigVersion: cachedConfig.version }),
+    }).pipe(
+      Stream.runForEach((wireEvent) =>
         Effect.gen(function* () {
+          // Restore only after this server acknowledges the cache. Older
+          // servers ignore the opt-in and send their ordinary full snapshot.
+          const event =
+            wireEvent.type === "configUnchanged" && cachedConfig !== undefined
+              ? { version: 1 as const, type: "snapshot" as const, config: cachedConfig.config }
+              : wireEvent;
           const buffered = yield* Ref.modify(serverConfigState, (current) => {
             const projection = applyServerConfigProjection(
               Option.map(current, (state) => state.projection),
@@ -267,10 +299,19 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
             ] as const;
           });
           if (Option.isSome(buffered)) {
+            if ("configVersion" in wireEvent && wireEvent.configVersion !== undefined) {
+              configCache.delete(connection.environmentId);
+              configCache.set(connection.environmentId, {
+                config: withoutEnvironmentThemes(buffered.value.replay.projection.config),
+                version: wireEvent.configVersion,
+              });
+              if (configCache.size > 32) configCache.delete(configCache.keys().next().value!);
+            } else if (wireEvent.type === "snapshot") {
+              // A downgraded environment must not keep a newer wire version.
+              configCache.delete(connection.environmentId);
+            }
             yield* PubSub.publish(serverConfigUpdates, buffered.value);
-          }
-          if (event.type === "snapshot") {
-            yield* Deferred.succeed(initialConfigDeferred, event.config);
+            yield* Deferred.succeed(initialConfigDeferred, buffered.value.replay.projection.config);
           }
         }),
       ),
