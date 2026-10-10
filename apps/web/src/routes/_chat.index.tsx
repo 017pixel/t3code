@@ -1,9 +1,10 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { LinkIcon, PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { resolveLandingDraft } from "../bootLandingDraft";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { isElectron } from "../env";
 import { NoProjectsHero } from "../components/NoProjectsHero";
@@ -110,7 +111,19 @@ function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
   );
 }
 
+let landingConsidered = false;
+
 export const Route = createFileRoute("/_chat/")({
+  // On the first load, a browser with a boot snapshot opens its empty draft
+  // without waiting for the server (see bootLanding.ts).
+  beforeLoad: async () => {
+    if (landingConsidered) return;
+    landingConsidered = true;
+    const draftId = await resolveLandingDraft();
+    if (draftId !== null) {
+      throw redirect({ to: "/draft/$draftId", params: { draftId }, replace: true });
+    }
+  },
   component: ChatIndexRouteView,
 });
 

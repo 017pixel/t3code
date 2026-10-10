@@ -1,7 +1,8 @@
-import { AuthPreviewOperateScope } from "@t3tools/contracts";
+import { AuthPreviewOperateScope, type ServerConfig } from "@t3tools/contracts";
 import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useLayoutEffect, useMemo } from "react";
+import { Atom } from "effect/reactivity";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { registerChatSurface } from "../components/chatSurfaceSlot";
@@ -11,11 +12,12 @@ import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects } from "../state/entities";
 import { isPreviewAvailableFor } from "../browser/previewRuntime";
 import { usePrimaryEnvironmentId } from "../state/environments";
-import { useEnvironmentScope } from "../state/session";
+import { environmentSession, useEnvironmentScope } from "../state/session";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
-import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useHandleNewThread, useNewThreadHandler } from "../hooks/useHandleNewThread";
+import { clearPendingLandingDraft, usePendingLandingDraft } from "../bootLanding";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
@@ -214,6 +216,31 @@ function ChatRouteGlobalShortcuts() {
   return null;
 }
 
+/** Applies the server's defaults to a draft the index route opened early. */
+function LandingDraftDefaults() {
+  const landing = usePendingLandingDraft();
+  const handleNewThread = useNewThreadHandler();
+  const liveConfig = useAtomValue(
+    landing === null
+      ? NO_LIVE_CONFIG_ATOM
+      : environmentSession.initialConfigValueAtom(landing.projectRef.environmentId),
+  );
+  const startedDraftIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (landing === null || liveConfig === null) return;
+    if (startedDraftIdRef.current === landing.draftId) return;
+    startedDraftIdRef.current = landing.draftId;
+    void handleNewThread(landing.projectRef, { replace: true, landing })
+      .catch(() => undefined)
+      .finally(() => clearPendingLandingDraft(landing.draftId));
+  }, [handleNewThread, landing, liveConfig]);
+  return null;
+}
+
+const NO_LIVE_CONFIG_ATOM = Atom.make<ServerConfig | null>(null).pipe(
+  Atom.withLabel("web-landing-no-live-config"),
+);
+
 function ChatRouteLayout() {
   // The thread routes render nothing here: the root layout hosts their view
   // (see KeptChatSurface) so it outlives the route swaps around it.
@@ -221,6 +248,7 @@ function ChatRouteLayout() {
   return (
     <>
       <ChatRouteGlobalShortcuts />
+      <LandingDraftDefaults />
       <Outlet />
     </>
   );

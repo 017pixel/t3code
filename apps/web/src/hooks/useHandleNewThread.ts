@@ -34,6 +34,11 @@ import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
+import {
+  landingDraftContext,
+  type PendingLandingDraft,
+  sameLandingDraftContext,
+} from "../bootLanding";
 
 interface NewThreadWorkspaceOptions {
   branch?: string | null;
@@ -72,6 +77,12 @@ export function useNewThreadHandler() {
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
         replace?: boolean;
+        /**
+         * Applies the defaults to a draft the index route opened before the
+         * server answered (see bootLanding.ts): as if opened from "/", typed
+         * text stays, and a workspace context the user changed meanwhile wins.
+         */
+        landing?: PendingLandingDraft;
       },
       // Which draft the thread ended up in, so a caller that has something to put in it — a
       // prepared checkout, a task to write — addresses that one rather than looking the project
@@ -92,7 +103,9 @@ export function useNewThreadHandler() {
       } = useComposerDraftStore.getState();
       const requestingRouteHref = router.state.location.href;
       const routeChangedSinceRequest = () => router.state.location.href !== requestingRouteHref;
-      const currentRouteTarget = getCurrentRouteTarget();
+      const landing = options?.landing ?? null;
+      // A landing draft was opened from "/", so nothing carries over from it.
+      const currentRouteTarget = landing ? null : getCurrentRouteTarget();
       // A new thread carries the user's working mode from the thread being
       // viewed. The target project's configured model still wins; interaction
       // mode carries independently. Permissions, branch, worktree, and env mode
@@ -190,9 +203,15 @@ export function useNewThreadHandler() {
       // drafts rather than deleting them.
       const emptyStoredDraftThread =
         reusableStoredDraftThread &&
-        !composerDraftHasUserContent(getComposerDraft(reusableStoredDraftThread.draftId))
+        (reusableStoredDraftThread.draftId === landing?.draftId ||
+          !composerDraftHasUserContent(getComposerDraft(reusableStoredDraftThread.draftId)))
           ? reusableStoredDraftThread
           : null;
+      // The landing draft stays on screen; one that stopped being this
+      // project's reusable draft keeps whatever it has.
+      if (landing !== null && emptyStoredDraftThread?.draftId !== landing.draftId) {
+        return Promise.resolve(null);
+      }
       const latestActiveDraftThread: DraftThreadState | null = currentRouteTarget
         ? currentRouteTarget.kind === "server"
           ? getDraftThread(currentRouteTarget.threadRef)
@@ -203,6 +222,7 @@ export function useNewThreadHandler() {
           const isDraftAlreadyOpen =
             currentRouteTarget?.kind === "draft" &&
             currentRouteTarget.draftId === emptyStoredDraftThread.draftId;
+          const isLandingDraft = landing?.draftId === emptyStoredDraftThread.draftId;
           const hasExplicitWorkspaceOption =
             hasBranchOption ||
             hasWorktreePathOption ||
@@ -222,7 +242,7 @@ export function useNewThreadHandler() {
             workspaceContext = pickExplicitWorkspaceOptions(options);
           } else if (!isDraftAlreadyOpen) {
             const defaultEnvMode = await resolveDefaultEnvMode();
-            if (routeChangedSinceRequest()) {
+            if (!isLandingDraft && routeChangedSinceRequest()) {
               return null;
             }
             // The await yields. If the draft was opened (a concurrent
@@ -246,8 +266,26 @@ export function useNewThreadHandler() {
             const investedMeanwhile = composerDraftHasUserContent(
               getComposerDraft(emptyStoredDraftThread.draftId),
             );
-            if (openedMeanwhile || promotedMeanwhile || remappedMeanwhile || investedMeanwhile) {
+            if (
+              promotedMeanwhile ||
+              remappedMeanwhile ||
+              (!isLandingDraft && (openedMeanwhile || investedMeanwhile))
+            ) {
               return null;
+            }
+            const landingSession = isLandingDraft
+              ? getDraftSession(emptyStoredDraftThread.draftId)
+              : null;
+            if (
+              landing !== null &&
+              landingSession !== null &&
+              !sameLandingDraftContext(landing.openedWith, landingDraftContext(landingSession))
+            ) {
+              // The user picked a workspace while the defaults loaded.
+              return {
+                draftId: emptyStoredDraftThread.draftId,
+                threadId: emptyStoredDraftThread.threadId,
+              };
             }
             workspaceContext = {
               branch: null,
@@ -312,8 +350,9 @@ export function useNewThreadHandler() {
           // again would push a duplicate history entry.
           const routeTargetAfterWrites = getCurrentRouteTarget();
           if (
-            routeTargetAfterWrites?.kind === "draft" &&
-            routeTargetAfterWrites.draftId === emptyStoredDraftThread.draftId
+            isLandingDraft ||
+            (routeTargetAfterWrites?.kind === "draft" &&
+              routeTargetAfterWrites.draftId === emptyStoredDraftThread.draftId)
           ) {
             return opened;
           }
