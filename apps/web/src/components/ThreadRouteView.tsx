@@ -36,6 +36,8 @@ import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { flushSync } from "react-dom";
+import { isBootHeld, releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   buildThreadRouteParams,
   finishWarmingThreadView,
@@ -70,6 +72,48 @@ function trackUserInput() {
   }
 }
 
+let bootChatViewDeferred = false;
+
+/**
+ * On a boot painting from its snapshot, the first frame shows the sidebar and
+ * this view's frame, and the chat view renders right after it, so its large
+ * first render does not hold back that frame. It renders in one task ahead of
+ * the connection's work: rendering it as a sliced transition let decoding
+ * interleave and made the composer later.
+ */
+function useBootDeferredChatView(): boolean {
+  const [ready, setReady] = useState(() => bootChatViewDeferred || !isBootHeld());
+  const pendingReleaseRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (ready) return;
+    bootChatViewDeferred = true;
+    const release = retainBootHold();
+    let mounted = false;
+    const mount = () => {
+      if (mounted) return;
+      mounted = true;
+      // Released after the chat view's own commit paints, or on unmount.
+      pendingReleaseRef.current = release;
+      flushSync(() => setReady(true));
+    };
+    const frame = requestAnimationFrame(() => setTimeout(mount, 0));
+    const timer = setTimeout(mount, 100);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      if (!mounted) release();
+    };
+  }, [ready]);
+  useEffect(() => {
+    const release = pendingReleaseRef.current;
+    if (!ready || release === null) return;
+    const cancel = releaseBootHoldAfterPaint(release);
+    pendingReleaseRef.current = null;
+    return cancel;
+  }, [ready]);
+  return ready;
+}
+
 /**
  * The single chat surface behind both `/draft/$draftId` and
  * `/$environmentId/$threadId`. Each draft gets its own ChatView instance (so
@@ -101,6 +145,7 @@ export const ThreadRouteView = memo(function ThreadRouteView({
   const draftSession = useComposerDraftStore((store) =>
     draftId === null ? null : store.getDraftSession(draftId),
   );
+  const chatViewReady = useBootDeferredChatView();
   const threadRefs = useThreadRefs();
   // The server thread this view is about: the route's own ref, or the draft's
   // reserved ref once the server knows it.
@@ -334,36 +379,37 @@ export const ThreadRouteView = memo(function ThreadRouteView({
       ref={insetRef}
       className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
     >
-      {nextKeptViews.map((view) => (
-        <Activity
-          key={view.key}
-          mode={view.key === activeViewKey || view.warming === true ? "visible" : "hidden"}
-        >
-          <KeptViewFrame
-            viewKey={view.key}
-            warming={view.warming === true && view.key !== activeViewKey}
-            onWarm={finishWarming}
+      {chatViewReady &&
+        nextKeptViews.map((view) => (
+          <Activity
+            key={view.key}
+            mode={view.key === activeViewKey || view.warming === true ? "visible" : "hidden"}
           >
-            <KeptViewLifetimeContext value={lifetimeFor(view.key)}>
-              {view.draftId === null ? (
-                <KeptChatView
-                  environmentId={view.environmentId}
-                  threadId={view.threadId}
-                  routeKind="server"
-                />
-              ) : (
-                <KeptChatView
-                  draftId={view.draftId}
-                  environmentId={view.environmentId}
-                  threadId={view.threadId}
-                  routeKind="draft"
-                  forceExpandedMobileComposer
-                />
-              )}
-            </KeptViewLifetimeContext>
-          </KeptViewFrame>
-        </Activity>
-      ))}
+            <KeptViewFrame
+              viewKey={view.key}
+              warming={view.warming === true && view.key !== activeViewKey}
+              onWarm={finishWarming}
+            >
+              <KeptViewLifetimeContext value={lifetimeFor(view.key)}>
+                {view.draftId === null ? (
+                  <KeptChatView
+                    environmentId={view.environmentId}
+                    threadId={view.threadId}
+                    routeKind="server"
+                  />
+                ) : (
+                  <KeptChatView
+                    draftId={view.draftId}
+                    environmentId={view.environmentId}
+                    threadId={view.threadId}
+                    routeKind="draft"
+                    forceExpandedMobileComposer
+                  />
+                )}
+              </KeptViewLifetimeContext>
+            </KeptViewFrame>
+          </Activity>
+        ))}
     </SidebarInset>
   );
 });

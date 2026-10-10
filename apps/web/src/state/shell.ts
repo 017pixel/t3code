@@ -12,11 +12,18 @@ import {
   type EnvironmentCatalogState,
   enabledEnvironmentIds,
 } from "@t3tools/client-runtime/state/connections";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
-import { environmentCatalog } from "../connection/catalog";
+import { readBootSnapshot } from "../bootSnapshot";
+import {
+  afterBootHold,
+  bootHoldAtom,
+  environmentCatalog,
+  readBootCatalogState,
+  startBootCatalogRecorder,
+} from "../connection/catalog";
 import { primaryEnvironmentMissingAtom } from "../connection/platform";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { isHostedStaticApp } from "../hostedPairing";
@@ -24,12 +31,104 @@ import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 
 export const shellEnvironment = createShellEnvironmentAtoms(connectionAtomRuntime);
-export const environmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
+const liveEnvironmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
+
+const bootShellStates = new Map<EnvironmentId, OrchestrationV2ShellSnapshot | null>();
+
+function readBootShell(environmentId: EnvironmentId): OrchestrationV2ShellSnapshot | null {
+  let snapshot = bootShellStates.get(environmentId);
+  if (snapshot === undefined) {
+    snapshot = readBootSnapshot()?.shells.get(environmentId) ?? null;
+    bootShellStates.set(environmentId, snapshot);
+  }
+  return snapshot;
+}
+
+const bootOverlays = new Map<
+  EnvironmentId,
+  WeakMap<EnvironmentShellState, EnvironmentShellState>
+>();
+
+/**
+ * Until the live state holds a snapshot (from IndexedDB or the server), the
+ * boot snapshot stands in as cached data, keeping the live status and error.
+ */
+function withBootShell(
+  environmentId: EnvironmentId,
+  live: EnvironmentShellState,
+): EnvironmentShellState {
+  if (Option.isSome(live.snapshot) || live.status === "live") return live;
+  const boot = readBootShell(environmentId);
+  if (boot === null) return live;
+  let overlays = bootOverlays.get(environmentId);
+  if (overlays === undefined) {
+    overlays = new WeakMap();
+    bootOverlays.set(environmentId, overlays);
+  }
+  let overlay = overlays.get(live);
+  if (overlay === undefined) {
+    overlay = {
+      snapshot: Option.some(boot),
+      status: live.status === "empty" ? "cached" : live.status,
+      error: live.error,
+    };
+    overlays.set(live, overlay);
+  }
+  return overlay;
+}
+
+const EMPTY_LIVE_SHELL_STATE: EnvironmentShellState = {
+  snapshot: Option.none(),
+  status: "empty",
+  error: Option.none(),
+};
+const bootStateResults = new WeakMap<
+  EnvironmentShellState,
+  AsyncResult.AsyncResult<EnvironmentShellState, never>
+>();
+
+function bootStateResult(state: EnvironmentShellState) {
+  let result = bootStateResults.get(state);
+  if (result === undefined) {
+    result = AsyncResult.success(state);
+    bootStateResults.set(state, result);
+  }
+  return result;
+}
+
+/** Shell state with the boot snapshot standing in until live data arrives. */
+export const environmentShell = {
+  stateAtom: Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => {
+      if (get(bootHoldAtom)) {
+        const held = withBootShell(environmentId, EMPTY_LIVE_SHELL_STATE);
+        if (held !== EMPTY_LIVE_SHELL_STATE) return bootStateResult(held);
+      }
+      const live = get(liveEnvironmentShell.stateAtom(environmentId));
+      if (AsyncResult.isFailure(live)) return live;
+      const liveState = Option.getOrElse(AsyncResult.value(live), () => EMPTY_LIVE_SHELL_STATE);
+      const shown = withBootShell(environmentId, liveState);
+      return shown === liveState ? live : bootStateResult(shown);
+    }).pipe(Atom.withLabel(`web-environment-shell-state:${environmentId}`)),
+  ),
+  stateValueAtom: Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => {
+      if (get(bootHoldAtom)) {
+        const held = withBootShell(environmentId, EMPTY_LIVE_SHELL_STATE);
+        if (held !== EMPTY_LIVE_SHELL_STATE) return held;
+      }
+      return withBootShell(environmentId, get(liveEnvironmentShell.stateValueAtom(environmentId)));
+    }).pipe(Atom.withLabel(`web-environment-shell-state-value:${environmentId}`)),
+  ),
+};
 export const environmentSnapshotAtom = createEnvironmentSnapshotAtom(environmentShell.stateAtom);
 
 export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
-  const catalog = AsyncResult.value(get(environmentCatalog.catalogAtom));
-  if (Option.isNone(catalog)) {
+  const catalog = get(environmentCatalog.catalogValueAtom);
+  if (
+    catalog !== readBootCatalogState() &&
+    Option.isNone(AsyncResult.value(get(environmentCatalog.catalogAtom)))
+  ) {
     return false;
   }
   // The persisted catalog emits before platform discovery registers the
@@ -39,13 +138,13 @@ export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
     !isHostedStaticApp() &&
     !isLocalEnvironmentDisabled() &&
     !get(primaryEnvironmentMissingAtom) &&
-    !Array.from(catalog.value.entries.values()).some(
+    !Array.from(catalog.entries.values()).some(
       (entry) => entry.target._tag === "PrimaryConnectionTarget",
     )
   ) {
     return false;
   }
-  for (const environmentId of enabledEnvironmentIds(catalog.value)) {
+  for (const environmentId of enabledEnvironmentIds(catalog)) {
     if (Option.isSome(get(environmentShell.stateValueAtom(environmentId)).snapshot)) {
       continue;
     }
@@ -76,7 +175,11 @@ let environmentShellsStarted = false;
 export function startEnvironmentShells(): void {
   if (environmentShellsStarted) return;
   environmentShellsStarted = true;
-  appAtomRegistry.mount(allEnvironmentShellsBootstrappedAtom);
+  // A boot painting from its snapshot connects after the first frame.
+  afterBootHold(() => {
+    appAtomRegistry.mount(allEnvironmentShellsBootstrappedAtom);
+    startBootCatalogRecorder();
+  });
 }
 
 /** Cached or missing snapshots cannot establish that a saved project no longer exists. */
