@@ -35,6 +35,7 @@ import {
   type ReactNode,
   type SetStateAction,
   useCallback,
+  useContext,
   useEffect,
   useEffectEvent,
   useLayoutEffect,
@@ -78,6 +79,7 @@ import {
   type ThreadTerminalGroup,
 } from "../types";
 import { readLocalApi } from "~/localApi";
+import { KeptViewLifetimeContext } from "./keptView";
 import { confirmTerminalClose } from "~/lib/terminalCloseConfirm";
 import { useClientSettings } from "../hooks/useSettings";
 import { useLocalStorage } from "../hooks/useLocalStorage";
@@ -383,6 +385,14 @@ export function TerminalViewport({
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<GhosttyTerminalSurface | null>(null);
   const visibleRef = useRef(visible);
+  // A hidden kept thread view keeps the surface (see the setup effect).
+  const keptViewLifetime = useContext(KeptViewLifetimeContext);
+  const parkedSurfaceRef = useRef<{
+    readonly key: string;
+    readonly cleanup: () => void;
+    readonly release: () => void;
+    readonly cancelRelease: () => void;
+  } | null>(null);
   const environmentId = threadRef.environmentId;
   const canOperateTerminal = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
   const hasTerminalWriteAccess = useEffectEvent(() =>
@@ -540,6 +550,17 @@ export function TerminalViewport({
   useEffect(() => {
     const mount = containerRef.current;
     if (!mount) return;
+    const surfaceKey = [environmentId, threadId, terminalId, cwd, worktreePath, runtimeEnvKey].join(
+      "\u0000",
+    );
+    const parked = parkedSurfaceRef.current;
+    if (parked !== null) {
+      parkedSurfaceRef.current = null;
+      parked.cancelRelease();
+      // Shown again for the same session: the surface was kept as it was.
+      if (parked.key === surfaceKey) return parked.cleanup;
+      parked.release();
+    }
 
     const localApi = readLocalApi();
     let cancelled = false;
@@ -997,7 +1018,7 @@ export function TerminalViewport({
         mount.textContent = `${message} — close and reopen the terminal to retry.`;
       });
 
-    return () => {
+    const release = () => {
       cancelled = true;
       const hadFocus = mount.contains(document.activeElement);
       teardown?.();
@@ -1005,6 +1026,25 @@ export function TerminalViewport({
         mount.focus({ preventScroll: true });
       }
     };
+    // Hiding a kept thread view runs this cleanup but keeps the DOM. The
+    // surface, its scrollback and selection stay until the view is shown
+    // again or goes away for good; while hidden it does not fit or resize.
+    const cleanup = () => {
+      if (keptViewLifetime === null || !mount.isConnected) {
+        release();
+        return;
+      }
+      visibleRef.current = false;
+      terminalRef.current?.setVisible(false);
+      parkedSurfaceRef.current = {
+        key: surfaceKey,
+        cleanup,
+        release,
+        cancelRelease: keptViewLifetime.hold(release),
+      };
+    };
+    return cleanup;
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- The lifetime is fixed for a kept view.
   }, [cwd, environmentId, runtimeEnvKey, terminalId, threadId, worktreePath]);
 
   useEffect(() => {
