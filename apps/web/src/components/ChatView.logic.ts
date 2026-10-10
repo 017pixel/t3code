@@ -426,7 +426,7 @@ export function resolveThreadSwitchTimeline<T extends readonly unknown[]>(input:
     return { entries: rememberedForActive, displayThreadKey: input.activeThreadKey };
   }
 
-  const lastReady = input.lastReady === undefined ? peekHeldThreadTimeline<T>() : input.lastReady;
+  const lastReady = input.lastReady ?? peekHeldThreadTimeline<T>();
   if (
     input.loading &&
     lastReady !== null &&

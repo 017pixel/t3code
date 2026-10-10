@@ -6,10 +6,12 @@ import {
   memo,
   useContext,
   useEffect,
+  useLayoutEffect,
   useReducer,
   useRef,
   useState,
   type DependencyList,
+  type ReactNode,
   type RefObject,
 } from "react";
 
@@ -239,3 +241,50 @@ export const KeptEditorContent = memo(
     },
   ),
 );
+
+/** True while a kept view warms up out of sight; it must not act as the shown thread. */
+export const KeptViewWarmingContext = createContext(false);
+
+/**
+ * Frames one kept view. While warming, the view lays out at full size but
+ * out of sight, and cannot be focused or clicked; `onWarm` runs two frames
+ * after it mounted, once its list has settled.
+ */
+export function KeptViewFrame({
+  viewKey,
+  warming,
+  onWarm,
+  children,
+}: {
+  viewKey: string;
+  warming: boolean;
+  onWarm: (viewKey: string) => void;
+  children: ReactNode;
+}) {
+  const onWarmRef = useRef(onWarm);
+  onWarmRef.current = onWarm;
+  useLayoutEffect(() => {
+    if (!warming) return;
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => onWarmRef.current(viewKey));
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+  }, [viewKey, warming]);
+  return (
+    <div
+      className={
+        warming
+          ? "pointer-events-none invisible absolute inset-0 flex min-h-0 flex-col"
+          : "contents"
+      }
+      inert={warming || undefined}
+      aria-hidden={warming || undefined}
+    >
+      <KeptViewWarmingContext value={warming}>{children}</KeptViewWarmingContext>
+    </div>
+  );
+}

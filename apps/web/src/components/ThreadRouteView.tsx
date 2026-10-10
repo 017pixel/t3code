@@ -4,6 +4,8 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Activity,
   memo,
+  startTransition,
+  useCallback,
   useDeferredValue,
   useEffect,
   useLayoutEffect,
@@ -13,7 +15,7 @@ import {
 } from "react";
 
 import ChatView from "./ChatView";
-import { createKeptViewLifetime, KeptViewLifetimeContext } from "./keptView";
+import { createKeptViewLifetime, KeptViewFrame, KeptViewLifetimeContext } from "./keptView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
 import { waitForDraftHeroTransition } from "./chat/draftHeroTransition";
 import { SidebarInset } from "./ui/sidebar";
@@ -24,13 +26,20 @@ import {
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
-import { useEnvironmentThreadRefs, useThreadRefs, useThreadShell } from "../state/entities";
+import {
+  useEnvironmentThreadRefs,
+  useThreadRefs,
+  useThreadShell,
+  useThreadStatus,
+} from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import {
   buildThreadRouteParams,
+  finishWarmingThreadView,
+  keepReleasedThreadView,
   resolveKeptThreadViews,
   resolveThreadRouteRenderState,
   resolveThreadRouteTarget,
@@ -42,6 +51,24 @@ import {
 
 // Kept views re-render only when their own thread or route kind changes.
 const KeptChatView = memo(ChatView);
+
+/** Threads with a kept view, as of the last commit; read by KeptChatSurface. */
+let keptThreadKeys: ReadonlySet<string> = new Set();
+
+/** How long the user must leave the app alone before a kept view warms up. */
+const WARM_UP_QUIET_MS = 1_000;
+let lastUserInputAt = 0;
+let trackingUserInput = false;
+function trackUserInput() {
+  if (trackingUserInput || typeof window === "undefined") return;
+  trackingUserInput = true;
+  const record = () => {
+    lastUserInputAt = performance.now();
+  };
+  for (const type of ["keydown", "pointerdown", "wheel"] as const) {
+    window.addEventListener(type, record, { capture: true, passive: true });
+  }
+}
 
 /**
  * The single chat surface behind both `/draft/$draftId` and
@@ -55,8 +82,11 @@ const KeptChatView = memo(ChatView);
  * The last few server threads stay rendered inside hidden `<Activity>`
  * boundaries, so a revisit only reveals the view it already painted. Hidden
  * views keep their DOM and state; React disconnects their effects and store
- * subscriptions until they are shown again. A draft's view is dropped once
- * another view is shown, as before.
+ * subscriptions until they are shown again. A first open switches an
+ * existing view to the new thread, as the single shared view used to, and
+ * keeps the thread it showed in a new hidden view once the app is idle (see
+ * `resolveKeptThreadViews`). A draft's view is dropped once another view is
+ * shown, as before.
  *
  * Rendered by KeptChatSurface rather than by the two leaf routes, since an
  * element only survives a route swap when the same parent renders it.
@@ -199,10 +229,54 @@ export const ThreadRouteView = memo(function ThreadRouteView({
     };
   }
   const [keptViews, setKeptViews] = useState<ReadonlyArray<KeptThreadView>>([]);
-  const nextKeptViews = resolveKeptThreadViews(keptViews, activeView);
+  const [releasedView, setReleasedView] = useState<KeptThreadView | null>(null);
+  const keptUpdate = resolveKeptThreadViews(keptViews, activeView);
+  const nextKeptViews = keptUpdate.views;
   if (nextKeptViews !== keptViews) {
     setKeptViews(nextKeptViews);
+    if (keptUpdate.released !== null) setReleasedView(keptUpdate.released);
   }
+  // A first open took over the shown view. The thread it showed gets a view
+  // of its own again, which warms up out of sight (see KeptViewFrame) so a
+  // revisit only reveals it. Mounting it is a long task, so it waits until
+  // the shown thread has loaded and the user has left the app alone.
+  const shownThreadStatus = useThreadStatus(target.kind === "server" ? target.threadRef : null);
+  const shownThreadLoaded =
+    target.kind !== "server" || shownThreadStatus === "live" || shownThreadStatus === "deleted";
+  useEffect(trackUserInput, []);
+  useEffect(() => {
+    if (releasedView === null || !shownThreadLoaded) return;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let idle: number | undefined;
+    const keep = () =>
+      startTransition(() => {
+        setKeptViews((current) => keepReleasedThreadView(current, releasedView));
+        setReleasedView(null);
+      });
+    const attempt = () => {
+      const quietFor = performance.now() - lastUserInputAt;
+      if (quietFor < WARM_UP_QUIET_MS) {
+        timeout = setTimeout(attempt, WARM_UP_QUIET_MS - quietFor);
+      } else if (typeof requestIdleCallback === "function") {
+        idle = requestIdleCallback(keep, { timeout: 2_000 });
+      } else {
+        keep();
+      }
+    };
+    timeout = setTimeout(attempt, WARM_UP_QUIET_MS);
+    return () => {
+      clearTimeout(timeout);
+      if (idle !== undefined) cancelIdleCallback(idle);
+    };
+  }, [releasedView, shownThreadLoaded]);
+  const finishWarming = useCallback((viewKey: string) => {
+    setKeptViews((current) => finishWarmingThreadView(current, viewKey));
+  }, []);
+  useLayoutEffect(() => {
+    keptThreadKeys = new Set(
+      keptViews.flatMap((view) => (view.draftId === null ? [view.threadKey] : [])),
+    );
+  }, [keptViews]);
   // One lifetime per kept view, released once the view is gone for good.
   const lifetimesRef = useRef(new Map<string, ReturnType<typeof createKeptViewLifetime>>());
   const insetRef = useRef<HTMLElement | null>(null);
@@ -261,24 +335,33 @@ export const ThreadRouteView = memo(function ThreadRouteView({
       className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
     >
       {nextKeptViews.map((view) => (
-        <Activity key={view.key} mode={view.key === activeViewKey ? "visible" : "hidden"}>
-          <KeptViewLifetimeContext value={lifetimeFor(view.key)}>
-            {view.draftId === null ? (
-              <KeptChatView
-                environmentId={view.environmentId}
-                threadId={view.threadId}
-                routeKind="server"
-              />
-            ) : (
-              <KeptChatView
-                draftId={view.draftId}
-                environmentId={view.environmentId}
-                threadId={view.threadId}
-                routeKind="draft"
-                forceExpandedMobileComposer
-              />
-            )}
-          </KeptViewLifetimeContext>
+        <Activity
+          key={view.key}
+          mode={view.key === activeViewKey || view.warming === true ? "visible" : "hidden"}
+        >
+          <KeptViewFrame
+            viewKey={view.key}
+            warming={view.warming === true && view.key !== activeViewKey}
+            onWarm={finishWarming}
+          >
+            <KeptViewLifetimeContext value={lifetimeFor(view.key)}>
+              {view.draftId === null ? (
+                <KeptChatView
+                  environmentId={view.environmentId}
+                  threadId={view.threadId}
+                  routeKind="server"
+                />
+              ) : (
+                <KeptChatView
+                  draftId={view.draftId}
+                  environmentId={view.environmentId}
+                  threadId={view.threadId}
+                  routeKind="draft"
+                  forceExpandedMobileComposer
+                />
+              )}
+            </KeptViewLifetimeContext>
+          </KeptViewFrame>
         </Activity>
       ))}
     </SidebarInset>
@@ -295,23 +378,29 @@ export function KeptChatSurface() {
     strict: false,
     select: (params) => threadRouteTargetKey(resolveThreadRouteTarget(params)),
   });
-  // The URL and sidebar selection commit with the click; the thread view
-  // swap follows in a transition, so opening a thread never holds that frame.
+  // Revealing a kept thread follows the click in a transition, so the URL and
+  // sidebar selection paint at once. A first open renders with the click, as
+  // the single shared view did: deferring it only delays its data render.
   const deferredTargetKey = useDeferredValue(targetKey);
-  // Start loading the thread with the click; its view mounts a transition later.
+  const targetThreadKey = targetKey?.startsWith("server:")
+    ? targetKey.slice("server:".length)
+    : null;
+  const reveal = targetThreadKey !== null && keptThreadKeys.has(targetThreadKey);
+  const shownKey = reveal ? deferredTargetKey : targetKey;
+  // Start loading the thread with the click, ahead of its view.
   useEffect(() => {
     const urgentTarget = threadRouteTargetFromKey(targetKey);
     if (urgentTarget?.kind !== "server") return;
     return appAtomRegistry.mount(environmentThreadDetails.threadAtom(urgentTarget.threadRef));
   }, [targetKey]);
-  const [shownTargetKey, setShownTargetKey] = useState(deferredTargetKey);
-  if (deferredTargetKey !== null && deferredTargetKey !== shownTargetKey) {
-    setShownTargetKey(deferredTargetKey);
+  const [shownTargetKey, setShownTargetKey] = useState(shownKey);
+  if (shownKey !== null && shownKey !== shownTargetKey) {
+    setShownTargetKey(shownKey);
   }
   const target = useMemo(() => threadRouteTargetFromKey(shownTargetKey), [shownTargetKey]);
   if (target === null) return null;
   return (
-    <Activity mode={targetKey !== null && deferredTargetKey !== null ? "visible" : "hidden"}>
+    <Activity mode={targetKey !== null && shownKey !== null ? "visible" : "hidden"}>
       <ThreadRouteView target={target} />
     </Activity>
   );

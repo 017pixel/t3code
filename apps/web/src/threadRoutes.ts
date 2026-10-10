@@ -135,65 +135,155 @@ export interface KeptThreadView {
   readonly draftId: DraftId | null;
   /** Visit order, used to evict the least recently shown view. */
   readonly visit: number;
+  /**
+   * Mounted in idle time to keep a thread whose view a first open took over.
+   * It lays out once, out of sight, before it is hidden like any kept view.
+   */
+  readonly warming?: boolean;
 }
 
 /** Recently shown server threads stay rendered, so a revisit only reveals them. */
 export const KEPT_THREAD_VIEW_LIMIT = 4;
 
+function retarget(
+  view: KeptThreadView,
+  active: Omit<KeptThreadView, "visit">,
+  visit: number,
+): KeptThreadView {
+  return {
+    ...view,
+    environmentId: active.environmentId,
+    threadId: active.threadId,
+    threadKey: active.threadKey,
+    draftId: active.draftId,
+    visit,
+  };
+}
+
+function leastRecentlyShown(views: ReadonlyArray<KeptThreadView>): KeptThreadView | null {
+  return views.reduce<KeptThreadView | null>(
+    (oldest, view) => (oldest !== null && oldest.visit <= view.visit ? oldest : view),
+    null,
+  );
+}
+
+export interface KeptThreadViewsUpdate {
+  readonly views: ReadonlyArray<KeptThreadView>;
+  /** The thread the shown view stopped showing; keep it with `keepReleasedThreadView`. */
+  readonly released: KeptThreadView | null;
+}
+
 /**
- * Adds or refreshes the active view and evicts the least recently shown
- * ones past `limit`. Entries never reorder: moving a rendered view in the
- * DOM would drop its scroll position. Returns `current` when nothing changed.
+ * Shows `active` in a kept view. A revisit reveals the view that already
+ * shows it. A first open switches the shown view to the new thread, as the
+ * single shared view always did, and returns the thread it showed as
+ * `released`; mounting a view on the way there would make the open slower.
+ * From a draft, a hidden view is reused if there is one. Drafts get their own
+ * view and are dropped once left. Entries never reorder: moving a rendered
+ * view in the DOM would drop its scroll position. Returns `current` when
+ * nothing changed.
  */
 export function resolveKeptThreadViews(
   current: ReadonlyArray<KeptThreadView>,
   active: Omit<KeptThreadView, "visit"> | null,
   limit = KEPT_THREAD_VIEW_LIMIT,
-): ReadonlyArray<KeptThreadView> {
+): KeptThreadViewsUpdate {
+  const unchanged = { views: current, released: null };
   const lastVisit = current.reduce((max, view) => Math.max(max, view.visit), 0);
   // A server thread reuses whichever view already shows it, which is how a
   // promoted draft's view carries over to the thread route.
-  const activeIndex =
+  const existing =
     active === null
-      ? -1
-      : current.findIndex((view) =>
+      ? undefined
+      : current.find((view) =>
           active.draftId === null ? view.threadKey === active.threadKey : view.key === active.key,
         );
-  let next = current.filter((view, index) => view.draftId === null || index === activeIndex);
-  if (active !== null) {
-    const existing = activeIndex === -1 ? undefined : current[activeIndex];
-    if (existing === undefined) {
-      next = [...next, { ...active, visit: lastVisit + 1 }];
-    } else if (
-      existing.draftId !== active.draftId ||
-      existing.environmentId !== active.environmentId ||
-      existing.threadId !== active.threadId ||
-      existing.visit !== lastVisit
-    ) {
-      const refreshed: KeptThreadView = {
-        ...existing,
-        environmentId: active.environmentId,
-        threadId: active.threadId,
-        threadKey: active.threadKey,
-        draftId: active.draftId,
-        visit: existing.visit === lastVisit ? lastVisit : lastVisit + 1,
+  const servers = current.filter((view) => view.draftId === null && view !== existing);
+  const same = (views: ReadonlyArray<KeptThreadView>) =>
+    views.length === current.length && views.every((view, index) => view === current[index]);
+  if (active === null) {
+    return same(servers) ? unchanged : { views: servers, released: null };
+  }
+  if (existing !== undefined) {
+    const visit = existing.visit === lastVisit ? lastVisit : lastVisit + 1;
+    const refreshed =
+      existing.draftId === active.draftId &&
+      existing.environmentId === active.environmentId &&
+      existing.threadId === active.threadId &&
+      existing.visit === visit &&
+      existing.warming !== true
+        ? existing
+        : { ...retarget(existing, active, visit), warming: false };
+    const views = current.flatMap((view) =>
+      view === existing ? [refreshed] : view.draftId === null ? [view] : [],
+    );
+    return same(views) ? unchanged : { views, released: null };
+  }
+  const visit = lastVisit + 1;
+  const shown = current.find((view) => view.visit === lastVisit && view.warming !== true);
+  if (active.draftId === null) {
+    if (shown !== undefined && shown.draftId === null) {
+      return {
+        views: servers.map((view) => (view === shown ? retarget(view, active, visit) : view)),
+        released: shown,
       };
-      next = next.map((view) => (view === existing ? refreshed : view));
+    }
+    const recycled = leastRecentlyShown(servers.filter((view) => view.warming !== true));
+    if (recycled !== null) {
+      return {
+        views: servers.map((view) => (view === recycled ? retarget(view, active, visit) : view)),
+        released: null,
+      };
     }
   }
-  while (next.length > limit) {
-    const evicted = next.reduce<KeptThreadView | null>(
-      (oldest, view) =>
-        (active !== null && view.threadKey === active.threadKey) ||
-        (oldest !== null && oldest.visit <= view.visit)
-          ? oldest
-          : view,
-      null,
-    );
+  // Nothing to switch (the first view, or a new draft): mount one.
+  let views: ReadonlyArray<KeptThreadView> = [
+    ...servers,
+    { ...active, key: active.draftId ?? `view:${active.threadKey}:${visit}`, visit },
+  ];
+  while (views.length > limit) {
+    const evicted = leastRecentlyShown(views.slice(0, -1));
     if (evicted === null) break;
-    next = next.filter((view) => view !== evicted);
+    views = views.filter((view) => view !== evicted);
   }
-  return next.length === current.length && next.every((view, index) => view === current[index])
-    ? current
-    : next;
+  return { views, released: null };
+}
+
+/**
+ * Keeps a released thread in a new view that warms up in idle time, making
+ * room by dropping the least recently shown hidden view. Skipped once the
+ * thread is shown again.
+ */
+export function keepReleasedThreadView(
+  current: ReadonlyArray<KeptThreadView>,
+  released: KeptThreadView,
+  limit = KEPT_THREAD_VIEW_LIMIT,
+): ReadonlyArray<KeptThreadView> {
+  if (limit < 2 || current.some((view) => view.threadKey === released.threadKey)) return current;
+  const lastVisit = current.reduce((max, view) => Math.max(max, view.visit), 0);
+  let views = current;
+  while (views.length >= limit) {
+    const evicted = leastRecentlyShown(views.filter((view) => view.visit !== lastVisit));
+    if (evicted === null) return current;
+    views = views.filter((view) => view !== evicted);
+  }
+  return [
+    ...views,
+    {
+      ...released,
+      key: `kept:${released.threadKey}:${released.visit}`,
+      draftId: null,
+      warming: true,
+    },
+  ];
+}
+
+/** Hides a warmed view like any kept one. */
+export function finishWarmingThreadView(
+  current: ReadonlyArray<KeptThreadView>,
+  key: string,
+): ReadonlyArray<KeptThreadView> {
+  return current.some((view) => view.key === key && view.warming === true)
+    ? current.map((view) => (view.key === key ? { ...view, warming: false } : view))
+    : current;
 }

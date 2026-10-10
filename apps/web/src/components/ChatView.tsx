@@ -156,6 +156,7 @@ import {
   type SetStateAction,
   Suspense,
   useCallback,
+  useContext,
   useEffect,
   useEffectEvent,
   useLayoutEffect,
@@ -164,6 +165,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
+import { KeptViewWarmingContext } from "./keptView";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { assistantCitationFromLocation } from "../lib/assistantCitationNavigation";
 import { isMacPlatform } from "../lib/utils";
@@ -1624,6 +1626,9 @@ function releaseChatTimelineAnchor<T extends { readonly messageId: MessageId | n
   return current.messageId === null ? current : { ...current, messageId: null };
 }
 
+/** The composer inset the last chat view measured; seeds the next view (see ChatView). */
+let lastComposerTimelineInset = 0;
+
 /** Runs with a workspace preparation retry in flight, across ChatView instances. */
 const retryingWorkspacePreparationRunIds = new Set<RunId>();
 
@@ -2036,8 +2041,12 @@ export default function ChatView(props: ChatViewProps) {
   // Space the timeline keeps clear above its end. Tracks the overlay while the
   // composer is expanded and holds that height while it rests, so the resting
   // composer never exposes rows that its expansion will cover.
-  const [composerTimelineInset, setComposerTimelineInset] = useState(0);
-  const composerTimelineInsetRef = useRef(0);
+  // A new view starts from the last measured inset, so its list scrolls to
+  // the true end on its first frame instead of correcting once measured.
+  const [composerTimelineInset, setComposerTimelineInset] = useState(
+    () => lastComposerTimelineInset,
+  );
+  const composerTimelineInsetRef = useRef(lastComposerTimelineInset);
   const composerRestingRef = useRef(false);
   // False while a status bar stands in for the composer (a native subagent).
   const composerMountedRef = useRef(true);
@@ -2997,8 +3006,18 @@ export default function ChatView(props: ChatViewProps) {
     [openOrReuseProjectDraftThread],
   );
 
+  // A kept view warming up out of sight is not being viewed (see ThreadRouteView).
+  const keptViewWarming = useContext(KeptViewWarmingContext);
+  // Hiding a kept view ends the visit, so showing it again counts as reopening
+  // the thread, as it did when a single view switched threads.
+  useEffect(
+    () => () => {
+      lastDispatchedVisitRef.current = null;
+    },
+    [],
+  );
   useEffect(() => {
-    if (!serverThread?.id) return;
+    if (!serverThread?.id || keptViewWarming) return;
     const threadUpdatedAt = Date.parse(serverThread.updatedAt);
     if (Number.isNaN(threadUpdatedAt)) return;
     const effectiveLastVisitedAt = resolveThreadLastVisitedAt(
@@ -3051,6 +3070,7 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, [
     activeThreadLocalLastVisitedAt,
+    keptViewWarming,
     markThreadVisited,
     routeThreadKey,
     serverThread?.environmentId,
@@ -4028,9 +4048,6 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadKey,
     nextEntries: timelineEntries,
     rememberedForActive: peekRememberedThreadTimeline<typeof timelineEntries>(activeThreadKey),
-    // Each thread has its own view (see ThreadRouteView), so another thread's
-    // timeline is never painted while this one loads.
-    lastReady: null,
   });
   const displayedTimelineKey = displayedTimeline.displayThreadKey ?? routeThreadKey;
   const paintOnlyDisplayedTimeline = isPaintOnlyThreadTimeline(
@@ -7072,6 +7089,7 @@ export default function ChatView(props: ChatViewProps) {
       });
       if (composerTimelineInsetRef.current !== nextInset) {
         composerTimelineInsetRef.current = nextInset;
+        lastComposerTimelineInset = nextInset;
         setComposerTimelineInset(nextInset);
       }
       const mainSurface = composerOverlayElement?.querySelector<HTMLElement>(
