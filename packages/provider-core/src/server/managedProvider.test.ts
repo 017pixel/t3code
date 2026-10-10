@@ -1,5 +1,5 @@
 import * as Exit from "effect/Exit";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ProviderAdapter from "./ProviderAdapter.ts";
 import { makeLazyAdapter } from "./lazyAdapter.ts";
 import { describe, it, assert } from "@effect/vitest";
@@ -707,7 +707,7 @@ it.effect(
             driver,
             Effect.gen(function* () {
               constructed++;
-              owner = (yield* HostProcessEnvironment).OWNER;
+              owner = (yield* HostProcess.Environment).OWNER;
               yield* Effect.addFinalizer(() =>
                 Effect.sync(() => {
                   finalized++;
@@ -741,7 +741,7 @@ it.effect(
             ],
             { concurrency: "unbounded" },
           ).pipe(
-            Effect.provideService(HostProcessEnvironment, { OWNER: "request" }),
+            Effect.provideService(HostProcess.Environment, { OWNER: "request" }),
             Effect.forkScoped,
           );
           yield* Deferred.await(started);
@@ -754,7 +754,7 @@ it.effect(
           yield* adapter.getCapabilities().pipe(Effect.scoped, Effect.exit);
           assert.equal(constructed, 1);
           assert.equal(finalized, 0);
-        }).pipe(Effect.provideService(HostProcessEnvironment, { OWNER: "instance" })),
+        }).pipe(Effect.provideService(HostProcess.Environment, { OWNER: "instance" })),
       );
       assert.equal(finalized, 1);
     }),

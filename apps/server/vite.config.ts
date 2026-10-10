@@ -1,6 +1,6 @@
 import "vite-plus/test/config";
 import * as Effect from "effect/Effect";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { defineConfig, mergeConfig } from "vite-plus";
 
 import baseConfig from "../../vite.config.ts";
@@ -43,7 +43,7 @@ const packExecutable = process.env.T3CODE_PACK_EXE === "1";
 // which Node happens to run the build.
 const SEA_NODE_VERSION = "26.8.2";
 const [hostPlatform, hostArch] = Effect.runSync(
-  Effect.all([HostProcessPlatform, HostProcessArchitecture]),
+  Effect.all([HostProcess.Platform, HostProcess.Architecture]),
 );
 const SEA_TARGETS = {
   "darwin-arm64": { platform: "darwin", arch: "arm64" },
