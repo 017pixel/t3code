@@ -2125,6 +2125,16 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         syncedSnapshot,
       );
       assert.deepEqual(afterSync.updatedAt, beforeSync.updatedAt);
+      // A sync is not activity, but a settlement decided from the snapshot before it is stale.
+      const autoSettleBeforeSync = yield* orchestrator
+        .dispatch({
+          type: "thread.auto-settle",
+          commandId: CommandId.make("branch-pr-auto-settle-before-sync"),
+          threadId,
+          snapshotAt: Orchestrator.autoSettleSnapshotAt(beforeSync),
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(autoSettleBeforeSync, Orchestrator.OrchestratorDispatchError);
       yield* orchestrator.dispatch({
         type: "thread.pull-request.unlink",
         commandId: CommandId.make("branch-pr-unlink"),

@@ -751,6 +751,25 @@ export function shouldPrepareLegacyImportHandoff(input: {
   );
 }
 
+/**
+ * The last change automatic settlement decides from: activity, or a pull request host sync,
+ * which records its time on the link instead of bumping the thread's activity timestamp.
+ */
+export function autoSettleSnapshotAt(thread: {
+  readonly updatedAt: DateTime.Utc;
+  readonly pullRequests?:
+    | ReadonlyArray<{ readonly snapshot: { readonly syncedAt: string } | null }>
+    | undefined;
+}): DateTime.Utc {
+  return (thread.pullRequests ?? []).reduce(
+    (latest, link) =>
+      link.snapshot === null
+        ? latest
+        : DateTime.max(latest, DateTime.makeUnsafe(link.snapshot.syncedAt)),
+    thread.updatedAt,
+  );
+}
+
 export function appendContextHandoffId(
   handoffIds: OrchestrationV2ProviderThread["handoffIds"],
   handoffId: OrchestrationV2ContextHandoff["id"] | null,
@@ -10200,7 +10219,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           );
         if (
           thread.settledOverride !== null ||
-          DateTime.toEpochMillis(thread.updatedAt) > DateTime.toEpochMillis(command.snapshotAt)
+          DateTime.toEpochMillis(autoSettleSnapshotAt(thread)) >
+            DateTime.toEpochMillis(command.snapshotAt)
         ) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
