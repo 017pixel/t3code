@@ -1,8 +1,10 @@
 import type { AuthSessionState, EnvironmentId, ServerConfig } from "@t3tools/contracts";
 import * as Data from "effect/Data";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equivalence from "effect/Equivalence";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { HttpClient } from "effect/http";
@@ -39,6 +41,25 @@ function initialConfigOption<E>(
 // Bounded so a wedged environment cannot pin the permissions check (and with it
 // the settings UI) in a loading state for long.
 const DEFAULT_SESSION_STATE_TIMEOUT_MS = 6_000;
+
+// The session is fetched once per connect attempt and revalidated after 30 s.
+// A fetch that fails while the socket connects (a server still starting, a
+// network blip) retries, so permission-gated UI does not stay off until then.
+const SESSION_STATE_RETRIES = 5;
+const SESSION_STATE_RETRY_SCHEDULE = Schedule.exponential("500 millis").pipe(
+  Schedule.modifyDelay(({ duration }) =>
+    Effect.succeed(Duration.min(duration, Duration.seconds(4))),
+  ),
+);
+
+function isTransientSessionStateError(error: { readonly _tag: string }): boolean {
+  return (
+    error._tag === "RemoteEnvironmentAuthFetchError" ||
+    error._tag === "RemoteEnvironmentAuthTimeoutError" ||
+    error._tag === "RemoteEnvironmentAuthUndeclaredStatusError" ||
+    error._tag === "EnvironmentInternalError"
+  );
+}
 
 /**
  * Read the granted scopes of this client's session on one environment via its
@@ -155,7 +176,14 @@ function makeEnvironmentSessionAtoms<R, E>(
             prepared,
             signer,
             remoteAuthorization,
-          }).pipe(Effect.provideService(HttpClient.HttpClient, client.value));
+          }).pipe(
+            Effect.provideService(HttpClient.HttpClient, client.value),
+            Effect.retry({
+              schedule: SESSION_STATE_RETRY_SCHEDULE,
+              times: SESSION_STATE_RETRIES,
+              while: isTransientSessionStateError,
+            }),
+          );
         });
       })
       .pipe(
