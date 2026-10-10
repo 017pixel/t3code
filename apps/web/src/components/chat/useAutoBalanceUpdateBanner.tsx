@@ -26,18 +26,30 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 import { ComposerServerUpdateIcon } from "./ComposerServerUpdateStatus";
 
+interface EnvironmentUpdateState {
+  readonly environment: EnvironmentPresentation;
+  readonly state: ServerUpdateState;
+}
+
+// Shared by every caller without machines. A fresh atom per render would be
+// read before it is subscribed and produce a new empty array, which makes
+// React render the chat view again after it commits.
+const NO_ENVIRONMENT_UPDATE_STATES = Atom.make<ReadonlyArray<EnvironmentUpdateState>>([]);
+
 /** Keep every machine's update visible while auto balance has no single update target. */
 export function useAutoBalanceUpdateBanner(
   environments: readonly EnvironmentPresentation[],
 ): ComposerBannerStackItem | null {
   const statesAtom = useMemo(
     () =>
-      Atom.make((get) =>
-        environments.map((environment) => ({
-          environment,
-          state: get(serverEnvironment.updateStateAtom(environment.environmentId)),
-        })),
-      ),
+      environments.length === 0
+        ? NO_ENVIRONMENT_UPDATE_STATES
+        : Atom.make((get): ReadonlyArray<EnvironmentUpdateState> =>
+            environments.map((environment) => ({
+              environment,
+              state: get(serverEnvironment.updateStateAtom(environment.environmentId)),
+            })),
+          ),
     [environments],
   );
   const states = useAtomValue(statesAtom);
