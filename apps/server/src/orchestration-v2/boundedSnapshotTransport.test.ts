@@ -393,6 +393,48 @@ it.layer(TestLayer)("compact bounded snapshot transport", (it) => {
     }),
   );
 
+  it.effect(
+    "resumes across a compact visit without a snapshot for legacy and opted-in subscribers",
+    () =>
+      Effect.gen(function* () {
+        const at = yield* DateTime.now;
+        const event: OrchestrationV2DomainEvent = {
+          id: EventId.make("event:compact-transport:resume-visit"),
+          type: "thread.visit-recorded",
+          threadId: PARENT,
+          occurredAt: at,
+          payload: { lastVisitedAt: at },
+        };
+        const events = Layer.mock(OrchestrationEventStore.OrchestrationEventStore)({
+          latestAgentSequence: () => Effect.succeed(2),
+          getAgentReplayStats: () =>
+            Effect.succeed({ eventCount: 1, rawPayloadBytes: 128, hasCreateEvent: false }),
+          readAgentEvents: () => Stream.make({ sequence: 2, commandId: null, event }),
+        });
+        for (const acceptThreadFieldEvents of [false, true]) {
+          const head = yield* subscribeOrchestrationV2Thread({
+            threadId: PARENT,
+            afterSequence: 1,
+            requestCompletionMarker: true,
+            acceptThreadFieldEvents,
+          }).pipe(
+            Effect.flatMap((stream) => Stream.runHead(stream)),
+            Effect.provide(events),
+          );
+          const first = head._tag === "Some" ? head.value : undefined;
+          // Legacy subscribers skip the visit (their shell carries read state); opted-in ones replay it.
+          if (acceptThreadFieldEvents) {
+            assert.equal(
+              first?.kind === "event" ? first.event.type : first?.kind,
+              "thread.visit-recorded",
+            );
+          } else {
+            assert.equal(first?.kind, "synchronized");
+          }
+        }
+      }),
+  );
+
   describe.each([
     ["fork", FORK],
     ["long run with a retained interrupt request", LONG],

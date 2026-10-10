@@ -1019,14 +1019,16 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
         // Only replace its bounded replay when a snapshot can exist.
         if (shell !== null) return yield* snapshotThenLive();
       }
-      const replay = yield* loadReplayThrough(input.afterSequence, highWater);
+      const storedReplay = yield* loadReplayThrough(input.afterSequence, highWater);
+      // Older clients cannot read compact thread events. A visit moves only read state, which
+      // their shell stream carries, so their replay skips it; a pull request sync needs a snapshot.
+      const replay =
+        input.acceptThreadFieldEvents === true
+          ? storedReplay
+          : storedReplay.filter((item) => item.event.type !== "thread.visit-recorded");
       if (
         input.acceptThreadFieldEvents !== true &&
-        replay.some(
-          (item) =>
-            item.event.type === "thread.pull-request-link-synced" ||
-            item.event.type === "thread.visit-recorded",
-        )
+        replay.some((item) => item.event.type === "thread.pull-request-link-synced")
       ) {
         return yield* snapshotThenLive();
       }
