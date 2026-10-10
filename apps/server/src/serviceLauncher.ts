@@ -216,8 +216,10 @@ async function restoreDatabaseBackup(
 
 async function discardDatabaseBackup(baseDir: string, updateId: string): Promise<void> {
   const backupDir = databaseBackupDir(baseDir, updateId);
-  if (!(await pathExists(backupDir))) return;
+  const stagingDir = `${backupDir}.staging`;
+  if (!(await pathExists(backupDir)) && !(await pathExists(stagingDir))) return;
   await NodeFSP.rm(backupDir, { recursive: true, force: true });
+  await NodeFSP.rm(stagingDir, { recursive: true, force: true });
   await syncDirectory(NodePath.dirname(backupDir));
 }
 
@@ -585,6 +587,7 @@ export class Launcher {
       const failed = terminalUpdate({ pending, status: "failed", reason: "db-backup-failed" });
       this.#state = { ...this.#state, update: failed };
       await writeServiceState(this.#statePath, this.#state);
+      await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
       return;
     }
     this.#child = null;

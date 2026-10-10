@@ -208,6 +208,9 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-stop-" });
       const statePath = path.join(root, "runtime", "service-state.json");
+      const stagingDir = path.join(root, "runtime", "db-backup", "failed-online-backup.staging");
+      yield* fs.makeDirectory(stagingDir, { recursive: true });
+      yield* fs.writeFileString(path.join(stagingDir, "database"), "incomplete online backup");
       yield* writeFakeRuntime(
         fs,
         path,
@@ -218,6 +221,12 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
         writeServiceState(statePath, {
           protocol: SERVICE_LAUNCHER_PROTOCOL,
           activeVersion: "1.0.0",
+          update: {
+            id: "failed-online-backup",
+            fromVersion: "1.0.0",
+            targetVersion: "1.1.0",
+            status: "failed",
+          },
         }),
       );
 
@@ -230,6 +239,7 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
       assert.isTrue(yield* fs.exists(path.join(root, "runtime", SERVICE_STOP_MARKER_FILE)));
       yield* Effect.promise(() => stopping);
       yield* Effect.promise(() => running);
+      assert.isFalse(yield* fs.exists(stagingDir));
     }),
   );
 
