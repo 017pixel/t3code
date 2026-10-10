@@ -1,4 +1,9 @@
 import { projectTurnItemForWire } from "./WireProjection.ts";
+import {
+  compactThreadPullRequests,
+  decodeThreadReadPayload,
+  encodeThreadReadPayload,
+} from "./ThreadReadPayload.ts";
 import * as Stream from "effect/Stream";
 import type {
   OrchestrationV2SearchThreadInput,
@@ -327,6 +332,7 @@ export interface ProjectionTimelinePage {
 
 export interface ShellSnapshotOptions {
   readonly location?: "active" | "archive";
+  readonly compactPullRequests?: boolean;
   /**
    * For background sweeps, not clients: skips settled threads before any of
    * their run, item or session rows are read.
@@ -389,6 +395,7 @@ export interface ProjectionStoreV2Shape {
   >;
   readonly getThreadShell: (
     threadId: ThreadId,
+    options?: ShellSnapshotOptions,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, ProjectionStoreV2Error>;
   readonly getThread: (
     threadId: ThreadId,
@@ -1794,6 +1801,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
 
+    const upsertThreadRead = (thread: OrchestrationV2AppThread) =>
+      Effect.gen(function* () {
+        const payload = yield* encodeThreadReadPayload(thread);
+        const compact = yield* encodeThreadReadPayload(compactThreadPullRequests(thread));
+        yield* sql`
+        INSERT INTO orchestration_v2_projection_thread_reads (thread_id, payload_json, compact_payload_json)
+        VALUES (${thread.id}, ${payload}, ${compact})
+        ON CONFLICT(thread_id) DO UPDATE SET payload_json = excluded.payload_json,
+          compact_payload_json = excluded.compact_payload_json
+      `;
+      });
+
     // For run upserts: a snapshot without `path` keeps the value another event recorded there.
     const keepRecordedRunField = (payload: Statement.Fragment, path: string) => sql`
       CASE
@@ -1880,6 +1899,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 deleted_at = excluded.deleted_at,
                 payload_json = excluded.payload_json
             `;
+            yield* upsertThreadRead(event.payload);
             break;
           }
           // These events carry one field rather than the thread, so they patch the stored row.
@@ -1907,6 +1927,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 payload_json = ${payloadJson}
               WHERE thread_id = ${event.threadId}
             `;
+            yield* upsertThreadRead(updatedThread);
             break;
           }
           case "run.created":
@@ -2269,6 +2290,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     payload_json = ${updatedThreadPayloadJson}
                   WHERE thread_id = ${event.payload.appThreadId}
                 `;
+                yield* upsertThreadRead(updatedThread);
               }
             }
             break;
@@ -2709,6 +2731,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SET
                 updated_at = ${stringField(parseEncodedPayload(payloadJson), "updatedAt")},
                 payload_json = ${payloadJson}
+              WHERE thread_id = ${event.threadId}
+            `;
+            // Activity-only events change no PR fields. Patch the small read
+            // projections without encoding their stacks again on every token.
+            const updatedAt = stringField(parseEncodedPayload(payloadJson), "updatedAt");
+            yield* sql`
+              UPDATE orchestration_v2_projection_thread_reads
+              SET payload_json = json_set(payload_json, '$.thread.updatedAt', ${updatedAt}),
+                  compact_payload_json = json_set(compact_payload_json, '$.thread.updatedAt', ${updatedAt})
               WHERE thread_id = ${event.threadId}
             `;
           }
@@ -5177,11 +5208,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       threadId?: ThreadId,
       location?: "active" | "archive",
       unsettledOnly = false,
+      compactPullRequests = false,
     ) =>
       sql<ShellThreadRow>`
             SELECT
               t.thread_id,
-              t.payload_json,
+              ${compactPullRequests ? sql`summary.compact_payload_json` : sql`summary.payload_json`} AS payload_json,
               CASE
                 WHEN json_extract(t.payload_json, '$.forkedFrom.type') = 'run'
                   THEN json_extract(t.payload_json, '$.forkedFrom.threadId')
@@ -5325,6 +5357,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND i.run_id IS NULL
               ) AS runless_item_count
             FROM orchestration_v2_projection_threads t
+            JOIN orchestration_v2_projection_thread_reads summary ON summary.thread_id = t.thread_id
             -- The newest run not waiting in a held queue, matching latestUnheldRun.
             LEFT JOIN orchestration_v2_projection_runs presented ON presented.run_id = (
               SELECT candidate.run_id
@@ -5495,7 +5528,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             // provider sessions or inherited fork rows. Reject parked and busy
             // threads before loading the remaining candidates' background work.
             const rows = yield* sql<SettlementThreadRow>`
-            SELECT t.thread_id, t.payload_json,
+            SELECT t.thread_id, summary.compact_payload_json AS payload_json,
               r.run_id AS latest_run_id,
               r.status AS latest_run_status,
               r.requested_at AS latest_run_requested_at,
@@ -5517,6 +5550,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS latest_user_authored_message_at
             FROM orchestration_v2_projection_threads t
+            JOIN orchestration_v2_projection_thread_reads summary ON summary.thread_id = t.thread_id
             LEFT JOIN orchestration_v2_projection_runs r ON r.run_id = (
               SELECT latest.run_id FROM orchestration_v2_projection_runs latest
               WHERE latest.thread_id = t.thread_id
@@ -5549,7 +5583,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               });
             return yield* Effect.forEach(rows, (row) =>
               Effect.gen(function* () {
-                const thread = yield* decodeThreadPayload(row.payload_json);
+                const thread = yield* decodeThreadReadPayload(row.payload_json);
                 const status = shellStatusFromStoredRunStatus(row.latest_run_status);
                 const latestRunId =
                   row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
@@ -5608,16 +5642,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     ) =>
       Effect.gen(function* () {
         const rows = yield* sql<PayloadRow>`
-          SELECT payload_json
-          FROM orchestration_v2_projection_threads
-          WHERE deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND thread_id = ${threadId}`}
-            AND archived_at IS NULL
+          SELECT summary.payload_json
+          FROM orchestration_v2_projection_threads t
+          JOIN orchestration_v2_projection_thread_reads summary ON summary.thread_id = t.thread_id
+          WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}
+            AND t.archived_at IS NULL
             -- Read from the sweep index (migration 061) rather than each payload.
-            AND json_array_length(payload_json, '$.pullRequests') > 0
-          ORDER BY updated_at ASC, thread_id ASC
+            AND json_array_length(t.payload_json, '$.pullRequests') > 0
+          ORDER BY t.updated_at ASC, t.thread_id ASC
         `;
         return yield* Effect.forEach(rows, (row) =>
-          decodeThreadPayload(row.payload_json).pipe(
+          decodeThreadReadPayload(row.payload_json).pipe(
             Effect.map((thread): ProjectionThreadPullRequests => ({
               id: thread.id,
               projectId: thread.projectId,
@@ -5651,7 +5686,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           providerThreadsByThreadId,
           pendingTurnItemsByThreadId,
         } = input;
-        const thread = yield* decodeThreadPayload(row.payload_json);
+        const thread = yield* decodeThreadReadPayload(row.payload_json);
         const pendingRuntimeRequest =
           row.pending_request_payload_json !== null
             ? yield* decodeRuntimeRequestPayload(row.pending_request_payload_json)
@@ -5781,6 +5816,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           undefined,
           options?.location,
           options?.unsettledOnly ?? false,
+          options?.compactPullRequests ?? false,
         );
         const targetThreadIds = new Set(
           targetThreadRows.map((row) => ThreadId.make(row.thread_id)),
@@ -5796,7 +5832,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         while (pendingSourceIds.length > 0) {
           const sourceId = pendingSourceIds.pop();
           if (sourceId === undefined || rowsByThreadId.has(sourceId)) continue;
-          const source = (yield* selectShellThreadRows(sourceId))[0];
+          const source = (yield* selectShellThreadRows(
+            sourceId,
+            undefined,
+            false,
+            options?.compactPullRequests,
+          ))[0];
           if (source === undefined) continue;
           rowsByThreadId.set(sourceId, source);
           if (source.forked_from_run_source_thread_id !== null) {
@@ -5895,7 +5936,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     // Per-thread shell for the live shell streams: reads only the target thread
     // plus its fork-source chain instead of materializing every thread. Returns
     // null when the thread is deleted or unknown.
-    const getThreadShell: ProjectionStoreV2Shape["getThreadShell"] = (threadId) =>
+    const getThreadShell: ProjectionStoreV2Shape["getThreadShell"] = (threadId, options) =>
       sql
         .withTransaction(
           Effect.gen(function* () {
@@ -5906,7 +5947,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               if (nextId === undefined || rowsByThreadId.has(nextId)) {
                 continue;
               }
-              const rows = yield* selectShellThreadRows(nextId);
+              const rows = yield* selectShellThreadRows(
+                nextId,
+                undefined,
+                false,
+                options?.compactPullRequests,
+              );
               const row = rows[0];
               if (row === undefined) {
                 continue;
@@ -6052,7 +6098,17 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           const shells = yield* Effect.forEach(
             selectedThreadIds.toSorted((left, right) => String(left).localeCompare(String(right))),
             (threadId) =>
-              service.getThreadProjection(threadId).pipe(Effect.map(threadShellFromProjection)),
+              service
+                .getThreadProjection(threadId)
+                .pipe(
+                  Effect.map((projection) =>
+                    threadShellFromProjection(
+                      options?.compactPullRequests
+                        ? { ...projection, thread: compactThreadPullRequests(projection.thread) }
+                        : projection,
+                    ),
+                  ),
+                ),
           );
           const visible = shells.filter((thread) => thread.deletedAt === null);
           return {
@@ -6064,7 +6120,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         }),
       readShellSnapshot: (options) =>
         service.getShellSnapshot(options).pipe(Effect.map(Effect.succeed)),
-      getThreadShell: (threadId) =>
+      getThreadShell: (threadId, options) =>
         Effect.gen(function* () {
           const existing = (yield* Ref.get(replayState)).projections;
           if (!existing.has(threadId)) {
@@ -6072,7 +6128,15 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           }
           const shell = yield* service
             .getThreadProjection(threadId)
-            .pipe(Effect.map(threadShellFromProjection));
+            .pipe(
+              Effect.map((projection) =>
+                threadShellFromProjection(
+                  options?.compactPullRequests
+                    ? { ...projection, thread: compactThreadPullRequests(projection.thread) }
+                    : projection,
+                ),
+              ),
+            );
           return shell.deletedAt === null ? shell : null;
         }),
       getThread: (threadId) =>

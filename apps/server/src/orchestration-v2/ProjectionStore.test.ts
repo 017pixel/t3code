@@ -30,12 +30,23 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
+import {
+  resolveThreadPullRequestBadge,
+  resolveThreadPullRequestChains,
+  threadPullRequestSearchTerms,
+} from "@t3tools/shared/threadPullRequests";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 
 import ProjectionThreadSweepIndexes from "../persistence/Migrations/061_ProjectionThreadSweepIndexes.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import {
+  compactThreadPullRequests,
+  decodeThreadReadPayload,
+  encodeThreadReadPayload,
+} from "./ThreadReadPayload.ts";
+import { compactThreadFieldEvent } from "../persistence/DatabaseCompaction.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -1868,11 +1879,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       // No decoding under the read transaction: a payload that cannot decode
       // fails the returned step, not the read.
       const [stored] = yield* sql<{ readonly payload_json: string }>`
-        SELECT payload_json FROM orchestration_v2_projection_threads
+        SELECT payload_json FROM orchestration_v2_projection_thread_reads
         WHERE thread_id = ${laterThreadId}
       `;
       const setPayload = (payload: string) =>
-        sql`UPDATE orchestration_v2_projection_threads SET payload_json = ${payload}
+        sql`UPDATE orchestration_v2_projection_thread_reads SET payload_json = ${payload}
           WHERE thread_id = ${laterThreadId}`;
       yield* setPayload("{}");
       const failure = yield* sql
@@ -1963,6 +1974,28 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const markedUnread = yield* projectionStore.getThreadProjection(threadId);
       assert.isNull(markedUnread.thread.lastVisitedAt);
       assert.deepEqual(markedUnread.thread.updatedAt, createdAt);
+
+      const visitedPayload = { ...thread, lastVisitedAt: visitedOccurredAt };
+      const legacy = {
+        id: EventId.make("event:compact-visit"),
+        type: "thread.visited" as const,
+        threadId,
+        occurredAt: visitedOccurredAt,
+        payload: visitedPayload,
+      };
+      assert.equal(compactThreadFieldEvent(legacy, thread).type, "thread.visit-recorded");
+      assert.strictEqual(
+        compactThreadFieldEvent(
+          { ...legacy, payload: { ...visitedPayload, title: "Also changed" } },
+          thread,
+        ).type,
+        "thread.visited",
+      );
+      assert.deepEqual(
+        yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(thread)),
+        thread,
+      );
+      assert.deepEqual(compactThreadPullRequests(thread), thread);
     }),
   );
 
@@ -4863,6 +4896,74 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.deepEqual(synced.pullRequests?.[0]?.snapshot, snapshot);
       assert.isDefined(synced.pullRequests?.[0]?.watch);
       assert.deepEqual(synced.updatedAt, at);
+      const previous = {
+        ...synced,
+        pullRequests: [{ ...synced.pullRequests![0]!, snapshot: null }],
+      };
+      const legacySync = {
+        id: EventId.make("event:compact-pr-sync"),
+        type: "thread.pull-request-synced" as const,
+        threadId,
+        occurredAt: at,
+        payload: synced,
+      };
+      assert.equal(
+        compactThreadFieldEvent(legacySync, previous).type,
+        "thread.pull-request-link-synced",
+      );
+      assert.equal(
+        compactThreadFieldEvent(
+          { ...legacySync, payload: { ...synced, title: "Changed too" } },
+          previous,
+        ).type,
+        "thread.pull-request-synced",
+      );
+      const stack = {
+        kind: "native" as const,
+        id: "stack:codec",
+        number: 1,
+        url: "https://github.com/pingdotgg/t3code/stack/1",
+        base: "main",
+        layers: [7, 8, 9].map((number) => ({
+          number,
+          headBranch: `branch-${number}`,
+          state: "open" as const,
+        })),
+      };
+      const rich = {
+        ...synced,
+        pullRequests: [7, 8, 9].map((number) => ({
+          ...synced.pullRequests![0]!,
+          number,
+          stack: number === 9 ? { ...stack, base: "older-base" } : stack,
+          snapshot: { ...snapshot, additions: 23, deletions: 2, checksState: "passing" as const },
+        })),
+      };
+      assert.deepEqual(yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(rich)), rich);
+      const compact = compactThreadPullRequests(rich);
+      assert.isUndefined(compact.pullRequests?.[0]?.snapshot?.additions);
+      assert.equal(rich.pullRequests[0]?.snapshot?.additions, 23);
+      assert.deepEqual(
+        resolveThreadPullRequestBadge(compact.pullRequests),
+        resolveThreadPullRequestBadge(rich.pullRequests),
+      );
+      assert.deepEqual(
+        resolveThreadPullRequestChains(compact.pullRequests ?? []).map((chain) =>
+          chain.layers.map((entry) => entry.number),
+        ),
+        resolveThreadPullRequestChains(rich.pullRequests).map((chain) =>
+          chain.layers.map((entry) => entry.number),
+        ),
+      );
+      assert.deepEqual(threadPullRequestSearchTerms(compact), threadPullRequestSearchTerms(rich));
+      yield* syncPullRequests("rich", rich.pullRequests);
+      assert.deepEqual((yield* store.getThreadShell(threadId))?.pullRequests, rich.pullRequests);
+      assert.deepEqual(
+        (yield* store.getThreadShell(threadId, { compactPullRequests: true }))?.pullRequests,
+        compact.pullRequests,
+      );
+      assert.deepEqual((yield* store.getThread(threadId)).pullRequests, rich.pullRequests);
+      yield* syncPullRequests("restore", synced.pullRequests ?? []);
       assert.equal(yield* phase, "running");
       assert.equal((yield* store.getThreadsWithPullRequests()).length, 1);
 

@@ -9,6 +9,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import { prepareServiceDatabaseBackup } from "./serviceDatabaseBackup.ts";
 
 import type {
   PendingServiceUpdate,
@@ -132,6 +133,43 @@ async function backupDatabaseOnce(baseDir: string, pending: PendingServiceUpdate
     await NodeFSP.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
     throw cause;
   }
+}
+
+/** Ask the target executable, whose migration manifest may differ from this launcher. */
+async function targetNeedsDatabaseBackup(baseDir: string, pending: PendingServiceUpdate) {
+  const target = runtimePaths(baseDir, pending.targetVersion);
+  return new Promise<boolean | undefined>((resolve) => {
+    NodeChildProcess.execFile(
+      target.entryPath,
+      [
+        "__service-preflight",
+        "--database-path",
+        pending.dbPath,
+        "--launcher-protocol",
+        String(SERVICE_LAUNCHER_PROTOCOL),
+      ],
+      { timeout: 30_000, maxBuffer: 64 * 1024 },
+      (error, stdout) => {
+        if (error !== null) {
+          resolve(undefined);
+          return;
+        }
+        try {
+          const result = JSON.parse(stdout);
+          resolve(
+            result.status === "ready" &&
+              result.version === pending.targetVersion &&
+              result.launcherProtocol === SERVICE_LAUNCHER_PROTOCOL &&
+              typeof result.needsDatabaseBackup === "boolean"
+              ? result.needsDatabaseBackup
+              : undefined,
+          );
+        } catch {
+          resolve(undefined);
+        }
+      },
+    );
+  });
 }
 
 const restoreMarkerPath = (baseDir: string, updateId: string) =>
@@ -398,10 +436,12 @@ export class Launcher {
     await this.#startTrial(update);
   }
 
-  async #startTrial(pending: PendingServiceUpdate): Promise<void> {
+  async #startTrial(pending: PendingServiceUpdate, needsBackup?: boolean): Promise<void> {
     // The previous child is dead here, so all three SQLite files are quiescent.
     try {
-      await backupDatabaseOnce(this.#baseDir, pending);
+      if ((needsBackup ?? (await targetNeedsDatabaseBackup(this.#baseDir, pending))) !== false) {
+        await backupDatabaseOnce(this.#baseDir, pending);
+      }
     } catch {
       await this.#returnToPrevious(pending, "failed", "db-backup-failed");
       return;
@@ -530,9 +570,41 @@ export class Launcher {
       return;
     }
     this.#timer = undefined;
+    // Old targets without the preflight field retain the original stopped-copy
+    // path. New targets copy online while the active child continues serving.
+    const needsBackup = await targetNeedsDatabaseBackup(this.#baseDir, pending);
+    const backupDir = databaseBackupDir(this.#baseDir, pending.id);
+    const stagingDir = `${backupDir}.staging`;
+    let prepared: Awaited<ReturnType<typeof prepareServiceDatabaseBackup>> | undefined;
+    try {
+      if (needsBackup === true && !(await pathExists(backupDir))) {
+        prepared = await prepareServiceDatabaseBackup(pending.dbPath, stagingDir);
+      }
+    } catch {
+      // A failed online copy must not turn into a long outage.
+      const failed = terminalUpdate({ pending, status: "failed", reason: "db-backup-failed" });
+      this.#state = { ...this.#state, update: failed };
+      await writeServiceState(this.#statePath, this.#state);
+      return;
+    }
     this.#child = null;
-    await terminateChild(child.process);
-    await this.#startTrial(pending);
+    try {
+      await terminateChild(child.process);
+      if (prepared !== undefined) {
+        await prepared.finish();
+        await syncDirectory(stagingDir);
+        await NodeFSP.rename(stagingDir, backupDir);
+        await syncDirectory(NodePath.dirname(backupDir));
+      }
+    } catch {
+      prepared?.close();
+      prepared = undefined;
+      await this.#returnToPrevious(pending, "failed", "db-backup-failed");
+      return;
+    } finally {
+      prepared?.close();
+    }
+    await this.#startTrial(pending, needsBackup);
   }
 
   async #handlePrepared(child: ManagedChild, updateId: string): Promise<void> {

@@ -129,13 +129,16 @@ export const make = Effect.gen(function* () {
     threadId === null
       ? orchestrator.getShellSnapshot({
           location: "active",
+          compactPullRequests: true,
           unsettledOnly: !(backfill || pendingBackfill.size > 0),
         })
       : Effect.gen(function* () {
           // Read the sequence first. The thread is then at least this new, so a
           // sync guarded by the sequence is rejected rather than missing a change.
           const snapshotSequence = yield* orchestrator.getThreadEventSequence(threadId);
-          const thread = yield* orchestrator.getThreadShell(threadId);
+          const thread = yield* orchestrator.getThreadShell(threadId, {
+            compactPullRequests: true,
+          });
           return { snapshotSequence, threads: thread === null ? [] : [thread] };
         });
 

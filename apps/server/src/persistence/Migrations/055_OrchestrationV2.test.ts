@@ -28,7 +28,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 61 }, (_, index) => index + 1),
+        Array.from({ length: 62 }, (_, index) => index + 1),
       );
     }),
   );
@@ -48,6 +48,7 @@ layer("055_OrchestrationV2", (it) => {
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
         [61, "ProjectionThreadSweepIndexes"],
+        [62, "ProjectionThreadReadPayload"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -75,6 +76,7 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 59, name: "McpAppModelContext" },
         { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
         { migration_id: 61, name: "ProjectionThreadSweepIndexes" },
+        { migration_id: 62, name: "ProjectionThreadReadPayload" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -171,7 +173,7 @@ layer("055_OrchestrationV2", (it) => {
           '2026-07-24T00:00:00.000Z', ${payload}
         )
       `;
-      yield* runMigrations();
+      yield* runMigrations({ toMigrationInclusive: 61 });
       const sweep = sql<{ readonly thread_id: string; readonly pull_requests: number }>`
         SELECT thread_id, json_array_length(payload_json, '$.pullRequests') AS pull_requests
         FROM orchestration_v2_projection_threads
@@ -210,7 +212,9 @@ layer("055_OrchestrationV2", (it) => {
         ON orchestration_v2_projection_threads(updated_at, thread_id)
         WHERE deleted_at IS NULL AND archived_at IS NULL
       `;
-      assert.deepStrictEqual(yield* runMigrations(), [[61, "ProjectionThreadSweepIndexes"]]);
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 61 }), [
+        [61, "ProjectionThreadSweepIndexes"],
+      ]);
       const [index] = yield* sql<{ readonly sql: string }>`
         SELECT sql FROM sqlite_master WHERE name = 'orchestration_v2_projection_threads_active_idx'
       `;
@@ -229,7 +233,8 @@ layer("055_OrchestrationV2", (it) => {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 60 });
       yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (61, 'PeerLinks')`;
-      assert.deepStrictEqual(yield* runMigrations(), []);
+      // Ids above the preview's latest still run.
+      assert.deepStrictEqual(yield* runMigrations(), [[62, "ProjectionThreadReadPayload"]]);
       assert.deepStrictEqual(skippedWarnings, [["61_ProjectionThreadSweepIndexes"]]);
       assert.deepStrictEqual(
         yield* sql`

@@ -75,6 +75,7 @@ import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
 import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_ProjectionThreadSweepIndexes.ts";
+import Migration0062 from "./Migrations/062_ProjectionThreadReadPayload.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -152,6 +153,7 @@ export const migrationEntries = [
   // Published previews ran PeerLinks as 61, so their databases skip this one (runMigrations
   // warns). They only lose the sweep index: no query names it with INDEXED BY.
   [61, "ProjectionThreadSweepIndexes", Migration0061],
+  [62, "ProjectionThreadReadPayload", Migration0062],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

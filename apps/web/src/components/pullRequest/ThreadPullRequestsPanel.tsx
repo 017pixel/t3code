@@ -18,7 +18,12 @@ import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { findProjectForChangeRequest, useOpenPrLink } from "~/lib/openPullRequestLink";
 import { cn } from "~/lib/utils";
 import { useShortcutModifierState } from "~/shortcutModifierState";
-import { useProjects, useServerConfigs, useThreadShell } from "~/state/entities";
+import {
+  useProjects,
+  useServerConfigs,
+  useThreadProjection,
+  useThreadShell,
+} from "~/state/entities";
 import { PullRequestsUnavailableState } from "./PullRequestsUnavailableState";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -328,7 +333,9 @@ export function ThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
 }
 
 function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThreadRef }) {
-  const thread = useThreadShell(threadRef);
+  const shell = useThreadShell(threadRef);
+  const detail = useThreadProjection(threadRef);
+  const thread = detail?.projection.thread ?? shell;
   const projects = useProjects();
   const environmentProjects = useMemo(
     () =>
