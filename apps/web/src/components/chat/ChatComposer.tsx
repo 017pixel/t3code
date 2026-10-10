@@ -7489,6 +7489,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           : prompt
                     }
                     cursor={composerCursor}
+                    historyScope={`${routeThreadRef.environmentId}:${routeThreadRef.threadId}`}
                     contextRecords={composerContextRecords}
                     buildContextClipboardFragment={buildContextClipboardFragment}
                     importContextFragment={importContextFragment}

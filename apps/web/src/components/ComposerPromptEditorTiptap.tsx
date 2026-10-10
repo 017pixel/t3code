@@ -4,13 +4,7 @@ import { ReactNodeViewRenderer, NodeViewWrapper, type NodeViewProps } from "@tip
 import StarterKit from "@tiptap/starter-kit";
 import { type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { newlineInCode, splitBlockKeepMarks } from "@tiptap/pm/commands";
-import {
-  type EditorState,
-  NodeSelection,
-  Plugin,
-  PluginKey,
-  TextSelection,
-} from "@tiptap/pm/state";
+import { EditorState, NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import type { NodeType, ResolvedPos } from "@tiptap/pm/model";
 import type {
@@ -135,6 +129,11 @@ export interface ComposerPromptEditorHandle {
 export interface ComposerPromptEditorProps {
   value: string;
   cursor: number;
+  /**
+   * The thread the prompt belongs to. A kept chat view that switches threads
+   * keeps its editor, and a new scope starts a new undo history.
+   */
+  historyScope?: string;
   /**
    * Render Markdown styling (bold, italic, code, strike, task checkboxes).
    * Off renders the same Tiptap engine as plain text: every marker stays a
@@ -810,6 +809,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
   const {
     value,
     cursor,
+    historyScope,
     richTextEnabled,
     literalText = false,
     contextRecords,
@@ -1586,6 +1586,16 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     skillLabelFor,
     value,
   ]);
+
+  // Runs after the effect above has loaded the new thread's prompt, so undo
+  // cannot bring back the previous thread's prompt.
+  const historyScopeRef = useRef(historyScope);
+  useLayoutEffect(() => {
+    if (!editor || historyScopeRef.current === historyScope) return;
+    historyScopeRef.current = historyScope;
+    const { doc, selection, plugins } = editor.state;
+    editor.view.updateState(EditorState.create({ doc, selection, plugins }));
+  }, [editor, historyScope]);
 
   const focusAt = useCallback(
     (nextCursor: number) => {
