@@ -21,12 +21,21 @@ if (
   })
 ) {
   const command = process.argv[2];
-  // The spawn host loads only Node builtins and has no --base-dir to place a cache under.
-  if (!(process.argv.length === 3 && command === "--version") && command !== "__spawn-host") {
+  // The server starts these helpers without its --base-dir, so they would cache under
+  // ~/.t3 for a server with another home; `browser setup` runs under sudo, which could
+  // leave a root-owned cache there.
+  const uncached =
+    command === "__spawn-host" ||
+    command === "__claude-history" ||
+    command === "acp-mcp-bridge" ||
+    command === "acp-mcp-call" ||
+    command === "browser";
+  if (!(process.argv.length === 3 && command === "--version") && !uncached) {
     enableCliCompileCache({
       bundled: NodeSea.isSea() || import.meta.url.endsWith(".mjs"),
       argv: process.argv.slice(2),
       environment: process.env,
+      version: packageJson.version,
     });
   }
   if (process.argv.length === 3 && command === "--version") {

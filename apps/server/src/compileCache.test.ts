@@ -52,9 +52,14 @@ process.kill(process.pid, "SIGKILL");`,
   },
 );
 
-it.each([false, true])(
-  "selects the CLI cache under the explicit T3 home (disabled: %s)",
-  async (disabled) => {
+it.each([
+  { disabledBy: undefined },
+  { disabledBy: "NODE_DISABLE_COMPILE_CACHE" },
+  { disabledBy: "APPIMAGE" },
+] as const)(
+  "selects the CLI cache under the explicit T3 home (disabled by: $disabledBy)",
+  async ({ disabledBy }) => {
+    const disabled = disabledBy !== undefined;
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cli-cache-"));
     try {
       const child = NodeChildProcess.spawnSync(
@@ -64,7 +69,7 @@ it.each([false, true])(
           "--eval",
           `
 const { enableCliCompileCache } = await import(${JSON.stringify(new URL("./cliCompileCache.ts", import.meta.url).href)});
-enableCliCompileCache({ bundled: true, argv: ["serve", "--base-dir", ${JSON.stringify(directory)}], environment: process.env });
+enableCliCompileCache({ bundled: true, argv: ["serve", "--base-dir", ${JSON.stringify(directory)}], environment: process.env, version: "1.2.3" });
 await import(${JSON.stringify(import.meta.resolve("effect/Effect"))});
 const { flushCompileCache } = await import(${JSON.stringify(new URL("./compileCache.ts", import.meta.url).href)});
 const Effect = await import(${JSON.stringify(import.meta.resolve("effect/Effect"))});
@@ -76,20 +81,23 @@ process.kill(process.pid, "SIGKILL");`,
           env: {
             ...process.env,
             NODE_COMPILE_CACHE: undefined,
-            NODE_DISABLE_COMPILE_CACHE: disabled ? "1" : undefined,
+            NODE_DISABLE_COMPILE_CACHE:
+              disabledBy === "NODE_DISABLE_COMPILE_CACHE" ? "1" : undefined,
+            APPIMAGE: disabledBy === "APPIMAGE" ? "/opt/T3-Code.AppImage" : undefined,
           },
         },
       );
       assert.equal(child.error, undefined);
       assert.equal(child.stderr, "");
-      const entries = await NodeFSP.readdir(NodePath.join(directory, "compile-cache"), {
+      const cacheDirectory = NodePath.join(directory, "compile-cache", "1.2.3");
+      const entries = await NodeFSP.readdir(cacheDirectory, {
         recursive: true,
       }).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return [];
         throw error;
       });
       const files = await Promise.all(
-        entries.map((entry) => NodeFSP.stat(NodePath.join(directory, "compile-cache", entry))),
+        entries.map((entry) => NodeFSP.stat(NodePath.join(cacheDirectory, entry))),
       );
       assert.equal(
         files.some((entry) => entry.isFile()),
@@ -100,6 +108,38 @@ process.kill(process.pid, "SIGKILL");`,
     }
   },
 );
+
+it("keeps only the running version's CLI cache directory", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cli-cache-"));
+  try {
+    const root = NodePath.join(directory, "compile-cache");
+    await NodeFSP.mkdir(NodePath.join(root, "1.2.2", "node"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(root, "1.2.2", "node", "entry"), "stale");
+    const child = NodeChildProcess.spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+const { enableCliCompileCache } = await import(${JSON.stringify(new URL("./cliCompileCache.ts", import.meta.url).href)});
+enableCliCompileCache({ bundled: true, argv: ["serve", "--base-dir", ${JSON.stringify(directory)}], environment: process.env, version: "1.2.3" });`,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          NODE_COMPILE_CACHE: undefined,
+          NODE_DISABLE_COMPILE_CACHE: undefined,
+        },
+      },
+    );
+    assert.equal(child.error, undefined);
+    assert.equal(child.stderr, "");
+    assert.deepEqual(await NodeFSP.readdir(root), ["1.2.3"]);
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+});
 
 it("preserves the version output through the thin CLI entry", async () => {
   const packageJson = JSON.parse(
