@@ -514,7 +514,9 @@ export function KeptChatSurface() {
     ? targetKey.slice("server:".length)
     : null;
   const reveal = targetThreadKey !== null && keptThreadKeys.has(targetThreadKey);
-  const shownKey = reveal ? deferredTargetKey : targetKey;
+  // Coming back from a full page there is no thread on screen to keep
+  // showing, so the kept one is revealed with the click.
+  const shownKey = reveal && deferredTargetKey !== null ? deferredTargetKey : targetKey;
   // Start loading the thread with the click, ahead of its view.
   useEffect(() => {
     const urgentTarget = threadRouteTargetFromKey(targetKey);
