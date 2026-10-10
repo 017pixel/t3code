@@ -46,14 +46,15 @@ const KeptChatView = memo(ChatView);
  * `/$environmentId/$threadId`. Each draft gets its own ChatView instance (so
  * a background send's state stays with the draft it came from), and that
  * instance carries the draft through its promotion to a server thread: the
- * thread route keeps keying by the draft id while the draft record exists,
- * so the route swap only changes props and the timeline never paints an
- * empty frame.
+ * thread route reuses the view that already shows the thread, under the
+ * draft's key, so the route swap only changes props and the timeline never
+ * paints an empty frame.
  *
  * The last few server threads stay rendered inside hidden `<Activity>`
  * boundaries, so a revisit only reveals the view it already painted. Hidden
  * views keep their DOM and state; React disconnects their effects and store
- * subscriptions until they are shown again.
+ * subscriptions until they are shown again. A draft's view is dropped once
+ * another view is shown, as before.
  *
  * Rendered by KeptChatSurface rather than by the two leaf routes, since an
  * element only survives a route swap when the same parent renders it.
@@ -236,6 +237,17 @@ export const ThreadRouteView = memo(function ThreadRouteView({
             ? view.threadKey === activeView.threadKey
             : view.key === activeView.key,
         )?.key ?? null);
+  // A hidden view keeps its DOM, so its media would keep playing. Pause it
+  // whenever the shown view changes or the whole chat is hidden, as leaving a
+  // thread used to.
+  useLayoutEffect(() => {
+    const inset = insetRef.current;
+    return () => {
+      for (const media of inset?.querySelectorAll<HTMLMediaElement>("video, audio") ?? []) {
+        if (!media.paused) media.pause();
+      }
+    };
+  }, [activeViewKey]);
 
   return (
     <SidebarInset

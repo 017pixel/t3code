@@ -1993,20 +1993,36 @@ function PullRequestsRouteView() {
     );
   };
   // Everything a visible row reads; a change re-renders the rows the list has mounted.
-  const listExtraData = [
-    capableEnvironments.length,
-    environmentLabels,
-    typedParsed.text,
-    selected,
-    selectEntry,
-    speedMode,
-    onSpeedAction,
-    closingKeys,
-    closeSweepKeys,
-    showProvider,
-    registerStatsRow,
-    startCloseSweep,
-  ];
+  const listExtraData = useMemo(
+    () => [
+      capableEnvironments.length,
+      environmentLabels,
+      typedParsed.text,
+      selected,
+      selectEntry,
+      speedMode,
+      onSpeedAction,
+      closingKeys,
+      closeSweepKeys,
+      showProvider,
+      registerStatsRow,
+      startCloseSweep,
+    ],
+    [
+      capableEnvironments.length,
+      environmentLabels,
+      typedParsed.text,
+      selected,
+      selectEntry,
+      speedMode,
+      onSpeedAction,
+      closingKeys,
+      closeSweepKeys,
+      showProvider,
+      registerStatsRow,
+      startCloseSweep,
+    ],
+  );
   const listBody = (
     <>
       {!capabilityKnown ? (

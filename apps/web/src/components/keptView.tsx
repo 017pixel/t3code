@@ -6,7 +6,6 @@ import {
   memo,
   useContext,
   useEffect,
-  useMemo,
   useReducer,
   useRef,
   useState,
@@ -130,10 +129,17 @@ function destroyUnlessMounted(instance: KeptEditorInstance) {
   if (!instance.mounted && !instance.editor.isDestroyed) instance.editor.destroy();
 }
 
-function destroyOnNextTask(instance: KeptEditorInstance) {
-  const timeout = setTimeout(() => destroyUnlessMounted(instance), 1);
+function destroyAfter(instance: KeptEditorInstance, delayMs: number) {
+  const timeout = setTimeout(() => destroyUnlessMounted(instance), delayMs);
   return () => clearTimeout(timeout);
 }
+
+/**
+ * How long an editor made during a render may wait for that render to
+ * commit. Thread views mount in transitions, which can take longer than the
+ * next task; a render React discards frees its editor after this.
+ */
+const UNCOMMITTED_EDITOR_GRACE_MS = 5_000;
 
 /**
  * `useEditor` from @tiptap/react, except that hiding a kept thread view does
@@ -153,8 +159,7 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
       mounted: false,
       cancelDestroy: null,
     };
-    // A render React discards never mounts; free its editor.
-    created.cancelDestroy = destroyOnNextTask(created);
+    created.cancelDestroy = destroyAfter(created, UNCOMMITTED_EDITOR_GRACE_MS);
     return created;
   });
 
@@ -189,7 +194,7 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
       instance.cancelDestroy =
         lifetime !== null && instance.editor.view.dom?.isConnected === true
           ? lifetime.hold(() => destroyUnlessMounted(instance))
-          : destroyOnNextTask(instance);
+          : destroyAfter(instance, 1);
     };
   }, [instance, lifetime]);
 
@@ -209,13 +214,28 @@ class KeptPureEditorContent extends PureEditorContent {
   }
 }
 
+const editorContentKeys = new WeakMap<Editor, string>();
+let nextEditorContentKey = 0;
+
+// Like EditorContent, a new editor instance gets a fresh content component.
+function editorContentKey(editor: Editor | null): string {
+  if (editor === null) return "none";
+  let key = editorContentKeys.get(editor);
+  if (key === undefined) {
+    nextEditorContentKey += 1;
+    key = String(nextEditorContentKey);
+    editorContentKeys.set(editor, key);
+  }
+  return key;
+}
+
 /** `EditorContent` from @tiptap/react for editors made by `useKeptEditor`. */
 export const KeptEditorContent = memo(
   forwardRef<HTMLDivElement, Omit<EditorContentProps, "ref" | "innerRef">>(
     function KeptEditorContent(props, ref) {
-      // Like EditorContent, a new editor instance gets a fresh content component.
-      const key = useMemo(() => Math.floor(Math.random() * 0xffffffff).toString(), [props.editor]);
-      return <KeptPureEditorContent key={key} innerRef={ref} {...props} />;
+      return (
+        <KeptPureEditorContent key={editorContentKey(props.editor)} innerRef={ref} {...props} />
+      );
     },
   ),
 );
