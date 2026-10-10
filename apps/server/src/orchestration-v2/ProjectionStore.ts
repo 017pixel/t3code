@@ -3524,7 +3524,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           readonly failure_payload_json: string;
           readonly last_error: string | null;
         }>`
-          SELECT t.payload_json, r.run_id, r.completed_at,
+          SELECT summary.compact_payload_json AS payload_json, r.run_id, r.completed_at,
             item.payload_json AS failure_payload_json,
             (
               SELECT json_extract(session.payload_json, '$.lastError')
@@ -3537,6 +3537,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               LIMIT 1
             ) AS last_error
           FROM orchestration_v2_projection_threads t
+          INNER JOIN orchestration_v2_projection_thread_reads summary ON summary.thread_id = t.thread_id
           INNER JOIN orchestration_v2_projection_runs r ON r.run_id = (
             SELECT latest.run_id FROM orchestration_v2_projection_runs latest
             WHERE latest.thread_id = t.thread_id
@@ -3571,19 +3572,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(COALESCE(r.completed_at, t.updated_at))
             AND (
               (
-                json_extract(t.payload_json, '$.limitRecovery.runId') IS r.run_id
-                AND json_extract(t.payload_json, '$.limitRecovery.resetAt') IS json_extract(item.payload_json, '$.failure.resetAt')
-                AND json_extract(t.payload_json, '$.limitRecovery.autoResume') = 1
+                json_extract(summary.compact_payload_json, '$.thread.limitRecovery.runId') IS r.run_id
+                AND json_extract(summary.compact_payload_json, '$.thread.limitRecovery.resetAt') IS json_extract(item.payload_json, '$.failure.resetAt')
+                AND json_extract(summary.compact_payload_json, '$.thread.limitRecovery.autoResume') = 1
                 AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) <= julianday(${DateTime.formatIso(options.now)})
                 AND (
-                  json_extract(t.payload_json, '$.snoozedUntil') IS NULL
-                  OR julianday(json_extract(t.payload_json, '$.snoozedUntil')) <= julianday(${DateTime.formatIso(options.now)})
+                  json_extract(summary.compact_payload_json, '$.thread.snoozedUntil') IS NULL
+                  OR julianday(json_extract(summary.compact_payload_json, '$.thread.snoozedUntil')) <= julianday(${DateTime.formatIso(options.now)})
                 )
               )
               OR (
                 (
-                  json_extract(t.payload_json, '$.limitRecovery.runId') IS NOT r.run_id
-                  OR json_extract(t.payload_json, '$.limitRecovery.resetAt') IS NOT json_extract(item.payload_json, '$.failure.resetAt')
+                  json_extract(summary.compact_payload_json, '$.thread.limitRecovery.runId') IS NOT r.run_id
+                  OR json_extract(summary.compact_payload_json, '$.thread.limitRecovery.resetAt') IS NOT json_extract(item.payload_json, '$.failure.resetAt')
                 )
                 AND (
                   ${booleanInt(options.autoResume)}
@@ -3599,7 +3600,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         `;
         const candidates: Array<ProjectionLimitRecoveryCandidate> = [];
         for (const row of rows) {
-          const thread = yield* decodeThreadPayload(row.payload_json);
+          const thread = yield* decodeThreadReadPayload(row.payload_json);
           if (thread.settledOverride === "settled") continue;
           const item = yield* decodeTurnItemPayload(row.failure_payload_json);
           const summary = threadErrorSummary(
