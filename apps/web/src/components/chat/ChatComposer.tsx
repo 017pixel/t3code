@@ -1131,6 +1131,7 @@ import {
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useDelayedStatus } from "../../hooks/useDelayedStatus";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { useElementState } from "../../hooks/useElementState";
 import { usePanelAnimationSettings } from "../../panelAnimations";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { readEnvironmentScope } from "../../state/session";
@@ -1151,7 +1152,7 @@ const extendReplacementRangeForTrailingSpace = (
 };
 
 function useRestingComposerControlsLayout(host: HTMLDivElement | null, useControlsAsHost = false) {
-  const [controls, setControls] = useState<HTMLDivElement | null>(null);
+  const [controls, setControls] = useElementState<HTMLDivElement>();
   const controlsRef = useRef<HTMLDivElement>(null);
   const attachControls = useCallback((element: HTMLDivElement | null) => {
     controlsRef.current = element;
@@ -2452,7 +2453,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [providerInputSubmissionError, setProviderInputSubmissionError] = useState<string | null>(
     null,
   );
-  const [composerMenuAnchor, setComposerMenuAnchor] = useState<HTMLDivElement | null>(null);
+  const [composerMenuAnchor, setComposerMenuAnchor] = useElementState<HTMLDivElement>();
   const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor);
   const hasMultilinePrompt = prompt.includes("\n") || hasWrappedPrompt;
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
@@ -2999,9 +3000,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isComposerOwned: true,
   } satisfies Parameters<typeof renderProviderTraitsPicker>[0];
   const providerTraitsPicker = renderProviderTraitsPicker(providerTraitsPickerInput);
-  const [inlineRestingControlsHost, setInlineRestingControlsHost] = useState<HTMLDivElement | null>(
-    null,
-  );
+  const [inlineRestingControlsHost, setInlineRestingControlsHost] =
+    useElementState<HTMLDivElement>();
   const {
     controlsRef: restingComposerControlsRef,
     attachControls: attachRestingComposerControls,
@@ -5243,7 +5243,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [isComposerResting, onRestingChange]);
   // The resting footer floats over the prompt row, so the row reserves its
   // measured width. Wide actions like the compact-before-send chip vary too much for a fixed inset.
-  const [restingActionsElement, setRestingActionsElement] = useState<HTMLDivElement | null>(null);
+  const [restingActionsElement, setRestingActionsElement] = useElementState<HTMLDivElement>();
   const [restingActionsWidth, setRestingActionsWidth] = useState<number | null>(null);
   useLayoutEffect(() => {
     if (!isComposerResting || !restingActionsElement) return;

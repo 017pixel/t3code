@@ -1,9 +1,19 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "@tanstack/react-router";
+import {
+  Activity,
+  memo,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import ChatView from "./ChatView";
+import { createKeptViewLifetime, KeptViewLifetimeContext } from "./keptView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
 import { waitForDraftHeroTransition } from "./chat/draftHeroTransition";
 import { SidebarInset } from "./ui/sidebar";
@@ -19,9 +29,17 @@ import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import {
   buildThreadRouteParams,
+  resolveKeptThreadViews,
   resolveThreadRouteRenderState,
+  resolveThreadRouteTarget,
+  threadRouteTargetFromKey,
+  threadRouteTargetKey,
+  type KeptThreadView,
   type ThreadRouteTarget,
 } from "../threadRoutes";
+
+// Kept views re-render only when their own thread or route kind changes.
+const KeptChatView = memo(ChatView);
 
 /**
  * The single chat surface behind both `/draft/$draftId` and
@@ -30,13 +48,21 @@ import {
  * instance carries the draft through its promotion to a server thread: the
  * thread route keeps keying by the draft id while the draft record exists,
  * so the route swap only changes props and the timeline never paints an
- * empty frame. Plain server threads are unkeyed, so navigating between them
- * reuses one instance as ChatView expects.
+ * empty frame.
  *
- * Rendered by the `_chat` layout rather than by the two leaf routes, since
- * an element only survives a route swap when the same parent renders it.
+ * The last few server threads stay rendered inside hidden `<Activity>`
+ * boundaries, so a revisit only reveals the view it already painted. Hidden
+ * views keep their DOM and state; React disconnects their effects and store
+ * subscriptions until they are shown again.
+ *
+ * Rendered by KeptChatSurface rather than by the two leaf routes, since an
+ * element only survives a route swap when the same parent renders it.
  */
-export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
+export const ThreadRouteView = memo(function ThreadRouteView({
+  target,
+}: {
+  target: ThreadRouteTarget;
+}) {
   const navigate = useNavigate();
   const draftId = target.kind === "draft" ? target.draftId : null;
   const draftSession = useComposerDraftStore((store) =>
@@ -76,25 +102,6 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   const draftThread = useComposerDraftStore((store) =>
     serverThreadRef ? store.getDraftThreadByRef(serverThreadRef) : null,
   );
-  const promotedDraftId = useComposerDraftStore((store) =>
-    target.kind === "server" ? store.getDraftIdByRef(target.threadRef) : null,
-  );
-  // The draft record is removed once the promoted thread has started, which
-  // is after the route swap. Latch the key so the element that carried the
-  // draft keeps its identity for as long as this thread stays on screen.
-  const [chatViewKey, setChatViewKey] = useState<{ threadKey: string; key: string } | null>(null);
-  const serverThreadKey = target.kind === "server" ? scopedThreadKey(target.threadRef) : null;
-  const nextChatViewKey =
-    serverThreadKey === null
-      ? null
-      : chatViewKey?.threadKey === serverThreadKey
-        ? chatViewKey
-        : promotedDraftId
-          ? { threadKey: serverThreadKey, key: promotedDraftId }
-          : null;
-  if (nextChatViewKey !== chatViewKey) {
-    setChatViewKey(nextChatViewKey);
-  }
   const environmentHasDraftThreads = useComposerDraftStore((store) =>
     serverThreadRef ? store.hasDraftThreadsInEnvironment(serverThreadRef.environmentId) : false,
   );
@@ -164,34 +171,119 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
     finalizePromotedDraftThreadByRef(target.threadRef);
   }, [draftThread, serverThreadStarted, target]);
 
-  let view: React.ReactNode = null;
+  let activeView: Omit<KeptThreadView, "visit"> | null = null;
   if (target.kind === "draft") {
     if (draftSession) {
-      view = (
-        <ChatView
-          key={target.draftId}
-          draftId={target.draftId}
-          environmentId={draftSession.environmentId}
-          threadId={draftSession.threadId}
-          routeKind="draft"
-          forceExpandedMobileComposer
-        />
-      );
+      activeView = {
+        key: target.draftId,
+        threadKey: scopedThreadKey(draftSession),
+        environmentId: draftSession.environmentId,
+        threadId: draftSession.threadId,
+        draftId: target.draftId,
+      };
     }
   } else if (renderState === "ready" || (renderState === "loading" && serverThreadShell !== null)) {
-    view = (
-      <ChatView
-        key={nextChatViewKey?.key}
-        environmentId={target.threadRef.environmentId}
-        threadId={target.threadRef.threadId}
-        routeKind="server"
-      />
-    );
+    activeView = {
+      key: scopedThreadKey(target.threadRef),
+      threadKey: scopedThreadKey(target.threadRef),
+      environmentId: target.threadRef.environmentId,
+      threadId: target.threadRef.threadId,
+      draftId: null,
+    };
   }
+  const [keptViews, setKeptViews] = useState<ReadonlyArray<KeptThreadView>>([]);
+  const nextKeptViews = resolveKeptThreadViews(keptViews, activeView);
+  if (nextKeptViews !== keptViews) {
+    setKeptViews(nextKeptViews);
+  }
+  // One lifetime per kept view, released once the view is gone for good.
+  const lifetimesRef = useRef(new Map<string, ReturnType<typeof createKeptViewLifetime>>());
+  const pendingUnmountDisposeRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lifetimeFor = (key: string) => {
+    let lifetime = lifetimesRef.current.get(key);
+    if (lifetime === undefined) {
+      lifetime = createKeptViewLifetime();
+      lifetimesRef.current.set(key, lifetime);
+    }
+    return lifetime;
+  };
+  useLayoutEffect(() => {
+    const keys = new Set(keptViews.map((view) => view.key));
+    for (const [key, lifetime] of lifetimesRef.current) {
+      if (keys.has(key)) continue;
+      lifetimesRef.current.delete(key);
+      lifetime.dispose();
+    }
+  }, [keptViews]);
+  useEffect(() => {
+    const lifetimes = lifetimesRef.current;
+    if (pendingUnmountDisposeRef.current !== null) clearTimeout(pendingUnmountDisposeRef.current);
+    return () => {
+      // A task later, so StrictMode's simulated remount can cancel it.
+      pendingUnmountDisposeRef.current = setTimeout(() => {
+        for (const lifetime of lifetimes.values()) lifetime.dispose();
+        lifetimes.clear();
+      }, 0);
+    };
+  }, []);
+  const activeViewKey =
+    activeView === null
+      ? null
+      : (nextKeptViews.find((view) =>
+          activeView.draftId === null
+            ? view.threadKey === activeView.threadKey
+            : view.key === activeView.key,
+        )?.key ?? null);
 
   return (
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh">
-      {view}
+      {nextKeptViews.map((view) => (
+        <Activity key={view.key} mode={view.key === activeViewKey ? "visible" : "hidden"}>
+          <KeptViewLifetimeContext value={lifetimeFor(view.key)}>
+            {view.draftId === null ? (
+              <KeptChatView
+                environmentId={view.environmentId}
+                threadId={view.threadId}
+                routeKind="server"
+              />
+            ) : (
+              <KeptChatView
+                draftId={view.draftId}
+                environmentId={view.environmentId}
+                threadId={view.threadId}
+                routeKind="draft"
+                forceExpandedMobileComposer
+              />
+            )}
+          </KeptViewLifetimeContext>
+        </Activity>
+      ))}
     </SidebarInset>
+  );
+});
+
+/**
+ * Hosts the thread view above the route outlet. A full page (settings, pull
+ * requests) hides the chat rather than unmounting it, so returning to a
+ * thread only reveals it.
+ */
+export function KeptChatSurface() {
+  const targetKey = useParams({
+    strict: false,
+    select: (params) => threadRouteTargetKey(resolveThreadRouteTarget(params)),
+  });
+  // The URL and sidebar selection commit with the click; the thread view
+  // swap follows in a transition, so opening a thread never holds that frame.
+  const deferredTargetKey = useDeferredValue(targetKey);
+  const [shownTargetKey, setShownTargetKey] = useState(deferredTargetKey);
+  if (deferredTargetKey !== null && deferredTargetKey !== shownTargetKey) {
+    setShownTargetKey(deferredTargetKey);
+  }
+  const target = useMemo(() => threadRouteTargetFromKey(shownTargetKey), [shownTargetKey]);
+  if (target === null) return null;
+  return (
+    <Activity mode={targetKey !== null && deferredTargetKey !== null ? "visible" : "hidden"}>
+      <ThreadRouteView target={target} />
+    </Activity>
   );
 }

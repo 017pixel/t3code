@@ -38,7 +38,8 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { EditorContent, useEditor } from "@tiptap/react";
+import type { Editor } from "@tiptap/core";
+import { KeptEditorContent, useKeptEditor } from "./keptView";
 
 import {
   clampCollapsedComposerCursor,
@@ -772,7 +773,7 @@ const ComposerMarkersExtension = Extension.create({
 // unit tests can round-trip it without a browser.
 // ── Editor component ───────────────────────────────────────────────────────
 
-type TiptapEditor = NonNullable<ReturnType<typeof useEditor>>;
+type TiptapEditor = Editor;
 
 export function ComposerPromptEditorTiptap(props: ComposerPromptEditorProps) {
   // Extensions are creation-time, so changing text mode remounts the editor.
@@ -1022,7 +1023,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     [activeSuggestionId, ariaLabel, className, disabled, placeholder, richText, suggestionListId],
   );
 
-  const editor = useEditor(
+  const editor = useKeptEditor(
     {
       extensions: [
         StarterKit.configure({
@@ -1745,7 +1746,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
               containerClassName,
             )}
           >
-            <EditorContent
+            <KeptEditorContent
               editor={editor}
               onKeyDown={(event) => {
                 if (

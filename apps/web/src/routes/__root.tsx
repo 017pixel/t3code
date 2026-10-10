@@ -17,6 +17,7 @@ import { lazy, Suspense, useEffect, useEffectEvent, useMemo, useRef, useState } 
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
+import { ChatSurfaceSlot } from "../components/chatSurfaceSlot";
 import { CommandPaletteHost } from "../components/CommandPaletteHost";
 import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
@@ -238,6 +239,7 @@ function RootRouteView() {
   const appShell = (
     <CommandPaletteHost>
       <AppSidebarLayout>
+        <ChatSurfaceSlot />
         <Outlet />
       </AppSidebarLayout>
     </CommandPaletteHost>

@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
+  Activity,
   lazy,
   Suspense,
   useEffect,
@@ -236,7 +237,7 @@ function NavigationHistoryShortcuts() {
   return null;
 }
 
-// Settings swaps the thread sidebar out of the tree. Keep the lightweight
+// Settings hides the thread sidebar, which drops its subscriptions. Keep the lightweight
 // project projection subscribed so returning to a draft never renders the
 // zero-project state while the environment snapshot reconnects.
 function ProjectProjectionRetention() {
@@ -358,13 +359,17 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
                 <SettingsSidebarNav pathname={pathname} />
               </Suspense>
             </>
-          ) : legacySidebarEnabled ? (
-            <Suspense fallback={<SidebarChromeShell />}>
-              <LegacyThreadSidebar />
-            </Suspense>
-          ) : (
-            <ThreadSidebar />
-          )}
+          ) : null}
+          {/* Hidden rather than unmounted on settings, so going back only reveals it. */}
+          <Activity mode={isOnSettings ? "hidden" : "visible"}>
+            {legacySidebarEnabled ? (
+              <Suspense fallback={<SidebarChromeShell />}>
+                <LegacyThreadSidebar />
+              </Suspense>
+            ) : (
+              <ThreadSidebar />
+            )}
+          </Activity>
           <SidebarRail onDoubleClick={resetSidebarWidth} />
         </Sidebar>
         {children}

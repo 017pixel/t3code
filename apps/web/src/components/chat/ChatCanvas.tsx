@@ -7,6 +7,8 @@ import {
   type ComponentProps,
   type CSSProperties,
 } from "react";
+import { flushSync } from "react-dom";
+import { useElementState } from "../../hooks/useElementState";
 import { ChatCanvasContext } from "./ChatCanvasContext";
 import { resolveChatCanvasLayout, type ChatCanvasPreview } from "./chatCanvasLayout";
 import type { PreviewMiniPlayerObstacles } from "../preview/previewMiniPlayerLayout";
@@ -27,7 +29,7 @@ export function ChatCanvas({
 }) {
   const elementRef = useRef<HTMLDivElement | null>(null);
   const widthProbeRef = useRef<HTMLDivElement | null>(null);
-  const [timelineElement, registerTimeline] = useState<HTMLElement | null>(null);
+  const [timelineElement, registerTimeline] = useElementState<HTMLElement>();
   const [preview, setPreview] = useState<ChatCanvasPreview | null>(null);
   const [detailsCard, setDetailsCard] = useState<PreviewMiniPlayerObstacles["detailsCard"]>(null);
   const reportDetailsCard = useCallback((next: PreviewMiniPlayerObstacles["detailsCard"]) => {

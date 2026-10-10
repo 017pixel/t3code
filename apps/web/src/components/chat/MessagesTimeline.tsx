@@ -265,6 +265,8 @@ import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useClientSettings } from "~/hooks/useSettings";
 import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
+import { useElementState } from "~/hooks/useElementState";
+import { useDelayedStatus } from "~/hooks/useDelayedStatus";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
@@ -529,6 +531,8 @@ interface MessagesTimelineProps {
   findOpen?: boolean;
   cancelPositionRestoreRef?: React.RefObject<(() => void) | null> | undefined;
   hideEmptyPlaceholder?: boolean;
+  /** The thread's messages are still loading; the empty pane shows a spinner once that lasts. */
+  loading?: boolean;
   topFadeEnabled?: boolean;
   historyControls?: MessagesTimelineHistoryControls | undefined;
   /** Non-null when older turns exist beyond the loaded window. */
@@ -625,11 +629,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
   onManualNavigation,
   cancelPositionRestoreRef,
   hideEmptyPlaceholder = false,
+  loading = false,
   topFadeEnabled = false,
   historyControls,
   loadEarlier = null,
 }: MessagesTimelineProps) {
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
+  const shownLoading = useDelayedStatus(routeThreadKey, loading ? true : null);
   const rememberedPosition = useMemo(
     () => readTimelinePosition(listIdentityKey),
     [listIdentityKey],
@@ -1045,9 +1051,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     rows,
   ]);
 
-  const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
-    null,
-  );
+  const [timelineViewportElement, setTimelineViewportElement] = useElementState<HTMLDivElement>();
   // Re-measure the minimap gutter when the chat column changes width without a viewport resize.
   const chatWidth = useClientSettings((settings) => settings.chatWidth);
   const {
@@ -1556,7 +1560,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
     if (hideEmptyPlaceholder) {
       // Occupy the pane with the theme surface so a thread switch cannot
       // punch a hole through to the window chrome (white in light mode).
-      return <div className="h-full min-h-0 bg-background" data-timeline-loading="true" />;
+      return (
+        <div
+          className="flex h-full min-h-0 items-center justify-center bg-background"
+          data-timeline-loading="true"
+        >
+          {shownLoading ? <Spinner size="md" tone="muted" aria-label="Loading messages" /> : null}
+        </div>
+      );
     }
     return (
       <div className="flex h-full items-center justify-center">
