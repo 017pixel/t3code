@@ -37,7 +37,6 @@ import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { flushSync } from "react-dom";
 import { environmentSession } from "../state/session";
 import { isBootHeld, releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
@@ -108,8 +107,11 @@ function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
       if (mounted) return;
       mounted = true;
       stopWaiting();
+      // The screen switches to live data in this task and the chat view
+      // renders in the next, so neither waits on the other's long task, and
+      // its effects run after it paints.
       release();
-      flushSync(() => setReady(true));
+      setTimeout(() => setReady(true), 0);
     };
     const renderFromSnapshot = () => {
       if (mounted) return;

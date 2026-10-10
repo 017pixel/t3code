@@ -223,11 +223,7 @@ function parseDocument(raw: string): BootSnapshot | null {
 let loaded = false;
 let bootSnapshot: BootSnapshot | null = null;
 
-/**
- * The snapshot this page booted with, read once. Null when there is none, it
- * came from another build, or it was discarded.
- */
-export function readBootSnapshot(): BootSnapshot | null {
+function loadStoredBootSnapshot(): BootSnapshot | null {
   if (loaded) return bootSnapshot;
   loaded = true;
   try {
@@ -237,6 +233,42 @@ export function readBootSnapshot(): BootSnapshot | null {
     bootSnapshot = null;
   }
   return bootSnapshot;
+}
+
+/**
+ * Whether this page paints from the snapshot: a reload, which renders long
+ * before the session and the cache could answer, or a desktop window, whose
+ * backend may still be starting. A new browser tab loads the app graph for
+ * long enough that the cache and the session are ready when it renders, so it
+ * starts as it always has.
+ */
+function bootPaintApplies(): boolean {
+  if (typeof window === "undefined") return false;
+  if (window.desktopBridge !== undefined) return true;
+  try {
+    const navigation = performance.getEntriesByType("navigation")[0] as
+      | PerformanceNavigationTiming
+      | undefined;
+    return navigation?.type === "reload";
+  } catch {
+    return false;
+  }
+}
+
+let paintChecked = false;
+let paintApplies = false;
+
+/**
+ * The snapshot this page paints its first screen from, read once. Null when
+ * this boot does not paint from a snapshot, there is none, it came from
+ * another build, or it was discarded.
+ */
+export function readBootSnapshot(): BootSnapshot | null {
+  if (!paintChecked) {
+    paintChecked = true;
+    paintApplies = bootPaintApplies();
+  }
+  return paintApplies ? loadStoredBootSnapshot() : null;
 }
 
 // ── Writing ────────────────────────────────────────────────────────────────
@@ -255,7 +287,7 @@ let discarded = false;
 function seedFromBootSnapshot() {
   if (seeded) return;
   seeded = true;
-  const initial = readBootSnapshot();
+  const initial = loadStoredBootSnapshot();
   if (initial === null) return;
   catalog ??= initial.catalog;
   for (const [environmentId, snapshot] of initial.shells) {
@@ -379,8 +411,17 @@ function scheduleFlush() {
     });
   }
   // Shell saves are already throttled to one per 10 s; this only batches the
-  // shell, config and catalog that change together.
-  if (flushTimer === null) flushTimer = setTimeout(flush, 1_500);
+  // shell, config and catalog that change together, then waits for an idle
+  // moment so the write never lands in the middle of startup work.
+  if (flushTimer === null) {
+    flushTimer = setTimeout(() => {
+      if (typeof requestIdleCallback === "function") {
+        requestIdleCallback(flush, { timeout: 5_000 });
+      } else {
+        flush();
+      }
+    }, 1_500);
+  }
 }
 
 /** Called after the environment shell cache saved this snapshot. */
@@ -425,6 +466,8 @@ export function discardBootSnapshot(): void {
   discarded = true;
   bootSnapshot = null;
   loaded = true;
+  paintChecked = true;
+  paintApplies = false;
   if (flushTimer !== null) clearTimeout(flushTimer);
   flushTimer = null;
   try {
