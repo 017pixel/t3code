@@ -1075,15 +1075,6 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   background-size: var(--surface-grain-size);
 }
 
-/* Suppress all transitions during theme changes */
-.no-transitions,
-.no-transitions *,
-.no-transitions *::before,
-.no-transitions *::after {
-  transition-duration: 0s !important;
-  animation-duration: 0s !important;
-}
-
 :root {
   color-scheme: light;
   --radius: 0.625rem;

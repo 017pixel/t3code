@@ -76,6 +76,7 @@ import { SettingsGroup } from "./SettingsGroup";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { keybindingSearchAnchorId, searchableSetting } from "./settingsSearch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { useProgressiveRowLimit } from "../../hooks/useProgressiveRowLimit";
 import { useAtomCommand } from "../../state/use-atom-command";
 
 function KeybindingPill({ value }: { value: string }) {
@@ -1243,20 +1244,31 @@ interface KeybindingsGroupsProps extends KeybindingRowActions {
 /** One titled section per command area, each holding its binding rows. */
 function KeybindingsGroups(props: KeybindingsGroupsProps) {
   const { groups, anchorIds, savingCommand, ...rowActions } = props;
-  return groups.map((group) => (
-    <SettingsSection key={group.id} id={`keybindings-${group.id}`} title={group.title}>
-      {group.rows.map((row) => (
-        <KeybindingSettingsRow
-          key={row.id}
-          row={row}
-          anchorId={anchorIds.get(row.id)}
-          isSaving={savingCommand === row.command}
-          {...rowActions}
-        />
-      ))}
-    </SettingsSection>
-  ));
+  const rowLimit = useProgressiveRowLimit(INITIAL_KEYBINDING_ROWS);
+  let rowsBefore = 0;
+  return groups.map((group) => {
+    const budget = rowLimit - rowsBefore;
+    rowsBefore += group.rows.length;
+    if (budget <= 0) return null;
+    const rows = group.rows.length > budget ? group.rows.slice(0, budget) : group.rows;
+    return (
+      <SettingsSection key={group.id} id={`keybindings-${group.id}`} title={group.title}>
+        {rows.map((row) => (
+          <KeybindingSettingsRow
+            key={row.id}
+            row={row}
+            anchorId={anchorIds.get(row.id)}
+            isSaving={savingCommand === row.command}
+            {...rowActions}
+          />
+        ))}
+      </SettingsSection>
+    );
+  });
 }
+
+/** Enough rows to fill a tall window; the rest render right after the first paint. */
+const INITIAL_KEYBINDING_ROWS = 24;
 
 /** Shown in the browser build only; the desktop app receives every shortcut. */
 function BrowserKeybindingNotice() {

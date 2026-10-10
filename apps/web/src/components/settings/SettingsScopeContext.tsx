@@ -6,6 +6,10 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { createContext, type ReactNode, useContext, useMemo } from "react";
 
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
+import {
+  applyOptimisticServerSettings,
+  useOptimisticServerSettingsPatches,
+} from "./optimisticServerSettings";
 import { getProjectFileQueryAtom, optimisticFileAtom } from "../files/projectFilesQueryState";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { resolveScopedSettingsTargets, selectScopedSettingsEnvironments } from "./scopedSettings";
@@ -56,7 +60,31 @@ function useMemberProjectFiles(scope: ReturnType<typeof resolveSettingsScope>) {
 
 function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironment: boolean) {
   const groups = useSettingsProjectGroups();
-  const { environments: availableEnvironments } = useEnvironments();
+  const { environments: liveEnvironments } = useEnvironments();
+  // Writes in flight show at once; a failed one falls back to the server's value.
+  const optimisticPatches = useOptimisticServerSettingsPatches();
+  const availableEnvironments = useMemo(
+    () =>
+      optimisticPatches.length === 0
+        ? liveEnvironments
+        : liveEnvironments.map((environment) =>
+            environment.serverConfig === null ||
+            !optimisticPatches.some((entry) => entry.environmentId === environment.environmentId)
+              ? environment
+              : {
+                  ...environment,
+                  serverConfig: {
+                    ...environment.serverConfig,
+                    settings: applyOptimisticServerSettings(
+                      environment.environmentId,
+                      environment.serverConfig.settings,
+                      optimisticPatches,
+                    ),
+                  },
+                },
+          ),
+    [liveEnvironments, optimisticPatches],
+  );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const search = useMemo(
     () =>
