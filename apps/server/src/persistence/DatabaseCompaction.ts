@@ -320,9 +320,12 @@ const compact = Effect.fn("DatabaseCompaction.compact")(
         try {
           comparison.prepare("ATTACH DATABASE ? AS original_replay").run(beforePath);
           comparison.prepare("ATTACH DATABASE ? AS compact_replay").run(afterPath);
+          // Thread reads are derived from thread rows and keep a stale row after another build
+          // rewrites its thread, which a replay never reproduces. The thread rows are compared.
           const tables = comparison
             .prepare(`SELECT name FROM sqlite_schema WHERE type='table'
-        AND name LIKE 'orchestration_v2_projection_%' AND name <> 'orchestration_v2_projection_metadata'`)
+        AND name LIKE 'orchestration_v2_projection_%' AND name <> 'orchestration_v2_projection_metadata'
+        AND name <> 'orchestration_v2_projection_thread_reads'`)
             .all()
             .map((row) => String(row.name));
           tables.push("orchestration_v2_turn_item_positions");
