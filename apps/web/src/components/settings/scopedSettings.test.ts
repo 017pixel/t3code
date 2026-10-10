@@ -23,6 +23,10 @@ import {
   selectScopedSettingsEnvironments,
 } from "./scopedSettings";
 import { resolveSettingsScope } from "./settingsScope";
+import {
+  applyOptimisticServerSettings,
+  type OptimisticServerSettingsPatch,
+} from "./optimisticServerSettings";
 
 function environment(
   id: string,
@@ -642,5 +646,37 @@ describe("partial object patches at project scope", () => {
         },
       },
     });
+  });
+});
+
+describe("applyOptimisticServerSettings", () => {
+  const environmentId = EnvironmentId.make("env-optimistic");
+  const flipped = !DEFAULT_SERVER_SETTINGS.sidebarAutoSettleOnMerge;
+  const pending = (saved: boolean): OptimisticServerSettingsPatch => ({
+    environmentId,
+    patch: { sidebarAutoSettleOnMerge: flipped },
+    base: DEFAULT_SERVER_SETTINGS,
+    saved,
+  });
+
+  it("shows a write in flight on its own environment only", () => {
+    expect(
+      applyOptimisticServerSettings(environmentId, DEFAULT_SERVER_SETTINGS, [pending(false)])
+        .sidebarAutoSettleOnMerge,
+    ).toBe(flipped);
+    expect(
+      applyOptimisticServerSettings(EnvironmentId.make("env-other"), DEFAULT_SERVER_SETTINGS, [
+        pending(false),
+      ]),
+    ).toBe(DEFAULT_SERVER_SETTINGS);
+  });
+
+  it("keeps a saved write until the server's settings replace the ones it was sent against", () => {
+    expect(
+      applyOptimisticServerSettings(environmentId, DEFAULT_SERVER_SETTINGS, [pending(true)])
+        .sidebarAutoSettleOnMerge,
+    ).toBe(flipped);
+    const pushed: ServerSettings = { ...DEFAULT_SERVER_SETTINGS };
+    expect(applyOptimisticServerSettings(environmentId, pushed, [pending(true)])).toBe(pushed);
   });
 });

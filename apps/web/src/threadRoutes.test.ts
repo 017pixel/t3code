@@ -7,9 +7,13 @@ import {
   buildDraftThreadRouteParams,
   buildThreadRouteParams,
   resolveActiveThreadRouteRef,
+  resolveKeptThreadViews,
   resolveThreadRouteRenderState,
   resolveThreadRouteRef,
   resolveThreadRouteTarget,
+  threadRouteTargetFromKey,
+  threadRouteTargetKey,
+  type KeptThreadView,
 } from "./threadRoutes";
 
 describe("threadRoutes", () => {
@@ -152,5 +156,64 @@ describe("threadRoutes", () => {
         draftThreadExists: false,
       }),
     ).toBe("missing");
+  });
+
+  it("round-trips a route target through its key", () => {
+    const server = resolveThreadRouteTarget({ environmentId: "env-1", threadId: "thread-1" });
+    const draft = resolveThreadRouteTarget({ draftId: "draft-1" });
+    expect(threadRouteTargetFromKey(threadRouteTargetKey(server))).toEqual(server);
+    expect(threadRouteTargetFromKey(threadRouteTargetKey(draft))).toEqual(draft);
+    expect(threadRouteTargetKey(null)).toBeNull();
+    expect(threadRouteTargetFromKey(null)).toBeNull();
+  });
+});
+
+describe("resolveKeptThreadViews", () => {
+  const serverView = (id: string): Omit<KeptThreadView, "visit"> => ({
+    key: `env-1:${id}`,
+    threadKey: `env-1:${id}`,
+    environmentId: "env-1" as never,
+    threadId: ThreadId.make(id),
+    draftId: null,
+  });
+  const keep = (
+    views: ReadonlyArray<KeptThreadView>,
+    active: Omit<KeptThreadView, "visit"> | null,
+    limit?: number,
+  ) => resolveKeptThreadViews(views, active, limit);
+
+  it("adds each visited thread in place and returns the same list when nothing changes", () => {
+    const first = keep([], serverView("a"));
+    const second = keep(first, serverView("b"));
+    expect(second.map((view) => view.threadId)).toEqual(["a", "b"]);
+    expect(keep(second, serverView("b"))).toBe(second);
+  });
+
+  it("revisits a kept thread without moving it", () => {
+    const views = keep(keep(keep([], serverView("a")), serverView("b")), serverView("a"));
+    expect(views.map((view) => view.threadId)).toEqual(["a", "b"]);
+    expect(views[0]!.visit).toBeGreaterThan(views[1]!.visit);
+  });
+
+  it("evicts the least recently shown thread past the limit", () => {
+    let views = keep([], serverView("a"), 2);
+    views = keep(views, serverView("b"), 2);
+    views = keep(views, serverView("a"), 2);
+    views = keep(views, serverView("c"), 2);
+    expect(views.map((view) => view.threadId)).toEqual(["a", "c"]);
+  });
+
+  it("keeps a promoted draft's view, and its key, on the thread route", () => {
+    const draftId = DraftId.make("draft-1");
+    const draft = keep([], { ...serverView("t"), key: draftId, draftId });
+    const promoted = keep(draft, serverView("t"));
+    expect(promoted).toHaveLength(1);
+    expect(promoted[0]).toMatchObject({ key: draftId, draftId: null, threadId: "t" });
+  });
+
+  it("drops a draft's view once another view is shown", () => {
+    const draftId = DraftId.make("draft-1");
+    const views = keep(keep([], serverView("a")), { ...serverView("t"), key: draftId, draftId });
+    expect(keep(views, serverView("a")).map((view) => view.key)).toEqual(["env-1:a"]);
   });
 });

@@ -810,9 +810,11 @@ type EnvironmentUnavailableState = {
 function eventPathContainsSelector(event: Event, selector: string): boolean {
   const path = event.composedPath();
   if (path.length === 0 && event.target) {
-    path.push(event.target);
+    return event.target instanceof Element && event.target.closest(selector) !== null;
   }
-  return path.some((target) => target instanceof Element && target.closest(selector));
+  // The composed path already lists every ancestor, so one match per entry
+  // covers what `closest` from each entry would.
+  return path.some((target) => target instanceof Element && target.matches(selector));
 }
 
 const SECRET_REQUEST_SELECTOR = '[data-v2-item-type="secret_request"]';
