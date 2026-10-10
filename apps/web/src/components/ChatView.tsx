@@ -521,6 +521,8 @@ import {
   deriveComposerSendState,
   dismissBranchMismatchForSession,
   hasEnvironmentReconnectWarningGraceElapsed,
+  isInitialEnvironmentConnect,
+  markEnvironmentConnected,
   scheduleEnvironmentReconnectWarning,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
@@ -2765,6 +2767,18 @@ export default function ChatView(props: ChatViewProps) {
       setReconnectWarningGraceElapsedEnvironmentId(activeReconnectingEnvironmentId),
     );
   }, [activeReconnectingEnvironmentId]);
+  const activeEnvironmentIdForConnection = activeEnvironment?.environmentId ?? null;
+  useEffect(() => {
+    if (
+      activeEnvironmentIdForConnection !== null &&
+      activeEnvironmentConnectionPhase === "connected"
+    ) {
+      markEnvironmentConnected(activeEnvironmentIdForConnection);
+    }
+  }, [activeEnvironmentConnectionPhase, activeEnvironmentIdForConnection]);
+  const activeEnvironmentInitialConnect =
+    activeEnvironmentIdForConnection !== null &&
+    isInitialEnvironmentConnect(activeEnvironmentIdForConnection, activeEnvironmentConnectionPhase);
   const activeEnvironmentUnavailableLabel = activeEnvironment?.label ?? null;
   const activeEnvironmentUnavailableState = useMemo<EnvironmentUnavailableState | null>(() => {
     if (!activeEnvironmentUnavailable || !activeEnvironmentUnavailableLabel || !activeEnvironment) {
@@ -3201,7 +3215,8 @@ export default function ChatView(props: ChatViewProps) {
     // restarts) and the update banner already shows progress. Hard failure
     // phases still surface so the Reconnect action stays reachable.
     const suppressUnavailableBanner =
-      environmentReconnecting && (updateRunning || !reconnectWarningGraceElapsed);
+      environmentReconnecting &&
+      (updateRunning || !reconnectWarningGraceElapsed || activeEnvironmentInitialConnect);
     if (activeEnvironmentUnavailableState && unavailableConnection && !suppressUnavailableBanner) {
       items.push({
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
@@ -3321,6 +3336,7 @@ export default function ChatView(props: ChatViewProps) {
     setDismissedVersionMismatchKey,
     showVersionMismatchBanner,
     reconnectWarningGraceElapsed,
+    activeEnvironmentInitialConnect,
     serverUpdateFailureDismissed,
     serverUpdateState,
     versionMismatch,
