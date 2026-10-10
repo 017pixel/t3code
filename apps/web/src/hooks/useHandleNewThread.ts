@@ -42,7 +42,7 @@ import { useClientSettings } from "./useSettings";
 import {
   landingDraftContext,
   type PendingLandingDraft,
-  sameLandingDraftContext,
+  type LandingDraftContext,
 } from "../bootLanding";
 
 interface NewThreadWorkspaceOptions {
@@ -247,6 +247,7 @@ export function useNewThreadHandler() {
           // in the composer. Model selection has its own explicit-pick rule
           // below and does not follow this guard.
           let workspaceContext: NewThreadWorkspaceOptions | null = null;
+          let keepRuntimeMode = false;
           if (hasExplicitWorkspaceOption) {
             workspaceContext = pickExplicitWorkspaceOptions(options);
           } else if (!isDraftAlreadyOpen) {
@@ -285,31 +286,41 @@ export function useNewThreadHandler() {
             const landingSession = isLandingDraft
               ? getDraftSession(emptyStoredDraftThread.draftId)
               : null;
-            if (
+            // What the user changed on the landing draft while the defaults
+            // loaded stands; everything else, the model included, gets them.
+            const landingNow = landingSession === null ? null : landingDraftContext(landingSession);
+            const landingChanged = (field: keyof LandingDraftContext) =>
               landing !== null &&
-              landingSession !== null &&
-              !sameLandingDraftContext(landing.openedWith, landingDraftContext(landingSession))
+              landingNow !== null &&
+              landing.openedWith[field] !== landingNow[field];
+            keepRuntimeMode = landingChanged("runtimeMode");
+            if (
+              !landingChanged("envMode") &&
+              !landingChanged("worktreePath") &&
+              !landingChanged("startFromOrigin")
             ) {
-              // The user picked a workspace while the defaults loaded.
-              return {
-                draftId: emptyStoredDraftThread.draftId,
-                threadId: emptyStoredDraftThread.threadId,
+              workspaceContext = {
+                // The composer fills a local draft's branch from git status,
+                // which is no pick; it holds while the env mode does.
+                branch:
+                  landingNow !== null && landingNow.envMode === defaultEnvMode
+                    ? landingNow.branch
+                    : null,
+                worktreePath: null,
+                envMode: defaultEnvMode,
+                startFromOrigin: resolveNewDraftStartFromOrigin({
+                  envMode: defaultEnvMode,
+                  newWorktreesStartFromOrigin: projectSettings.settings.newWorktreesStartFromOrigin,
+                }),
               };
             }
-            workspaceContext = {
-              branch: null,
-              worktreePath: null,
-              envMode: defaultEnvMode,
-              startFromOrigin: resolveNewDraftStartFromOrigin({
-                envMode: defaultEnvMode,
-                newWorktreesStartFromOrigin: projectSettings.settings.newWorktreesStartFromOrigin,
-              }),
-            };
           }
           if (workspaceContext) {
             setDraftThreadContext(emptyStoredDraftThread.draftId, {
               ...workspaceContext,
-              ...(!isDraftAlreadyOpen ? { runtimeMode: defaultRuntimeMode } : {}),
+              ...(!isDraftAlreadyOpen && !keepRuntimeMode
+                ? { runtimeMode: defaultRuntimeMode }
+                : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             });
           }
@@ -346,7 +357,9 @@ export function useNewThreadHandler() {
             {
               threadId: emptyStoredDraftThread.threadId,
               ...workspaceContext,
-              ...(!isDraftAlreadyOpen ? { runtimeMode: defaultRuntimeMode } : {}),
+              ...(!isDraftAlreadyOpen && !keepRuntimeMode
+                ? { runtimeMode: defaultRuntimeMode }
+                : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             },
           );

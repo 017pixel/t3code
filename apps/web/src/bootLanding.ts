@@ -33,17 +33,6 @@ export function landingDraftContext(draft: DraftSessionState): LandingDraftConte
   };
 }
 
-export function sameLandingDraftContext(a: LandingDraftContext, b: LandingDraftContext): boolean {
-  return (
-    a.branch === b.branch &&
-    a.worktreePath === b.worktreePath &&
-    a.envMode === b.envMode &&
-    a.startFromOrigin === b.startFromOrigin &&
-    a.runtimeMode === b.runtimeMode &&
-    a.interactionMode === b.interactionMode
-  );
-}
-
 let pending: PendingLandingDraft | null = null;
 const listeners = new Set<() => void>();
 
