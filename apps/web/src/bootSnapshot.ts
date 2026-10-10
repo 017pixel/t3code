@@ -284,6 +284,11 @@ let discarded = false;
 
 // The first write keeps the values this page booted with for environments the
 // live data has not written yet.
+// Environments cleared during this page, which seeding must not bring back.
+const forgotten = new Set<EnvironmentId>();
+
+// Runs at the first write, in an idle moment, so reading the stored document
+// never lands on the startup path.
 function seedFromBootSnapshot() {
   if (seeded) return;
   seeded = true;
@@ -291,10 +296,14 @@ function seedFromBootSnapshot() {
   if (initial === null) return;
   catalog ??= initial.catalog;
   for (const [environmentId, snapshot] of initial.shells) {
-    if (!shells.has(environmentId)) shells.set(environmentId, snapshot);
+    if (!shells.has(environmentId) && !forgotten.has(environmentId)) {
+      shells.set(environmentId, snapshot);
+    }
   }
   for (const [environmentId, config] of initial.serverConfigs) {
-    if (!serverConfigs.has(environmentId)) serverConfigs.set(environmentId, config);
+    if (!serverConfigs.has(environmentId) && !forgotten.has(environmentId)) {
+      serverConfigs.set(environmentId, config);
+    }
   }
 }
 
@@ -430,7 +439,7 @@ export function recordBootShell(
   snapshot: OrchestrationV2ShellSnapshot,
 ): void {
   if (shells.get(environmentId) === snapshot) return;
-  seedFromBootSnapshot();
+  forgotten.delete(environmentId);
   shells.set(environmentId, snapshot);
   scheduleFlush();
 }
@@ -438,24 +447,23 @@ export function recordBootShell(
 /** Called after the server configuration cache saved this config. */
 export function recordBootServerConfig(environmentId: EnvironmentId, config: ServerConfig): void {
   if (serverConfigs.get(environmentId) === config) return;
-  seedFromBootSnapshot();
+  forgotten.delete(environmentId);
   serverConfigs.set(environmentId, config);
   scheduleFlush();
 }
 
 /** The live connection catalog, so the next boot knows which environments to show. */
 export function recordBootCatalog(entries: ReadonlyArray<BootCatalogEntry>): void {
-  seedFromBootSnapshot();
   catalog = entries;
   scheduleFlush();
 }
 
 /** Called when an environment's cache is cleared. */
 export function forgetBootEnvironment(environmentId: EnvironmentId): void {
-  seedFromBootSnapshot();
-  const removedShell = shells.delete(environmentId);
-  const removedConfig = serverConfigs.delete(environmentId);
-  if (removedShell || removedConfig) scheduleFlush();
+  forgotten.add(environmentId);
+  shells.delete(environmentId);
+  serverConfigs.delete(environmentId);
+  scheduleFlush();
 }
 
 /**

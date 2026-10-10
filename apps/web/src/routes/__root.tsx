@@ -138,6 +138,8 @@ export const Route = createRootRoute({
     const authGateState = shouldRenderBeforeAuthGate(location.pathname)
       ? renderBeforeAuthGate(authGate)
       : await authGate;
+    // A snapshot of a workspace this browser can no longer open must not paint later.
+    if (authGateState.status === "requires-auth") discardBootSnapshot();
     // Connect and read cached shells while the route chunks still load.
     if (authGateState.status === "authenticated") startEnvironmentShells();
     if (
