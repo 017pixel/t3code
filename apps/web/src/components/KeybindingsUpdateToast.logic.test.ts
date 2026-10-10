@@ -59,6 +59,39 @@ describe("keybindings update toast policy", () => {
     });
   });
 
+  it("reads keybinding reloads from config deltas", () => {
+    const controller = createKeybindingsUpdateToastController({});
+    const delta = (
+      changes: Extract<ServerConfigStreamEvent, { type: "configDelta" }>["changes"],
+    ): ServerConfigStreamEvent => ({
+      version: 1,
+      type: "configDelta",
+      configVersion: "v2",
+      changes,
+      removed: [],
+      providerChanges: [],
+    });
+    const malformed = {
+      kind: "keybindings.malformed-config",
+      message: "Expected JSON array",
+    } as const;
+
+    expect(controller.handle(delta({ keybindings: [] }))).toEqual({ _tag: "Success" });
+    expect(controller.handle(delta({ issues: [malformed] }))).toEqual({
+      _tag: "InvalidConfiguration",
+      message: "Expected JSON array",
+    });
+    // Another issue changes while the file is still malformed.
+    expect(
+      controller.handle(
+        delta({
+          issues: [malformed, { kind: "keybindings.invalid-entry", message: "Unknown", index: 3 }],
+        }),
+      ),
+    ).toBeNull();
+    expect(controller.handle(delta({ cwd: "/repo" }))).toBeNull();
+  });
+
   it("ignores unrelated server config notifications", () => {
     const controller = createKeybindingsUpdateToastController({});
 
