@@ -12,6 +12,7 @@ import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
@@ -669,7 +670,13 @@ export function createServerEnvironmentAtoms<R, E>(
         projection,
         get(options.initialConfigValueAtom(environmentId)),
       );
-    }).pipe(Atom.withLabel(`environment-data:server:config:${environmentId}`));
+    }).pipe(
+      // Boot hands the same config over from the cache, the session, and the
+      // live projection. An equal config keeps its identity, so settings,
+      // keybindings, and every reader do not rerender for each handoff.
+      Atom.withEquality(Equal.equals),
+      Atom.withLabel(`environment-data:server:config:${environmentId}`),
+    );
   });
   const updateStateValueAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) =>

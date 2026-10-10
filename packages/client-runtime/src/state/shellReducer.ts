@@ -1,13 +1,14 @@
 import {
+  OrchestrationProjectShell,
   OrchestrationV2ThreadShell,
   ThreadPullRequestLink,
-  type OrchestrationProjectShell,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ShellStreamItem,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const sameThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
+const sameProjectShell = Schema.toEquivalence(OrchestrationProjectShell);
 const sameLinks = Schema.toEquivalence(Schema.UndefinedOr(Schema.Array(ThreadPullRequestLink)));
 
 /** Whether two rows' pull request links are equal, including both absent. */
@@ -127,7 +128,10 @@ export function mergeShellSnapshotProjects(
       if (resolvedRootSet?.has(project.workspaceRoot) === true) {
         return project;
       }
-      return retainRepositoryIdentity(prior, project);
+      const merged = retainRepositoryIdentity(prior, project);
+      // An unchanged project keeps its object, so the cached-to-live handoff
+      // does not rerender every project reader.
+      return prior !== undefined && sameProjectShell(prior, merged) ? prior : merged;
     }),
   };
 }
