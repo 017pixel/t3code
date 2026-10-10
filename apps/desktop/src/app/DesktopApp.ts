@@ -168,6 +168,13 @@ const bootstrap = Effect.gen(function* () {
   const snapShot = yield* DesktopSnapShot.DesktopSnapShot;
   const appActivation = yield* DesktopAppActivation.DesktopAppActivation;
   const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
+  const shutdown = yield* DesktopShutdown.DesktopShutdown;
+  // The window can open, close and quit the app while the login shell is still
+  // starting. False when a quit came first: bootstrap starts nothing after it.
+  const awaitShellEnvironment = Effect.raceFirst(
+    shellEnvironment.installIntoProcess.pipe(Effect.as(true)),
+    shutdown.awaitRequest.pipe(Effect.as(false)),
+  );
   yield* logBootstrapInfo("bootstrap start");
 
   const settings = yield* desktopSettings.get;
@@ -194,7 +201,7 @@ const bootstrap = Effect.gen(function* () {
       yield* desktopWindow.createMainIfBackendReady;
     }
     // Snap Shot reads the desktop session variables the login shell provides.
-    yield* shellEnvironment.installIntoProcess;
+    if (!(yield* awaitShellEnvironment)) return;
     yield* snapShot.initialize;
     return;
   }
@@ -253,7 +260,7 @@ const bootstrap = Effect.gen(function* () {
     if (wslOnly) {
       yield* desktopWindow.showConnectingSplash;
       // Resolving the WSL primary's config runs wsl.exe.
-      yield* shellEnvironment.installIntoProcess;
+      if (!(yield* awaitShellEnvironment)) return;
     }
     yield* primaryBackend.start;
     yield* logBootstrapInfo("bootstrap backend start requested");
@@ -273,7 +280,7 @@ const bootstrap = Effect.gen(function* () {
       );
     }
     // Snap Shot reads the desktop session variables the login shell provides.
-    yield* shellEnvironment.installIntoProcess;
+    if (!(yield* awaitShellEnvironment)) return;
     yield* snapShot.initialize;
     yield* appActivation.start.pipe(
       Effect.tap(() => logBootstrapInfo("desktop app control socket ready")),
@@ -301,6 +308,7 @@ const startup = Effect.gen(function* () {
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const previewPasskeys = yield* PreviewPasskeys.PreviewPasskeys;
+  const state = yield* DesktopState.DesktopState;
 
   // Chromium picks the secret storage backend from --password-store and the
   // inherited desktop variables before any asynchronous work runs, so the
@@ -344,6 +352,8 @@ const startup = Effect.gen(function* () {
   yield* previewPasskeys.configure;
   yield* applicationMenu.configure;
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
+  // A quit while bootstrap waited for the login shell skips the rest.
+  if (yield* Ref.get(state.quitting)) return;
   // Bootstrap has opened the window (or the WSL splash); neither needs these.
   yield* updates.configure;
   yield* DesktopRemoteUpdates.listen;
