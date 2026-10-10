@@ -366,7 +366,7 @@ const startup = Effect.gen(function* () {
   yield* previewPasskeys.configure;
   yield* applicationMenu.configure;
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
-  // After the window: nothing above needs the updater or the URL handler.
+  // Bootstrap has opened the window (or the WSL splash); neither needs these.
   yield* updates.configure;
   yield* DesktopRemoteUpdates.listen;
   yield* linuxUrlHandler.register;
