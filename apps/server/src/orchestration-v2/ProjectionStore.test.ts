@@ -4991,7 +4991,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         number: 1,
         url: "https://github.com/pingdotgg/t3code/stack/1",
         base: "main",
-        layers: [7, 8, 9].map((number) => ({
+        // The thread links 7-9; 6 and 10 are stack layers it does not link.
+        layers: [6, 7, 8, 9, 10].map((number) => ({
           number,
           headBranch: `branch-${number}`,
           state: "open" as const,
@@ -5010,6 +5011,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const compact = compactThreadPullRequests(rich);
       assert.isUndefined(compact.pullRequests?.[0]?.snapshot?.additions);
       assert.equal(rich.pullRequests[0]?.snapshot?.additions, 23);
+      // Clients show the saved stack before it refreshes, so the compact shell keeps it whole.
+      assert.deepEqual(
+        compact.pullRequests?.map((link) => link.stack),
+        rich.pullRequests.map((link) => link.stack),
+      );
       assert.deepEqual(
         resolveThreadPullRequestBadge(compact.pullRequests),
         resolveThreadPullRequestBadge(rich.pullRequests),

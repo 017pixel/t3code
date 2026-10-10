@@ -6,26 +6,17 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { normalizeThreadPullRequestKey } from "@t3tools/shared/threadPullRequests";
 
-/** Keep shell badges, search, chain order and settlement dates; PR views read canonical snapshots. */
+/**
+ * Keep shell badges, search, chain order and settlement dates; PR views read canonical snapshots.
+ * Stacks stay whole: clients show a stack's saved layers before it refreshes, and the read
+ * payload and the shell wire send each distinct stack once per thread.
+ */
 export const compactThreadPullRequests = (
   thread: OrchestrationV2AppThread,
 ): OrchestrationV2AppThread => {
   const links = thread.pullRequests;
   if (links === undefined) return thread;
-  const stackKey = (link: (typeof links)[number]) => {
-    const { host, repository } = normalizeThreadPullRequestKey(link);
-    return JSON.stringify([host, repository, link.stack?.id]);
-  };
-  const members = new Map<string, Set<number>>();
-  for (const link of links) {
-    if (link.stack === null) continue;
-    const key = stackKey(link);
-    const numbers = members.get(key) ?? new Set<number>();
-    numbers.add(link.number);
-    members.set(key, numbers);
-  }
   return {
     ...thread,
     pullRequests: links.map((link) => ({
@@ -43,15 +34,6 @@ export const compactThreadPullRequests = (
               syncedAt: link.snapshot.syncedAt,
               ...(link.snapshot.mergedAt == null ? {} : { mergedAt: link.snapshot.mergedAt }),
               ...(link.snapshot.closedAt == null ? {} : { closedAt: link.snapshot.closedAt }),
-            },
-      stack:
-        link.stack === null
-          ? null
-          : {
-              ...link.stack,
-              layers: link.stack.layers.filter((layer) =>
-                members.get(stackKey(link))?.has(layer.number),
-              ),
             },
     })),
   };
