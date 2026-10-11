@@ -1840,6 +1840,49 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
 
+    // Field events already carry decoded values. Patch JSON in SQLite rather than
+    // decoding and encoding every saved PR and stack for a timestamp change.
+    const patchThreadFields = (
+      threadId: ThreadId,
+      fields: {
+        readonly updatedAt?: string;
+        readonly lastVisitedAt?: string | null;
+        readonly activeProviderThreadId?: ProviderThreadId;
+      },
+    ) =>
+      Effect.gen(function* () {
+        const readRows = yield* sql<{ readonly source_stale: number }>`
+          SELECT source_stale FROM orchestration_v2_projection_thread_reads
+          WHERE thread_id = ${threadId}
+        `;
+        const patches = Object.entries(fields);
+        yield* sql`
+          UPDATE orchestration_v2_projection_threads
+          SET payload_json = json_set(payload_json, ${sql.join(
+            ", ",
+            false,
+          )(patches.map(([key, value]) => sql`${`$.${key}`}, ${value}`))})
+            ${fields.updatedAt === undefined ? sql`` : sql`, updated_at = ${fields.updatedAt}`}
+            ${fields.activeProviderThreadId === undefined ? sql`` : sql`, active_provider_thread_id = ${fields.activeProviderThreadId}`}
+          WHERE thread_id = ${threadId}
+        `;
+        // An older build may have changed other fields. Only restore a read row
+        // that was current before the canonical write marked it stale.
+        if (readRows[0]?.source_stale === 0) {
+          const readPatches = sql.join(
+            ", ",
+            false,
+          )(patches.map(([key, value]) => sql`${`$.thread.${key}`}, ${value}`));
+          yield* sql`
+            UPDATE orchestration_v2_projection_thread_reads
+            SET payload_json = json_set(payload_json, ${readPatches}),
+                compact_payload_json = json_set(compact_payload_json, ${readPatches}),
+                source_stale = 0
+            WHERE thread_id = ${threadId}
+          `;
+        }
+      });
+
     const upsertThreadRead = (thread: OrchestrationV2AppThread) =>
       Effect.gen(function* () {
         const payload = yield* encodeThreadReadPayload(thread);
@@ -1944,8 +1987,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           }
           // These events carry one field rather than the thread, so they patch the stored row.
           // A link sync keeps the thread's activity timestamp, just like its legacy event.
-          case "thread.pull-request-link-synced":
           case "thread.visit-recorded": {
+            yield* patchThreadFields(event.threadId, {
+              lastVisitedAt:
+                event.payload.lastVisitedAt === null
+                  ? null
+                  : DateTime.formatIso(event.payload.lastVisitedAt),
+            });
+            break;
+          }
+          case "thread.pull-request-link-synced": {
             const rows = yield* sql<PayloadRow>`
               SELECT payload_json
               FROM orchestration_v2_projection_threads
@@ -1955,10 +2006,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             const row = rows[0];
             if (row === undefined) break;
             const thread = yield* decodeThreadPayload(row.payload_json);
-            const updatedThread =
-              event.type === "thread.visit-recorded"
-                ? { ...thread, lastVisitedAt: event.payload.lastVisitedAt }
-                : applyThreadPullRequestLinkSync(thread, event.payload);
+            const updatedThread = applyThreadPullRequestLinkSync(thread, event.payload);
             const payloadJson = yield* encodeThreadPayload(updatedThread);
             yield* sql`
               UPDATE orchestration_v2_projection_threads
@@ -2307,31 +2355,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               event.payload.appThreadId !== null &&
               !isQueuedProviderThreadPlaceholder(event.payload)
             ) {
-              const threadRows = yield* sql<PayloadRow>`
-                SELECT payload_json
-                FROM orchestration_v2_projection_threads
-                WHERE thread_id = ${event.payload.appThreadId}
-                LIMIT 1
-              `;
-              const threadRow = threadRows[0];
-              if (threadRow !== undefined) {
-                const thread = yield* decodeThreadPayload(threadRow.payload_json);
-                const updatedThread = {
-                  ...thread,
-                  activeProviderThreadId: event.payload.id,
-                  updatedAt: event.payload.updatedAt,
-                };
-                const updatedThreadPayloadJson = yield* encodeThreadPayload(updatedThread);
-                yield* sql`
-                  UPDATE orchestration_v2_projection_threads
-                  SET
-                    active_provider_thread_id = ${event.payload.id},
-                    updated_at = ${stringField(parseEncodedPayload(updatedThreadPayloadJson), "updatedAt")},
-                    payload_json = ${updatedThreadPayloadJson}
-                  WHERE thread_id = ${event.payload.appThreadId}
-                `;
-                yield* upsertThreadRead(updatedThread);
-              }
+              yield* patchThreadFields(event.payload.appThreadId, {
+                activeProviderThreadId: event.payload.id,
+                updatedAt: DateTime.formatIso(event.payload.updatedAt),
+              });
             }
             break;
           }
@@ -2755,43 +2782,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           event.type !== "thread.model-selection-updated" &&
           event.type !== "thread.provider-switched"
         ) {
-          const rows = yield* sql<PayloadRow>`
-            SELECT payload_json
-            FROM orchestration_v2_projection_threads
-            WHERE thread_id = ${event.threadId}
-            LIMIT 1
-          `;
-          const row = rows[0];
-          if (row !== undefined) {
-            const thread = yield* decodeThreadPayload(row.payload_json);
-            const updatedThread = { ...thread, updatedAt: event.occurredAt };
-            const payloadJson = yield* encodeThreadPayload(updatedThread);
-            // The thread write marks its read row stale. Only a row that was current
-            // before it can be patched back to current.
-            const readRows = yield* sql<{ readonly source_stale: number }>`
-              SELECT source_stale FROM orchestration_v2_projection_thread_reads
-              WHERE thread_id = ${event.threadId}
-            `;
-            yield* sql`
-              UPDATE orchestration_v2_projection_threads
-              SET
-                updated_at = ${stringField(parseEncodedPayload(payloadJson), "updatedAt")},
-                payload_json = ${payloadJson}
-              WHERE thread_id = ${event.threadId}
-            `;
-            // Activity-only events change no PR fields. Patch the small read
-            // projections without encoding their stacks again on every token.
-            if (readRows[0]?.source_stale === 0) {
-              const updatedAt = stringField(parseEncodedPayload(payloadJson), "updatedAt");
-              yield* sql`
-                UPDATE orchestration_v2_projection_thread_reads
-                SET payload_json = json_set(payload_json, '$.thread.updatedAt', ${updatedAt}),
-                    compact_payload_json = json_set(compact_payload_json, '$.thread.updatedAt', ${updatedAt}),
-                    source_stale = 0
-                WHERE thread_id = ${event.threadId}
-              `;
-            }
-          }
+          yield* patchThreadFields(event.threadId, {
+            updatedAt: DateTime.formatIso(event.occurredAt),
+          });
         }
       }).pipe(
         Effect.mapError(
