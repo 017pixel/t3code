@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodeSqlite from "node:sqlite";
 
 vi.mock("node:fs/promises", { spy: true });
@@ -217,6 +218,20 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
       const leases = path.join(root, "cache", "t3", "provider-maintenance");
       yield* fs.makeDirectory(leases, { recursive: true });
       yield* fs.writeFileString(path.join(leases, "install.json"), "corrupt");
+      // A crashed server's record makes cleanup read the corrupt lease.
+      const records = path.join(root, "userdata", "provider-processes");
+      yield* fs.makeDirectory(records, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(records, "0.json"),
+        JSON.stringify({
+          version: 1,
+          instanceId: "crashed",
+          hostname: NodeOS.hostname(),
+          stateDir: path.join(root, "userdata"),
+          owner: { pid: 2 ** 30, startTime: "exited" },
+          processes: [],
+        }),
+      );
       yield* Effect.acquireRelease(
         Effect.sync(() => vi.stubEnv("XDG_CACHE_HOME", path.join(root, "cache"))),
         () => Effect.sync(() => vi.unstubAllEnvs()),
