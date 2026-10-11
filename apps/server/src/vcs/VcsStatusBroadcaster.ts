@@ -11,17 +11,18 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
-import type {
-  GitManagerServiceError,
-  VcsStatusInput,
+import {
+  type GitManagerServiceError,
+  type VcsStatusInput,
   VcsStatusLocalResult,
   VcsStatusRemoteResult,
-  VcsStatusResult,
-  VcsStatusStreamEvent,
-  VcsStatusSubscriptionInput,
+  type VcsStatusResult,
+  type VcsStatusStreamEvent,
+  type VcsStatusSubscriptionInput,
 } from "@t3tools/contracts";
 import { applyGitStatusStreamEvent, mergeGitStatusParts } from "@t3tools/shared/git";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -37,6 +38,7 @@ const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_MAX_DELAY = Duration.minutes(15);
 const MAX_FAILURE_DIAGNOSTIC_VALUES = 8;
 const MAX_FAILURE_DIAGNOSTIC_VALUE_LENGTH = 128;
+const MAX_CACHED_WORKSPACES = 256;
 
 function boundedDiagnosticValue(value: string): string {
   return value.slice(0, MAX_FAILURE_DIAGNOSTIC_VALUE_LENGTH);
@@ -127,7 +129,6 @@ interface VcsStatusChange {
 }
 
 interface CachedValue<T> {
-  readonly fingerprint: string;
   readonly value: T;
 }
 
@@ -210,8 +211,24 @@ export class VcsStatusBroadcaster extends Context.Service<
   }
 >()("t3/vcs/VcsStatusBroadcaster") {}
 
-function fingerprintStatusPart(status: unknown): string {
-  return JSON.stringify(status);
+const sameLocalStatus = Schema.toEquivalence(VcsStatusLocalResult);
+const sameRemoteStatus = Schema.toEquivalence(Schema.NullOr(VcsStatusRemoteResult));
+
+// Status already owns the file paths and PR fields. Comparing the typed values
+// avoids retaining a second copy of them as a JSON fingerprint per workspace.
+function cacheStatus(
+  cache: ReadonlyMap<string, CachedVcsStatus>,
+  cwd: string,
+  status: CachedVcsStatus,
+) {
+  const next = new Map(cache);
+  next.delete(cwd);
+  next.set(cwd, status);
+  if (next.size > MAX_CACHED_WORKSPACES) {
+    const oldest = next.keys().next().value;
+    if (oldest !== undefined) next.delete(oldest);
+  }
+  return next;
 }
 
 const normalizeCwd = (cwd: string) =>
@@ -251,17 +268,18 @@ export const make = Effect.gen(function* () {
   const updateCachedLocalStatus = Effect.fn("VcsStatusBroadcaster.updateCachedLocalStatus")(
     function* (cwd: string, local: VcsStatusLocalResult, options?: { publish?: boolean }) {
       const nextLocal = {
-        fingerprint: fingerprintStatusPart(local),
         value: local,
       } satisfies CachedValue<VcsStatusLocalResult>;
       const shouldPublish = yield* Ref.modify(cacheRef, (cache) => {
         const previous = cache.get(cwd) ?? { local: null, remote: null };
-        const nextCache = new Map(cache);
-        nextCache.set(cwd, {
+        if (previous.local !== null && sameLocalStatus(previous.local.value, local)) {
+          return [false, cache] as const;
+        }
+        const nextCache = cacheStatus(cache, cwd, {
           ...previous,
           local: nextLocal,
         });
-        return [previous.local?.fingerprint !== nextLocal.fingerprint, nextCache] as const;
+        return [true, nextCache] as const;
       });
 
       if (options?.publish && shouldPublish) {
@@ -281,17 +299,18 @@ export const make = Effect.gen(function* () {
   const updateCachedRemoteStatus = Effect.fn("VcsStatusBroadcaster.updateCachedRemoteStatus")(
     function* (cwd: string, remote: VcsStatusRemoteResult | null, options?: { publish?: boolean }) {
       const nextRemote = {
-        fingerprint: fingerprintStatusPart(remote),
         value: remote,
       } satisfies CachedValue<VcsStatusRemoteResult | null>;
       const shouldPublish = yield* Ref.modify(cacheRef, (cache) => {
         const previous = cache.get(cwd) ?? { local: null, remote: null };
-        const nextCache = new Map(cache);
-        nextCache.set(cwd, {
+        if (previous.remote !== null && sameRemoteStatus(previous.remote.value, remote)) {
+          return [false, cache] as const;
+        }
+        const nextCache = cacheStatus(cache, cwd, {
           ...previous,
           remote: nextRemote,
         });
-        return [previous.remote?.fingerprint !== nextRemote.fingerprint, nextCache] as const;
+        return [true, nextCache] as const;
       });
 
       if (options?.publish && shouldPublish) {
@@ -315,25 +334,26 @@ export const make = Effect.gen(function* () {
     options?: { publish?: boolean },
   ) {
     const nextLocal = {
-      fingerprint: fingerprintStatusPart(local),
       value: local,
     } satisfies CachedValue<VcsStatusLocalResult>;
     const nextRemote = {
-      fingerprint: fingerprintStatusPart(remote),
       value: remote,
     } satisfies CachedValue<VcsStatusRemoteResult | null>;
     const shouldPublish = yield* Ref.modify(cacheRef, (cache) => {
       const previous = cache.get(cwd) ?? { local: null, remote: null };
-      const nextCache = new Map(cache);
-      nextCache.set(cwd, {
+      if (
+        previous.local !== null &&
+        previous.remote !== null &&
+        sameLocalStatus(previous.local.value, local) &&
+        sameRemoteStatus(previous.remote.value, remote)
+      ) {
+        return [false, cache] as const;
+      }
+      const nextCache = cacheStatus(cache, cwd, {
         local: nextLocal,
         remote: nextRemote,
       });
-      return [
-        previous.local?.fingerprint !== nextLocal.fingerprint ||
-          previous.remote?.fingerprint !== nextRemote.fingerprint,
-        nextCache,
-      ] as const;
+      return [true, nextCache] as const;
     });
 
     if (options?.publish && shouldPublish) {

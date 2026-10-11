@@ -197,6 +197,30 @@ function layerBackgroundPolicy(shouldRunScopeWork: (scope: BackgroundScope) => b
 }
 
 describe("VcsStatusBroadcaster", () => {
+  it.effect("releases old workspace statuses and loads an evicted workspace again", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      for (let index = 0; index < 300; index++) {
+        yield* broadcaster.getStatus({ cwd: `/repo-${index}` });
+      }
+      const reads = state.localStatusCalls;
+      assert.deepStrictEqual(yield* broadcaster.getStatus({ cwd: "/repo-299" }), baseStatus);
+      assert.equal(state.localStatusCalls, reads);
+      state.currentLocalStatus = { ...baseLocalStatus, refName: "fresh-branch" };
+      const reloaded = yield* broadcaster.getStatus({ cwd: "/repo-0" });
+      assert.equal(reloaded.refName, "fresh-branch");
+      assert.equal(state.localStatusCalls, reads + 1);
+    }).pipe(Effect.provide(layerTestFor(state)));
+  });
+
   it.effect.skipIf(!symlinksSupported)(
     "automatically pulls an enabled clean default branch when status detects it is behind",
     () => {
