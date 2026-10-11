@@ -43,6 +43,7 @@ import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentSession } from "../state/session";
+import { isElectron } from "../env";
 import { isBootHeld, releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   buildThreadRouteParams,
@@ -122,8 +123,8 @@ function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => v
 let bootChatViewDeferred = false;
 
 // How long the chat view waits for the session before rendering from the
-// snapshot. A local server answers well within it; a starting desktop backend
-// or a slow tunnel does not, and the composer appears without it.
+// snapshot. Desktop skips this wait because its backend is still starting.
+// A slow tunnel eventually renders the composer without its session.
 const BOOT_SESSION_WAIT_MS = 750;
 
 /**
@@ -131,7 +132,8 @@ const BOOT_SESSION_WAIT_MS = 750;
  * this view's frame, and the chat view renders after it, so its large first
  * render does not hold back that frame.
  *
- * If the environment's session answers within BOOT_SESSION_WAIT_MS, the
+ * Desktop renders the cached chat view after that first frame. For web, if
+ * the environment's session answers within BOOT_SESSION_WAIT_MS, the
  * screen switches to live data and the chat view renders with it in one
  * task, with nothing left to redo. Otherwise it renders from the snapshot as
  * a transition, which yields so the connection keeps making progress, and the
@@ -171,6 +173,9 @@ function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
       const configAtom = sessionConfigAtom();
       if (configAtom === null) return renderFromSnapshot();
       if (appAtomRegistry.get(configAtom) !== null) return renderLive();
+      // A desktop backend is still booting. Let the user type from the cached
+      // screen immediately; sending still waits for the authenticated session.
+      if (isElectron) return renderFromSnapshot();
       // A task later, so the requests the session sends as it starts go out
       // before this render instead of queuing behind it.
       const unsubscribe = appAtomRegistry.subscribe(configAtom, (config) => {
