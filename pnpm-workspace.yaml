@@ -291,9 +291,10 @@ patchedDependencies:
   expo-audio@58.0.4: patches/expo-audio@58.0.4.patch
   "@clerk/expo@4.6.8": patches/@clerk__expo@4.6.8.patch
   # An input fd pipe keeps an error listener after its writer stops, so a child that exits with
-  # unread input (the desktop backend quit during a cold start) does not crash the parent. The
-  # spawner also takes the spawn function as a parameter so the server can start children from its
-  # spawn host.
+  # unread input (the desktop backend quit during a cold start) does not crash the parent. Windows
+  # cleanup also skips taskkill for a child that already exited, since its PID may be reused. The
+  # spawner takes the spawn function as a parameter so the server can start children from its spawn
+  # host.
   "@effect/platform-node-shared@4.0.2": patches/@effect__platform-node-shared@4.0.2.patch
   "@effect/vitest@4.0.2": patches/@effect__vitest@4.0.2.patch
   "@expo/metro-config@58.0.6": patches/@expo__metro-config@58.0.6.patch
