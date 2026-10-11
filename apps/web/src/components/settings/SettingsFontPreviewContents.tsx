@@ -1,5 +1,5 @@
 import { preloadPatchFile } from "@pierre/diffs/ssr";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { EMPTY_COMPOSER_CONTEXT_RECORDS } from "../composerContextPresentation";
 import { terminalThemeFromApp } from "../ThreadTerminalDrawer";
@@ -110,7 +110,8 @@ const DIFF_PREVIEW_THEME_BRIDGE = `
 
 function StaticDiffHtml({ html }: { html: string }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
+  // Before paint, so the host never shows a frame at zero height.
+  useLayoutEffect(() => {
     const host = hostRef.current;
     if (host === null) return;
     const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
