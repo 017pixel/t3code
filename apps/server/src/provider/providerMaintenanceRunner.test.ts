@@ -2509,6 +2509,16 @@ describe("provider maintenance host leases", () => {
 
   it.effect("keeps anything but a server off the user-wide gate", () =>
     Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cache = yield* fs.makeTempDirectoryScoped();
+      const previous = process.env.XDG_CACHE_HOME;
+      process.env.XDG_CACHE_HOME = cache;
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          if (previous === undefined) delete process.env.XDG_CACHE_HOME;
+          else process.env.XDG_CACHE_HOME = previous;
+        }),
+      );
       const fallback = yield* HostLock.ProviderMaintenanceHostLock;
       assert.isTrue(fallback.directory.startsWith(NodeOS.tmpdir()));
       assert.notStrictEqual(fallback.directory, HostLock.userDirectory());
@@ -2516,7 +2526,10 @@ describe("provider maintenance host leases", () => {
         Effect.provide(HostLock.layer),
       );
       assert.strictEqual(served.directory, HostLock.userDirectory());
-    }),
+      assert.strictEqual(served.directory, NodePath.join(cache, "t3", "provider-maintenance"));
+      yield* served.withRead(Effect.void);
+      assert.isTrue(NodeFS.existsSync(NodePath.join(served.directory, "readers")));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it.effect("shows a manual update waiting for turns and cancels it before installing", () => {
