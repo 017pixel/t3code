@@ -226,7 +226,7 @@ export const layer: Layer.Layer<
       // The run is durably starting before this effect is dispatched. Wait for
       // an admitted install, then reread: active-work blocks later installs,
       // without holding the permit through provider commands such as /compact.
-      yield* admission.withPermit(Effect.void);
+      yield* admission.withLaunchPermit(Effect.void);
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
       const run = projection.runs.find((candidate) => candidate.id === runId);
       if (run === undefined) {

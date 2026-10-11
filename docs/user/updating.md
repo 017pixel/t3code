@@ -97,6 +97,9 @@ it. While `settings.json` cannot be read, automatic updates stay off.
 
 ## Update providers
 
+ACP Registry agents, including Antigravity, and local ACP commands do not offer
+one-click updates and are not updated by this setting.
+
 **Settings → Providers** shows provider updates for the selected environment.
 **Update all** updates every outdated provider on every connected environment
 at once. Hover it to see which providers it will update. Providers that only

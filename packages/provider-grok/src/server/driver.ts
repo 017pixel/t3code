@@ -32,8 +32,8 @@ import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/
 import { discoverGrokSkills } from "./skills.ts";
 import {
   makeCachedProviderMaintenanceResolution,
-  makeManualOnlyProviderMaintenanceCapabilities,
-  makeProviderMaintenanceCapabilities,
+  resolvePackageManagedProviderMaintenance,
+  normalizeCommandPath,
   type ProviderMaintenanceCapabilitiesResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "@t3tools/provider-core/server/maintenanceResolver";
@@ -48,28 +48,29 @@ const DRIVER_KIND = ProviderDriverKind.make("grok");
 // npm's `latest` tracks Grok's stable channel, the one `grok update` installs
 // by default, so the registry stays the source for "latest".
 const GROK_NPM_PACKAGE = "@xai-official/grok";
-// `grok update` finds the installer that owns the binary itself, so the
-// resolved executable is its own updater. It installs under `GROK_HOME`, so it
-// runs with the instance's environment. No executable means nothing to update,
-// not "whatever is on PATH".
+// Native updates target GROK_HOME; package-manager installs stay with their owner.
 const UPDATE: ProviderMaintenanceCapabilitiesResolver = {
-  resolve: (context) =>
-    Effect.succeed(
-      context
-        ? makeProviderMaintenanceCapabilities({
-            provider: DRIVER_KIND,
-            packageName: GROK_NPM_PACKAGE,
-            updateExecutable: context.resolvedCommandPath,
-            updateArgs: ["update"],
-            updateLockKey: "grok",
-            platform: context.platform,
-            env: context.env,
-          })
-        : makeManualOnlyProviderMaintenanceCapabilities({
-            provider: DRIVER_KIND,
-            packageName: GROK_NPM_PACKAGE,
-          }),
-    ),
+  resolve: (context) => {
+    const home = (
+      context?.env.GROK_HOME || (context?.env.HOME ? `${context.env.HOME}/.grok` : undefined)
+    )
+      ?.trim()
+      .replace(/[\\/]+$/, "");
+    return resolvePackageManagedProviderMaintenance(
+      {
+        provider: DRIVER_KIND,
+        npmPackageName: GROK_NPM_PACKAGE,
+        nativeUpdate: {
+          args: ["update"],
+          isCommandPath: (value) =>
+            Boolean(home) &&
+            normalizeCommandPath(value).replace(/\.exe$/, "") ===
+              normalizeCommandPath(`${home}/bin/grok`),
+        },
+      },
+      context,
+    );
+  },
 };
 
 export type GrokDriverEnv =

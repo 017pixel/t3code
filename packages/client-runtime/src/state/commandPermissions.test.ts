@@ -8,6 +8,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   AuthOrchestrationOperateScope,
+  AuthProvidersManageScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   ThreadId,
@@ -18,6 +19,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
@@ -59,6 +61,57 @@ const setup = Effect.gen(function* () {
 });
 
 describe("command permissions", () => {
+  it.effect("guards settings updates with the destination grant for every changed domain", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const command = createEnvironmentRpcCommand(runtime, {
+          label: "test.settings",
+          tag: WS_METHODS.serverUpdateSettings,
+          execute: () => Effect.die("must not dispatch a denied update"),
+        });
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(command.permissionAtom(env))).toBe(false);
+        const denied = yield* Effect.promise(() =>
+          command.run(registry, {
+            environmentId: env,
+            input: { patch: { automaticUpdates: false } },
+          }),
+        );
+        expect(denied._tag).toBe("Failure");
+        const settings = createCommandPermissions(runtime, WS_METHODS.serverUpdateSettings);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(false), permissions: [AuthSettingsWriteScope] }),
+        );
+        expect(registry.get(command.permissionAtom(env))).toBe(true);
+        yield* settings.authorize(registry, env, { patch: { automaticUpdates: false } });
+        yield* settings.authorize(registry, env, {
+          patch: { providerHealthRefreshInterval: Duration.minutes(10) },
+        });
+        const providerPatch = { patch: { providerInstances: {} } };
+        expect(registry.get(settings.permissionAtom(env, providerPatch))).toBe(false);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(false), permissions: [AuthProvidersManageScope] }),
+        );
+        yield* settings.authorize(registry, env, providerPatch);
+        expect(registry.get(command.permissionAtom(env))).toBe(false);
+        const mixed = { patch: { automaticUpdates: false, providerInstances: {} } };
+        expect(registry.get(settings.permissionAtom(env, mixed))).toBe(false);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            permissions: [AuthProvidersManageScope, AuthSettingsWriteScope],
+          }),
+        );
+        yield* settings.authorize(registry, env, mixed);
+        registry.set(sessions(other), AsyncResult.success(grant(false)));
+        expect(registry.get(command.permissionAtom(other))).toBe(false);
+      }),
+    ),
+  );
   it.effect("requires the destination settings grant to run storage cleanup", () =>
     Effect.scoped(
       Effect.gen(function* () {
