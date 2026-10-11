@@ -1885,6 +1885,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 source_stale = 0
             WHERE thread_id = ${threadId}
           `;
+        } else {
+          // A stale or missing read row is rebuilt from the whole thread once,
+          // so readers stop decoding the full payload.
+          const rows = yield* sql<PayloadRow>`
+            SELECT payload_json FROM orchestration_v2_projection_threads
+            WHERE thread_id = ${threadId}
+          `;
+          const row = rows[0];
+          if (row !== undefined) {
+            yield* upsertThreadRead(yield* decodeThreadPayload(row.payload_json));
+          }
         }
       });
 

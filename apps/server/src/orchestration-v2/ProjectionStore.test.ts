@@ -6014,7 +6014,12 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         payload: { lastVisitedAt: at },
       });
       assert.deepEqual(yield* store.getThreadsWithPullRequests(), []);
-      // Its write marks the read projection stale, so shells read the payload it wrote.
+      // Its write marked the read projection stale. The visit rebuilt it from
+      // that payload, so shells read what it wrote without decoding the thread.
+      const [read] = yield* sql<{ readonly source_stale: number }>`
+        SELECT source_stale FROM orchestration_v2_projection_thread_reads
+        WHERE thread_id = ${threadId}`;
+      assert.equal(read?.source_stale, 0);
       assert.deepEqual(
         (yield* store.getThreadShell(threadId, { compactPullRequests: true }))?.pullRequests,
         [],
