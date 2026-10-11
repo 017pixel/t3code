@@ -4532,8 +4532,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // on every streamed delta and ArrowUp is rare.
   const promptHistoryMessagesRef = useRef(promptHistoryMessages);
   promptHistoryMessagesRef.current = promptHistoryMessages;
-  // Set while recall waits for an older page to bring the next prompt.
-  const olderPromptRecallPendingRef = useRef(false);
+  // Set while recall waits for an older page to bring the next prompt. Holds
+  // the oldest loaded message at the key press, so a streamed delta is not
+  // taken for the page.
+  const olderPromptRecallPendingRef = useRef<{
+    readonly oldestMessageId: string | undefined;
+  } | null>(null);
 
   // The composer persists across threads. A recall from thread A must not
   // be treated as active in thread B, where the text-match fallback could
@@ -4541,7 +4545,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const promptHistoryTargetKey = composerTargetKey(composerDraftTarget);
   useEffect(() => {
     promptHistoryPositionRef.current = null;
-    olderPromptRecallPendingRef.current = false;
+    olderPromptRecallPendingRef.current = null;
   }, [promptHistoryTargetKey]);
 
   const replacePromptFromHistory = useCallback(
@@ -4590,15 +4594,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         currentPrompt: promptRef.current,
       });
       if (!step) {
-        // Past the oldest loaded prompt, a long thread still has older ones:
-        // load the next page and step once it arrives.
-        if (direction !== "backward" || promptHistoryPositionRef.current === null) return false;
-        if (olderPromptRecallPendingRef.current) return true;
-        if (!onLoadOlderPromptHistory?.()) return false;
-        olderPromptRecallPendingRef.current = true;
+        // Past the oldest loaded prompt, or with none loaded, a long thread
+        // still has older ones: load one page per key press and step once it
+        // arrives.
+        if (direction !== "backward" || !onLoadOlderPromptHistory?.()) {
+          olderPromptRecallPendingRef.current = null;
+          return false;
+        }
+        olderPromptRecallPendingRef.current = {
+          oldestMessageId: promptHistoryMessagesRef.current[0]?.id,
+        };
         return true;
       }
-      olderPromptRecallPendingRef.current = false;
+      olderPromptRecallPendingRef.current = null;
       promptHistoryPositionRef.current = step.position;
       replacePromptFromHistory(step.prompt);
       return true;
@@ -4618,28 +4626,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   useEffect(() => {
-    if (!olderPromptRecallPendingRef.current) return;
+    const pending = olderPromptRecallPendingRef.current;
+    if (pending === null) return;
     const position = promptHistoryPositionRef.current;
     // An edit or send since the key press ends browsing.
-    if (position === null || promptRef.current !== position.recalled) {
-      olderPromptRecallPendingRef.current = false;
+    if (promptRef.current !== (position?.recalled ?? "")) {
+      olderPromptRecallPendingRef.current = null;
       return;
     }
+    if (promptHistoryMessages[0]?.id === pending.oldestMessageId) return;
+    olderPromptRecallPendingRef.current = null;
     const step = stepComposerPromptHistory({
       direction: "backward",
       entries: buildComposerPromptHistoryEntries(promptHistoryMessages),
       position,
       currentPrompt: promptRef.current,
     });
-    if (step) {
-      olderPromptRecallPendingRef.current = false;
-      promptHistoryPositionRef.current = step.position;
-      replacePromptFromHistory(step.prompt);
-      return;
-    }
-    // A page of only agent work brings no prompt; keep loading until one does.
-    if (!onLoadOlderPromptHistory?.()) olderPromptRecallPendingRef.current = false;
-  }, [onLoadOlderPromptHistory, promptHistoryMessages, promptRef, replacePromptFromHistory]);
+    // A page of only agent work brings no prompt. The next ArrowUp loads
+    // another page instead of chaining through a long run unasked.
+    if (!step) return;
+    promptHistoryPositionRef.current = step.position;
+    replacePromptFromHistory(step.prompt);
+  }, [promptHistoryMessages, promptRef, replacePromptFromHistory]);
 
   // ------------------------------------------------------------------
   // Callbacks: command key
