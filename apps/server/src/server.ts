@@ -62,6 +62,7 @@ import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceR
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
+import * as McpServerTools from "./mcpServers/McpServerTools.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
@@ -591,6 +592,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
   SkillLibrary.layer.pipe(Layer.provide(ProcessRunner.layer)),
+  McpServerTools.layer,
 ).pipe(
   // Core Services
   Layer.provideMerge(layerOrchestrationApplication),

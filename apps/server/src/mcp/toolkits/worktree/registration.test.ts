@@ -127,6 +127,14 @@ it.effect("production mcp layer lists worktree tools over http", () =>
       // than replacing them.
       expect(toolNames).toContain("preview_status");
       expect(toolNames).toContain("delegate_task");
+      // Settings → Tools describes t3-code from this list without a session.
+      expect(
+        new Set(
+          McpHttpServer.T3_MCP_TOOLKITS.flatMap((toolkit) =>
+            Object.values(toolkit.tools).map((tool) => tool.name),
+          ),
+        ),
+      ).toEqual(new Set(toolNames));
 
       // The handoff tool mutates thread state, reaches the network (origin
       // fetch), and runs project setup scripts, so its MCP hints must not

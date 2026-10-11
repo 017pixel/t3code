@@ -854,6 +854,28 @@ export const layerMcpTransport = McpServer.layerHttp({
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(layerMcpAuthMiddleware));
 
+/**
+ * Every tool `layer` registers, for describing `t3-code` without a session
+ * (Settings → Tools). Add a toolkit here when you register one below.
+ */
+export const T3_MCP_TOOLKITS: ReadonlyArray<Toolkit.Any> = [
+  PreviewStandardToolkit,
+  PreviewSnapshotToolkit,
+  OrchestratorToolkit,
+  ThreadToolkit,
+  AttachmentToolkit,
+  ProjectToolkit,
+  EnvironmentToolkit,
+  ToolsToolkit,
+  PreviewControlsToolkit,
+  WorktreeToolkit,
+  PullRequestsToolkit,
+  DeviceStandardToolkit,
+  DeviceScreenshotToolkit,
+  HtmlRenderToolkit,
+  HtmlPreviewToolkit,
+];
+
 export const layer = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
