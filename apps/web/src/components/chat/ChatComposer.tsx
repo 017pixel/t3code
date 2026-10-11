@@ -1612,6 +1612,8 @@ export interface ChatComposerProps {
   promptHistoryMessages: ReadonlyArray<ChatMessage>;
   /** Loads an older history page; false when there is none to load right now. */
   onLoadOlderPromptHistory?: (() => boolean) | undefined;
+  /** True once an older history page failed to load. */
+  olderPromptHistoryFailed?: boolean | undefined;
   isServerThread: boolean;
   isLocalDraftThread: boolean;
   forceExpandedOnMobile: boolean;
@@ -1800,6 +1802,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThread,
     promptHistoryMessages,
     onLoadOlderPromptHistory,
+    olderPromptHistoryFailed = false,
     isServerThread: _isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     forceExpandedOnMobile,
@@ -2562,6 +2565,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerSuggestionListId = `${composerSuggestionId}-${encodeURIComponent(draftId ?? activeThreadId ?? "new")}-suggestions`;
   // Active ArrowUp recall. Cleared on edit and on thread switch.
   const promptHistoryPositionRef = useRef<ComposerPromptHistoryPosition | null>(null);
+  // Set while recall waits for an older page to bring the next prompt. Holds
+  // the oldest loaded message at the key press, so a streamed delta is not
+  // taken for the page. Cleared on edit, send, failure and thread switch.
+  const olderPromptRecallPendingRef = useRef<{
+    readonly oldestMessageId: string | undefined;
+  } | null>(null);
   const [composerHighlightedSearchKey, setComposerHighlightedSearchKey] = useState<string | null>(
     null,
   );
@@ -3873,8 +3882,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       // Any edit ends browsing, even one later undone by hand: typing a
       // character and deleting it leaves the text equal to the recall, and
       // ArrowDown must move the caret then, not clear the composer.
-      if (promptHistoryPositionRef.current?.recalled !== nextPrompt) {
+      const recalled = promptHistoryPositionRef.current?.recalled;
+      if (recalled !== nextPrompt) {
         promptHistoryPositionRef.current = null;
+      }
+      if ((recalled ?? "") !== nextPrompt) {
+        olderPromptRecallPendingRef.current = null;
       }
       const referenced = new Set(contextIds);
       const retained = removedContextPayloadsRef.current;
@@ -4432,6 +4445,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       setComposerSubmissionError(submission.validationMessage);
       if (!submission.didDispatch) return;
+      olderPromptRecallPendingRef.current = null;
       onTypingGuardSend();
       if (shouldBlurMobileComposerOnSubmit()) {
         blurMobileComposerAfterSend();
@@ -4535,12 +4549,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // on every streamed delta and ArrowUp is rare.
   const promptHistoryMessagesRef = useRef(promptHistoryMessages);
   promptHistoryMessagesRef.current = promptHistoryMessages;
-  // Set while recall waits for an older page to bring the next prompt. Holds
-  // the oldest loaded message at the key press, so a streamed delta is not
-  // taken for the page.
-  const olderPromptRecallPendingRef = useRef<{
-    readonly oldestMessageId: string | undefined;
-  } | null>(null);
 
   // The composer persists across threads. A recall from thread A must not
   // be treated as active in thread B, where the text-match fallback could
@@ -4562,25 +4570,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerDraftTarget, promptRef, setComposerDraftPrompt, setComposerTrigger],
   );
 
+  // Approvals and questions own the composer. A composer holding an image,
+  // file, picked element, preview annotation, or review comment is not
+  // empty: recalling text into it would send the old prompt with the new
+  // context, which is never what ArrowUp meant.
+  const isPromptHistoryBlocked = useCallback(
+    () =>
+      isComposerApprovalState ||
+      pendingUserInputs.length > 0 ||
+      composerImagesRef.current.length > 0 ||
+      composerFilesRef.current.length > 0 ||
+      composerTerminalContextsRef.current.length > 0 ||
+      composerPreviewAnnotations.length > 0 ||
+      composerReviewComments.length > 0,
+    [
+      composerTerminalContextsRef,
+      composerFilesRef,
+      composerImagesRef,
+      composerPreviewAnnotations.length,
+      composerReviewComments.length,
+      isComposerApprovalState,
+      pendingUserInputs.length,
+    ],
+  );
+
   const navigatePromptHistory = useCallback(
     (direction: "backward" | "forward", event: KeyboardEvent): boolean => {
       if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || event.isComposing) {
         return false;
       }
-      if (isComposerApprovalState || pendingUserInputs.length > 0) return false;
-      // A composer holding an image, file, picked element, preview
-      // annotation, or review comment is not empty. Recalling text into it
-      // would send the old prompt with the new context, which is never what
-      // ArrowUp meant.
-      if (
-        composerImagesRef.current.length > 0 ||
-        composerFilesRef.current.length > 0 ||
-        composerTerminalContextsRef.current.length > 0 ||
-        composerPreviewAnnotations.length > 0 ||
-        composerReviewComments.length > 0
-      ) {
-        return false;
-      }
+      if (isPromptHistoryBlocked()) return false;
       // A typed draft with no active recall can never step, so skip the
       // layout read and the entry build for that common case.
       if (promptHistoryPositionRef.current === null && promptRef.current.length > 0) {
@@ -4614,26 +4633,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       replacePromptFromHistory(step.prompt);
       return true;
     },
-    [
-      composerTerminalContextsRef,
-      composerFilesRef,
-      composerImagesRef,
-      composerPreviewAnnotations.length,
-      composerReviewComments.length,
-      isComposerApprovalState,
-      onLoadOlderPromptHistory,
-      pendingUserInputs.length,
-      promptRef,
-      replacePromptFromHistory,
-    ],
+    [isPromptHistoryBlocked, onLoadOlderPromptHistory, promptRef, replacePromptFromHistory],
   );
 
   useEffect(() => {
     const pending = olderPromptRecallPendingRef.current;
     if (pending === null) return;
     const position = promptHistoryPositionRef.current;
-    // An edit or send since the key press ends browsing.
-    if (promptRef.current !== (position?.recalled ?? "")) {
+    // An edit since the key press, a failed page, or context added while the
+    // page loaded ends browsing.
+    if (
+      promptRef.current !== (position?.recalled ?? "") ||
+      olderPromptHistoryFailed ||
+      isPromptHistoryBlocked()
+    ) {
       olderPromptRecallPendingRef.current = null;
       return;
     }
@@ -4650,7 +4663,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (!step) return;
     promptHistoryPositionRef.current = step.position;
     replacePromptFromHistory(step.prompt);
-  }, [promptHistoryMessages, promptRef, replacePromptFromHistory]);
+  }, [
+    isPromptHistoryBlocked,
+    olderPromptHistoryFailed,
+    promptHistoryMessages,
+    promptRef,
+    replacePromptFromHistory,
+  ]);
 
   // ------------------------------------------------------------------
   // Callbacks: command key

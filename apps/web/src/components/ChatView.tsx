@@ -11932,6 +11932,7 @@ export default function ChatView(props: ChatViewProps) {
                               activeThreadShell={activeThreadShell}
                               promptHistoryMessages={timelineMessages}
                               onLoadOlderPromptHistory={loadOlderPromptHistory}
+                              olderPromptHistoryFailed={Boolean(threadHistoryControls?.error)}
                               isServerThread={isServerThread}
                               isLocalDraftThread={isLocalDraftThread}
                               forceExpandedOnMobile={
