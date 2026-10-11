@@ -18,6 +18,7 @@ import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread, useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { clearPendingLandingDraft, usePendingLandingDraft } from "../bootLanding";
+import { environmentCatalog } from "../connection/catalog";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
@@ -226,6 +227,15 @@ function LandingDraftDefaults() {
       : environmentSession.initialConfigValueAtom(landing.projectRef.environmentId),
   );
   const startedDraftIdRef = useRef<string | null>(null);
+  // The snapshot can name an environment this browser has since removed. Its
+  // config never arrives, so the draft stops waiting for it and reports the
+  // environment as unavailable instead of connecting forever.
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const landingEnvironmentGone =
+    landing !== null && catalog.isReady && !catalog.entries.has(landing.projectRef.environmentId);
+  useEffect(() => {
+    if (landing !== null && landingEnvironmentGone) clearPendingLandingDraft(landing.draftId);
+  }, [landing, landingEnvironmentGone]);
   useEffect(() => {
     if (landing === null || liveConfig === null) return;
     if (startedDraftIdRef.current === landing.draftId) return;
