@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
+import * as HostLock from "./ProviderMaintenanceHostLock.ts";
 
 /** One permit per process: background installs hold it, provider turn starts wait for it. */
 export class ProviderMaintenanceAdmission extends Context.Reference<{
@@ -26,6 +27,7 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
 )(function* <E>(input: { readonly makeAlreadyRunningError: (targetKey: string) => E }) {
   const runningTargetsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
   const locks = yield* KeyedLock.make<string>();
+  const hostLock = yield* HostLock.ProviderMaintenanceHostLock;
 
   const acquireTarget = Effect.fn("acquireTarget")(function* (targetKey: string) {
     return yield* Ref.modify(runningTargetsRef, (runningTargets) => {
@@ -59,7 +61,7 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
       }
 
       return yield* (onQueued ?? Effect.void).pipe(
-        Effect.andThen(locks.withLock(lockKey, run)),
+        Effect.andThen(locks.withLock(lockKey, hostLock.withWrite(run))),
         Effect.onInterrupt(() => onInterrupted ?? Effect.void),
         Effect.ensuring(releaseTarget(targetKey)),
       );

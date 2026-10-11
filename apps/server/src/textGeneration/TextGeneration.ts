@@ -10,6 +10,7 @@ import * as ProviderMaintenanceCoordinator from "../provider/providerMaintenance
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ThreadTitleLinks from "./ThreadTitleLinks.ts";
+import * as HostLock from "../provider/ProviderMaintenanceHostLock.ts";
 
 export type {
   BranchNameGenerationInput,
@@ -58,6 +59,7 @@ export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
+  const hostLock = yield* HostLock.ProviderMaintenanceHostLock;
   // Waits out a background install so a provider CLI is never launched mid-replacement.
   const instanceFor = (operation: TextGenerationOp, instanceId: ProviderInstanceId) =>
     admission
@@ -66,15 +68,21 @@ export const make = Effect.gen(function* () {
   return TextGeneration.of({
     generateCommitMessage: (input) =>
       instanceFor("generateCommitMessage", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),
+        Effect.flatMap((textGeneration) =>
+          hostLock.withRead(textGeneration.generateCommitMessage(input)),
+        ),
       ),
     generatePrContent: (input) =>
       instanceFor("generatePrContent", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generatePrContent(input)),
+        Effect.flatMap((textGeneration) =>
+          hostLock.withRead(textGeneration.generatePrContent(input)),
+        ),
       ),
     generateBranchName: (input) =>
       instanceFor("generateBranchName", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateBranchName(input)),
+        Effect.flatMap((textGeneration) =>
+          hostLock.withRead(textGeneration.generateBranchName(input)),
+        ),
       ),
     generateThreadTitle: (input) =>
       instanceFor("generateThreadTitle", input.modelSelection.instanceId).pipe(
@@ -88,7 +96,9 @@ export const make = Effect.gen(function* () {
                   sourceControl,
                 ),
               ));
-            return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
+            return yield* hostLock.withRead(
+              textGeneration.generateThreadTitle({ ...input, linkedContext }),
+            );
           }),
         ),
       ),

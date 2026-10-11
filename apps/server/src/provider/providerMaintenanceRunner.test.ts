@@ -1,4 +1,12 @@
+// @effect-diagnostics nodeBuiltinImport:off - Separate processes exercise host-wide maintenance leases.
 import { describe, it, assert } from "@effect/vitest";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
+import * as HostLock from "./ProviderMaintenanceHostLock.ts";
+import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
@@ -50,7 +58,14 @@ const encoder = new TextEncoder();
 // `{ command, args }` assertions below hold deterministically on any host
 // (including Windows). Windows-specific resolution is covered by the dedicated
 // win32 case at the end of this suite.
-const layerNonWindowsPlatform = Layer.succeed(HostProcess.Platform, "linux");
+const layerNonWindowsPlatform = Layer.merge(
+  Layer.succeed(HostProcess.Platform, "linux"),
+  Layer.succeed(HostLock.ProviderMaintenanceHostLock, {
+    acquireRead: Effect.succeed(Effect.void),
+    withRead: (effect) => effect,
+    withWrite: (effect) => effect,
+  }),
+);
 
 function lifecycleFor(provider: ProviderDriverKind): ProviderMaintenanceCapabilities {
   if (provider === NATIVE_CLI_DRIVER) {
@@ -1493,3 +1508,185 @@ it.effect(
     );
   },
 );
+
+describe("provider maintenance host leases", () => {
+  const coordinatedWrite = <A>(directory: string, run: Effect.Effect<A>) =>
+    Effect.gen(function* () {
+      const coordinator = yield* makeProviderMaintenanceCommandCoordinator({
+        makeAlreadyRunningError: () => new Error("already running"),
+      });
+      return yield* coordinator.withCommandLock({ targetKey: "provider", lockKey: "install", run });
+    }).pipe(Effect.provideService(HostLock.ProviderMaintenanceHostLock, HostLock.make(directory)));
+  const childLease = (directory: string, mode: "withRead" | "withWrite") =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        const child = NodeChildProcess.spawn(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            `
+          import * as Effect from "effect/Effect";
+          import { make } from ${JSON.stringify(new URL("./ProviderMaintenanceHostLock.ts", import.meta.url).href)};
+          await Effect.runPromise(make(process.argv[1])[process.argv[2]](Effect.promise(() =>
+            new Promise(resolve => { process.stdout.write("held\\n"); process.stdin.once("data", resolve); })
+          )));
+        `,
+            directory,
+            mode,
+          ],
+          { cwd: NodePath.resolve(import.meta.dirname, "../.."), stdio: "pipe" },
+        );
+        const held = new Promise<void>((resolve, reject) => {
+          child.stdout.once("data", () => resolve());
+          child.once("error", reject);
+          child.once("exit", (code) => code && reject(new Error(`holder exited ${code}`)));
+        });
+        const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+        return { child, held, exited };
+      }),
+      ({ child, exited }) =>
+        Effect.promise(async () => {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          await exited;
+        }),
+    );
+
+  const waitForGate = (directory: string) =>
+    Effect.callback<void>((resume) => {
+      const gate = NodePath.join(directory, "gate.lock");
+      const watcher = NodeFS.watch(directory, () => {
+        if (NodeFS.existsSync(gate)) resume(Effect.void);
+      });
+      watcher.once("error", (error) => resume(Effect.die(error)));
+      if (NodeFS.existsSync(gate)) resume(Effect.void);
+      return Effect.sync(() => watcher.close());
+    });
+
+  it.live("holds another server's install through a turn and admits nested CLI calls", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const holder = yield* childLease(directory, "withRead");
+        yield* Effect.promise(() => holder.held);
+        const local = HostLock.make(directory);
+        const release = yield* local.acquireRead;
+        const entered = yield* Deferred.make<void>();
+        const gate = Effect.raceFirst(
+          waitForGate(directory),
+          Deferred.await(entered).pipe(Effect.andThen(Effect.die("install bypassed active turn"))),
+        );
+        const install = yield* coordinatedWrite(
+          directory,
+          Deferred.succeed(entered, undefined),
+        ).pipe(Effect.forkScoped);
+        yield* gate;
+        assert.isFalse(yield* Deferred.isDone(entered));
+        yield* local.withRead(Effect.void);
+        yield* release;
+        assert.isFalse(yield* Deferred.isDone(entered));
+        holder.child.stdin.end("release");
+        yield* Effect.promise(() => holder.exited);
+        yield* Fiber.join(install);
+        assert.isTrue(yield* Deferred.isDone(entered));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("serializes installs across independent server processes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const holder = yield* childLease(directory, "withWrite");
+        yield* Effect.promise(() => holder.held);
+        const entered = yield* Deferred.make<void>();
+        const install = yield* coordinatedWrite(
+          directory,
+          Deferred.succeed(entered, undefined),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(entered));
+        holder.child.stdin.end("release");
+        yield* Effect.promise(() => holder.exited);
+        yield* Fiber.join(install);
+        assert.isTrue(yield* Deferred.isDone(entered));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("releases active and waiting host leases on interruption", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const local = HostLock.make(directory);
+        const entered = yield* Deferred.make<void>();
+        const turn = yield* local
+          .withRead(Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)))
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        const gate = waitForGate(directory);
+        const install = yield* local.withWrite(Effect.never).pipe(Effect.forkScoped);
+        yield* gate;
+        yield* Fiber.interrupt(install);
+        yield* Fiber.interrupt(turn);
+        assert.equal(NodeFS.readdirSync(NodePath.join(directory, "readers")).length, 0);
+        assert.equal(yield* local.withWrite(Effect.succeed("installed")), "installed");
+        const writer = yield* childLease(directory, "withWrite");
+        yield* Effect.promise(() => writer.held);
+        const queued = yield* local.withRead(Effect.never).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* Fiber.interrupt(queued);
+        writer.child.stdin.end("release");
+        yield* Effect.promise(() => writer.exited);
+        assert.equal(yield* local.withWrite(Effect.succeed("installed")), "installed");
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("reclaims a dead reader whose PID has been reused", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) !== "linux") return;
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const readers = NodePath.join(directory, "readers");
+        NodeFS.mkdirSync(readers);
+        NodeFS.writeFileSync(
+          NodePath.join(readers, `${process.pid}-old-reader`),
+          "previous-process-start",
+        );
+        assert.equal(
+          yield* HostLock.make(directory).withWrite(Effect.succeed("installed")),
+          "installed",
+        );
+        assert.deepEqual(NodeFS.readdirSync(readers), []);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("reclaims a crashed server's turn and install leases", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        for (const mode of ["withRead", "withWrite"] as const) {
+          const holder = yield* childLease(directory, mode);
+          yield* Effect.promise(() => holder.held);
+          holder.child.kill("SIGKILL");
+          yield* Effect.promise(() => holder.exited);
+          if (mode === "withWrite") {
+            // Advance the dead heartbeat, without sleeping through its stale interval.
+            NodeFS.utimesSync(NodePath.join(directory, "gate.lock"), 0, 0);
+          }
+          assert.equal(
+            yield* HostLock.make(directory).withWrite(Effect.succeed("installed")),
+            "installed",
+          );
+        }
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
