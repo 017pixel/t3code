@@ -78,7 +78,7 @@ afterEach(async () => {
 async function renderFind(open: boolean, previewX = 1548) {
   await act(() =>
     root.render(
-      <ChatCanvas composerOverlayElement={null} detailsCardTopInset={open ? 48 : 0}>
+      <ChatCanvas composerOverlayRef={null} detailsCardTopInset={open ? 48 : 0}>
         {open ? <div data-thread-find-bar /> : null}
         <Preview x={previewX} />
       </ChatCanvas>,
