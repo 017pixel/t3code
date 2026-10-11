@@ -8,6 +8,7 @@ import {
   type ServerProviderUpdateState,
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -68,6 +69,8 @@ export interface ProviderMaintenanceRunnerShape {
           readonly targetVersion?: string | undefined;
           /** Skips installer output progress, for background installs nobody watches. */
           readonly quiet?: boolean | undefined;
+          /** Requires proven ownership and pins the checked release when supported. */
+          readonly background?: boolean | undefined;
         },
   ) => Effect.Effect<ServerProviderUpdatedPayload, ServerProviderUpdateError>;
 }
@@ -104,7 +107,10 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
         // which a bare ChildProcess.spawn cannot launch (spawn npm ENOENT);
         // resolveSpawnCommand finds the real `.cmd` and routes it through the
         // shell. On Linux/macOS (incl. the WSL backend) this is a no-op.
-        const resolved = yield* resolveSpawnCommand(input.command, input.args);
+        const resolved = yield* resolveSpawnCommand(input.command, input.args, {
+          ...(input.env ? { env: input.env } : {}),
+          extendEnv: true,
+        });
         const child = yield* input.spawner
           .spawn(
             ChildProcess.make(resolved.command, resolved.args, {
@@ -318,33 +324,60 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       }),
   });
 
+  const resolveInstallationInstances = (
+    provider: ProviderDriverKind,
+    instanceId: ProviderInstanceId,
+    installationKey: string | undefined,
+  ) =>
+    providerRegistry.getProviders.pipe(
+      Effect.flatMap((providers) =>
+        Effect.forEach(providers, (candidate) =>
+          candidate.instanceId === instanceId
+            ? Effect.succeed(candidate.instanceId)
+            : candidate.driver !== provider || !installationKey
+              ? Effect.succeed(null)
+              : providerRegistry
+                  .getProviderMaintenanceCapabilitiesForInstance(
+                    candidate.instanceId,
+                    candidate.driver,
+                  )
+                  .pipe(
+                    Effect.map((capabilities) =>
+                      capabilities.update?.installationKey === installationKey
+                        ? candidate.instanceId
+                        : null,
+                    ),
+                  ),
+        ),
+      ),
+      Effect.map((ids) => ids.filter((id) => id !== null)),
+    );
+
+  const refreshInstallationInstances = (
+    provider: ProviderDriverKind,
+    instanceIds: ReadonlyArray<ProviderInstanceId>,
+    alreadyFresh?: ProviderInstanceId,
+  ) =>
+    Effect.forEach(
+      instanceIds,
+      (id) =>
+        (id === alreadyFresh
+          ? Effect.void
+          : providerRegistry.getProviderMaintenanceCapabilitiesForInstance(id, provider, {
+              fresh: true,
+            })
+        ).pipe(Effect.andThen(providerRegistry.refreshInstance(id))),
+      { discard: true },
+    );
+
   const verifyRefreshedProvider = (
     provider: ProviderDriverKind,
     maintenanceCapabilities: ProviderMaintenanceCapabilities,
     instanceId: ProviderInstanceId,
+    instanceIds: ReadonlyArray<ProviderInstanceId>,
   ): Effect.Effect<VerifiedProviderRefresh> =>
-    providerRegistry.getProviders.pipe(
-      Effect.map((providers) => {
-        const instanceIds: Array<ProviderInstanceId> = [];
-        for (const candidate of providers) {
-          if (candidate.driver === provider && candidate.instanceId === instanceId) {
-            instanceIds.push(candidate.instanceId);
-          }
-        }
-        return instanceIds;
-      }),
-      Effect.flatMap((instanceIds) =>
-        instanceIds.length === 0
-          ? providerRegistry.refreshInstance(instanceId)
-          : Effect.forEach(
-              instanceIds,
-              (instanceId) => providerRegistry.refreshInstance(instanceId),
-              {
-                concurrency: "unbounded",
-                discard: true,
-              },
-            ).pipe(Effect.andThen(providerRegistry.getProviders)),
-      ),
+    refreshInstallationInstances(provider, instanceIds, instanceId).pipe(
+      Effect.andThen(providerRegistry.getProviders),
       Effect.flatMap((providers) => {
         const refreshedProviders = providers.filter(
           (candidate) => candidate.driver === provider && candidate.instanceId === instanceId,
@@ -398,6 +431,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         : (target.instanceId ?? defaultInstanceIdForDriver(provider));
     const targetVersion = typeof target === "string" ? undefined : target.targetVersion;
     const quiet = typeof target !== "string" && target.quiet === true;
+    const background = typeof target !== "string" && target.background === true;
     const targetKey = `instance:${instanceId}`;
     const capabilities = yield* providerRegistry.getProviderMaintenanceCapabilitiesForInstance(
       instanceId,
@@ -455,7 +489,13 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               provider,
               { fresh: true },
             );
-            if (!fresh.update || fresh.update.lockKey !== update.lockKey) {
+            if (
+              !fresh.update ||
+              fresh.update.lockKey !== update.lockKey ||
+              (background &&
+                (!fresh.update.installationKey ||
+                  fresh.update.installationKey !== update.installationKey))
+            ) {
               return yield* finish(
                 makeUpdateState({
                   status: "failed",
@@ -467,8 +507,14 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
             }
 
             const manifest = yield* manifestService.current;
+            const checkedTarget = targetVersion
+              ? makeTargetedProviderUpdateAction(fresh, targetVersion)
+              : null;
+            if (background && !checkedTarget && fresh.packageName) {
+              yield* latestVersions.invalidate(fresh.packageName);
+            }
             const candidateVersion =
-              targetVersion ??
+              (!background || checkedTarget !== null ? targetVersion : undefined) ??
               (yield* resolveLatestProviderVersion(fresh).pipe(
                 Effect.provideService(HttpClient.HttpClient, httpClient),
                 Effect.provideService(
@@ -483,12 +529,48 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                 provider,
                 candidateVersion,
               );
-            const command =
-              targetVersion !== undefined
+            if (background) {
+              // Re-probe under the install lock: a manual/external update may have won the race.
+              const current = (yield* providerRegistry.refreshInstance(instanceId)).find(
+                (candidate) => candidate.instanceId === instanceId,
+              );
+              if (
+                !current?.enabled ||
+                !current.installed ||
+                !current.version ||
+                !candidateVersion ||
+                !parseSemver(current.version) ||
+                !parseSemver(candidateVersion) ||
+                (fresh.compareVersions ?? compareSemverVersions)(
+                  current.version,
+                  candidateVersion,
+                ) >= 0
+              ) {
+                return yield* finish(
+                  makeUpdateState({
+                    status: "unchanged",
+                    startedAt,
+                    finishedAt: yield* nowIso,
+                    message: "No newer provider version is available.",
+                  }),
+                );
+              }
+            }
+            const pinnedCommand = candidateVersion
+              ? makeTargetedProviderUpdateAction(fresh, candidateVersion)
+              : null;
+            const command = background
+              ? (pinnedCommand ??
+                (fresh.packageName === null ||
+                fresh.latestVersion !== undefined ||
+                fresh.update.lockKey.endsWith("-native")
+                  ? fresh.update
+                  : null))
+              : targetVersion !== undefined
                 ? makeTargetedProviderUpdateAction(fresh, targetVersion)
                 : fresh.update;
             const rejected =
-              targetVersion !== undefined
+              !background && targetVersion !== undefined
                 ? !command ||
                   advisory?.recommendedVersion !== targetVersion ||
                   advisory.status !== "supported"
@@ -506,6 +588,11 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                 }),
               );
             }
+            const affectedInstances = yield* resolveInstallationInstances(
+              provider,
+              instanceId,
+              fresh.update.installationKey,
+            );
             yield* setRunningMessage(`Running ${describeCommand(command)}`);
             const result = yield* runMaintenanceCommand(
               command,
@@ -513,6 +600,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
             );
             const finishedAt = yield* nowIso;
             if (result.timedOut || result.exitCode !== 0) {
+              yield* refreshInstallationInstances(provider, affectedInstances);
               return yield* finish(
                 makeUpdateState({
                   status: "failed",
@@ -535,6 +623,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               provider,
               verified,
               instanceId,
+              affectedInstances,
             );
             // "Succeeded" needs the provider to still be installed: an
             // installer that exits 0 and leaves the binary missing is not a
@@ -545,8 +634,16 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               verifiedProviders.some(
                 (verifiedProvider) =>
                   !isStillInstalled(verifiedProvider) ||
-                  (targetVersion !== undefined &&
-                    verifiedProvider.version?.replace(/^v/, "") !== targetVersion),
+                  (background &&
+                    (!verifiedProvider.version ||
+                      !candidateVersion ||
+                      (verified.compareVersions ?? compareSemverVersions)(
+                        verifiedProvider.version,
+                        candidateVersion,
+                      ) < 0)) ||
+                  (((!background && targetVersion !== undefined) ||
+                    (background && pinnedCommand !== null)) &&
+                    verifiedProvider.version?.replace(/^v/, "") !== candidateVersion),
               );
             const stillOutdated =
               targetVersion === undefined &&

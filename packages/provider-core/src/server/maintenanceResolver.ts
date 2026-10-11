@@ -16,7 +16,6 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Cache from "effect/Cache";
-import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -45,25 +44,6 @@ const PROVIDER_UPDATE_ACTION_TOAST_MESSAGE = "Install the update now or review p
  * get; the npm registry check keeps its own cache.
  */
 const MAINTENANCE_CAPABILITIES_CACHE_TTL = Duration.hours(1);
-
-const compactEnv = (input: Record<string, Option.Option<string>>): NodeJS.ProcessEnv =>
-  Object.fromEntries(
-    Object.entries(input).flatMap(([key, value]) =>
-      Option.match(value, {
-        onNone: () => [],
-        onSome: (resolved) => [[key, resolved]],
-      }),
-    ),
-  );
-
-const CommandLookupEnvConfig = Config.all({
-  PATH: Config.String("PATH").pipe(Config.option),
-  Path: Config.String("Path").pipe(Config.option),
-  path: Config.String("path").pipe(Config.option),
-  PATHEXT: Config.String("PATHEXT").pipe(Config.option),
-}).pipe(Config.map(compactEnv));
-
-const readCommandLookupEnv = CommandLookupEnvConfig.pipe(Effect.orElseSucceed(() => ({})));
 
 /** Where the provider executable was found; every path is absolute. */
 export interface ProviderMaintenanceResolutionContext {
@@ -135,6 +115,7 @@ export function makeProviderMaintenanceCapabilities(input: {
   readonly updateExecutable: string | null;
   readonly updateArgs: ReadonlyArray<string>;
   readonly updateLockKey: string | null;
+  readonly installationKey?: string | undefined;
   /** Shown to the user instead of `<executable> <args>`; use for a bare tool name like `brew`. */
   readonly updateCommand?: string;
   readonly platform?: NodeJS.Platform;
@@ -155,6 +136,7 @@ export function makeProviderMaintenanceCapabilities(input: {
           executable: input.updateExecutable,
           args: input.updateArgs,
           lockKey: input.updateLockKey,
+          ...(input.installationKey ? { installationKey: input.installationKey } : {}),
           ...(input.env ? { env: input.env } : {}),
         };
   return {
@@ -170,7 +152,7 @@ export function makeTargetedProviderUpdateAction(
   capabilities: ProviderMaintenanceCapabilities,
   version: string,
 ): ProviderMaintenanceCommandAction | null {
-  if (!/^\d+\.\d+\.\d+$/.test(version)) return null;
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) return null;
   const update = capabilities.update;
   const packageName = capabilities.packageName;
   if (!update || !packageName) return null;
@@ -227,9 +209,17 @@ function isYarnGlobalCommandPath(commandPath: string): boolean {
 }
 
 /** Version-manager installs are pinned in its config, so updating them means editing that. */
-function isMiseCommandPath(commandPath: string): boolean {
+function isMiseCommandPath(commandPath: string, env: NodeJS.ProcessEnv): boolean {
   const normalized = normalizeCommandPath(commandPath);
-  return normalized.includes("/mise/installs/") || normalized.includes("/mise/shims/");
+  const dataDir = env.MISE_DATA_DIR?.trim().replace(/[\\/]+$/, "");
+  const roots = ["/mise", ...(dataDir ? [normalizeCommandPath(dataDir)] : [])];
+  return roots.some((root) => {
+    if (normalized.includes(`${root}/shims/`)) return true;
+    const installs = `${root}/installs/`;
+    const tool = normalized.slice(normalized.indexOf(installs) + installs.length).split("/")[0];
+    // A global package under mise's Node install belongs to npm, not mise.
+    return normalized.includes(installs) && tool !== "node";
+  });
 }
 
 function isPnpmGlobalCommandPath(commandPath: string): boolean {
@@ -386,6 +376,34 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   const commandPaths = [context.resolvedCommandPath, context.realCommandPath];
   const packageName = definition.npmPackageName;
 
+  const fileSystem = yield* FileSystem.FileSystem;
+  const miseDataDir = context.env.MISE_DATA_DIR;
+  const realMiseDataDir = miseDataDir
+    ? yield* fileSystem.realPath(miseDataDir).pipe(Effect.orElseSucceed(() => miseDataDir))
+    : undefined;
+  if (
+    commandPaths.some((commandPath) =>
+      isMiseCommandPath(commandPath, { ...context.env, MISE_DATA_DIR: realMiseDataDir }),
+    ) ||
+    (yield* isMiseWrapperScript(context))
+  ) {
+    return manual;
+  }
+  const identity = (value: string) =>
+    context.platform === "win32" ? normalizeCommandPath(value) : value.replaceAll("\\", "/");
+  // A configured version directory stays pinned even if an installer owns the active alias.
+  const pinned =
+    /[\\/](?:\.local[\\/]share[\\/]claude[\\/]versions|packages[\\/]standalone[\\/]releases|Cellar|Caskroom|\.pnpm)[\\/]/i.test(
+      context.binaryPath,
+    );
+  const keyFor = (root: string) => (pinned ? undefined : `${packageName}:${identity(root)}`);
+  const installationKey = keyFor(context.realCommandPath);
+  const rootAt = (marker: string) => {
+    const owned = commandPaths.find((value) => normalizeCommandPath(value).includes(marker));
+    if (!owned) return context.realCommandPath;
+    const slash = owned.replaceAll("\\", "/");
+    return slash.slice(0, normalizeCommandPath(slash).indexOf(marker) + marker.length - 1);
+  };
   const nativeUpdate = definition.nativeUpdate;
   const native = nativeUpdate
     ? makeProviderMaintenanceCapabilities({
@@ -395,11 +413,28 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
         updateArgs: nativeUpdate.args,
         updateLockKey: `${definition.provider}-native`,
         platform: context.platform,
-        ...(nativeUpdate.env ? { env: nativeUpdate.env } : {}),
+        env: { ...context.env, ...nativeUpdate.env },
       })
     : manual;
-  if (nativeUpdate?.isCommandPath && commandPaths.some(nativeUpdate.isCommandPath)) {
-    return native;
+  if (nativeUpdate?.isCommandPath && nativeUpdate.isCommandPath(context.realCommandPath)) {
+    const nativeRoot = context.realCommandPath
+      .replaceAll("\\", "/")
+      .replace(/(\/packages\/standalone)\/.*$/i, "$1")
+      .replace(/(\/\.local\/share\/claude)\/.*$/i, "$1");
+    const codexHome = nativeUpdate.env?.CODEX_HOME;
+    const ownsHome =
+      definition.provider !== "codex" ||
+      !codexHome ||
+      identity(nativeRoot) === identity(`${codexHome.replace(/[\\/]+$/, "")}/packages/standalone`);
+    return {
+      ...native,
+      update: native.update
+        ? {
+            ...native.update,
+            ...(ownsHome && keyFor(nativeRoot) ? { installationKey: keyFor(nativeRoot) } : {}),
+          }
+        : null,
+    };
   }
   // A `node_modules` path not proven below belongs to another package or a
   // project, so the provider's own updater could act on the wrong install.
@@ -411,24 +446,44 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   if (commandPaths.some(isVitePlusGlobalCommandPath)) {
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
+      env: context.env,
+      platform: context.platform,
+      installationKey: keyFor(rootAt("/.vite-plus/")),
       packageName,
       updateExecutable: "vp",
       updateArgs: ["i", "-g", packageName],
       updateLockKey: "vite-plus-global",
     });
   }
-  if (commandPaths.some(isBunGlobalCommandPath)) {
+  const bunBin = context.env.BUN_INSTALL?.trim().replace(/[\\/]+$/, "");
+  if (
+    commandPaths.some(isBunGlobalCommandPath) ||
+    (bunBin &&
+      commandPaths.some((value) =>
+        normalizeCommandPath(value).startsWith(`${normalizeCommandPath(bunBin)}/bin/`),
+      ))
+  ) {
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
+      env: context.env,
+      platform: context.platform,
+      installationKey: keyFor(bunBin || rootAt("/.bun/")),
       packageName,
       updateExecutable: "bun",
       updateArgs: ["i", "-g", `${packageName}@latest`],
       updateLockKey: "bun-global",
     });
   }
-  if (commandPaths.some(isPnpmGlobalCommandPath)) {
+  const pnpmHome = context.env.PNPM_HOME?.trim().replace(/[\\/]+$/, "");
+  if (
+    commandPaths.some(isPnpmGlobalCommandPath) ||
+    (pnpmHome && commandPaths.some((value) => identity(value).startsWith(`${identity(pnpmHome)}/`)))
+  ) {
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
+      env: context.env,
+      platform: context.platform,
+      installationKey: keyFor(context.realCommandPath.replaceAll("\\", "/").split("/global/")[0]!),
       packageName,
       updateExecutable: "pnpm",
       updateArgs: ["add", "-g", `${packageName}@latest`],
@@ -439,6 +494,9 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   if (commandPaths.some(isYarnGlobalCommandPath)) {
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
+      env: context.env,
+      platform: context.platform,
+      installationKey,
       packageName,
       updateExecutable: "yarn",
       updateArgs: ["global", "add", `${packageName}@latest`],
@@ -448,6 +506,9 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   if (yield* isVoltaPackageInstall(context, packageName)) {
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
+      env: context.env,
+      platform: context.platform,
+      installationKey: keyFor(context.resolvedCommandPath.replaceAll("\\", "/").split("/bin/")[0]!),
       packageName,
       updateExecutable: "volta",
       updateArgs: ["install", `${packageName}@latest`],
@@ -467,6 +528,8 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
     // Older npm warns about the unknown config and continues.
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
+      env: context.env,
+      platform: context.platform,
       packageName,
       updateExecutable: "npm",
       updateArgs: [
@@ -478,11 +541,8 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
         `${packageName}@latest`,
       ],
       updateLockKey: `npm-global:${normalizeCommandPath(npmPrefix)}`,
+      installationKey: `${packageName}:${identity(npmPrefix)}`,
     });
-  }
-
-  if (commandPaths.some(isMiseCommandPath) || (yield* isMiseWrapperScript(context))) {
-    return manual;
   }
 
   const homebrew = homebrewOwnershipFromCommandPath(context.realCommandPath);
@@ -491,7 +551,6 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
     if (homebrew.kind === "formula" && homebrew.name.toLowerCase() === "mise") {
       return manual;
     }
-    const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     // The keg's own brew works even when a GUI-launched server has no
     // Homebrew on PATH; the prefix check below still applies to it.
@@ -523,10 +582,13 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
     const info = yield* runHomebrew(brewPath, ["info", "--json=v2", homebrew.name], context.env);
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
+      env: context.env,
+      platform: context.platform,
       packageName,
       updateExecutable: brewPath,
       updateArgs: args,
       updateLockKey: "homebrew",
+      installationKey: keyFor(`${homebrew.prefix}/${homebrew.kind}/${homebrew.name}`),
       updateCommand: ["brew", ...args].join(" "),
       latestVersion: info ? parseHomebrewLatestVersion(info, homebrew) : null,
     });
@@ -644,7 +706,7 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
     return yield* resolver.resolve(null);
   }
 
-  const env = options?.env ?? (yield* readCommandLookupEnv);
+  const env = options?.env ?? (yield* HostProcess.Environment);
   // resolveCommandPath checks explicit paths for existence too, so a missing
   // binary always lands in the no-context branch and never gets an update
   // command it cannot run.

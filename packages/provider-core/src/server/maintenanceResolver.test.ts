@@ -237,11 +237,15 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     ),
   );
 
-  it.effect.skipIf(!symlinksSupported)(
-    "pins npm updates to the global prefix that owns the package",
-    () =>
+  it.effect.each(["", ".nvm/versions/node/24", "Cellar/node/24"])(
+    "pins npm updates to the owning global prefix even under %s",
+    (prefix) =>
       Effect.gen(function* () {
-        const tempDir = yield* makeTempDir("t3-npm-capabilities");
+        const root = yield* makeTempDir("t3-npm-capabilities");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const tempDir = NodePath.join(root, prefix);
         const link = linkIntoPackage(tempDir, "package-tool", [
           "lib",
           "node_modules",
@@ -257,7 +261,8 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           },
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn));
 
-        expect(capabilities).toEqual({
+        expect(capabilities.update?.installationKey).toBeDefined();
+        expect(capabilities).toMatchObject({
           provider: driver("packageTool"),
           packageName: "@example/package-tool",
           update: {
@@ -274,7 +279,8 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
             lockKey: `npm-global:${normalizeCommandPath(tempDir)}`,
           },
         });
-      }),
+      }).pipe(Effect.scoped),
+    { skip: windowsHost || !symlinksSupported },
   );
 
   it("derives the npm prefix only from the global lib/node_modules layout", () => {
@@ -458,7 +464,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn),
       );
 
-      expect(capabilities).toEqual({
+      expect(capabilities).toMatchObject({
         provider: driver("nativePackageTool"),
         packageName: "@example/native-package-tool",
         update: {
@@ -589,7 +595,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         env: { PATH: "" },
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn));
 
-      expect(capabilities.update?.env).toEqual({ TOOL_HOME: tempDir });
+      expect(capabilities.update?.env).toEqual({ PATH: "", TOOL_HOME: tempDir });
     }),
   );
 
@@ -679,7 +685,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           [brewPath, "--prefix"],
           [brewPath, "info", "--json=v2", fixture.name],
         ]);
-        expect(capabilities).toEqual({
+        expect(capabilities).toMatchObject({
           provider: driver("packageTool"),
           packageName: "@example/package-tool",
           latestVersion: "0.148.0",
@@ -879,6 +885,404 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     }),
   );
 
+  it.effect.each(["npm", "pnpm", "bun", "yarn", "volta", "vp", "brew", "native"] as const)(
+    "executes the owning %s updater with the instance environment",
+    (method) =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("pf-09-execution");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const tools = NodePath.join(root, "tools");
+        const env = {
+          PATH: tools,
+          BUN_INSTALL: NodePath.join(root, "custom-bun"),
+          npm_config_prefix: NodePath.join(root, "other-prefix"),
+          npm_config_registry: "https://private.invalid/",
+          CODEX_HOME: NodePath.join(root, "instance-home"),
+        };
+        const executable = NodePath.join(tools, method === "native" ? "package-tool" : method);
+        writeExecutable(executable);
+        NodeFS.writeFileSync(
+          executable,
+          `#!/bin/sh\nprintf '%s\n' "$BUN_INSTALL" "$npm_config_prefix" "$CODEX_HOME" "$npm_config_registry" "$@"\n`,
+        );
+        const nativeRoot = NodePath.join(root, ".local", "bin");
+        const resolved =
+          method === "bun"
+            ? NodePath.join(env.BUN_INSTALL, "bin", "package-tool")
+            : method === "vp"
+              ? NodePath.join(root, ".vite-plus", "bin", "package-tool")
+              : method === "volta"
+                ? NodePath.join(root, ".volta", "bin", "package-tool")
+                : method === "native"
+                  ? NodePath.join(nativeRoot, "package-tool")
+                  : NodePath.join(root, "bin", "package-tool");
+        const real =
+          method === "npm"
+            ? NodePath.join(
+                root,
+                "lib",
+                "node_modules",
+                "@example",
+                "package-tool",
+                "bin",
+                "tool.js",
+              )
+            : method === "pnpm"
+              ? NodePath.join(
+                  root,
+                  ".local",
+                  "share",
+                  "pnpm",
+                  "global",
+                  "node_modules",
+                  "@example",
+                  "package-tool",
+                  "bin",
+                  "tool.js",
+                )
+              : method === "yarn"
+                ? NodePath.join(
+                    root,
+                    ".config",
+                    "yarn",
+                    "global",
+                    "node_modules",
+                    "@example",
+                    "package-tool",
+                    "bin",
+                    "tool.js",
+                  )
+                : method === "volta"
+                  ? NodePath.join(root, ".volta", "bin", "volta-shim")
+                  : method === "brew"
+                    ? NodePath.join(root, "Cellar", "package-tool", "1.0.0", "bin", "tool")
+                    : resolved;
+        writeExecutable(real);
+        if (method === "native") NodeFS.copyFileSync(executable, resolved);
+        if (method === "volta")
+          NodeFS.mkdirSync(
+            NodePath.join(root, ".volta", "tools", "image", "packages", "@example", "package-tool"),
+            { recursive: true },
+          );
+        const resolver = {
+          provider: driver("packageTool"),
+          npmPackageName: "@example/package-tool",
+          nativeUpdate: {
+            args: ["update"],
+            isCommandPath: isNativeTestCommandPath("/.local/bin/package-tool"),
+            env: { CODEX_HOME: "shared-home" },
+          },
+        };
+        const capabilities = yield* resolvePackageManagedProviderMaintenance(resolver, {
+          binaryPath: resolved,
+          resolvedCommandPath: resolved,
+          realCommandPath: real,
+          env,
+          platform: "linux",
+        }).pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            stdoutSpawner((_command, args) =>
+              args[0] === "--prefix"
+                ? root
+                : JSON.stringify({ formulae: [{ versions: { stable: "2.0.0" } }] }),
+            ),
+          ),
+        );
+        const action = capabilities.update!;
+        expect(action).not.toBeNull();
+        const expectedEnv = method === "native" ? { ...env, CODEX_HOME: "shared-home" } : env;
+        expect(action.env).toEqual(expectedEnv);
+        expect(action.installationKey).toBeDefined();
+        const result = NodeChildProcess.spawnSync(action.executable, action.args, {
+          env: { ...process.env, ...action.env },
+          encoding: "utf8",
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout.trim().split("\n")).toEqual([
+          env.BUN_INSTALL,
+          env.npm_config_prefix,
+          expectedEnv.CODEX_HOME,
+          env.npm_config_registry,
+          ...action.args,
+        ]);
+        if (method === "npm") expect(action.args).toContain(root);
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
+  it.effect.each([
+    "installs/npm-codex/1.0.0/lib/node_modules/@example/package-tool/bin/tool.js",
+    "installs/package-tool/1.0.0/bin/tool",
+    "shims/tool",
+  ])(
+    "keeps custom MISE_DATA_DIR %s manual-only before choosing an updater",
+    (suffix) =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("pf-09-mise");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const binary = NodePath.join(root, "custom-data", suffix);
+        writeExecutable(binary);
+        const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+          makePackageManagedProviderMaintenanceResolver({
+            provider: driver("packageTool"),
+            npmPackageName: "@example/package-tool",
+            nativeUpdate: { args: ["update"] },
+          }),
+          {
+            binaryPath: binary,
+            env: { PATH: "", MISE_DATA_DIR: NodePath.join(root, "custom-data") },
+          },
+        );
+        expect(capabilities.update).toBeNull();
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "allows npm globals in custom mise Node installs but keeps wrappers manual",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("pf-09-mise-node");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const binary = NodePath.join(
+          root,
+          "data",
+          "installs",
+          "node",
+          "24",
+          "lib",
+          "node_modules",
+          "@example",
+          "package-tool",
+          "bin",
+          "tool.js",
+        );
+        writeExecutable(binary);
+        const env = { PATH: "", MISE_DATA_DIR: NodePath.join(root, "data") };
+        const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+          packageToolUpdate,
+          {
+            binaryPath: binary,
+            env,
+          },
+        );
+        expect(capabilities.update?.executable).toBe("npm");
+        NodeFS.writeFileSync(binary, "#!/bin/sh\nexec mise x package-tool -- package-tool\n");
+        expect(
+          (yield* resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
+            binaryPath: binary,
+            env,
+          })).update,
+        ).toBeNull();
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "distinguishes automatic native installs from custom pinned and SDK binaries",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("pf-09-ownership");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        for (const suffix of [
+          "opt/pinned/tool",
+          "node_modules/@example/sdk/bin/tool",
+          ".local/bin/native-package-tool",
+        ]) {
+          const binary = NodePath.join(root, suffix);
+          writeExecutable(binary);
+          const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+            nativePackageToolUpdate,
+            { binaryPath: binary, env: { PATH: "" } },
+          );
+          if (suffix.startsWith(".local"))
+            expect(capabilities.update?.installationKey).toBeDefined();
+          else expect(capabilities.update?.installationKey).toBeUndefined();
+          if (suffix.startsWith("opt")) expect(capabilities.update?.args).toEqual(["update"]);
+          if (suffix.startsWith("node_modules")) expect(capabilities.update).toBeNull();
+        }
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "native aliases share stable ownership but configured release paths stay pinned",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("pf-09-native-alias");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const release = NodePath.join(
+          root,
+          ".local",
+          "share",
+          "claude",
+          "versions",
+          "1.0.0",
+          "claude",
+        );
+        writeExecutable(release);
+        const alias = NodePath.join(root, ".local", "bin", "claude");
+        NodeFS.mkdirSync(NodePath.dirname(alias), { recursive: true });
+        NodeFS.symlinkSync(release, alias);
+        const resolver = makePackageManagedProviderMaintenanceResolver({
+          provider: driver("claudeAgent"),
+          npmPackageName: "@anthropic-ai/claude-code",
+          nativeUpdate: {
+            args: ["update"],
+            isCommandPath: (value) =>
+              value.includes("/.local/share/claude/") || value.endsWith("/.local/bin/claude"),
+          },
+        });
+        const resolve = (binaryPath: string) =>
+          resolveProviderMaintenanceCapabilitiesEffect(resolver, { binaryPath, env: { PATH: "" } });
+        const active = yield* resolve(alias);
+        const pinned = yield* resolve(release);
+        expect(active.update?.installationKey).toBeDefined();
+        expect(pinned.update?.installationKey).toBeUndefined();
+        const newer = NodePath.join(
+          root,
+          ".local",
+          "share",
+          "claude",
+          "versions",
+          "2.0.0",
+          "claude",
+        );
+        writeExecutable(newer);
+        NodeFS.unlinkSync(alias);
+        NodeFS.symlinkSync(newer, alias);
+        expect((yield* resolve(alias)).update?.installationKey).toBe(
+          active.update?.installationKey,
+        );
+        const foreign = NodePath.join(root, "opt", "pinned", "claude");
+        writeExecutable(foreign);
+        NodeFS.unlinkSync(alias);
+        NodeFS.symlinkSync(foreign, alias);
+        expect((yield* resolve(alias)).update?.installationKey).toBeUndefined();
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "standalone Codex only owns updates for its installation home",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("pf-09-codex-home");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const binary = NodePath.join(root, "packages", "standalone", "current", "bin", "codex");
+        writeExecutable(binary);
+        const resolve = (home: string) =>
+          resolveProviderMaintenanceCapabilitiesEffect(
+            makePackageManagedProviderMaintenanceResolver({
+              provider: driver("codex"),
+              npmPackageName: "@openai/codex",
+              nativeUpdate: {
+                args: ["update"],
+                env: { CODEX_HOME: home },
+                isCommandPath: (value) => value.includes("/packages/standalone/"),
+              },
+            }),
+            { binaryPath: binary, env: { PATH: "instance-path", CODEX_HOME: "shadow-home" } },
+          );
+        const owned = yield* resolve(root);
+        expect(owned.update?.installationKey).toBeDefined();
+        expect(owned.update?.env).toEqual({ PATH: "instance-path", CODEX_HOME: root });
+        expect(
+          (yield* resolve(NodePath.join(root, "other"))).update?.installationKey,
+        ).toBeUndefined();
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "Homebrew active aliases keep identity across keg versions and explicit kegs stay pinned",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("pf-09-brew-identity");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const brew = NodePath.join(root, "bin", "brew");
+        writeExecutable(brew);
+        const resolve = (version: string, pinned: boolean) => {
+          const real = NodePath.join(root, "Cellar", "package-tool", version, "bin", "tool");
+          writeExecutable(real);
+          return resolvePackageManagedProviderMaintenance(
+            {
+              provider: driver("packageTool"),
+              npmPackageName: "@example/package-tool",
+              nativeUpdate: null,
+            },
+            {
+              binaryPath: pinned ? real : "tool",
+              resolvedCommandPath: NodePath.join(root, "bin", "tool"),
+              realCommandPath: real,
+              env: { PATH: NodePath.dirname(brew) },
+              platform: "linux",
+            },
+          ).pipe(
+            Effect.provideService(
+              ChildProcessSpawner.ChildProcessSpawner,
+              stdoutSpawner((_command, args) => (args[0] === "--prefix" ? root : "{}")),
+            ),
+          );
+        };
+        const old = yield* resolve("1.0.0", false);
+        const next = yield* resolve("2.0.0", false);
+        expect(old.update?.installationKey).toBeDefined();
+        expect(next.update?.installationKey).toBe(old.update?.installationKey);
+        expect((yield* resolve("1.0.0", true)).update?.installationKey).toBeUndefined();
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
+  it.effect.skipIf(!symlinksSupported || windowsHost)(
+    "keeps aliased custom mise data directories manual-only",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("pf-09-mise-alias");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const data = NodePath.join(root, "physical");
+        const binary = NodePath.join(
+          data,
+          "installs",
+          "npm-package-tool",
+          "1.0.0",
+          "lib",
+          "node_modules",
+          "@example",
+          "package-tool",
+          "bin",
+          "tool.js",
+        );
+        writeExecutable(binary);
+        const logical = NodePath.join(root, "logical");
+        NodeFS.symlinkSync(data, logical);
+        const alias = NodePath.join(root, "tool");
+        NodeFS.symlinkSync(binary, alias);
+        const result = yield* resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
+          binaryPath: alias,
+          env: { PATH: "", MISE_DATA_DIR: logical },
+        });
+        expect(result.update).toBeNull();
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("caches resolution until a fresh read is requested", () =>
     Effect.gen(function* () {
       let resolutions = 0;
@@ -953,44 +1357,49 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
   );
 });
 
-it("pins only owned package-manager installs and preserves their execution context", () => {
-  const capabilities = makeProviderMaintenanceCapabilities({
-    provider: driver("codex"),
-    packageName: "@openai/codex",
-    updateExecutable: "npm",
-    updateLockKey: "npm-global:/opt/node",
-    updateArgs: [
-      "install",
-      "-g",
-      "--prefix",
-      "/opt/node",
-      "--allow-scripts=@openai/codex",
-      "@openai/codex@latest",
-    ],
-    env: { PATH: "/opt/node/bin" },
-  });
-  const pinned = makeTargetedProviderUpdateAction(capabilities, "2.0.0");
-  expect(pinned).toMatchObject({
-    executable: "npm",
-    lockKey: capabilities.update?.lockKey,
-    env: capabilities.update?.env,
-    args: [
-      "install",
-      "-g",
-      "--prefix",
-      "/opt/node",
-      "--allow-scripts=@openai/codex",
-      "@openai/codex@2.0.0",
-    ],
-  });
-  expect(pinned?.command).toContain("@openai/codex@2.0.0");
-  for (const lockKey of ["codex-native", "homebrew", "manual"]) {
-    expect(
-      makeTargetedProviderUpdateAction(
-        { ...capabilities, update: { ...capabilities.update!, lockKey } },
-        "2.0.0",
-      ),
-    ).toBeNull();
-  }
-  expect(makeTargetedProviderUpdateAction(capabilities, "2.0.0; rm -rf /")).toBeNull();
-});
+it.each(["2.0.0", "2.0.0-beta.1"])(
+  "pins only owned package-manager installs to %s and preserves their execution context",
+  (version) => {
+    const capabilities = makeProviderMaintenanceCapabilities({
+      provider: driver("codex"),
+      packageName: "@openai/codex",
+      updateExecutable: "npm",
+      updateLockKey: "npm-global:/opt/node",
+      updateArgs: [
+        "install",
+        "-g",
+        "--prefix",
+        "/opt/node",
+        "--allow-scripts=@openai/codex",
+        "@openai/codex@latest",
+      ],
+      env: { PATH: "/opt/node/bin" },
+    });
+    const pinned = makeTargetedProviderUpdateAction(capabilities, version);
+    expect(pinned).toMatchObject({
+      executable: "npm",
+      lockKey: capabilities.update?.lockKey,
+      env: capabilities.update?.env,
+      args: [
+        "install",
+        "-g",
+        "--prefix",
+        "/opt/node",
+        "--allow-scripts=@openai/codex",
+        `@openai/codex@${version}`,
+      ],
+    });
+    expect(pinned?.command).toContain(`@openai/codex@${version}`);
+    for (const lockKey of ["codex-native", "homebrew", "manual"]) {
+      expect(
+        makeTargetedProviderUpdateAction(
+          { ...capabilities, update: { ...capabilities.update!, lockKey } },
+          "2.0.0",
+        ),
+      ).toBeNull();
+    }
+    for (const invalid of ["2.0.0; rm -rf /", "2.0.0-beta; echo injected", "2.0.0-beta..1"]) {
+      expect(makeTargetedProviderUpdateAction(capabilities, invalid)).toBeNull();
+    }
+  },
+);

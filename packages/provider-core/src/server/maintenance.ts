@@ -20,6 +20,8 @@ export interface ProviderMaintenanceCommandAction {
   readonly executable: string;
   readonly args: ReadonlyArray<string>;
   readonly lockKey: string;
+  /** Stable identity of an install whose updater ownership is proven. Absent for manual fallbacks. */
+  readonly installationKey?: string | undefined;
   /**
    * Extra environment for the spawned updater, on top of the server's own.
    * A native updater finds its install through the same variables the

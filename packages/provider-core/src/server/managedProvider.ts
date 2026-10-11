@@ -51,7 +51,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     readonly publishSnapshot: (snapshot: ServerProvider) => Effect.Effect<void>;
   }) => Effect.Effect<void>;
   readonly refreshInterval?: Duration.Input;
-  readonly refreshOnInterval?: boolean;
+  readonly refreshOnInterval?: boolean | "enrich";
   readonly checkProviderOnSettingsChange?: (previous: Settings, next: Settings) => boolean;
 }): Effect.fn.Return<
   ManagedServerProvider,
@@ -224,6 +224,16 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     return yield* applySnapshot(nextSettings, { forceRefresh: true });
   });
 
+  const refreshEnrichment = refreshSemaphore.withPermits(1)(
+    Effect.gen(function* () {
+      const settings = yield* input.getSettings;
+      const state = yield* Ref.get(snapshotStateRef);
+      const generation = state.enrichmentGeneration + 1;
+      yield* Ref.set(snapshotStateRef, { ...state, enrichmentGeneration: generation });
+      yield* restartSnapshotEnrichment(settings, state.snapshot, generation);
+    }),
+  );
+
   const hasProviderStatusDemand = Effect.gen(function* () {
     const state = yield* Ref.get(snapshotStateRef);
     const instanceId = state.snapshot.instanceId;
@@ -234,7 +244,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     return genericDemand || instanceDemand;
   });
 
-  const getRefreshInterval =
+  const configuredRefreshInterval =
     input.refreshInterval !== undefined
       ? Effect.succeed(input.refreshInterval)
       : host.settings.get.pipe(
@@ -244,6 +254,15 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
           ),
           Effect.orElseSucceed(() => DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL),
         );
+
+  const getRefreshInterval = configuredRefreshInterval.pipe(
+    Effect.map((interval) =>
+      input.refreshOnInterval === "enrich" &&
+      Duration.toMillis(Duration.fromInputUnsafe(interval)) <= 0
+        ? Duration.hours(1)
+        : interval,
+    ),
+  );
 
   const refreshIntervalChanges = yield* Queue.sliding<void>(1);
   if (input.refreshInterval === undefined) {
@@ -282,7 +301,18 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
             Duration.toMillis(Duration.fromInputUnsafe(refreshInterval)) > 0
               ? hasProviderStatusDemand.pipe(
                   Effect.flatMap((shouldRefresh) =>
-                    shouldRefresh ? refreshSnapshot().pipe(Effect.asVoid) : Effect.void,
+                    input.refreshOnInterval === "enrich"
+                      ? host.settings.get.pipe(
+                          Effect.flatMap((settings) =>
+                            shouldRefresh ||
+                            (settings.automaticUpdates && settings.enableProviderUpdateChecks)
+                              ? refreshEnrichment
+                              : Effect.void,
+                          ),
+                        )
+                      : shouldRefresh
+                        ? refreshSnapshot().pipe(Effect.asVoid)
+                        : Effect.void,
                   ),
                 )
               : Effect.void,
