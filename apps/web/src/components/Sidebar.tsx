@@ -690,10 +690,10 @@ function SortableThreadRow(props: {
     [setNodeRef],
   );
   useLayoutEffect(() => {
-    if (visible && focusedRef.current) {
-      node?.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
-      focusedRef.current = false;
-    }
+    // The swap commit still holds the detached placeholder; wait for the row.
+    if (!visible || !focusedRef.current || !node?.isConnected) return;
+    focusedRef.current = false;
+    node.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
   }, [visible, node]);
   // dnd-kit memoizes each field but not the bag, so the memoized row would
   // rerender on every shell update without this.
