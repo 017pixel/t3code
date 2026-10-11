@@ -2,6 +2,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 import * as NodeVM from "node:vm";
 import { build } from "vite-plus/pack";
 import { assert, it } from "vite-plus/test";
@@ -116,6 +117,39 @@ export function run() {
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
 });
+
+it("keeps the real desktop chunks from requiring the application entry", async () => {
+  // conf (through @clerk/electron/storage) evicts application.cjs from the
+  // require cache, so any chunk that requires it re-runs the whole entry.
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-desktop-chunks-"));
+  try {
+    assert.ok(Array.isArray(desktopConfig.pack));
+    const packConfig = desktopConfig.pack.find(
+      (config) => Array.isArray(config.entry) && config.entry.includes("src/application.ts"),
+    );
+    assert.ok(packConfig);
+    await build({
+      ...packConfig,
+      config: false,
+      cwd: NodeURL.fileURLToPath(new URL("..", import.meta.url)),
+      outDir: directory,
+      sourcemap: false,
+      onSuccess: undefined,
+      logLevel: "silent",
+    });
+    const requirers = [];
+    for (const filename of await NodeFSP.readdir(directory)) {
+      if (!filename.endsWith(".cjs") || filename === "main.cjs") continue;
+      const source = await NodeFSP.readFile(NodePath.join(directory, filename), "utf8");
+      if (/require\(["'`]\.\/(?:application|main)\.cjs["'`]\)/.test(source)) {
+        requirers.push(filename);
+      }
+    }
+    assert.deepEqual(requirers, []);
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+}, 120_000);
 
 it("loads the emitted packaged boot entry and backend cache preload", async () => {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-desktop-boot-"));
