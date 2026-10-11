@@ -4546,12 +4546,6 @@ export function useComposerThreadDraftSelector<T>(
   );
 }
 
-export function useComposerThreadDraft(threadRef: ComposerThreadTarget): ComposerThreadDraftState {
-  return useComposerDraftStore((state) => {
-    return getComposerDraftState(state, threadRef) ?? EMPTY_THREAD_DRAFT;
-  });
-}
-
 /**
  * True when a real thread's composer holds unsent user content. Selects a
  * boolean so the sidebar row that reads it re-renders only when the draft
