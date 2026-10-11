@@ -185,6 +185,7 @@ import {
 } from "../../lib/attachmentUploadState";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { getTerminalFocusOwner } from "../../lib/terminalFocus";
+import { usePortalContainer } from "../../lib/portalContainer";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../../keybindings";
 import {
@@ -996,6 +997,7 @@ function composerCommandMenuPositionsEqual(
 }
 
 function ComposerCommandMenuLayer(props: { anchor: HTMLElement | null; children: ReactNode }) {
+  const portalContainer = usePortalContainer();
   const [position, setPosition] = useState<ComposerCommandMenuPosition | null>(null);
 
   useLayoutEffect(() => {
@@ -1068,7 +1070,7 @@ function ComposerCommandMenuLayer(props: { anchor: HTMLElement | null; children:
     >
       {props.children}
     </div>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }
 import { Button } from "../ui/button";

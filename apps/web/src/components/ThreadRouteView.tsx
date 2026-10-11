@@ -469,12 +469,12 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
             key={view.key}
             mode={view.key === activeViewKey || view.key === layingOutKey ? "visible" : "hidden"}
           >
-            <KeptViewFrame
-              viewKey={view.key}
-              warming={view.warming === true && view.key !== activeViewKey}
-              onWarm={finishWarming}
-            >
-              <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
+            <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
+              <KeptViewFrame
+                viewKey={view.key}
+                warming={view.warming === true && view.key !== activeViewKey}
+                onWarm={finishWarming}
+              >
                 {view.draftId === null ? (
                   <KeptChatView
                     environmentId={view.environmentId}
@@ -490,8 +490,8 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
                     forceExpandedMobileComposer
                   />
                 )}
-              </KeptViewLifetimeContext>
-            </KeptViewFrame>
+              </KeptViewFrame>
+            </KeptViewLifetimeContext>
           </Activity>
         ))}
     </SidebarInset>
