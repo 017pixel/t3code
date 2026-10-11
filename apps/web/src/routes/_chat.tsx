@@ -31,7 +31,7 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../termina
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
-import { primaryServerKeybindingsAtom } from "~/state/server";
+import { liveServerConfigValueAtom, primaryServerKeybindingsAtom } from "~/state/server";
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -221,11 +221,17 @@ function ChatRouteGlobalShortcuts() {
 function LandingDraftDefaults() {
   const landing = usePendingLandingDraft();
   const handleNewThread = useNewThreadHandler();
-  const liveConfig = useAtomValue(
+  // Waits for the server to answer this session; the live config then also
+  // carries any change made since, for a landing that runs after boot.
+  const sessionConfig = useAtomValue(
     landing === null
       ? NO_LIVE_CONFIG_ATOM
       : environmentSession.initialConfigValueAtom(landing.projectRef.environmentId),
   );
+  const currentConfig = useAtomValue(
+    liveServerConfigValueAtom(landing?.projectRef.environmentId ?? null),
+  );
+  const liveConfig = sessionConfig === null ? null : (currentConfig ?? sessionConfig);
   const startedDraftIdRef = useRef<string | null>(null);
   // The snapshot can name an environment this browser has since removed. Its
   // config never arrives, so the draft stops waiting for it and reports the
