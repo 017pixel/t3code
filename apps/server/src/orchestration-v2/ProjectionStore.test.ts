@@ -1400,6 +1400,134 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         listed.toSorted((left, right) => Number(left[0]) - Number(right[0])),
         Array.from({ length: 24 }, (_, index) => [index + 1, index + 1 === 24 ? undefined : 1]),
       );
+
+      // Like a turn-aligned window, a thread whose latest 152 turns all
+      // started without the user lists only the window's runs.
+      const agentThreadId = ThreadId.make("thread:viewport-agent-turns");
+      yield* projectionStore.apply({
+        id: EventId.make("event:viewport-agent-turns:thread"),
+        type: "thread.created",
+        threadId: agentThreadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: agentThreadId,
+          projectId: ProjectId.make("project:viewport-turn-coverage"),
+          title: "Viewport agent turns",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: agentThreadId,
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      for (let ordinal = 1; ordinal <= 152; ordinal += 1) {
+        const runId = RunId.make(`run:viewport-agent-turns:${ordinal}`);
+        const nodeId = NodeId.make(`node:viewport-agent-turns:${ordinal}`);
+        yield* projectionStore.apply({
+          id: EventId.make(`event:viewport-agent-turns:run:${ordinal}`),
+          type: "run.created",
+          threadId: agentThreadId,
+          runId,
+          occurredAt: now,
+          payload: {
+            id: runId,
+            threadId: agentThreadId,
+            ordinal,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make(`message:viewport-agent-turns:${ordinal}`),
+            rootNodeId: nodeId,
+            activeAttemptId: null,
+            status: "completed",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: now,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        });
+        yield* projectionStore.apply({
+          id: EventId.make(`event:viewport-agent-turns:prompt:${ordinal}`),
+          type: "turn-item.updated",
+          threadId: agentThreadId,
+          runId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`item:viewport-agent-turns:${ordinal}`),
+            threadId: agentThreadId,
+            runId,
+            nodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: ordinal * 100,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "user_message",
+            messageId: MessageId.make(`message:viewport-agent-turns:${ordinal}`),
+            text: "Delegated task finished",
+            attachments: [],
+            inputIntent: "queued_turn",
+            createdBy: "agent",
+            creationSource: "server",
+          },
+        });
+        yield* projectionStore.apply({
+          id: EventId.make(`event:viewport-agent-turns:checkpoint:${ordinal}`),
+          type: "checkpoint.captured",
+          threadId: agentThreadId,
+          occurredAt: now,
+          payload: {
+            id: CheckpointId.make(`checkpoint:viewport-agent-turns:${ordinal}`),
+            threadId: agentThreadId,
+            scopeId: CheckpointScopeId.make(`scope:viewport-agent-turns:${ordinal}`),
+            runId,
+            nodeId,
+            parentCheckpointId: null,
+            ordinalWithinScope: 1,
+            appRunOrdinal: ordinal,
+            ref: CheckpointRef.make(`refs/t3/viewport-agent-turns/${ordinal}`),
+            status: "ready",
+            files: [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }],
+            capturedAt: now,
+          },
+        });
+      }
+      const agentViewport = yield* projectionStore.getThreadSnapshotWindow(agentThreadId, {
+        rowLimit: 1,
+        deferHistoricalSupport: true,
+      });
+      assert.deepEqual(
+        agentViewport.projection.checkpoints.map((checkpoint) => [
+          checkpoint.appRunOrdinal,
+          checkpoint.deferredFileCount,
+        ]),
+        [[152, undefined]],
+      );
     }),
   );
 

@@ -3324,7 +3324,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 -- the Diff panel and Review, bounded like a turn-aligned window:
                 -- from the run of the twelfth latest user turn (a page plus
                 -- two), or every run when there are fewer. Wake-up runs ride
-                -- along without using up the turn budget.
+                -- along without using up the turn budget. With no user turn
+                -- among the latest turns, only the window's own runs are listed.
                 -- Their file lists arrive with the rows' history page.
                 OR (${window.deferHistoricalSupport ? 1 : 0} = 1 AND app_run_ordinal >= (
                   WITH turn_starts AS (
@@ -3344,7 +3345,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
                   )
                   SELECT CASE
-                    WHEN TOTAL(by_user) = 0 AND COUNT(*) < ${THREAD_HISTORY_MAX_RAW_TURNS + 2} THEN NULL
+                    WHEN TOTAL(by_user) = 0 THEN NULL
                     ELSE MAX(
                       COALESCE((
                         SELECT run_ordinal FROM turn_starts WHERE by_user
