@@ -199,7 +199,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
     }),
   );
 
-  it.effect.each(["withdrawn", "disabled"] as const)(
+  it.effect.each(["withdrawn", "disabled", "rolled-back", "failed"] as const)(
     "rechecks a staged release at handoff: %s",
     (scenario) =>
       Effect.gen(function* () {
@@ -227,7 +227,16 @@ it.layer(NodeServices.layer)("server self update", (it) => {
           ),
           Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, {
             managed: true,
-            lastOutcome: undefined,
+            lastOutcome:
+              scenario === "rolled-back" || scenario === "failed"
+                ? {
+                    id: "crash-loop",
+                    fromVersion: "1.0.0",
+                    targetVersion: "1.1.0",
+                    status: scenario,
+                    reason: "candidate-crash-loop",
+                  }
+                : undefined,
             requestUpdate: () => Effect.succeed("id"),
             prepareTrial: Effect.undefined,
           }),
@@ -263,6 +272,14 @@ it.layer(NodeServices.layer)("server self update", (it) => {
           ),
         );
         yield* pass;
+        if (scenario === "rolled-back" || scenario === "failed") {
+          expect(staged).toEqual([]);
+          latest = "1.2.0";
+          yield* TestClock.adjust("1 hour");
+          yield* pass;
+          expect(staged).toEqual(["1.2.0"]);
+          return;
+        }
         expect(staged).toEqual(["1.1.0"]);
         latest = "1.2.0";
         yield* TestClock.adjust("1 hour");

@@ -101,21 +101,25 @@ it("expires real mobile interaction independently of foreground heartbeats", () 
   expect(mobileRecentlyInteracted()).toBe(true);
 });
 
-it("reports continuous interaction without starving the reporter debounce", () => {
-  const start = performance.now() + 10_000;
+it("reports renewed interaction once and lets heartbeats cover continuous use", () => {
+  const start = performance.now() + 40_000;
   const clock = vi.spyOn(performance, "now");
   let reports = 0;
   const unsubscribe = onRetainedMobileBackgroundScopesChange(() => {
     reports++;
   });
   try {
-    for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+    for (let elapsed = 0; elapsed < 120_000; elapsed += 100) {
       clock.mockReturnValue(start + elapsed);
       recordMobileInteraction();
     }
-    expect(reports).toBe(10);
-    expect(mobileRecentlyInteracted(start + 10_000)).toBe(true);
-    expect(mobileRecentlyInteracted(start + 40_000)).toBe(false);
+    expect(reports).toBe(1);
+    expect(mobileRecentlyInteracted(start + 120_000)).toBe(true);
+    expect(mobileRecentlyInteracted(start + 150_000)).toBe(false);
+    clock.mockReturnValue(start + 150_000);
+    recordMobileInteraction();
+    expect(reports).toBe(2);
+    expect(mobileRecentlyInteracted(start + 150_000)).toBe(true);
   } finally {
     unsubscribe();
     clock.mockRestore();

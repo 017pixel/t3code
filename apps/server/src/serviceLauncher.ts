@@ -9,6 +9,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import type {
   PendingServiceUpdate,
@@ -33,7 +34,33 @@ import {
 const HANDOFF_DELAY_MS = 2_000;
 const PREPARED_TIMEOUT_MS = 120_000;
 const TERMINATE_GRACE_MS = 5_000;
-const HEALTH_PERIOD_MS = 5 * 60_000;
+const CRASH_WINDOW_MS = 5 * 60_000;
+const CRASH_LIMIT = 3;
+
+// A read-only transaction includes WAL state. Compare both the migration ledger
+// and actual schema: missing/corrupt history or untracked DDL must fail closed.
+function databaseSchema(dbPath: string): string | null {
+  let db: NodeSqlite.DatabaseSync | undefined;
+  try {
+    db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+    db.exec("BEGIN");
+    const ledger = db
+      .prepare("SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id")
+      .all();
+    if (ledger.length === 0) return null;
+    const schema = db
+      .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+      .all();
+    const version = db.prepare("PRAGMA user_version").get();
+    return NodeCrypto.createHash("sha256")
+      .update(JSON.stringify({ ledger, schema, version }))
+      .digest("hex");
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
 
 type TerminalStatus = "committed" | "rolled-back" | "failed";
 type ChildRole = "active" | "trial";
@@ -241,6 +268,8 @@ export async function pruneServiceRuntimes(
     protectedVersions.add(state.update.targetVersion);
   }
   if (state.rollback !== undefined) protectedVersions.add(state.rollback.update.fromVersion);
+  if (state.crashRecovery !== undefined)
+    protectedVersions.add(state.crashRecovery.update.fromVersion);
   const versionsDir = NodePath.join(baseDir, "runtime", "versions");
   for (const entry of await NodeFSP.readdir(versionsDir, { withFileTypes: true })) {
     if (
@@ -315,6 +344,7 @@ export class Launcher {
   #stopRequested = false;
   #stopping = false;
   #done = false;
+  #committedAtMonotonic: number | undefined;
   readonly #completion = Promise.withResolvers<void>();
 
   constructor(baseDir: string, state: ServiceState) {
@@ -379,6 +409,7 @@ export class Launcher {
       // before this queued stop tears it down. That replacement owns the
       // pre-activation tunnel cleanup path and observes the marker above.
       this.#stopping = true;
+      this.#clearTimer();
       const child = this.#child?.process;
       this.#child = null;
       if (child !== undefined) await terminateChild(child, signal);
@@ -421,17 +452,11 @@ export class Launcher {
         await this.#returnToPrevious(rollback.update, "rolled-back", "rollback-interrupted");
         return;
       }
-      // Restarting the launcher must not turn an unproven release into a healthy one.
-      const healthyAfter = Date.now() + HEALTH_PERIOD_MS;
-      this.#state = { ...this.#state, rollback: { ...rollback, healthyAfter } };
-      await writeServiceState(this.#statePath, this.#state);
-      try {
-        await this.#startChild(this.#state.activeVersion, "active", this.#state.update);
-        this.#watchHealth();
-      } catch {
-        await this.#returnToPrevious(rollback.update, "rolled-back", "candidate-start-failed");
-      }
-      return;
+      // Older launchers retained a backup after activation. It may predate
+      // accepted work, so only an already-started restore can use it safely.
+      const { rollback: _rollback, ...next } = this.#state;
+      await writeServiceState(this.#statePath, next);
+      this.#state = next;
     }
     const update = this.#state.update;
     if (update?.status !== "pending") {
@@ -571,7 +596,9 @@ export class Launcher {
       dbPath: message.dbPath,
       status: "pending",
     };
-    const next: ServiceState = { ...this.#state, update: pending };
+    const { crashRecovery: _recovery, ...state } = this.#state;
+    const next: ServiceState = { ...state, update: pending };
+    this.#committedAtMonotonic = undefined;
     await writeServiceState(this.#statePath, next);
     this.#state = next;
     await sendMessage(child.process, { type: "update-accepted", updateId: pending.id });
@@ -605,41 +632,28 @@ export class Launcher {
     }
     this.#clearTimer();
     const committed = terminalUpdate({ pending, status: "committed" });
-    const healthyAfter = Date.now() + HEALTH_PERIOD_MS;
     const next: ServiceState = {
       ...this.#state,
       activeVersion: pending.targetVersion,
       update: committed,
-      rollback: { update: pending, healthyAfter },
+      crashRecovery: {
+        update: pending,
+        schema: databaseSchema(
+          databaseBackupFile(databaseBackupDir(this.#baseDir, pending.id), ""),
+        ),
+        committedAt: Date.now(),
+        crashes: 0,
+      },
     };
     await writeServiceState(this.#statePath, next);
     this.#state = next;
     child.role = "active";
-    this.#watchHealth();
+    this.#committedAtMonotonic = performance.now();
+    // Committed opens the runtime's provider and client gates. Never restore
+    // this snapshot afterward: it would erase receipts for accepted work.
     await sendMessage(child.process, { type: "committed", updateId: committed.id });
-  }
-
-  #watchHealth(): void {
-    this.#timer = setTimeout(
-      () =>
-        this.#enqueue(async () => {
-          const rollback = this.#state.rollback;
-          if (
-            rollback === undefined ||
-            this.#stopping ||
-            this.#child === null ||
-            this.#child.process.exitCode !== null ||
-            this.#child.process.signalCode !== null
-          )
-            return;
-          const { rollback: _rollback, ...next } = this.#state;
-          await writeServiceState(this.#statePath, next);
-          this.#state = next;
-          await discardDatabaseBackup(this.#baseDir, rollback.update.id).catch(() => undefined);
-          await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
-        }),
-      HEALTH_PERIOD_MS,
-    );
+    await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
+    await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
   }
 
   async #handlePreparedTimeout(child: ManagedChild): Promise<void> {
@@ -673,20 +687,79 @@ export class Launcher {
     }
 
     this.#clearTimer();
-    if (this.#state.rollback !== undefined) {
-      await this.#returnToPrevious(
-        this.#state.rollback.update,
-        "rolled-back",
-        `candidate-exited-after-commit:${String(code ?? signal ?? "unknown")}`,
-      );
-      return;
-    }
     const pending = this.#state.update;
     if (pending?.status === "pending") {
       await this.#startTrial(pending);
       return;
     }
+    if (this.#state.crashRecovery !== undefined) {
+      await this.#handleCommittedCrash();
+      return;
+    }
     throw new Error(`Active child exited unexpectedly (${String(code ?? signal ?? "unknown")}).`);
+  }
+
+  async #handleCommittedCrash(): Promise<void> {
+    const recovery = this.#state.crashRecovery;
+    if (recovery === undefined) return;
+    const age =
+      this.#committedAtMonotonic === undefined
+        ? Date.now() - recovery.committedAt
+        : performance.now() - this.#committedAtMonotonic;
+    // A launcher restart uses durable time. A backward clock jump is not
+    // evidence of a bounded crash loop, so it cannot authorize a downgrade.
+    if (this.#state.update?.status !== "failed" && (age < 0 || age > CRASH_WINDOW_MS)) {
+      const { crashRecovery: _recovery, ...next } = this.#state;
+      await writeServiceState(this.#statePath, next);
+      this.#state = next;
+      await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
+      throw new Error("Active child exited outside the update crash window.");
+    }
+    const crashes = Math.min(recovery.crashes + 1, 6);
+    let next: ServiceState = { ...this.#state, crashRecovery: { ...recovery, crashes } };
+    if (crashes >= CRASH_LIMIT && this.#state.update?.status !== "failed") {
+      const current = databaseSchema(recovery.update.dbPath);
+      if (
+        recovery.schema !== null &&
+        current === recovery.schema &&
+        (await runtimeExists(this.#baseDir, recovery.update.fromVersion))
+      ) {
+        const { crashRecovery: _recovery, ...state } = next;
+        next = {
+          ...state,
+          activeVersion: recovery.update.fromVersion,
+          update: terminalUpdate({
+            pending: recovery.update,
+            status: "rolled-back",
+            reason: "candidate-crash-loop: previous runtime resumed with current database",
+          }),
+        };
+      } else {
+        next = {
+          ...next,
+          update: terminalUpdate({
+            pending: recovery.update,
+            status: "failed",
+            reason:
+              "candidate-crash-loop: database schema changed or compatibility could not be verified; keeping candidate runtime",
+          }),
+        };
+      }
+    }
+    await writeServiceState(this.#statePath, next);
+    this.#state = next;
+    if (this.#stopRequested) return;
+    // Keep the launcher alive so systemd's start limit does not strand the
+    // service. The timer stays cancellable by explicit shutdown.
+    this.#timer = setTimeout(
+      () => {
+        this.#timer = undefined;
+        this.#enqueue(() =>
+          this.#startChild(this.#state.activeVersion, "active", this.#state.update),
+        );
+      },
+      Math.min(1_000 * 2 ** (crashes - 1), 30_000),
+    );
   }
 
   async #returnToPrevious(

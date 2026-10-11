@@ -4,14 +4,12 @@ import * as Effect from "effect/Effect";
 
 const INTERACTION_WINDOW_MS = 30_000;
 let lastInteractionAt = Number.NEGATIVE_INFINITY;
-let lastInteractionReportAt = Number.NEGATIVE_INFINITY;
 
 export function recordMobileInteraction(): void {
-  lastInteractionAt = performance.now();
-  if (lastInteractionAt - lastInteractionReportAt >= 1_000) {
-    lastInteractionReportAt = lastInteractionAt;
-    notify();
-  }
+  const now = performance.now();
+  const wasRecent = mobileRecentlyInteracted(now);
+  lastInteractionAt = now;
+  if (!wasRecent) notify();
 }
 
 export function mobileRecentlyInteracted(now = performance.now()): boolean {

@@ -60,6 +60,7 @@ const layerHostLock = Layer.succeed(HostLock.ProviderMaintenanceHostLock, {
   acquireRead: Effect.succeed(Effect.void),
   withRead: (effect) => effect,
   withWrite: (effect) => effect,
+  handoff: (effect) => effect,
 });
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
@@ -4825,6 +4826,7 @@ it.effect("ProviderSessionManagerV2 holds the host lease through terminal backgr
       directory: "",
       withRead: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
       withWrite: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      handoff: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
       acquireRead: Ref.update(held, (value) => value + 1).pipe(
         Effect.as(Ref.update(held, (value) => value - 1)),
       ),

@@ -1,7 +1,6 @@
 import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 
-// Protocol 3 requires the standalone executable layout. Post-commit health
-// observation is launcher-owned and does not change the runtime's IPC contract.
+// Protocol 3 requires the standalone executable layout.
 export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
 export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
 export const SERVICE_STATE_FILE = "service-state.json";
@@ -32,6 +31,14 @@ export interface ServiceState {
   readonly activeVersion: string;
   readonly update?: ServiceUpdateRecord;
   readonly launcherVersion?: string;
+  /** Runtime-only recovery; its schema predates the trial, never accepted work. */
+  readonly crashRecovery?: {
+    readonly update: PendingServiceUpdate;
+    readonly schema: string | null;
+    readonly committedAt: number;
+    readonly crashes: number;
+  };
+  /** Legacy launchers retained post-commit backups; read them for recovery only. */
   readonly rollback?: { readonly update: PendingServiceUpdate; readonly healthyAfter: number };
 }
 
@@ -164,7 +171,33 @@ export function decodeServiceState(value: unknown): ServiceState | undefined {
     Number.isFinite(value.rollback.healthyAfter)
       ? { update: rollbackUpdate, healthyAfter: value.rollback.healthyAfter }
       : undefined;
+  const recoveryUpdate = isRecord(value.crashRecovery)
+    ? decodeServiceUpdate(value.crashRecovery.update)
+    : undefined;
+  const crashRecovery =
+    isRecord(value.crashRecovery) &&
+    recoveryUpdate?.status === "pending" &&
+    (value.crashRecovery.schema === null || typeof value.crashRecovery.schema === "string") &&
+    typeof value.crashRecovery.committedAt === "number" &&
+    Number.isFinite(value.crashRecovery.committedAt) &&
+    typeof value.crashRecovery.crashes === "number" &&
+    Number.isSafeInteger(value.crashRecovery.crashes) &&
+    value.crashRecovery.crashes >= 0
+      ? {
+          update: recoveryUpdate,
+          schema: value.crashRecovery.schema,
+          committedAt: value.crashRecovery.committedAt,
+          crashes: value.crashRecovery.crashes,
+        }
+      : undefined;
   if (
+    (value.crashRecovery !== undefined &&
+      (crashRecovery === undefined ||
+        (update?.status !== "committed" && update?.status !== "failed") ||
+        crashRecovery.update.id !== update.id ||
+        crashRecovery.update.targetVersion !== value.activeVersion ||
+        crashRecovery.update.targetVersion !== update.targetVersion ||
+        crashRecovery.update.fromVersion !== update.fromVersion)) ||
     (value.launcherVersion !== undefined &&
       (typeof value.launcherVersion !== "string" ||
         !isExactServiceVersion(value.launcherVersion))) ||
@@ -182,8 +215,10 @@ export function decodeServiceState(value: unknown): ServiceState | undefined {
       compareExactServiceVersions(update.targetVersion, update.fromVersion) <= 0) ||
     (update?.status === "pending" && update.fromVersion !== value.activeVersion) ||
     (update?.status === "committed" && update.targetVersion !== value.activeVersion) ||
-    ((update?.status === "rolled-back" || update?.status === "failed") &&
-      update.fromVersion !== value.activeVersion)
+    (update?.status === "rolled-back" && update.fromVersion !== value.activeVersion) ||
+    (update?.status === "failed" &&
+      update.fromVersion !== value.activeVersion &&
+      (crashRecovery === undefined || update.targetVersion !== value.activeVersion))
   ) {
     return undefined;
   }
@@ -195,6 +230,7 @@ export function decodeServiceState(value: unknown): ServiceState | undefined {
       ? { launcherVersion: value.launcherVersion }
       : {}),
     ...(rollback === undefined ? {} : { rollback }),
+    ...(crashRecovery === undefined ? {} : { crashRecovery }),
   };
 }
 
@@ -252,7 +288,9 @@ export function decodeServiceLauncherContext(value: string): ServiceLauncherCont
   const update = parsed.update === undefined ? undefined : decodeServiceUpdate(parsed.update);
   if (parsed.update !== undefined && update === undefined) return undefined;
   const selectedVersion =
-    update?.status === "pending" || update?.status === "committed"
+    update?.status === "pending" ||
+    update?.status === "committed" ||
+    (update?.status === "failed" && parsed.childVersion === update.targetVersion)
       ? update.targetVersion
       : update === undefined
         ? parsed.childVersion

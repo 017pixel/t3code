@@ -9,10 +9,10 @@ processes do not self-update.
 
 Exact-version installs keep restarts independent of npm cache eviction or a moving
 release tag. Installation and preflight happen in staging before publishing an
-immutable runtime. Preflight checks the launcher's IPC protocol. The post-commit
-health period is launcher-owned and remains compatible with protocol 3; older
-launchers can run the new runtime without that extra rollback protection.
-Upgrading the launcher requires a local service update.
+immutable runtime. Preflight checks the launcher's IPC protocol. Crash-loop
+recovery after commit is launcher-owned and remains compatible with protocol 3;
+older launchers can run the new runtime without it. Upgrading the launcher
+requires a local service update.
 
 ## Commit boundary
 
@@ -28,9 +28,12 @@ child release its gates, accept commands, and publish ready. Keep fallible start
 acquisitions before this boundary. A listener alone does not prove the runtime is
 ready to commit.
 
-A failed or timed-out trial returns to the old version. The launcher also rolls
-back a committed target that exits during its health period. After that period,
-the service manager's ordinary restart policy applies.
+A failed or timed-out trial returns to the old version. After commit, the database
+is never restored: commit opens the gates, so a restore would erase accepted work.
+If the committed target exits three times within five minutes, the launcher returns
+to the previous runtime only when the migration ledger and schema still match the
+pre-trial database. Otherwise it keeps restarting the target with backoff and
+records the update as failed.
 
 ## Database rollback
 
@@ -40,10 +43,8 @@ migrations. The snapshot is made once per update and survives launcher restarts;
 replacing it during a retry could capture changes from the failed trial.
 
 Rollback stops the trial before restoring. A durable restore marker makes an
-interrupted restore finish before either version boots. Keep the snapshot until
-the committed target survives its health period, or until both restoration and
-the terminal rollback state are durable.
-Post-commit rollback also discards database writes accepted during the health period.
+interrupted restore finish before either version boots. Discard the snapshot at
+commit, or once both restoration and the terminal rollback state are durable.
 Attachments and other files outside SQLite are outside this rollback boundary.
 
 ## Client acknowledgement
