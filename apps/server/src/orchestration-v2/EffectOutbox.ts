@@ -511,7 +511,13 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             available_at = ${now},
             updated_at = ${now},
             last_error = 'Requeued after the previous server process ended.'
-          WHERE status = 'running'
+          WHERE (
+              status = 'running'
+              -- Shutdown intent is ready on startup even if the wall clock
+              -- moved backwards or a previous delivery was awaiting a retry.
+              OR (status = 'pending' AND effect_type = 'provider-runtime.continue'
+                AND available_at > ${now})
+            )
             AND effect_type IN ${sql.in(REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS)}
           RETURNING effect_id
         `;

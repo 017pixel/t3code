@@ -24,6 +24,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ServerSettings from "../serverSettings.ts";
 import { restartContinuationRun, continueRestartedRun } from "./RestartContinuation.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { pendingRestartCancelledBackgroundWork } from "./RestartBackgroundNote.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as EventSink from "./EventSink.ts";
@@ -925,6 +926,45 @@ it.effect("stops continuing after three automatic restart continuations in a row
   }),
 );
 
+it.effect.each([0, 1, 2, 3])(
+  "counts only %s automatic continuations after a human steering restart",
+  (automaticCount) =>
+    Effect.gen(function* () {
+      const cut = cutMidTurn();
+      const chain = Array.from({ length: automaticCount + 4 }, (_, index) => ({
+        ...cut.runs[0]!,
+        id: index === 0 ? runId : RunId.make(`run:steered-chain:${index}`),
+        activeAttemptId: RunAttemptId.make(`attempt:steered-chain:${index}`),
+        rootNodeId: NodeId.make(`node:steered-chain:${index}`),
+        restartContinuationOfRunId: RunId.make(`run:steered-chain:${index + 1}`),
+      }));
+      const steered = chain[automaticCount]!;
+      assert.lengthOf(
+        yield* continuationTexts({
+          ...cut,
+          runs: chain,
+          providerTurns: [{ ...cut.providerTurns[0]!, runAttemptId: chain[0]!.activeAttemptId }],
+          attempts: [
+            {
+              id: steered.activeAttemptId!,
+              runId: steered.id,
+              attemptOrdinal: 1,
+              rootNodeId: steered.rootNodeId!,
+              providerInstanceId: instanceId,
+              providerThreadId,
+              providerTurnId: null,
+              reason: "steering_restart",
+              status: "cancelled",
+              startedAt: testNow,
+              completedAt: testNow,
+            },
+          ],
+        }),
+        automaticCount < 3 ? 1 : 0,
+      );
+    }),
+);
+
 const queuedFollowUp = {
   id: RunId.make("run:queued"),
   ordinal: 2,
@@ -1580,6 +1620,354 @@ it.effect("prepares pending native steering on a settled run before graceful shu
           event.type === "run.updated" &&
           event.payload.restartPendingMessageIds?.includes(messageId),
       ),
+    );
+  }),
+);
+
+it.effect.each(["expired", "cancelled"] as const)(
+  "continues a later goal phase after an earlier phase's request was %s",
+  (status) =>
+    Effect.gen(function* () {
+      const cut = cutMidTurn();
+      const earlier = { ...cut.providerTurns[0]!, ordinal: 1, status: "completed" as const };
+      const current = {
+        ...earlier,
+        id: ProviderTurnId.make("turn:goal-current"),
+        ordinal: 2,
+        status: "cancelled" as const,
+      };
+      assert.lengthOf(
+        yield* continuationTexts({
+          ...cut,
+          providerTurns: [earlier, current],
+          runtimeRequests: [
+            {
+              kind: "user_input",
+              status,
+              providerTurnId: earlier.id,
+              responseCapability: { type: "not_resumable", reason: "Earlier phase ended." },
+            } as never,
+          ],
+        }),
+        1,
+      );
+    }),
+);
+
+it.effect.each(["saved", "declined"] as const)(
+  "continues after a secret was explicitly %s",
+  (secretStatus) =>
+    Effect.gen(function* () {
+      assert.lengthOf(
+        yield* continuationTexts({
+          ...cutMidTurn(),
+          turnItems: [{ type: "secret_request", runId, secretStatus } as never],
+        }),
+        1,
+      );
+    }),
+);
+
+it.effect.each(["dynamic_tool_call", "auth_refresh"] as const)(
+  "continues after recovery expired a %s callback",
+  (kind) =>
+    Effect.gen(function* () {
+      const cut = cutMidTurn();
+      assert.lengthOf(
+        yield* continuationTexts({
+          ...cut,
+          runtimeRequests: [
+            {
+              kind,
+              status: "expired",
+              providerTurnId: cut.providerTurns[0]!.id,
+              responseCapability: { type: "not_resumable", reason: "Process lost." },
+            } as never,
+          ],
+        }),
+        1,
+      );
+    }),
+);
+
+it.effect.each(["environment", "project"] as const)(
+  "reads the %s setting fresh for shutdown, startup, and delivery",
+  (scope) =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService.pipe(
+        Effect.provide(ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true })),
+      );
+      let projection = makeProjection();
+      const intents: Array<EffectOutbox.PendingOrchestrationEffectV2> = [];
+      const commands: Parameters<
+        ThreadManagementService.ThreadManagementService["Service"]["dispatch"]
+      >[0][] = [];
+      const layer = Layer.mergeAll(
+        Layer.succeed(ServerSettings.ServerSettingsService, settings),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          writeWithEffects: (input) => {
+            intents.push(...input.effects);
+            return Effect.succeed([]);
+          },
+          commitCommand: (input) => {
+            intents.push(...input.effects);
+            return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+          },
+        }),
+        IdAllocator.layer,
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(projection),
+          recoverDelegatedTask: () => Effect.void,
+          dispatch: (command) => {
+            commands.push(command);
+            return Effect.succeed({} as never);
+          },
+        }),
+      );
+      const recovery = yield* ProviderRuntimeRecovery.make.pipe(Effect.provide(layer));
+      const setEnabled = (enabled: boolean) =>
+        settings.updateSettings(
+          scope === "environment"
+            ? { continueThreadsAfterServerUpdate: enabled }
+            : {
+                projectSettingsOverrides: {
+                  [projection.thread.projectId]: { continueThreadsAfterServerUpdate: enabled },
+                },
+              },
+        );
+      for (const enabled of [false, true, false]) {
+        yield* setEnabled(enabled);
+        intents.length = 0;
+        yield* recovery.prepareForShutdown;
+        assert.lengthOf(intents, enabled ? 1 : 0);
+        intents.length = 0;
+        yield* recovery.reconcile("startup");
+        assert.lengthOf(intents, enabled ? 1 : 0);
+        projection = cutMidTurn();
+        commands.length = 0;
+        yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(Effect.provide(layer));
+        assert.lengthOf(commands, enabled ? 1 : 0);
+        projection = makeProjection();
+      }
+    }),
+);
+
+it.effect.each(["archivedAt", "deletedAt"] as const)(
+  "declines an already recorded continuation after %s changes",
+  (field) =>
+    Effect.gen(function* () {
+      const cut = cutMidTurn();
+      assert.deepEqual(
+        yield* continuationTexts({ ...cut, thread: { ...cut.thread, [field]: testNow } }),
+        [],
+      );
+    }),
+);
+
+it.effect.each([-1, 0, 1])("checks snooze expiry at the current clock boundary (%s ms)", (offset) =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(DateTime.toEpochMillis(testNow));
+    const live = makeProjection();
+    const thread = {
+      ...live.thread,
+      snoozedUntil: DateTime.add(testNow, { milliseconds: offset }),
+    };
+    assert.equal(restartContinuationRun({ ...live, thread }, testNow) !== undefined, offset <= 0);
+    assert.lengthOf(yield* continuationTexts({ ...cutMidTurn(), thread }), offset <= 0 ? 1 : 0);
+  }),
+);
+
+it.effect.each(["snoozed", "settled", "archived", "deleted", "question"] as const)(
+  "holds a queued worktree handoff when the thread is %s during recovery",
+  (state) =>
+    Effect.gen(function* () {
+      const base = makeProjection();
+      const projection = {
+        ...base,
+        thread: {
+          ...base.thread,
+          worktreePath: "/tmp/handoff-worktree",
+          ...(state === "snoozed"
+            ? { snoozedUntil: DateTime.makeUnsafe("2099-01-01T00:00:00.000Z") }
+            : {}),
+          ...(state === "settled" ? { settledOverride: "settled" } : {}),
+          ...(state === "archived" ? { archivedAt: testNow } : {}),
+          ...(state === "deleted" ? { deletedAt: testNow } : {}),
+        },
+        runs: [
+          {
+            ...queuedFollowUp,
+            queueHeld: false,
+            userMessageId: MessageId.make("message:mcp:session:worktree-continuation:held"),
+          },
+        ],
+        providerThreads: [],
+        providerSessions: [],
+        providerTurns: [],
+        runtimeRequests:
+          state === "question"
+            ? [
+                {
+                  nodeId: NodeId.make("question-node"),
+                  kind: "user_input",
+                  status: "pending",
+                  responseCapability: { type: "live", providerSessionId: sessionId },
+                },
+              ]
+            : [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const events: Parameters<
+        EventSink.EventSinkV2["Service"]["commitCommand"]
+      >[0]["events"][number][] = [];
+      const intents: EffectOutbox.PendingOrchestrationEffectV2[] = [];
+      const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([threadId]),
+              getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              writeWithEffects: (input) => {
+                intents.push(...input.effects);
+                return Effect.succeed([]);
+              },
+              commitCommand: (input) => {
+                events.push(...input.events);
+                intents.push(...input.effects);
+                return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+              },
+            }),
+            IdAllocator.layer,
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              cancelUnsettled: () => Effect.succeed([]),
+              signalCancellations: () => Effect.void,
+              reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+            }),
+          ),
+        ),
+      );
+      yield* recovery.reconcile("startup");
+      assert.lengthOf(intents, 0);
+      assert.isTrue(
+        events.some((event) => event.type === "run.updated" && event.payload.queueHeld === true),
+      );
+    }),
+);
+
+it.effect.each(["earlier", "newer"] as const)(
+  "uses provider turn order when %s completed work has a skewed wall clock",
+  (order) =>
+    Effect.gen(function* () {
+      const cut = cutMidTurn({ completedAt: DateTime.makeUnsafe("2026-10-03T09:00:00.000Z") });
+      const otherAttempt = RunAttemptId.make(`attempt:clock:${order}`);
+      const otherRun = {
+        ...cut.runs[0]!,
+        id: RunId.make(`run:clock:${order}`),
+        ordinal: 2,
+        status: "completed" as const,
+        activeAttemptId: otherAttempt,
+        completedAt: DateTime.makeUnsafe(
+          order === "earlier" ? "2026-10-03T10:00:00.000Z" : "2026-10-03T08:00:00.000Z",
+        ),
+      };
+      const projection = {
+        ...cut,
+        runs: [...cut.runs, otherRun],
+        providerTurns: [
+          { ...cut.providerTurns[0]!, ordinal: 2 },
+          {
+            ...cut.providerTurns[0]!,
+            id: ProviderTurnId.make(`turn:clock:${order}`),
+            runAttemptId: otherAttempt,
+            ordinal: order === "earlier" ? 1 : 3,
+            status: "completed" as const,
+          },
+        ],
+      };
+      assert.lengthOf(yield* continuationTexts(projection), order === "earlier" ? 1 : 0);
+    }),
+);
+
+it.each([false, true])(
+  "does not repeat a delivered background note after a backward clock change and steering: %s",
+  (steered) => {
+    const source = cutMidTurn({
+      completedAt: DateTime.makeUnsafe("2026-10-03T10:00:00.000Z"),
+      restartCancelledBackgroundWork: [{ kind: "shell", label: "Cancelled command" }],
+    });
+    const delivered = {
+      ...source.runs[0]!,
+      id: RunId.make("run:delivered-clock-note"),
+      ordinal: 2,
+      activeAttemptId: RunAttemptId.make(
+        steered ? "attempt:steered-clock-note" : "attempt:delivered-clock-note",
+      ),
+      status: "completed" as const,
+      restartCancelledBackgroundWork: [],
+      completedAt: DateTime.makeUnsafe("2026-10-03T09:00:00.000Z"),
+    };
+    const current = {
+      ...delivered,
+      id: RunId.make("run:after-clock-note"),
+      ordinal: 3,
+      activeAttemptId: RunAttemptId.make("attempt:after-clock-note"),
+      status: "running" as const,
+      completedAt: null,
+    };
+    assert.deepEqual(
+      pendingRestartCancelledBackgroundWork({
+        runs: [...source.runs, delivered, current],
+        run: current,
+        compactionMessageIds: new Set(),
+        attempts: [{ id: RunAttemptId.make("attempt:delivered-clock-note"), runId: delivered.id }],
+        providerTurns: [
+          { ...source.providerTurns[0]!, ordinal: 1 },
+          {
+            ...source.providerTurns[0]!,
+            ordinal: 2,
+            runAttemptId: RunAttemptId.make("attempt:delivered-clock-note"),
+            status: "completed",
+          },
+        ],
+      }),
+      [],
+    );
+  },
+);
+
+it.effect("recovers an unstarted continuation after a second restart with a backward clock", () =>
+  Effect.gen(function* () {
+    const cut = cutMidTurn({
+      ordinal: 2,
+      restartContinuationOfRunId: RunId.make("run:clock-ancestor"),
+      completedAt: DateTime.makeUnsafe("2026-10-03T09:00:00.000Z"),
+    });
+    const ancestor = {
+      ...cut.runs[0]!,
+      id: RunId.make("run:clock-ancestor"),
+      ordinal: 1,
+      restartContinuationOfRunId: undefined,
+      activeAttemptId: RunAttemptId.make("attempt:clock-ancestor"),
+      completedAt: DateTime.makeUnsafe("2026-10-03T10:00:00.000Z"),
+    };
+    assert.lengthOf(
+      yield* continuationTexts({
+        ...cut,
+        runs: [...cut.runs, ancestor],
+        providerTurns: [
+          { ...cut.providerTurns[0]!, ordinal: 1, runAttemptId: ancestor.activeAttemptId },
+        ],
+      }),
+      1,
     );
   }),
 );

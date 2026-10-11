@@ -25,6 +25,7 @@ import {
   PullRequestOperationError,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   RunId,
@@ -3436,6 +3437,283 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         assert.lengthOf(projection.runs, 1);
         assert.equal(projection.runs[0]?.status, status);
       }),
+  );
+
+  it.effect.each([
+    ["starting", "completed", false],
+    ["starting", "failed", false],
+    ["starting", "interrupted", false],
+    ["running", "completed", false],
+    ["running", "failed", false],
+    ["running", "interrupted", false],
+    ["running", "cancelled", false],
+    ["running", "running", true],
+  ] as const)(
+    "recovery retains the latest root turn when the run is %s and its goal phase is %s",
+    ([runStatus, turnStatus, shouldContinue]) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const threadId = ThreadId.make(`recovery-goal:${runStatus}:${turnStatus}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${threadId}:create`),
+          threadId,
+          projectId: ProjectId.make("restart-project"),
+          title: "Goal recovery",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${threadId}:message`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:message`),
+          text: "Review the goal phases.",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        const run = before.runs[0]!;
+        const attempt = before.attempts[0]!;
+        const providerThread = before.providerThreads[0]!;
+        const sessionId = ProviderSessionId.make(`${threadId}:session`);
+        const now = yield* DateTime.now;
+        const turns = (
+          [turnStatus === "cancelled" ? "running" : "completed", turnStatus] as const
+        ).map((status, index) => ({
+          id: ProviderTurnId.make(`${threadId}:turn:${index}`),
+          providerThreadId: providerThread.id,
+          nodeId: run.rootNodeId!,
+          runAttemptId: attempt.id,
+          nativeTurnRef: null,
+          ordinal: index + 1,
+          status,
+          startedAt: now,
+          completedAt: status === "running" ? null : now,
+        }));
+        yield* sink.commitCommand({
+          commandId: CommandId.make(`${threadId}:state`),
+          threadId,
+          commandType: "provider-runtime.reconcile",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make(`${threadId}:run`),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: runStatus, startedAt: now },
+            },
+            {
+              id: EventId.make(`${threadId}:attempt`),
+              type: "run-attempt.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...attempt, reason: "steering_restart", status: "running" },
+            },
+            {
+              id: EventId.make(`${threadId}:session`),
+              type: "provider-session.attached",
+              threadId,
+              occurredAt: now,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              payload: {
+                id: sessionId,
+                driver,
+                providerInstanceId: modelSelection.instanceId,
+                status: "ready",
+                cwd: process.cwd(),
+                model: modelSelection.model,
+                capabilities: CodexProviderCapabilitiesV2,
+                createdAt: now,
+                updatedAt: now,
+                lastError: null,
+              },
+            },
+            {
+              id: EventId.make(`${threadId}:provider-thread`),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              payload: {
+                ...providerThread,
+                status: "active",
+                providerSessionId: sessionId,
+                nativeThreadRef: { driver, nativeId: "goal-native", strength: "strong" },
+              },
+            },
+            ...turns.map((turn) => ({
+              id: EventId.make(`${threadId}:event:${turn.id}`),
+              type: "provider-turn.updated" as const,
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: turn,
+            })),
+          ],
+        });
+        const projection = yield* store.getRuntimeRecoveryProjection(threadId);
+        assert.equal(projection.providerTurns.at(-1)?.id, turns[1]!.id);
+        yield* recovery.prepareForShutdown;
+        yield* recovery.reconcile("startup");
+        const intent = yield* outbox.get(`effect:restart-continuation:${run.id}`);
+        assert.equal(Option.isSome(intent), shouldContinue);
+        // A crash while recovery itself is committing must replay the same durable intent.
+        yield* recovery.reconcile("startup");
+        const repeated = yield* outbox.get(`effect:restart-continuation:${run.id}`);
+        assert.deepEqual(repeated, intent);
+      }),
+  );
+
+  it.effect.each([false, true])(
+    "enforces the restart chain cap during command admission after steering: %s",
+    (steered) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make(`restart-admission-cap:${steered}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${threadId}:create`),
+          threadId,
+          projectId: ProjectId.make("restart-project"),
+          title: "Restart cap",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${threadId}:original`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:original`),
+          text: "Original work",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        for (let index = 1; index <= (steered ? 7 : 4); index++) {
+          const before = yield* orchestrator.getThreadProjection(threadId);
+          const source = before.runs.at(-1)!;
+          const now = yield* DateTime.now;
+          yield* sink.commitCommand({
+            commandId: CommandId.make(`${threadId}:cancel:${index}`),
+            threadId,
+            commandType: "provider-runtime.reconcile",
+            acceptedAt: now,
+            effects: [],
+            events: [
+              {
+                id: EventId.make(`${threadId}:cancel:${index}`),
+                type: "run.updated",
+                threadId,
+                runId: source.id,
+                occurredAt: now,
+                payload: { ...source, status: "cancelled", completedAt: now },
+              },
+              ...(steered && index === 4
+                ? [
+                    {
+                      id: EventId.make(`${threadId}:steered-attempt`),
+                      type: "run-attempt.updated" as const,
+                      threadId,
+                      runId: source.id,
+                      occurredAt: now,
+                      payload: {
+                        ...before.attempts.find(
+                          (attempt) => attempt.id === source.activeAttemptId,
+                        )!,
+                        reason: "steering_restart" as const,
+                      },
+                    },
+                  ]
+                : []),
+            ],
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${threadId}:continue:${index}`),
+            threadId,
+            messageId: MessageId.make(`${threadId}:continue:${index}`),
+            text: "Continue where you left off.",
+            attachments: [],
+            modelSelection,
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "agent",
+            creationSource: "server",
+            restartContinuationOfRunId: source.id,
+          });
+          assert.lengthOf(
+            (yield* orchestrator.getThreadProjection(threadId)).runs,
+            Math.min(index + 1, steered ? 7 : 4),
+          );
+        }
+      }),
+  );
+
+  it.effect(
+    "makes a pending shutdown continuation claimable after the wall clock moves backwards",
+    () =>
+      Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const threadId = ThreadId.make("restart-clock-rollback");
+        yield* TestClock.setTime(
+          DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-03T10:00:00.000Z")),
+        );
+        yield* outbox.enqueue([
+          {
+            id: "effect:restart-clock-rollback",
+            commandId: CommandId.make("restart-clock-rollback"),
+            threadId,
+            request: { type: "provider-runtime.continue", sourceRunId: RunId.make("clock-source") },
+          },
+        ]);
+        yield* TestClock.setTime(
+          DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-03T09:00:00.000Z")),
+        );
+        yield* outbox.reconcileAfterProcessLoss;
+        // Startup recovery must leave it for the normal worker, regardless of clock skew.
+        assert.isTrue(
+          Option.isNone(
+            yield* outbox.claimNext({
+              workerId: "recovery",
+              leaseDurationMs: 1000,
+              excludeRestartContinuations: true,
+            }),
+          ),
+        );
+        const claim = yield* outbox.claimNext({ workerId: "normal", leaseDurationMs: 1000 });
+        assert.isTrue(Option.isSome(claim));
+        if (Option.isSome(claim)) assert.equal(claim.value.id, "effect:restart-clock-rollback");
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+        ),
+      ),
   );
 
   it.effect("rejects settling a thread while a run is active", () =>

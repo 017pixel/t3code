@@ -87,8 +87,15 @@ import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.t
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "@t3tools/provider-core/server/notification";
-import { isRestartNoteSource, isWorktreeContinuationRun } from "./RestartBackgroundNote.ts";
-import { restartContinuationBlocked } from "./RestartContinuation.ts";
+import {
+  isRestartNoteSource,
+  isWorktreeContinuationRun,
+  restartRunRanAfter,
+} from "./RestartBackgroundNote.ts";
+import {
+  restartContinuationBlocked,
+  restartContinuationLimitReached,
+} from "./RestartContinuation.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -4588,6 +4595,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             )) ||
           (isRestartNoteSource(source, projection.providerTurns) &&
             (source.restartPendingMessageIds?.length ?? 0) === 0) ||
+          restartContinuationLimitReached(source, projection.runs, projection.attempts) ||
           restartContinuationBlocked(
             { ...projection, turnItems: secretRequests.turnItems },
             source,
@@ -4599,7 +4607,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             (run) =>
               run.id !== source.id &&
               run.status !== "queued" &&
-              (worktreeContinuation ? run.ordinal > source.ordinal : runRanAfter(run, source)),
+              (worktreeContinuation
+                ? run.ordinal > source.ordinal
+                : restartRunRanAfter(
+                    run,
+                    source,
+                    projection.providerTurns,
+                    projection.runs,
+                    projection.attempts,
+                  )),
           ) ||
           (yield* stopReachedRun(command, command.threadId, source.id))
         ) {

@@ -5,6 +5,7 @@ import {
   latestProviderTurnForAttempt,
   MessageId,
   type OrchestrationV2Run,
+  type OrchestrationV2RunAttempt,
   type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -22,6 +23,7 @@ import {
   restartContinuationNote,
   restartPromptSource,
   restartPendingMessageIds,
+  restartRunRanAfter,
 } from "./RestartBackgroundNote.ts";
 
 const CONTINUE_PROMPT = "Continue where you left off.";
@@ -90,11 +92,8 @@ export function restartContinuationBlocked(
           // Recovery closes live callbacks; it does not answer their question.
           ((request.status === "expired" || request.status === "cancelled") &&
             request.responseCapability.type === "not_resumable" &&
-            source.activeAttemptId !== null &&
-            projection.providerTurns.some(
-              (turn) =>
-                turn.id === request.providerTurnId && turn.runAttemptId === source.activeAttemptId,
-            ))),
+            turn !== undefined &&
+            turn.id === request.providerTurnId)),
     ) ||
     projection.turnItems.some(
       (item) =>
@@ -181,14 +180,10 @@ export function restartContinuationRun(
     (liveTurnRequired && (session.status === "stopped" || session.status === "error"))
   )
     return;
+  const turn = latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId);
   if (
     liveTurnRequired &&
-    !projection.providerTurns.some(
-      (turn) =>
-        turn.providerThreadId === providerThread.id &&
-        turn.runAttemptId === run.activeAttemptId &&
-        turn.status === "running",
-    )
+    (turn === undefined || turn.providerThreadId !== providerThread.id || turn.status !== "running")
   )
     return;
   return run;
@@ -196,6 +191,30 @@ export function restartContinuationRun(
 
 /** Consecutive automatic continuations allowed before a person has to step in. */
 const MAX_CONTINUATION_CHAIN = 3;
+
+/** Admission and delivery share the cap so stale commands cannot bypass it. */
+export function restartContinuationLimitReached(
+  source: OrchestrationV2Run,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  attempts: ReadonlyArray<Pick<OrchestrationV2RunAttempt, "id" | "reason">>,
+): boolean {
+  let chainLength = 0;
+  for (
+    let run: OrchestrationV2Run | undefined = source;
+    run?.restartContinuationOfRunId !== undefined && chainLength < MAX_CONTINUATION_CHAIN;
+    run = runs.find((candidate) => candidate.id === run?.restartContinuationOfRunId)
+  ) {
+    // A replacement prompt interrupts the consecutive automatic restart chain.
+    if (
+      attempts.some(
+        (attempt) => attempt.id === run.activeAttemptId && attempt.reason === "steering_restart",
+      )
+    )
+      break;
+    chainLength += 1;
+  }
+  return chainLength >= MAX_CONTINUATION_CHAIN;
+}
 
 export const continueRestartedRun = Effect.fn("RestartContinuation.continueRestartedRun")(
   function* (input: { readonly threadId: ThreadId; readonly sourceRunId: RunId }) {
@@ -251,21 +270,21 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         (run) =>
           run.id !== source.id &&
           run.status !== "queued" &&
-          (worktreeContinuation ? run.ordinal > source.ordinal : runRanAfter(run, source)),
+          (worktreeContinuation
+            ? run.ordinal > source.ordinal
+            : restartRunRanAfter(
+                run,
+                source,
+                projection.providerTurns,
+                projection.runs,
+                projection.attempts,
+              )),
       )
     )
       return;
     if (projection.thread.providerInstanceId !== source.providerInstanceId) return;
     // A turn that keeps crashing the server would otherwise restart it forever.
-    let chainLength = 0;
-    for (
-      let run: (typeof projection.runs)[number] | undefined = source;
-      run?.restartContinuationOfRunId !== undefined && chainLength < MAX_CONTINUATION_CHAIN;
-      run = projection.runs.find((candidate) => candidate.id === run?.restartContinuationOfRunId)
-    ) {
-      chainLength += 1;
-    }
-    if (chainLength >= MAX_CONTINUATION_CHAIN) {
+    if (restartContinuationLimitReached(source, projection.runs, projection.attempts)) {
       yield* Effect.logWarning("Not continuing a run restarted too many times in a row", {
         threadId: input.threadId,
         sourceRunId: input.sourceRunId,

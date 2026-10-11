@@ -80,3 +80,67 @@ it("uses the thread provider for stale background work without provider threads"
     expect(event?.type === "turn-item.updated" ? event.payload.status : null).toBe("cancelled");
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
+
+it.each(["assistant_message", "reasoning", "proposed_plan"] as const)(
+  "closes the streaming flag on a cancelled %s item",
+  async (type) => {
+    const threadId = ThreadId.make(`thread:streaming:${type}`);
+    const runId = RunId.make(`run:streaming:${type}`);
+    const events: Parameters<
+      EventSink.EventSinkV2["Service"]["commitCommand"]
+    >[0]["events"][number][] = [];
+    const projection = {
+      thread: { id: threadId, providerInstanceId: ProviderInstanceId.make("codex") },
+      runs: [
+        { id: runId, status: "running", providerInstanceId: ProviderInstanceId.make("codex") },
+      ],
+      runtimeRequests: [],
+      providerSessions: [],
+      providerThreads: [],
+      providerTurns: [],
+      attempts: [],
+      nodes: [],
+      subagents: [],
+      messages: [],
+      turnItems: [
+        {
+          id: TurnItemId.make(`item:${type}`),
+          runId,
+          nodeId: null,
+          type,
+          status: "running",
+          streaming: true,
+        },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    await Effect.gen(function* () {
+      const recovery = yield* ProviderRuntimeRecovery.make;
+      yield* recovery.reconcile("startup");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerSettings.layerTest(),
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getRecoveryThreadIds: () => Effect.succeed([threadId]),
+            getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+          }),
+          Layer.mock(EventSink.EventSinkV2)({
+            commitCommand: (input) => {
+              events.push(...input.events);
+              return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+            },
+          }),
+          IdAllocator.layer,
+          Layer.mock(EffectOutbox.EffectOutboxV2)({
+            reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+          }),
+        ),
+      ),
+      Effect.runPromise,
+    );
+    const item = events.find((event) => event.type === "turn-item.updated");
+    expect(
+      item?.type === "turn-item.updated" && "streaming" in item.payload && item.payload.streaming,
+    ).toBe(false);
+  },
+);

@@ -111,7 +111,73 @@ export function restartCancelledBackgroundWorkNote(work: ReadonlyArray<Work>): s
 type ProviderTurnState = Pick<
   OrchestrationV2ProviderTurn,
   "runAttemptId" | "providerThreadId" | "status"
+> &
+  Partial<Pick<OrchestrationV2ProviderTurn, "ordinal">>;
+
+type OrderedRun = Pick<
+  OrchestrationV2Run,
+  | "id"
+  | "ordinal"
+  | "completedAt"
+  | "providerThreadId"
+  | "activeAttemptId"
+  | "restartContinuationOfRunId"
 >;
+
+/** Native turn ordinals and continuation links retain order across wall clock changes. */
+export function restartRunRanAfter(
+  run: OrderedRun,
+  other: OrderedRun,
+  providerTurns: ReadonlyArray<ProviderTurnState>,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  attempts: ReadonlyArray<Attempt> = [],
+): boolean {
+  const lineage = (source: OrderedRun) => {
+    const chain = [source];
+    const visited = new Set([source.id]);
+    for (let current = source; current.restartContinuationOfRunId !== undefined;) {
+      const previous = runs.find(
+        (candidate) => candidate.id === current.restartContinuationOfRunId,
+      );
+      if (previous === undefined || visited.has(previous.id)) break;
+      chain.push(previous);
+      visited.add(previous.id);
+      current = previous;
+    }
+    return chain;
+  };
+  const runChain = lineage(run);
+  const otherChain = lineage(other);
+  if (runChain.some((ancestor) => ancestor.id === other.id)) return run.id !== other.id;
+  if (otherChain.some((ancestor) => ancestor.id === run.id)) return false;
+  if (run.providerThreadId !== null && run.providerThreadId === other.providerThreadId) {
+    const turnOrdinal = (chain: ReadonlyArray<OrderedRun>) => {
+      for (const source of chain) {
+        const attemptIds = new Set(
+          attempts.filter((attempt) => attempt.runId === source.id).map((attempt) => attempt.id),
+        );
+        if (source.activeAttemptId != null) attemptIds.add(source.activeAttemptId);
+        if (attemptIds.size === 0) continue;
+        const ordinal = providerTurns.reduce(
+          (latest, turn) =>
+            turn.providerThreadId === run.providerThreadId &&
+            turn.runAttemptId !== null &&
+            attemptIds.has(turn.runAttemptId)
+              ? Math.max(latest, turn.ordinal ?? 0)
+              : latest,
+          0,
+        );
+        if (ordinal > 0) return ordinal;
+      }
+      return 0;
+    };
+    const runOrdinal = turnOrdinal(runChain);
+    const otherOrdinal = turnOrdinal(otherChain);
+    if (runOrdinal > 0 && otherOrdinal > 0 && runOrdinal !== otherOrdinal)
+      return runOrdinal > otherOrdinal;
+  }
+  return runRanAfter(run, other);
+}
 
 /**
  * A run whose turn had settled before the restart cancelled its background
@@ -311,9 +377,11 @@ export function pendingRestartCancelledBackgroundWork(input: {
   return sameThread
     .filter(
       (source) =>
-        runRanAfter(input.run, source) &&
         (source.restartCancelledBackgroundWork?.length ?? 0) > 0 &&
-        !prompted.some((later) => runRanAfter(later, source)),
+        restartRunRanAfter(input.run, source, input.providerTurns, input.runs, input.attempts) &&
+        !prompted.some((later) =>
+          restartRunRanAfter(later, source, input.providerTurns, input.runs, input.attempts),
+        ),
     )
     .reduce<ReadonlyArray<Work>>(
       (work, source) =>

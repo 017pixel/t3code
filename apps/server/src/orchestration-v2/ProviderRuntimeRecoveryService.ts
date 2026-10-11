@@ -21,7 +21,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { restartContinuationRun } from "./RestartContinuation.ts";
+import { restartContinuationBlocked, restartContinuationRun } from "./RestartContinuation.ts";
 import {
   endOrphanedNativeSubagent,
   endRunlessRootTurns,
@@ -158,7 +158,17 @@ const cancelledItem = (
 ): OrchestrationV2ThreadProjection["turnItems"][number] =>
   item.type === "secret_request" && item.secretStatus === "pending"
     ? { ...item, status: "cancelled", secretStatus: "cancelled", completedAt: now, updatedAt: now }
-    : { ...item, status: "cancelled", completedAt: now, updatedAt: now };
+    : {
+        ...item,
+        status: "cancelled",
+        completedAt: now,
+        updatedAt: now,
+        ...(item.type === "reasoning" ||
+        item.type === "assistant_message" ||
+        item.type === "proposed_plan"
+          ? { streaming: false }
+          : {}),
+      };
 
 /**
  * A provider thread's latest started run: the last turn that provider saw.
@@ -325,12 +335,15 @@ export const make = Effect.gen(function* () {
       // A handoff's continuation already has that consent, and the old
       // session was detached to run it in the newly bound worktree.
       const queuedRuns = projection.runs.filter((run) => run.status === "queued");
+      const handoffCandidates = queuedRuns.filter(
+        (run) => run.queueHeld !== true && isWorktreeContinuationRun(run),
+      );
       const handoffContinuation =
         continueAfterRestart &&
         projection.thread.worktreePath != null &&
-        queuedRuns.filter((run) => run.queueHeld !== true && isWorktreeContinuationRun(run))
-          .length === 1
-          ? queuedRuns.find((run) => run.queueHeld !== true && isWorktreeContinuationRun(run))
+        handoffCandidates.length === 1 &&
+        !restartContinuationBlocked(projection, handoffCandidates[0]!, now)
+          ? handoffCandidates[0]
           : undefined;
       for (const run of projection.runs) {
         if (

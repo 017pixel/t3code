@@ -4256,10 +4256,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ORDER BY COALESCE(provider_thread.first_run_ordinal, 0), provider_thread.provider_thread_id ASC
             `,
           sql<PayloadRow>`
+              WITH latest_turns AS MATERIALIZED (
+                SELECT provider_thread_id, run_attempt_id, MAX(ordinal) AS ordinal
+                FROM orchestration_v2_projection_provider_turns
+                WHERE thread_id = ${threadId} AND run_attempt_id IS NOT NULL
+                GROUP BY provider_thread_id, run_attempt_id
+              )
               SELECT provider_turn.payload_json
               FROM orchestration_v2_projection_provider_turns AS provider_turn
               WHERE provider_turn.thread_id = ${threadId}
-                AND provider_turn.status IN ('pending', 'starting', 'running', 'waiting')
+                AND (
+                  provider_turn.status IN ('pending', 'running')
+                  -- A terminal last phase rules out continuation even when the
+                  -- app run has not settled yet. Older live phases still need cleanup.
+                  OR (provider_turn.provider_thread_id, provider_turn.run_attempt_id,
+                    provider_turn.ordinal) IN (
+                      SELECT provider_thread_id, run_attempt_id, ordinal FROM latest_turns
+                    )
+                )
                 AND (
                   provider_turn.run_attempt_id IS NULL
                   OR provider_turn.run_attempt_id IN (
