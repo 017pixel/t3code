@@ -239,6 +239,9 @@ importers:
       electron:
         specifier: 44.4.5
         version: 44.4.5
+      electron-store:
+        specifier: ^8.2.0
+        version: 8.2.0
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
@@ -17739,8 +17742,7 @@ snapshots:
 
   at-least-node@1.0.0: {}
 
-  atomically@1.7.0:
-    optional: true
+  atomically@1.7.0: {}
 
   await-lock@2.2.2: {}
 
@@ -18201,7 +18203,6 @@ snapshots:
       onetime: 5.1.2
       pkg-up: 3.1.0
       semver: 7.8.5
-    optional: true
 
   connect@3.7.0:
     dependencies:
@@ -18525,7 +18526,6 @@ snapshots:
   debounce-fn@4.0.0:
     dependencies:
       mimic-fn: 3.1.0
-    optional: true
 
   debug@2.6.9:
     dependencies:
@@ -18655,7 +18655,6 @@ snapshots:
   dot-prop@6.0.1:
     dependencies:
       is-obj: 2.0.0
-    optional: true
 
   dotenv-expand@11.0.7:
     dependencies:
@@ -18752,7 +18751,6 @@ snapshots:
     dependencies:
       conf: 10.2.0
       type-fest: 2.19.0
-    optional: true
 
   electron-to-chromium@1.5.430: {}
 
@@ -19516,7 +19514,6 @@ snapshots:
   find-up@3.0.0:
     dependencies:
       locate-path: 3.0.0
-    optional: true
 
   flatted@3.4.4: {}
 
@@ -19984,8 +19981,7 @@ snapshots:
 
   is-number@7.0.0: {}
 
-  is-obj@2.0.0:
-    optional: true
+  is-obj@2.0.0: {}
 
   is-plain-obj@4.1.0: {}
 
@@ -20109,8 +20105,7 @@ snapshots:
 
   json-schema-traverse@1.0.0: {}
 
-  json-schema-typed@7.0.3:
-    optional: true
+  json-schema-typed@7.0.3: {}
 
   json-schema-typed@8.0.2: {}
 
@@ -20264,7 +20259,6 @@ snapshots:
     dependencies:
       p-locate: 3.0.0
       path-exists: 3.0.0
-    optional: true
 
   lodash-es@4.18.1: {}
 
@@ -20962,11 +20956,9 @@ snapshots:
 
   mimic-fn@1.2.0: {}
 
-  mimic-fn@2.1.0:
-    optional: true
+  mimic-fn@2.1.0: {}
 
-  mimic-fn@3.1.0:
-    optional: true
+  mimic-fn@3.1.0: {}
 
   mimic-function@5.0.1: {}
 
@@ -21252,7 +21244,6 @@ snapshots:
   onetime@5.1.2:
     dependencies:
       mimic-fn: 2.1.0
-    optional: true
 
   onetime@7.0.0:
     dependencies:
@@ -21480,7 +21471,6 @@ snapshots:
   p-limit@2.3.0:
     dependencies:
       p-try: 2.2.0
-    optional: true
 
   p-limit@3.1.0:
     dependencies:
@@ -21493,7 +21483,6 @@ snapshots:
   p-locate@3.0.0:
     dependencies:
       p-limit: 2.3.0
-    optional: true
 
   p-queue@9.3.3:
     dependencies:
@@ -21502,8 +21491,7 @@ snapshots:
 
   p-timeout@7.0.2: {}
 
-  p-try@2.2.0:
-    optional: true
+  p-try@2.2.0: {}
 
   package-manager-detector@1.6.0: {}
 
@@ -21539,8 +21527,7 @@ snapshots:
 
   path-data-parser@0.1.0: {}
 
-  path-exists@3.0.0:
-    optional: true
+  path-exists@3.0.0: {}
 
   path-expression-matcher@1.6.2:
     optional: true
@@ -21629,7 +21616,6 @@ snapshots:
   pkg-up@3.1.0:
     dependencies:
       find-up: 3.0.0
-    optional: true
 
   pkijs@3.4.0:
     dependencies:
@@ -22992,8 +22978,7 @@ snapshots:
 
   type-fest@0.7.1: {}
 
-  type-fest@2.19.0:
-    optional: true
+  type-fest@2.19.0: {}
 
   type-fest@5.7.0:
     dependencies:
