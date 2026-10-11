@@ -26,6 +26,10 @@ export function createReviewEnvironmentAtoms<R, E>(
       label: "environment-data:review:diff-preview",
       tag: WS_METHODS.reviewGetDiffPreview,
       staleTimeMs: 5_000,
+      // The cache key changes on every workspace mutation, so each tool call
+      // supersedes a whole preview. Keep old ones only long enough to cover
+      // closing and reopening the panel.
+      idleTtlMs: 30_000,
     }),
     diffFilePatch: createEnvironmentQueryAtomFamily(runtime, {
       label: "environment-data:review:diff-file-patch",
