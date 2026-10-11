@@ -445,10 +445,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   // ProjectionStore reads this table, so it must exist even when its migration was skipped.
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 63) {
-    const { ensureThreadReadProjection } = yield* Effect.promise(
-      () => import("./Migrations/063_ProjectionThreadReadPayload.ts"),
-    );
-    yield* ensureThreadReadProjection;
+    yield* loadMigration(() => import("./Migrations/063_ProjectionThreadReadPayload.ts"));
   }
   if (toMigrationInclusive === undefined && divergent.length === 0 && skipped.length === 0) {
     // Other builds can share this database. Schema changes miss this cache; ledger
@@ -468,10 +465,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
           )
         )
           return;
-        const { ensureThreadReadProjection } = yield* Effect.promise(
-          () => import("./Migrations/063_ProjectionThreadReadPayload.ts"),
-        );
-        yield* ensureThreadReadProjection;
+        yield* loadMigration(() => import("./Migrations/063_ProjectionThreadReadPayload.ts"));
         yield* sql`CREATE TABLE IF NOT EXISTS t3_schema_cache (
         id INTEGER PRIMARY KEY CHECK (id = 1), manifest TEXT NOT NULL, schema_version INTEGER NOT NULL
       )`;
