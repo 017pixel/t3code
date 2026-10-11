@@ -1771,8 +1771,11 @@ export const layerWithOptions = (
                   ),
                 ),
                 () =>
-                  (compact ? runtime.compactThread!(input) : runtime.startTurn(input)).pipe(
-                    turnMetrics("send", input.modelSelection.model),
+                  hostLock.withRead(
+                    (compact ? runtime.compactThread!(input) : runtime.startTurn(input)).pipe(
+                      turnMetrics("send", input.modelSelection.model),
+                    ),
+                    hostLeases.get(runtime),
                   ),
                 (_, exit) =>
                   Exit.isFailure(exit)
@@ -1783,6 +1786,7 @@ export const layerWithOptions = (
                     : Effect.void,
               ),
             ),
+            hostLock.withRead,
           );
         return {
           ...runtime,
@@ -1908,20 +1912,24 @@ export const layerWithOptions = (
           steerTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(
-                hostLock.withRead(runtime.steerTurn(input)).pipe(turnMetrics("steer")),
+                hostLock
+                  .withRead(runtime.steerTurn(input), hostLeases.get(runtime))
+                  .pipe(turnMetrics("steer")),
               ),
             ),
           interruptTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(
-                hostLock.withRead(runtime.interruptTurn(input)).pipe(turnMetrics("interrupt")),
+                hostLock
+                  .withRead(runtime.interruptTurn(input), hostLeases.get(runtime))
+                  .pipe(turnMetrics("interrupt")),
               ),
             ),
           respondToRuntimeRequest: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(
                 hostLock
-                  .withRead(runtime.respondToRuntimeRequest(input))
+                  .withRead(runtime.respondToRuntimeRequest(input), hostLeases.get(runtime))
                   .pipe(turnMetrics("runtime-request-response")),
               ),
             ),

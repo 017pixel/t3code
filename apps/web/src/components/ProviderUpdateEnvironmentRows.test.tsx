@@ -224,6 +224,51 @@ async function flushPromises(): Promise<void> {
 }
 
 describe("ProviderUpdatePrimaryNotification", () => {
+  it("settles a batch when a queued provider disappears during an earlier update", async () => {
+    hooks.reset();
+    testState.permittedEnvironmentIds.add(environmentId);
+    testState.addToast.mockReset().mockReturnValue("removed-provider-toast");
+    testState.updateToast.mockReset();
+    testState.updateProvider.mockReset();
+    const first = { ...provider(), instanceId: ProviderInstanceId.make("removal-first") };
+    const second = {
+      ...provider(),
+      instanceId: ProviderInstanceId.make("removal-second"),
+      driver: ProviderDriverKind.make("claude"),
+    };
+    const pending =
+      deferred<ReturnType<typeof AsyncResult.success<{ providers: ServerProvider[] }>>>();
+    testState.updateProvider.mockReturnValueOnce(pending.promise);
+    testState.primaryProviders = [first, second];
+    const render = () => {
+      hooks.beginRender();
+      ProviderUpdatePrimaryNotification();
+      hooks.flushEffects();
+    };
+    render();
+    testState.addToast.mock.calls[0]![0].actionProps.onClick();
+    expect(testState.updateProvider).toHaveBeenCalledTimes(1);
+    testState.primaryProviders = [first];
+    render();
+    pending.resolve(
+      AsyncResult.success({
+        providers: [{ ...provider("succeeded"), instanceId: first.instanceId }],
+      }),
+    );
+    await flushPromises();
+    expect(testState.updateProvider).toHaveBeenCalledTimes(1);
+    expect(testState.addToast.mock.calls.at(-1)?.[0].title).toBe("Provider updated");
+    testState.primaryProviders = [
+      {
+        ...first,
+        instanceId: ProviderInstanceId.make("removal-next"),
+        versionAdvisory: { ...first.versionAdvisory!, latestVersion: "1.2.0" },
+      },
+    ];
+    render();
+    expect(testState.addToast.mock.calls.at(-1)?.[0].actionProps.children).toBe("Update");
+  });
+
   it("removes the stale launch Update action when an unsolicited update starts", () => {
     hooks.reset();
     testState.permittedEnvironmentIds.add(environmentId);

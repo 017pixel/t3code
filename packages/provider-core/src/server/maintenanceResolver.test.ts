@@ -1014,6 +1014,33 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     { skip: windowsHost },
   );
 
+  it.effect.each(["bun", "pnpm"] as const)(
+    "does not grant %s ownership to a symlink targeting another installation",
+    (manager) =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("r5-02-manager-link");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const home = NodePath.join(root, `custom-${manager}`);
+        const visible = NodePath.join(home, "bin", "package-tool");
+        const real = NodePath.join(root, "foreign", "package-tool");
+        writeExecutable(real);
+        NodeFS.mkdirSync(NodePath.dirname(visible), { recursive: true });
+        NodeFS.symlinkSync(real, visible);
+        const result = yield* resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
+          binaryPath: visible,
+          env: {
+            PATH: "",
+            BUN_INSTALL: manager === "bun" ? home : undefined,
+            PNPM_HOME: manager === "pnpm" ? home : undefined,
+          },
+        }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn));
+        expect(result.update).toBeNull();
+      }).pipe(Effect.scoped),
+    { skip: windowsHost || !symlinksSupported },
+  );
+
   it.effect.each(["bun", "pnpm", "yarn", "vp"] as const)(
     "does not treat a foreign SDK binary under %s as an owned provider install",
     (manager) =>
