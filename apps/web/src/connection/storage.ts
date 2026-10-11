@@ -395,10 +395,24 @@ function writeShellRowsOnConnection(
             if (!incremental || previous?.rows.get(key) !== value) store.put(value, key);
           }
           const prefix = shellRowsPrefix(environmentId);
-          const keys = store.getAllKeys(IDBKeyRange.bound(prefix, `${prefix}\uffff`));
+          // The first save in a page also drops rows whose environment has no
+          // manifest left, which an older build's cache removal leaves behind.
+          const keys = store.getAllKeys(
+            previous === undefined ? undefined : IDBKeyRange.bound(prefix, `${prefix}\uffff`),
+          );
           keys.addEventListener("success", () => {
-            for (const key of keys.result)
-              if (typeof key === "string" && !rows.has(key)) store.delete(key);
+            const manifests = new Set(
+              keys.result.filter((key) => typeof key === "string" && !key.includes("\u0000")),
+            );
+            for (const key of keys.result) {
+              if (typeof key !== "string") continue;
+              if (key.startsWith(prefix)) {
+                if (!rows.has(key)) store.delete(key);
+                continue;
+              }
+              const separator = key.indexOf("\u0000");
+              if (separator > 0 && !manifests.has(key.slice(0, separator))) store.delete(key);
+            }
           });
           store.put(manifest, environmentId);
         } catch {
