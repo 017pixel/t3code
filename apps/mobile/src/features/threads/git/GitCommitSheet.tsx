@@ -112,6 +112,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
       ) : null}
       <MaterialScreenContent fitToContents>
         <ScrollView
+          nestedScrollEnabled
           className="android:shrink android:grow-0 ios:flex-1"
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
