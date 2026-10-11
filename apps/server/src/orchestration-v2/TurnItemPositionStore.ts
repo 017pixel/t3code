@@ -17,7 +17,7 @@ export class TurnItemPositionStoreError extends Schema.TaggedError<TurnItemPosit
 const isTurnItemPositionStoreError = Schema.is(TurnItemPositionStoreError);
 
 /** Positions per band; a turn item's band is `Math.floor(position / BAND_SIZE)`. */
-export const BAND_SIZE = 1_000_000;
+const BAND_SIZE = 1_000_000;
 
 export interface TurnItemPositionStoreV2Shape {
   readonly allocate: (input: {

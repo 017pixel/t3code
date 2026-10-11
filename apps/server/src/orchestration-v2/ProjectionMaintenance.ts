@@ -174,7 +174,7 @@ export const layer: Layer.Layer<
           }
           // Stored ordinals are already positions, so each run keeps the band
           // its items were written in. Same backfill as migration 061; the
-          // literal is TurnItemPositionStore.BAND_SIZE (integer division).
+          // literal is TurnItemPositionStore's BAND_SIZE (integer division).
           yield* sql`
             INSERT INTO orchestration_v2_run_timeline_bands (thread_id, run_id, band)
             SELECT thread_id, run_id, MAX(ordinal / 1000000)
