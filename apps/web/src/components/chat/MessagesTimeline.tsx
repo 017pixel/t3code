@@ -208,6 +208,7 @@ import {
   resolveWorkGroupScrollIndex,
   shouldCollapseUserMessage,
   shouldFollowWorkGroupAppend,
+  timelineRunIdsOpeningWindow,
   timelineTurnFoldRunIdsByEntryId,
   threadReadLabelPrefix,
   threadReadTargetId,
@@ -784,16 +785,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
     if (!historyControls?.hasMoreHistory || historyControls.loading || historyControls.error)
       return;
     // A row window can start inside a folded turn. Hydrate its missing activity
-    // only when the reader opens it, stopping once its user message is present.
+    // only when the reader opens it, stopping once a response boundary precedes it.
+    const openingRunIds = timelineRunIdsOpeningWindow(timelineEntries);
     for (const runId of paintedExpandedRunIds) {
-      if (
-        !timelineEntries.some(
-          (entry) =>
-            entry.kind === "message" &&
-            entry.message.role === "user" &&
-            entry.message.runId === runId,
-        )
-      ) {
+      if (openingRunIds.has(runId)) {
         historyControls.onLoadEarlier(runId);
         break;
       }

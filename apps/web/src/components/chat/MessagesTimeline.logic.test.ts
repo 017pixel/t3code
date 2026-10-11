@@ -29,6 +29,7 @@ import {
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
   timelineEntryTurnFoldRunId,
+  timelineRunIdsOpeningWindow,
   deriveMessagesTimelineRowsWithState,
   shouldCollapseUserMessage,
   liveWorkEntryLabel,
@@ -5353,5 +5354,60 @@ describe("shouldCollapseUserMessage", () => {
 
     expect(text.length).toBeGreaterThan(600);
     expect(shouldCollapseUserMessage(text)).toBe(false);
+  });
+});
+
+describe("timelineRunIdsOpeningWindow", () => {
+  const work = (id: string, runId: string | null, itemType?: "notification") => ({
+    id,
+    kind: "work" as const,
+    createdAt: "2026-01-01T00:00:00Z",
+    entry: {
+      id,
+      createdAt: "2026-01-01T00:00:00Z",
+      runId: runId as never,
+      label: id,
+      tone: "tool" as const,
+      ...(itemType ? { itemType } : {}),
+    },
+  });
+  const prompt = (id: string, runId: string | null) => ({
+    id,
+    kind: "message" as const,
+    createdAt: "2026-01-01T00:00:00Z",
+    message: {
+      id: id as never,
+      role: "user" as const,
+      text: id,
+      runId: runId as never,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      streaming: false,
+    },
+  });
+
+  it("names the run a history window starts inside", () => {
+    expect([
+      ...timelineRunIdsOpeningWindow([
+        work("a", "run-1"),
+        prompt("p", "run-2"),
+        work("b", "run-2"),
+      ]),
+    ]).toEqual(["run-1"]);
+  });
+
+  it("stops once the run's prompt or notification is loaded", () => {
+    expect(timelineRunIdsOpeningWindow([prompt("p", "run-1"), work("a", "run-1")]).size).toBe(0);
+    expect(
+      timelineRunIdsOpeningWindow([
+        work("prior", "run-0"),
+        work("wake", "run-1", "notification"),
+        work("a", "run-1"),
+      ]),
+    ).toEqual(new Set(["run-0"]));
+  });
+
+  it("ignores runless rows, which no older page can hydrate by id", () => {
+    expect(timelineRunIdsOpeningWindow([work("a", null), prompt("p", null)]).size).toBe(0);
   });
 });

@@ -2101,6 +2101,22 @@ export function timelineTurnFoldRunIdsByEntryId(
   return byEntryId;
 }
 
+/**
+ * Runs whose rows open a history window before any response boundary, so the
+ * window starts inside them and their earlier rows are not loaded yet.
+ */
+export function timelineRunIdsOpeningWindow(
+  timelineEntries: ReadonlyArray<TimelineEntry>,
+): ReadonlySet<RunId> {
+  const runIds = new Set<RunId>();
+  for (const entry of timelineEntries) {
+    if (timelineEntryStartsResponse(entry)) break;
+    const runId = timelineEntryFoldRunId(entry, null);
+    if (runId !== null) runIds.add(runId);
+  }
+  return runIds;
+}
+
 function sameCheckpointSummaries(
   previous: MessagesTimelineRowsInput["turnDiffSummaries"],
   next: MessagesTimelineRowsInput["turnDiffSummaries"],
