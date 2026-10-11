@@ -1,6 +1,6 @@
 import { createRouter, RouterHistory } from "@tanstack/react-router";
 
-import { preloadSpeculatively } from "./lib/chunkReloadGuard";
+import { preloadRouteSpeculatively } from "./lib/chunkReloadGuard";
 import { routeTree } from "./routeTree.gen";
 
 export function getRouter(history: RouterHistory) {
@@ -18,7 +18,7 @@ export function getRouter(history: RouterHistory) {
   // the failure and reloads on render).
   const preloadRoute = router.preloadRoute;
   router.preloadRoute = ((options: Parameters<typeof preloadRoute>[0]) =>
-    preloadSpeculatively(() => preloadRoute(options))) as typeof preloadRoute;
+    preloadRouteSpeculatively(() => preloadRoute(options))) as typeof preloadRoute;
   return router;
 }
 

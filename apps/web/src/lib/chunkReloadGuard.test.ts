@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  isRoutePreloadPending,
+  isSpeculativeLoadFailure,
   isSpeculativeLoadPending,
+  preloadRouteSpeculatively,
   preloadSpeculatively,
   reloadOnceForChunkLoadError,
 } from "./chunkReloadGuard";
@@ -135,13 +138,48 @@ describe("preloadSpeculatively", () => {
     );
 
     expect(isSpeculativeLoadPending()).toBe(true);
-    fail(new TypeError(failedImport("CommandPalette-1.js")));
+    const failure = new TypeError(failedImport("CommandPalette-1.js"));
+    fail(failure);
     await expect(preload).resolves.toBeUndefined();
     expect(isSpeculativeLoadPending()).toBe(false);
+    expect(isSpeculativeLoadFailure(failure)).toBe(true);
+  });
+
+  it("leaves a real load's failure during the preload unclaimed", async () => {
+    let fail: (error: Error) => void = () => undefined;
+    const preload = preloadSpeculatively(
+      () =>
+        new Promise<never>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    // The drawer mounts and imports the same chunk while its preload runs.
+    const real = new TypeError(failedImport("ThreadTerminalDrawer-1.js"));
+    const own = new TypeError(failedImport("ThreadTerminalDrawer-1.js"));
+    fail(own);
+    await preload;
+    expect(isSpeculativeLoadFailure(own)).toBe(true);
+    expect(isSpeculativeLoadFailure(real)).toBe(false);
   });
 
   it("stops claiming failures once the preload has loaded", async () => {
     await expect(preloadSpeculatively(async () => "module")).resolves.toBe("module");
     expect(isSpeculativeLoadPending()).toBe(false);
+  });
+});
+
+describe("preloadRouteSpeculatively", () => {
+  it("leaves failures to the route while its preload runs", async () => {
+    let done: () => void = () => undefined;
+    const preload = preloadRouteSpeculatively(
+      () =>
+        new Promise<void>((resolve) => {
+          done = resolve;
+        }),
+    );
+    expect(isRoutePreloadPending()).toBe(true);
+    done();
+    await preload;
+    expect(isRoutePreloadPending()).toBe(false);
   });
 });

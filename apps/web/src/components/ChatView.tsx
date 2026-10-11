@@ -742,21 +742,16 @@ const ThreadPullRequestsPanel = lazy(() =>
   })),
 );
 let loadedTerminalDrawer: (typeof import("./ThreadTerminalDrawer"))["default"] | null = null;
-let terminalDrawerLoad: Promise<typeof import("./ThreadTerminalDrawer")> | null = null;
 const loadTerminalDrawer = () =>
-  (terminalDrawerLoad ??= import("./ThreadTerminalDrawer").then(
-    (module) => {
-      loadedTerminalDrawer = module.default;
-      return module;
-    },
-    (error: unknown) => {
-      terminalDrawerLoad = null;
-      throw error;
-    },
-  ));
+  import("./ThreadTerminalDrawer").then((module) => {
+    loadedTerminalDrawer = module.default;
+    return module;
+  });
 const LazyThreadTerminalDrawer = lazy(loadTerminalDrawer);
 // A drawer the saved terminal state opens starts loading with this chunk, so
-// it paints with the composer instead of pushing it up a moment later.
+// it paints with the composer instead of pushing it up a moment later. A
+// drawer that mounts meanwhile imports it again (the browser shares the
+// fetch), so a failed chunk reloads the page for it.
 if (
   Object.values(useTerminalUiStateStore.getState().terminalUiStateByThreadKey).some(
     (state) => state.terminalOpen,
