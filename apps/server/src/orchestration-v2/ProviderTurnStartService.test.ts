@@ -171,6 +171,8 @@ function makeLocalCommandHarness(input: {
   readonly writeFailure?: unknown;
   /** Loads the thread and starts the run, then fails every later state read. */
   readonly failReadsAfterRunning?: boolean;
+  /** Makes the run a restart continuation of an interrupted source run. */
+  readonly restartSource?: { readonly pendingSteering: boolean };
 }) {
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
@@ -184,6 +186,9 @@ function makeLocalCommandHarness(input: {
   const newInstanceId = ProviderInstanceId.make("codex-personal");
   const checkpointScopeId = CheckpointScopeId.make("scope-native-account-command");
   const messageId = MessageId.make("message-native-account-command");
+  const sourceRunId = RunId.make("restart-source-run");
+  const sourceMessageId = MessageId.make("restart-source-message");
+  const steeringMessageId = MessageId.make("restart-source-steering");
   const run: OrchestrationV2ThreadProjection["runs"][number] = {
     id: runId,
     threadId,
@@ -200,6 +205,7 @@ function makeLocalCommandHarness(input: {
     completedAt: null,
     checkpointId: null,
     contextHandoffId: null,
+    ...(input.restartSource === undefined ? {} : { restartContinuationOfRunId: sourceRunId }),
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
@@ -252,6 +258,22 @@ function makeLocalCommandHarness(input: {
             },
           ]
         : []),
+      ...(input.restartSource === undefined
+        ? []
+        : [
+            {
+              ...run,
+              id: sourceRunId,
+              ordinal: 1,
+              status: "cancelled" as const,
+              userMessageId: sourceMessageId,
+              activeAttemptId: RunAttemptId.make("restart-source-attempt"),
+              restartContinuationOfRunId: undefined,
+              ...(input.restartSource.pendingSteering
+                ? { restartPendingMessageIds: [steeringMessageId] }
+                : {}),
+            },
+          ]),
       run,
     ],
     attempts: [
@@ -313,6 +335,12 @@ function makeLocalCommandHarness(input: {
         id: MessageId.make(`previous-message-${index}`),
         text,
       })),
+      ...(input.restartSource === undefined
+        ? []
+        : [
+            { ...message, id: sourceMessageId, runId: sourceRunId, text: "Original prompt" },
+            { ...message, id: steeringMessageId, runId: sourceRunId, text: "Steering input" },
+          ]),
       message,
     ],
     checkpointScopes: [
@@ -513,6 +541,7 @@ function makeLocalCommandHarness(input: {
                   (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
               ),
             }),
+          getThreadRecords: () => Effect.succeed(projection),
           getTurnStartHistory: () =>
             Effect.fail(
               new ProjectionStore.ProjectionStoreReadError({
@@ -754,6 +783,28 @@ effectIt.effect("does not mistake a failed state read for a superseded run", () 
     expect(startCheck._tag).toBe("ProjectionStoreReadError");
     expect(finalizeCheck._tag).toBe("ProjectionStoreReadError");
   }),
+);
+
+effectIt.effect.each([false, true])(
+  "gives the adapter the restart source only without undelivered steering (steering: %s)",
+  (pendingSteering) =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        failReadsAfterRunning: true,
+        restartSource: { pendingSteering },
+      });
+
+      yield* harness.start;
+
+      const started = harness.startRootRun.mock.calls[0]?.[0];
+      expect(started).toBeDefined();
+      // A source makes OpenCode follow or settle a surviving turn instead of
+      // prompting, which would drop the steering text.
+      expect(started?.restartContinuationSource?.message.text).toBe(
+        pendingSteering ? undefined : "Original prompt",
+      );
+    }),
 );
 
 effectIt.effect("does not overwrite a run interrupted while its thread loads", () =>

@@ -50,6 +50,7 @@ import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
   restartCancelledBackgroundWorkNote,
+  restartPendingMessageIds,
 } from "./RestartBackgroundNote.ts";
 
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
@@ -1231,8 +1232,12 @@ export const layer: Layer.Layer<
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
+      // Undelivered steering must be prompted. A surviving native turn that is
+      // followed or settled from its source would drop it.
       const restartSourceRun = projection.runs.find(
-        (source) => source.id === run.restartContinuationOfRunId,
+        (source) =>
+          source.id === run.restartContinuationOfRunId &&
+          restartPendingMessageIds(source, projection.runs, projection.providerTurns).length === 0,
       );
       const restartSourceTurn = projection.providerTurns.findLast(
         (turn) => turn.runAttemptId === restartSourceRun?.activeAttemptId,
