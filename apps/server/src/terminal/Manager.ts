@@ -3349,14 +3349,19 @@ if [[ -f $ZDOTDIR/${name} ]]; then source $ZDOTDIR/${name}; fi
     if (sessions.some((session) => session.status === "starting")) return true;
     const running = sessions.filter((session) => session.status === "running");
     if (running.length === 0) return false;
+    if (
+      running.some(
+        (session) => session.pid === null || !session.tracksPrompt || session.commandPending,
+      )
+    )
+      return true;
     const activityMark = (session: TerminalSessionState) =>
       session.eventSequence + session.inputCount;
     const marks = new Map(running.map((session) => [session, activityMark(session)]));
     const { inspector, snapshotSucceeded } = yield* acquireSubprocessInspector;
     if (!snapshotSucceeded) return true;
     for (const session of running) {
-      if (session.pid === null || !session.tracksPrompt || session.commandPending) return true;
-      if ((yield* inspector(session.pid, true)).hasRunningSubprocess) return true;
+      if ((yield* inspector(session.pid!, true)).hasRunningSubprocess) return true;
     }
     const after = yield* readManagerState;
     return [...after.sessions.values()].some(

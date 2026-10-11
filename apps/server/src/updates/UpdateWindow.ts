@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
+import type { ProviderInstanceId } from "@t3tools/contracts";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -44,8 +45,12 @@ export class UpdateWindow extends Context.Service<
      */
     readonly runIfOpen: <A, E, R>(
       install: Effect.Effect<A, E, R>,
-      /** Server shutdown also ends integrated terminals, so busy ones block it. */
-      options?: { readonly restartsServer?: boolean },
+      options?: {
+        /** Server shutdown also ends integrated terminals, so busy ones block it. */
+        readonly restartsServer?: boolean;
+        /** The provider whose own queued update is asking for the window. */
+        readonly updatingInstanceId?: ProviderInstanceId;
+      },
     ) => Effect.Effect<Option.Option<A>, E, R>;
   }
 >()("t3/updates/UpdateWindow") {}
@@ -71,7 +76,10 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
   ];
 
   /** Returns what keeps the window closed; empty means open. */
-  const blockers = Effect.fn("updates.UpdateWindow.blockers")(function* (restartsServer: boolean) {
+  const blockers = Effect.fn("updates.UpdateWindow.blockers")(function* (
+    restartsServer: boolean,
+    updatingInstanceId?: ProviderInstanceId,
+  ) {
     const now = yield* DateTime.now;
     const horizon = DateTime.addDuration(now, UPDATE_LOOKAHEAD);
 
@@ -94,7 +102,8 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
     // Includes installs someone started by hand.
     const providerUpdating = (yield* providers.getProviders).some(
       (provider) =>
-        provider.updateState?.status === "queued" || provider.updateState?.status === "running",
+        provider.instanceId !== updatingInstanceId &&
+        (provider.updateState?.status === "queued" || provider.updateState?.status === "running"),
     );
     if (providerUpdating) return ["provider-update"];
     // A first install downloads inside this server, so a restart would discard it.
@@ -174,12 +183,13 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
 
   const runIfOpen: UpdateWindow["Service"]["runIfOpen"] = (install, options) =>
     admission.withPermit(
-      blockers(options?.restartsServer === true).pipe(
+      blockers(options?.restartsServer === true, options?.updatingInstanceId).pipe(
         Effect.flatMap((found) => {
           if (found.length > 0)
             return Effect.logDebug("Background update waiting for the update window", {
               blockers: found,
             }).pipe(Effect.as(Option.none()));
+          // Interaction may have arrived during the blocker reads.
           const stillQuiet = backgroundPolicy.sinceLastClientInteraction.pipe(
             Effect.flatMap((quiet) =>
               Duration.isLessThan(quiet, QUIET_PERIOD)

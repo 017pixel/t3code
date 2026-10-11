@@ -121,7 +121,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         getSnapshot: Ref.get(snapshotStateRef).pipe(Effect.map((state) => state.snapshot)),
         publishSnapshot: (nextSnapshot) => publishEnrichedSnapshot(generation, nextSnapshot),
       })
-      .pipe(admission.withLaunchPermit, Effect.ignoreCause({ log: true }), Effect.forkIn(scope));
+      .pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(scope));
 
     yield* Ref.set(enrichmentFiberRef, fiber);
   });

@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
   CLI_RELEASE_CHECKSUMS_FILE,
@@ -138,11 +138,35 @@ const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(
 ) {
   // The install lock is held for the whole transaction, so a stalled download
   // must fail rather than block every other caller.
-  return yield* httpClient.execute(HttpClientRequest.get(url)).pipe(
-    Effect.flatMap(HttpClientResponse.filterStatusOk),
+  const requiresHttps = new URL(url).protocol === "https:";
+  const validateDownload = (targetUrl: string) => {
+    const target = validateCliReleaseDownloadUrl(targetUrl);
+    if (requiresHttps && target.protocol !== "https:") {
+      throw new Error("HTTPS release downloads cannot redirect to HTTP.");
+    }
+  };
+  return yield* Effect.gen(function* () {
+    let nextUrl = url;
+    for (let redirects = 0; ; redirects++) {
+      yield* Effect.try(() => validateDownload(nextUrl));
+      const response = yield* HttpClient.withScope(httpClient)
+        .execute(HttpClientRequest.get(nextUrl))
+        .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }));
+      yield* Effect.try(() => validateDownload(response.url || nextUrl));
+      if (![301, 302, 303, 307, 308].includes(response.status) || !response.headers.location) {
+        return yield* HttpClientResponse.filterStatusOk(response);
+      }
+      if (redirects >= 10)
+        return yield* new PinnedRuntimeInstallError({
+          step: "following too many release redirects",
+        });
+      nextUrl = yield* Effect.try(
+        () => new URL(response.headers.location!, response.url || nextUrl).href,
+      );
+    }
+  }).pipe(
     Effect.flatMap(
       Effect.fn(function* (response) {
-        yield* Effect.try(() => validateCliReleaseDownloadUrl(response.url || url));
         if (onProgress === undefined) return new Uint8Array(yield* response.arrayBuffer);
         const length = Number(response.headers["content-length"]);
         const total = Number.isFinite(length) && length > 0 ? length : undefined;
@@ -170,6 +194,7 @@ const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(
         return bytes;
       }),
     ),
+    Effect.scoped,
     Effect.mapError((cause) => new PinnedRuntimeInstallError({ step, cause })),
     Effect.timeoutOrElse({
       duration: PINNED_RUNTIME_INSTALL_TIMEOUT,

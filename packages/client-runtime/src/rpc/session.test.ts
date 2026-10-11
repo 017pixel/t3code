@@ -264,6 +264,7 @@ const completeInitialConfig = Effect.fn("TestRpcSessionFactory.completeInitialCo
     tag: WS_METHODS.subscribeServerConfig,
     payload,
   });
+  expect(request).toMatchObject({ payload: { providerUpdateOrigins: true } });
   socket.serverMessage(
     encodeJson({
       _tag: "Chunk",

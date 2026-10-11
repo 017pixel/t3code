@@ -136,12 +136,13 @@ function handleBeforeQuit(
       );
     }).pipe(Effect.withSpan("desktop.lifecycle.beforeQuit")),
   ).finally(() => {
-    markQuitAllowed();
     void runEffect(
       Effect.gen(function* () {
         const electronApp = yield* ElectronApp.ElectronApp;
         const updates = yield* DesktopUpdates.DesktopUpdates;
-        if (!(yield* updates.installOnQuit)) yield* electronApp.quit;
+        yield* updates.installOnQuit;
+        markQuitAllowed();
+        yield* electronApp.quit;
       }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
     );
   });
@@ -163,9 +164,10 @@ function quitFromSignal(
       if (wasQuitting) return;
       yield* logLifecycleInfo("process signal received", { signal });
       yield* requestDesktopShutdownAndWait();
-      markQuitAllowed();
       const updates = yield* DesktopUpdates.DesktopUpdates;
-      if (!(yield* updates.installOnQuit)) yield* electronApp.quit;
+      yield* updates.installOnQuit;
+      markQuitAllowed();
+      yield* electronApp.quit;
     }).pipe(Effect.withSpan("desktop.lifecycle.processSignal")),
   );
 }
@@ -277,6 +279,8 @@ export const make = DesktopLifecycle.of({
 
     if (environment.platform !== "win32") {
       yield* addScopedListener(process, "SIGINT", () => {
+        if (quitRequested) return;
+        quitRequested = true;
         quitFromSignal(
           "SIGINT",
           () => {
@@ -286,6 +290,8 @@ export const make = DesktopLifecycle.of({
         );
       });
       yield* addScopedListener(process, "SIGTERM", () => {
+        if (quitRequested) return;
+        quitRequested = true;
         quitFromSignal(
           "SIGTERM",
           () => {

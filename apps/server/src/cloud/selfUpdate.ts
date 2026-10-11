@@ -204,7 +204,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const lifecycle = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const inFlight = yield* Ref.make<{ readonly acceptedAt?: bigint } | undefined>(undefined);
   const acquire = Effect.gen(function* () {
-    const now = yield* Clock.currentTimeNanos;
+    const now = yield* Clock.monotonicTimeNanos;
     const acquired = yield* Ref.modify(inFlight, (current) => {
       const expired =
         current?.acceptedAt !== undefined &&
@@ -371,7 +371,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
             ),
           ),
           Effect.tap((updateId) =>
-            Clock.currentTimeNanos.pipe(
+            Clock.monotonicTimeNanos.pipe(
               Effect.flatMap((acceptedAt) => Ref.set(inFlight, { acceptedAt })),
               Effect.andThen(onHandoffAccepted()),
               Effect.andThen(

@@ -427,7 +427,7 @@ export class Launcher {
       await writeServiceState(this.#statePath, this.#state);
       try {
         await this.#startChild(this.#state.activeVersion, "active", this.#state.update);
-        this.#watchHealth(healthyAfter);
+        this.#watchHealth();
       } catch {
         await this.#returnToPrevious(rollback.update, "rolled-back", "candidate-start-failed");
       }
@@ -615,11 +615,11 @@ export class Launcher {
     await writeServiceState(this.#statePath, next);
     this.#state = next;
     child.role = "active";
-    this.#watchHealth(healthyAfter);
+    this.#watchHealth();
     await sendMessage(child.process, { type: "committed", updateId: committed.id });
   }
 
-  #watchHealth(healthyAfter: number): void {
+  #watchHealth(): void {
     this.#timer = setTimeout(
       () =>
         this.#enqueue(async () => {
@@ -638,7 +638,7 @@ export class Launcher {
           await discardDatabaseBackup(this.#baseDir, rollback.update.id).catch(() => undefined);
           await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
         }),
-      Math.max(0, healthyAfter - Date.now()),
+      HEALTH_PERIOD_MS,
     );
   }
 

@@ -85,7 +85,7 @@ export const layer = Layer.effectDiscard(
             fromVersion: current.version,
             targetVersion,
           });
-          return { provider: current.driver, targetVersion };
+          return { provider: current.driver, targetVersion, attemptKey };
         });
         // Rechecked per install: the previous one may have run for minutes.
         const picked = yield* updateWindow.runIfOpen(pick);
@@ -93,8 +93,29 @@ export const layer = Layer.effectDiscard(
         if (picked.value === undefined) continue;
         // Installed after the window releases admission: the runner first drains host
         // leases, and a session holding one may still need admission to launch its CLI.
+        const { attemptKey, ...target } = picked.value;
+        const beforeInstall = Effect.gen(function* () {
+          const allowed = yield* Effect.gen(function* () {
+            const settings = yield* serverSettings.getSettings;
+            return (
+              settings.automaticUpdates &&
+              settings.enableProviderUpdateChecks &&
+              Option.isSome(
+                yield* updateWindow.runIfOpen(Effect.void, { updatingInstanceId: instanceId }),
+              )
+            );
+          }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+          if (!allowed) attempts.delete(attemptKey);
+          return allowed;
+        });
         yield* runner
-          .updateProvider({ ...picked.value, instanceId, quiet: true, origin: "background" })
+          .updateProvider({
+            ...target,
+            instanceId,
+            quiet: true,
+            origin: "background",
+            beforeInstall,
+          })
           .pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("Background provider update failed", { instanceId, cause }),

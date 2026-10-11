@@ -181,7 +181,10 @@ export const make = ElectronUpdater.of({
             native.once("error", failed);
             signal.addEventListener("abort", cleanup, { once: true });
             try {
-              install();
+              // MacUpdater.quitAndInstall adds a persistent listener that quits
+              // immediately on staging. The lifecycle owns quit after this wait.
+              autoUpdater.autoRunAppAfterInstall = false;
+              native.checkForUpdates();
             } catch (cause) {
               failed(cause);
             }

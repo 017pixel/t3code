@@ -2,6 +2,7 @@ export type {
   ProviderMaintenanceCapabilities,
   ProviderMaintenanceCommandAction,
 } from "@t3tools/provider-core/server/maintenance";
+import { ProviderMaintenanceAdmission } from "./maintenance.ts";
 import type {
   ProviderMaintenanceCapabilities,
   ProviderMaintenanceCommandAction,
@@ -375,6 +376,19 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   }
   const commandPaths = [context.resolvedCommandPath, context.realCommandPath];
   const packageName = definition.npmPackageName;
+  // A manager's bin directory can contain links into a different package or SDK.
+  // Only its own entry point, including pnpm's store indirection, proves ownership.
+  const packagePaths = normalizeCommandPath(context.realCommandPath)
+    .split("/node_modules/")
+    .slice(1);
+  if (
+    packagePaths.some((value, index) =>
+      index === packagePaths.length - 1
+        ? !value.startsWith(`${packageName.toLowerCase()}/`)
+        : !value.startsWith(".pnpm/"),
+    )
+  )
+    return manual;
 
   const fileSystem = yield* FileSystem.FileSystem;
   const miseDataDir = context.env.MISE_DATA_DIR;
@@ -416,7 +430,11 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
         env: { ...context.env, ...nativeUpdate.env },
       })
     : manual;
-  if (nativeUpdate?.isCommandPath && nativeUpdate.isCommandPath(context.realCommandPath)) {
+  if (
+    packagePaths.length === 0 &&
+    nativeUpdate?.isCommandPath &&
+    nativeUpdate.isCommandPath(context.realCommandPath)
+  ) {
     const nativeRoot = context.realCommandPath
       .replaceAll("\\", "/")
       .replace(/(\/packages\/standalone)\/.*$/i, "$1")
@@ -751,9 +769,12 @@ export const makeCachedProviderMaintenanceResolution = Effect.fn(
     timeToLive: MAINTENANCE_CAPABILITIES_CACHE_TTL,
     lookup: () => resolve,
   });
+  const admission = yield* ProviderMaintenanceAdmission;
   const cached = Cache.get(cache, undefined);
   return (options?: { readonly fresh?: boolean }) =>
-    options?.fresh ? Cache.invalidate(cache, undefined).pipe(Effect.andThen(cached)) : cached;
+    admission.withLaunchPermit(
+      options?.fresh ? Cache.invalidate(cache, undefined).pipe(Effect.andThen(cached)) : cached,
+    );
 });
 
 function deriveVersionAdvisory(input: {

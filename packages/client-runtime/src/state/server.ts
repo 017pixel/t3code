@@ -590,34 +590,37 @@ export const makeEnvironmentServerWelcomeState = Effect.fn("EnvironmentServerWel
       }),
     ).pipe(
       Stream.runForEach(([session, event]) =>
-        updateWithCurrentSession((current, currentSession) =>
-          applyServerWelcomeEvent({ ...current, currentSession }, session, event),
-        ).pipe(
-          Effect.andThen(
-            Effect.gen(function* () {
-              if ((yield* SubscriptionRef.get(state)).currentSession !== session) return;
-              if (event.type === "ready" && restartObserver !== undefined) {
-                yield* Fiber.interrupt(restartObserver);
-                restartObserver = undefined;
-              }
-              if (event.type !== "updateRestart") return;
-              if (restartObserver !== undefined) yield* Fiber.interrupt(restartObserver);
-              restartObserver = yield* nudgeReconnectDuringUpdateRestart({
-                stateChanges: SubscriptionRef.changes(supervisor.state),
-                retryNow: supervisor.retryNow,
-              }).pipe(
-                Effect.andThen(
-                  SubscriptionRef.update(state, (current) =>
-                    current.restart?.updateId === event.payload.updateId
-                      ? { ...current, restart: undefined }
-                      : current,
-                  ),
-                ),
-                Effect.forkScoped,
-              );
-            }),
-          ),
-        ),
+        Effect.gen(function* () {
+          const remaining =
+            event.type === "updateRestart" && event.payload.expiresInMs !== undefined
+              ? event.payload.expiresInMs
+              : Duration.toMillis(SERVER_UPDATE_RESUME_TIMEOUT);
+          if (remaining <= 0) return;
+          yield* updateWithCurrentSession((current, currentSession) =>
+            applyServerWelcomeEvent({ ...current, currentSession }, session, event),
+          );
+          if ((yield* SubscriptionRef.get(state)).currentSession !== session) return;
+          if (event.type === "ready" && restartObserver !== undefined) {
+            yield* Fiber.interrupt(restartObserver);
+            restartObserver = undefined;
+          }
+          if (event.type !== "updateRestart") return;
+          if (restartObserver !== undefined) yield* Fiber.interrupt(restartObserver);
+          restartObserver = yield* nudgeReconnectDuringUpdateRestart({
+            stateChanges: SubscriptionRef.changes(supervisor.state),
+            retryNow: supervisor.retryNow,
+          }).pipe(
+            Effect.timeoutOption(Duration.millis(remaining)),
+            Effect.andThen(
+              SubscriptionRef.update(state, (current) =>
+                current.restart?.updateId === event.payload.updateId
+                  ? { ...current, restart: undefined }
+                  : current,
+              ),
+            ),
+            Effect.forkScoped,
+          );
+        }),
       ),
       Effect.forkScoped,
     );

@@ -16,6 +16,7 @@ import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderLatestVersions from "./ProviderLatestVersions.ts";
+import * as Maintenance from "./maintenance.ts";
 import {
   createProviderVersionAdvisory,
   makeTargetedProviderUpdateAction,
@@ -1013,6 +1014,48 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     { skip: windowsHost },
   );
 
+  it.effect.each(["bun", "pnpm", "yarn", "vp"] as const)(
+    "does not treat a foreign SDK binary under %s as an owned provider install",
+    (manager) =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("r2-04-sdk-ownership");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const home = NodePath.join(
+          root,
+          manager === "bun" ? ".bun" : manager === "vp" ? ".vite-plus" : manager,
+        );
+        const visible = NodePath.join(home, "bin", "package-tool");
+        const real = NodePath.join(
+          home,
+          manager === "yarn" ? "global" : "install",
+          "node_modules",
+          "@example",
+          "sdk",
+          "bin",
+          "package-tool",
+        );
+        writeExecutable(real);
+        const result = yield* resolvePackageManagedProviderMaintenance(
+          {
+            provider: driver("packageTool"),
+            npmPackageName: "@example/package-tool",
+            nativeUpdate: null,
+          },
+          {
+            binaryPath: visible,
+            resolvedCommandPath: visible,
+            realCommandPath: real,
+            env: { PATH: "", PNPM_HOME: manager === "pnpm" ? home : undefined },
+            platform: "linux",
+          },
+        ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn));
+        expect(result.update?.installationKey).toBeUndefined();
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
   it.effect.each([
     "installs/npm-codex/1.0.0/lib/node_modules/@example/package-tool/bin/tool.js",
     "installs/package-tool/1.0.0/bin/tool",
@@ -1409,4 +1452,36 @@ it.each(["2.0.0", "2.0.0-beta.1"])(
       expect(makeTargetedProviderUpdateAction(capabilities, invalid)).toBeNull();
     }
   },
+);
+
+it.effect(
+  "maintenance resolution waits for install admission before inspecting an executable",
+  () =>
+    Effect.gen(function* () {
+      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let inspections = 0;
+      const install = yield* admission
+        .withPermit(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      const resolve = yield* makeCachedProviderMaintenanceResolution(
+        Effect.sync(() => {
+          inspections++;
+          return manualPackageTool;
+        }),
+      );
+      const resolution = yield* resolve().pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      expect(inspections).toBe(0);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(install);
+      expect(yield* Fiber.join(resolution)).toEqual(manualPackageTool);
+      expect(inspections).toBe(1);
+      expect(yield* admission.withPermit(resolve({ fresh: true }))).toEqual(manualPackageTool);
+      expect(inspections).toBe(2);
+    }),
 );
