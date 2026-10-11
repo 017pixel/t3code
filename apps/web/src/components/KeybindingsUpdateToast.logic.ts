@@ -33,6 +33,10 @@ function keybindingsUpdateFromEvent(
   return { keybindingsChanged: keybindings !== undefined, issues: issues ?? null };
 }
 
+function keybindingsIssue(issues: ServerConfig["issues"]) {
+  return issues.find((entry) => entry.kind.startsWith("keybindings."));
+}
+
 export function createKeybindingsUpdateToastController(input: {
   readonly now?: () => number;
 }): KeybindingsUpdateToastController {
@@ -43,14 +47,22 @@ export function createKeybindingsUpdateToastController(input: {
 
   return {
     handle: (event) => {
+      // A file that is already invalid when the config arrives is fixed later
+      // by a delta that only clears the issue.
+      if (event?.type === "snapshot") {
+        reportedIssueMessage = keybindingsIssue(event.config.issues)?.message ?? null;
+        return null;
+      }
       const update = keybindingsUpdateFromEvent(event);
       if (update === null) {
         return null;
       }
 
+      let fixed = false;
       if (update.issues !== null) {
-        const issue = update.issues.find((entry) => entry.kind.startsWith("keybindings."));
+        const issue = keybindingsIssue(update.issues);
         const repeated = !update.keybindingsChanged && issue?.message === reportedIssueMessage;
+        fixed = !issue && reportedIssueMessage !== null;
         reportedIssueMessage = issue?.message ?? null;
         if (issue && !repeated) {
           return {
@@ -62,7 +74,7 @@ export function createKeybindingsUpdateToastController(input: {
           return null;
         }
       }
-      if (!update.keybindingsChanged) {
+      if (!update.keybindingsChanged && !fixed) {
         return null;
       }
 

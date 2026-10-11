@@ -92,6 +92,38 @@ describe("keybindings update toast policy", () => {
     expect(controller.handle(delta({ cwd: "/repo" }))).toBeNull();
   });
 
+  it("reports a fixed file whose bindings did not change", () => {
+    const controller = createKeybindingsUpdateToastController({});
+    const malformed = {
+      kind: "keybindings.malformed-config",
+      message: "Expected JSON array",
+    } as const;
+    const issues = (
+      next: NonNullable<
+        Extract<ServerConfigStreamEvent, { type: "configDelta" }>["changes"]["issues"]
+      >,
+    ): ServerConfigStreamEvent => ({
+      version: 1,
+      type: "configDelta",
+      configVersion: "v2",
+      changes: { issues: next },
+      removed: [],
+      providerChanges: [],
+    });
+
+    // The file was already malformed when the config arrived.
+    expect(
+      controller.handle({
+        version: 1,
+        type: "snapshot",
+        config: { issues: [malformed] } as never,
+      }),
+    ).toBeNull();
+    expect(controller.handle(issues([]))).toEqual({ _tag: "Success" });
+    // An unrelated issue clearing later is not a keybindings update.
+    expect(controller.handle(issues([]))).toBeNull();
+  });
+
   it("ignores unrelated server config notifications", () => {
     const controller = createKeybindingsUpdateToastController({});
 
