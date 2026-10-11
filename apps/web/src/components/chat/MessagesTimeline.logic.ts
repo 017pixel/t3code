@@ -2102,6 +2102,26 @@ export function timelineTurnFoldRunIdsByEntryId(
 }
 
 /**
+ * Whether the history cursor anchors on this item: older pages end at it, so
+ * nothing of its turn is missing between it and the rows after it. Unreadable
+ * cursors count as not anchored.
+ */
+export function historyCursorAnchorsItem(
+  cursor: string | null | undefined,
+  itemId: string | undefined,
+): boolean {
+  if (!cursor || itemId === undefined) return false;
+  try {
+    const payload: unknown = JSON.parse(atob(cursor.replace(/-/g, "+").replace(/_/g, "/")));
+    return (
+      typeof payload === "object" && payload !== null && "si" in payload && payload.si === itemId
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Runs whose rows open a history window before any response boundary, so the
  * window starts inside them and their earlier rows are not loaded yet.
  */

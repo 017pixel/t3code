@@ -29,6 +29,7 @@ import {
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
   timelineEntryTurnFoldRunId,
+  historyCursorAnchorsItem,
   timelineRunIdsOpeningWindow,
   deriveMessagesTimelineRowsWithState,
   shouldCollapseUserMessage,
@@ -5409,5 +5410,25 @@ describe("timelineRunIdsOpeningWindow", () => {
 
   it("ignores runless rows, which no older page can hydrate by id", () => {
     expect(timelineRunIdsOpeningWindow([work("a", null), prompt("p", null)]).size).toBe(0);
+  });
+});
+
+describe("historyCursorAnchorsItem", () => {
+  // Same shape the server's history cursor uses: base64url JSON naming the anchor row.
+  const cursor = (si: string) =>
+    btoa(JSON.stringify({ v: 1, seq: 7, st: "thread", si, p: 40 }))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+
+  it("matches the row older pages end at", () => {
+    expect(historyCursorAnchorsItem(cursor("prompt-item"), "prompt-item")).toBe(true);
+    expect(historyCursorAnchorsItem(cursor("row-after-gap"), "prompt-item")).toBe(false);
+  });
+
+  it("treats a missing or unreadable cursor as not anchored", () => {
+    expect(historyCursorAnchorsItem(null, "prompt-item")).toBe(false);
+    expect(historyCursorAnchorsItem("%%%", "prompt-item")).toBe(false);
+    expect(historyCursorAnchorsItem(cursor("prompt-item"), undefined)).toBe(false);
   });
 });

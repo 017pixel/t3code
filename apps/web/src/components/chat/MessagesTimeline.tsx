@@ -208,6 +208,7 @@ import {
   resolveWorkGroupScrollIndex,
   shouldCollapseUserMessage,
   shouldFollowWorkGroupAppend,
+  historyCursorAnchorsItem,
   timelineRunIdsOpeningWindow,
   timelineTurnFoldRunIdsByEntryId,
   threadReadLabelPrefix,
@@ -438,6 +439,8 @@ export interface MessagesTimelineHistoryControls {
   readonly loading: boolean;
   readonly error: string | null;
   readonly onLoadEarlier: (throughEntryId?: string) => void;
+  /** Where the next older page ends; it names the oldest loaded row. */
+  readonly cursor?: string | null;
 }
 
 interface MessagesTimelineProps {
@@ -787,13 +790,15 @@ const ConversationTimeline = memo(function ConversationTimeline({
     // A row window can start inside a folded turn. Hydrate its missing activity
     // only when the reader opens it, stopping once a response boundary precedes it.
     // The server keeps a long turn's prompt above the gap, so a prompt that
-    // opens the window still names its run.
+    // opens the window still names its run, unless the cursor anchors on it:
+    // then the window starts at a turn boundary and nothing of it is missing.
     const openingRunIds = new Set(timelineRunIdsOpeningWindow(timelineEntries));
     const firstEntry = timelineEntries[0];
     if (
       firstEntry?.kind === "message" &&
       firstEntry.message.role === "user" &&
-      firstEntry.message.runId != null
+      firstEntry.message.runId != null &&
+      !historyCursorAnchorsItem(historyControls.cursor, firstEntry.projectedItem?.sourceItemId)
     ) {
       openingRunIds.add(firstEntry.message.runId);
     }

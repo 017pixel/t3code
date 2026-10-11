@@ -1852,6 +1852,7 @@ export default function ChatView(props: ChatViewProps) {
       hasMoreHistory: serverThreadHistory.hasMoreHistory,
       loading: serverThreadHistory.loading,
       error: serverThreadHistory.error,
+      cursor: serverThreadHistory.historyCursor,
       onLoadEarlier: (throughEntryId) => {
         void loadEarlierThreadHistory({
           environmentId: routeThreadDetailRef.environmentId,
