@@ -1,3 +1,7 @@
+import {
+  T3_CODE_DARK_THEME_COLORS,
+  T3_CODE_LIGHT_THEME_COLORS,
+} from "@t3tools/shared/themePalettes";
 import type { DesktopBridge } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import * as Schema from "effect/Schema";
@@ -283,25 +287,15 @@ function normalizeThemeColor(value: string | null | undefined): string | null {
   return value?.trim() ?? null;
 }
 
-function resolveBrowserChromeSurface(): HTMLElement {
-  return (
-    document.querySelector<HTMLElement>("main[data-slot='sidebar-inset']") ??
-    document.querySelector<HTMLElement>("[data-slot='sidebar-inner']") ??
-    document.body
-  );
-}
-
 export function syncBrowserChromeTheme() {
-  if (typeof document === "undefined" || typeof getComputedStyle === "undefined") return;
-  const rootStyles = getComputedStyle(document.documentElement);
-  const themeChromeColor = document.documentElement.dataset.themeId
-    ? normalizeThemeColor(rootStyles.getPropertyValue("--app-chrome-background"))
-    : null;
-  const surfaceColor = normalizeThemeColor(
-    getComputedStyle(resolveBrowserChromeSurface()).backgroundColor,
-  );
-  const fallbackColor = normalizeThemeColor(getComputedStyle(document.body).backgroundColor);
-  const backgroundColor = themeChromeColor ?? surfaceColor ?? fallbackColor;
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  // The applied palette already owns this color, including an editor draft.
+  // Reading computed styles here forces a second document-wide style pass.
+  const backgroundColor = root.dataset.themeId
+    ? normalizeThemeColor(root.style.getPropertyValue("--app-theme-chrome"))
+    : (root.classList.contains("dark") ? T3_CODE_DARK_THEME_COLORS : T3_CODE_LIGHT_THEME_COLORS)
+        .chrome;
   if (!backgroundColor) return;
 
   document.documentElement.style.backgroundColor = backgroundColor;
@@ -355,18 +349,15 @@ function applyTheme(theme: Theme, { suppressTransitions = false, preservePreview
   document.documentElement.classList.toggle("dark", resolvedAppearance === "dark");
   lastAppliedTheme = { theme, systemDark, followSystem, appearanceMode, themeHalves };
   syncDesktopTheme(theme, followSystem, appearanceMode);
-  if (suppressTransitions) {
-    settleThemeAfterPaint();
-  } else {
-    syncBrowserChromeTheme();
-  }
+  syncBrowserChromeTheme();
+  if (suppressTransitions) settleThemeAfterPaint();
 }
 
 let themeSettleGeneration = 0;
 
 /**
  * Finish a transition-suppressed theme change once the next frame has painted
- * it. Reading computed colors or removing `no-transitions` any earlier forces
+ * it. Removing `no-transitions` any earlier forces
  * an extra full-document style recalc before the new theme reaches the screen.
  * The frame itself computes styles with transitions off, so nothing animates.
  * Another change before then restarts the wait so it paints without transitions too.
@@ -376,7 +367,6 @@ function settleThemeAfterPaint() {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       if (generation !== themeSettleGeneration) return;
-      syncBrowserChromeTheme();
       document.documentElement.classList.remove("no-transitions");
     });
   });

@@ -27,6 +27,29 @@ afterEach(() => {
 });
 
 describe("theme failure handling", () => {
+  it("keeps browser chrome aligned with a draft and the restored default", async () => {
+    const meta = { setAttribute: vi.fn() };
+    const root = {
+      dataset: { themeId: "__preview" } as { themeId?: string },
+      style: { backgroundColor: "", getPropertyValue: () => "#123456" },
+      classList: { contains: () => false },
+    };
+    const body = { style: { backgroundColor: "" } };
+    vi.stubGlobal("document", { documentElement: root, body, querySelectorAll: () => [meta] });
+    const { syncBrowserChromeTheme } = await import("./useTheme");
+
+    syncBrowserChromeTheme();
+    expect(root.style.backgroundColor).toBe("#123456");
+    expect(body.style.backgroundColor).toBe("#123456");
+    expect(meta.setAttribute).toHaveBeenLastCalledWith("content", "#123456");
+
+    delete root.dataset.themeId;
+    syncBrowserChromeTheme();
+    expect(root.style.backgroundColor).toBe("#fcfcfc");
+    expect(body.style.backgroundColor).toBe("#fcfcfc");
+    expect(meta.setAttribute).toHaveBeenLastCalledWith("content", "#fcfcfc");
+  });
+
   it("preserves exact storage causes and operation context", async () => {
     const readCause = new Error("storage read blocked");
     const writeCause = new Error("storage quota exceeded");
@@ -95,8 +118,12 @@ describe("theme failure handling", () => {
     });
     vi.stubGlobal("document", {
       documentElement: {
-        classList: { toggle: vi.fn() },
+        dataset: {},
+        style: { removeProperty: vi.fn(), setProperty: vi.fn(), getPropertyValue: () => "" },
+        classList: { toggle: vi.fn(), contains: () => false },
       },
+      body: { style: {} },
+      querySelectorAll: () => [{ setAttribute: vi.fn() }],
     });
 
     await expect(import("./useTheme")).resolves.toBeDefined();

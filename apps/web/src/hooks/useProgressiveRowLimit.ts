@@ -2,17 +2,19 @@ import { startTransition, useEffect, useState } from "react";
 
 /**
  * How many rows of a long list to render. The first paint gets `initial`
- * rows and the rest follow in a transition, so opening the page paints at
- * once and rendering the remainder never blocks input.
+ * rows and the rest follow in small transitions between paints. A single
+ * transition for the whole remainder still commits hundreds of controls at once.
  */
-export function useProgressiveRowLimit(initial: number): number {
+export function useProgressiveRowLimit(initial: number, total: number): number {
   const [limit, setLimit] = useState(initial);
   useEffect(() => {
-    if (limit === Number.POSITIVE_INFINITY) return;
-    const frame = requestAnimationFrame(() =>
-      startTransition(() => setLimit(Number.POSITIVE_INFINITY)),
-    );
+    if (limit >= total) return;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() =>
+        startTransition(() => setLimit((current) => Math.min(total, current + initial))),
+      );
+    });
     return () => cancelAnimationFrame(frame);
-  }, [limit]);
+  }, [initial, limit, total]);
   return limit;
 }
