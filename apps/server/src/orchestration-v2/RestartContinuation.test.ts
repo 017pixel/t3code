@@ -1340,3 +1340,87 @@ it.effect("continues a cut goal turn after an earlier phase of the attempt compl
     );
   }),
 );
+
+it.effect.each(["settled", "running", "stopped"] as const)(
+  "preserves startup session liveness after a shared-session %s thread is recovered",
+  (firstStatus) =>
+    Effect.gen(function* () {
+      const secondThreadId = ThreadId.make("thread:restart-second");
+      const secondRunId = RunId.make("run:restart-second");
+      const base = makeProjection();
+      let session = {
+        ...base.providerSessions[0]!,
+        status: firstStatus === "stopped" ? "stopped" : "ready",
+      } as OrchestrationV2ThreadProjection["providerSessions"][number];
+      const writes: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0][] = [];
+      const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([threadId, secondThreadId]),
+              getRuntimeRecoveryProjection: (id) => {
+                const second = id === secondThreadId;
+                const settled = !second && firstStatus === "settled";
+                return Effect.succeed({
+                  ...base,
+                  thread: { ...base.thread, id },
+                  runs: [
+                    {
+                      ...base.runs[0]!,
+                      id: second ? secondRunId : runId,
+                      status: settled ? "completed" : "running",
+                    },
+                  ],
+                  providerThreads: [
+                    {
+                      ...base.providerThreads[0]!,
+                      appThreadId: id,
+                      status: settled ? "idle" : "active",
+                    },
+                  ],
+                  providerSessions: [session],
+                  providerTurns: [
+                    { ...base.providerTurns[0]!, status: settled ? "completed" : "running" },
+                  ],
+                } as OrchestrationV2ThreadProjection);
+              },
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              commitCommand: (input) => {
+                writes.push(input);
+                for (const event of input.events) {
+                  if (event.type === "provider-session.updated") session = event.payload;
+                }
+                return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+              },
+            }),
+            IdAllocator.layer,
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+            }),
+          ),
+        ),
+      );
+      yield* recovery.reconcile("startup");
+      const sources = writes
+        .flatMap((write) => write.effects ?? [])
+        .flatMap((effect) =>
+          effect.request.type === "provider-runtime.continue" ? [effect.request.sourceRunId] : [],
+        );
+      assert.deepEqual(
+        sources,
+        firstStatus === "stopped"
+          ? []
+          : firstStatus === "running"
+            ? [runId, secondRunId]
+            : [secondRunId],
+      );
+      assert.lengthOf(
+        writes
+          .flatMap((write) => write.events)
+          .filter((event) => event.type === "provider-session.updated"),
+        firstStatus === "stopped" ? 0 : 1,
+      );
+    }),
+);

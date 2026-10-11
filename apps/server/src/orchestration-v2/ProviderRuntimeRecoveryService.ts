@@ -191,6 +191,10 @@ export const make = Effect.gen(function* () {
       projection: ProjectionStore.ProjectionRuntimeRecoveryState,
       trigger: "startup" | "shutdown",
       continueAfterRestart: boolean,
+      initialSessions: ReadonlyMap<
+        string,
+        OrchestrationV2ThreadProjection["providerSessions"][number]
+      >,
     ) {
       const now = yield* DateTime.now;
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
@@ -276,8 +280,17 @@ export const make = Effect.gen(function* () {
         if (!isBackgroundCapableTurnItemType(item.type)) return;
         const work = cancelledTurnItemWork(item);
         if (work === undefined) return;
+        // A native subagent item can point at its child thread. The parent
+        // that spawned it must receive the note about its missing result.
+        const parentThreadId =
+          item.type === "subagent"
+            ? (projection.providerTurns.find((turn) => turn.id === item.providerTurnId)
+                ?.providerThreadId ??
+              projection.runs.find((run) => run.id === item.runId)?.providerThreadId)
+            : undefined;
         recordCancelledBackgroundWork(
-          item.providerThreadId ??
+          parentThreadId ??
+            item.providerThreadId ??
             projection.runs.find((run) => run.id === item.runId)?.providerThreadId,
           work,
         );
@@ -646,7 +659,16 @@ export const make = Effect.gen(function* () {
       }
       const continuationRun =
         continueAfterRestart && trigger === "startup"
-          ? (handoffContinuation ?? restartContinuationRun(projection, now))
+          ? (handoffContinuation ??
+            restartContinuationRun(
+              {
+                ...projection,
+                providerSessions: projection.providerSessions.map(
+                  (session) => initialSessions.get(session.id) ?? session,
+                ),
+              },
+              now,
+            ))
           : undefined;
       const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
         ? [
@@ -744,6 +766,12 @@ export const make = Effect.gen(function* () {
       let stoppedSessions = 0;
       let closedRequests = 0;
       let retiredEffects = 0;
+      // Recovering one thread stops its shared session. Later threads must
+      // judge continuation against that session's state before recovery.
+      const initialSessions = new Map<
+        string,
+        OrchestrationV2ThreadProjection["providerSessions"][number]
+      >();
       for (const threadId of threadIds) {
         const projection = yield* projections.getRuntimeRecoveryProjection(threadId).pipe(
           Effect.mapError(
@@ -755,11 +783,14 @@ export const make = Effect.gen(function* () {
               }),
           ),
         );
+        for (const session of projection.providerSessions) {
+          if (!initialSessions.has(session.id)) initialSessions.set(session.id, session);
+        }
         const enabled =
           continueAfterRestart !== null &&
           resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
             .continueThreadsAfterServerUpdate;
-        const result = yield* reconcileProjection(projection, trigger, enabled);
+        const result = yield* reconcileProjection(projection, trigger, enabled, initialSessions);
         terminalizedRuns += result.terminalizedRuns;
         stoppedSessions += result.stoppedSessions;
         closedRequests += result.closedRequests;

@@ -1346,7 +1346,7 @@ it.effect.each([true, false])(
   },
 );
 
-it.effect("leaves delegated tasks to their own child threads after process loss", () => {
+it.effect("notes native child cancellation on its parent", () => {
   const threadId = ThreadId.make("thread_recovery_delegation");
   const settledRunId = RunId.make("run_recovery_delegation_settled");
   const runningRunId = RunId.make("run_recovery_delegation_running");
@@ -1431,7 +1431,11 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
     turnItems: [
       subagentItem(settledTaskId, settledRunId, "app_owned"),
       subagentItem(runningTaskId, runningRunId, "app_owned"),
-      subagentItem(nativeSubagentId, settledRunId, "provider_native"),
+      {
+        ...subagentItem(nativeSubagentId, settledRunId, "provider_native"),
+        // Codex points this item at the child, while its run belongs to the parent.
+        providerThreadId: ProviderThreadId.make("provider_thread_recovery_native_child"),
+      },
     ],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
