@@ -150,6 +150,9 @@ import {
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
   InstalledSkillInput,
+  SkillBundle,
+  SkillExportInput,
+  SkillImportInput,
   SkillInspectInput,
   SkillInspectResult,
   SkillInstallInput,
@@ -477,6 +480,8 @@ export const WS_METHODS = {
   skillsInstall: "skills.install",
   skillsUpdate: "skills.update",
   skillsRemove: "skills.remove",
+  skillsExport: "skills.export",
+  skillsImport: "skills.import",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
   serverUpdateServerWithProgress: "server.updateServerWithProgress",
@@ -626,6 +631,18 @@ const WsSkillsUpdateRpc = Rpc.make(WS_METHODS.skillsUpdate, {
 
 const WsSkillsRemoveRpc = Rpc.make(WS_METHODS.skillsRemove, {
   payload: InstalledSkillInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([SkillLibraryError, EnvironmentAuthorizationError]),
+});
+
+const WsSkillsExportRpc = Rpc.make(WS_METHODS.skillsExport, {
+  payload: SkillExportInput,
+  success: SkillBundle,
+  error: Schema.Union([SkillLibraryError, EnvironmentAuthorizationError]),
+});
+
+const WsSkillsImportRpc = Rpc.make(WS_METHODS.skillsImport, {
+  payload: SkillImportInput,
   success: Schema.Struct({}),
   error: Schema.Union([SkillLibraryError, EnvironmentAuthorizationError]),
 });
@@ -1862,6 +1879,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsSkillsInstallRpc,
   WsSkillsUpdateRpc,
   WsSkillsRemoveRpc,
+  WsSkillsExportRpc,
+  WsSkillsImportRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,
   WsProviderAuthStartRpc,
