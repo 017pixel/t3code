@@ -49,30 +49,35 @@ export function NightlyMobileBetaNotice() {
 
   useEffect(() => {
     if (!IS_NIGHTLY_BUILD || noticeShown || isNoticeDismissed()) return;
-    noticeShown = true;
-    const toastId = toastManager.add({
-      title: "Nightly needs the beta mobile app",
-      description:
-        "Nightly uses the new orchestrator. The App Store and Google Play versions of T3 Code cannot connect to it.",
-      timeout: 0,
-      onClose: dismissNotice,
-      actionProps: {
-        children: "Get the beta app",
-        onClick: () => {
-          toastManager.close(toastId);
-          void navigate({ to: "/settings/general", hash: NIGHTLY_MOBILE_BETA_ROW_ID });
+    // The toast provider can mount in the same commit and subscribes in its
+    // own effect, after this one; a toast added before that is lost.
+    const timeout = setTimeout(() => {
+      noticeShown = true;
+      const toastId = toastManager.add({
+        title: "Nightly needs the beta mobile app",
+        description:
+          "Nightly uses the new orchestrator. The App Store and Google Play versions of T3 Code cannot connect to it.",
+        timeout: 0,
+        onClose: dismissNotice,
+        actionProps: {
+          children: "Get the beta app",
+          onClick: () => {
+            toastManager.close(toastId);
+            void navigate({ to: "/settings/general", hash: NIGHTLY_MOBILE_BETA_ROW_ID });
+          },
         },
-      },
-      data: {
-        leadingIcon: <SmartphoneIcon className="size-4" />,
-        actionLayout: "stacked-end",
-        secondaryActionProps: {
-          children: "Dismiss",
-          onClick: () => toastManager.close(toastId),
+        data: {
+          leadingIcon: <SmartphoneIcon className="size-4" />,
+          actionLayout: "stacked-end",
+          secondaryActionProps: {
+            children: "Dismiss",
+            onClick: () => toastManager.close(toastId),
+          },
+          secondaryActionVariant: "ghost",
         },
-        secondaryActionVariant: "ghost",
-      },
-    });
+      });
+    }, 0);
+    return () => clearTimeout(timeout);
   }, [navigate]);
 
   return null;
