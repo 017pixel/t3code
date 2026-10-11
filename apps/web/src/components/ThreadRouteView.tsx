@@ -47,6 +47,7 @@ import { isBootHeld, releaseBootHoldAfterPaint, retainBootHold } from "../connec
 import {
   buildThreadRouteParams,
   finishWarmingThreadView,
+  isThreadRouteSnapshotAuthoritative,
   keepReleasedThreadView,
   resolveKeptThreadViews,
   resolveThreadRouteRenderState,
@@ -272,7 +273,7 @@ export const ThreadRouteView = memo(function ThreadRouteView({
   );
   const serverThreadShell = serverThread;
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
-  const bootstrapComplete = shell.data?.snapshot._tag === "Some";
+  const bootstrapComplete = isThreadRouteSnapshotAuthoritative(shell.data?.status);
   const draftThread = useComposerDraftStore((store) =>
     serverThreadRef ? store.getDraftThreadByRef(serverThreadRef) : null,
   );

@@ -1,3 +1,4 @@
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
@@ -243,7 +244,7 @@ export const make = Effect.gen(function* () {
     // this reads today is `core`; a `search/` read would need its own resource here. A refusal
     // still pauses the whole host, the key PullRequestService records its own backoff under.
     const resource = input.graphql === true ? "graphql" : "core";
-    const key = { provider: "github" as const, host };
+    const key = { provider: SourceControlProviderKind.make("github"), host };
     const run = Effect.gen(function* () {
       const lease = yield* quota
         .admit(host, resource, { allowReserve: input.allowReserve })
