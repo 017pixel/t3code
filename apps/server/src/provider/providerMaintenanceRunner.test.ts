@@ -66,6 +66,11 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
+const decodeInstallLease = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({ pid: Schema.Number, identity: Schema.NullOr(Schema.String) }),
+  ),
+);
 
 it.effect.each([
   "claude",
@@ -2237,6 +2242,148 @@ it.effect.each(["interaction", "opt-out"] as const)(
 );
 
 describe("provider maintenance host leases", () => {
+  it.live("reclaims an install lease whose live PID belongs to another process", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        assert.isFalse(HostLock.isProcessAlive(process.pid, "previous-process-start"));
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        NodeFS.writeFileSync(
+          HostLock.installLeasePath(directory),
+          JSON.stringify({ pid: process.pid, identity: "previous-process-start" }),
+        );
+        assert.isFalse(HostLock.installIsAlive(directory));
+        const host = HostLock.make(directory);
+        assert.equal(yield* host.withRead(Effect.succeed("launched")), "launched");
+        assert.equal(yield* host.withWrite(Effect.succeed("installed")), "installed");
+        assert.isFalse(NodeFS.existsSync(HostLock.installLeasePath(directory)));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.each(["legacy", "matching", "missing", "unknown"] as const)(
+    "keeps a live install exclusive with %s identity",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const identity = HostLock.readProcessIdentity(process.pid);
+          assert.isNotNull(identity);
+          NodeFS.writeFileSync(
+            HostLock.installLeasePath(directory),
+            mode === "legacy"
+              ? String(process.pid)
+              : JSON.stringify({
+                  pid: process.pid,
+                  ...(mode === "missing" ? {} : { identity: mode === "unknown" ? null : identity }),
+                }),
+          );
+          assert.isTrue(HostLock.installIsAlive(directory));
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.each(["darwin", "win32"] as const)(
+    "checks %s process creation identity conservatively",
+    (platform) => {
+      const require = NodeModule.createRequire(import.meta.url);
+      const mutableOS = require("node:os") as typeof NodeOS;
+      const mutableChildProcess = require("node:child_process") as typeof NodeChildProcess;
+      const osSpy = vi.spyOn(mutableOS, "platform").mockReturnValue(platform);
+      const scan = vi.spyOn(mutableChildProcess, "spawnSync").mockReturnValue({
+        pid: 1,
+        output: [null, "current-start\n", ""],
+        stdout: "current-start\n",
+        stderr: "",
+        status: 0,
+        signal: null,
+      });
+      NodeModule.syncBuiltinESMExports();
+      try {
+        assert.equal(HostLock.readProcessIdentity(process.pid), "current-start");
+        assert.isTrue(HostLock.isProcessAlive(process.pid, "current-start"));
+        assert.isFalse(HostLock.isProcessAlive(process.pid, "previous-start"));
+        scan.mockReturnValue({
+          pid: 1,
+          output: [null, "", ""],
+          stdout: "",
+          stderr: "",
+          status: 1,
+          signal: null,
+        });
+        assert.isNull(HostLock.readProcessIdentity(process.pid));
+        assert.isTrue(HostLock.isProcessAlive(process.pid, "previous-start"));
+      } finally {
+        scan.mockRestore();
+        osSpy.mockRestore();
+        NodeModule.syncBuiltinESMExports();
+      }
+    },
+  );
+
+  it.effect("keeps an install alive when its Linux identity cannot be read", () =>
+    Effect.gen(function* () {
+      if ((yield* HostProcess.Platform) !== "linux") return;
+      const mutableFS = NodeModule.createRequire(import.meta.url)("node:fs") as typeof NodeFS;
+      const readFile = NodeFS.readFileSync;
+      const spy = vi
+        .spyOn(mutableFS, "readFileSync")
+        .mockImplementation((...args: Parameters<typeof readFile>) => {
+          if (
+            args[0] === "/proc/sys/kernel/random/boot_id" ||
+            args[0] === `/proc/${process.pid}/stat`
+          )
+            throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return readFile(...args);
+        });
+      NodeModule.syncBuiltinESMExports();
+      try {
+        assert.isNull(HostLock.readProcessIdentity(process.pid));
+        assert.isTrue(HostLock.isProcessAlive(process.pid, "previous-start"));
+      } finally {
+        spy.mockRestore();
+        NodeModule.syncBuiltinESMExports();
+      }
+    }),
+  );
+
+  it.live.each(["live children", "failed scan"] as const)(
+    "a reused supervisor PID keeps admission closed for %s",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          if ((yield* HostProcess.Platform) !== "linux") return;
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          NodeFS.writeFileSync(
+            HostLock.installLeasePath(directory),
+            JSON.stringify({ pid: process.pid, identity: "previous-start" }),
+          );
+          const mutableChildProcess = NodeModule.createRequire(import.meta.url)(
+            "node:child_process",
+          ) as typeof NodeChildProcess;
+          const scan = vi.spyOn(mutableChildProcess, "spawnSync").mockReturnValue({
+            pid: 1,
+            output: [null, "", ""],
+            stdout: `2 ${process.pid} S\n`,
+            stderr: "",
+            status: mode === "failed scan" ? 1 : 0,
+            signal: null,
+          });
+          NodeModule.syncBuiltinESMExports();
+          try {
+            if (mode === "failed scan")
+              assert.throws(() => HostLock.installIsAlive(directory), /Could not inspect/);
+            else assert.isTrue(HostLock.installIsAlive(directory));
+          } finally {
+            scan.mockRestore();
+            NodeModule.syncBuiltinESMExports();
+          }
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   const coordinatedWrite = <A>(directory: string, run: Effect.Effect<A>) =>
     Effect.gen(function* () {
       const coordinator = yield* makeProviderMaintenanceCommandCoordinator({
@@ -2751,7 +2898,7 @@ describe("provider maintenance host leases", () => {
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.live.each(["unacknowledged", "existing owner"] as const)(
+  it.live.each(["unacknowledged", "existing owner", "reused parent", "reused relay"] as const)(
     "a late supervisor preserves the current host gate (%s)",
     (mode) =>
       Effect.scoped(
@@ -2773,7 +2920,8 @@ describe("provider maintenance host leases", () => {
               instanceId: CODEX_INSTANCE_ID,
               instanceIds: [CODEX_INSTANCE_ID],
               startedAt: "2026-04-10T00:00:00.000Z",
-              parentPid: dead.pid,
+              parentPid: mode === "reused parent" ? process.pid : dead.pid,
+              ...(mode === "reused parent" ? { parentIdentity: "previous-start" } : {}),
               directory,
               command: process.execPath,
               args: ["-e", ""],
@@ -2789,7 +2937,8 @@ describe("provider maintenance host leases", () => {
                   NodePath.resolve(import.meta.dirname, "../bin.ts"),
                   "__provider-install",
                   file,
-                  String(dead.pid),
+                  String(mode === "reused relay" ? process.pid : dead.pid),
+                  "previous-start",
                 ],
                 { stdio: "ignore" },
               );
@@ -2940,6 +3089,15 @@ describe("provider maintenance host leases", () => {
             return Effect.sync(() => watcher.close());
           });
           const receipt = InstallSupervisor.readReceipt(receiptFile);
+          assert.ok(receipt.pid);
+          assert.equal(receipt.parentIdentity, HostLock.readProcessIdentity(receipt.parentPid));
+          const lease = yield* decodeInstallLease(
+            NodeFS.readFileSync(HostLock.installLeasePath(directory), "utf8"),
+          );
+          assert.deepEqual(lease, {
+            pid: receipt.pid,
+            identity: HostLock.readProcessIdentity(receipt.pid),
+          });
           assert.isTrue(HostLock.installIsAlive(directory));
           if (mode === "supervisor") {
             assert.ok(receipt.pid);
