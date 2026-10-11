@@ -145,23 +145,29 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const navigation = useNavigation();
   const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
   const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
+  const projectSelected = selectedProjectKey !== null;
+  const targets = useMemo(
+    () =>
+      resolveMobileSettingsTargets(
+        selectedTargets,
+        projectSelected ? (selectedProject?.members.map((member) => member.project) ?? []) : null,
+      ),
+    [selectedTargets, selectedProject, projectSelected],
+  );
   const canWriteSettings = useAtomValue(
     useMemo(
       () =>
         Atom.make(
           (get) =>
-            selectedTargets.length > 0 &&
-            selectedTargets.every((target) =>
-              get(serverEnvironment.updateSettings.permissionAtom(target.environmentId)),
+            targets.length > 0 &&
+            targets.every((target) =>
+              get(
+                serverEnvironment.updateSettings.permissionAtom(target.environment.environmentId),
+              ),
             ),
         ),
-      [selectedTargets],
+      [targets],
     ),
-  );
-  const projectSelected = selectedProjectKey !== null;
-  const targets = resolveMobileSettingsTargets(
-    selectedTargets,
-    projectSelected ? (selectedProject?.members.map((member) => member.project) ?? []) : null,
   );
   const [pendingWrites, setPendingWrites] = useState(0);
   const writeInFlight = useRef(false);
