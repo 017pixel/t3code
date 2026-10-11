@@ -376,6 +376,87 @@ describe("RpcSessionFactory", () => {
     ).toBeUndefined();
   });
 
+  it.effect("resubscribes for a full snapshot after a delta drops a provider", () =>
+    Effect.gen(function* () {
+      const provider: ServerConfigType["providers"][number] = {
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        enabled: true,
+        installed: true,
+        version: "1.0.0",
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-08-27T00:00:00.000Z",
+        models: [],
+        slashCommands: [],
+        skills: [],
+      };
+      const withProvider = { ...SERVER_CONFIG, providers: [provider] };
+      const { factory, sockets } = yield* makeFactory();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* factory.connect(PREPARED);
+          const socket = yield* awaitSocket(sockets);
+          socket.open();
+          yield* publishConfigEvents(socket, [
+            { version: 1, type: "snapshot", config: withProvider, configVersion: "first" },
+          ]);
+          yield* session.ready;
+          const observed = yield* Queue.unbounded<ServerConfigStreamEventType>();
+          yield* session.subscribeServerConfig({}).pipe(
+            Stream.runForEach((event) => Queue.offer(observed, event)),
+            Effect.forkScoped,
+          );
+          expect((yield* Queue.take(observed)).type).toBe("snapshot");
+          // A newer server's status this build cannot read.
+          const unreadable = encodeServerConfigStreamEvent(
+            diffServerConfig(
+              withProvider,
+              { ...withProvider, providers: [{ ...provider, checkedAt: "2026-08-28T00:00:00Z" }] },
+              "second",
+            ),
+          ) as unknown as { providerChanges: Array<{ changes: Record<string, unknown> }> };
+          unreadable.providerChanges[0]!.changes.status = "a-later-state";
+          const first = yield* awaitRequest(socket);
+          socket.serverMessage(
+            encodeJson({ _tag: "Chunk", requestId: first.id, values: [unreadable] }),
+          );
+          const dropped = yield* Queue.take(observed);
+          expect(dropped.type).toBe("configDelta");
+          const resubscribe = yield* awaitRequest(socket, 1);
+          expect(resubscribe).toMatchObject({
+            tag: WS_METHODS.subscribeServerConfig,
+            payload: { configDeltas: true, knownConfigVersion: "resync" },
+          });
+          socket.serverMessage(
+            encodeJson({
+              _tag: "Chunk",
+              requestId: resubscribe.id,
+              values: [
+                encodeServerConfigStreamEvent({
+                  version: 1,
+                  type: "snapshot",
+                  config: withProvider,
+                  configVersion: "third",
+                }),
+              ],
+            }),
+          );
+          const restored = yield* Queue.take(observed);
+          expect(restored.type === "snapshot" && restored.config.providers).toEqual([provider]);
+        }),
+      );
+      // The version of the delta that dropped the provider is never acknowledged.
+      yield* factory.connect(PREPARED);
+      const socket = yield* awaitSocket(sockets, 1);
+      socket.open();
+      expect((yield* awaitRequest(socket)).payload).toEqual({
+        configDeltas: true,
+        knownConfigVersion: "third",
+      });
+    }),
+  );
+
   it.effect("deduplicates discovery calls and invalidates on explicit refresh", () =>
     Effect.gen(function* () {
       const { factory, sockets } = yield* makeFactory();
