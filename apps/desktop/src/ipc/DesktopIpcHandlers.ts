@@ -129,7 +129,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleWithoutShell(getLocalEnvironmentBearerToken);
 
   yield* ipc.handleWithoutShell(getClientSettings);
-  yield* ipc.handle(setClientSettings);
+  yield* ipc.handleWithoutShell(setClientSettings);
   yield* ipc.handleSecretStorage(getConnectionCatalog);
   yield* ipc.handle(getSnapShotState);
   yield* ipc.handle(setupSnapShot);
