@@ -3,8 +3,6 @@ import * as Duration from "effect/Duration";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
-import * as FiberHandle from "effect/FiberHandle";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -153,28 +151,14 @@ export const make = Effect.gen(function* () {
     return yield* getDriverDiffPreview(input);
   });
 
-  // Clients with a freshness epoch can reuse a preview across surface remounts.
-  // Legacy callers still read fresh; failures are never retained.
-  const previews = yield* Cache.makeWith(
-    (key: string) => readDiffPreview(JSON.parse(key) as ReviewDiffPreviewInput),
-    {
-      capacity: 32,
-      timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.seconds(5) : Duration.zero),
-    },
-  );
-  // Expired entries leave memory only when read again, so drop them once
-  // requests stop. Walking Cache.keys removes expired entries and keeps pending
-  // lookups, which re-arm this sweep when they finish.
-  const previewSweep = yield* FiberHandle.make();
-  const sweepPreviewsWhenIdle = FiberHandle.run(
-    previewSweep,
-    Effect.sleep(Duration.seconds(5)).pipe(
-      Effect.andThen(Cache.keys(previews)),
-      Effect.map((keys) => {
-        Array.from(keys);
-      }),
-    ),
-  );
+  // Surfaces asking for the same epoch while a preview loads share that read.
+  // A finished preview is not kept: a terminal or outside edit changes the
+  // workspace without changing the epoch. Legacy callers always read fresh.
+  const previews = yield* Cache.make({
+    lookup: (key: string) => readDiffPreview(JSON.parse(key) as ReviewDiffPreviewInput),
+    capacity: 32,
+    timeToLive: Duration.zero,
+  });
   const getDiffPreview: ReviewService["Service"]["getDiffPreview"] = (input) =>
     assertWorkspaceBoundCwd("ReviewService.getDiffPreview", input.cwd).pipe(
       Effect.andThen(
@@ -189,7 +173,7 @@ export const make = Effect.gen(function* () {
                 ignoreWhitespace: input.ignoreWhitespace ?? false,
                 ...(input.file ? { file: input.file } : {}),
               }),
-            ).pipe(Effect.ensuring(sweepPreviewsWhenIdle)),
+            ),
       ),
     );
 
