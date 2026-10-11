@@ -17,12 +17,12 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { type BootCatalogEntry, readBootSnapshot, recordBootCatalog } from "../bootSnapshot";
-import { isDesktopLocalConnectionTarget } from "./desktopLocal";
+import { desktopLocalBackendId } from "./desktopLocal";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { isHostedStaticApp } from "../hostedPairing";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { primaryEnvironmentMissingAtom } from "./platform";
+import { discoverableDesktopLocalBackendsAtom, primaryEnvironmentMissingAtom } from "./platform";
 import { connectionAtomRuntime } from "./runtime";
 
 const liveCatalog = createEnvironmentCatalogAtoms(connectionAtomRuntime);
@@ -151,6 +151,7 @@ if (typeof window !== "undefined" && readBootSnapshot() !== null) {
 
 let lastMerged: {
   readonly live: EnvironmentCatalogState;
+  readonly discoverable: ReadonlySet<string> | null;
   readonly merged: EnvironmentCatalogState;
 } | null = null;
 
@@ -159,8 +160,11 @@ let lastMerged: {
  * registry has loaded the saved environments and, where there is one,
  * platform discovery has registered the primary environment. Until then the
  * boot entries discovery registers (the primary and desktop-local backends
- * such as WSL) stand in for theirs. A discovery that ends without the primary
- * drops them, so the workspace settles as it does without a snapshot.
+ * such as WSL) stand in for theirs. After that a desktop-local backend's boot
+ * entry stands until discovery registers it or stops expecting it, so a WSL
+ * backend that answers later than the primary does not vanish meanwhile. A
+ * discovery that ends without the primary drops them, so the workspace
+ * settles as it does without a snapshot.
  */
 const catalogValueAtom = Atom.make((get): EnvironmentCatalogState => {
   const boot = readBootCatalogState();
@@ -168,23 +172,39 @@ const catalogValueAtom = Atom.make((get): EnvironmentCatalogState => {
   const live = get(liveCatalog.catalogValueAtom);
   if (boot === null) return live;
   if (!live.isReady) return boot;
-  if (hasPrimaryEntry(live) || get(primaryEnvironmentMissingAtom)) return live;
+  if (get(primaryEnvironmentMissingAtom)) return live;
+  const discovered = hasPrimaryEntry(live);
+  const discoverable = discovered ? get(discoverableDesktopLocalBackendsAtom) : null;
   let bootPrimary: [EnvironmentId, ConnectionCatalogEntry] | null = null;
-  const awaitingDiscovery: Array<[EnvironmentId, ConnectionCatalogEntry]> = [];
+  const standIns: Array<[EnvironmentId, ConnectionCatalogEntry]> = [];
   for (const entry of boot.entries) {
     const { target } = entry[1];
-    if (target._tag === "PrimaryConnectionTarget") bootPrimary = entry;
-    else if (isDesktopLocalConnectionTarget(target) && !live.entries.has(entry[0])) {
-      awaitingDiscovery.push(entry);
+    if (target._tag === "PrimaryConnectionTarget") {
+      bootPrimary = entry;
+      continue;
+    }
+    const backendId = desktopLocalBackendId(target);
+    if (
+      backendId !== null &&
+      !live.entries.has(entry[0]) &&
+      (discoverable === null || discoverable.has(backendId))
+    ) {
+      standIns.push(entry);
     }
   }
-  if (bootPrimary === null || live.entries.has(bootPrimary[0])) return live;
-  if (lastMerged?.live === live) return lastMerged.merged;
+  if (!discovered) {
+    if (bootPrimary === null || live.entries.has(bootPrimary[0])) return live;
+    standIns.unshift(bootPrimary);
+  }
+  if (standIns.length === 0) return live;
+  if (lastMerged?.live === live && lastMerged.discoverable === discoverable) {
+    return lastMerged.merged;
+  }
   const merged: EnvironmentCatalogState = {
     isReady: true,
-    entries: new Map([bootPrimary, ...awaitingDiscovery, ...live.entries]),
+    entries: new Map([...standIns, ...live.entries]),
   };
-  lastMerged = { live, merged };
+  lastMerged = { live, discoverable, merged };
   return merged;
 }).pipe(Atom.withLabel("web-environment-catalog-value"));
 
