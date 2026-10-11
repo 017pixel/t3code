@@ -29,6 +29,7 @@ import { useHtmlRenderTheme } from "~/hooks/useHtmlRenderTheme";
 import { Button } from "~/components/ui/button";
 import { isElectron } from "~/env";
 import { cn } from "~/lib/utils";
+import { queryShownElement } from "~/lib/shownElement";
 import { useTurnItemDetail } from "~/state/queries";
 import { mcpAppEnvironment } from "~/state/mcpApps";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -405,7 +406,7 @@ export function McpAppFrame(props: {
         // Full screen would cover the approval or question the agent waits
         // on, or a confirmation any app is waiting on. Another app already
         // full screen keeps the page; two would stack.
-        const otherFullscreen = document.querySelector("[data-mcp-app-fullscreen]");
+        const otherFullscreen = queryShownElement("[data-mcp-app-fullscreen]");
         if (
           mode === "fullscreen" &&
           (latest.current.props.awaitingUser === true ||

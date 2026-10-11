@@ -174,6 +174,7 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { assistantCitationFromLocation } from "../lib/assistantCitationNavigation";
 import { isMacPlatform } from "../lib/utils";
+import { queryShownElement } from "../lib/shownElement";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -841,7 +842,7 @@ function shouldRedirectInputToComposer(event: Event): boolean {
   if (eventPathContainsSelector(event, SECRET_REQUEST_SELECTOR)) return false;
   if (eventPathContainsSelector(event, TYPE_TO_FOCUS_EDITABLE_SELECTOR)) return false;
   if (eventPathContainsSelector(event, TYPE_TO_FOCUS_INTERACTIVE_SELECTOR)) return false;
-  if (document.querySelector(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR)) return false;
+  if (queryShownElement(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR)) return false;
   return true;
 }
 
@@ -6741,7 +6742,7 @@ export default function ChatView(props: ChatViewProps) {
             event.metaKey ||
             event.shiftKey ||
             eventPathContainsSelector(event, TYPE_TO_FOCUS_EDITABLE_SELECTOR) ||
-            document.querySelector(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR)
+            queryShownElement(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR)
           ) {
             return;
           }
@@ -7001,7 +7002,7 @@ export default function ChatView(props: ChatViewProps) {
         frame = window.requestAnimationFrame(() => {
           frame = null;
           // A full-screen app owns the page; refocusing the composer would close it.
-          if (document.querySelector("[data-mcp-app-fullscreen]") !== null) return;
+          if (queryShownElement("[data-mcp-app-fullscreen]") !== null) return;
           if (shouldRefocusComposerOnWindowFocus(document.activeElement)) focusComposer();
         });
       });

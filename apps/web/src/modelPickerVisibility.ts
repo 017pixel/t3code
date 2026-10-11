@@ -1,3 +1,5 @@
+import { queryShownElement } from "./lib/shownElement";
+
 const MODEL_PICKER_CONTENT_SELECTOR = "[data-model-picker-content]";
 
 /**
@@ -6,8 +8,5 @@ const MODEL_PICKER_CONTENT_SELECTOR = "[data-model-picker-content]";
  * a second React or external store.
  */
 export function isModelPickerOpen(): boolean {
-  return (
-    typeof document !== "undefined" &&
-    document.querySelector(MODEL_PICKER_CONTENT_SELECTOR) !== null
-  );
+  return queryShownElement(MODEL_PICKER_CONTENT_SELECTOR) !== null;
 }
