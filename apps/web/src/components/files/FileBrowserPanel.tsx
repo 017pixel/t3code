@@ -105,6 +105,11 @@ export default function FileBrowserPanel({
   onRefreshSelectedFile,
   workspaceMutationId,
 }: FileBrowserPanelProps) {
+  useEffect(() => {
+    void import("./FilePreviewPanel")
+      .then(({ preloadFileViewer }) => preloadFileViewer())
+      .catch(() => undefined);
+  }, []);
   const { resolvedTheme } = useTheme();
   const composerRef = useComposerHandleContext();
   const fileContextMenu = useFileContextMenu(environmentId);
