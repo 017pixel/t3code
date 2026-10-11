@@ -19,6 +19,15 @@ const HeldWrite = Context.Reference<{ readonly owner: object; active: boolean } 
   { defaultValue: () => null },
 );
 
+interface ReadToken {
+  readonly lease: { readonly owner: object; readonly file: string; users: number };
+  active: boolean;
+}
+const HeldRead = Context.Reference<ReadToken | null>(
+  "t3/provider/ProviderMaintenanceHostLock/HeldRead",
+  { defaultValue: () => null },
+);
+
 const HeldGate = Context.Reference<{
   readonly handoff: Effect.Effect<void>;
   readonly resume: Effect.Effect<void>;
@@ -234,8 +243,7 @@ export const make = (directory: string) => {
     );
 
   const readPermit = Semaphore.makeUnsafe(1);
-  let readCount = 0;
-  let readFile: string | undefined;
+  const readTokens = new WeakMap<Effect.Effect<void>, ReadToken>();
   const registerRead = Effect.sync(() => {
     const file = NodePath.join(readers, `${process.pid}-${NodeCrypto.randomUUID()}`);
     NodeFS.writeFileSync(file, processIdentity(process.pid) ?? "", { flag: "wx" });
@@ -243,44 +251,51 @@ export const make = (directory: string) => {
   });
   // A provider can launch helper CLIs while its turn holds a read lease.
   // Joining that lease must not wait behind an installer draining this turn.
-  const acquireRead = Effect.flatMap(HeldWrite, (held) =>
-    held?.owner === owner && held.active
-      ? // A scoped verification can outlive the install. Its own reader remains
-        // visible to the next writer without admitting unrelated launches here.
-        registerRead.pipe(
-          Effect.map((file) => Effect.sync(() => NodeFS.rmSync(file, { force: true }))),
-        )
-      : Effect.acquireUseRelease(
-          Effect.interruptible(readPermit.take(1)),
-          () =>
-            Effect.uninterruptible(
-              Effect.gen(function* () {
-                if (readCount === 0) {
-                  readFile = yield* withGate(registerRead);
-                }
-                readCount++;
-                let released = false;
-                return readPermit.withPermits(1)(
-                  Effect.sync(() => {
-                    if (released) return;
-                    released = true;
-                    if (--readCount === 0 && readFile !== undefined) {
-                      NodeFS.rmSync(readFile, { force: true });
-                      readFile = undefined;
-                    }
-                  }),
-                );
-              }),
-            ),
-          () => Effect.asVoid(readPermit.release(1)),
-        ),
+  const acquireRead = Effect.uninterruptible(
+    Effect.gen(function* () {
+      const inherited = yield* HeldRead;
+      const held = yield* HeldWrite;
+      const lease =
+        inherited?.lease.owner === owner && inherited.active
+          ? inherited.lease
+          : {
+              owner,
+              // An install's scoped verification keeps its own reader if it outlives the writer.
+              file: yield* held?.owner === owner && held.active
+                ? registerRead
+                : Effect.acquireUseRelease(
+                    Effect.interruptible(readPermit.take(1)),
+                    () => withGate(registerRead),
+                    () => Effect.asVoid(readPermit.release(1)),
+                  ),
+              users: 0,
+            };
+      lease.users++;
+      const token = { lease, active: true };
+      const release = Effect.sync(() => {
+        if (!token.active) return;
+        token.active = false;
+        if (--lease.users === 0) NodeFS.rmSync(lease.file, { force: true });
+      });
+      readTokens.set(release, token);
+      return release;
+    }),
   );
-  const withRead = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    Effect.acquireUseRelease(
+  const withRead = <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+    inheritedRelease?: Effect.Effect<void>,
+  ) => {
+    const inherited = inheritedRelease === undefined ? undefined : readTokens.get(inheritedRelease);
+    const read = Effect.acquireUseRelease(
       acquireRead,
-      () => effect,
+      (release) =>
+        effect.pipe(
+          Effect.provideService(HeldRead, inherited?.active ? inherited : readTokens.get(release)!),
+        ),
       (release) => release,
     );
+    return inherited === undefined ? read : read.pipe(Effect.provideService(HeldRead, inherited));
+  };
   const drained = Effect.sync(() => {
     let busy = false;
     for (const file of NodeFS.readdirSync(readers)) {
@@ -371,7 +386,11 @@ export const layer = Layer.effectContext(
         withScopedLaunchPermit: (effect) =>
           Effect.acquireRelease(host.acquireRead, (release) => release, {
             interruptible: true,
-          }).pipe(Effect.andThen(admission.withScopedLaunchPermit(effect))),
+          }).pipe(
+            Effect.flatMap((release) =>
+              host.withRead(admission.withScopedLaunchPermit(effect), release),
+            ),
+          ),
       }),
     );
   }),
