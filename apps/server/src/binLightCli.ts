@@ -9,8 +9,22 @@ import { sharedServerCommandFlags } from "./cli/config.ts";
 
 /** Load only the requested command; keep parsing and execution in the existing CLI. */
 export async function runLightCli(
-  command: "pair" | "auth" | "service" | "project" | "serve" | "start",
+  command: "pair" | "auth" | "service" | "project" | "serve" | "start" | "desktop",
 ) {
+  const root = Command.make("t3", { ...sharedServerCommandFlags }).pipe(
+    Command.withDescription("Run the T3 Code server."),
+  );
+  if (command === "desktop") {
+    const { runDefaultServerCommand } = await import("./cli/server.ts");
+    Command.run(root.pipe(Command.withHandler(runDefaultServerCommand)), {
+      version: packageJson.version,
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer)),
+      NodeRuntime.runMain,
+    );
+    return;
+  }
   const selected =
     command === "pair"
       ? (await import("./cli/pair.ts")).pairCommand
@@ -23,10 +37,7 @@ export async function runLightCli(
             : command === "serve"
               ? (await import("./cli/server.ts")).serveCommand
               : (await import("./cli/server.ts")).startCommand;
-  const cli = Command.make("t3", { ...sharedServerCommandFlags }).pipe(
-    Command.withDescription("Run the T3 Code server."),
-    Command.withSubcommands([selected]),
-  );
+  const cli = root.pipe(Command.withSubcommands([selected]));
   Command.run(cli, { version: packageJson.version }).pipe(
     Effect.scoped,
     Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer)),

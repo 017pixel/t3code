@@ -47,9 +47,12 @@ export function enableCliCompileCache(input: {
     if (status !== NodeModule.constants.compileCacheStatus.ENABLED) return;
     // Bundle chunk names change with their contents, so other versions' entries
     // never hit again. Only the running version's directory stays.
-    for (const entry of NodeFS.readdirSync(root)) {
-      if (entry === input.version) continue;
-      NodeFS.rm(NodePath.join(root, entry), { recursive: true, force: true }, () => {});
-    }
+    NodeFS.readdir(root, (error, entries) => {
+      if (error) return;
+      for (const entry of entries) {
+        if (entry === input.version) continue;
+        NodeFS.rm(NodePath.join(root, entry), { recursive: true, force: true }, () => {});
+      }
+    });
   } catch {}
 }
