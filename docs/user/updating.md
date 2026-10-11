@@ -84,7 +84,7 @@ hold updates back while they run. Then it installs:
   checks** is also on;
 - the newest T3 Code release on its channel, when it runs as a background service
   (`t3 service install`). It downloads first and restarts only inside that window.
-  While one release waits for the window, newer releases wait for it to install.
+  If a newer release is published while one waits, the newer one replaces it.
 
 Automatic server restarts also wait for integrated terminal commands to finish.
 
