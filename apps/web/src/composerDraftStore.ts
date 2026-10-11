@@ -106,29 +106,24 @@ const composerBaseStorage =
   typeof localStorage !== "undefined" ? localStorage : createMemoryStorage();
 let pendingComposerWrite: { name: string; value: StorageValue<ComposerPersistState> } | null = null;
 let composerPersistTimer: ReturnType<typeof setTimeout> | undefined;
-let composerPersistIdle: number | undefined;
 
 function cancelComposerPersistSchedule() {
   clearTimeout(composerPersistTimer);
   composerPersistTimer = undefined;
-  if (composerPersistIdle !== undefined) window.cancelIdleCallback(composerPersistIdle);
-  composerPersistIdle = undefined;
 }
 
-// Keep typing writes in memory. Serialize once after idle, or synchronously on unload.
+// Keep typing writes in memory. Serialize once typing pauses, or synchronously
+// on unload. Desktop quit destroys the window without unload events, so the
+// pause is the only flush there and must stay short.
 const composerDebouncedStorage = {
   getItem: (name: string) => composerBaseStorage.getItem(name),
   setItem: (name: string, value: StorageValue<ComposerPersistState>) => {
     pendingComposerWrite = { name, value };
     cancelComposerPersistSchedule();
-    composerPersistTimer = setTimeout(() => {
-      composerPersistTimer = undefined;
-      if (typeof window !== "undefined" && typeof window.requestIdleCallback === "function") {
-        composerPersistIdle = window.requestIdleCallback(() => composerDebouncedStorage.flush(), {
-          timeout: 1000,
-        });
-      } else composerDebouncedStorage.flush();
-    }, COMPOSER_PERSIST_DEBOUNCE_MS);
+    composerPersistTimer = setTimeout(
+      () => composerDebouncedStorage.flush(),
+      COMPOSER_PERSIST_DEBOUNCE_MS,
+    );
   },
   removeItem: (name: string) => {
     pendingComposerWrite = null;
