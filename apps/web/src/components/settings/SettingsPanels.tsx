@@ -269,11 +269,14 @@ function backgroundActivityProfileSettings(profile: BackgroundActivityProfile) {
   };
 }
 
-function AboutVersionTitle() {
+export function AboutVersionTitle() {
+  const updateState = useDesktopUpdateState();
   return (
     <span className="inline-flex items-baseline gap-2">
       <span>Version</span>
-      <code className="text-2xs font-medium text-muted-foreground">{APP_VERSION}</code>
+      <code className="text-2xs font-medium text-muted-foreground">
+        {updateState?.currentVersion ?? APP_VERSION}
+      </code>
     </span>
   );
 }

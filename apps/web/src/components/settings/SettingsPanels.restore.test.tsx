@@ -1,10 +1,13 @@
 import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts";
+import { renderToString } from "react-dom/server";
+import { APP_VERSION } from "../../branding";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { reactHookHarness as hooks } from "../../test/reactHookHarness";
 
 const state = vi.hoisted(() => ({
   settings: null as UnifiedSettings | null,
+  desktopVersion: null as string | null,
   update: vi.fn(),
   confirm: vi.fn(),
 }));
@@ -51,16 +54,29 @@ vi.mock("../../localApi", async (importOriginal) => ({
   readLocalApi: () => ({ dialogs: { confirm: state.confirm } }),
 }));
 
-import { useSettingsRestore } from "./SettingsPanels";
+vi.mock("../../state/desktopUpdate", () => ({
+  useDesktopUpdateState: () =>
+    state.desktopVersion === null ? null : { currentVersion: state.desktopVersion },
+}));
+
+import { AboutVersionTitle, useSettingsRestore } from "./SettingsPanels";
 
 beforeEach(() => {
   hooks.reset();
   vi.clearAllMocks();
+  state.desktopVersion = null;
   state.settings = { ...DEFAULT_UNIFIED_SETTINGS };
   state.confirm.mockResolvedValue(true);
 });
 
 describe("restoring V2 settings", () => {
+  it("shows the desktop version rather than the web bundle version", () => {
+    state.desktopVersion = "9.8.7";
+    expect(renderToString(<AboutVersionTitle />)).toContain("9.8.7");
+    expect(renderToString(<AboutVersionTitle />)).not.toContain(APP_VERSION);
+    state.desktopVersion = null;
+    expect(renderToString(<AboutVersionTitle />)).toContain(APP_VERSION);
+  });
   it.each([
     ["persistComposerContextStrip", "Composer context"],
     ["autoResumeLimitedThreads", "Auto-resume limited threads"],
