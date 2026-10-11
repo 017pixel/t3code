@@ -2817,6 +2817,127 @@ describe("provider maintenance host leases", () => {
     30_000,
   );
 
+  it.live.each([
+    "runtime-replaced",
+    "heartbeat-write-error",
+    "installer-killed-with-live-child",
+  ] as const)(
+    "finishes the installer after %s",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const runtime = NodePath.join(directory, "runtime");
+          NodeFS.mkdirSync(NodePath.join(runtime, "provider"), { recursive: true });
+          const supervisor = NodePath.join(runtime, "provider/ProviderInstallSupervisor.ts");
+          NodeFS.copyFileSync(
+            NodePath.join(import.meta.dirname, "ProviderInstallSupervisor.ts"),
+            supervisor,
+          );
+          for (const name of ["ProviderMaintenanceHostLock.ts", "providerMaintenanceRunner.ts"])
+            NodeFS.symlinkSync(
+              NodePath.join(import.meta.dirname, name),
+              NodePath.join(runtime, "provider", name),
+            );
+          NodeFS.symlinkSync(
+            NodePath.resolve(import.meta.dirname, "../config.ts"),
+            NodePath.join(runtime, "config.ts"),
+          );
+          NodeFS.symlinkSync(
+            NodePath.resolve(import.meta.dirname, "../../node_modules"),
+            NodePath.join(runtime, "node_modules"),
+          );
+          const file = NodePath.join(directory, "receipt.json");
+          const installed = NodePath.join(directory, "installed");
+          const dead = NodeChildProcess.spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+          yield* Effect.promise(
+            () => new Promise<void>((resolve) => dead.once("exit", () => resolve())),
+          );
+          NodeFS.mkdirSync(NodePath.join(directory, "gate.lock"));
+          NodeFS.writeFileSync(
+            file,
+            JSON.stringify({
+              id: "runtime-replaced",
+              provider: CODEX_DRIVER,
+              instanceId: CODEX_INSTANCE_ID,
+              instanceIds: [CODEX_INSTANCE_ID],
+              startedAt: "2026-04-10T00:00:00.000Z",
+              parentPid: process.pid,
+              directory,
+              command: process.execPath,
+              args: [
+                "-e",
+                mode === "installer-killed-with-live-child"
+                  ? `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(`setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(installed)}, "installed"), 2500)`)}], {stdio: "ignore"}).on("spawn", () => process.kill(process.pid, "SIGKILL"))`
+                  : `console.log("installing"); setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(installed)}, "installed"), ${mode === "heartbeat-write-error" ? 2500 : 0})`,
+              ],
+            }),
+          );
+          for (const suffix of [".stdout", ".stderr"]) NodeFS.writeFileSync(file + suffix, "");
+          const watcher = NodeFS.watch(directory, () => {
+            if (InstallSupervisor.readReceipt(file).pid === undefined) return;
+            watcher.close();
+            if (mode === "runtime-replaced")
+              NodeFS.rmSync(NodePath.join(runtime, "provider/providerMaintenanceRunner.ts"));
+            NodeFS.writeFileSync(file + ".start", "runtime-replaced");
+          });
+          yield* Effect.addFinalizer(() => Effect.sync(() => watcher.close()));
+          const child = yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              NodeChildProcess.spawn(
+                process.execPath,
+                [
+                  "--input-type=module",
+                  "-e",
+                  `import * as fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
+             import { runInstallSubcommand } from ${JSON.stringify(supervisor)};
+             ${
+               mode === "heartbeat-write-error"
+                 ? `const original = fs.default.utimesSync; let failed = false;
+               fs.default.utimesSync = (...args) => { if (!failed) { failed = true; throw Object.assign(new Error("full disk"), {code: "ENOSPC"}); } return original(...args); };
+               syncBuiltinESMExports();`
+                 : ""
+             }
+             await runInstallSubcommand("__provider-install", ${JSON.stringify([file, String(dead.pid)])});`,
+                ],
+                { stdio: "ignore", detached: true },
+              ),
+            ),
+            (child) =>
+              Effect.sync(() => {
+                if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+              }),
+          );
+          const code = yield* Effect.promise(
+            () => new Promise<number | null>((resolve) => child.once("exit", resolve)),
+          );
+          const finishedBeforeChildren = !NodeFS.existsSync(installed);
+          if (mode !== "runtime-replaced")
+            yield* Effect.callback<void>((resume) => {
+              const complete = () => {
+                if (!NodeFS.existsSync(installed)) return;
+                watcher.close();
+                resume(Effect.void);
+              };
+              const watcher = NodeFS.watch(directory, complete);
+              complete();
+              return Effect.sync(() => watcher.close());
+            });
+          assert.equal(code, 0);
+          if (mode === "installer-killed-with-live-child") {
+            assert.isFalse(
+              finishedBeforeChildren,
+              "lease released before installer child finished",
+            );
+            assert.isFalse(HostLock.installIsAlive(directory));
+          } else assert.equal(InstallSupervisor.readReceipt(file).result?.exitCode, 0);
+          assert.equal(NodeFS.readFileSync(installed, "utf8"), "installed");
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+    30_000,
+  );
+
   it.live("reclaims a crashed server's turn and install leases", () =>
     Effect.scoped(
       Effect.gen(function* () {
