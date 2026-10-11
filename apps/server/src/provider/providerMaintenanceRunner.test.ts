@@ -16,7 +16,9 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as HostLock from "./ProviderMaintenanceHostLock.ts";
+import * as InstallSupervisor from "./ProviderInstallSupervisor.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -27,6 +29,7 @@ import {
 } from "@t3tools/contracts";
 import { ServerProviderUpdateError } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -53,9 +56,392 @@ import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import {
   makeProviderMaintenanceCapabilities,
+  makePackageManagedProviderMaintenanceResolver,
+  resolveProviderMaintenanceCapabilitiesEffect,
   type ProviderMaintenanceCapabilities,
 } from "@t3tools/provider-core/server/maintenanceResolver";
+import { PiDriver } from "@t3tools/provider-pi/server";
+import { GrokDriver } from "@t3tools/provider-grok/server";
+import { MuseDriver } from "@t3tools/provider-muse/server";
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
+
+it.effect.each([
+  "claude",
+  "codex",
+  "codex-custom",
+  "codex-linked",
+  "opencode",
+  "pi",
+  "grok",
+  "muse",
+  "npm",
+  "pnpm-5",
+  "pnpm-11",
+  "bun",
+  "yarn",
+  "volta",
+  "vp-legacy",
+  "vp-split",
+  "brew-formula",
+  "brew-cask",
+] as const)(
+  "background updates execute the official %s install's owning command",
+  (method) => {
+    let root = "";
+    let updated = false;
+    const calls: Array<{ command: string; args: ReadonlyArray<string>; env?: NodeJS.ProcessEnv }> =
+      [];
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      root = yield* fs.makeTempDirectoryScoped({ prefix: "r3-03-runner-" });
+      const write = (file: string, source = '#!/bin/sh\nprintf "%s\\n" "$@"\n') => {
+        NodeFS.mkdirSync(NodePath.dirname(file), { recursive: true });
+        NodeFS.writeFileSync(file, source);
+        NodeFS.chmodSync(file, 0o755);
+      };
+      const link = (target: string, alias: string) => {
+        NodeFS.mkdirSync(NodePath.dirname(alias), { recursive: true });
+        NodeFS.symlinkSync(NodePath.relative(NodePath.dirname(alias), target), alias);
+      };
+      const bin = NodePath.join(root, ".local/bin");
+      const cli =
+        method === "claude"
+          ? "claude"
+          : method === "opencode"
+            ? "opencode"
+            : method === "pi"
+              ? "pi"
+              : method === "grok"
+                ? "grok"
+                : method === "muse"
+                  ? "muse"
+                  : "codex";
+      const alias = NodePath.join(bin, cli);
+      const kind = ProviderDriverKind.make(cli === "claude" ? "claudeAgent" : cli);
+      const packageName =
+        cli === "claude"
+          ? "@anthropic-ai/claude-code"
+          : cli === "opencode"
+            ? "opencode-ai"
+            : cli === "pi"
+              ? "@earendil-works/pi-coding-agent"
+              : cli === "grok"
+                ? "@xai-official/grok"
+                : "@openai/codex";
+      let expectedExecutable = alias;
+      let expectedArgs: ReadonlyArray<string> = [cli === "opencode" ? "upgrade" : "update"];
+      let codexHome = NodePath.join(root, ".codex");
+      const env = { HOME: root, PATH: bin, GROK_HOME: NodePath.join(root, ".grok") };
+      if (method === "claude") {
+        const release = NodePath.join(root, ".local/share/claude/versions/2.1.293");
+        write(release);
+        link(release, alias);
+      } else if (method.startsWith("codex")) {
+        if (method === "codex-custom") codexHome = NodePath.join(root, "custom-codex");
+        const release = NodePath.join(
+          codexHome,
+          "packages/standalone/releases/0.162.1-x86_64/bin/codex",
+        );
+        write(release);
+        const current = NodePath.join(codexHome, "packages/standalone/current");
+        link(NodePath.dirname(NodePath.dirname(release)), current);
+        if (method === "codex-linked") {
+          const linkedHome = NodePath.join(root, "linked-codex");
+          link(codexHome, linkedHome);
+          codexHome = linkedHome;
+        }
+        link(NodePath.join(codexHome, "packages/standalone/current/bin/codex"), alias);
+      } else if (method === "opencode") {
+        const native = NodePath.join(root, ".opencode/bin/opencode");
+        write(native);
+        link(native, alias);
+      } else if (method === "pi") {
+        const agent = NodePath.join(root, ".pi/agent");
+        const launcher = NodePath.join(agent, "bin/pi");
+        const release = NodePath.join(
+          agent,
+          "install/releases/1.0.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+        );
+        write(release);
+        link(release, NodePath.join(agent, "install/releases/1.0.0/node_modules/.bin/pi"));
+        write(NodePath.join(agent, "install/current-version"), "1.0.0\n");
+        write(
+          NodePath.join(agent, "install/managed-install.json"),
+          JSON.stringify({
+            kind: "pi-managed-install",
+            schemaVersion: 1,
+            layout: "releases-v1",
+            entrypoint: { type: "symlink", path: alias },
+          }),
+        );
+        write(
+          launcher,
+          '#!/bin/sh\npi_bin_dir=${0%/*}\npi_agent_dir=${pi_bin_dir%/*}\npi_current_file=$pi_agent_dir/install/current-version\nIFS= read -r pi_current_version < "$pi_current_file"\npi_release_bin=$pi_agent_dir/install/releases/$pi_current_version/node_modules/.bin/pi\nPI_MANAGED_INSTALL_ROOT=$pi_agent_dir/install\nexport PI_MANAGED_INSTALL_ROOT\nexec "$pi_release_bin" "$@"\n',
+        );
+        link(launcher, alias);
+        expectedArgs = ["update", "--self"];
+      } else if (method === "grok") {
+        const download = NodePath.join(env.GROK_HOME, "downloads/grok-linux-x86_64");
+        write(download);
+        link(download, NodePath.join(env.GROK_HOME, "bin/grok"));
+        link(NodePath.join(env.GROK_HOME, "bin/grok"), alias);
+      } else if (method === "muse") {
+        write(
+          alias,
+          '#!/bin/bash\n# muse-code/launcher-2\nMUSE_SYNC_UPDATE=${MUSE_SYNC_UPDATE:-0}\nexec "${0%/*}/muse-bin-2.0.0-R1" "$@"\n',
+        );
+        write(NodePath.join(bin, "muse-bin-2.0.0-R1"));
+        expectedArgs = ["--version"];
+      } else if (method === "volta") {
+        const shim = NodePath.join(root, ".volta/bin/volta-shim");
+        write(shim);
+        NodeFS.mkdirSync(NodePath.join(root, ".volta/tools/image/packages/@openai/codex/1.0.0"), {
+          recursive: true,
+        });
+        const voltaAlias = NodePath.join(root, ".volta/bin/codex");
+        link(shim, voltaAlias);
+        link(voltaAlias, alias);
+        expectedExecutable = "volta";
+        expectedArgs = ["install", "@openai/codex@2.0.0"];
+      } else if (method.startsWith("vp-")) {
+        const data = NodePath.join(
+          root,
+          method === "vp-legacy" ? ".vite-plus" : ".local/share/vite-plus",
+        );
+        const vp = NodePath.join(data, "1.1.0/bin/vp");
+        write(vp);
+        link(NodePath.dirname(NodePath.dirname(vp)), NodePath.join(data, "current"));
+        write(
+          NodePath.join(data, "bins/codex.json"),
+          JSON.stringify({
+            name: "codex",
+            package: packageName,
+            version: "1.0.0",
+            nodeVersion: "24.13.1",
+            source: "vp",
+          }),
+        );
+        write(
+          NodePath.join(data, "packages/@openai/codex.json"),
+          JSON.stringify({
+            name: packageName,
+            version: "1.0.0",
+            bins: ["codex"],
+            jsBins: ["codex"],
+            manager: "npm",
+            platform: { node: "24.13.1" },
+            installedAt: "2026-10-11T00:00:00Z",
+          }),
+        );
+        const vpAlias = NodePath.join(data, "bin/codex");
+        link(NodePath.join(data, "current/bin/vp"), vpAlias);
+        link(vpAlias, alias);
+        expectedExecutable = "vp";
+        expectedArgs = ["i", "-g", "@openai/codex@2.0.0"];
+      } else if (method.startsWith("brew-")) {
+        const real = NodePath.join(
+          root,
+          method === "brew-cask"
+            ? "Caskroom/codex/0.162.1/bin/codex"
+            : "Cellar/opencode/2.0.25/bin/opencode",
+        );
+        write(real);
+        link(real, alias);
+        write(NodePath.join(root, "bin/brew"));
+        expectedExecutable = NodePath.join(root, "bin/brew");
+        expectedArgs =
+          method === "brew-cask" ? ["upgrade", "--cask", "codex"] : ["upgrade", "opencode"];
+      } else {
+        const prefix =
+          method === "npm"
+            ? "npm/lib"
+            : method === "bun"
+              ? ".bun/install/global"
+              : method === "yarn"
+                ? ".config/yarn/global"
+                : method === "pnpm-5"
+                  ? ".local/share/pnpm/global/5"
+                  : ".local/share/pnpm/global/v11/store/codex/node_modules/.pnpm/@openai+codex@1.0.0";
+        const real = NodePath.join(root, prefix, "node_modules/@openai/codex/bin/codex.js");
+        write(real);
+        const ownerAlias = NodePath.join(
+          root,
+          method === "bun"
+            ? ".bun/bin/codex"
+            : method.startsWith("pnpm")
+              ? ".local/share/pnpm/bin/codex"
+              : ".local/bin/codex-link",
+        );
+        if (method.startsWith("pnpm")) {
+          // pnpm writes a shell shim, not an npm-style executable symlink.
+          write(
+            ownerAlias,
+            `#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/${NodePath.relative(NodePath.dirname(ownerAlias), real)}" "$@"\n`,
+          );
+        } else link(real, ownerAlias);
+        link(ownerAlias, alias);
+        expectedExecutable = method.startsWith("pnpm") ? "pnpm" : method;
+        expectedArgs =
+          method === "npm"
+            ? [
+                "install",
+                "-g",
+                "--prefix",
+                NodePath.join(root, "npm"),
+                "--allow-scripts=@openai/codex",
+                "@openai/codex@2.0.0",
+              ]
+            : method.startsWith("pnpm")
+              ? ["add", "-g", "@openai/codex@2.0.0"]
+              : method === "bun"
+                ? ["i", "-g", "@openai/codex@2.0.0"]
+                : ["global", "add", "@openai/codex@2.0.0"];
+      }
+      const resolver = makePackageManagedProviderMaintenanceResolver({
+        provider: kind,
+        npmPackageName: packageName,
+        nativeUpdate: {
+          args: expectedArgs,
+          isCommandPath: (value) =>
+            method === "claude"
+              ? value.includes("/.local/share/claude/versions/")
+              : method.startsWith("codex")
+                ? value.includes("/packages/standalone/")
+                : method === "opencode"
+                  ? value.endsWith("/.opencode/bin/opencode")
+                  : false,
+          ...(method.startsWith("codex") ? { env: { CODEX_HOME: codexHome } } : {}),
+        },
+      });
+      const instanceId = ProviderInstanceId.make("official-install");
+      const instance =
+        method === "pi"
+          ? yield* PiDriver.create({
+              instanceId,
+              displayName: undefined,
+              enabled: false,
+              environment: [],
+              config: { ...PiDriver.defaultConfig(), binaryPath: alias },
+            })
+          : method === "grok"
+            ? yield* GrokDriver.create({
+                instanceId,
+                displayName: undefined,
+                enabled: false,
+                environment: [{ name: "GROK_HOME", value: env.GROK_HOME, sensitive: false }],
+                config: { ...GrokDriver.defaultConfig(), binaryPath: alias },
+              })
+            : method === "muse"
+              ? yield* MuseDriver.create({
+                  instanceId,
+                  displayName: undefined,
+                  enabled: false,
+                  environment: [],
+                  config: { ...MuseDriver.defaultConfig(), binaryPath: alias },
+                })
+              : null;
+      const resolve = (options?: { fresh?: boolean }) =>
+        instance
+          ? instance.snapshot.resolveMaintenance(options)
+          : resolveProviderMaintenanceCapabilitiesEffect(resolver, { binaryPath: alias, env }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            );
+      assert.isDefined((yield* resolve()).update?.installationKey);
+      const { registry, providersRef } = yield* makeRegistry({
+        ...baseProvider,
+        instanceId,
+        driver: kind,
+        version: "1.0.0",
+      });
+      const runner = yield* makeTestRunner(
+        {
+          ...registry,
+          getProviderMaintenanceCapabilitiesForInstance: (_id, _driver, options) =>
+            resolve(options),
+          refreshInstance: () =>
+            Ref.updateAndGet(providersRef, (providers) =>
+              providers.map((provider) => (updated ? { ...provider, version: "2.0.0" } : provider)),
+            ),
+        },
+        {
+          version: 1,
+          currentModels: {},
+          compatibility: [
+            {
+              driver: kind,
+              t3CodeRange: ">=0.0.42",
+              ranges: [{ range: ">=1.0.0", status: "supported" }],
+            },
+          ],
+        },
+      );
+      const result = yield* runner.updateProvider({
+        instanceId,
+        provider: kind,
+        origin: "background",
+      });
+      assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+      assert.strictEqual(calls.length, 1);
+      assert.strictEqual(calls[0]?.command, expectedExecutable);
+      assert.deepStrictEqual(calls[0]?.args, expectedArgs);
+      if (method.startsWith("codex")) assert.strictEqual(calls[0]?.env?.CODEX_HOME, codexHome);
+      if (method === "muse") assert.strictEqual(calls[0]?.env?.MUSE_SYNC_UPDATE, "1");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          NodeServices.layer,
+          TestProviderHost.layer({ runBackgroundWork: false }).pipe(
+            Layer.provide(NodeServices.layer),
+          ),
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          ProviderLatestVersions.layer,
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+          layerMockSpawner((command, args, options) => {
+            if (args[0] === "--prefix") return { stdout: root };
+            if (args[0] === "info")
+              return {
+                stdout: JSON.stringify({
+                  formulae: [{ versions: { stable: "2.0.0" } }],
+                  casks: [{ version: "2.0.0" }],
+                }),
+              };
+            calls.push({ command, args, ...(options.env ? { env: options.env } : {}) });
+            updated = true;
+            return { stdout: "updated" };
+          }),
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(
+                  request,
+                  Response.json({
+                    version: request.url.includes("meta.ai") ? "2.0.0-R1" : "2.0.0",
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+      Effect.scoped,
+    );
+  },
+  { skip: HostProcess.Platform.defaultValue() === "win32" },
+);
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const NATIVE_CLI_DRIVER = ProviderDriverKind.make("nativeCli");
@@ -76,6 +462,7 @@ const layerNonWindowsPlatform = Layer.merge(
     acquireRead: Effect.succeed(Effect.void),
     withRead: (effect) => effect,
     withWrite: (effect) => effect,
+    handoff: (effect) => effect,
   }),
 );
 
@@ -257,24 +644,53 @@ const makeTestRunner = (
       ranges: [],
     })),
   },
+  receipts = Effect.succeed<ReadonlyArray<InstallSupervisor.InstallReceipt>>([]),
+  onInstall: (
+    input: Parameters<InstallSupervisor.ProviderInstallSupervisor["Service"]["run"]>[0],
+  ) => Effect.Effect<void> = () => Effect.void,
 ) =>
-  Effect.service(ProviderMaintenanceRunner.ProviderMaintenanceRunner).pipe(
-    Effect.provide(
-      ProviderMaintenanceRunner.layer.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            Layer.succeed(ProviderRegistry.ProviderRegistry, registry),
-            Layer.succeed(ModelManifest.ModelManifest, {
-              current: Effect.succeed(manifest),
-              refresh: Effect.succeed(manifest),
-              forceRefresh: Effect.succeed(manifest),
-              refreshInBackground: Effect.void,
+  Layer.build(
+    ProviderMaintenanceRunner.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.succeed(ProviderRegistry.ProviderRegistry, registry),
+          Layer.succeed(ModelManifest.ModelManifest, {
+            current: Effect.succeed(manifest),
+            refresh: Effect.succeed(manifest),
+            forceRefresh: Effect.succeed(manifest),
+            refreshInBackground: Effect.void,
+          }),
+          // Fresh per runner so a version cached by one test cannot leak into another.
+          ProviderLatestVersions.layer,
+          Layer.effect(
+            InstallSupervisor.ProviderInstallSupervisor,
+            Effect.gen(function* () {
+              const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+              return InstallSupervisor.ProviderInstallSupervisor.of({
+                run: (input) =>
+                  ProviderMaintenanceRunner.runProviderMaintenanceCommandWithSpawner({
+                    ...input,
+                    spawner,
+                  }).pipe(
+                    Effect.tap(() => onInstall(input)),
+                    Effect.mapError(
+                      (cause) =>
+                        new InstallSupervisor.ProviderInstallError({
+                          message: cause.message,
+                          cause,
+                        }),
+                    ),
+                  ),
+                receipts,
+              });
             }),
-            // Fresh per runner so a version cached by one test cannot leak into another.
-            ProviderLatestVersions.layer,
           ),
         ),
       ),
+    ),
+  ).pipe(
+    Effect.map((context) =>
+      Context.get(context, ProviderMaintenanceRunner.ProviderMaintenanceRunner),
     ),
   );
 
@@ -307,6 +723,145 @@ describe("providerMaintenanceRunner", () => {
       ),
     ),
   );
+
+  it.effect("does not time out or kill an installer still writing after five minutes", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      let killed = false;
+      const spawner = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() =>
+          Effect.succeed({
+            ...mockHandle({}),
+            exitCode: Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Deferred.await(finished)),
+            ),
+            kill: () =>
+              Effect.sync(() => {
+                killed = true;
+              }),
+          }),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const { registry } = yield* makeRegistry(baseNativeCliProvider);
+        const runner = yield* makeTestRunner(registry);
+        const install = yield* runner.updateProvider(NATIVE_CLI_DRIVER).pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust("6 minutes");
+        assert.isUndefined(install.pollUnsafe());
+        assert.isFalse(killed);
+        yield* Deferred.succeed(finished, ChildProcessSpawner.ExitCode(0));
+        assert.equal((yield* Fiber.join(install)).providers[0]?.updateState?.status, "succeeded");
+      }).pipe(Effect.provide(spawner));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          TestClock.layer(),
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("1.0.0"),
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each([
+    { origin: "background" as const, installedVersion: "1.0.0" },
+    { origin: "manual" as const, installedVersion: "1.1.0" },
+  ])(
+    "restores a detached $origin install result and refreshes its installed version on the next server",
+    ({ origin, installedVersion }) =>
+      Effect.gen(function* () {
+        const { registry, providersRef } = yield* makeRegistry();
+        const recovered = yield* Deferred.make<void>();
+        let receipt: InstallSupervisor.InstallReceipt = {
+          id: "install",
+          provider: CODEX_DRIVER,
+          instanceId: CODEX_INSTANCE_ID,
+          instanceIds: [CODEX_INSTANCE_ID],
+          origin,
+          targetVersion: "1.0.0",
+          exactVersion: true,
+          startedAt: "2026-04-10T00:00:00.000Z",
+          finishedAt: "2026-04-10T00:01:00.000Z",
+          command: "npm",
+          args: [],
+          parentPid: 1,
+          directory: "",
+          result: {
+            stdout: "installed",
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          },
+        };
+        if (origin === "manual") {
+          const runner = yield* makeTestRunner(
+            {
+              ...registry,
+              getProviderMaintenanceCapabilitiesForInstance: () =>
+                Effect.succeed(
+                  makeProviderMaintenanceCapabilities({
+                    provider: CODEX_DRIVER,
+                    packageName: "@openai/codex",
+                    updateExecutable: "npm",
+                    updateArgs: ["install", "-g", "@openai/codex@latest"],
+                    updateLockKey: "npm-global:/owned",
+                  }),
+                ),
+            },
+            undefined,
+            undefined,
+            (input) =>
+              Effect.sync(() => {
+                receipt = { ...receipt, ...input };
+              }),
+          );
+          yield* runner.updateProvider({ provider: CODEX_DRIVER, origin });
+        }
+        yield* makeTestRunner(
+          {
+            ...registry,
+            refreshInstance: () =>
+              Ref.updateAndGet(providersRef, (providers) =>
+                providers.map((provider) => ({ ...provider, version: installedVersion })),
+              ),
+            setProviderMaintenanceActionState: (input) =>
+              registry
+                .setProviderMaintenanceActionState(input)
+                .pipe(
+                  Effect.tap(() =>
+                    input.state?.status === "succeeded" ||
+                    input.state?.status === "unchanged" ||
+                    input.state?.status === "failed"
+                      ? Deferred.succeed(recovered, undefined)
+                      : Effect.void,
+                  ),
+                ),
+          },
+          undefined,
+          Effect.succeed([receipt]),
+        );
+        yield* Deferred.await(recovered);
+        const provider = (yield* registry.getProviders)[0];
+        assert.equal(provider?.version, installedVersion);
+        assert.equal(provider?.updateState?.status, "succeeded");
+        assert.equal(provider?.updateState?.origin, origin);
+        assert.equal(provider?.updateState?.output, "installed");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerNonWindowsPlatform,
+            layerLatestVersionHttpClient("1.0.0"),
+            layerMockSpawner(() => ({})),
+          ),
+        ),
+      ),
+  );
+
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {
@@ -1612,6 +2167,7 @@ it.effect.each(["interaction", "opt-out"] as const)(
           directory: "",
           acquireRead: Effect.succeed(Effect.void),
           withRead: (effect) => effect,
+          handoff: (effect) => effect,
           withWrite: (effect) =>
             Deferred.succeed(queued, undefined).pipe(
               Effect.andThen(Deferred.await(release)),
@@ -2036,6 +2592,232 @@ describe("provider maintenance host leases", () => {
         assert.deepEqual(NodeFS.readdirSync(readers), []);
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.each(["unacknowledged", "existing owner"] as const)(
+    "a late supervisor preserves the current host gate (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const host = HostLock.make(directory);
+          const dead = NodeChildProcess.spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+          yield* Effect.promise(
+            () => new Promise<void>((resolve) => dead.once("exit", () => resolve())),
+          );
+          assert.ok(dead.pid);
+          const file = NodePath.join(directory, "receipt.json");
+          NodeFS.writeFileSync(
+            file,
+            JSON.stringify({
+              id: "late",
+              provider: CODEX_DRIVER,
+              instanceId: CODEX_INSTANCE_ID,
+              instanceIds: [CODEX_INSTANCE_ID],
+              startedAt: "2026-04-10T00:00:00.000Z",
+              parentPid: dead.pid,
+              directory,
+              command: process.execPath,
+              args: ["-e", ""],
+            }),
+          );
+          yield* host.withWrite(
+            Effect.gen(function* () {
+              if (mode === "existing owner")
+                NodeFS.writeFileSync(HostLock.installLeasePath(directory), String(process.pid));
+              const child = NodeChildProcess.spawn(
+                process.execPath,
+                [
+                  NodePath.resolve(import.meta.dirname, "../bin.ts"),
+                  "__provider-install",
+                  file,
+                  String(dead.pid),
+                ],
+                { stdio: "ignore" },
+              );
+              const code = yield* Effect.promise(
+                () => new Promise<number | null>((resolve) => child.once("exit", resolve)),
+              );
+              assert.equal(code, mode === "existing owner" ? 1 : 0);
+              if (mode === "existing owner") assert.isTrue(HostLock.installIsAlive(directory));
+              // Independent admission must still reject the gate while its writer holds it.
+              yield* Effect.promise(async () => {
+                const { lock } = await import("proper-lockfile");
+                try {
+                  const release = await lock(NodePath.join(directory, "gate"), { realpath: false });
+                  await release();
+                } catch (error) {
+                  assert.instanceOf(error, Error);
+                  assert.equal((error as NodeJS.ErrnoException).code, "ELOCKED");
+                  return;
+                }
+                assert.fail("Unacknowledged supervisor opened another server's gate");
+              });
+              NodeFS.rmSync(HostLock.installLeasePath(directory), { force: true });
+            }),
+          );
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+    30_000,
+  );
+
+  it.live.each(["SIGKILL", "SIGTERM", "supervisor"] as const)(
+    "keeps an orphaned installer exclusive until it exits (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          if ((yield* HostProcess.Platform) === "win32") return;
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const stateDir = NodePath.join(directory, "state");
+          const started = NodePath.join(directory, "started");
+          const finish = NodePath.join(directory, "finish");
+          const done = NodePath.join(directory, "done");
+          const readerPending = NodePath.join(directory, "reader-pending");
+          const writing = NodePath.join(directory, "writing");
+          const receiptFile = NodePath.join(stateDir, "provider-updates", "codex.json");
+          const waitForFile = (file: string) =>
+            Effect.callback<void>((resume) => {
+              const watcher = NodeFS.watch(directory, () => {
+                if (NodeFS.existsSync(file)) {
+                  watcher.close();
+                  resume(Effect.void);
+                }
+              });
+              watcher.once("error", (error) => resume(Effect.die(error)));
+              if (NodeFS.existsSync(file)) {
+                watcher.close();
+                resume(Effect.void);
+              }
+              return Effect.sync(() => watcher.close());
+            });
+          const installer = `
+        const fs = require("node:fs");
+        console.log("installer started");
+        fs.writeFileSync(${JSON.stringify(started)}, String(process.pid));
+        let chunks = 0;
+        const ticker = setInterval(() => {
+          if (!fs.existsSync(${JSON.stringify(readerPending)})) return;
+          console.log("installer writing chunk " + (++chunks));
+          if (chunks === 2) fs.writeFileSync(${JSON.stringify(writing)}, "writing");
+        }, 250);
+        const watcher = fs.watch(${JSON.stringify(directory)}, () => {
+          if (!fs.existsSync(${JSON.stringify(finish)})) return;
+          clearInterval(ticker);
+          console.log("installer still writing");
+          fs.writeFileSync(${JSON.stringify(done)}, "installed");
+          watcher.close();
+        });
+      `;
+          const parent = NodeChildProcess.spawn(
+            process.execPath,
+            [
+              "--input-type=module",
+              "-e",
+              `
+        import * as Effect from "effect/Effect";
+        import * as Layer from "effect/Layer";
+        import * as NodeServices from "@effect/platform-node/NodeServices";
+        import * as HostProcess from "@t3tools/shared/HostProcess";
+        import * as Supervisor from ${JSON.stringify(new URL("./ProviderInstallSupervisor.ts", import.meta.url).href)};
+        import * as Host from ${JSON.stringify(new URL("./ProviderMaintenanceHostLock.ts", import.meta.url).href)};
+        import * as Config from ${JSON.stringify(new URL("../config.ts", import.meta.url).href)};
+        const abort = new AbortController();
+        process.on("SIGTERM", () => abort.abort());
+        const host = Host.make(${JSON.stringify(directory)});
+        await Effect.runPromise(Effect.gen(function* () {
+          const supervisor = yield* Supervisor.ProviderInstallSupervisor;
+          yield* host.withWrite(supervisor.run({
+            provider: "codex", instanceId: "codex", instanceIds: ["codex"], origin: "manual",
+            startedAt: new Date().toISOString(), command: process.execPath,
+            args: ["-e", ${JSON.stringify(installer)}],
+          }));
+        }).pipe(Effect.provide(Supervisor.layer), Effect.provide(Layer.mergeAll(
+          NodeServices.layer,
+          Layer.succeed(Config.ServerConfig, { stateDir: ${JSON.stringify(stateDir)} }),
+          Layer.succeed(Host.ProviderMaintenanceHostLock, host),
+          Layer.succeed(HostProcess.Arguments, [process.execPath, ${JSON.stringify(new URL("../bin.ts", import.meta.url).pathname)}]),
+        ))), { signal: abort.signal }).catch(() => {});
+      `,
+            ],
+            { cwd: NodePath.resolve(import.meta.dirname, "../.."), stdio: "ignore" },
+          );
+          const exited = new Promise<void>((resolve) => parent.once("exit", () => resolve()));
+          yield* Effect.addFinalizer(() =>
+            Effect.promise(async () => {
+              const completed = NodeFS.existsSync(started)
+                ? new Promise<void>((resolve) => {
+                    const watcher = NodeFS.watch(directory, () => {
+                      if (NodeFS.existsSync(done)) {
+                        watcher.close();
+                        resolve();
+                      }
+                    });
+                    if (NodeFS.existsSync(done)) {
+                      watcher.close();
+                      resolve();
+                    }
+                  })
+                : Promise.resolve();
+              NodeFS.writeFileSync(finish, "finish");
+              if (parent.exitCode === null && parent.signalCode === null) parent.kill("SIGKILL");
+              await exited;
+              await completed;
+            }),
+          );
+          yield* waitForFile(started);
+          yield* Effect.callback<void>((resume) => {
+            const check = () => {
+              if (
+                NodeFS.existsSync(receiptFile) &&
+                InstallSupervisor.readReceipt(receiptFile).progress
+              ) {
+                watcher.close();
+                resume(Effect.void);
+              }
+            };
+            const watcher = NodeFS.watch(NodePath.dirname(receiptFile), check);
+            watcher.once("error", (error) => resume(Effect.die(error)));
+            check();
+            return Effect.sync(() => watcher.close());
+          });
+          const receipt = InstallSupervisor.readReceipt(receiptFile);
+          assert.isTrue(HostLock.installIsAlive(directory));
+          if (mode === "supervisor") {
+            assert.ok(receipt.pid);
+            process.kill(receipt.pid, "SIGKILL");
+          }
+          parent.kill(mode === "SIGTERM" ? "SIGTERM" : "SIGKILL");
+          yield* Effect.promise(() => exited);
+          if (NodeFS.existsSync(NodePath.join(directory, "gate.lock"))) {
+            NodeFS.utimesSync(NodePath.join(directory, "gate.lock"), 0, 0);
+          }
+          assert.isTrue(HostLock.installIsAlive(directory));
+          const admitted = yield* Deferred.make<void>();
+          const reader = yield* HostLock.make(directory)
+            .withRead(
+              Effect.sync(() => assert.equal(NodeFS.readFileSync(done, "utf8"), "installed")).pipe(
+                Effect.andThen(Deferred.succeed(admitted, undefined)),
+              ),
+            )
+            .pipe(Effect.forkChild);
+          NodeFS.writeFileSync(readerPending, "pending");
+          yield* waitForFile(writing);
+          assert.isFalse(yield* Deferred.isDone(admitted));
+          NodeFS.writeFileSync(finish, "finish");
+          yield* waitForFile(done);
+          yield* Fiber.join(reader);
+          if (mode !== "supervisor") {
+            assert.equal(InstallSupervisor.readReceipt(receiptFile).result?.exitCode, 0);
+            assert.match(
+              InstallSupervisor.readReceipt(receiptFile).result?.stdout ?? "",
+              /installer still writing/,
+            );
+          }
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+    30_000,
   );
 
   it.live("reclaims a crashed server's turn and install leases", () =>

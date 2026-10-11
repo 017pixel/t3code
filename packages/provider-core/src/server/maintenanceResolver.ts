@@ -201,7 +201,10 @@ function isVitePlusGlobalCommandPath(commandPath: string): boolean {
 }
 
 function isBunGlobalCommandPath(commandPath: string): boolean {
-  return normalizeCommandPath(commandPath).includes("/.bun/bin/");
+  const normalized = normalizeCommandPath(commandPath);
+  return (
+    normalized.includes("/.bun/bin/") || normalized.includes("/.bun/install/global/node_modules/")
+  );
 }
 
 function isYarnGlobalCommandPath(commandPath: string): boolean {
@@ -465,6 +468,21 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   )
     ? manual
     : native;
+  const vitePlus = yield* resolveVitePlusPackageInstall(context, packageName);
+  if (vitePlus) {
+    return makeProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      env: context.env,
+      platform: context.platform,
+      installationKey: keyFor(vitePlus),
+      packageName,
+      updateExecutable: "vp",
+      updateArgs: ["i", "-g", packageName],
+      updateLockKey: "vite-plus-global",
+    });
+  }
+  // Vite+ package shims resolve to vp itself, not the installed package.
+  if (/\/vp(?:\.exe)?$/.test(normalizeCommandPath(context.realCommandPath))) return manual;
   if (commandPaths.some(isVitePlusGlobalCommandPath)) {
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
@@ -530,7 +548,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       provider: definition.provider,
       env: context.env,
       platform: context.platform,
-      installationKey: keyFor(context.resolvedCommandPath.replaceAll("\\", "/").split("/bin/")[0]!),
+      installationKey: keyFor(context.realCommandPath.replaceAll("\\", "/").split("/bin/")[0]!),
       packageName,
       updateExecutable: "volta",
       updateArgs: ["install", `${packageName}@latest`],
@@ -619,6 +637,52 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   return fallback;
 });
 
+const VitePlusBinConfig = Schema.fromJsonString(
+  Schema.Struct({
+    name: Schema.String,
+    package: Schema.String,
+    source: Schema.optional(Schema.Literal("vp")),
+  }),
+);
+const VitePlusPackageMetadata = Schema.fromJsonString(
+  Schema.Struct({
+    name: Schema.String,
+    bins: Schema.Array(Schema.String),
+    versionSpec: Schema.optional(Schema.String),
+  }),
+);
+
+/** Vite+ records the owner of a shim in <DATA>/bins and <DATA>/packages. */
+const resolveVitePlusPackageInstall = Effect.fn("resolveVitePlusPackageInstall")(function* (
+  context: ProviderMaintenanceResolutionContext,
+  packageName: string,
+) {
+  if (!/\/vp(?:\.exe)?$/.test(normalizeCommandPath(context.realCommandPath))) return null;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const data = path.dirname(path.dirname(path.dirname(context.realCommandPath)));
+  const name = path.basename(context.resolvedCommandPath).replace(/\.exe$/i, "");
+  return yield* Effect.gen(function* () {
+    const config = yield* fs
+      .readFileString(path.join(data, "bins", `${name}.json`))
+      .pipe(Effect.flatMap(Schema.decodeUnknownEffect(VitePlusBinConfig)));
+    const metadata = yield* fs
+      .readFileString(path.join(data, "packages", `${packageName}.json`))
+      .pipe(Effect.flatMap(Schema.decodeUnknownEffect(VitePlusPackageMetadata)));
+    const active = yield* fs.realPath(
+      path.join(data, "current/bin", path.basename(context.realCommandPath)),
+    );
+    return active === context.realCommandPath &&
+      config.name === name &&
+      config.package === packageName &&
+      metadata.name === packageName &&
+      metadata.bins.includes(name) &&
+      (!metadata.versionSpec || metadata.versionSpec === "latest")
+      ? data
+      : null;
+  }).pipe(Effect.orElseSucceed(() => null));
+});
+
 /** A launcher script that runs the provider through mise (`exec mise x codex -- codex`). */
 const isMiseWrapperScript = Effect.fn("isMiseWrapperScript")(function* (
   context: ProviderMaintenanceResolutionContext,
@@ -652,7 +716,7 @@ const isVoltaPackageInstall = Effect.fn("isVoltaPackageInstall")(function* (
   ) {
     return false;
   }
-  const voltaHome = path.dirname(path.dirname(context.resolvedCommandPath));
+  const voltaHome = path.dirname(path.dirname(context.realCommandPath));
   const packageDir = path.join(voltaHome, "tools", "image", "packages", ...packageName.split("/"));
   const fileSystem = yield* FileSystem.FileSystem;
   return yield* fileSystem.exists(packageDir).pipe(Effect.orElseSucceed(() => false));

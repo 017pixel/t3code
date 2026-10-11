@@ -44,6 +44,68 @@ const noSpawner = ChildProcessSpawner.make(() =>
 const windowsHost = HostProcess.Platform.defaultValue() === "win32";
 
 it.layer(layerTest)("GrokDriver", (it) => {
+  it.effect.each(["default", "linked-home", "custom-bin"] as const)(
+    "owns the official Grok download symlinks (%s) but not a pinned download",
+    (layout) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "r3-03-grok-" });
+        const home = path.join(root, ".grok");
+        const download = path.join(home, "downloads/grok-linux-x86_64");
+        const bin = layout === "custom-bin" ? path.join(root, "tools") : path.join(home, "bin");
+        yield* fs.makeDirectory(path.dirname(download), { recursive: true });
+        yield* fs.writeFileString(download, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+        yield* fs.chmod(download, 0o755);
+        yield* fs.makeDirectory(bin, { recursive: true });
+        yield* fs.symlink(path.relative(bin, download), path.join(bin, "grok"));
+        yield* fs.symlink(path.relative(bin, download), path.join(bin, "agent"));
+        let visibleHome = home;
+        if (layout === "linked-home") {
+          visibleHome = path.join(root, "linked-grok");
+          yield* fs.symlink(home, visibleHome);
+        }
+        const alias = path.join(root, ".local/bin/grok");
+        yield* fs.makeDirectory(path.dirname(alias), { recursive: true });
+        yield* fs.symlink(
+          layout === "custom-bin" ? path.join(bin, "grok") : path.join(visibleHome, "bin/grok"),
+          alias,
+        );
+        const resolve = Effect.fnUntraced(function* (binaryPath: string) {
+          const instance = yield* GrokDriver.create({
+            instanceId: ProviderInstanceId.make("grok-native-layout"),
+            displayName: undefined,
+            enabled: false,
+            environment: [
+              { name: "GROK_HOME", value: visibleHome, sensitive: false },
+              ...(layout === "custom-bin"
+                ? [{ name: "GROK_BIN_DIR", value: bin, sensitive: false }]
+                : []),
+            ],
+            config: { ...GrokDriver.defaultConfig(), binaryPath },
+          });
+          return yield* instance.snapshot.resolveMaintenance();
+        });
+        const active = yield* resolve(alias);
+        expect(active.update).toMatchObject({ executable: alias, args: ["update"] });
+        expect(active.update?.installationKey).toBeDefined();
+        expect((yield* resolve(path.join(bin, "grok"))).update?.installationKey).toBe(
+          active.update?.installationKey,
+        );
+        expect((yield* resolve(download)).update?.installationKey).toBeUndefined();
+        const foreign = path.join(root, "pinned/grok");
+        yield* fs.makeDirectory(path.dirname(foreign), { recursive: true });
+        yield* fs.writeFileString(foreign, "#!/bin/sh\n");
+        yield* fs.chmod(foreign, 0o755);
+        yield* fs.remove(alias);
+        yield* fs.symlink(foreign, alias);
+        expect((yield* resolve(alias)).update?.installationKey).toBeUndefined();
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawner),
+        Effect.scoped,
+      ),
+    { skip: windowsHost },
+  );
   it.effect.skipIf(windowsHost)("updates through the configured executable's own updater", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

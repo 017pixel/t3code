@@ -160,6 +160,7 @@ import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain"
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
+import * as InstallSupervisor from "./provider/ProviderInstallSupervisor.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderAutoUpdater from "./updates/ProviderAutoUpdater.ts";
 import * as ServerAutoUpdater from "./updates/ServerAutoUpdater.ts";
@@ -553,7 +554,7 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 // behind the same per-installer lock.
 const layerProviderUpdates = ProviderAutoUpdater.layer.pipe(
   Layer.provide(UpdateWindow.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
-  Layer.provideMerge(ProviderMaintenanceRunner.layer),
+  Layer.provideMerge(ProviderMaintenanceRunner.layer.pipe(Layer.provide(InstallSupervisor.layer))),
 );
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
