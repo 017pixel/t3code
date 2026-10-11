@@ -3,6 +3,10 @@ import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
+import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Option from "effect/Option";
 import * as ThreadContracts from "@t3tools/contracts";
@@ -3511,6 +3515,26 @@ it.effect.each([
     expected: false,
     updatedInstance: ProviderInstanceId.make("other"),
   },
+  ...(
+    [
+      "review-guides",
+      "project-clones",
+      "workspace-preparation",
+      "git-refreshes",
+      "missing-guide-tracker",
+    ] as const
+  ).flatMap((work) =>
+    [true, false].map((restart) => ({
+      name: `${work} during ${restart ? "restart" : "provider install"}`,
+      restart,
+      busy: false,
+      installing: false,
+      interaction: false,
+      expected: !restart,
+      updatedInstance: null,
+      work,
+    })),
+  ),
 ])("rechecks the update window for $name", (scenario) =>
   Effect.gen(function* () {
     let quietReads = 0;
@@ -3519,6 +3543,28 @@ it.effect.each([
       UpdateWindow.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            "work" in scenario && scenario.work === "missing-guide-tracker"
+              ? Layer.empty
+              : Layer.mock(PullRequestReviewGuideService.PullRequestReviewGuideService)({
+                  activeGenerationCount: Effect.succeed(
+                    "work" in scenario && scenario.work === "review-guides" ? 2 : 0,
+                  ),
+                }),
+            Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({
+              activeCloneCount: Effect.succeed(
+                "work" in scenario && scenario.work === "project-clones" ? 1 : 0,
+              ),
+            }),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              activePreparationCount: Effect.succeed(
+                "work" in scenario && scenario.work === "workspace-preparation" ? 1 : 0,
+              ),
+            }),
+            Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
+              activeRefreshCount: Effect.succeed(
+                "work" in scenario && scenario.work === "git-refreshes" ? 1 : 0,
+              ),
+            }),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getRecoveryThreadIds: () => Effect.succeed([]),
               getLimitRecoveryCandidates: () => Effect.succeed([]),

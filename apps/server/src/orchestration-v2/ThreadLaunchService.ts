@@ -23,6 +23,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -47,6 +48,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
+import * as ProviderMaintenanceCoordinator from "@t3tools/provider-core/server/maintenance";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
@@ -187,6 +189,8 @@ export class ThreadLaunchService extends Context.Service<
       | Orchestrator.OrchestratorV2Error
       | ThreadManagement.ThreadManagementProviderInstanceDisabledError
     >;
+    /** Workspace preparation and branch naming can outlive a thread's run. */
+    readonly activePreparationCount: Effect.Effect<number>;
   }
 >()("t3/orchestration-v2/ThreadLaunchService") {}
 
@@ -215,9 +219,13 @@ const make = Effect.gen(function* () {
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+  const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
   const preparationScope = yield* Scope.make("sequential");
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
+  const preparations = yield* FiberSet.make().pipe(
+    Effect.provideService(Scope.Scope, preparationScope),
+  );
 
   const mapError =
     (input: PreparationInput, operation: ThreadLaunchError["operation"], threadId?: ThreadId) =>
@@ -531,7 +539,7 @@ const make = Effect.gen(function* () {
               cause,
             }),
           ),
-          Effect.forkIn(preparationScope),
+          FiberSet.run(preparations, { startImmediately: false }),
         );
       }
 
@@ -745,7 +753,8 @@ const make = Effect.gen(function* () {
       ),
       Effect.ignoreCause,
       Effect.ensuring(releasePreparation(input.commandId)),
-      Effect.forkIn(preparationScope),
+      FiberSet.run(preparations, { startImmediately: false }),
+      admission.withLaunchPermit,
     );
   });
 
@@ -1050,7 +1059,12 @@ const make = Effect.gen(function* () {
     );
   };
 
-  return ThreadLaunchService.of({ launch, checkWorktreeBase, retryPreparation });
+  return ThreadLaunchService.of({
+    launch,
+    checkWorktreeBase,
+    retryPreparation,
+    activePreparationCount: FiberSet.size(preparations),
+  });
 });
 
 export const layer = Layer.effect(ThreadLaunchService, make);
