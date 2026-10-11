@@ -844,10 +844,21 @@ export const layer: Layer.Layer<
             // opening a Claude process already runs the user's SessionStart
             // hooks and MCP servers, which can edit the workspace.
             if (input.baselineCaptured !== true) {
-              yield* checkpointService.captureBaseline({
-                scope: input.checkpointScope,
-                ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
-              });
+              yield* checkpointService
+                .captureBaseline({
+                  scope: input.checkpointScope,
+                  ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
+                })
+                .pipe(
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause)
+                      ? Effect.failCause(cause)
+                      : Effect.logWarning(
+                          "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                          { runId: input.run.id },
+                        ),
+                  ),
+                );
             }
             if (
               input.shouldStartProviderTurn !== undefined &&

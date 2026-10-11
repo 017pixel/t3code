@@ -398,25 +398,31 @@ function makeLocalCommandHarness(input: {
       ),
     ensureThread: () => Effect.succeed(providerThread),
   };
-  let baselineCaptured = false;
+  let baselineSettled = false;
   const captureBaseline = vi.fn(() =>
     input.interruptBaseline === true
       ? Effect.interrupt
       : "baselineFailure" in input
-        ? Effect.fail(
-            new CheckpointService.CheckpointBaselineCaptureError({
-              scopeId: checkpointScopeId,
-              ordinalWithinScope: 1,
-              cause: input.baselineFailure,
-            }),
+        ? Effect.sync(() => {
+            baselineSettled = true;
+          }).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new CheckpointService.CheckpointBaselineCaptureError({
+                  scopeId: checkpointScopeId,
+                  ordinalWithinScope: 1,
+                  cause: input.baselineFailure,
+                }),
+              ),
+            ),
           )
         : Effect.sync(() => {
-            baselineCaptured = true;
+            baselineSettled = true;
             if (input.interruptRunDuringBaseline === true) interruptRun();
           }),
   );
   const open = vi.fn(() => {
-    expect(baselineCaptured).toBe(true);
+    expect(baselineSettled).toBe(true);
     return input.interruptOpen === true
       ? Effect.interrupt
       : "historyReadFailureAfterFallback" in input
@@ -881,24 +887,31 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
   );
 }
 
-effectIt.effect("fails before provider startup when its baseline cannot be captured", () =>
+effectIt.effect("starts the provider after its baseline capture fails", () =>
   Effect.gen(function* () {
-    const harness = makeLocalCommandHarness({ text: "Continue", baselineFailure: "disk full" });
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      baselineFailure: "disk full",
+      failReadsAfterRunning: true,
+    });
     yield* harness.start;
     expect(harness.captureBaseline).toHaveBeenCalledOnce();
-    expect(harness.open).not.toHaveBeenCalled();
-    expect(harness.startRootRun).not.toHaveBeenCalled();
-    expect(harness.projection().runs.at(-1)).toMatchObject({ status: "failed" });
+    expect(harness.open).toHaveBeenCalledOnce();
+    expect(harness.startRootRun).toHaveBeenCalledOnce();
+    expect(harness.projection().runs.at(-1)?.status).toBe("running");
   }),
 );
 
-effectIt.effect("retries a baseline failure without starting the provider", () =>
+effectIt.effect("does not retry a turn whose baseline capture fails", () =>
   Effect.gen(function* () {
-    const harness = makeLocalCommandHarness({ text: "Continue", baselineFailure: "disk full" });
-    const error = yield* harness.startWithRetry.pipe(Effect.flip);
-    expect(error._tag).toBe("ProviderTurnStartError");
-    expect(harness.open).not.toHaveBeenCalled();
-    expect(harness.projection().runs.at(-1)).toMatchObject({ status: "starting" });
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      baselineFailure: "disk full",
+      failReadsAfterRunning: true,
+    });
+    yield* harness.startWithRetry;
+    expect(harness.captureBaseline).toHaveBeenCalledOnce();
+    expect(harness.startRootRun).toHaveBeenCalledOnce();
   }),
 );
 

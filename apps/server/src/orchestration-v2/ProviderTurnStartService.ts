@@ -548,7 +548,6 @@ export const layer: Layer.Layer<
         readonly signal: string;
         readonly title: string;
         readonly error: Error;
-        readonly failureClass?: "unknown";
       }) =>
         Effect.gen(function* () {
           const nestedCause = "cause" in failed.error ? failed.error.cause : undefined;
@@ -569,24 +568,19 @@ export const layer: Layer.Layer<
                     : typeof nestedCause === "string"
                       ? nestedCause
                       : failed.error.message,
-                class: failed.failureClass ?? "provider_error",
+                class: "provider_error",
               }),
             },
           });
         });
       // Session open and native thread setup can run hooks and MCP servers
       // before a prompt. Capture their edits in the turn, never in its baseline.
+      // A capture that fails still starts the turn, without a baseline.
       if (baseline._tag === "Failure") {
-        if (input.willRetry === true) {
-          return yield* new ProviderTurnStartError({ runId, cause: baseline.failure });
-        }
-        yield* settleStartFailure({
-          signal: "checkpoint-baseline-capture-failure",
-          title: "Workspace baseline failed to capture",
-          error: baseline.failure,
-          failureClass: "unknown",
-        });
-        return;
+        yield* Effect.logWarning(
+          "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+          { runId, cause: String(baseline.failure) },
+        );
       }
       if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const sessionResult = yield* Effect.result(

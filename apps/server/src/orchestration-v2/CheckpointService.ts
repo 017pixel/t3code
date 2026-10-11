@@ -268,8 +268,9 @@ export const layer: Layer.Layer<
       withWorkspaceLock(
         input.scope.cwd,
         Effect.gen(function* () {
-          // A failed probe must not let provider startup proceed without a baseline.
-          if (!(yield* checkpointStore.isGitRepository(input.scope.cwd))) {
+          // A failed probe (no Git installed, a timeout) means no baseline,
+          // the same answer the turn-end capture gets.
+          if (!(yield* isGitCheckpointable(input.scope.cwd))) {
             return;
           }
 

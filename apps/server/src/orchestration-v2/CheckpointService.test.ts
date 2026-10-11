@@ -105,7 +105,7 @@ it.effect.each([false, true, "interrupt"] as const)(
 );
 
 it.effect.each([false, true, "failure", "interrupt"] as const)(
-  "baseline repository probe preserves non-Git workspaces and fails closed (%s)",
+  "baseline repository probe treats a failed probe like a non-Git workspace (%s)",
   (probe) => {
     const scope: OrchestrationV2CheckpointScope = {
       id: CheckpointScopeId.make("checkpoint-scope:baseline-probe"),
@@ -152,14 +152,7 @@ it.effect.each([false, true, "failure", "interrupt"] as const)(
         checkpoints.captureBaseline({ scope, ordinalWithinScope: 0 }),
       );
       if (probe === "interrupt") assert.isTrue(Exit.hasInterrupts(exit));
-      else if (probe === "failure") {
-        const error = Exit.findErrorOption(exit);
-        assert.isTrue(error._tag === "Some");
-        if (error._tag === "Some") {
-          assert.equal(error.value._tag, "CheckpointBaselineCaptureError");
-          assert.equal(error.value.cause, failure);
-        }
-      } else assert.isTrue(Exit.isSuccess(exit));
+      else assert.isTrue(Exit.isSuccess(exit));
       assert.equal(hasCheckpointRef.mock.calls.length, probe === true ? 1 : 0);
       assert.equal(captureCheckpoint.mock.calls.length, probe === true ? 1 : 0);
     }).pipe(Effect.provide(layer));
