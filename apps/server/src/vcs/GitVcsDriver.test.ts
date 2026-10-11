@@ -1191,6 +1191,69 @@ it.effect("cached indexes remain valid when HEAD moves while normalizing a neste
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
+it.effect(
+  "a warm capture keeps its cached index when another workspace captures during validation",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-cache-race-" });
+      const other = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-cache-other-" });
+      const { git } = yield* makeCheckpointFixture(driver, cwd);
+      const { git: otherGit } = yield* makeCheckpointFixture(driver, other);
+      for (const [root, runGit] of [
+        [cwd, git],
+        [other, otherGit],
+      ] as const) {
+        yield* fs.makeDirectory(path.join(root, "scope"));
+        yield* fs.writeFileString(path.join(root, "scope", "inside.txt"), "inside\n");
+        yield* runGit(["add", "scope"]);
+        yield* runGit(["commit", "-m", "record nested workspace"]);
+      }
+      const outside = (yield* git(["show", "HEAD:file.txt"])).stdout;
+      const index = path.join(cwd, ".git", "index");
+      const source = yield* fs.readFile(index);
+      yield* fs.writeFileString(path.join(other, "file.txt"), "other repo head\n");
+      yield* otherGit(["add", "file.txt"]);
+      yield* otherGit(["commit", "-m", "change other HEAD"]);
+      yield* fs.writeFile(path.join(other, ".git", "index"), source);
+      // Both object stores can resolve either tree, making wrong reuse observable as bytes.
+      yield* driver.execute({
+        operation: "checkpoint-test",
+        cwd,
+        args: ["hash-object", "-w", "--stdin"],
+        stdin: "other repo head\n",
+      });
+      let interleave = Effect.void;
+      const captureDriver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          readFile: (file) =>
+            fs.readFile(file).pipe(Effect.tap(() => (file === index ? interleave : Effect.void))),
+        }),
+      );
+      yield* captureDriver.checkpoints.captureCheckpoint({
+        cwd: path.join(cwd, "scope"),
+        checkpointRef: CheckpointRef.make("refs/t3/checkpoints/cache-race/first"),
+      });
+      interleave = Effect.gen(function* () {
+        interleave = Effect.void;
+        yield* captureDriver.checkpoints.captureCheckpoint({
+          cwd: path.join(other, "scope"),
+          checkpointRef: CheckpointRef.make("refs/t3/checkpoints/cache-race/other"),
+        });
+      }).pipe(Effect.orDie);
+      const next = CheckpointRef.make("refs/t3/checkpoints/cache-race/next");
+      yield* captureDriver.checkpoints.captureCheckpoint({
+        cwd: path.join(cwd, "scope"),
+        checkpointRef: next,
+      });
+      assert.strictEqual((yield* git(["show", `${next}:file.txt`])).stdout, outside);
+      assert.deepEqual(yield* fs.readFile(index), source);
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
 it.effect("cached checkpoints capture submodule HEAD changes without capturing its files", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

@@ -939,30 +939,33 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             // Stay below the source timestamp even if Date rounded up, preserving Git's racy check.
             const indexTime = Math.floor((mtime.value.getTime() - 1) / 1000);
             if (indexTime <= 0) return false;
+            const cacheable = !sparseCheckout && size <= BigInt(checkpointIndexMaxBytes);
+            const cachedIndex = checkpointIndex;
+            if (
+              cacheable &&
+              cachedIndex?.cwd === input.cwd &&
+              cachedIndex.headCommit === headCommit
+            ) {
+              const bytes = yield* fileSystem.readFile(indexPath.stdout.trim());
+              const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+              if (cachedIndex.source.equals(source)) {
+                yield* fileSystem.writeFile(tempIndexPath, cachedIndex.normalized);
+                yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
+                return true;
+              }
+            }
+            // Cache the exact copied bytes, even if the user's index changes
+            // during copy. A cold capture keeps the original cheap disk copy.
+            yield* fileSystem.copyFile(indexPath.stdout.trim(), tempIndexPath);
             const sourceBytes =
-              !sparseCheckout && size <= BigInt(checkpointIndexMaxBytes)
-                ? yield* fileSystem.readFile(indexPath.stdout.trim())
+              cacheable &&
+              (yield* fileSystem.stat(tempIndexPath)).size <= BigInt(checkpointIndexMaxBytes)
+                ? yield* fileSystem.readFile(tempIndexPath)
                 : undefined;
             const source =
               sourceBytes === undefined
                 ? undefined
                 : Buffer.from(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength);
-            if (
-              source !== undefined &&
-              checkpointIndex?.cwd === input.cwd &&
-              checkpointIndex.headCommit === headCommit &&
-              checkpointIndex.source.equals(source)
-            ) {
-              yield* fileSystem.writeFile(tempIndexPath, checkpointIndex.normalized);
-              yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
-              return true;
-            }
-            if (source === undefined) {
-              checkpointIndex = undefined;
-              yield* fileSystem.copyFile(indexPath.stdout.trim(), tempIndexPath);
-            } else {
-              yield* fileSystem.writeFile(tempIndexPath, source);
-            }
             // Pin normalization to the cache key even if HEAD moves during capture.
             yield* execute({
               operation,
