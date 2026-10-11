@@ -2412,6 +2412,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const baselineEntries = yield* request({ type: "get_entries" }).pipe(
           Effect.orElseSucceed(() => undefined),
         );
+        const entries = recordField(baselineEntries, "entries");
+        if (
+          resumeId != null &&
+          (existing?.nativeConversationHeadRef != null || existing?.firstRunOrdinal != null) &&
+          Array.isArray(entries) &&
+          !entries.some((entry) => {
+            const type = recordField(entry, "type");
+            return type === "message" || type === "compaction" || type === "custom_message";
+          })
+        ) {
+          threadState = null;
+          return yield* protocolError("Pi lost the persisted conversation for this session");
+        }
         lastKnownLeaf = recordString(baselineEntries, "leafId") ?? null;
         // A successful full baseline makes the cursor trustworthy again. Only
         // a failed one leaves it stale, so a recovered session does not keep

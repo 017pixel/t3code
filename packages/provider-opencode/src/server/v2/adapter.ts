@@ -1788,6 +1788,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       }
       state.providerThread = {
         ...state.providerThread,
+        ...(terminal.status === "completed" && promptOf(turn.providerTurn) !== undefined
+          ? { nativeConversationHeadRef: ref(promptOf(turn.providerTurn)!, "weak") }
+          : {}),
         status: threadDisposition === "broken" ? "error" : "idle",
         updatedAt: completedAt,
       };
@@ -2689,7 +2692,20 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
      * OpenCode appends after each one, or undefined when there is none after
      * the turn's start.
      */
-    const backfill = Effect.fnUntraced(function* (sessionId: string, state: ThreadState) {
+    const backfill = Effect.fnUntraced(function* (
+      sessionId: string,
+      state: ThreadState,
+      activeSessions?: ReadonlySet<string>,
+    ): Effect.fn.Return<
+      { outcome: string } | undefined,
+      Effect.Error<
+        | ReturnType<typeof client.message.list>
+        | ReturnType<typeof client.permission.list>
+        | ReturnType<typeof client.session.form.list>
+        | ReturnType<typeof onAsked>
+        | ReturnType<typeof attachChild>
+      >
+    > {
       const turn = state.active;
       if (turn === undefined) return undefined;
       const promptId = promptOf(turn.providerTurn);
@@ -2716,10 +2732,79 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         for (const part of message.content) {
           if (part.type === "text" || part.type === "reasoning") {
             const block = { assistantMessageID: message.id, ordinal: ordinals[part.type]++ };
-            yield* emitText(state, turn, block, part.type, () => part.text, true);
+            yield* emitText(
+              state,
+              turn,
+              block,
+              part.type,
+              () => part.text,
+              message.time.completed !== undefined || idle !== undefined,
+            );
             continue;
           }
           if (part.type !== "tool") continue;
+          if (part.name === "subagent") {
+            if (!state.calls.has(part.id)) yield* startCall(state, turn, part.id);
+            const call = state.calls.get(part.id)!;
+            const input = typeof part.state.input === "object" ? part.state.input : undefined;
+            const metadata = "metadata" in part.state ? part.state.metadata : undefined;
+            call.prompt = stringField(input, "prompt") ?? call.prompt;
+            call.title = stringField(input, "description") ?? call.title;
+            call.agent = stringField(input, "agent") ?? call.agent;
+            call.model = stringField(input, "model") ?? call.model;
+            call.background =
+              call.background ||
+              stringField(metadata, "status") === "running" ||
+              input?.["background"] === true;
+            const childId = stringField(metadata, "sessionID");
+            const restoringChild = childId !== undefined && call.child === undefined;
+            if (childId !== undefined) yield* attachChild(call, childId);
+            if (part.state.status === "error") {
+              yield* settleCall(call, "failed", part.state.error.message);
+            } else if (part.state.status === "completed" && !call.background) {
+              yield* settleCall(call, "completed", subagentOutput(textOf(part.state.content)));
+            } else {
+              yield* emitSubagent(call);
+              if (restoringChild) {
+                if (
+                  call.background &&
+                  activeSessions !== undefined &&
+                  !activeSessions.has(childId!)
+                ) {
+                  yield* settleCall(call, "interrupted", LOST_BACKGROUND);
+                  continue;
+                }
+                const sessionID = Session.ID.make(childId!);
+                if (activeSessions?.has(childId!) && call.child !== undefined) {
+                  const history = yield* OpenCode2Client.paginate(
+                    { sessionID, order: "desc" as const, limit: 50 },
+                    client.message.list,
+                  ).pipe(Stream.runCollect);
+                  const child = call.child;
+                  child.subagent!.turns = Math.max(
+                    child.subagent!.turns,
+                    history.filter((entry) => entry.type === "idle").length,
+                  );
+                  yield* startChildTurn(child);
+                  child.active!.before =
+                    history.find(
+                      (entry) =>
+                        entry.type === "user" ||
+                        entry.type === "synthetic" ||
+                        entry.type === "idle",
+                    )?.id ?? null;
+                  yield* backfill(childId!, child, activeSessions);
+                }
+                const [permissions, forms] = yield* Effect.all([
+                  client.permission.list({ sessionID }),
+                  client.session.form.list({ sessionID }),
+                ]);
+                for (const request of permissions) yield* onAsked({ type: "permission", request });
+                for (const form of forms) yield* onAsked({ type: "form", form });
+              }
+            }
+            continue;
+          }
           if (!turn.tools.has(part.id)) {
             turn.tools.set(part.id, { name: part.name, input: {} });
             turn.startedAt.set(part.id, yield* DateTime.now);
@@ -2784,7 +2869,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       for (const [sessionId, state] of running) {
         const turn = state.active;
         if (turn === undefined) continue;
-        const ended = yield* backfill(sessionId, state);
+        const ended = yield* backfill(sessionId, state, new Set(Object.keys(active)));
         if (sessionId in active || state.active !== turn) continue;
         yield* finishTurn(
           state,
@@ -3787,7 +3872,6 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                     const active = yield* client.session
                       .active()
                       .pipe(Effect.timeout(ACTIVE_CHECK_TIMEOUT));
-                    if (!(sessionId in active)) return false;
                     // A surviving server is still executing the interrupted
                     // run. Attach its events without enqueuing another prompt.
                     const history = yield* OpenCode2Client.paginate(
@@ -3798,6 +3882,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                       Stream.runCollect,
                     );
                     const prompt = history.at(-1);
+                    const idle = history.find((message) => message.type === "idle");
+                    const finishedWhileDown =
+                      prompt?.type === "user" &&
+                      prompt.id !== turnInput.providerThread.nativeConversationHeadRef?.nativeId &&
+                      idle?.type === "idle" &&
+                      idle.outcome === "succeeded";
+                    if (!(sessionId in active) && !finishedWhileDown) return false;
                     const turn = yield* beginTurn(state, turnInput, false);
                     yield* takeRunningWake(state);
                     if (state.active !== turn) return true;
@@ -3807,7 +3898,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                         nativeTurnRef: ref(prompt.id, "weak"),
                       };
                       yield* emitProviderTurn(state, turn, turn.providerTurn);
-                      yield* backfill(sessionId, state).pipe(
+                      yield* backfill(sessionId, state, new Set(Object.keys(active))).pipe(
                         Effect.tapError((cause) =>
                           finishTurn(state, {
                             status: "failed",
@@ -3815,6 +3906,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                           }),
                         ),
                       );
+                    }
+                    if (finishedWhileDown && !(sessionId in active)) {
+                      yield* finishTurn(state, { status: "completed" });
                     }
                     return true;
                   }),

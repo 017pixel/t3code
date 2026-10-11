@@ -447,21 +447,83 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect("prompts after a restart when the native execution did not survive", () =>
+  it.effect.each(["empty", "already settled", "failed"] as const)(
+    "prompts after a restart with %s history instead of following an earlier completion",
+    (previous) =>
+      Effect.gen(function* () {
+        const { runtime, thread } = yield* resumed([
+          out("session.active"),
+          replyData("session.active", {}),
+          out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+          reply("message.list", {
+            data:
+              previous === "empty"
+                ? []
+                : history.data
+                    .toReversed()
+                    .map((message) =>
+                      message.type === "idle" && previous === "failed"
+                        ? { ...message, outcome: "failed" }
+                        : message,
+                    ),
+            cursor: {},
+          }),
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({
+          ...turnInput(
+            previous === "already settled"
+              ? {
+                  ...thread,
+                  nativeConversationHeadRef: {
+                    driver: OPENCODE_PROVIDER,
+                    nativeId: history.data[0]!.id,
+                    strength: "weak",
+                  },
+                }
+              : thread,
+          ),
+          restartContinuationOfRunId: RunId.make("interrupted-run"),
+        });
+        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("settles an execution that finished during a T3 restart without another prompt", () =>
     Effect.gen(function* () {
-      const { runtime, thread } = yield* resumed([
-        out("session.active"),
-        replyData("session.active", {}),
-        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
-        promptAccepted,
-        event("session.execution.succeeded", { sessionID: SESSION }),
-      ]);
-      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      const finished = { data: history.data.toReversed(), cursor: {} };
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.active"),
+          replyData("session.active", {}),
+          out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+          reply("message.list", finished),
+          out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+          reply("message.list", finished),
+        ],
+        { external: true },
+      );
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
       yield* runtime.startTurn({
         ...turnInput(thread),
-        restartContinuationOfRunId: RunId.make("interrupted-run"),
+        restartContinuationOfRunId: RunId.make("cut-run"),
       });
-      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+      const collected = yield* Fiber.join(events);
+      assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+      const updated = collected.findLast((event) => event.type === "provider_thread.updated");
+      assert.equal(
+        updated?.type === "provider_thread.updated"
+          ? updated.providerThread.nativeConversationHeadRef?.nativeId
+          : undefined,
+        history.data[0]!.id,
+      );
     }).pipe(Effect.scoped),
   );
 
@@ -757,6 +819,266 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     } as OrchestrationV2AppThread,
   });
   const CHILD = "ses_f1485c529ffea4URrYruwEg0Ja";
+
+  it.effect.each(["prompt", "follow-up", "joined"] as const)(
+    "restores a subagent card and its pending question after a T3 restart during a %s",
+    (execution) =>
+      Effect.gen(function* () {
+        const restored = {
+          data: [
+            {
+              id: "msg_subagent",
+              type: "assistant",
+              time: { created: 2 },
+              agent: "build",
+              model: { providerID: "opencode", id: "big-pickle", variant: "default" },
+              content: [
+                {
+                  type: "tool",
+                  id: "call-restored",
+                  name: "subagent",
+                  executed: true,
+                  state: {
+                    status: "running",
+                    input: { prompt: "Choose a color", description: "Color" },
+                    metadata: { sessionID: CHILD },
+                  },
+                  time: { created: 2, ran: 2 },
+                },
+              ],
+            },
+            { id: PROMPT_ID, type: "user", time: { created: 1 }, text: "Delegate" },
+          ],
+          cursor: {},
+        };
+        if (execution === "joined") {
+          restored.data[0]!.content!.push({
+            ...restored.data[0]!.content![0]!,
+            id: "call-restored-again",
+          });
+        }
+        const childHistory = {
+          ...restored,
+          data: [
+            {
+              ...history.data[1],
+              id: "msg_child",
+              time: { created: 2 },
+              finish: undefined,
+              content: [{ type: "text", text: "Pre" }],
+            },
+            ...(execution === "follow-up"
+              ? [{ id: "msg_child_idle", type: "idle", time: { created: 1 }, outcome: "succeeded" }]
+              : []),
+            { id: "msg_child_prompt", type: "user", time: { created: 1 }, text: "Choose a color" },
+          ],
+        };
+        const { runtime, thread } = yield* resumed(
+          [
+            out("session.active"),
+            replyData("session.active", {
+              [SESSION]: { type: "running" },
+              [CHILD]: { type: "running" },
+            }),
+            out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+            reply("message.list", restored),
+            out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+            reply("message.list", restored),
+            out("session.update", { sessionID: CHILD, permissions: t3Rules }),
+            reply("session.update", null),
+            out("message.list", { sessionID: CHILD, order: "desc", limit: "50" }),
+            reply("message.list", childHistory),
+            out("message.list", { sessionID: CHILD, order: "desc", limit: "50" }),
+            reply("message.list", childHistory),
+            out("permission.list", { sessionID: CHILD }),
+            replyData("permission.list", []),
+            out("session.form.list", { sessionID: CHILD }),
+            replyData("session.form.list", [{ ...colorForm, sessionID: CHILD }]),
+            ...(execution === "joined"
+              ? [
+                  out("message.list", { sessionID: CHILD, order: "desc", limit: "50" }),
+                  reply("message.list", childHistory),
+                  out("message.list", { sessionID: CHILD, order: "desc", limit: "50" }),
+                  reply("message.list", childHistory),
+                  out("permission.list", { sessionID: CHILD }),
+                  replyData("permission.list", []),
+                  out("session.form.list", { sessionID: CHILD }),
+                  replyData("session.form.list", [{ ...colorForm, sessionID: CHILD }]),
+                ]
+              : []),
+            out("session.form.reply", {
+              sessionID: CHILD,
+              formID: colorForm.id,
+              answer: { q0: "Red" },
+            }),
+            reply("session.form.reply", null),
+            event("session.text.delta", {
+              sessionID: CHILD,
+              assistantMessageID: "msg_child",
+              ordinal: 0,
+              delta: "fix",
+            }),
+            event("session.text.ended", {
+              sessionID: CHILD,
+              assistantMessageID: "msg_child",
+              ordinal: 0,
+              text: "Prefix",
+            }),
+            event("session.execution.succeeded", { sessionID: CHILD }),
+            ...(execution === "joined"
+              ? [
+                  event("session.execution.started", { sessionID: CHILD }),
+                  event("session.execution.succeeded", { sessionID: CHILD }),
+                ]
+              : []),
+            ...["call-restored", ...(execution === "joined" ? ["call-restored-again"] : [])].map(
+              (id): ProviderReplayEntry => ({
+                type: "emit_inbound",
+                frame: {
+                  type: "sdk.event",
+                  event: {
+                    id: "evt_restoredsuccess",
+                    created: 3,
+                    type: "session.tool.success",
+                    durable: { aggregateID: SESSION, seq: 1, version: 2 },
+                    data: {
+                      sessionID: SESSION,
+                      assistantMessageID: "msg_subagent",
+                      id,
+                      executed: true,
+                      content: [{ type: "text", text: "Red" }],
+                      metadata: { sessionID: CHILD },
+                    },
+                  },
+                },
+              }),
+            ),
+            event("session.execution.succeeded", { sessionID: SESSION }),
+          ],
+          { external: true },
+        );
+        const requested = yield* Deferred.make<
+          Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "runtime_request.updated" }>,
+          Error
+        >();
+        const events = yield* runtime.events.pipe(
+          Stream.tap((event) =>
+            event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending"
+              ? Deferred.succeed(requested, event)
+              : event.type === "turn.terminal"
+                ? Deferred.fail(requested, new Error(JSON.stringify(event)))
+                : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn({
+          ...withLineage(thread),
+          restartContinuationOfRunId: RunId.make("cut-run"),
+        });
+        const question = (yield* Deferred.await(requested)).runtimeRequest;
+        assert.equal(question.nativeRequestRef?.nativeId, colorForm.id);
+        yield* runtime.respondToRuntimeRequest({
+          requestId: question.id,
+          decision: "accept",
+          answers: { q0: "Red" },
+        });
+        const collected = yield* Fiber.join(events);
+        assert.isTrue(
+          collected.some(
+            (event) =>
+              event.type === "subagent.updated" &&
+              event.subagent.childThreadId !== null &&
+              event.subagent.result === "Red",
+          ),
+        );
+        assert.isTrue(
+          collected.some(
+            (event) =>
+              event.type === "message.updated" &&
+              event.message.threadId !== threadId &&
+              event.message.text === "Prefix",
+          ),
+        );
+        assert.isFalse(
+          collected.some(
+            (event) => event.type === "message.updated" && event.message.text === "fix",
+          ),
+        );
+        if (execution === "joined") {
+          const childTurns = collected.flatMap((event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.nativeTurnRef?.nativeId.startsWith(CHILD)
+              ? [event.providerTurn.ordinal]
+              : [],
+          );
+          assert.include(childTurns, 2);
+        }
+        assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("retires a restored background subagent that ended while T3 was down", () =>
+    Effect.gen(function* () {
+      const finished = {
+        data: [
+          { id: "msg_parent_idle", type: "idle", time: { created: 3 }, outcome: "succeeded" },
+          {
+            ...history.data[1],
+            id: "msg_parent",
+            content: [
+              {
+                type: "tool",
+                id: "call-retired",
+                name: "subagent",
+                executed: true,
+                state: {
+                  status: "completed",
+                  input: { prompt: "Work", background: true },
+                  content: [{ type: "text", text: "Running in the background" }],
+                  metadata: { sessionID: CHILD, status: "running" },
+                },
+                time: { created: 2, ran: 2, completed: 2 },
+              },
+            ],
+          },
+          { id: PROMPT_ID, type: "user", time: { created: 1 }, text: "Delegate" },
+        ],
+        cursor: {},
+      };
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.active"),
+          replyData("session.active", {}),
+          out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+          reply("message.list", finished),
+          out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+          reply("message.list", finished),
+          out("session.update", { sessionID: CHILD, permissions: t3Rules }),
+          reply("session.update", null),
+        ],
+        { external: true },
+      );
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn({
+        ...withLineage(thread),
+        restartContinuationOfRunId: RunId.make("cut-run"),
+      });
+      const collected = yield* Fiber.join(events);
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isTrue(
+        collected.some(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "interrupted",
+        ),
+      );
+      assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+    }).pipe(Effect.scoped),
+  );
   /**
    * The single reader of the runtime's events: resolves `attached` once the
    * running background child has its thread, then returns the turn's terminal.
@@ -2925,6 +3247,61 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       ]);
       assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
     }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["text", "reasoning"] as const)(
+    "preserves backfilled %s before the next delta and end event",
+    (kind) =>
+      Effect.gen(function* () {
+        const reconnectEntries = reconnected({ [SESSION]: { type: "running" } });
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+          promptAccepted,
+          ...reconnectEntries.slice(0, -1),
+          reply("message.list", {
+            data: [
+              {
+                id: "msg_assistant_gap",
+                time: { created: 2 },
+                type: "assistant",
+                agent: "build",
+                model: { id: "big-pickle", providerID: "opencode", variant: "default" },
+                content: [{ type: kind, text: "prefix" }],
+              },
+              { id: PROMPT_ID, time: { created: 1 }, text: "hi", type: "user" },
+            ],
+            cursor: {},
+          }),
+          ...openRequests([]),
+          event(`session.${kind}.delta`, {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            delta: " suffix",
+          }),
+          event(`session.${kind}.ended`, {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            text: "prefix suffix",
+          }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        const events = yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(turnInput(thread));
+        const texts = (yield* Fiber.join(events)).flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          (event.turnItem.type === "assistant_message" || event.turnItem.type === "reasoning")
+            ? [event.turnItem.text]
+            : [],
+        );
+        assert.include(texts, "prefix suffix");
+        assert.notInclude(texts, " suffix");
+      }).pipe(Effect.scoped),
   );
 
   it.effect("shows a permission asked while the stream was down, and answers it", () =>

@@ -1408,6 +1408,106 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect.each(["settled", "interrupted first", "model entries"] as const)(
+    "rejects a resumed session that lost its persisted conversation after a %s turn",
+    (previous) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const thread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        if (previous === "model entries") {
+          fake.queueEntries({
+            entries: [
+              {
+                type: "model_change",
+                id: "new-model",
+                parentId: null,
+                provider: "cliproxyapi",
+                modelId: "gpt-6-luna",
+              },
+              {
+                type: "thinking_level_change",
+                id: "new-thinking",
+                parentId: "new-model",
+                thinkingLevel: "medium",
+              },
+            ],
+            leafId: "new-thinking",
+          });
+        }
+        const error = yield* runtime
+          .resumeThread({
+            providerThread: {
+              ...thread,
+              firstRunOrdinal: 1,
+              nativeConversationHeadRef:
+                previous === "interrupted first"
+                  ? null
+                  : {
+                      driver: PI_PROVIDER,
+                      nativeId: "saved-leaf",
+                      strength: "strong",
+                    },
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterResumeThreadError");
+        assert.match(String(error.cause), /persisted conversation/);
+        const replacement = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+          existingProviderThread: { ...thread, nativeThreadRef: null },
+        });
+        assert.notEqual(replacement.nativeThreadRef?.nativeId, thread.nativeThreadRef?.nativeId);
+        yield* startTurn(runtime, replacement);
+        yield* fake.takeRequest("prompt");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("resumes a compacted conversation whose older entries were pruned", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const thread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.queueEntries({
+        entries: [
+          {
+            type: "compaction",
+            id: "summary",
+            parentId: null,
+            summary: "Remember PAPAYA",
+            firstKeptEntryId: "pruned",
+            tokensBefore: 1000,
+          },
+        ],
+        leafId: "summary",
+      });
+      const resumed = yield* runtime.resumeThread({
+        providerThread: {
+          ...thread,
+          firstRunOrdinal: 1,
+          nativeConversationHeadRef: {
+            driver: PI_PROVIDER,
+            nativeId: "pruned",
+            strength: "strong",
+          },
+        },
+      });
+      assert.equal(resumed.nativeThreadRef?.nativeId, thread.nativeThreadRef?.nativeId);
+      yield* startTurn(runtime, resumed);
+      yield* fake.takeRequest("prompt");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect.each(["veto", "same identity"] as const)(
     "rejects a replacement with %s",
     (invalidReplacement) =>
