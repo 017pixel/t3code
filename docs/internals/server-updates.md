@@ -33,7 +33,9 @@ is never restored: commit opens the gates, so a restore would erase accepted wor
 If the committed target exits three times within five minutes, the launcher returns
 to the previous runtime only when the migration ledger and schema still match the
 pre-trial database. Otherwise it keeps restarting the target with backoff and
-records the update as failed.
+records the update as failed. Before it starts any runtime, the launcher stops the
+providers a crashed server recorded, because an older runtime cannot. A cleanup
+failure never stops the launcher; a runtime with cleanup repeats it.
 
 ## Database rollback
 
