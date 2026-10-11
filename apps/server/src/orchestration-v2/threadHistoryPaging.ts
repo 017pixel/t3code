@@ -53,6 +53,7 @@ type HistoryRow = Pick<
     readonly messageId?: string;
     readonly inputIntent?: string;
     readonly createdBy?: string;
+    readonly runId?: string | null;
   };
 };
 export type SelectTimelinePageResult<Row extends HistoryRow = OrchestrationV2ProjectedTurnItem> = {
@@ -294,7 +295,9 @@ export function selectHistoryPageFromCursor<Row extends HistoryRow>(input: {
   };
   if (input.throughEntryId !== undefined) {
     const targetIndex = input.items.findIndex(
-      (row) => (row.item.messageId ?? row.item.id) === input.throughEntryId,
+      (row) =>
+        (row.item.messageId ?? row.item.id) === input.throughEntryId ||
+        row.item.runId === input.throughEntryId,
     );
     if (targetIndex >= 0 && targetIndex < anchorIndex) {
       // A search jump can combine two pages, but never grow into an unbounded read.
@@ -459,11 +462,35 @@ export function buildBoundedThreadProjection(input: {
   readonly projection: OrchestrationV2ThreadProjection;
   readonly snapshotSequence: number;
   readonly policy?: ThreadHistoryPagePolicy | undefined;
+  readonly viewportWindow?: boolean;
 }): BoundedProjectionResult {
   const policy = input.policy ?? THREAD_HISTORY_PAGE_POLICY;
   const threadId = input.projection.thread.id;
+  const recentRows = input.projection.visibleTurnItems.slice(-policy.maxItems);
+  const retainedRunIds = new Set(recentRows.map(({ item }) => item.runId));
+  for (const run of input.projection.runs) {
+    if (["queued", "preparing", "starting", "running", "waiting"].includes(run.status)) {
+      retainedRunIds.add(run.id);
+    }
+  }
+  const retainedNodeIds = new Set(recentRows.map(({ item }) => item.nodeId));
+  const retainedCheckpointIds = new Set(
+    recentRows.flatMap(({ item }) => ("checkpointId" in item ? [item.checkpointId] : [])),
+  );
   const controlProjection = {
     ...input.projection,
+    ...(input.viewportWindow
+      ? {
+          // Ancestor nodes can belong to old runs with enormous checkpoints.
+          // Their file lists hydrate with the corresponding history page.
+          checkpoints: input.projection.checkpoints.filter(
+            (checkpoint) =>
+              (checkpoint.runId !== null && retainedRunIds.has(checkpoint.runId)) ||
+              retainedNodeIds.has(checkpoint.nodeId) ||
+              retainedCheckpointIds.has(checkpoint.id),
+          ),
+        }
+      : {}),
     plans: input.projection.plans.filter((plan) => plan.status === "active"),
     contextHandoffs: input.projection.contextHandoffs.filter(
       (handoff) => handoff.status === "pending" || handoff.status === "ready",

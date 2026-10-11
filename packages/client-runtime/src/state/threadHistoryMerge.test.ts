@@ -45,6 +45,51 @@ function row(index: number): OrchestrationV2ProjectedTurnItem {
 }
 
 describe("threadHistoryMerge", () => {
+  it("hydrates older execution metadata without overwriting live entities", () => {
+    const node = {
+      id: "history-node" as never,
+      threadId: v2ThreadId,
+      runId: null,
+      parentNodeId: null,
+      rootNodeId: "history-node" as never,
+      kind: "system" as const,
+      status: "completed" as const,
+      countsForRun: false,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      runtimeRequestId: null,
+      checkpointScopeId: null,
+      startedAt: NOW,
+      completedAt: NOW,
+    };
+    const current = {
+      ...v2Projection,
+      nodes: [node],
+      turnItems: [row(4).item],
+      visibleTurnItems: [row(4)],
+    };
+    const older = { ...node, id: "older-node" as never, rootNodeId: "older-node" as never };
+    const merged = mergeOlderHistoryIntoProjection(current, [row(1)], {
+      nodes: [{ ...node, status: "running" }, older],
+      checkpoints: [],
+      runs: [],
+      attempts: [],
+    });
+    expect(merged.nodes).toEqual([older, node]);
+    expect(merged.nodes[1]).toBe(node);
+    expect(merged.visibleTurnItems.map((item) => item.sourceItemId)).toEqual(["item-1", "item-4"]);
+    for (const rows of [[], current.visibleTurnItems]) {
+      const hydrated = mergeOlderHistoryIntoProjection(current, rows, {
+        nodes: [older],
+        checkpoints: [],
+        runs: [],
+        attempts: [],
+      });
+      expect(hydrated.nodes).toEqual([older, node]);
+      expect(hydrated.visibleTurnItems).toBe(current.visibleTurnItems);
+    }
+  });
   it("fills activity around partial messages in canonical order and preserves live edits", () => {
     const initial = { ...v2Projection, turnItems: [row(4).item], visibleTurnItems: [row(4)] };
     const preview = [row(1), row(3)];

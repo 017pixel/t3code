@@ -1,5 +1,6 @@
 import {
   EventId,
+  MessageId,
   OrchestrationV2ThreadStreamItem,
   ThreadId,
   TurnItemId,
@@ -207,6 +208,44 @@ describe("decideThreadResume", () => {
     expect(snapshot.hasMoreHistory).toBe(true);
     expect(snapshot.latestLocalTurnOrdinal).toBe(80);
     expect(snapshot.payloadBudgetExceeded).toBe(false);
+  });
+
+  it("keeps a large turn pageable only for clients requesting a viewport window", () => {
+    const base = timelineProjection(100);
+    const first = base.visibleTurnItems[0]!;
+    const user = {
+      ...first.item,
+      type: "user_message" as const,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      messageId: MessageId.make("viewport-user"),
+      text: "Start a long turn",
+      attachments: [],
+      inputIntent: "turn_start" as const,
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+      createdAt: NOW,
+    };
+    const visibleTurnItems = [{ ...first, item: user }, ...base.visibleTurnItems.slice(1)];
+    const projection = {
+      ...base,
+      visibleTurnItems,
+      turnItems: visibleTurnItems.map((row) => row.item),
+    };
+    const legacy = buildBoundedThreadStreamSnapshot({ snapshotSequence: 44, projection });
+    const viewport = buildBoundedThreadStreamSnapshot({
+      snapshotSequence: 44,
+      projection,
+      viewportWindow: true,
+    });
+    expect(legacy.projection.visibleTurnItems).toHaveLength(100);
+    expect(legacy.hasMoreHistory).toBe(false);
+    expect(viewport.projection.visibleTurnItems).toHaveLength(75);
+    expect(viewport.hasMoreHistory).toBe(true);
+    expect(viewport.historyCursor).not.toBeNull();
+    expect(viewport.payloadBudgetExceeded).toBe(false);
   });
 
   it("rejects a 10 MiB raw replay even when its projected form fits the wire budget", () => {

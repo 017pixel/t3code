@@ -361,6 +361,7 @@ export interface ProjectionStoreV2Shape {
     cursor: string,
     throughEntryId?: string,
     conversationOnly?: boolean,
+    includeSupport?: boolean,
   ) => Effect.Effect<OrchestrationV2ThreadHistoryPage, ProjectionStoreV2Error>;
   readonly getTimelinePage: (
     threadId: ThreadId,
@@ -529,6 +530,8 @@ export interface ProjectionStoreV2Shape {
       readonly rowLimit: number;
       /** User-turn window, with extra anchors for the inclusive cursor and has-more check. */
       readonly userTurnLimit?: number | undefined;
+      /** Historical checkpoints hydrate with their rows instead of node ancestry. */
+      readonly deferHistoricalSupport?: boolean | undefined;
       readonly anchorItemId?: TurnItemId | undefined;
       readonly anchorThreadId?: ThreadId | undefined;
       readonly requiredRunId?: RunId | undefined;
@@ -2801,6 +2804,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       window?: {
         readonly rowLimit: number;
         readonly userTurnLimit?: number | undefined;
+        readonly deferHistoricalSupport?: boolean | undefined;
         readonly anchorItemId?: TurnItemId | undefined;
         readonly requiredRunId?: RunId | undefined;
         readonly suppressLocal?: boolean | undefined;
@@ -3286,7 +3290,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND (status IN ('pending','capturing')
                 OR checkpoint_id IN (SELECT value FROM json_each(${cohortCheckpointIds}))
                 OR run_id IN (SELECT value FROM json_each(${cohortRunIds}))
-                OR node_id IN (SELECT value FROM json_each(${cohortNodeIds})))
+                OR node_id IN (SELECT value FROM json_each(${window.deferHistoricalSupport ? cohortJson("nodeId") : cohortNodeIds})))
             ORDER BY scope_id ASC, ordinal_within_scope ASC
           `,
           fields !== undefined && !fields.includes("contextHandoffs")
@@ -3408,6 +3412,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       window?: {
         readonly rowLimit: number;
         readonly userTurnLimit?: number | undefined;
+        readonly deferHistoricalSupport?: boolean | undefined;
         readonly anchorItemId?: TurnItemId | undefined;
         readonly requiredRunId?: RunId | undefined;
         readonly suppressLocal?: boolean | undefined;
@@ -3524,6 +3529,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 return {
                   rowLimit: window.rowLimit,
                   userTurnLimit: window.userTurnLimit,
+                  deferHistoricalSupport: window.deferHistoricalSupport,
                   requiredRunId: forkedFrom.runId,
                   suppressLocal: anchor === undefined || anchorIsInDescendant,
                   ...(anchor === undefined || anchorIsInDescendant
@@ -5053,6 +5059,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       cursor,
       throughEntryId,
       conversationOnly,
+      includeSupport,
     ) =>
       sql
         .withTransaction(
@@ -5084,6 +5091,29 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               catch: (cause) => new ProjectionStoreReadError({ threadId, cause }),
             });
             const end = (page.items.at(-1)?.canonicalPosition ?? -1) + 1;
+            const supportProjection =
+              includeSupport && page.items.length > 0
+                ? yield* readProjection(threadId, new Set(), {
+                    rowLimit: page.items.length,
+                    deferHistoricalSupport: true,
+                    ...(page.items.at(-1)!.sourceThreadId === threadId
+                      ? { anchorItemId: page.items.at(-1)!.sourceItemId }
+                      : {}),
+                    historyAnchor: {
+                      threadId: page.items.at(-1)!.sourceThreadId,
+                      itemId: page.items.at(-1)!.sourceItemId,
+                    },
+                  })
+                : undefined;
+            const support =
+              supportProjection === undefined
+                ? undefined
+                : {
+                    nodes: supportProjection.nodes,
+                    checkpoints: supportProjection.checkpoints,
+                    runs: supportProjection.runs,
+                    attempts: supportProjection.attempts,
+                  };
             const hasUserTurns = index.visible
               .slice(0, end)
               .some((row) => isThreadHistoryUserTurn(row.item));
@@ -5130,6 +5160,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ...page,
                 snapshotSequence,
                 items: items.map((row, position) => ({ ...row, position })),
+                ...(support === undefined ? {} : { support }),
               };
             // The no-turn fallback also respects the encoded byte budget after projection.
             const bounded = selectRecentTimelineWindow({
@@ -5149,6 +5180,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 : bounded.items,
               nextCursor: bounded.hasMoreHistory ? bounded.nextCursor : page.nextCursor,
               hasMoreHistory: bounded.hasMoreHistory || page.hasMoreHistory,
+              ...(support === undefined ? {} : { support }),
             };
           }),
         )
@@ -5243,6 +5275,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             const projection = yield* readProjection(threadId, new Set(), {
               rowLimit: options.rowLimit,
               userTurnLimit: options.userTurnLimit,
+              deferHistoricalSupport: options.deferHistoricalSupport,
               ...(historyAnchor?.threadId === threadId
                 ? { anchorItemId: historyAnchor.itemId }
                 : {}),
@@ -6734,7 +6767,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 ),
           ),
         ),
-      getThreadHistoryPage: (threadId, cursor, throughEntryId, conversationOnly) =>
+      getThreadHistoryPage: (threadId, cursor, throughEntryId, conversationOnly, includeSupport) =>
         service.getThreadSnapshot(threadId).pipe(
           Effect.flatMap(({ projection, snapshotSequence }) =>
             Effect.gen(function* () {
@@ -6757,6 +6790,16 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                     items: conversationOnly
                       ? page.items.filter((row) => isConversationHistoryItem(row.item))
                       : page.items,
+                    ...(includeSupport
+                      ? {
+                          support: {
+                            nodes: projection.nodes,
+                            checkpoints: projection.checkpoints,
+                            runs: projection.runs,
+                            attempts: projection.attempts,
+                          },
+                        }
+                      : {}),
                   };
                 },
                 catch: (cause) => new ProjectionStoreReadError({ threadId, cause }),

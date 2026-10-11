@@ -1,6 +1,7 @@
 import type {
   OrchestrationV2ProjectedTurnItem,
   OrchestrationV2ThreadProjection,
+  OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
 import { isOrchestrationV2TurnItemVisible } from "@t3tools/shared/orchestrationV2Timeline";
 
@@ -67,10 +68,19 @@ function renumberVisible(
 export function mergeOlderHistoryIntoProjection(
   projection: OrchestrationV2ThreadProjection,
   olderItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
+  support?: OrchestrationV2ThreadHistoryPage["support"],
 ): OrchestrationV2ThreadProjection {
-  if (olderItems.length === 0) {
-    return projection;
-  }
+  const withSupport =
+    support === undefined
+      ? projection
+      : {
+          ...projection,
+          nodes: mergeHistoryEntities(projection.nodes, support.nodes),
+          checkpoints: mergeHistoryEntities(projection.checkpoints, support.checkpoints),
+          runs: mergeHistoryEntities(projection.runs, support.runs),
+          attempts: mergeHistoryEntities(projection.attempts, support.attempts),
+        };
+  if (olderItems.length === 0) return withSupport;
 
   const currentByKey = new Map(
     projection.visibleTurnItems.map((row) => [projectedItemKey(row), row]),
@@ -111,7 +121,7 @@ export function mergeOlderHistoryIntoProjection(
     )
       turnItemById.set(String(row.sourceItemId), row.item);
   }
-  if (page.length === 0) return projection;
+  if (page.length === 0) return withSupport;
   // Server page order fills gaps between rows from a partial conversation load.
   // Existing rows supply live values; rows outside this range keep their order.
   const visible = [
@@ -122,12 +132,22 @@ export function mergeOlderHistoryIntoProjection(
     visible.length === projection.visibleTurnItems.length &&
     visible.every((row, index) => row === projection.visibleTurnItems[index])
   )
-    return projection;
+    return withSupport;
   return {
-    ...projection,
+    ...withSupport,
     turnItems: [...turnItemById.values()],
     visibleTurnItems: renumberVisible(visible),
   };
+}
+
+/** Historical pages fill missing entities without replacing newer live values. */
+function mergeHistoryEntities<T extends { readonly id: string }>(
+  current: ReadonlyArray<T>,
+  older: ReadonlyArray<T>,
+): ReadonlyArray<T> {
+  const ids = new Set(current.map((value) => value.id));
+  const missing = older.filter((value) => !ids.has(value.id));
+  return missing.length === 0 ? current : [...missing, ...current];
 }
 
 export function applyHistoryPageMeta(

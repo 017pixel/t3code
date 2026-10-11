@@ -824,6 +824,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
     readonly acceptBoundedSnapshot?: boolean;
     readonly acceptCompactTurnItems?: boolean;
     readonly acceptCompactCheckpointItems?: boolean;
+    readonly acceptViewportWindow?: boolean;
     readonly acceptThreadFieldEvents?: boolean;
   }) {
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -929,7 +930,10 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
         useBoundedSnapshot
           ? threadManagement.getThreadSnapshotWindow(input.threadId, {
               rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
-              userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
+              deferHistoricalSupport: input.acceptViewportWindow === true,
+              userTurnLimit: input.acceptViewportWindow
+                ? undefined
+                : THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
             })
           : threadManagement.getThreadSnapshot(input.threadId)
       ).pipe(
@@ -948,6 +952,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
             ...snapshot,
             compactTurnItems: input.acceptCompactTurnItems === true,
             compactCheckpointItems: input.acceptCompactCheckpointItems === true,
+            viewportWindow: input.acceptViewportWindow === true,
           })
         : {
             kind: "snapshot" as const,

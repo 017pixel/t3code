@@ -720,7 +720,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
                 { _tag: "loaded" },
                 {
                   ...latest,
-                  data: Option.some(mergeOlderHistoryIntoProjection(latest.data.value, page.items)),
+                  data: Option.some(
+                    mergeOlderHistoryIntoProjection(latest.data.value, page.items, page.support),
+                  ),
                   status: complete && waiting ? "synchronizing" : latest.status,
                   history: complete
                     ? applyHistoryPageMeta(latest.history, page)
@@ -893,6 +895,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
                 acceptBoundedSnapshot: true as const,
                 acceptCompactTurnItems: true as const,
                 acceptCompactCheckpointItems: true as const,
+                acceptViewportWindow: true as const,
               }
             : {}),
         };
