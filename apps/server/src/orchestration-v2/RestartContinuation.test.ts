@@ -416,6 +416,25 @@ it("recovers an admitted continuation after another crash before provider start"
   assert.equal(restartContinuationRun(starting, testNow)?.id, runId);
 });
 
+it("recovers an accepted initial prompt before admission creates its native session", () => {
+  const projection = makeProjection();
+  const starting = {
+    ...projection,
+    runs: [{ ...projection.runs[0]!, status: "starting" as const }],
+    attempts: [{ id: attemptId, runId, reason: "initial" }],
+    providerThreads: [{ ...projection.providerThreads[0]!, nativeThreadRef: null }],
+    providerSessions: [],
+    providerTurns: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  assert.equal(restartContinuationRun(starting, testNow)?.id, runId);
+  assert.isUndefined(
+    restartContinuationRun(
+      { ...starting, runs: [{ ...starting.runs[0]!, status: "queued" }] },
+      testNow,
+    ),
+  );
+});
+
 it("recovers an accepted steering restart before the replacement turn starts", () => {
   const projection = makeProjection();
   const starting = {
@@ -923,6 +942,20 @@ const cutMidTurn = (extra: Record<string, unknown> = {}) => {
     providerTurns: [{ ...base.providerTurns[0]!, status: "cancelled" }],
   } as unknown as OrchestrationV2ThreadProjection;
 };
+
+it.effect("delivers the original prompt when a restart cuts initial provider admission", () =>
+  Effect.gen(function* () {
+    const projection = {
+      ...cutMidTurn(),
+      attempts: [{ id: attemptId, runId, reason: "initial" }],
+      providerTurns: [],
+      messages: [
+        { id: MessageId.make("message:user"), text: "Do the accepted work.", attachments: [] },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    assert.deepEqual(yield* continuationTexts(projection), [projection.messages[0]!.text]);
+  }),
+);
 
 it.effect(
   "delivers the replacement prompt when a steering restart never reached the provider",

@@ -240,7 +240,7 @@ export function restartContinuationNote(
 export const isWorktreeContinuationRun = (run: Pick<OrchestrationV2Run, "userMessageId">) =>
   /^message:mcp:[^:]+:worktree-continuation:/.test(run.userMessageId);
 
-/** A handoff or replacement prompt that never reached the provider. */
+/** An initial, handoff, or replacement prompt that never reached the provider. */
 export function restartPromptSource(
   source: OrchestrationV2Run,
   runs: ReadonlyArray<OrchestrationV2Run>,
@@ -256,7 +256,8 @@ export function restartPromptSource(
       isWorktreeContinuationRun(current) ||
       attempts.some(
         (attempt) =>
-          attempt.id === current?.activeAttemptId && attempt.reason === "steering_restart",
+          attempt.id === current?.activeAttemptId &&
+          (attempt.reason === "initial" || attempt.reason === "steering_restart"),
       )
     )
       return current;

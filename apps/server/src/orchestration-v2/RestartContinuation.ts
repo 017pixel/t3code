@@ -146,11 +146,13 @@ export function restartContinuationRun(
     undefined,
   );
   if (!run) return;
+  const promptSource =
+    run.status === "starting"
+      ? restartPromptSource(run, projection.runs, projection.providerTurns, projection.attempts)
+      : undefined;
   const preparedContinuation =
     run.status === "starting" &&
-    (run.restartContinuationOfRunId !== undefined ||
-      restartPromptSource(run, projection.runs, projection.providerTurns, projection.attempts) !==
-        undefined);
+    (run.restartContinuationOfRunId !== undefined || promptSource !== undefined);
   const pendingSteering = (run.restartPendingMessageIds?.length ?? 0) > 0;
   if (
     run.status !== "running" &&
@@ -170,12 +172,24 @@ export function restartContinuationRun(
     providerThread.appThreadId !== projection.thread.id ||
     providerThread.ownerNodeId !== null ||
     providerThread.providerInstanceId !== run.providerInstanceId ||
+    providerThread.status === "closed" ||
+    providerThread.status === "archived"
+  )
+    return;
+  // Admission can hold an accepted prompt before its first native session exists.
+  if (
+    preparedContinuation &&
+    promptSource !== undefined &&
+    projection.attempts.some(
+      (attempt) => attempt.id === promptSource.activeAttemptId && attempt.reason === "initial",
+    )
+  )
+    return run;
+  if (
     providerThread.nativeThreadRef?.nativeId == null ||
     providerThread.nativeThreadRef.strength !== "strong" ||
     providerThread.nativeThreadRef.driver !== providerThread.driver ||
-    (liveTurnRequired && providerThread.status !== "active") ||
-    providerThread.status === "closed" ||
-    providerThread.status === "archived"
+    (liveTurnRequired && providerThread.status !== "active")
   )
     return;
   const session = projection.providerSessions.find(
