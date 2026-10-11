@@ -166,6 +166,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import {
+  eraseHeldText,
   holdTextForUrlRouteTarget,
   isUrlRouteTargetElsewhere,
   KeptViewWarmingContext,
@@ -883,6 +884,16 @@ function isComposerTextKey(event: KeyboardEvent): boolean {
   if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return false;
   return (
     event.key.length === 1 &&
+    event.target instanceof Element &&
+    event.target.closest('[data-testid="composer-editor"]') !== null
+  );
+}
+
+/** Enter or Backspace pressed in the chat composer itself. */
+function isComposerEditKey(event: KeyboardEvent): boolean {
+  return (
+    !event.isComposing &&
+    (event.key === "Enter" || event.key === "Backspace") &&
     event.target instanceof Element &&
     event.target.closest('[data-testid="composer-editor"]') !== null
   );
@@ -8226,6 +8237,14 @@ export default function ChatView(props: ChatViewProps) {
         (typesToComposer || isComposerTextKey(event)) &&
         holdTextForUrlRouteTarget(viewRouteTargetKey, event.key)
       ) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      // Enter would send this thread's draft and Backspace would edit it.
+      // Backspace takes back held text instead, and Enter does nothing.
+      if (isUrlRouteTargetElsewhere(viewRouteTargetKey) && isComposerEditKey(event)) {
+        if (event.key === "Backspace") eraseHeldText(viewRouteTargetKey);
         event.preventDefault();
         event.stopPropagation();
         return;
