@@ -12,6 +12,7 @@ import {
 } from "@t3tools/shared/serverSettings";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -26,6 +27,8 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as Tracer from "effect/Tracer";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientError from "effect/http/HttpClientError";
 import { OtlpExporter, OtlpLogger, OtlpTracer } from "effect/observability";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -616,6 +619,37 @@ const layerBackendOutputLogFactory = Layer.effect(
   }),
 );
 
+// The OTLP specification's default export timeout. An exporter waits for one
+// export before the next, and the main process's node:http client has no
+// timeout, so a collector that accepts a request and never answers would stop
+// main-process telemetry for the session. The bound covers the response body.
+const OTLP_EXPORT_TIMEOUT = Duration.seconds(10);
+
+const layerOtlpHttpClient = Layer.effect(
+  HttpClient.HttpClient,
+  Effect.map(
+    HttpClient.HttpClient,
+    HttpClient.transform((response, request) =>
+      response.pipe(
+        // The exporter reads the body next; the response caches it.
+        Effect.tap((received) => received.arrayBuffer),
+        Effect.timeoutOrElse({
+          duration: OTLP_EXPORT_TIMEOUT,
+          orElse: () =>
+            Effect.fail(
+              new HttpClientError.HttpClientError({
+                reason: new HttpClientError.TransportError({
+                  request,
+                  description: "OTLP export timed out",
+                }),
+              }),
+            ),
+        }),
+      ),
+    ),
+  ),
+);
+
 /**
  * Logs and traces for the main process, assembled together because they share
  * one read of the environment and Settings, and because a process gets exactly
@@ -724,7 +758,9 @@ const layerTelemetry = Layer.unwrap(
     );
 
     return layerOtelWarnings.pipe(
-      Layer.provideMerge(Layer.mergeAll(layerLogger, layerTracer)),
+      Layer.provideMerge(
+        Layer.mergeAll(layerLogger, layerTracer).pipe(Layer.provide(layerOtlpHttpClient)),
+      ),
       Layer.provide(OtelEnvironment.layerResourceAttributes(endpoints.resourceAttributes)),
     );
   }),
