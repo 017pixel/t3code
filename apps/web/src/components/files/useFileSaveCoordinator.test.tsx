@@ -98,6 +98,15 @@ describe("file-save React lifecycle", () => {
     expect(appAtomRegistry.get(revision)).toBe(before + 1);
   });
 
+  it("keeps the pending indicator when a newer draft supersedes the save", async () => {
+    confirmFile.mockReturnValue(false);
+    mount();
+    changeHandler()("older draft");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(onPendingChange).not.toHaveBeenCalledWith("file.txt", false);
+  });
+
   it("persists rendered Markdown task changes after StrictMode setup replay", async () => {
     mount({ ...defaultProps, relativePath: "README.md" });
     const nextContents = setMarkdownTaskChecked("- [ ] task\n", 2, true);

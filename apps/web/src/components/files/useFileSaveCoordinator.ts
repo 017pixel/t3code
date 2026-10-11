@@ -44,8 +44,14 @@ export function useFileSaveCoordinator({
               input: { cwd, relativePath, contents: nextContents },
             }),
           onConfirmed: (confirmedContents) => {
-            confirmProjectFileQueryData(environmentId, cwd, relativePath, confirmedContents);
+            const confirmed = confirmProjectFileQueryData(
+              environmentId,
+              cwd,
+              relativePath,
+              confirmedContents,
+            );
             invalidateReviewWorkspace(environmentId, cwd);
+            return confirmed;
           },
         });
         coordinatorRef.current = coordinator;
