@@ -71,10 +71,11 @@ behind. Cancelled background work is reported on the next user turn; it does not
 wake a finished run. Undelivered steering can still qualify as unfinished input.
 
 A crashed server can leave its providers and terminals running. The next server
-stops the ones its [process ledger](../../apps/server/src/process/ProviderProcessLedger.ts)
+stops the ones its [process ledger](../../apps/server/src/process/ownedProcesses.ts)
 recorded before any continuation can launch, so a continued run never races its
 orphaned original. Each signal rechecks the process's creation identity. A detached
-provider installer is never stopped, even when it descends from a recorded process.
+provider installer, another environment's registered server and its launcher are
+never stopped, even when they descend from a recorded process.
 
 Recovery retires effects tied to the lost process and records continuation intent
 in the durable outbox. That intent survives another restart before provider startup.
