@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import { lock } from "proper-lockfile";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
 import * as Semaphore from "effect/Semaphore";
 
@@ -129,19 +130,32 @@ export const make = (directory: string) => {
         return yield* effect;
       }),
     );
-  return { acquireRead, withRead, withWrite };
+  return { directory, acquireRead, withRead, withWrite };
 };
 
+/** Every T3 server on the host shares the user's provider CLIs, so servers share one gate. */
+export const userDirectory = () =>
+  NodePath.join(
+    process.env.XDG_CACHE_HOME || NodePath.join(NodeOS.homedir(), ".cache"),
+    "t3",
+    "provider-maintenance",
+  );
+
+/**
+ * Servers provide the user-wide gate through `layer`. Anything else, such as a
+ * test, gets a private gate so it never waits on or blocks a live T3.
+ */
 export class ProviderMaintenanceHostLock extends Context.Reference<ReturnType<typeof make>>(
   "t3/provider/ProviderMaintenanceHostLock",
   {
-    defaultValue: () =>
-      make(
-        NodePath.join(
-          process.env.XDG_CACHE_HOME || NodePath.join(NodeOS.homedir(), ".cache"),
-          "t3",
-          "provider-maintenance",
-        ),
-      ),
+    defaultValue: () => {
+      const directory = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-provider-maintenance-"),
+      );
+      process.once("exit", () => NodeFS.rmSync(directory, { recursive: true, force: true }));
+      return make(directory);
+    },
   },
 ) {}
+
+export const layer = Layer.sync(ProviderMaintenanceHostLock, () => make(userDirectory()));

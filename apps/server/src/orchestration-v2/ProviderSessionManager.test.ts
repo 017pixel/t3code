@@ -54,6 +54,7 @@ import * as HostLock from "../provider/ProviderMaintenanceHostLock.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const layerHostLock = Layer.succeed(HostLock.ProviderMaintenanceHostLock, {
+  directory: "",
   acquireRead: Effect.succeed(Effect.void),
   withRead: (effect) => effect,
   withWrite: (effect) => effect,
@@ -4740,6 +4741,7 @@ it.effect("ProviderSessionManagerV2 holds the host lease through terminal backgr
     const pending = yield* Ref.make(true);
     const held = yield* Ref.make(0);
     const hostLock = {
+      directory: "",
       withRead: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
       withWrite: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
       acquireRead: Ref.update(held, (value) => value + 1).pipe(

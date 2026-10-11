@@ -201,6 +201,7 @@ it.effect("holds the host lease until the text generation provider completes", (
       }),
     );
     const host = {
+      directory: "",
       acquireRead: Effect.succeed(Effect.void),
       withRead: permit.withPermits(1),
       withWrite: permit.withPermits(1),

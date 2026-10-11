@@ -9,6 +9,7 @@ import * as ThreadContracts from "@t3tools/contracts";
 import { describe, it, assert } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
@@ -68,6 +69,7 @@ const encoder = new TextEncoder();
 const layerNonWindowsPlatform = Layer.merge(
   Layer.succeed(HostProcess.Platform, "linux"),
   Layer.succeed(HostLock.ProviderMaintenanceHostLock, {
+    directory: "",
     acquireRead: Effect.succeed(Effect.void),
     withRead: (effect) => effect,
     withWrite: (effect) => effect,
@@ -1706,6 +1708,18 @@ describe("provider maintenance host leases", () => {
         assert.isTrue(yield* Deferred.isDone(entered));
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps anything but a server off the user-wide gate", () =>
+    Effect.gen(function* () {
+      const fallback = yield* HostLock.ProviderMaintenanceHostLock;
+      assert.isTrue(fallback.directory.startsWith(NodeOS.tmpdir()));
+      assert.notStrictEqual(fallback.directory, HostLock.userDirectory());
+      const served = yield* HostLock.ProviderMaintenanceHostLock.pipe(
+        Effect.provide(HostLock.layer),
+      );
+      assert.strictEqual(served.directory, HostLock.userDirectory());
+    }),
   );
 
   it.live("reclaims a dead reader whose PID has been reused", () =>
