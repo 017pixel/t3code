@@ -291,7 +291,7 @@ export const make = Effect.gen(function* () {
   const finishedUpdateActions = yield* PubSub.unbounded<UpdateAction>();
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
-  const failedBackgroundDownloadRef = yield* Ref.make<string | null>(null);
+  const failedDownloads = new Set<string>();
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
       environment.appVersion,
@@ -336,17 +336,18 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  // The .deb carries electron-builder's resources/package-type marker.
-  // electron-updater reads the same file and installs updates with dpkg.
-  const isDebPackage =
+  // Use the same package identity as electron-updater. An inherited APPIMAGE
+  // variable must not enable updates for an RPM or pacman installation.
+  const linuxPackageType =
     environment.platform === "linux" && environment.isPackaged
       ? yield* fileSystem
           .readFileString(environment.path.join(environment.resourcesPath, "package-type"))
           .pipe(
-            Effect.map((packageType) => packageType.trim() === "deb"),
-            Effect.orElseSucceed(() => false),
+            Effect.map((packageType) => packageType.trim()),
+            Effect.orElseSucceed(() => null),
           )
-      : false;
+      : null;
+  const isDebPackage = linuxPackageType === "deb";
 
   const hasUpdateFeedConfig = Ref.get(appUpdateYmlConfigRef).pipe(
     Effect.map((appUpdateYmlConfig) => Option.isSome(appUpdateYmlConfig) || config.mockUpdates),
@@ -359,7 +360,10 @@ export const make = Effect.gen(function* () {
         isDevelopment: environment.isDevelopment,
         isPackaged: environment.isPackaged,
         platform: environment.platform,
-        appImage: Option.getOrUndefined(config.appImagePath),
+        appImage:
+          linuxPackageType === "rpm" || linuxPackageType === "pacman"
+            ? undefined
+            : Option.getOrUndefined(config.appImagePath),
         isDebPackage,
         disabledByEnv: config.disableAutoUpdate,
         hasUpdateFeedConfig: hasFeedConfig,
@@ -471,7 +475,9 @@ export const make = Effect.gen(function* () {
       return { accepted: false, completed: false };
     }
 
-    const releaseFailedDownload = electronUpdater.setAutoInstallOnAppQuit(false);
+    const releaseFailedDownload = Effect.sync(() => {
+      if (state.availableVersion !== null) failedDownloads.add(state.availableVersion);
+    }).pipe(Effect.andThen(electronUpdater.setAutoInstallOnAppQuit(false)));
 
     return yield* Effect.gen(function* () {
       yield* setState(reduceDesktopUpdateStateOnDownloadStart(state));
@@ -532,11 +538,8 @@ export const make = Effect.gen(function* () {
       if ((yield* Ref.get(updateStateRef)).downloadedVersion !== null) return;
       if (!(yield* checkForUpdates(reason)) || (yield* Ref.get(desktopState.quitting))) return;
       const version = (yield* Ref.get(updateStateRef)).availableVersion;
-      if (version === null || version === (yield* Ref.get(failedBackgroundDownloadRef))) return;
-      const result = yield* downloadAvailableUpdate;
-      if (result.accepted && !result.completed) {
-        yield* Ref.set(failedBackgroundDownloadRef, version);
-      }
+      if (version === null || failedDownloads.has(version)) return;
+      yield* downloadAvailableUpdate;
     },
   );
 

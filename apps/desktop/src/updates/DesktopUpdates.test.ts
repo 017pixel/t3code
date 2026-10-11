@@ -21,6 +21,45 @@ import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 describe("DesktopUpdates", () => {
+  it.effect.each([true, false])(
+    "does not retry failed releases on polls (manual: %s)",
+    (manual) => {
+      let offeredVersion = "1.2.4";
+      const harness = makeHarness({
+        platform: "win32",
+        checkForUpdates: Effect.sync(() =>
+          harness.emit("update-available", { version: offeredVersion }),
+        ),
+        downloadUpdate: Effect.fail(
+          new ElectronUpdater.ElectronUpdaterDownloadUpdateError({
+            channel: "latest",
+            cause: new Error("offline"),
+          }),
+        ),
+      });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          if (manual) {
+            yield* updates.check("manual");
+            assert.isFalse((yield* updates.download).completed);
+          }
+          yield* TestClock.adjust(Duration.seconds(15));
+          assert.equal(harness.downloadCount(), 1);
+          offeredVersion = "1.2.5";
+          yield* TestClock.adjust(Duration.minutes(4));
+          assert.equal(harness.downloadCount(), 2);
+          offeredVersion = "1.2.4";
+          yield* TestClock.adjust(Duration.minutes(4));
+          assert.equal(harness.downloadCount(), 2);
+          assert.isTrue((yield* updates.download).accepted);
+          assert.equal(harness.downloadCount(), 3);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
+
   it("preserves complete causes for update poller and event failures", () => {
     const cause = Cause.combine(
       Cause.fail(new Error("updater failed")),
@@ -106,19 +145,26 @@ describe("DesktopUpdates", () => {
     }),
   );
 
-  it.effect("leaves RPM installs disabled", () => {
-    const harness = makeHarness({ platform: "linux", packageType: "rpm" });
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        yield* updates.configure;
-        assert.equal((yield* updates.getState).status, "disabled");
-        assert.isFalse((yield* updates.check("manual")).checked);
-        assert.isFalse(yield* updates.installOnQuit);
-        assert.equal(harness.downloadCount(), 0);
-      }),
-    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
-  });
+  it.effect.each([false, true])(
+    "leaves RPM installs disabled (inherited APPIMAGE: %s)",
+    (inherited) => {
+      const harness = makeHarness({
+        platform: "linux",
+        packageType: "rpm",
+        env: inherited ? { APPIMAGE: "/tmp/T3.AppImage" } : {},
+      });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          assert.equal((yield* updates.getState).status, "disabled");
+          assert.isFalse((yield* updates.check("manual")).checked);
+          assert.isFalse(yield* updates.installOnQuit);
+          assert.equal(harness.downloadCount(), 0);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
 
   it.effect(
     "recovers background checks after being offline without downloading during errors",
@@ -349,6 +395,38 @@ describe("DesktopUpdates", () => {
         yield* TestClock.adjust(Duration.seconds(15));
         assert.equal((yield* updates.getState).status, "downloading");
         assert.equal(harness.downloadCount(), 1);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect.each([
+    { platform: "win32" as const, env: {}, packageType: undefined, installOnQuit: true },
+    {
+      platform: "linux" as const,
+      env: { APPIMAGE: "/tmp/T3.AppImage" },
+      packageType: undefined,
+      installOnQuit: true,
+    },
+    { platform: "linux" as const, env: {}, packageType: "deb", installOnQuit: false },
+  ])("downloads on $platform ($packageType) and preserves its installer for quit", (options) => {
+    const harness = makeHarness({
+      ...options,
+      checkForUpdates: Effect.sync(() => harness.emit("update-available", { version: "1.2.4" })),
+      downloadUpdate: Effect.sync(() => harness.emit("update-downloaded", { version: "1.2.4" })),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* TestClock.adjust(Duration.seconds(15));
+        assert.equal(harness.downloadCount(), 1);
+        assert.equal((yield* updates.getState).downloadedVersion, "1.2.4");
+        assert.equal(harness.autoInstallOnAppQuit(), options.installOnQuit);
+        yield* TestClock.adjust(Duration.minutes(12));
+        assert.equal(harness.checkCount(), 1);
+        assert.equal(harness.downloadCount(), 1);
+        assert.isTrue((yield* updates.install).accepted);
+        assert.equal(harness.quitAndInstalls(), 1);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
