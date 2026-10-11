@@ -676,6 +676,11 @@ function EventRouter({
     handleWelcome(serverWelcome);
   }, [serverWelcome]);
 
+  // Before handling the event: the first config can come without one.
+  useEffect(() => {
+    if (serverConfig) keybindingsToastController.seed(serverConfig.issues);
+  }, [keybindingsToastController, serverConfig]);
+
   useEffect(() => {
     if (serverConfigEvent === null || handledConfigEventRef.current === serverConfigEvent) {
       return;

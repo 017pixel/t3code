@@ -498,6 +498,18 @@ export function forgetBootEnvironment(environmentId: EnvironmentId): void {
   forgotten.add(environmentId);
   shells.delete(environmentId);
   serverConfigs.delete(environmentId);
+  // What this page booted with stops standing in for it too, so the
+  // environment, paired again, starts from its own data.
+  if (
+    bootSnapshot !== null &&
+    (bootSnapshot.shells.has(environmentId) || bootSnapshot.serverConfigs.has(environmentId))
+  ) {
+    const bootShells = new Map(bootSnapshot.shells);
+    const bootServerConfigs = new Map(bootSnapshot.serverConfigs);
+    bootShells.delete(environmentId);
+    bootServerConfigs.delete(environmentId);
+    bootSnapshot = { ...bootSnapshot, shells: bootShells, serverConfigs: bootServerConfigs };
+  }
   scheduleFlush();
 }
 

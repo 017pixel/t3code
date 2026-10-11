@@ -430,7 +430,9 @@ export function groupPullRequestsByInvolvement<Entry extends ScopedEntry>(
  * the environment on top of that, because two connected machines can hold the same repository and
  * would otherwise contribute two rows under one key.
  */
-export function pullRequestEntryKey(entry: ScopedEntry): string {
+export function pullRequestEntryKey(
+  entry: Pick<ScopedEntry, "environmentId" | "host" | "repository" | "number">,
+): string {
   const scope = entry.environmentId === undefined ? "" : `${entry.environmentId}:`;
   return `${scope}${entry.host}:${entry.repository}#${entry.number}`;
 }

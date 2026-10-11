@@ -98,9 +98,17 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
             Effect.andThen(() => method.handler(raw, event)),
           ),
       }),
-    // For handlers that spawn nothing and read no login shell variables. The
-    // connection catalog's safeStorage ignores a D-Bus address set after startup.
+    // For handlers that spawn nothing and read no login shell variables.
     handleWithoutShell: desktopIpc.handle,
+    // For handlers that use safeStorage, which can need the shell's session bus.
+    handleSecretStorage: <E, R>(method: DesktopIpc.DesktopIpcMethod<E, R>) =>
+      desktopIpc.handle({
+        channel: method.channel,
+        handler: (raw, event) =>
+          shellEnvironment.secretStorageReady.pipe(
+            Effect.andThen(() => method.handler(raw, event)),
+          ),
+      }),
     handleSync: desktopIpc.handleSync,
   };
   yield* installNotificationBadge();
@@ -121,8 +129,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleWithoutShell(getLocalEnvironmentBearerToken);
 
   yield* ipc.handleWithoutShell(getClientSettings);
-  yield* ipc.handle(setClientSettings);
-  yield* ipc.handleWithoutShell(getConnectionCatalog);
+  yield* ipc.handleWithoutShell(setClientSettings);
+  yield* ipc.handleSecretStorage(getConnectionCatalog);
   yield* ipc.handle(getSnapShotState);
   yield* ipc.handle(setupSnapShot);
   yield* ipc.handle(previewSnapShotConfig);
@@ -135,8 +143,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setSnapShotAnimationDestination);
   yield* ipc.handle(dismissSnapShotAnimation);
   yield* ipc.handle(acknowledgeSnapShot);
-  yield* ipc.handleWithoutShell(setConnectionCatalog);
-  yield* ipc.handleWithoutShell(clearConnectionCatalog);
+  yield* ipc.handleSecretStorage(setConnectionCatalog);
+  yield* ipc.handleSecretStorage(clearConnectionCatalog);
 
   yield* ipc.handle(discoverSshHosts);
   yield* ipc.handle(resolveSshHost);

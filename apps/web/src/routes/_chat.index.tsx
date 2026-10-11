@@ -115,9 +115,10 @@ let landingConsidered = false;
 
 export const Route = createFileRoute("/_chat/")({
   // On the first load, a browser with a boot snapshot opens its empty draft
-  // without waiting for the server (see bootLanding.ts).
-  beforeLoad: async () => {
-    if (landingConsidered) return;
+  // without waiting for the server (see bootLanding.ts). Hovering a link to
+  // "/" preloads this route, which is no visit.
+  beforeLoad: async ({ preload }) => {
+    if (preload || landingConsidered) return;
     landingConsidered = true;
     const draftId = await resolveLandingDraft();
     if (draftId !== null) {

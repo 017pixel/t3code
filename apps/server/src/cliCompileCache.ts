@@ -4,6 +4,9 @@ import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+/** Another version's cache directory goes once no start has used it for this long. */
+const UNUSED_VERSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
 /**
  * Source dev stays uncached; bundled and SEA dependencies persist under the
  * selected T3 home, in one directory per version.
@@ -43,15 +46,27 @@ export function enableCliCompileCache(input: {
   const root = NodePath.join(directory, "compile-cache");
   // Cache failures never prevent CLI or server startup, including a read-only home.
   try {
-    const { status } = NodeModule.enableCompileCache(NodePath.join(root, input.version));
+    const current = NodePath.join(root, input.version);
+    const { status } = NodeModule.enableCompileCache(current);
     if (status !== NodeModule.constants.compileCacheStatus.ENABLED) return;
-    // Bundle chunk names change with their contents, so other versions' entries
-    // never hit again. Only the running version's directory stays.
+    // Bundle chunk names change with their contents, so an old version's entries
+    // never hit again. Installs of other versions can share this home (a global
+    // t3 and npx t3@other), so each start marks its directory as used and only
+    // directories unused for a week go.
+    // @effect-diagnostics-next-line globalDate:off -- Runs before the Effect runtime loads.
+    const now = new Date();
+    NodeFS.utimes(current, now, now, () => {});
+    const cutoff = now.getTime() - UNUSED_VERSION_MAX_AGE_MS;
     NodeFS.readdir(root, (error, entries) => {
       if (error) return;
       for (const entry of entries) {
         if (entry === input.version) continue;
-        NodeFS.rm(NodePath.join(root, entry), { recursive: true, force: true }, () => {});
+        const path = NodePath.join(root, entry);
+        NodeFS.stat(path, (statError, stats) => {
+          if (statError === null && stats.mtimeMs < cutoff) {
+            NodeFS.rm(path, { recursive: true, force: true }, () => {});
+          }
+        });
       }
     });
   } catch {}

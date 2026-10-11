@@ -51,6 +51,8 @@ const configValueAtom = Atom.family((environmentId: EnvironmentId | null) =>
       }).pipe(Atom.withLabel(`web-environment-server-config:${environmentId}`)),
 );
 export const serverEnvironment = { ...liveServerEnvironment, configValueAtom };
+/** The server's current config, without the boot snapshot standing in for it. */
+export const liveServerConfigValueAtom = liveServerEnvironment.configValueAtom;
 /** Updates a host whose protocol is too old for this client to connect to. */
 export const updateOutdatedServer = createOutdatedServerUpdateCommand(connectionAtomRuntime);
 export const environmentServerConfigsAtom = createEnvironmentServerConfigsAtom({

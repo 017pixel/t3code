@@ -32,15 +32,8 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 export const shellEnvironment = createShellEnvironmentAtoms(connectionAtomRuntime);
 const liveEnvironmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
 
-const bootShellStates = new Map<EnvironmentId, OrchestrationV2ShellSnapshot | null>();
-
 function readBootShell(environmentId: EnvironmentId): OrchestrationV2ShellSnapshot | null {
-  let snapshot = bootShellStates.get(environmentId);
-  if (snapshot === undefined) {
-    snapshot = readBootSnapshot()?.shells.get(environmentId) ?? null;
-    bootShellStates.set(environmentId, snapshot);
-  }
-  return snapshot;
+  return readBootSnapshot()?.shells.get(environmentId) ?? null;
 }
 
 const bootOverlays = new Map<

@@ -3,7 +3,10 @@ import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Spinner } from "~/components/ui/spinner";
 import { useShortcutModifierState } from "~/shortcutModifierState";
 import type { PullRequestSpeedActionResult } from "~/components/pullRequest/PullRequestSpeedActions";
-import { usePullRequestCloseBatch } from "~/components/pullRequest/usePullRequestActions";
+import {
+  isPullRequestActionPending,
+  usePullRequestCloseBatch,
+} from "~/components/pullRequest/usePullRequestActions";
 import { SidebarPointerSensor } from "~/components/Sidebar.pointer";
 import { resolveSidebarSweepKeys } from "~/components/Sidebar.logic";
 import { pullRequestHostOf, resolveEnvironmentMachineKind } from "@t3tools/contracts";
@@ -1725,9 +1728,7 @@ function PullRequestsRouteView() {
         row.entry.state === "open" &&
         closeSweepRef.current.hostActionsOf(row.entry).has("close") &&
         !closeSweepRef.current.closingKeys.has(key) &&
-        !scrollRef.current?.querySelector(
-          `[data-pull-request-key="${CSS.escape(key)}"] [data-pull-request-action-pending="true"]`,
-        )
+        !isPullRequestActionPending(key)
       );
     };
     let sweptKeys: string[] = [];

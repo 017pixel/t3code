@@ -16,6 +16,8 @@ import {
   type RefObject,
 } from "react";
 
+import { PortalContainerContext } from "~/lib/portalContainer";
+
 /**
  * A thread view that `ThreadRouteView` keeps rendered while hidden. React
  * runs a hidden view's effect cleanups without unmounting it, so work that
@@ -272,7 +274,8 @@ export const KeptViewWarmingContext = createContext(false);
 /**
  * Frames one kept view. While warming, the view lays out at full size but
  * out of sight, and cannot be focused or clicked; `onWarm` runs two frames
- * after it mounted, once its list has settled.
+ * after it mounted, once its list has settled. Its popups portal into a
+ * container of its own, shown only while the view is shown and not warming.
  */
 export function KeptViewFrame({
   viewKey,
@@ -285,6 +288,23 @@ export function KeptViewFrame({
   onWarm: (viewKey: string) => void;
   children: ReactNode;
 }) {
+  const lifetime = useContext(KeptViewLifetimeContext);
+  const [portalContainer] = useState(() => {
+    const container = document.createElement("div");
+    container.hidden = true;
+    return container;
+  });
+  useLayoutEffect(() => {
+    if (!portalContainer.isConnected) {
+      document.body.append(portalContainer);
+      lifetime?.hold(() => portalContainer.remove());
+    }
+    portalContainer.toggleAttribute("hidden", warming);
+    // Hiding the view runs this cleanup too; its popups stay mounted but out of sight.
+    return () => {
+      portalContainer.toggleAttribute("hidden", true);
+    };
+  }, [lifetime, portalContainer, warming]);
   const warmed = useEffectEvent(() => onWarm(viewKey));
   useLayoutEffect(() => {
     if (!warming) return;
@@ -307,7 +327,9 @@ export function KeptViewFrame({
       inert={warming || undefined}
       aria-hidden={warming || undefined}
     >
-      <KeptViewWarmingContext value={warming}>{children}</KeptViewWarmingContext>
+      <KeptViewWarmingContext value={warming}>
+        <PortalContainerContext value={portalContainer}>{children}</PortalContainerContext>
+      </KeptViewWarmingContext>
     </div>
   );
 }
