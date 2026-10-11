@@ -1,5 +1,5 @@
 import { ArrowDownIcon, ArrowUpIcon } from "lucide-react";
-import { type ComponentProps, type ReactNode, useEffect, useRef } from "react";
+import { type ComponentProps, type ReactNode, useLayoutEffect, useRef } from "react";
 
 import { Command, CommandFooter, CommandInput, CommandPanel } from "./ui/command";
 import { Kbd, KbdGroup } from "./ui/kbd";
@@ -42,18 +42,17 @@ export function CommandPaletteContent({
   // Direct-open flows replace the initial palette view after the dialog has
   // already moved focus. Reclaim it when the replacement input mounts so
   // typing cannot continue in the composer behind the modal.
-  useEffect(() => {
-    let frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
-    });
-    return () => cancelAnimationFrame(frame);
+  // Focus in the mount commit, inside the opening gesture: mobile browsers
+  // raise the keyboard only then, and keys typed meanwhile reach the input.
+  useLayoutEffect(() => {
+    inputRef.current?.focus({ preventScroll: true });
   }, []);
 
   return (
     <div className="contents" data-testid={testId}>
       <Command {...commandProps}>
         <div className="relative">
-          <CommandInput {...inputProps} autoFocus={false} ref={inputRef} />
+          <CommandInput {...inputProps} ref={inputRef} />
           {inputAccessory}
         </div>
         <CommandPanel

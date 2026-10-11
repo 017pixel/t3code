@@ -58,13 +58,12 @@ const OVERLAY_MODE_BY_COMMAND = {
   "projectSearch.toggle": "content",
 } as const satisfies Partial<Record<string, SearchOverlayMode>>;
 
-/** Whether the open view has rendered its text input, which then takes the keys. */
+/** Whether the requested view has rendered its text input, which then takes the keys. */
 function paletteTextInputMounted(mode: SearchOverlayMode): boolean {
   const palette = document.getElementById(COMMAND_PALETTE_ELEMENT_ID);
   return (
     palette?.dataset.paletteMode === mode &&
-    palette?.contains(document.activeElement) === true &&
-    document.activeElement?.matches("input, textarea, [contenteditable='true']") === true
+    palette.querySelector("input, textarea, [contenteditable='true']") != null
   );
 }
 

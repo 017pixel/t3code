@@ -355,7 +355,6 @@ export function CommandPaletteDialog(props: {
 
   return (
     <CommandDialogPopup
-      initialFocus={false}
       aria-label={
         props.mode === "files"
           ? "File picker"

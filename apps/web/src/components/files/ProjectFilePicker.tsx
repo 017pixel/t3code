@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { useActiveProjectTarget, type ActiveProjectTarget } from "~/hooks/useActiveProjectTarget";
 import { useTheme } from "~/hooks/useTheme";
@@ -79,9 +79,6 @@ function OpenProjectFilePicker(props: ProjectFilePickerProps & { target: ActiveP
       .catch(() => undefined);
   }, []);
   const [query, setQuery] = useState(props.initialQuery ?? "");
-  useLayoutEffect(() => {
-    setQuery(props.initialQuery ?? "");
-  }, [props.initialQuery]);
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
   const result = useProjectFilePickerQuery(
     target.environmentId,
