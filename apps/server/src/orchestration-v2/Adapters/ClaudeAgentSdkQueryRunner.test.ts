@@ -8,11 +8,8 @@ import * as Layer from "effect/Layer";
 import { vi } from "vite-plus/test";
 
 import { ProviderEventLoggers } from "@t3tools/provider-core/server/ProviderEventLoggers";
-import {
-  CLAUDE_AGENT_SDK_QUERY_PROTOCOL,
-  ClaudeAgentSdkQueryRunner,
-  layerQueryRunner,
-} from "./ClaudeAdapterV2.ts";
+import { ClaudeAgentSdkQueryRunner } from "../../provider/ClaudeAgentSdkQueryRunner.ts";
+import { CLAUDE_AGENT_SDK_QUERY_PROTOCOL, layerQueryRunner } from "./ClaudeAdapterV2.ts";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
 
