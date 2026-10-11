@@ -17,6 +17,7 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { type BootCatalogEntry, readBootSnapshot, recordBootCatalog } from "../bootSnapshot";
+import { isDesktopLocalConnectionTarget } from "./desktopLocal";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { isHostedStaticApp } from "../hostedPairing";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
@@ -156,9 +157,10 @@ let lastMerged: {
 /**
  * Shows the boot catalog until the live one can stand on its own: the
  * registry has loaded the saved environments and, where there is one,
- * platform discovery has registered the primary environment. A discovery
- * that ends without the primary drops the boot one, so the workspace settles
- * as it does without a snapshot.
+ * platform discovery has registered the primary environment. Until then the
+ * boot entries discovery registers (the primary and desktop-local backends
+ * such as WSL) stand in for theirs. A discovery that ends without the primary
+ * drops them, so the workspace settles as it does without a snapshot.
  */
 const catalogValueAtom = Atom.make((get): EnvironmentCatalogState => {
   const boot = readBootCatalogState();
@@ -168,14 +170,19 @@ const catalogValueAtom = Atom.make((get): EnvironmentCatalogState => {
   if (!live.isReady) return boot;
   if (hasPrimaryEntry(live) || get(primaryEnvironmentMissingAtom)) return live;
   let bootPrimary: [EnvironmentId, ConnectionCatalogEntry] | null = null;
+  const awaitingDiscovery: Array<[EnvironmentId, ConnectionCatalogEntry]> = [];
   for (const entry of boot.entries) {
-    if (entry[1].target._tag === "PrimaryConnectionTarget") bootPrimary = entry;
+    const { target } = entry[1];
+    if (target._tag === "PrimaryConnectionTarget") bootPrimary = entry;
+    else if (isDesktopLocalConnectionTarget(target) && !live.entries.has(entry[0])) {
+      awaitingDiscovery.push(entry);
+    }
   }
   if (bootPrimary === null || live.entries.has(bootPrimary[0])) return live;
   if (lastMerged?.live === live) return lastMerged.merged;
   const merged: EnvironmentCatalogState = {
     isReady: true,
-    entries: new Map([bootPrimary, ...live.entries]),
+    entries: new Map([bootPrimary, ...awaitingDiscovery, ...live.entries]),
   };
   lastMerged = { live, merged };
   return merged;
