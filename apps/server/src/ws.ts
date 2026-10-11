@@ -264,6 +264,37 @@ export const resolveAvailableEditorsForConfig = <A, E, R>(
   discovery: Effect.Effect<ReadonlyArray<A>, E, R>,
 ) => resolveDiscoveryForConfig(discovery, () => []);
 
+/** Keep background install diagnostics out of clients that cannot distinguish their origin. */
+export const withProviderUpdateOrigins = <E, R>(
+  events: Stream.Stream<ServerConfigStreamEvent, E, R>,
+  input: { readonly providerUpdateOrigins?: boolean },
+) => {
+  if (input.providerUpdateOrigins === true) return events;
+  const providersForClient = (providers: ClientServerConfig["providers"]) =>
+    providers.map((provider) => {
+      if (provider.updateState?.origin !== "background") return provider;
+      const { updateState: _updateState, ...legacyProvider } = provider;
+      return legacyProvider;
+    });
+  return events.pipe(
+    Stream.map((event): ServerConfigStreamEvent => {
+      if (event.type === "snapshot") {
+        return {
+          ...event,
+          config: { ...event.config, providers: providersForClient(event.config.providers) },
+        };
+      }
+      if (event.type === "providerStatuses") {
+        return {
+          ...event,
+          payload: { providers: providersForClient(event.payload.providers) },
+        };
+      }
+      return event;
+    }),
+  );
+};
+
 const resolveFileManagerRevealKindForConfig = <E, R>(
   discovery: Effect.Effect<FileManagerRevealKind | undefined, E, R>,
 ) => resolveDiscoveryForConfig(discovery, () => undefined);
@@ -3052,7 +3083,7 @@ const layerWsRpc = (
               return Stream.concat(
                 rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
                 withLateEditorConfig(config, liveUpdates, externalLauncher),
-              );
+              ).pipe((events) => withProviderUpdateOrigins(events, input));
             }),
           ),
         [WS_METHODS.subscribeServerLifecycle]: (_input) =>

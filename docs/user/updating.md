@@ -86,6 +86,8 @@ automatic updates stay off.
 
 ACP Registry agents, including Antigravity, and local ACP commands do not offer
 one-click updates and are not updated by this setting.
+If T3 Code cannot identify a CLI's installation, its update button can still run
+the CLI's own updater manually, but automatic updates leave it alone.
 
 **Settings → Providers** shows provider updates for the selected environment.
 **Update all** updates every outdated provider on every connected environment
@@ -102,7 +104,7 @@ the machine instead.
 
 The same page lets you refresh provider status and update supported providers.
 These controls require a connected environment and permission to operate it.
-Provider update checks and restart continuation preferences are in
+Automatic updates, provider update checks, and restart continuation preferences are in
 **Settings → Maintenance**. If provider update checks are disabled, enable them
 there before refreshing to find newer versions.
 
