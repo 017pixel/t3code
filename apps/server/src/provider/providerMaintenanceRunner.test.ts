@@ -2343,12 +2343,91 @@ describe("provider maintenance host leases", () => {
         ).pipe(Effect.forkScoped);
         yield* gate;
         assert.isFalse(yield* Deferred.isDone(entered));
-        yield* local.withRead(Effect.void);
+        yield* local.withRead(Effect.void, release);
         yield* release;
         assert.isFalse(yield* Deferred.isDone(entered));
         holder.child.stdin.end("release");
         yield* Effect.promise(() => holder.exited);
         yield* Fiber.join(install);
+        assert.isTrue(yield* Deferred.isDone(entered));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("blocks unrelated readers behind a waiting writer while admitting turn helpers", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const host = HostLock.make(yield* fs.makeTempDirectoryScoped());
+        const entered = yield* Deferred.make<void>();
+        const helper = yield* Deferred.make<void>();
+        const helperEntered = yield* Deferred.make<void>();
+        const finish = yield* Deferred.make<void>();
+        const turn = yield* host
+          .withRead(
+            Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(helper)),
+              Effect.andThen(host.withRead(Deferred.succeed(helperEntered, undefined))),
+              Effect.andThen(Deferred.await(finish)),
+            ),
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        const waiting = yield* Deferred.make<void>();
+        const installed = yield* Deferred.make<void>();
+        const releaseWriter = yield* Deferred.make<void>();
+        const writer = yield* host
+          .withWrite(
+            Deferred.succeed(installed, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseWriter)),
+            ),
+            Deferred.succeed(waiting, undefined),
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(waiting);
+        const unrelatedEntered = yield* Deferred.make<void>();
+        const unrelated = yield* Effect.forkChild(
+          host.withRead(Deferred.succeed(unrelatedEntered, undefined)),
+          { startImmediately: true },
+        );
+        yield* Deferred.succeed(helper, undefined);
+        yield* Deferred.await(helperEntered);
+        assert.isFalse(yield* Deferred.isDone(unrelatedEntered));
+        yield* Deferred.succeed(finish, undefined);
+        yield* Fiber.join(turn);
+        yield* Deferred.await(installed);
+        assert.isFalse(yield* Deferred.isDone(unrelatedEntered));
+        yield* Deferred.succeed(releaseWriter, undefined);
+        yield* Fiber.join(writer);
+        yield* Fiber.join(unrelated);
+        assert.isTrue(yield* Deferred.isDone(unrelatedEntered));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("does not let an expired turn lease bypass a later writer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const host = HostLock.make(yield* fs.makeTempDirectoryScoped());
+        const release = yield* host.acquireRead;
+        const entered = yield* Deferred.make<void>();
+        const lateHelper = host.withRead(Deferred.succeed(entered, undefined), release);
+        yield* release;
+        const writing = yield* Deferred.make<void>();
+        const finish = yield* Deferred.make<void>();
+        const writer = yield* host
+          .withWrite(
+            Deferred.succeed(writing, undefined).pipe(Effect.andThen(Deferred.await(finish))),
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(writing);
+        const helper = yield* Effect.forkChild(lateHelper, { startImmediately: true });
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(entered));
+        yield* Deferred.succeed(finish, undefined);
+        yield* Fiber.join(writer);
+        yield* Fiber.join(helper);
         assert.isTrue(yield* Deferred.isDone(entered));
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
@@ -2834,6 +2913,7 @@ describe("provider maintenance host leases", () => {
     "runtime-replaced",
     "heartbeat-write-error",
     "installer-killed-with-live-child",
+    "verbose-output",
   ] as const)(
     "finishes the installer after %s",
     (mode) =>
@@ -2863,6 +2943,8 @@ describe("provider maintenance host leases", () => {
           );
           const file = NodePath.join(directory, "receipt.json");
           const installed = NodePath.join(directory, "installed");
+          const compacted = NodePath.join(directory, "compacted");
+          let heartbeatOutputSize: number | undefined;
           const dead = NodeChildProcess.spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
           yield* Effect.promise(
             () => new Promise<void>((resolve) => dead.once("exit", () => resolve())),
@@ -2883,27 +2965,50 @@ describe("provider maintenance host leases", () => {
                 "-e",
                 mode === "installer-killed-with-live-child"
                   ? `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(`setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(installed)}, "installed"), 2500)`)}], {stdio: "ignore"}).on("spawn", () => process.kill(process.pid, "SIGKILL"))`
-                  : `console.log("installing"); setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(installed)}, "installed"), ${mode === "heartbeat-write-error" ? 2500 : 0})`,
+                  : mode === "verbose-output"
+                    ? `const fs = require("node:fs"); console.error("e".repeat(30000) + "\\ninstalling"); console.log("x".repeat(30000)); const watcher = fs.watch(${JSON.stringify(directory)}, () => { if (fs.existsSync(${JSON.stringify(compacted)})) { watcher.close(); fs.writeFileSync(${JSON.stringify(installed)}, "installed"); } });`
+                    : `console.log("installing"); setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(installed)}, "installed"), ${mode === "heartbeat-write-error" ? 2500 : 0})`,
               ],
             }),
           );
           for (const suffix of [".stdout", ".stderr"]) NodeFS.writeFileSync(file + suffix, "");
+          let authorized = false;
           const watcher = NodeFS.watch(directory, () => {
             if (InstallSupervisor.readReceipt(file).pid === undefined) return;
+            if (mode === "verbose-output" && !InstallSupervisor.readReceipt(file).progress) {
+              if (!authorized) {
+                authorized = true;
+                NodeFS.writeFileSync(file + ".start", "runtime-replaced");
+              }
+              return;
+            }
             watcher.close();
+            if (mode === "verbose-output") {
+              heartbeatOutputSize = Math.max(
+                NodeFS.statSync(file + ".stdout").size,
+                NodeFS.statSync(file + ".stderr").size,
+              );
+              NodeFS.writeFileSync(compacted, "continue");
+              return;
+            }
             if (mode === "runtime-replaced")
               NodeFS.rmSync(NodePath.join(runtime, "provider/providerMaintenanceRunner.ts"));
             NodeFS.writeFileSync(file + ".start", "runtime-replaced");
           });
           yield* Effect.addFinalizer(() => Effect.sync(() => watcher.close()));
           const child = yield* Effect.acquireRelease(
-            Effect.sync(() =>
-              NodeChildProcess.spawn(
-                process.execPath,
-                [
-                  "--input-type=module",
-                  "-e",
-                  `import * as fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
+            Effect.sync(() => {
+              const outputs =
+                mode === "verbose-output"
+                  ? [NodeFS.openSync(file + ".stdout", "a"), NodeFS.openSync(file + ".stderr", "a")]
+                  : [];
+              try {
+                return NodeChildProcess.spawn(
+                  process.execPath,
+                  [
+                    "--input-type=module",
+                    "-e",
+                    `import * as fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
              import { runInstallSubcommand } from ${JSON.stringify(supervisor)};
              ${
                mode === "heartbeat-write-error"
@@ -2913,10 +3018,17 @@ describe("provider maintenance host leases", () => {
                  : ""
              }
              await runInstallSubcommand("__provider-install", ${JSON.stringify([file, String(dead.pid)])});`,
-                ],
-                { stdio: "ignore", detached: true },
-              ),
-            ),
+                  ],
+                  {
+                    stdio:
+                      mode === "verbose-output" ? ["ignore", outputs[0]!, outputs[1]!] : "ignore",
+                    detached: true,
+                  },
+                );
+              } finally {
+                for (const fd of outputs) NodeFS.closeSync(fd);
+              }
+            }),
             (child) =>
               Effect.sync(() => {
                 if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -2938,6 +3050,11 @@ describe("provider maintenance host leases", () => {
               return Effect.sync(() => watcher.close());
             });
           assert.equal(code, 0);
+          if (mode === "verbose-output") {
+            assert.isAtMost(heartbeatOutputSize!, 20_000);
+            assert.isTrue(InstallSupervisor.readReceipt(file).result?.stdoutTruncated);
+            assert.equal(InstallSupervisor.readReceipt(file).progress, "installing");
+          }
           if (mode === "installer-killed-with-live-child") {
             assert.isFalse(
               finishedBeforeChildren,

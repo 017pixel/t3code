@@ -497,10 +497,10 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   }
   const bunBin = context.env.BUN_INSTALL?.trim().replace(/[\\/]+$/, "");
   if (
-    commandPaths.some(isBunGlobalCommandPath) ||
+    isBunGlobalCommandPath(context.realCommandPath) ||
     (bunBin &&
-      commandPaths.some((value) =>
-        normalizeCommandPath(value).startsWith(`${normalizeCommandPath(bunBin)}/bin/`),
+      normalizeCommandPath(context.realCommandPath).startsWith(
+        `${normalizeCommandPath(bunBin)}/bin/`,
       ))
   ) {
     return makeProviderMaintenanceCapabilities({
@@ -516,8 +516,8 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   }
   const pnpmHome = context.env.PNPM_HOME?.trim().replace(/[\\/]+$/, "");
   if (
-    commandPaths.some(isPnpmGlobalCommandPath) ||
-    (pnpmHome && commandPaths.some((value) => identity(value).startsWith(`${identity(pnpmHome)}/`)))
+    isPnpmGlobalCommandPath(context.realCommandPath) ||
+    (pnpmHome && identity(context.realCommandPath).startsWith(`${identity(pnpmHome)}/`))
   ) {
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,

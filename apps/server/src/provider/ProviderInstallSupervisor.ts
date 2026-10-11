@@ -268,7 +268,9 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
   const beat = (format: (line: string) => string | null) => {
     NodeFS.utimesSync(lease, new Date(), new Date());
     NodeFS.utimesSync(NodePath.join(receipt.directory, "gate.lock"), new Date(), new Date());
-    const text = output(".stderr").text || output(".stdout").text;
+    const stderr = output(".stderr");
+    const stdout = output(".stdout");
+    const text = stderr.text || stdout.text;
     const progress = text
       .split(/\r?\n|\r/)
       .map(format)
