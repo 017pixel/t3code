@@ -240,6 +240,27 @@ describe("environment cache removal", () => {
         );
         const reloaded = Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId));
         expect(reloaded.projection.checkpoints[0]?.deferredFileCount).toBe(2);
+
+        // Viewport windows look complete to older builds, so even an entry
+        // with nothing compacted uses the envelope.
+        yield* cache.saveThread(environmentId, { snapshotSequence: 3, projection: v2Projection });
+        const entries = [...values.entries()];
+        expect(entries).toEqual([
+          [
+            expect.anything(),
+            expect.objectContaining({
+              format: "compact-thread-1",
+              omitLocal: false,
+              checkpointItemIds: [],
+            }),
+          ],
+        ]);
+        // Plain entries written by earlier builds still load.
+        const [key, envelope] = entries[0] as [IDBValidKey, { readonly data: string }];
+        values.set(key, envelope.data);
+        const plain = Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId));
+        expect(plain.snapshotSequence).toBe(3);
+        expect(plain.projection.thread).toEqual(v2Projection.thread);
       }).pipe(Effect.provide(ConnectionStorage.layer));
     }),
   );

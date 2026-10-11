@@ -1068,14 +1068,6 @@ export const layer = Layer.effectContext(
           yield* waitForCacheIdle;
           const withoutLocal = omitLocalVisibleTurnItems(snapshot.projection);
           const withoutFiles = omitCheckpointItemFiles(withoutLocal ?? snapshot.projection);
-          // Deferred checkpoints have empty file lists that older builds would
-          // read as "no changes", so those entries need the envelope too.
-          const compact =
-            withoutLocal !== null ||
-            withoutFiles !== null ||
-            snapshot.projection.checkpoints.some(
-              (checkpoint) => checkpoint.deferredFileCount !== undefined,
-            );
           const encoded = yield* encodeStoredThreadSnapshot({
             schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
             environmentId,
@@ -1089,15 +1081,15 @@ export const layer = Layer.effectContext(
             database,
             THREAD_STORE_NAME,
             threadCacheKey(environmentId, snapshot.projection.thread.id),
-            // Older builds ignore object-valued cache entries and fetch live data.
-            compact
-              ? {
-                  format: "compact-thread-1",
-                  data: encoded,
-                  omitLocal: withoutLocal !== null,
-                  checkpointItemIds: withoutFiles?.itemIds ?? [],
-                }
-              : encoded,
+            // Older builds ignore object-valued cache entries and fetch live
+            // data. They would read a viewport window or its deferred file
+            // lists as the whole thread, so every entry uses the envelope.
+            {
+              format: "compact-thread-1",
+              data: encoded,
+              omitLocal: withoutLocal !== null,
+              checkpointItemIds: withoutFiles?.itemIds ?? [],
+            },
           );
         }).pipe(
           Effect.mapError((cause) =>
