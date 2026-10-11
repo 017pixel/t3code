@@ -3051,7 +3051,7 @@ const layerWsRpc = (
               );
             }),
           ),
-        [WS_METHODS.subscribeServerLifecycle]: (_input) =>
+        [WS_METHODS.subscribeServerLifecycle]: (input) =>
           Stream.unwrap(
             Effect.gen(function* () {
               const liveBuffer = yield* Queue.unbounded<ServerLifecycleStreamEvent>();
@@ -3068,7 +3068,10 @@ const layerWsRpc = (
               const liveEvents = Stream.fromQueue(liveBuffer).pipe(
                 Stream.filter((event) => event.sequence > snapshot.sequence),
               );
-              return Stream.concat(rpcInitialItems(snapshotEvents), liveEvents);
+              return ServerLifecycleEvents.eventsForClient(
+                Stream.concat(rpcInitialItems(snapshotEvents), liveEvents),
+                input,
+              );
             }),
           ),
         [WS_METHODS.subscribeAuthAccess]: (_input) =>

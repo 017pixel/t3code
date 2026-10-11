@@ -24,7 +24,7 @@ const RECHECK = Duration.seconds(30);
 /** T3 releases are checked this often; the desktop app polls its own feed. */
 const RELEASE_CHECK_INTERVAL = Duration.hours(1);
 /** How long a handed-off install waits for the launcher to stop this server. */
-const HANDOFF_TIMEOUT = Duration.minutes(5);
+const HANDOFF_TIMEOUT = ServerSelfUpdate.HANDOFF_TIMEOUT;
 
 /**
  * Updates this environment in the background when `automaticUpdates` is on.
@@ -35,12 +35,12 @@ const HANDOFF_TIMEOUT = Duration.minutes(5);
  *   cannot establish that every other backend the app hosts is idle.
  * - Foreground and `npx` servers cannot replace themselves and are skipped.
  */
-export const layer = Layer.effectDiscard(
+export const makeUpdatePass = () =>
   Effect.gen(function* () {
     // A dev server must not relaunch the desktop app or service it runs beside.
-    if ((yield* ServerConfig.ServerConfig).devUrl !== undefined) return;
+    if ((yield* ServerConfig.ServerConfig).devUrl !== undefined) return { run: Effect.void };
     const selfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
-    if (selfUpdate.capability !== "boot-service") return;
+    if (selfUpdate.capability !== "boot-service") return { run: Effect.void };
     const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
     const updateWindow = yield* UpdateWindow.UpdateWindow;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -63,11 +63,12 @@ export const layer = Layer.effectDiscard(
       if (!(yield* automaticUpdatesEnabled)) return;
       const nowMs = yield* Clock.currentTimeMillis;
       // One staged release at a time, so a closed window cannot pile up downloads.
-      if (nowMs >= nextReleaseCheckAt && pendingTarget === undefined) {
-        nextReleaseCheckAt = nowMs + Duration.toMillis(RELEASE_CHECK_INTERVAL);
+      if (nowMs >= nextReleaseCheckAt) {
+        pendingTarget = undefined;
         const targetVersion = yield* resolveNewestVersion(cliReleaseChannelOf(currentVersion)).pipe(
           Effect.provideService(HttpClient.HttpClient, httpClient),
         );
+        nextReleaseCheckAt = nowMs + Duration.toMillis(RELEASE_CHECK_INTERVAL);
         if (
           compareExactServiceVersions(targetVersion, currentVersion) > 0 &&
           !skippedTargets.has(targetVersion)
@@ -106,6 +107,16 @@ export const layer = Layer.effectDiscard(
         Effect.gen(function* () {
           // The setting may have been turned off while waiting.
           if (!(yield* automaticUpdatesEnabled)) return;
+          // Revalidate the feed at the handoff too: an hours-old staged release
+          // may have been withdrawn or superseded while the window was closed.
+          const newest = yield* resolveNewestVersion(cliReleaseChannelOf(currentVersion)).pipe(
+            Effect.provideService(HttpClient.HttpClient, httpClient),
+          );
+          if (newest !== targetVersion) {
+            pendingTarget = undefined;
+            nextReleaseCheckAt = 0;
+            return;
+          }
           pendingTarget = undefined;
           skippedTargets.add(targetVersion);
           yield* Effect.logInfo("Installing a background server update", { targetVersion });
@@ -138,9 +149,15 @@ export const layer = Layer.effectDiscard(
       Effect.withSpan("updates.ServerAutoUpdater.bootService"),
     );
 
+    return { run: updateBootService };
+  });
+
+export const layer = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const { run: updatePass } = yield* makeUpdatePass();
     yield* forkParked(
       Effect.sleep(FIRST_PASS_DELAY).pipe(
-        Effect.andThen(updateBootService.pipe(Effect.repeat(Schedule.spaced(RECHECK)))),
+        Effect.andThen(updatePass.pipe(Effect.repeat(Schedule.spaced(RECHECK)))),
       ),
     );
   }),

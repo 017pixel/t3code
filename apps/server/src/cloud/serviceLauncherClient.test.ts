@@ -48,7 +48,7 @@ const makeClient = (host: FakeLauncherProcess, currentVersion: string) =>
     Effect.provideService(HostProcess.Environment, host.env),
   );
 
-it.effect("waits for the launcher to durably commit the trial update ID", () =>
+it.effect("activates a patched runtime under a deployed protocol 3 launcher", () =>
   Effect.gen(function* () {
     const pending = {
       id: "update-1",
@@ -58,7 +58,7 @@ it.effect("waits for the launcher to durably commit the trial update ID", () =>
       status: "pending" as const,
     };
     const host = new FakeLauncherProcess({
-      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      protocol: 3,
       childVersion: "1.1.0",
       update: pending,
     });
@@ -78,10 +78,10 @@ it.effect("waits for the launcher to durably commit the trial update ID", () =>
   }),
 );
 
-it.effect("returns the launcher-generated ID only after update acceptance", () =>
+it.effect("requests another self-update under a deployed protocol 3 launcher", () =>
   Effect.gen(function* () {
     const host = new FakeLauncherProcess({
-      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      protocol: 3,
       childVersion: "1.0.0",
     });
     const client = yield* makeClient(host, "1.0.0");

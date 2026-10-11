@@ -925,10 +925,25 @@ export const ServerLifecycleStreamLegacyThreadMigrationEvent = Schema.Struct({
 export type ServerLifecycleStreamLegacyThreadMigrationEvent =
   typeof ServerLifecycleStreamLegacyThreadMigrationEvent.Type;
 
+export const ServerLifecycleStreamUpdateRestartEvent = Schema.Struct({
+  version: Schema.Literal(1),
+  sequence: NonNegativeInt,
+  type: Schema.Literal("updateRestart"),
+  payload: Schema.Struct({
+    fromVersion: TrimmedNonEmptyString,
+    targetVersion: TrimmedNonEmptyString,
+    updateId: TrimmedNonEmptyString,
+    expiresAt: Schema.optionalKey(NonNegativeInt),
+  }),
+});
+export type ServerLifecycleStreamUpdateRestartEvent =
+  typeof ServerLifecycleStreamUpdateRestartEvent.Type;
+
 export const ServerLifecycleStreamEvent = Schema.Union([
   ServerLifecycleStreamWelcomeEvent,
   ServerLifecycleStreamReadyEvent,
   ServerLifecycleStreamLegacyThreadMigrationEvent,
+  ServerLifecycleStreamUpdateRestartEvent,
 ]);
 export type ServerLifecycleStreamEvent = typeof ServerLifecycleStreamEvent.Type;
 

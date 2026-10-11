@@ -5,6 +5,8 @@ import * as Schema from "effect/Schema";
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 import { WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
 
+const decodeLegacyLifecycleSubscription = Schema.decodeExit(Schema.Struct({}));
+
 /**
  * The client always sends `environmentThemes`, including to servers built
  * before the field existed, whose payload schema was an empty struct. What
@@ -66,5 +68,17 @@ describe("WebSocket RPC contracts", () => {
         }),
       ),
     ).toBe(true);
+  });
+});
+
+describe("subscribeServerLifecycle restart compatibility", () => {
+  it("keeps legacy subscriptions valid and carries the explicit restart opt-in", () => {
+    const rpc = WsRpcGroup.requests.get("subscribeServerLifecycle");
+    if (rpc === undefined) throw new Error("lifecycle RPC is missing");
+    const decode = Schema.decodeUnknownSync(rpc.payloadSchema);
+    expect(decode({})).toEqual({});
+    expect(decode({ updateRestarts: true })).toEqual({ updateRestarts: true });
+    expect(() => decode({ updateRestarts: "yes" })).toThrow();
+    expect(Exit.isSuccess(decodeLegacyLifecycleSubscription({ updateRestarts: true }))).toBe(true);
   });
 });

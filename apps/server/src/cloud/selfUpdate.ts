@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -22,6 +23,10 @@ import { HttpClient } from "effect/http";
 
 import { CLI_RELEASE_BASE_URL_ENV } from "@t3tools/shared/cliRelease";
 
+import { pruneServiceRuntimes } from "../serviceLauncher.ts";
+import * as ServerLifecycleEvents from "../serverLifecycleEvents.ts";
+import packageJson from "../../package.json" with { type: "json" };
+
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -34,6 +39,8 @@ import {
 import { decodeServicePreflightResult } from "./servicePreflight.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { isExactServiceVersion, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
+
+export const HANDOFF_TIMEOUT = Duration.minutes(5);
 
 const PREFLIGHT_TIMEOUT = Duration.seconds(30);
 
@@ -194,7 +201,21 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const releaseBaseUrl = Option.getOrUndefined(
     yield* Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(Config.option),
   );
-  const inFlight = yield* Ref.make(false);
+  const lifecycle = yield* ServerLifecycleEvents.ServerLifecycleEvents;
+  const inFlight = yield* Ref.make<{ readonly acceptedAt?: bigint } | undefined>(undefined);
+  const acquire = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeNanos;
+    const acquired = yield* Ref.modify(inFlight, (current) => {
+      const expired =
+        current?.acceptedAt !== undefined &&
+        now - current.acceptedAt >= BigInt(Duration.toMillis(HANDOFF_TIMEOUT)) * 1_000_000n;
+      return current === undefined || expired ? ([true, {}] as const) : ([false, current] as const);
+    });
+    if (!acquired)
+      return yield* new ServerSelfUpdateError({
+        reason: "A server update is already in progress.",
+      });
+  });
 
   const capability: ServerSelfUpdateCapability | null =
     serverConfig.mode === "desktop" ? "desktop-managed" : launcher.managed ? "boot-service" : null;
@@ -219,6 +240,13 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       platform,
       arch,
       releaseBaseUrl,
+      cleanup: Effect.tryPromise(() =>
+        pruneServiceRuntimes(serverConfig.baseDir, new Set([targetVersion, packageJson.version])),
+      ).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not prune server runtimes", { cause }),
+        ),
+      ),
       validate: (runtime) =>
         runner
           .run({
@@ -325,9 +353,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     if (!isExactServiceVersion(targetVersion)) {
       return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);
     }
-    if (yield* Ref.getAndSet(inFlight, true)) {
-      return yield* failWith("A server update is already in progress.");
-    }
+    yield* acquire;
 
     return yield* Effect.gen(function* () {
       yield* reportProgress("downloading");
@@ -344,7 +370,28 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
               error,
             ),
           ),
-          Effect.tap(() => onHandoffAccepted()),
+          Effect.tap((updateId) =>
+            Clock.currentTimeNanos.pipe(
+              Effect.flatMap((acceptedAt) => Ref.set(inFlight, { acceptedAt })),
+              Effect.andThen(onHandoffAccepted()),
+              Effect.andThen(
+                Clock.currentTimeMillis.pipe(
+                  Effect.flatMap((now) =>
+                    lifecycle.publish({
+                      version: 1,
+                      type: "updateRestart",
+                      payload: {
+                        fromVersion: packageJson.version,
+                        targetVersion,
+                        updateId,
+                        expiresAt: now + Duration.toMillis(HANDOFF_TIMEOUT),
+                      },
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
       );
 
@@ -354,7 +401,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         runtimePath: paths.entryPath,
       });
       return { targetVersion, method: "boot-service" as const, updateId };
-    }).pipe(Effect.onError(() => Ref.set(inFlight, false)));
+    }).pipe(Effect.onError(() => Ref.set(inFlight, undefined)));
   });
 
   return ServerSelfUpdate.of({
@@ -363,9 +410,16 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       desktopAppUpdate.commit(requestId, onHandoffAccepted),
     capability,
     stage: (targetVersion) =>
-      stageRuntime(targetVersion).pipe(
-        Effect.map(({ orchestrationProtocol }) => ({ orchestrationProtocol })),
-      ),
+      Effect.gen(function* () {
+        if (capability !== "boot-service" || !isExactServiceVersion(targetVersion)) {
+          return yield* failWith("Only a managed service can stage an exact server version.");
+        }
+        yield* acquire;
+        return yield* stageRuntime(targetVersion).pipe(
+          Effect.map(({ orchestrationProtocol }) => ({ orchestrationProtocol })),
+          Effect.ensuring(Ref.set(inFlight, undefined)),
+        );
+      }),
   });
 });
 

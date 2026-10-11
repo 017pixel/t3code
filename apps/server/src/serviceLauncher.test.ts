@@ -4,7 +4,12 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { Launcher, readServiceState, writeServiceState } from "./serviceLauncher.ts";
+import {
+  Launcher,
+  pruneServiceRuntimes,
+  readServiceState,
+  writeServiceState,
+} from "./serviceLauncher.ts";
 import {
   compareExactServiceVersions,
   decodeServiceState,
@@ -31,6 +36,13 @@ it("orders exact semantic versions without treating build metadata as precedence
   assert.equal(compareExactServiceVersions("2.0.0-alpha-beta", "2.0.0-alpha-alpha"), 1);
   assert.equal(compareExactServiceVersions("2.0.0", "2.0.0-rc.1"), 1);
   assert.equal(compareExactServiceVersions("2.0.0+one", "2.0.0+two"), 0);
+});
+
+it("reads deployed protocol 3 state without optional health fields", () => {
+  assert.deepEqual(decodeServiceState({ protocol: 3, activeVersion: "1.0.0" }), {
+    protocol: 3,
+    activeVersion: "1.0.0",
+  });
 });
 
 it("rejects contradictory service state", () => {
@@ -189,22 +201,27 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
-  it.effect("commits only after the trial reports prepared", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-flow-" });
-      const statePath = path.join(root, "runtime", "service-state.json");
-      const databasePath = path.join(root, "userdata", "state.sqlite");
-      yield* fs.makeDirectory(path.dirname(databasePath), { recursive: true });
-      yield* fs.writeFileString(databasePath, "before trial");
-      const encodedDatabasePath = JSON.stringify(databasePath);
-      const childSource = `
+  it.effect(
+    "rolls back and restores the database when a prepared candidate crashes after commit",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-flow-" });
+        const statePath = path.join(root, "runtime", "service-state.json");
+        const databasePath = path.join(root, "userdata", "state.sqlite");
+        yield* fs.makeDirectory(path.dirname(databasePath), { recursive: true });
+        yield* fs.writeFileString(databasePath, "before trial");
+        const encodedDatabasePath = JSON.stringify(databasePath);
+        const childSource = `
 const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
 if (context.update?.status === "pending") {
   process.send({ type: "prepared", updateId: context.update.id });
   process.on("message", (message) => {
-    if (message.type === "committed") process.exit(0);
+    if (message.type === "committed") {
+      require("node:fs").writeFileSync(${encodedDatabasePath}, "post-commit migration");
+      process.exit(42);
+    }
   });
 } else if (context.update === undefined) {
   process.send({ type: "request-update", targetVersion: "1.1.0", dbPath: ${encodedDatabasePath} });
@@ -213,33 +230,146 @@ if (context.update?.status === "pending") {
   process.exit(0);
 }
 `;
-      for (const version of ["1.0.0", "1.1.0"]) {
-        yield* writeFakeRuntime(
-          fs,
-          path,
-          path.join(root, "runtime", "versions", version),
-          childSource,
+        for (const version of ["1.0.0", "1.1.0"]) {
+          yield* writeFakeRuntime(
+            fs,
+            path,
+            path.join(root, "runtime", "versions", version),
+            childSource,
+          );
+        }
+        yield* Effect.promise(() =>
+          writeServiceState(statePath, {
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: "1.0.0",
+          }),
         );
-      }
-      yield* Effect.promise(() =>
-        writeServiceState(statePath, {
-          protocol: SERVICE_LAUNCHER_PROTOCOL,
-          activeVersion: "1.0.0",
-        }),
-      );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
-      yield* Effect.promise(() =>
-        launcher.run().then(
-          () => Promise.reject(new Error("launcher unexpectedly completed")),
-          () => Promise.resolve(),
-        ),
-      );
+        const launcher = new Launcher(
+          root,
+          yield* Effect.promise(() => readServiceState(statePath)),
+        );
+        yield* Effect.promise(() =>
+          launcher.run().then(
+            () => Promise.reject(new Error("launcher unexpectedly completed")),
+            () => Promise.resolve(),
+          ),
+        );
 
-      const state = yield* Effect.promise(() => readServiceState(statePath));
-      assert.equal(state.activeVersion, "1.1.0");
-      assert.equal(state.update?.status, "committed");
-    }),
+        const state = yield* Effect.promise(() => readServiceState(statePath));
+        assert.equal(state.activeVersion, "1.0.0");
+        assert.equal(state.update?.status, "rolled-back");
+        assert.equal(
+          state.update?.status === "rolled-back" ? state.update.reason : undefined,
+          "candidate-exited-after-commit:42",
+        );
+        assert.equal(yield* fs.readFileString(databasePath), "before trial");
+        assert.isUndefined(state.rollback);
+      }),
+  );
+
+  it.effect(
+    "recovers a committed candidate crash using the retained backup after launcher restart",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-health-" });
+        const statePath = path.join(root, "runtime", "service-state.json");
+        const dbPath = path.join(root, "database");
+        yield* fs.writeFileString(dbPath, "migrated database");
+        const backup = path.join(root, "runtime", "db-backup", "health-update");
+        yield* fs.makeDirectory(backup, { recursive: true });
+        yield* fs.writeFileString(path.join(backup, "database"), "original database");
+        for (const version of ["1.0.0", "1.1.0"]) {
+          yield* writeFakeRuntime(
+            fs,
+            path,
+            path.join(root, "runtime", "versions", version),
+            "process.exit(42);\n",
+          );
+        }
+        const update = {
+          id: "health-update",
+          fromVersion: "1.0.0",
+          targetVersion: "1.1.0",
+          dbPath,
+          status: "pending" as const,
+        };
+        yield* Effect.promise(() =>
+          writeServiceState(statePath, {
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: "1.1.0",
+            launcherVersion: "1.0.0",
+            update: { ...update, status: "committed" },
+            rollback: { update, healthyAfter: 60_000 },
+          }),
+        );
+        const launcher = new Launcher(
+          root,
+          yield* Effect.promise(() => readServiceState(statePath)),
+        );
+        yield* Effect.promise(() => launcher.run().catch(() => undefined));
+        const state = yield* Effect.promise(() => readServiceState(statePath));
+        assert.equal(state.activeVersion, "1.0.0");
+        assert.equal(state.update?.status, "rolled-back");
+        assert.equal(yield* fs.readFileString(dbPath), "original database");
+        assert.isFalse(yield* fs.exists(backup));
+      }),
+  );
+
+  it.effect(
+    "prunes staged runtimes while preserving launcher, active, rollback and current staging",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-prune-" });
+        const versions = path.join(root, "runtime", "versions");
+        for (const version of ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"]) {
+          yield* writeFakeRuntime(fs, path, path.join(versions, version), "process.exit(0);\n");
+        }
+        yield* fs.makeDirectory(path.join(versions, ".staging-in-progress"));
+        const update = {
+          id: "health-update",
+          fromVersion: "1.1.0",
+          targetVersion: "1.2.0",
+          dbPath: path.join(root, "database"),
+          status: "pending" as const,
+        };
+        const statePath = path.join(root, "runtime", "service-state.json");
+        yield* Effect.promise(() =>
+          writeServiceState(statePath, {
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: "1.2.0",
+            launcherVersion: "1.0.0",
+            update: { ...update, status: "committed" },
+            rollback: { update, healthyAfter: 60_000 },
+          }),
+        );
+        yield* Effect.promise(() => pruneServiceRuntimes(root, new Set(["1.4.0"])));
+        assert.deepEqual((yield* fs.readDirectory(versions)).sort(), [
+          ".staging-in-progress",
+          "1.0.0",
+          "1.1.0",
+          "1.2.0",
+          "1.4.0",
+        ]);
+        yield* Effect.promise(() =>
+          writeServiceState(statePath, {
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: "1.2.0",
+            launcherVersion: "1.0.0",
+            update: { ...update, status: "committed" },
+          }),
+        );
+        yield* Effect.promise(() => pruneServiceRuntimes(root));
+        assert.deepEqual((yield* fs.readDirectory(versions)).sort(), [
+          ".staging-in-progress",
+          "1.0.0",
+          "1.2.0",
+        ]);
+      }),
   );
 
   it.effect("rolls back a trial that reports the wrong update ID", () =>
