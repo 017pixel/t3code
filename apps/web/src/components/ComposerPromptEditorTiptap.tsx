@@ -39,7 +39,6 @@ import {
   clampCollapsedComposerCursor,
   collapseExpandedComposerCursor,
   expandCollapsedComposerCursor,
-  isCollapsedCursorAdjacentToInlineToken,
   pastedPathQueryLength,
 } from "~/composer-logic";
 import {
@@ -957,7 +956,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       const fromFlat = pmToFlat(map, from);
       const toFlat = pmToFlat(map, to);
       const nextValue = map.value;
-      const nextCursor = clampEditorCursor(map.value, flatToCollapsed(map, fromFlat));
+      const nextCursor = flatToCollapsed(map, fromFlat);
       const nextExpandedCursor = Math.max(
         0,
         Math.min(map.value.length, flatToMarkdown(map, fromFlat)),
@@ -1005,11 +1004,14 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       const suppressTrigger =
         literalText ||
         inCodeBlock ||
-        isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "left") ||
-        isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "right");
+        map.runs.some((run) => {
+          if (run.kind !== "token") return false;
+          const start = run.collapsedStart + run.openLen;
+          return nextCursor === start || nextCursor === start + run.docLen;
+        });
       onChangeRef.current(nextValue, nextCursor, nextExpandedCursor, suppressTrigger, contextIds);
     },
-    [clampEditorCursor, literalText],
+    [literalText],
   );
 
   const editorAttributes = useMemo(
@@ -1517,7 +1519,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     const fromFlat = pmToFlat(map, from);
     const next: typeof snapshot = {
       value: map.value,
-      cursor: clampEditorCursor(map.value, flatToCollapsed(map, fromFlat)),
+      cursor: flatToCollapsed(map, fromFlat),
       expandedCursor: Math.max(0, Math.min(map.value.length, flatToMarkdown(map, fromFlat))),
       contextIds: literalText ? [] : map.contextIds,
     };
@@ -1528,7 +1530,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     };
     snapshotRef.current = next;
     return next;
-  }, [clampEditorCursor, editor, literalText]);
+  }, [editor, literalText]);
 
   // Controlled value/cursor from the store (history recall, chip insertion…).
   useLayoutEffect(() => {
