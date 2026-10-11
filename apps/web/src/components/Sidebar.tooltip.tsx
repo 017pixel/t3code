@@ -21,9 +21,13 @@ export function SidebarTooltipScope({
 }: ComponentProps<typeof TooltipProvider>) {
   const [handle] = useState(() => TooltipPrimitive.createHandle<ReactNode>());
   useEffect(() => {
-    const close = () => {
-      const focused = document.activeElement;
-      if (focused?.matches('[data-slot="tooltip-trigger"][data-popup-open]')) return;
+    // Only a scroll that moves the open trigger dismisses it; the chat
+    // timeline scrolls on its own while a reply streams.
+    const close = (event: Event) => {
+      if (!handle.isOpen) return;
+      const trigger = document.querySelector('[data-slot="tooltip-trigger"][data-popup-open]');
+      if (!(event.target instanceof Node) || !trigger || !event.target.contains(trigger)) return;
+      if (trigger === document.activeElement) return;
       handle.close();
     };
     document.addEventListener("scroll", close, true);
