@@ -16,16 +16,17 @@ export class TurnItemPositionStoreError extends Schema.TaggedError<TurnItemPosit
 
 const isTurnItemPositionStoreError = Schema.is(TurnItemPositionStoreError);
 
+/** Positions per band; a turn item's band is `Math.floor(position / BAND_SIZE)`. */
+export const BAND_SIZE = 1_000_000;
+
 export interface TurnItemPositionStoreV2Shape {
   readonly allocate: (input: {
     readonly threadId: ThreadId;
     readonly turnItemId: TurnItemId;
     readonly runId: RunId | null;
-    readonly runOrdinal?: number;
   }) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
     item: OrchestrationV2TurnItem,
-    runOrdinal?: number,
   ) => Effect.Effect<OrchestrationV2TurnItem, TurnItemPositionStoreError>;
 }
 
@@ -39,25 +40,36 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
 
-    const allocate: TurnItemPositionStoreV2Shape["allocate"] = ({
-      threadId,
-      turnItemId,
-      runId,
-      runOrdinal: suppliedRunOrdinal,
-    }) =>
+    // A thread's timeline is split into bands of BAND_SIZE positions. Runless
+    // items share band 0. A run gets the next free band when it writes its
+    // first item, which happens when it starts, so runs sort by when they
+    // started rather than by their ordinal, which is fixed when they are queued.
+    const allocate: TurnItemPositionStoreV2Shape["allocate"] = ({ threadId, turnItemId, runId }) =>
       Effect.gen(function* () {
-        const runRows =
-          runId === null
-            ? []
-            : yield* sql<{ readonly ordinal: number }>`
-                SELECT ordinal
-                FROM orchestration_v2_projection_runs
-                WHERE thread_id = ${threadId} AND run_id = ${runId}
-                LIMIT 1
-              `;
-        const runOrdinal = suppliedRunOrdinal ?? runRows[0]?.ordinal ?? null;
-        const lowerBound = runOrdinal === null ? 0 : runOrdinal * 1_000_000;
-        const upperBound = runOrdinal === null ? 999_999 : lowerBound + 999_999;
+        const selectBand = (id: RunId) => sql<{ readonly band: number }>`
+          SELECT band
+          FROM orchestration_v2_run_timeline_bands
+          WHERE thread_id = ${threadId} AND run_id = ${id}
+          LIMIT 1
+        `;
+        let band = 0;
+        if (runId !== null) {
+          // Most calls update an item of a run that already has its band.
+          let bandRows = yield* selectBand(runId);
+          if (bandRows[0] === undefined) {
+            yield* sql`
+              INSERT INTO orchestration_v2_run_timeline_bands (thread_id, run_id, band)
+              SELECT ${threadId}, ${runId}, COALESCE(MAX(band), 0) + 1
+              FROM orchestration_v2_run_timeline_bands
+              WHERE thread_id = ${threadId}
+              ON CONFLICT(thread_id, run_id) DO NOTHING
+            `;
+            bandRows = yield* selectBand(runId);
+          }
+          band = bandRows[0]?.band ?? 0;
+        }
+        const lowerBound = band * BAND_SIZE;
+        const upperBound = lowerBound + BAND_SIZE - 1;
         yield* sql`
           INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
           SELECT
@@ -95,13 +107,10 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
 
     return TurnItemPositionStoreV2.of({
       allocate,
-      normalize: (item, runOrdinal) =>
-        allocate({
-          threadId: item.threadId,
-          turnItemId: item.id,
-          runId: item.runId,
-          ...(runOrdinal === undefined ? {} : { runOrdinal }),
-        }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal }))),
+      normalize: (item) =>
+        allocate({ threadId: item.threadId, turnItemId: item.id, runId: item.runId }).pipe(
+          Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal })),
+        ),
     });
   }),
 );

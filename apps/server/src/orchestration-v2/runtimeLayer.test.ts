@@ -4186,6 +4186,106 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("places a queued run that starts late after the runs that started before it", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const threadId = ThreadId.make("runtime-layer-late-queued-run");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId: ProjectId.make(`${threadId}:project`),
+        title: "Late queued run",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      const send = (key: string, dispatchMode: "start_immediately" | "queue_after_active") =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`${threadId}:message:${key}`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:message:${key}`),
+          text: key,
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: dispatchMode },
+        });
+      // A runs; B is queued behind it and held when A is stopped.
+      yield* send("A", "start_immediately");
+      yield* send("B", "queue_after_active");
+      const queued = yield* orchestrator.getThreadProjection(threadId);
+      const [runA, runB] = queued.runs;
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make(`${threadId}:interrupt`),
+        threadId,
+        runId: runA!.id,
+        holdQueue: true,
+      });
+      // C is sent later, so it has a higher run ordinal, but it starts first.
+      yield* send("C", "start_immediately");
+      const started = yield* orchestrator.getThreadProjection(threadId);
+      const runC = started.runs.find((run) => run.userMessageId === `${threadId}:message:C`)!;
+      assert.isAbove(runC.ordinal, runB!.ordinal);
+      assert.equal(started.runs.find((run) => run.id === runB!.id)?.status, "queued");
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make(`${threadId}:interrupt-c`),
+        threadId,
+        runId: runC.id,
+      });
+      yield* orchestrator.dispatch({
+        type: "queue.resume",
+        commandId: CommandId.make(`${threadId}:resume`),
+        threadId,
+      });
+
+      const userMessages = (
+        items: ReadonlyArray<{ readonly type: string; readonly text?: string }>,
+      ) => items.flatMap((item) => (item.type === "user_message" ? [item.text] : []));
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.notEqual(projection.runs.find((run) => run.id === runB!.id)?.status, "queued");
+      assert.deepEqual(userMessages(projection.turnItems), ["A", "C", "B"]);
+      // Every item of B sorts after every item of C.
+      const lastOfC = Math.max(
+        ...projection.turnItems.filter((item) => item.runId === runC.id).map((i) => i.ordinal),
+      );
+      assert.isTrue(
+        projection.turnItems
+          .filter((item) => item.runId === runB!.id)
+          .every((item) => item.ordinal > lastOfC),
+      );
+      const window = yield* projections.getThreadSnapshotWindow(threadId, {
+        rowLimit: 100,
+        userTurnLimit: 2,
+      });
+      assert.deepEqual(userMessages(window.projection.turnItems), ["A", "C", "B"]);
+
+      // A rebuild from the stored events keeps the order, and B's band stays above C's.
+      yield* maintenance.rebuild;
+      const rebuilt = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(userMessages(rebuilt.turnItems), ["A", "C", "B"]);
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make(`${threadId}:interrupt-b`),
+        threadId,
+        runId: runB!.id,
+      });
+      yield* send("D", "start_immediately");
+      const appended = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(userMessages(appended.turnItems), ["A", "C", "B", "D"]);
+    }),
+  );
+
   it.effect.each(["startup", "shutdown"] as const)(
     "preserves and holds queued messages across %s until explicitly resumed",
     (trigger) =>

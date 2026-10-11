@@ -306,28 +306,17 @@ const layerBase: Layer.Layer<
         });
       });
 
-    const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
-      const runOrdinals = new Map(
-        events.flatMap((event) =>
-          event.type === "run.created" || event.type === "run.updated"
-            ? [[event.payload.id, event.payload.ordinal] as const]
-            : [],
-        ),
-      );
-      return Effect.forEach(
+    const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+      Effect.forEach(
         events,
         (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
           event.type === "turn-item.updated"
             ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                )
+                .normalize(event.payload)
                 .pipe(Effect.map((payload) => ({ ...event, payload })))
             : Effect.succeed(event),
         { concurrency: 1 },
       );
-    };
 
     const applyStoredEvents = (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) =>
       Effect.gen(function* () {

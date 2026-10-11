@@ -141,6 +141,7 @@ export const layer: Layer.Layer<
           yield* sql`DELETE FROM orchestration_v2_projection_runs`;
           yield* sql`DELETE FROM orchestration_v2_projection_threads`;
           yield* sql`DELETE FROM orchestration_v2_turn_item_positions`;
+          yield* sql`DELETE FROM orchestration_v2_run_timeline_bands`;
 
           const pageSize = 500;
           let lastSequence = 0;
@@ -171,6 +172,16 @@ export const layer: Layer.Layer<
             if (page.length < pageSize) break;
             yield* Effect.yieldNow;
           }
+          // Stored ordinals are already positions, so each run keeps the band
+          // its items were written in. Same backfill as migration 061; the
+          // literal is TurnItemPositionStore.BAND_SIZE (integer division).
+          yield* sql`
+            INSERT INTO orchestration_v2_run_timeline_bands (thread_id, run_id, band)
+            SELECT thread_id, run_id, MAX(ordinal / 1000000)
+            FROM orchestration_v2_projection_turn_items
+            WHERE run_id IS NOT NULL
+            GROUP BY thread_id, run_id
+          `;
           const now = DateTime.formatIso(yield* DateTime.now);
           yield* sql`
             INSERT INTO orchestration_v2_projection_metadata (
