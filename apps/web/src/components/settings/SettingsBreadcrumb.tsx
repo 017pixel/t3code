@@ -1,3 +1,5 @@
+import { Link, useSearch } from "@tanstack/react-router";
+
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
@@ -17,11 +19,14 @@ function settingsBreadcrumbLabel(pathname: string): string | null {
 }
 
 /**
- * `Settings / Section`. The scope a change applies to lives at the top of the
- * page content, see `SettingsScopeSentence`.
+ * `Settings / Section`, or `Settings / Tools / skill` on a skill's page, where
+ * Tools leads back to the list. The scope a change applies to lives at the top
+ * of the page content, see `SettingsScopeSentence`.
  */
 export function SettingsBreadcrumb({ pathname }: { pathname: string }) {
   const sectionLabel = settingsBreadcrumbLabel(pathname);
+  const skill = useSearch({ strict: false, select: (search) => search.skill });
+  const page = pathname === "/settings/tools" ? skill : undefined;
 
   return (
     <WorkspaceBreadcrumb ariaLabel="Settings breadcrumb">
@@ -31,8 +36,23 @@ export function SettingsBreadcrumb({ pathname }: { pathname: string }) {
           <WorkspaceBreadcrumbSeparator />
         </>
       ) : null}
+      {page !== undefined && sectionLabel ? (
+        <>
+          <WorkspaceBreadcrumbItem>
+            {/* The settings route keeps the scope on a link without search. */}
+            <Link
+              to="/settings/tools"
+              replace
+              className="rounded-sm transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {sectionLabel}
+            </Link>
+          </WorkspaceBreadcrumbItem>
+          <WorkspaceBreadcrumbSeparator />
+        </>
+      ) : null}
       <WorkspaceBreadcrumbItem current className="truncate">
-        {sectionLabel ?? "Settings"}
+        {page ?? sectionLabel ?? "Settings"}
       </WorkspaceBreadcrumbItem>
     </WorkspaceBreadcrumb>
   );

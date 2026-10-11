@@ -17,8 +17,18 @@ import {
 
 export type ToolsTab = "skills" | "mcp";
 
-export function validateToolsSearch(raw: Record<string, unknown>): { tab?: ToolsTab } {
-  return raw.tab === "mcp" || raw.tab === "skills" ? { tab: raw.tab } : {};
+/** `tab` picks the tab; `skill` is the skill whose page is open on the Skills tab. */
+export function validateToolsSearch(raw: Record<string, unknown>): {
+  tab?: ToolsTab;
+  skill?: string;
+} {
+  const tab = raw.tab === "mcp" || raw.tab === "skills" ? raw.tab : undefined;
+  const skill =
+    tab !== "mcp" && typeof raw.skill === "string" && raw.skill.length > 0 ? raw.skill : undefined;
+  return {
+    ...(tab === undefined ? {} : { tab }),
+    ...(skill === undefined ? {} : { skill }),
+  };
 }
 
 /** Where a skill lives, the groups the Skills tab shows in order. */
