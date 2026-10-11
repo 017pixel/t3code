@@ -22,11 +22,17 @@ it("keeps lazy Linux imports and worker bundles from executing desktop startup t
       NodeFSP.mkdir(NodePath.join(directory, "src/snapShot"), { recursive: true }),
     ]);
     await Promise.all([
-      NodeFSP.writeFile(
+      NodeFSP.copyFile(
+        new URL("../src/main.ts", import.meta.url),
         NodePath.join(directory, "src/main.ts"),
+      ),
+      NodeFSP.writeFile(
+        NodePath.join(directory, "src/application.ts"),
         `import { shared } from "./shared.ts";
-process.emit("startup", shared.value);
-void import("./linux.ts").then(({ result }) => process.emit("ready", result));`,
+export function run() {
+  process.emit("startup", shared.value);
+  void import("./linux.ts").then(({ result }) => process.emit("ready", result));
+}`,
       ),
       NodeFSP.writeFile(
         NodePath.join(directory, "src/shared.ts"),
@@ -44,7 +50,7 @@ void import("./linux.ts").then(({ result }) => process.emit("ready", result));`,
       ),
     ]);
     assert.ok(Array.isArray(desktopConfig.pack));
-    const fixtureEntries = new Set(["src/main.ts", ...workerEntries]);
+    const fixtureEntries = new Set(["src/main.ts", "src/application.ts", ...workerEntries]);
     for (const packConfig of desktopConfig.pack) {
       if (!Array.isArray(packConfig.entry)) continue;
       if (!packConfig.entry.some((entry) => fixtureEntries.has(entry))) continue;
@@ -87,6 +93,7 @@ void import("./linux.ts").then(({ result }) => process.emit("ready", result));`,
         module,
         require: (specifier) => load(NodePath.resolve(NodePath.dirname(filename), specifier)),
         process: {
+          env: {},
           emit: (event, value) => {
             if (event === "startup") startups.push(value);
             if (event === "worker") workers.push(value);
