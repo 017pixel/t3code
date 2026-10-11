@@ -19,6 +19,8 @@ import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 
 /** Enough rows to fill a tall window; the rest render right after the first paint. */
 const INITIAL_LICENSE_ROWS = 40;
+// Off-screen rows are light, so later batches commit twice the first paint.
+const LICENSE_ROW_BATCH = 80;
 
 type LicenseManifestState =
   | { readonly status: "loading" }
@@ -251,7 +253,11 @@ export function OpenSourceLicensesPanel() {
     [entries, query],
   );
   const retry = useCallback(() => setRequestVersion((value) => value + 1), []);
-  const rowLimit = useProgressiveRowLimit(INITIAL_LICENSE_ROWS, filteredEntries.length);
+  const rowLimit = useProgressiveRowLimit(
+    INITIAL_LICENSE_ROWS,
+    filteredEntries.length,
+    LICENSE_ROW_BATCH,
+  );
   const shownEntries =
     filteredEntries.length > rowLimit ? filteredEntries.slice(0, rowLimit) : filteredEntries;
 
