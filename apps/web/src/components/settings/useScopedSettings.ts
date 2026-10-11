@@ -19,6 +19,7 @@ import {
   mergeEnvironmentSettings,
   persistClientSettingsPatch,
   useClientSettings,
+  useMigrateModelPreferences,
 } from "../../hooks/useSettings";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { environmentServerConfigsAtom, serverEnvironment } from "../../state/server";
@@ -44,6 +45,7 @@ export function useScopedSettings<T = UnifiedSettings>(
   const { target } = useSettingsScope();
   const clientSettings = useClientSettings();
   const serverSettings = target?.settings ?? DEFAULT_SERVER_SETTINGS;
+  useMigrateModelPreferences(target?.environmentId ?? null, target?.settings ?? null);
   const settings = useMemo(
     () => mergeEnvironmentSettings(serverSettings, clientSettings),
     [clientSettings, serverSettings],

@@ -28,7 +28,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 62 }, (_, index) => index + 1),
+        Array.from({ length: 63 }, (_, index) => index + 1),
       );
     }),
   );
@@ -47,8 +47,9 @@ layer("055_OrchestrationV2", (it) => {
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
-        [61, "ProjectionThreadSweepIndexes"],
-        [62, "ProjectionThreadReadPayload"],
+        [61, "PullRequestReviewGuides"],
+        [62, "ProjectionThreadSweepIndexes"],
+        [63, "ProjectionThreadReadPayload"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -75,8 +76,9 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 58, name: "WebhookRelayDeliveries" },
         { migration_id: 59, name: "McpAppModelContext" },
         { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
-        { migration_id: 61, name: "ProjectionThreadSweepIndexes" },
-        { migration_id: 62, name: "ProjectionThreadReadPayload" },
+        { migration_id: 61, name: "PullRequestReviewGuides" },
+        { migration_id: 62, name: "ProjectionThreadSweepIndexes" },
+        { migration_id: 63, name: "ProjectionThreadReadPayload" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -154,7 +156,7 @@ layer("055_OrchestrationV2", (it) => {
   it.effect("indexes sweep filters for existing threads and later payload-only writes", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 60 });
+      yield* runMigrations({ toMigrationInclusive: 61 });
       const payload = JSON.stringify({
         settledAt: "2026-07-24T00:00:00.000Z",
         settledOverride: "settled",
@@ -173,7 +175,7 @@ layer("055_OrchestrationV2", (it) => {
           '2026-07-24T00:00:00.000Z', ${payload}
         )
       `;
-      yield* runMigrations({ toMigrationInclusive: 61 });
+      yield* runMigrations({ toMigrationInclusive: 62 });
       const sweep = sql<{ readonly thread_id: string; readonly pull_requests: number }>`
         SELECT thread_id, json_array_length(payload_json, '$.pullRequests') AS pull_requests
         FROM orchestration_v2_projection_threads
@@ -206,14 +208,14 @@ layer("055_OrchestrationV2", (it) => {
   it.effect("replaces a same-named sweep index", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 60 });
+      yield* runMigrations({ toMigrationInclusive: 61 });
       yield* sql`
         CREATE INDEX orchestration_v2_projection_threads_active_idx
         ON orchestration_v2_projection_threads(updated_at, thread_id)
         WHERE deleted_at IS NULL AND archived_at IS NULL
       `;
-      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 61 }), [
-        [61, "ProjectionThreadSweepIndexes"],
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 62 }), [
+        [62, "ProjectionThreadSweepIndexes"],
       ]);
       const [index] = yield* sql<{ readonly sql: string }>`
         SELECT sql FROM sqlite_master WHERE name = 'orchestration_v2_projection_threads_active_idx'
@@ -222,12 +224,12 @@ layer("055_OrchestrationV2", (it) => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  // Another build's migration at 62 or above makes the migrator skip this build's 62.
+  // Another build's migration at 63 or above makes the migrator skip this build's 63.
   it.effect("creates the thread read projection when another build took its migration id", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 61 });
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (63, 'OtherBuild')`;
+      yield* runMigrations({ toMigrationInclusive: 62 });
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (64, 'OtherBuild')`;
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(
         yield* sql`
@@ -241,10 +243,12 @@ layer("055_OrchestrationV2", (it) => {
           { name: "orchestration_v2_projection_thread_reads_stale_on_update" },
         ],
       );
-      // A later pass leaves the existing projection alone.
+      // Builds that ran this migration as 62 run it again as 63, which leaves the projection alone.
       yield* sql`INSERT INTO orchestration_v2_projection_thread_reads
         (thread_id, compact_payload_json, payload_json) VALUES ('kept', '{}', '{}')`;
-      yield* runMigrations();
+      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 62`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (62, 'ProjectionThreadReadPayload')`;
+      assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadReadPayload"]]);
       assert.deepStrictEqual(
         yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
         [{ thread_id: "kept" }],
@@ -252,8 +256,8 @@ layer("055_OrchestrationV2", (it) => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  // Published previews ran PeerLinks as 61, so they never run this build's 61.
-  it.effect("keeps sweeps correct on a preview database that ran PeerLinks as 61", () => {
+  // Stacked builds ran ProjectionThreadReadPayload as 62, so they never run this build's 62.
+  it.effect("keeps sweeps correct on a database that recorded a different 62", () => {
     const skippedWarnings: Array<unknown> = [];
     const logger = Logger.make(({ fiber, logLevel }) => {
       const skipped = fiber.getRef(References.CurrentLogAnnotations).skipped;
@@ -261,11 +265,11 @@ layer("055_OrchestrationV2", (it) => {
     });
     return Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 60 });
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (61, 'PeerLinks')`;
-      // Ids above the preview's latest still run.
-      assert.deepStrictEqual(yield* runMigrations(), [[62, "ProjectionThreadReadPayload"]]);
-      assert.deepStrictEqual(skippedWarnings, [["61_ProjectionThreadSweepIndexes"]]);
+      yield* runMigrations({ toMigrationInclusive: 61 });
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (62, 'ProjectionThreadReadPayload')`;
+      // Ids above the recorded latest still run.
+      assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadReadPayload"]]);
+      assert.deepStrictEqual(skippedWarnings, [["62_ProjectionThreadSweepIndexes"]]);
       assert.deepStrictEqual(
         yield* sql`
           SELECT name FROM sqlite_master

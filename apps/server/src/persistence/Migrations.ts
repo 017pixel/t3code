@@ -324,17 +324,22 @@ export const migrationEntries = [
     "ThreadSnapshotWindowIndexes",
     loadMigration(() => import("./Migrations/060_ThreadSnapshotWindowIndexes.ts")),
   ],
-  // Published previews ran PeerLinks as 61, so their databases skip this one (runMigrations
-  // warns). They only lose the sweep index: no query names it with INDEXED BY.
   [
     61,
-    "ProjectionThreadSweepIndexes",
-    loadMigration(() => import("./Migrations/061_ProjectionThreadSweepIndexes.ts")),
+    "PullRequestReviewGuides",
+    loadMigration(() => import("./Migrations/061_PullRequestReviewGuides.ts")),
   ],
+  // Preview and stacked builds that already recorded a different 62 skip this one (runMigrations
+  // warns). They only lose the sweep index: no query names it with INDEXED BY.
   [
     62,
+    "ProjectionThreadSweepIndexes",
+    loadMigration(() => import("./Migrations/062_ProjectionThreadSweepIndexes.ts")),
+  ],
+  [
+    63,
     "ProjectionThreadReadPayload",
-    loadMigration(() => import("./Migrations/062_ProjectionThreadReadPayload.ts")),
+    loadMigration(() => import("./Migrations/063_ProjectionThreadReadPayload.ts")),
   ],
 ] as const;
 
@@ -439,9 +444,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ).pipe(Effect.annotateLogs({ skipped }));
   }
   // ProjectionStore reads this table, so it must exist even when its migration was skipped.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 62) {
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 63) {
     const { ensureThreadReadProjection } = yield* Effect.promise(
-      () => import("./Migrations/062_ProjectionThreadReadPayload.ts"),
+      () => import("./Migrations/063_ProjectionThreadReadPayload.ts"),
     );
     yield* ensureThreadReadProjection;
   }
@@ -464,7 +469,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
         )
           return;
         const { ensureThreadReadProjection } = yield* Effect.promise(
-          () => import("./Migrations/062_ProjectionThreadReadPayload.ts"),
+          () => import("./Migrations/063_ProjectionThreadReadPayload.ts"),
         );
         yield* ensureThreadReadProjection;
         yield* sql`CREATE TABLE IF NOT EXISTS t3_schema_cache (

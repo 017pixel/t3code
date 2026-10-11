@@ -18,8 +18,8 @@ import {
  * read row stale on any thread write, whoever makes it, and readers use the thread payload for a
  * stale or missing row until this build writes the thread again.
  *
- * ProjectionStore's readers join this table, so it cannot depend on migration 62 running: a
- * database that recorded another build's migration at or above 62 skips it. runMigrations also
+ * ProjectionStore's readers join this table, so it cannot depend on migration 63 running: a
+ * database that recorded another build's migration at or above 63 skips it. runMigrations also
  * runs this after every migration pass, and it does nothing once the table and triggers exist.
  */
 const ensureInTransaction = (sql: SqlClient.SqlClient) =>

@@ -41,8 +41,9 @@ describe("V2 preview upgrade", () => {
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
-        [61, "ProjectionThreadSweepIndexes"],
-        [62, "ProjectionThreadReadPayload"],
+        [61, "PullRequestReviewGuides"],
+        [62, "ProjectionThreadSweepIndexes"],
+        [63, "ProjectionThreadReadPayload"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -126,8 +127,9 @@ describe("V2 preview upgrade", () => {
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
-        [61, "ProjectionThreadSweepIndexes"],
-        [62, "ProjectionThreadReadPayload"],
+        [61, "PullRequestReviewGuides"],
+        [62, "ProjectionThreadSweepIndexes"],
+        [63, "ProjectionThreadReadPayload"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -153,26 +155,26 @@ it.effect("revalidates a cached schema after another build changes its ledger or
     yield* runMigrations();
     assert.equal((yield* sql`SELECT * FROM t3_schema_cache`).length, 1);
     yield* runMigrations();
-    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 62`;
+    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 63`;
     assert.deepStrictEqual(yield* sql`SELECT * FROM t3_schema_cache`, []);
-    assert.deepStrictEqual(yield* runMigrations(), [[62, "ProjectionThreadReadPayload"]]);
+    assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadReadPayload"]]);
 
-    yield* sql`UPDATE effect_sql_migrations SET name = 'OtherBuild' WHERE migration_id = 62`;
-    yield* runMigrations();
-    assert.deepStrictEqual(
-      yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id = 62`,
-      [{ name: "OtherBuild" }],
-    );
-    yield* sql`UPDATE effect_sql_migrations SET name = 'ProjectionThreadReadPayload' WHERE migration_id = 62`;
-    yield* runMigrations();
-
-    yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (63, 'NewerBuild')`;
+    yield* sql`UPDATE effect_sql_migrations SET name = 'OtherBuild' WHERE migration_id = 63`;
     yield* runMigrations();
     assert.deepStrictEqual(
       yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id = 63`,
+      [{ name: "OtherBuild" }],
+    );
+    yield* sql`UPDATE effect_sql_migrations SET name = 'ProjectionThreadReadPayload' WHERE migration_id = 63`;
+    yield* runMigrations();
+
+    yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (64, 'NewerBuild')`;
+    yield* runMigrations();
+    assert.deepStrictEqual(
+      yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id = 64`,
       [{ name: "NewerBuild" }],
     );
-    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 63`;
+    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 64`;
     yield* runMigrations();
 
     yield* sql`DROP TABLE orchestration_v2_projection_thread_reads`;
