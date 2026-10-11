@@ -109,12 +109,18 @@ process.kill(process.pid, "SIGKILL");`,
   },
 );
 
-it("keeps only the running version's CLI cache directory", async () => {
+it("removes another version's CLI cache directory only after a week unused", async () => {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-cli-cache-"));
   try {
     const root = NodePath.join(directory, "compile-cache");
-    await NodeFSP.mkdir(NodePath.join(root, "1.2.2", "node"), { recursive: true });
-    await NodeFSP.writeFile(NodePath.join(root, "1.2.2", "node", "entry"), "stale");
+    for (const version of ["1.2.2", "1.2.4"]) {
+      await NodeFSP.mkdir(NodePath.join(root, version, "node"), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(root, version, "node", "entry"), version);
+    }
+    // 1.2.2 was last used eight days ago; 1.2.4 is another install still in use.
+    const { mtimeMs } = await NodeFSP.stat(NodePath.join(root, "1.2.2"));
+    const eightDaysAgo = (mtimeMs - 8 * 24 * 60 * 60 * 1000) / 1000;
+    await NodeFSP.utimes(NodePath.join(root, "1.2.2"), eightDaysAgo, eightDaysAgo);
     const child = NodeChildProcess.spawnSync(
       process.execPath,
       [
@@ -135,7 +141,7 @@ enableCliCompileCache({ bundled: true, argv: ["serve", "--base-dir", ${JSON.stri
     );
     assert.equal(child.error, undefined);
     assert.equal(child.stderr, "");
-    assert.deepEqual(await NodeFSP.readdir(root), ["1.2.3"]);
+    assert.deepEqual((await NodeFSP.readdir(root)).sort(), ["1.2.3", "1.2.4"]);
   } finally {
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
