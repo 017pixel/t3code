@@ -13,6 +13,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as HostLock from "./ProviderMaintenanceHostLock.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
@@ -50,9 +51,392 @@ import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import {
   makeProviderMaintenanceCapabilities,
+  makePackageManagedProviderMaintenanceResolver,
+  resolveProviderMaintenanceCapabilitiesEffect,
   type ProviderMaintenanceCapabilities,
 } from "@t3tools/provider-core/server/maintenanceResolver";
+import { PiDriver } from "@t3tools/provider-pi/server";
+import { GrokDriver } from "@t3tools/provider-grok/server";
+import { MuseDriver } from "@t3tools/provider-muse/server";
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
+
+it.effect.each([
+  "claude",
+  "codex",
+  "codex-custom",
+  "codex-linked",
+  "opencode",
+  "pi",
+  "grok",
+  "muse",
+  "npm",
+  "pnpm-5",
+  "pnpm-11",
+  "bun",
+  "yarn",
+  "volta",
+  "vp-legacy",
+  "vp-split",
+  "brew-formula",
+  "brew-cask",
+] as const)(
+  "background updates execute the official %s install's owning command",
+  (method) => {
+    let root = "";
+    let updated = false;
+    const calls: Array<{ command: string; args: ReadonlyArray<string>; env?: NodeJS.ProcessEnv }> =
+      [];
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      root = yield* fs.makeTempDirectoryScoped({ prefix: "r3-03-runner-" });
+      const write = (file: string, source = '#!/bin/sh\nprintf "%s\\n" "$@"\n') => {
+        NodeFS.mkdirSync(NodePath.dirname(file), { recursive: true });
+        NodeFS.writeFileSync(file, source);
+        NodeFS.chmodSync(file, 0o755);
+      };
+      const link = (target: string, alias: string) => {
+        NodeFS.mkdirSync(NodePath.dirname(alias), { recursive: true });
+        NodeFS.symlinkSync(NodePath.relative(NodePath.dirname(alias), target), alias);
+      };
+      const bin = NodePath.join(root, ".local/bin");
+      const cli =
+        method === "claude"
+          ? "claude"
+          : method === "opencode"
+            ? "opencode"
+            : method === "pi"
+              ? "pi"
+              : method === "grok"
+                ? "grok"
+                : method === "muse"
+                  ? "muse"
+                  : "codex";
+      const alias = NodePath.join(bin, cli);
+      const kind = ProviderDriverKind.make(cli === "claude" ? "claudeAgent" : cli);
+      const packageName =
+        cli === "claude"
+          ? "@anthropic-ai/claude-code"
+          : cli === "opencode"
+            ? "opencode-ai"
+            : cli === "pi"
+              ? "@earendil-works/pi-coding-agent"
+              : cli === "grok"
+                ? "@xai-official/grok"
+                : "@openai/codex";
+      let expectedExecutable = alias;
+      let expectedArgs: ReadonlyArray<string> = [cli === "opencode" ? "upgrade" : "update"];
+      let codexHome = NodePath.join(root, ".codex");
+      const env = { HOME: root, PATH: bin, GROK_HOME: NodePath.join(root, ".grok") };
+      if (method === "claude") {
+        const release = NodePath.join(root, ".local/share/claude/versions/2.1.293");
+        write(release);
+        link(release, alias);
+      } else if (method.startsWith("codex")) {
+        if (method === "codex-custom") codexHome = NodePath.join(root, "custom-codex");
+        const release = NodePath.join(
+          codexHome,
+          "packages/standalone/releases/0.162.1-x86_64/bin/codex",
+        );
+        write(release);
+        const current = NodePath.join(codexHome, "packages/standalone/current");
+        link(NodePath.dirname(NodePath.dirname(release)), current);
+        if (method === "codex-linked") {
+          const linkedHome = NodePath.join(root, "linked-codex");
+          link(codexHome, linkedHome);
+          codexHome = linkedHome;
+        }
+        link(NodePath.join(codexHome, "packages/standalone/current/bin/codex"), alias);
+      } else if (method === "opencode") {
+        const native = NodePath.join(root, ".opencode/bin/opencode");
+        write(native);
+        link(native, alias);
+      } else if (method === "pi") {
+        const agent = NodePath.join(root, ".pi/agent");
+        const launcher = NodePath.join(agent, "bin/pi");
+        const release = NodePath.join(
+          agent,
+          "install/releases/1.0.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+        );
+        write(release);
+        link(release, NodePath.join(agent, "install/releases/1.0.0/node_modules/.bin/pi"));
+        write(NodePath.join(agent, "install/current-version"), "1.0.0\n");
+        write(
+          NodePath.join(agent, "install/managed-install.json"),
+          JSON.stringify({
+            kind: "pi-managed-install",
+            schemaVersion: 1,
+            layout: "releases-v1",
+            entrypoint: { type: "symlink", path: alias },
+          }),
+        );
+        write(
+          launcher,
+          '#!/bin/sh\npi_bin_dir=${0%/*}\npi_agent_dir=${pi_bin_dir%/*}\npi_current_file=$pi_agent_dir/install/current-version\nIFS= read -r pi_current_version < "$pi_current_file"\npi_release_bin=$pi_agent_dir/install/releases/$pi_current_version/node_modules/.bin/pi\nPI_MANAGED_INSTALL_ROOT=$pi_agent_dir/install\nexport PI_MANAGED_INSTALL_ROOT\nexec "$pi_release_bin" "$@"\n',
+        );
+        link(launcher, alias);
+        expectedArgs = ["update", "--self"];
+      } else if (method === "grok") {
+        const download = NodePath.join(env.GROK_HOME, "downloads/grok-linux-x86_64");
+        write(download);
+        link(download, NodePath.join(env.GROK_HOME, "bin/grok"));
+        link(NodePath.join(env.GROK_HOME, "bin/grok"), alias);
+      } else if (method === "muse") {
+        write(
+          alias,
+          '#!/bin/bash\n# muse-code/launcher-2\nMUSE_SYNC_UPDATE=${MUSE_SYNC_UPDATE:-0}\nexec "${0%/*}/muse-bin-2.0.0-R1" "$@"\n',
+        );
+        write(NodePath.join(bin, "muse-bin-2.0.0-R1"));
+        expectedArgs = ["--version"];
+      } else if (method === "volta") {
+        const shim = NodePath.join(root, ".volta/bin/volta-shim");
+        write(shim);
+        NodeFS.mkdirSync(NodePath.join(root, ".volta/tools/image/packages/@openai/codex/1.0.0"), {
+          recursive: true,
+        });
+        const voltaAlias = NodePath.join(root, ".volta/bin/codex");
+        link(shim, voltaAlias);
+        link(voltaAlias, alias);
+        expectedExecutable = "volta";
+        expectedArgs = ["install", "@openai/codex@2.0.0"];
+      } else if (method.startsWith("vp-")) {
+        const data = NodePath.join(
+          root,
+          method === "vp-legacy" ? ".vite-plus" : ".local/share/vite-plus",
+        );
+        const vp = NodePath.join(data, "1.1.0/bin/vp");
+        write(vp);
+        link(NodePath.dirname(NodePath.dirname(vp)), NodePath.join(data, "current"));
+        write(
+          NodePath.join(data, "bins/codex.json"),
+          JSON.stringify({
+            name: "codex",
+            package: packageName,
+            version: "1.0.0",
+            nodeVersion: "24.13.1",
+            source: "vp",
+          }),
+        );
+        write(
+          NodePath.join(data, "packages/@openai/codex.json"),
+          JSON.stringify({
+            name: packageName,
+            version: "1.0.0",
+            bins: ["codex"],
+            jsBins: ["codex"],
+            manager: "npm",
+            platform: { node: "24.13.1" },
+            installedAt: "2026-10-11T00:00:00Z",
+          }),
+        );
+        const vpAlias = NodePath.join(data, "bin/codex");
+        link(NodePath.join(data, "current/bin/vp"), vpAlias);
+        link(vpAlias, alias);
+        expectedExecutable = "vp";
+        expectedArgs = ["i", "-g", "@openai/codex@2.0.0"];
+      } else if (method.startsWith("brew-")) {
+        const real = NodePath.join(
+          root,
+          method === "brew-cask"
+            ? "Caskroom/codex/0.162.1/bin/codex"
+            : "Cellar/opencode/2.0.25/bin/opencode",
+        );
+        write(real);
+        link(real, alias);
+        write(NodePath.join(root, "bin/brew"));
+        expectedExecutable = NodePath.join(root, "bin/brew");
+        expectedArgs =
+          method === "brew-cask" ? ["upgrade", "--cask", "codex"] : ["upgrade", "opencode"];
+      } else {
+        const prefix =
+          method === "npm"
+            ? "npm/lib"
+            : method === "bun"
+              ? ".bun/install/global"
+              : method === "yarn"
+                ? ".config/yarn/global"
+                : method === "pnpm-5"
+                  ? ".local/share/pnpm/global/5"
+                  : ".local/share/pnpm/global/v11/store/codex/node_modules/.pnpm/@openai+codex@1.0.0";
+        const real = NodePath.join(root, prefix, "node_modules/@openai/codex/bin/codex.js");
+        write(real);
+        const ownerAlias = NodePath.join(
+          root,
+          method === "bun"
+            ? ".bun/bin/codex"
+            : method.startsWith("pnpm")
+              ? ".local/share/pnpm/bin/codex"
+              : ".local/bin/codex-link",
+        );
+        if (method.startsWith("pnpm")) {
+          // pnpm writes a shell shim, not an npm-style executable symlink.
+          write(
+            ownerAlias,
+            `#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/${NodePath.relative(NodePath.dirname(ownerAlias), real)}" "$@"\n`,
+          );
+        } else link(real, ownerAlias);
+        link(ownerAlias, alias);
+        expectedExecutable = method.startsWith("pnpm") ? "pnpm" : method;
+        expectedArgs =
+          method === "npm"
+            ? [
+                "install",
+                "-g",
+                "--prefix",
+                NodePath.join(root, "npm"),
+                "--allow-scripts=@openai/codex",
+                "@openai/codex@2.0.0",
+              ]
+            : method.startsWith("pnpm")
+              ? ["add", "-g", "@openai/codex@2.0.0"]
+              : method === "bun"
+                ? ["i", "-g", "@openai/codex@2.0.0"]
+                : ["global", "add", "@openai/codex@2.0.0"];
+      }
+      const resolver = makePackageManagedProviderMaintenanceResolver({
+        provider: kind,
+        npmPackageName: packageName,
+        nativeUpdate: {
+          args: expectedArgs,
+          isCommandPath: (value) =>
+            method === "claude"
+              ? value.includes("/.local/share/claude/versions/")
+              : method.startsWith("codex")
+                ? value.includes("/packages/standalone/")
+                : method === "opencode"
+                  ? value.endsWith("/.opencode/bin/opencode")
+                  : false,
+          ...(method.startsWith("codex") ? { env: { CODEX_HOME: codexHome } } : {}),
+        },
+      });
+      const instanceId = ProviderInstanceId.make("official-install");
+      const instance =
+        method === "pi"
+          ? yield* PiDriver.create({
+              instanceId,
+              displayName: undefined,
+              enabled: false,
+              environment: [],
+              config: { ...PiDriver.defaultConfig(), binaryPath: alias },
+            })
+          : method === "grok"
+            ? yield* GrokDriver.create({
+                instanceId,
+                displayName: undefined,
+                enabled: false,
+                environment: [{ name: "GROK_HOME", value: env.GROK_HOME, sensitive: false }],
+                config: { ...GrokDriver.defaultConfig(), binaryPath: alias },
+              })
+            : method === "muse"
+              ? yield* MuseDriver.create({
+                  instanceId,
+                  displayName: undefined,
+                  enabled: false,
+                  environment: [],
+                  config: { ...MuseDriver.defaultConfig(), binaryPath: alias },
+                })
+              : null;
+      const resolve = (options?: { fresh?: boolean }) =>
+        instance
+          ? instance.snapshot.resolveMaintenance(options)
+          : resolveProviderMaintenanceCapabilitiesEffect(resolver, { binaryPath: alias, env }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            );
+      assert.isDefined((yield* resolve()).update?.installationKey);
+      const { registry, providersRef } = yield* makeRegistry({
+        ...baseProvider,
+        instanceId,
+        driver: kind,
+        version: "1.0.0",
+      });
+      const runner = yield* makeTestRunner(
+        {
+          ...registry,
+          getProviderMaintenanceCapabilitiesForInstance: (_id, _driver, options) =>
+            resolve(options),
+          refreshInstance: () =>
+            Ref.updateAndGet(providersRef, (providers) =>
+              providers.map((provider) => (updated ? { ...provider, version: "2.0.0" } : provider)),
+            ),
+        },
+        {
+          version: 1,
+          currentModels: {},
+          compatibility: [
+            {
+              driver: kind,
+              t3CodeRange: ">=0.0.42",
+              ranges: [{ range: ">=1.0.0", status: "supported" }],
+            },
+          ],
+        },
+      );
+      const result = yield* runner.updateProvider({
+        instanceId,
+        provider: kind,
+        origin: "background",
+      });
+      assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+      assert.strictEqual(calls.length, 1);
+      assert.strictEqual(calls[0]?.command, expectedExecutable);
+      assert.deepStrictEqual(calls[0]?.args, expectedArgs);
+      if (method.startsWith("codex")) assert.strictEqual(calls[0]?.env?.CODEX_HOME, codexHome);
+      if (method === "muse") assert.strictEqual(calls[0]?.env?.MUSE_SYNC_UPDATE, "1");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          NodeServices.layer,
+          TestProviderHost.layer({ runBackgroundWork: false }).pipe(
+            Layer.provide(NodeServices.layer),
+          ),
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          ProviderLatestVersions.layer,
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+          layerMockSpawner((command, args, options) => {
+            if (args[0] === "--prefix") return { stdout: root };
+            if (args[0] === "info")
+              return {
+                stdout: JSON.stringify({
+                  formulae: [{ versions: { stable: "2.0.0" } }],
+                  casks: [{ version: "2.0.0" }],
+                }),
+              };
+            calls.push({ command, args, ...(options.env ? { env: options.env } : {}) });
+            updated = true;
+            return { stdout: "updated" };
+          }),
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(
+                  request,
+                  Response.json({
+                    version: request.url.includes("meta.ai") ? "2.0.0-R1" : "2.0.0",
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+      Effect.scoped,
+    );
+  },
+  { skip: HostProcess.Platform.defaultValue() === "win32" },
+);
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const NATIVE_CLI_DRIVER = ProviderDriverKind.make("nativeCli");

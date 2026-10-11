@@ -1157,6 +1157,75 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     { skip: windowsHost },
   );
 
+  it.effect.each(["legacy", "split", "custom"] as const)(
+    "owns official Vite+ package shims through their metadata (%s)",
+    (layout) =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("r3-03-vp");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const data = NodePath.join(
+          root,
+          layout === "legacy"
+            ? ".vite-plus"
+            : layout === "split"
+              ? ".local/share/vite-plus"
+              : "custom-data",
+        );
+        const bin = NodePath.join(layout === "custom" ? root : data, "bin");
+        const vp = NodePath.join(data, "1.1.0/bin/vp");
+        writeExecutable(vp);
+        NodeFS.symlinkSync("1.1.0", NodePath.join(data, "current"));
+        NodeFS.mkdirSync(bin, { recursive: true });
+        const alias = NodePath.join(bin, "package-tool");
+        NodeFS.symlinkSync(NodePath.relative(bin, NodePath.join(data, "current/bin/vp")), alias);
+        NodeFS.mkdirSync(NodePath.join(data, "bins"), { recursive: true });
+        NodeFS.writeFileSync(
+          NodePath.join(data, "bins/package-tool.json"),
+          JSON.stringify({
+            name: "package-tool",
+            package: "@example/package-tool",
+            version: "1.0.0",
+            nodeVersion: "24.13.1",
+            source: "vp",
+          }),
+        );
+        NodeFS.mkdirSync(NodePath.join(data, "packages/@example"), { recursive: true });
+        const metadata = NodePath.join(data, "packages/@example/package-tool.json");
+        const installed = {
+          name: "@example/package-tool",
+          version: "1.0.0",
+          installId: "",
+          platform: { node: "24.13.1" },
+          bins: ["package-tool"],
+          jsBins: ["package-tool"],
+          manager: "npm",
+          installedAt: "2026-10-11T00:00:00Z",
+        };
+        NodeFS.writeFileSync(metadata, JSON.stringify(installed));
+        const resolve = () =>
+          resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
+            binaryPath: alias,
+            env: { PATH: bin },
+          });
+        const active = yield* resolve();
+        expect(active.update).toMatchObject({
+          executable: "vp",
+          args: ["i", "-g", "@example/package-tool"],
+          lockKey: "vite-plus-global",
+        });
+        expect(active.update?.installationKey).toBeDefined();
+        NodeFS.writeFileSync(metadata, JSON.stringify({ ...installed, versionSpec: "1.0.0" }));
+        expect((yield* resolve()).update?.installationKey).toBeUndefined();
+        NodeFS.writeFileSync(metadata, JSON.stringify({ ...installed, name: "@example/sdk" }));
+        expect((yield* resolve()).update).toBeNull();
+        NodeFS.rmSync(metadata);
+        expect((yield* resolve()).update).toBeNull();
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
+
   it.effect.skipIf(windowsHost)(
     "native aliases share stable ownership but configured release paths stay pinned",
     () =>
@@ -1165,15 +1234,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
         );
-        const release = NodePath.join(
-          root,
-          ".local",
-          "share",
-          "claude",
-          "versions",
-          "1.0.0",
-          "claude",
-        );
+        const release = NodePath.join(root, ".local", "share", "claude", "versions", "1.0.0");
         writeExecutable(release);
         const alias = NodePath.join(root, ".local", "bin", "claude");
         NodeFS.mkdirSync(NodePath.dirname(alias), { recursive: true });
@@ -1193,15 +1254,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         const pinned = yield* resolve(release);
         expect(active.update?.installationKey).toBeDefined();
         expect(pinned.update?.installationKey).toBeUndefined();
-        const newer = NodePath.join(
-          root,
-          ".local",
-          "share",
-          "claude",
-          "versions",
-          "2.0.0",
-          "claude",
-        );
+        const newer = NodePath.join(root, ".local", "share", "claude", "versions", "2.0.0");
         writeExecutable(newer);
         NodeFS.unlinkSync(alias);
         NodeFS.symlinkSync(newer, alias);
