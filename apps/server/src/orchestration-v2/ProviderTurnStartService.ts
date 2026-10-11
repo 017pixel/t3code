@@ -508,7 +508,7 @@ export const layer: Layer.Layer<
         });
       // These reads cannot start a workspace-capable provider. Do them while
       // Git captures the baseline, then gate every session operation below.
-      const [inheritedBackgroundTurnItems, resolvedRuntimePolicy, baseline] = yield* Effect.all(
+      const [inheritedBackgroundTurnItems, resolvedRuntimePolicy] = yield* Effect.all(
         [
           projectionStore
             .getRuntimeRecoveryProjection(projection.thread.id)
@@ -517,12 +517,25 @@ export const layer: Layer.Layer<
             thread: projection.thread,
             modelSelection: run.modelSelection,
           }),
+          // Session open and native thread setup can run hooks and MCP servers
+          // before a prompt. Capture their edits in the turn, never in its
+          // baseline. A capture that fails or dies still starts the turn,
+          // without a baseline.
           checkpoints
             .captureBaseline({
               scope: checkpointScope,
               ordinalWithinScope: Math.max(0, run.ordinal - 1),
             })
-            .pipe(Effect.result),
+            .pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.failCause(cause)
+                  : Effect.logWarning(
+                      "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                      { runId, cause: Cause.pretty(cause) },
+                    ),
+              ),
+            ),
         ],
         { concurrency: "unbounded" },
       );
@@ -573,15 +586,6 @@ export const layer: Layer.Layer<
             },
           });
         });
-      // Session open and native thread setup can run hooks and MCP servers
-      // before a prompt. Capture their edits in the turn, never in its baseline.
-      // A capture that fails still starts the turn, without a baseline.
-      if (baseline._tag === "Failure") {
-        yield* Effect.logWarning(
-          "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
-          { runId, cause: String(baseline.failure) },
-        );
-      }
       if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const sessionResult = yield* Effect.result(
         providerSessions.open({
