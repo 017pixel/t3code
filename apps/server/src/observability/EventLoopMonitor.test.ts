@@ -71,6 +71,39 @@ describe("EventLoopMonitor", () => {
     }),
   );
 
+  it.effect("samples every second at startup and every 30 seconds after", () =>
+    Effect.gen(function* () {
+      let samples = 0;
+      yield* Layer.build(
+        EventLoopMonitor.layerWith(
+          Effect.succeed(
+            Effect.sync(() => {
+              samples += 1;
+              return quiet;
+            }),
+          ),
+        ),
+      );
+      yield* TestClock.adjust("30 seconds");
+      assert.strictEqual(samples, 30);
+      yield* TestClock.adjust("29 seconds");
+      assert.strictEqual(samples, 30);
+      yield* TestClock.adjust("1 second");
+      assert.strictEqual(samples, 31);
+    }).pipe(Effect.scoped),
+  );
+
+  it("reports only stalls over 2 s after startup", () => {
+    // Read at the steady 1 s resolution.
+    assert.isUndefined(
+      EventLoopMonitor.stallMs({ ...stalled, delayMaxNs: ms(2_900), steady: true }),
+    );
+    assert.strictEqual(
+      EventLoopMonitor.stallMs({ ...stalled, delayMaxNs: ms(4_000), steady: true }),
+      3_000,
+    );
+  });
+
   it("reports short stalls even when ELU active time lags the delay reading", () => {
     const short: EventLoopMonitor.EventLoopReadings = {
       ...stalled,
