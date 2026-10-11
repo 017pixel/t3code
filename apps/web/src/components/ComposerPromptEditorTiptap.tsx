@@ -131,6 +131,11 @@ export interface ComposerPromptEditorProps {
   value: string;
   cursor: number;
   /**
+   * Changes when the value was rewritten outside the editor. A rewrite can equal the last
+   * rendered value while the editor holds newer typing, so the new version still applies it.
+   */
+  valueVersion?: number;
+  /**
    * The thread the prompt belongs to. A kept chat view that switches threads
    * keeps its editor, and a new scope starts a new undo history.
    */
@@ -833,6 +838,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     suggestionListId,
     activeSuggestionId,
     isPathQueryActive,
+    valueVersion,
     containerClassName,
     className,
     placeholderClassName,
@@ -1625,6 +1631,8 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     richText,
     skillLabelFor,
     value,
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- An outside rewrite can equal the last rendered value.
+    valueVersion,
   ]);
 
   // Runs after the effect above has loaded the new thread's prompt, so undo

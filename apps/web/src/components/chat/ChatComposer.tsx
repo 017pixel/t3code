@@ -1448,11 +1448,12 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 
 // Local transactions have already painted in ProseMirror, so typing does not render this.
 // `promptVersion` moves on every rewrite from outside the editor (recall, chips, stash, send,
-// reload), which re-renders this memo with the new value.
+// reload). It re-renders this memo, and the editor applies the value even when it equals the
+// last rendered one.
 const ComposerDraftEditor = memo(function ComposerDraftEditor({
   target,
   readCursor,
-  promptVersion: _promptVersion,
+  promptVersion,
   value: overriddenValue,
   ...props
 }: Omit<ComposerPromptEditorProps, "value"> & {
@@ -1464,7 +1465,14 @@ const ComposerDraftEditor = memo(function ComposerDraftEditor({
   "use no memo"; // The caret is imperative; caching readCursor() would rewind typed text.
   const value =
     overriddenValue ?? useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
-  return <ComposerPromptEditor {...props} value={value} cursor={readCursor()} />;
+  return (
+    <ComposerPromptEditor
+      {...props}
+      value={value}
+      valueVersion={promptVersion}
+      cursor={readCursor()}
+    />
+  );
 });
 
 const ComposerDraftPromptText = memo(function ComposerDraftPromptText({
