@@ -341,25 +341,31 @@ export async function make(input: {
       throw new Error("Could not verify the recorded provider owner");
     }
     let next = withoutInstaller(discover(entry, table), table);
-    if (platform !== "win32") {
-      // Freeze to a fixed point. A child may fork while its parent is being stopped.
-      const stopped = new Set<string>();
-      for (let attempt = 0; attempt < 100; attempt++) {
-        const pending = survivors(next, table).filter(
-          (p) => !stopped.has(`${p.pid}:${p.startTime}`),
-        );
-        if (pending.length === 0) break;
-        for (const p of pending) {
-          await signal(p, "SIGSTOP");
-          stopped.add(`${p.pid}:${p.startTime}`);
+    const stopped = new Map<string, (typeof table)[number]>();
+    try {
+      if (platform !== "win32") {
+        // Freeze to a fixed point. A child may fork while its parent is being stopped.
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const pending = survivors(next, table).filter(
+            (p) => !stopped.has(`${p.pid}:${p.startTime}`),
+          );
+          if (pending.length === 0) break;
+          for (const p of pending) {
+            await signal(p, "SIGSTOP");
+            stopped.set(`${p.pid}:${p.startTime}`, p);
+          }
+          table = await controller.snapshot();
+          next = withoutInstaller(discover(next, table), table);
+          if (attempt === 99) throw new Error("Provider process tree did not stop for cleanup");
         }
-        table = await controller.snapshot();
-        next = withoutInstaller(discover(next, table), table);
-        if (attempt === 99) throw new Error("Provider process tree did not stop for cleanup");
       }
+      // Persist newly discovered children before signalling: recovery can itself be killed.
+      write(file, next);
+    } catch (error) {
+      // Never leave a frozen tree behind: resume it so the next cleanup can retry.
+      for (const p of stopped.values()) await signal(p, "SIGCONT").catch(() => undefined);
+      throw error;
     }
-    // Persist newly discovered children before signalling: recovery can itself be killed.
-    write(file, next);
     for (const p of survivors(next, await controller.snapshot()).toReversed())
       await signal(p, "SIGKILL");
     for (let attempt = 0; attempt < 100; attempt++) {
