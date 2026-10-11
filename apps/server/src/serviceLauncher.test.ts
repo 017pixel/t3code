@@ -237,62 +237,78 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
-  it.effect("starts the server when orphaned provider cleanup cannot run", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-reap-" });
-      const statePath = path.join(root, "runtime", "service-state.json");
-      const leases = path.join(root, "cache", "t3", "provider-maintenance");
-      yield* fs.makeDirectory(leases, { recursive: true });
-      yield* fs.writeFileString(path.join(leases, "install.json"), "corrupt");
-      // A crashed server's record makes cleanup read the corrupt lease.
-      const records = path.join(root, "userdata", "provider-processes");
-      yield* fs.makeDirectory(records, { recursive: true });
-      yield* fs.writeFileString(
-        path.join(records, "0.json"),
-        JSON.stringify({
-          version: 1,
-          instanceId: "crashed",
-          hostname: NodeOS.hostname(),
-          stateDir: path.join(root, "userdata"),
-          owner: { pid: 2 ** 30, startTime: "exited" },
-          processes: [],
-        }),
-      );
-      yield* Effect.acquireRelease(
-        Effect.sync(() => vi.stubEnv("XDG_CACHE_HOME", path.join(root, "cache"))),
-        () => Effect.sync(() => vi.unstubAllEnvs()),
-      );
-      yield* writeFakeRuntime(
-        fs,
-        path,
-        path.join(root, "runtime", "versions", "1.0.0"),
-        `require("node:fs").writeFileSync(${JSON.stringify(path.join(root, "started"))}, "");\nsetInterval(() => {}, 1_000);\n`,
-      );
-      yield* Effect.promise(() =>
-        writeServiceState(statePath, {
-          protocol: SERVICE_LAUNCHER_PROTOCOL,
-          activeVersion: "1.0.0",
-        }),
-      );
-      const started = Promise.withResolvers<void>();
-      yield* Effect.acquireRelease(
-        Effect.sync(() =>
-          NodeFS.watch(root, (_event, name) => {
-            if (name === "started") started.resolve();
+  it.effect.each(["corrupt", "legacy", "structured"] as const)(
+    "starts the server with a %s installer lease",
+    (lease) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-reap-" });
+        const statePath = path.join(root, "runtime", "service-state.json");
+        const leases = path.join(root, "cache", "t3", "provider-maintenance");
+        yield* fs.makeDirectory(leases, { recursive: true });
+        yield* fs.writeFileString(
+          path.join(leases, "install.json"),
+          lease === "corrupt"
+            ? "corrupt"
+            : lease === "legacy"
+              ? String(2 ** 30)
+              : JSON.stringify({ pid: 2 ** 30, identity: "exited", descendants: [] }),
+        );
+        // A crashed server's record makes cleanup inspect the install lease.
+        const records = path.join(root, "userdata", "provider-processes");
+        yield* fs.makeDirectory(records, { recursive: true });
+        yield* fs.writeFileString(
+          path.join(records, "0.json"),
+          JSON.stringify({
+            version: 1,
+            instanceId: "crashed",
+            hostname: NodeOS.hostname(),
+            stateDir: path.join(root, "userdata"),
+            owner: { pid: 2 ** 30, startTime: "exited" },
+            processes: [],
           }),
-        ),
-        (watcher) => Effect.sync(() => watcher.close()),
-      );
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
-      const running = launcher.run();
-      // A failed launcher would otherwise leave the child promise pending forever.
-      yield* Effect.promise(() => Promise.race([started.promise, running]));
-      assert.isTrue(yield* fs.exists(path.join(root, "started")));
-      yield* Effect.promise(() => launcher.stop("SIGTERM"));
-      yield* Effect.promise(() => running);
-    }),
+        );
+        yield* Effect.acquireRelease(
+          Effect.sync(() => vi.stubEnv("XDG_CACHE_HOME", path.join(root, "cache"))),
+          () => Effect.sync(() => vi.unstubAllEnvs()),
+        );
+        yield* writeFakeRuntime(
+          fs,
+          path,
+          path.join(root, "runtime", "versions", "1.0.0"),
+          `require("node:fs").writeFileSync(${JSON.stringify(path.join(root, "started"))}, "");\nsetInterval(() => {}, 1_000);\n`,
+        );
+        yield* Effect.promise(() =>
+          writeServiceState(statePath, {
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: "1.0.0",
+          }),
+        );
+        const started = Promise.withResolvers<void>();
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            NodeFS.watch(root, (_event, name) => {
+              if (name === "started") started.resolve();
+            }),
+          ),
+          (watcher) => Effect.sync(() => watcher.close()),
+        );
+        const launcher = new Launcher(
+          root,
+          yield* Effect.promise(() => readServiceState(statePath)),
+        );
+        const running = yield* Effect.acquireRelease(
+          Effect.sync(() => launcher.run()),
+          () => Effect.promise(() => launcher.stop("SIGTERM")),
+        );
+        // A failed launcher would otherwise leave the child promise pending forever.
+        yield* Effect.promise(() => Promise.race([started.promise, running]));
+        assert.isTrue(yield* fs.exists(path.join(root, "started")));
+        assert.equal(yield* fs.exists(path.join(records, "0.json")), lease === "corrupt");
+        yield* Effect.promise(() => launcher.stop("SIGTERM"));
+        yield* Effect.promise(() => running);
+      }),
   );
 
   it.effect.each([
