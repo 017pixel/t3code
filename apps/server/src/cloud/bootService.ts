@@ -829,8 +829,18 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     // written, from the same read the downgrade check uses; the stop that
     // normally serialises against the launcher is skipped on purpose.
     const start = options?.start !== false;
+    // A restarting install replaces the running server, like `restart`, so
+    // its external provider turns are kept rather than aborted.
+    const restartMarkerPath = path.join(input.baseDir, "runtime", SERVICE_RESTART_MARKER_FILE);
+    const removeRestartMarker =
+      installed && start
+        ? fs.remove(restartMarkerPath, { force: true }).pipe(Effect.ignore)
+        : Effect.void;
     if (installed && start) {
-      yield* runSteps(manager.stop);
+      yield* writeDurably(restartMarkerPath, "").pipe(
+        Effect.mapError((cause) => new BootServiceInstallError({ cause })),
+      );
+      yield* runSteps(manager.stop).pipe(Effect.onError(() => removeRestartMarker));
     }
 
     yield* Effect.gen(function* () {
@@ -902,6 +912,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       Effect.tapError(() =>
         installed && start ? runSteps(manager.restart).pipe(Effect.ignore) : Effect.void,
       ),
+      Effect.ensuring(removeRestartMarker),
     );
     return plan;
   });

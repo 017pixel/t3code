@@ -639,13 +639,20 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
 
   it.effect("restarts an installed service when repair fails", () =>
     Effect.gen(function* () {
-      const { service, commands, control } = yield* makeHarness();
+      const { service, commands, control, fs, statePath } = yield* makeHarness();
       yield* service.install();
+      expect(control.restartingAtStop).toBeUndefined();
       commands.length = 0;
       control.failCommand = "systemctl --user daemon-reload";
 
       const error = yield* service.install().pipe(Effect.flip);
       expect(error._tag).toBe("BootServiceCommandError");
+      // `t3 update` restarts a running service this way; it is a restart, not a stop.
+      expect(control.restartingAtStop).toBe(true);
+      const path = yield* Path.Path;
+      expect(
+        yield* fs.exists(path.join(path.dirname(statePath), SERVICE_RESTART_MARKER_FILE)),
+      ).toBe(false);
       expect(
         commands.filter(
           (command) => command.startsWith("systemctl ") && !command.includes("show-environment"),
