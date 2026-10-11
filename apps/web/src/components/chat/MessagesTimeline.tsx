@@ -2880,30 +2880,41 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   );
 }
 
+/** The message as the live row has it; the presentation snapshot freezes while tokens stream. */
+function readStreamedMessage(message: ChatMessage, threadRef: ScopedThreadRef): ChatMessage | null {
+  const item = appAtomRegistry
+    .get(environmentThreadDetails.visibleTurnItemsAtom(threadRef))
+    .find(
+      (row) => row.item.type === "assistant_message" && row.item.messageId === message.id,
+    )?.item;
+  return item?.type === "assistant_message"
+    ? {
+        ...message,
+        text: item.text,
+        updatedAt: DateTime.formatIso(item.updatedAt),
+        streaming: item.streaming,
+      }
+    : null;
+}
+
 /** Coalesce markdown work for token bursts, and show the final text immediately. */
 function useStreamingFrameMessage(
   message: ChatMessage,
   threadRef: ScopedThreadRef | null,
 ): ChatMessage {
-  const [painted, setPainted] = useState(message);
+  // A row that mounts mid-stream starts from the live text, not the snapshot's.
+  const [painted, setPainted] = useState(
+    () =>
+      (message.streaming && threadRef !== null ? readStreamedMessage(message, threadRef) : null) ??
+      message,
+  );
   useEffect(() => {
     if (!message.streaming || threadRef === null) return;
     const atom = environmentThreadDetails.visibleTurnItemsAtom(threadRef);
     let frame: number | undefined;
     const paint = () => {
-      const item = appAtomRegistry
-        .get(atom)
-        .find(
-          (row) => row.item.type === "assistant_message" && row.item.messageId === message.id,
-        )?.item;
-      if (item?.type === "assistant_message") {
-        setPainted({
-          ...message,
-          text: item.text,
-          updatedAt: DateTime.formatIso(item.updatedAt),
-          streaming: item.streaming,
-        });
-      }
+      const streamed = readStreamedMessage(message, threadRef);
+      if (streamed) setPainted(streamed);
     };
     const unsubscribe = appAtomRegistry.subscribe(atom, () => {
       if (frame !== undefined) return;
