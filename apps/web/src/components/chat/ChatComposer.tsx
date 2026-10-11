@@ -1599,6 +1599,8 @@ export interface ChatComposerProps {
   activeThreadShell: ThreadShell | null;
   /** Timeline messages including optimistic sends, for ArrowUp prompt recall. */
   promptHistoryMessages: ReadonlyArray<ChatMessage>;
+  /** Loads an older history page; false when there is none to load right now. */
+  onLoadOlderPromptHistory?: (() => boolean) | undefined;
   isServerThread: boolean;
   isLocalDraftThread: boolean;
   forceExpandedOnMobile: boolean;
@@ -1786,6 +1788,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
     promptHistoryMessages,
+    onLoadOlderPromptHistory,
     isServerThread: _isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     forceExpandedOnMobile,
@@ -4521,6 +4524,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // on every streamed delta and ArrowUp is rare.
   const promptHistoryMessagesRef = useRef(promptHistoryMessages);
   promptHistoryMessagesRef.current = promptHistoryMessages;
+  // Set while recall waits for an older page to bring the next prompt.
+  const olderPromptRecallPendingRef = useRef(false);
 
   // The composer persists across threads. A recall from thread A must not
   // be treated as active in thread B, where the text-match fallback could
@@ -4528,6 +4533,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const promptHistoryTargetKey = composerTargetKey(composerDraftTarget);
   useEffect(() => {
     promptHistoryPositionRef.current = null;
+    olderPromptRecallPendingRef.current = false;
   }, [promptHistoryTargetKey]);
 
   const replacePromptFromHistory = useCallback(
@@ -4575,7 +4581,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         position: promptHistoryPositionRef.current,
         currentPrompt: promptRef.current,
       });
-      if (!step) return false;
+      if (!step) {
+        // Past the oldest loaded prompt, a long thread still has older ones:
+        // load the next page and step once it arrives.
+        if (direction !== "backward" || promptHistoryPositionRef.current === null) return false;
+        if (olderPromptRecallPendingRef.current) return true;
+        if (!onLoadOlderPromptHistory?.()) return false;
+        olderPromptRecallPendingRef.current = true;
+        return true;
+      }
+      olderPromptRecallPendingRef.current = false;
       promptHistoryPositionRef.current = step.position;
       replacePromptFromHistory(step.prompt);
       return true;
@@ -4587,11 +4602,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerPreviewAnnotations.length,
       composerReviewComments.length,
       isComposerApprovalState,
+      onLoadOlderPromptHistory,
       pendingUserInputs.length,
       promptRef,
       replacePromptFromHistory,
     ],
   );
+
+  useEffect(() => {
+    if (!olderPromptRecallPendingRef.current) return;
+    const position = promptHistoryPositionRef.current;
+    // An edit or send since the key press ends browsing.
+    if (position === null || promptRef.current !== position.recalled) {
+      olderPromptRecallPendingRef.current = false;
+      return;
+    }
+    const step = stepComposerPromptHistory({
+      direction: "backward",
+      entries: buildComposerPromptHistoryEntries(promptHistoryMessages),
+      position,
+      currentPrompt: promptRef.current,
+    });
+    if (step) {
+      olderPromptRecallPendingRef.current = false;
+      promptHistoryPositionRef.current = step.position;
+      replacePromptFromHistory(step.prompt);
+      return;
+    }
+    // A page of only agent work brings no prompt; keep loading until one does.
+    if (!onLoadOlderPromptHistory?.()) olderPromptRecallPendingRef.current = false;
+  }, [onLoadOlderPromptHistory, promptHistoryMessages, promptRef, replacePromptFromHistory]);
 
   // ------------------------------------------------------------------
   // Callbacks: command key

@@ -1863,6 +1863,13 @@ export default function ChatView(props: ChatViewProps) {
       },
     };
   }, [loadEarlierThreadHistory, routeThreadDetailRef, serverThreadHistory]);
+  // Prompt recall past the loaded window pages older turns in. True while a
+  // page is on its way, false once there is nothing older to load.
+  const loadOlderPromptHistory = useCallback(() => {
+    if (!threadHistoryControls?.hasMoreHistory || threadHistoryControls.error) return false;
+    if (!threadHistoryControls.loading) threadHistoryControls.onLoadEarlier();
+    return true;
+  }, [threadHistoryControls]);
   const committedServerMessageIds = useMemo(
     () => deriveCommittedServerUserMessageIds(serverVisibleTurnItems),
     [serverVisibleTurnItems],
@@ -11880,6 +11887,7 @@ export default function ChatView(props: ChatViewProps) {
                               activeThread={activeThread}
                               activeThreadShell={activeThreadShell}
                               promptHistoryMessages={timelineMessages}
+                              onLoadOlderPromptHistory={loadOlderPromptHistory}
                               isServerThread={isServerThread}
                               isLocalDraftThread={isLocalDraftThread}
                               forceExpandedOnMobile={
