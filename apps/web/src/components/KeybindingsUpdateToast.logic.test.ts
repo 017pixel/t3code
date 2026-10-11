@@ -124,6 +124,33 @@ describe("keybindings update toast policy", () => {
     expect(controller.handle(issues([]))).toBeNull();
   });
 
+  it("reports a fix to a file that was invalid in the config shown at boot", () => {
+    const controller = createKeybindingsUpdateToastController({});
+    const malformed = {
+      kind: "keybindings.malformed-config",
+      message: "Expected JSON array",
+    } as const;
+    const issues = (
+      next: NonNullable<
+        Extract<ServerConfigStreamEvent, { type: "configDelta" }>["changes"]["issues"]
+      >,
+    ): ServerConfigStreamEvent => ({
+      version: 1,
+      type: "configDelta",
+      configVersion: "v2",
+      changes: { issues: next },
+      removed: [],
+      providerChanges: [],
+    });
+
+    // A boot snapshot or an unchanged config arrives with no snapshot event.
+    controller.seed([malformed]);
+    // Only the first config seeds.
+    controller.seed([]);
+    expect(controller.handle(issues([malformed]))).toBeNull();
+    expect(controller.handle(issues([]))).toEqual({ _tag: "Success" });
+  });
+
   it("ignores unrelated server config notifications", () => {
     const controller = createKeybindingsUpdateToastController({});
 

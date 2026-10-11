@@ -8,6 +8,12 @@ export type KeybindingsUpdateToastDecision =
 
 export interface KeybindingsUpdateToastController {
   readonly handle: (event: ServerConfigStreamEvent | null) => KeybindingsUpdateToastDecision | null;
+  /**
+   * The issues of the first config the client shows, which can arrive with no
+   * snapshot event: from a boot snapshot, or from a server that found it unchanged.
+   * Later calls do nothing.
+   */
+  readonly seed: (issues: ServerConfig["issues"]) => void;
 }
 
 interface KeybindingsUpdate {
@@ -44,12 +50,19 @@ export function createKeybindingsUpdateToastController(input: {
   let lastSuccessToastAt: number | null = null;
   // A delta that only changes other issues must not repeat a standing warning.
   let reportedIssueMessage: string | null = null;
+  let seeded = false;
 
   return {
+    seed: (issues) => {
+      if (seeded) return;
+      seeded = true;
+      reportedIssueMessage = keybindingsIssue(issues)?.message ?? null;
+    },
     handle: (event) => {
       // A file that is already invalid when the config arrives is fixed later
       // by a delta that only clears the issue.
       if (event?.type === "snapshot") {
+        seeded = true;
         reportedIssueMessage = keybindingsIssue(event.config.issues)?.message ?? null;
         return null;
       }
