@@ -15,6 +15,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as HostLock from "./ProviderMaintenanceHostLock.ts";
+import * as InstallSupervisor from "./ProviderInstallSupervisor.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -25,6 +26,7 @@ import {
 } from "@t3tools/contracts";
 import { ServerProviderUpdateError } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -457,6 +459,7 @@ const layerNonWindowsPlatform = Layer.merge(
     acquireRead: Effect.succeed(Effect.void),
     withRead: (effect) => effect,
     withWrite: (effect) => effect,
+    handoff: (effect) => effect,
   }),
 );
 
@@ -638,24 +641,53 @@ const makeTestRunner = (
       ranges: [],
     })),
   },
+  receipts = Effect.succeed<ReadonlyArray<InstallSupervisor.InstallReceipt>>([]),
+  onInstall: (
+    input: Parameters<InstallSupervisor.ProviderInstallSupervisor["Service"]["run"]>[0],
+  ) => Effect.Effect<void> = () => Effect.void,
 ) =>
-  Effect.service(ProviderMaintenanceRunner.ProviderMaintenanceRunner).pipe(
-    Effect.provide(
-      ProviderMaintenanceRunner.layer.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            Layer.succeed(ProviderRegistry.ProviderRegistry, registry),
-            Layer.succeed(ModelManifest.ModelManifest, {
-              current: Effect.succeed(manifest),
-              refresh: Effect.succeed(manifest),
-              forceRefresh: Effect.succeed(manifest),
-              refreshInBackground: Effect.void,
+  Layer.build(
+    ProviderMaintenanceRunner.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.succeed(ProviderRegistry.ProviderRegistry, registry),
+          Layer.succeed(ModelManifest.ModelManifest, {
+            current: Effect.succeed(manifest),
+            refresh: Effect.succeed(manifest),
+            forceRefresh: Effect.succeed(manifest),
+            refreshInBackground: Effect.void,
+          }),
+          // Fresh per runner so a version cached by one test cannot leak into another.
+          ProviderLatestVersions.layer,
+          Layer.effect(
+            InstallSupervisor.ProviderInstallSupervisor,
+            Effect.gen(function* () {
+              const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+              return InstallSupervisor.ProviderInstallSupervisor.of({
+                run: (input) =>
+                  ProviderMaintenanceRunner.runProviderMaintenanceCommandWithSpawner({
+                    ...input,
+                    spawner,
+                  }).pipe(
+                    Effect.tap(() => onInstall(input)),
+                    Effect.mapError(
+                      (cause) =>
+                        new InstallSupervisor.ProviderInstallError({
+                          message: cause.message,
+                          cause,
+                        }),
+                    ),
+                  ),
+                receipts,
+              });
             }),
-            // Fresh per runner so a version cached by one test cannot leak into another.
-            ProviderLatestVersions.layer,
           ),
         ),
       ),
+    ),
+  ).pipe(
+    Effect.map((context) =>
+      Context.get(context, ProviderMaintenanceRunner.ProviderMaintenanceRunner),
     ),
   );
 
@@ -688,6 +720,145 @@ describe("providerMaintenanceRunner", () => {
       ),
     ),
   );
+
+  it.effect("does not time out or kill an installer still writing after five minutes", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      let killed = false;
+      const spawner = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() =>
+          Effect.succeed({
+            ...mockHandle({}),
+            exitCode: Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Deferred.await(finished)),
+            ),
+            kill: () =>
+              Effect.sync(() => {
+                killed = true;
+              }),
+          }),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const { registry } = yield* makeRegistry(baseNativeCliProvider);
+        const runner = yield* makeTestRunner(registry);
+        const install = yield* runner.updateProvider(NATIVE_CLI_DRIVER).pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust("6 minutes");
+        assert.isUndefined(install.pollUnsafe());
+        assert.isFalse(killed);
+        yield* Deferred.succeed(finished, ChildProcessSpawner.ExitCode(0));
+        assert.equal((yield* Fiber.join(install)).providers[0]?.updateState?.status, "succeeded");
+      }).pipe(Effect.provide(spawner));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          TestClock.layer(),
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("1.0.0"),
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each([
+    { origin: "background" as const, installedVersion: "1.0.0" },
+    { origin: "manual" as const, installedVersion: "1.1.0" },
+  ])(
+    "restores a detached $origin install result and refreshes its installed version on the next server",
+    ({ origin, installedVersion }) =>
+      Effect.gen(function* () {
+        const { registry, providersRef } = yield* makeRegistry();
+        const recovered = yield* Deferred.make<void>();
+        let receipt: InstallSupervisor.InstallReceipt = {
+          id: "install",
+          provider: CODEX_DRIVER,
+          instanceId: CODEX_INSTANCE_ID,
+          instanceIds: [CODEX_INSTANCE_ID],
+          origin,
+          targetVersion: "1.0.0",
+          exactVersion: true,
+          startedAt: "2026-04-10T00:00:00.000Z",
+          finishedAt: "2026-04-10T00:01:00.000Z",
+          command: "npm",
+          args: [],
+          parentPid: 1,
+          directory: "",
+          result: {
+            stdout: "installed",
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          },
+        };
+        if (origin === "manual") {
+          const runner = yield* makeTestRunner(
+            {
+              ...registry,
+              getProviderMaintenanceCapabilitiesForInstance: () =>
+                Effect.succeed(
+                  makeProviderMaintenanceCapabilities({
+                    provider: CODEX_DRIVER,
+                    packageName: "@openai/codex",
+                    updateExecutable: "npm",
+                    updateArgs: ["install", "-g", "@openai/codex@latest"],
+                    updateLockKey: "npm-global:/owned",
+                  }),
+                ),
+            },
+            undefined,
+            undefined,
+            (input) =>
+              Effect.sync(() => {
+                receipt = { ...receipt, ...input };
+              }),
+          );
+          yield* runner.updateProvider({ provider: CODEX_DRIVER, origin });
+        }
+        yield* makeTestRunner(
+          {
+            ...registry,
+            refreshInstance: () =>
+              Ref.updateAndGet(providersRef, (providers) =>
+                providers.map((provider) => ({ ...provider, version: installedVersion })),
+              ),
+            setProviderMaintenanceActionState: (input) =>
+              registry
+                .setProviderMaintenanceActionState(input)
+                .pipe(
+                  Effect.tap(() =>
+                    input.state?.status === "succeeded" ||
+                    input.state?.status === "unchanged" ||
+                    input.state?.status === "failed"
+                      ? Deferred.succeed(recovered, undefined)
+                      : Effect.void,
+                  ),
+                ),
+          },
+          undefined,
+          Effect.succeed([receipt]),
+        );
+        yield* Deferred.await(recovered);
+        const provider = (yield* registry.getProviders)[0];
+        assert.equal(provider?.version, installedVersion);
+        assert.equal(provider?.updateState?.status, "succeeded");
+        assert.equal(provider?.updateState?.origin, origin);
+        assert.equal(provider?.updateState?.output, "installed");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerNonWindowsPlatform,
+            layerLatestVersionHttpClient("1.0.0"),
+            layerMockSpawner(() => ({})),
+          ),
+        ),
+      ),
+  );
+
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {
@@ -1993,6 +2164,7 @@ it.effect.each(["interaction", "opt-out"] as const)(
           directory: "",
           acquireRead: Effect.succeed(Effect.void),
           withRead: (effect) => effect,
+          handoff: (effect) => effect,
           withWrite: (effect) =>
             Deferred.succeed(queued, undefined).pipe(
               Effect.andThen(Deferred.await(release)),
@@ -2417,6 +2589,232 @@ describe("provider maintenance host leases", () => {
         assert.deepEqual(NodeFS.readdirSync(readers), []);
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.each(["unacknowledged", "existing owner"] as const)(
+    "a late supervisor preserves the current host gate (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const host = HostLock.make(directory);
+          const dead = NodeChildProcess.spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+          yield* Effect.promise(
+            () => new Promise<void>((resolve) => dead.once("exit", () => resolve())),
+          );
+          assert.ok(dead.pid);
+          const file = NodePath.join(directory, "receipt.json");
+          NodeFS.writeFileSync(
+            file,
+            JSON.stringify({
+              id: "late",
+              provider: CODEX_DRIVER,
+              instanceId: CODEX_INSTANCE_ID,
+              instanceIds: [CODEX_INSTANCE_ID],
+              startedAt: "2026-04-10T00:00:00.000Z",
+              parentPid: dead.pid,
+              directory,
+              command: process.execPath,
+              args: ["-e", ""],
+            }),
+          );
+          yield* host.withWrite(
+            Effect.gen(function* () {
+              if (mode === "existing owner")
+                NodeFS.writeFileSync(HostLock.installLeasePath(directory), String(process.pid));
+              const child = NodeChildProcess.spawn(
+                process.execPath,
+                [
+                  NodePath.resolve(import.meta.dirname, "../bin.ts"),
+                  "__provider-install",
+                  file,
+                  String(dead.pid),
+                ],
+                { stdio: "ignore" },
+              );
+              const code = yield* Effect.promise(
+                () => new Promise<number | null>((resolve) => child.once("exit", resolve)),
+              );
+              assert.equal(code, mode === "existing owner" ? 1 : 0);
+              if (mode === "existing owner") assert.isTrue(HostLock.installIsAlive(directory));
+              // Independent admission must still reject the gate while its writer holds it.
+              yield* Effect.promise(async () => {
+                const { lock } = await import("proper-lockfile");
+                try {
+                  const release = await lock(NodePath.join(directory, "gate"), { realpath: false });
+                  await release();
+                } catch (error) {
+                  assert.instanceOf(error, Error);
+                  assert.equal((error as NodeJS.ErrnoException).code, "ELOCKED");
+                  return;
+                }
+                assert.fail("Unacknowledged supervisor opened another server's gate");
+              });
+              NodeFS.rmSync(HostLock.installLeasePath(directory), { force: true });
+            }),
+          );
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+    30_000,
+  );
+
+  it.live.each(["SIGKILL", "SIGTERM", "supervisor"] as const)(
+    "keeps an orphaned installer exclusive until it exits (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          if ((yield* HostProcess.Platform) === "win32") return;
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const stateDir = NodePath.join(directory, "state");
+          const started = NodePath.join(directory, "started");
+          const finish = NodePath.join(directory, "finish");
+          const done = NodePath.join(directory, "done");
+          const readerPending = NodePath.join(directory, "reader-pending");
+          const writing = NodePath.join(directory, "writing");
+          const receiptFile = NodePath.join(stateDir, "provider-updates", "codex.json");
+          const waitForFile = (file: string) =>
+            Effect.callback<void>((resume) => {
+              const watcher = NodeFS.watch(directory, () => {
+                if (NodeFS.existsSync(file)) {
+                  watcher.close();
+                  resume(Effect.void);
+                }
+              });
+              watcher.once("error", (error) => resume(Effect.die(error)));
+              if (NodeFS.existsSync(file)) {
+                watcher.close();
+                resume(Effect.void);
+              }
+              return Effect.sync(() => watcher.close());
+            });
+          const installer = `
+        const fs = require("node:fs");
+        console.log("installer started");
+        fs.writeFileSync(${JSON.stringify(started)}, String(process.pid));
+        let chunks = 0;
+        const ticker = setInterval(() => {
+          if (!fs.existsSync(${JSON.stringify(readerPending)})) return;
+          console.log("installer writing chunk " + (++chunks));
+          if (chunks === 2) fs.writeFileSync(${JSON.stringify(writing)}, "writing");
+        }, 250);
+        const watcher = fs.watch(${JSON.stringify(directory)}, () => {
+          if (!fs.existsSync(${JSON.stringify(finish)})) return;
+          clearInterval(ticker);
+          console.log("installer still writing");
+          fs.writeFileSync(${JSON.stringify(done)}, "installed");
+          watcher.close();
+        });
+      `;
+          const parent = NodeChildProcess.spawn(
+            process.execPath,
+            [
+              "--input-type=module",
+              "-e",
+              `
+        import * as Effect from "effect/Effect";
+        import * as Layer from "effect/Layer";
+        import * as NodeServices from "@effect/platform-node/NodeServices";
+        import * as HostProcess from "@t3tools/shared/HostProcess";
+        import * as Supervisor from ${JSON.stringify(new URL("./ProviderInstallSupervisor.ts", import.meta.url).href)};
+        import * as Host from ${JSON.stringify(new URL("./ProviderMaintenanceHostLock.ts", import.meta.url).href)};
+        import * as Config from ${JSON.stringify(new URL("../config.ts", import.meta.url).href)};
+        const abort = new AbortController();
+        process.on("SIGTERM", () => abort.abort());
+        const host = Host.make(${JSON.stringify(directory)});
+        await Effect.runPromise(Effect.gen(function* () {
+          const supervisor = yield* Supervisor.ProviderInstallSupervisor;
+          yield* host.withWrite(supervisor.run({
+            provider: "codex", instanceId: "codex", instanceIds: ["codex"], origin: "manual",
+            startedAt: new Date().toISOString(), command: process.execPath,
+            args: ["-e", ${JSON.stringify(installer)}],
+          }));
+        }).pipe(Effect.provide(Supervisor.layer), Effect.provide(Layer.mergeAll(
+          NodeServices.layer,
+          Layer.succeed(Config.ServerConfig, { stateDir: ${JSON.stringify(stateDir)} }),
+          Layer.succeed(Host.ProviderMaintenanceHostLock, host),
+          Layer.succeed(HostProcess.Arguments, [process.execPath, ${JSON.stringify(new URL("../bin.ts", import.meta.url).pathname)}]),
+        ))), { signal: abort.signal }).catch(() => {});
+      `,
+            ],
+            { cwd: NodePath.resolve(import.meta.dirname, "../.."), stdio: "ignore" },
+          );
+          const exited = new Promise<void>((resolve) => parent.once("exit", () => resolve()));
+          yield* Effect.addFinalizer(() =>
+            Effect.promise(async () => {
+              const completed = NodeFS.existsSync(started)
+                ? new Promise<void>((resolve) => {
+                    const watcher = NodeFS.watch(directory, () => {
+                      if (NodeFS.existsSync(done)) {
+                        watcher.close();
+                        resolve();
+                      }
+                    });
+                    if (NodeFS.existsSync(done)) {
+                      watcher.close();
+                      resolve();
+                    }
+                  })
+                : Promise.resolve();
+              NodeFS.writeFileSync(finish, "finish");
+              if (parent.exitCode === null && parent.signalCode === null) parent.kill("SIGKILL");
+              await exited;
+              await completed;
+            }),
+          );
+          yield* waitForFile(started);
+          yield* Effect.callback<void>((resume) => {
+            const check = () => {
+              if (
+                NodeFS.existsSync(receiptFile) &&
+                InstallSupervisor.readReceipt(receiptFile).progress
+              ) {
+                watcher.close();
+                resume(Effect.void);
+              }
+            };
+            const watcher = NodeFS.watch(NodePath.dirname(receiptFile), check);
+            watcher.once("error", (error) => resume(Effect.die(error)));
+            check();
+            return Effect.sync(() => watcher.close());
+          });
+          const receipt = InstallSupervisor.readReceipt(receiptFile);
+          assert.isTrue(HostLock.installIsAlive(directory));
+          if (mode === "supervisor") {
+            assert.ok(receipt.pid);
+            process.kill(receipt.pid, "SIGKILL");
+          }
+          parent.kill(mode === "SIGTERM" ? "SIGTERM" : "SIGKILL");
+          yield* Effect.promise(() => exited);
+          if (NodeFS.existsSync(NodePath.join(directory, "gate.lock"))) {
+            NodeFS.utimesSync(NodePath.join(directory, "gate.lock"), 0, 0);
+          }
+          assert.isTrue(HostLock.installIsAlive(directory));
+          const admitted = yield* Deferred.make<void>();
+          const reader = yield* HostLock.make(directory)
+            .withRead(
+              Effect.sync(() => assert.equal(NodeFS.readFileSync(done, "utf8"), "installed")).pipe(
+                Effect.andThen(Deferred.succeed(admitted, undefined)),
+              ),
+            )
+            .pipe(Effect.forkChild);
+          NodeFS.writeFileSync(readerPending, "pending");
+          yield* waitForFile(writing);
+          assert.isFalse(yield* Deferred.isDone(admitted));
+          NodeFS.writeFileSync(finish, "finish");
+          yield* waitForFile(done);
+          yield* Fiber.join(reader);
+          if (mode !== "supervisor") {
+            assert.equal(InstallSupervisor.readReceipt(receiptFile).result?.exitCode, 0);
+            assert.match(
+              InstallSupervisor.readReceipt(receiptFile).result?.stdout ?? "",
+              /installer still writing/,
+            );
+          }
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+    30_000,
   );
 
   it.live("reclaims a crashed server's turn and install leases", () =>

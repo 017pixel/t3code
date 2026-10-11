@@ -17,7 +17,10 @@ if (
   })
 ) {
   const command = process.argv[2];
-  if (command === "acp-mcp-bridge" || command === "acp-mcp-call") {
+  if (command === "__provider-install" || command === "__provider-install-relay") {
+    const { runInstallSubcommand } = await import("./provider/ProviderInstallSupervisor.ts");
+    await runInstallSubcommand(command, process.argv.slice(3));
+  } else if (command === "acp-mcp-bridge" || command === "acp-mcp-call") {
     const { runAcpMcpCliFastPath } = await import("./mcp/AcpMcpStdioBridge.ts");
     await runAcpMcpCliFastPath(command, process.argv.slice(3));
   } else {
