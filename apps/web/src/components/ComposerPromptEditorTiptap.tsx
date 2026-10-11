@@ -136,6 +136,12 @@ export interface ComposerPromptEditorProps {
    */
   valueVersion?: number;
   /**
+   * Reads the prompt's current source of truth. A concurrent render can commit
+   * a value read before the latest keystroke; while the source already equals
+   * the editor, that older value is not applied.
+   */
+  readValue?: (() => string) | undefined;
+  /**
    * The thread the prompt belongs to. A kept chat view that switches threads
    * keeps its editor, and a new scope starts a new undo history.
    */
@@ -839,6 +845,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     activeSuggestionId,
     isPathQueryActive,
     valueVersion,
+    readValue,
     containerClassName,
     className,
     placeholderClassName,
@@ -1568,6 +1575,13 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     ) {
       return;
     }
+    if (
+      !initialSelection &&
+      previousSnapshot.value !== value &&
+      readValue?.() === previousSnapshot.value
+    ) {
+      return;
+    }
     const normalizedExpandedCursor = expandEditorCursor(value, normalizedCursor);
     snapshotRef.current = {
       value,
@@ -1628,6 +1642,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     editor,
     expandEditorCursor,
     literalText,
+    readValue,
     richText,
     skillLabelFor,
     value,

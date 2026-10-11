@@ -1463,13 +1463,16 @@ const ComposerDraftEditor = memo(function ComposerDraftEditor({
   value: string | undefined;
 }) {
   "use no memo"; // The caret is imperative; caching readCursor() would rewind typed text.
-  const value =
-    overriddenValue ?? useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
+  const readValue = useCallback(
+    () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "",
+    [target],
+  );
   return (
     <ComposerPromptEditor
       {...props}
-      value={value}
+      value={overriddenValue ?? readValue()}
       valueVersion={promptVersion}
+      readValue={overriddenValue === undefined ? readValue : undefined}
       cursor={readCursor()}
     />
   );
