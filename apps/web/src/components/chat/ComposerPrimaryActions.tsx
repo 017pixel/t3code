@@ -192,6 +192,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {...pointerFocusProps}
           disabled={
             !canOperateThread ||
+            isConnecting ||
             isEnvironmentUnavailable ||
             pendingAction.isResponding ||
             (pendingAction.isLastQuestion ? !pendingAction.isComplete : !pendingAction.canAdvance)
@@ -217,7 +218,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {...pointerFocusProps}
           disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
         >
-          {isConnecting || isSendBusy ? "Sending..." : "Refine"}
+          {isSendBusy ? "Sending..." : "Refine"}
         </button>
       );
     }
@@ -230,7 +231,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {...pointerFocusProps}
           disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
         >
-          {isConnecting || isSendBusy ? "Sending..." : "Implement"}
+          {isSendBusy ? "Sending..." : "Implement"}
         </button>
         <Menu>
           <MenuTrigger
