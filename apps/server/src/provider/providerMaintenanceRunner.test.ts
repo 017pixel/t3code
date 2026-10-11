@@ -2242,6 +2242,706 @@ it.effect.each(["interaction", "opt-out"] as const)(
 );
 
 describe("provider maintenance host leases", () => {
+  it("compares creation identity when the PID probe is denied", () => {
+    const identity = HostLock.readProcessIdentity(process.pid);
+    assert.isNotNull(identity);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    });
+    try {
+      assert.isFalse(HostLock.isProcessAlive(process.pid, "previous-process-start"));
+      assert.isTrue(HostLock.isProcessAlive(process.pid, identity));
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it.live("retains Unix group observations across child exit and PID reuse", () =>
+    Effect.gen(function* () {
+      if ((yield* HostProcess.Platform) !== "linux") return;
+      const require = NodeModule.createRequire(import.meta.url);
+      const cp = require("node:child_process") as typeof NodeChildProcess;
+      const fs = require("node:fs") as typeof NodeFS;
+      const readFile = NodeFS.readFileSync;
+      const fields = readFile(`/proc/${process.pid}/stat`, "utf8").split(") ").at(-1)!.split(" ");
+      let liveRow = true;
+      let childExited = true;
+      let group = process.pid;
+      const read = vi
+        .spyOn(fs, "readFileSync")
+        .mockImplementation((...args: Parameters<typeof readFile>) => {
+          if (args[0] === "/proc/201/stat")
+            return childExited ? "201 (exited child) Z" : `201 (helper) ${fields.join(" ")}`;
+          return readFile(...args);
+        });
+      const scan = vi.spyOn(cp, "spawnSync").mockImplementation(() => {
+        const stdout = liveRow ? `201 ${group} S\n` : "";
+        return { pid: 1, output: [null, stdout, ""], stdout, stderr: "", status: 0, signal: null };
+      });
+      NodeModule.syncBuiltinESMExports();
+      try {
+        const descendants: HostLock.InstallDescendants = new Map();
+        assert.isTrue(
+          HostLock.installChildrenAreAlive(process.pid, undefined, descendants),
+          "a child may have spawned a helper after its table row was read",
+        );
+        liveRow = false;
+        assert.isFalse(HostLock.installChildrenAreAlive(process.pid, undefined, descendants));
+        liveRow = true;
+        childExited = false;
+        fields[19] = "10";
+        assert.isTrue(HostLock.installChildrenAreAlive(process.pid, undefined, descendants));
+        fields[19] = "11";
+        assert.isTrue(HostLock.installChildrenAreAlive(process.pid, undefined, descendants));
+        group = process.pid + 1;
+        assert.isTrue(
+          HostLock.installChildrenAreAlive(process.pid, undefined, descendants),
+          "an observed replacement helper stays owned after leaving the group",
+        );
+        fields[19] = "12";
+        assert.isFalse(
+          HostLock.installChildrenAreAlive(process.pid, undefined, descendants),
+          "an unrelated reused PID outside the group cannot pin admission",
+        );
+      } finally {
+        scan.mockRestore();
+        read.mockRestore();
+        NodeModule.syncBuiltinESMExports();
+      }
+    }),
+  );
+
+  it.live("retries cleanup of a partially registered reader without masking its write error", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const readers = NodePath.join(directory, "readers");
+        const mutableFS = NodeModule.createRequire(import.meta.url)("node:fs") as typeof NodeFS;
+        const writeFile = NodeFS.writeFileSync;
+        const remove = NodeFS.rmSync;
+        const writeError = new Error("partial reader write");
+        let failed = false;
+        const write = vi
+          .spyOn(mutableFS, "writeFileSync")
+          .mockImplementation((...args: Parameters<typeof writeFile>) => {
+            writeFile(...args);
+            if (String(args[0]).startsWith(readers + NodePath.sep)) throw writeError;
+          });
+        const unlink = vi
+          .spyOn(mutableFS, "rmSync")
+          .mockImplementation((...args: Parameters<typeof remove>) => {
+            if (!failed && String(args[0]).startsWith(readers + NodePath.sep)) {
+              failed = true;
+              throw new Error("temporary unlink failure");
+            }
+            return remove(...args);
+          });
+        NodeModule.syncBuiltinESMExports();
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            write.mockRestore();
+            unlink.mockRestore();
+            NodeModule.syncBuiltinESMExports();
+          }),
+        );
+        const host = HostLock.make(directory);
+        const exit = yield* Effect.exit(host.acquireRead);
+        assert.isTrue(Exit.isFailure(exit));
+        if (Exit.isFailure(exit)) assert.strictEqual(Cause.squash(exit.cause), writeError);
+        assert.deepEqual(NodeFS.readdirSync(readers), []);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("retries a failed scoped reader unlink before returning", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const readers = NodePath.join(directory, "readers");
+        const mutableFS = NodeModule.createRequire(import.meta.url)("node:fs") as typeof NodeFS;
+        const remove = NodeFS.rmSync;
+        let failed = false;
+        const spy = vi
+          .spyOn(mutableFS, "rmSync")
+          .mockImplementation((...args: Parameters<typeof remove>) => {
+            if (!failed && String(args[0]).startsWith(readers + NodePath.sep)) {
+              failed = true;
+              throw new Error("transient unlink failure");
+            }
+            return remove(...args);
+          });
+        NodeModule.syncBuiltinESMExports();
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            spy.mockRestore();
+            NodeModule.syncBuiltinESMExports();
+          }),
+        );
+        const host = HostLock.make(directory);
+        assert.equal(yield* host.withRead(Effect.succeed("completed")), "completed");
+        assert.isTrue(failed);
+        assert.deepEqual(NodeFS.readdirSync(readers), []);
+        yield* host.withWrite(
+          Effect.void,
+          Effect.die(new Error("finished reader pinned admission")),
+        );
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("acknowledges a transferred gate before an interrupted wait", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const host = HostLock.make(directory);
+        const acknowledged = NodePath.join(directory, "acknowledged");
+        const exit = yield* Effect.exit(
+          host.withWrite(
+            host.handoff(
+              Effect.interrupt,
+              Effect.sync(() => NodeFS.writeFileSync(acknowledged, "authorized")),
+            ),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(exit));
+        assert.equal(NodeFS.readFileSync(acknowledged, "utf8"), "authorized");
+        NodeFS.utimesSync(NodePath.join(directory, "gate.lock"), 0, 0);
+        yield* host.withWrite(Effect.void);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.each(["linux", "darwin"] as const)("does not let a %s zombie retain admission", (platform) => {
+    const require = NodeModule.createRequire(import.meta.url);
+    const os = require("node:os") as typeof NodeOS;
+    const fs = require("node:fs") as typeof NodeFS;
+    const cp = require("node:child_process") as typeof NodeChildProcess;
+    const readFile = NodeFS.readFileSync;
+    const osSpy = vi.spyOn(os, "platform").mockReturnValue(platform);
+    const read = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation((...args: Parameters<typeof readFile>) => {
+        if (args[0] === `/proc/${process.pid}/stat`) return `${process.pid} (zombie) Z`;
+        return readFile(...args);
+      });
+    const scan = vi.spyOn(cp, "spawnSync").mockReturnValue({
+      pid: 1,
+      output: [null, "Z Fri Oct 11 00:00:00 2026", ""],
+      stdout: "Z Fri Oct 11 00:00:00 2026",
+      stderr: "",
+      status: 0,
+      signal: null,
+    });
+    NodeModule.syncBuiltinESMExports();
+    try {
+      assert.isFalse(HostLock.isProcessAlive(process.pid));
+    } finally {
+      scan.mockRestore();
+      read.mockRestore();
+      osSpy.mockRestore();
+      NodeModule.syncBuiltinESMExports();
+    }
+  });
+
+  it.live.each(["second output", "spawn", "output close"] as const)(
+    "closes relay output descriptors when %s fails",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const require = NodeModule.createRequire(import.meta.url);
+          const mutableFS = require("node:fs") as typeof NodeFS;
+          const childProcess = require("node:child_process") as typeof NodeChildProcess;
+          const open = NodeFS.openSync;
+          const close = NodeFS.closeSync;
+          const descriptors = new Set<number>();
+          let spawned = false;
+          let closeFailed = false;
+          const file = NodePath.join(directory, "receipt.json");
+          const openSpy = vi
+            .spyOn(mutableFS, "openSync")
+            .mockImplementation((...args: Parameters<typeof open>) => {
+              if (mode === "second output" && args[0] === file + ".stderr" && args[1] === "a")
+                throw new Error("cannot open stderr");
+              const fd = open(...args);
+              descriptors.add(fd);
+              return fd;
+            });
+          const closeSpy = vi.spyOn(mutableFS, "closeSync").mockImplementation((fd) => {
+            descriptors.delete(fd);
+            close(fd);
+            if (mode === "output close" && spawned && !closeFailed) {
+              closeFailed = true;
+              throw new Error("output close failed");
+            }
+          });
+          const spawn = vi.spyOn(childProcess, "spawn").mockImplementation(() => {
+            if (mode !== "output close") throw new Error("cannot spawn relay child");
+            spawned = true;
+            const child = new childProcess.ChildProcess();
+            queueMicrotask(() => child.emit("spawn"));
+            return child;
+          });
+          NodeModule.syncBuiltinESMExports();
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              openSpy.mockRestore();
+              closeSpy.mockRestore();
+              spawn.mockRestore();
+              NodeModule.syncBuiltinESMExports();
+              for (const fd of descriptors) close(fd);
+            }),
+          );
+          const exit = yield* Effect.exit(
+            Effect.tryPromise(() =>
+              InstallSupervisor.runInstallSubcommand("__provider-install-relay", [file]),
+            ),
+          );
+          assert.isTrue(Exit.isFailure(exit));
+          assert.equal(descriptors.size, 0, "relay leaked an output descriptor");
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.each(["partial write", "gate release", "lease release"] as const)(
+    "cleans up or retries reader release after %s fails",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const readers = NodePath.join(directory, "readers");
+          const mutableFS = NodeModule.createRequire(import.meta.url)("node:fs") as typeof NodeFS;
+          const writeFile = NodeFS.writeFileSync;
+          const rmdir = NodeFS.rmdir;
+          const remove = NodeFS.rmSync;
+          const injected = new Error("injected reader failure");
+          const host = HostLock.make(directory);
+          const release = mode === "lease release" ? yield* host.acquireRead : undefined;
+          let failed = false;
+          const spy =
+            mode === "partial write"
+              ? vi
+                  .spyOn(mutableFS, "writeFileSync")
+                  .mockImplementation((...args: Parameters<typeof writeFile>) => {
+                    writeFile(...args);
+                    if (String(args[0]).startsWith(readers + NodePath.sep)) throw injected;
+                  })
+              : mode === "gate release"
+                ? vi
+                    .spyOn(mutableFS, "rmdir")
+                    .mockImplementation((...args: Parameters<typeof rmdir>) => {
+                      if (!failed && args[0] === NodePath.join(directory, "gate.lock")) {
+                        failed = true;
+                        const callback = args.at(-1);
+                        if (typeof callback === "function") callback(injected);
+                        return;
+                      }
+                      return rmdir(...args);
+                    })
+                : vi
+                    .spyOn(mutableFS, "rmSync")
+                    .mockImplementation((...args: Parameters<typeof remove>) => {
+                      if (!failed && String(args[0]).startsWith(readers + NodePath.sep)) {
+                        failed = true;
+                        throw injected;
+                      }
+                      return remove(...args);
+                    });
+          NodeModule.syncBuiltinESMExports();
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              spy.mockRestore();
+              NodeModule.syncBuiltinESMExports();
+            }),
+          );
+          const exit = yield* Effect.exit(release ?? host.acquireRead);
+          assert.equal(Exit.isFailure(exit), mode !== "lease release");
+          spy.mockRestore();
+          NodeModule.syncBuiltinESMExports();
+          if (release) yield* release;
+          assert.deepEqual(NodeFS.readdirSync(readers), []);
+          if (mode === "gate release")
+            NodeFS.utimesSync(NodePath.join(directory, "gate.lock"), 0, 0);
+          yield* host.withWrite(Effect.void, Effect.die(new Error("reader leaked")));
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.each([
+    "live",
+    "empty",
+    "failed",
+    "malformed",
+    "reused root",
+    "reused foreign root",
+  ] as const)("uses Windows job lifetime membership for %s descendants", (mode) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const job = "t3-provider-install-00000000-0000-0000-0000-000000000001";
+        NodeFS.writeFileSync(
+          HostLock.installLeasePath(directory),
+          JSON.stringify({ pid: 101, identity: "root-start", job }),
+        );
+        const require = NodeModule.createRequire(import.meta.url);
+        const os = require("node:os") as typeof NodeOS;
+        const childProcess = require("node:child_process") as typeof NodeChildProcess;
+        const platform = vi.spyOn(os, "platform").mockReturnValue("win32");
+        const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+          if (mode === "reused foreign root") return true;
+          throw Object.assign(new Error("root exited"), { code: "ESRCH" });
+        });
+        const stdout =
+          mode === "live"
+            ? "103\n"
+            : mode === "reused root"
+              ? "101\n"
+              : mode === "malformed"
+                ? "broken"
+                : "";
+        const scan = vi.spyOn(childProcess, "spawnSync").mockReturnValue({
+          pid: 1,
+          output: [null, stdout, ""],
+          stdout,
+          stderr: "",
+          status: mode === "failed" ? 1 : 0,
+          signal: null,
+        });
+        NodeModule.syncBuiltinESMExports();
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            scan.mockRestore();
+            kill.mockRestore();
+            platform.mockRestore();
+            NodeModule.syncBuiltinESMExports();
+          }),
+        );
+        if (mode === "failed" || mode === "malformed")
+          assert.throws(() => HostLock.installIsAlive(directory), /Could not inspect/);
+        else
+          assert.equal(
+            HostLock.installIsAlive(directory),
+            mode === "live" || mode === "reused root",
+          );
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.each([NaN, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid process id %s instead of waiting forever",
+    (pid) => {
+      assert.isFalse(HostLock.isProcessAlive(pid));
+    },
+  );
+
+  it.live("keeps a legacy Linux reader active until it releases", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) !== "linux") return;
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const readers = NodePath.join(directory, "readers");
+        NodeFS.mkdirSync(readers);
+        NodeFS.writeFileSync(
+          NodePath.join(readers, `${process.pid}-legacy`),
+          HostLock.readProcessIdentity(process.pid)!.split(":").at(-1)!,
+        );
+        const exit = yield* Effect.exit(
+          HostLock.make(directory).withWrite(
+            Effect.void,
+            Effect.die(new Error("legacy reader is active")),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(exit));
+        assert.equal(NodeFS.readdirSync(readers).length, 1);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.each(["darwin", "win32"] as const)(
+    "stores and reclaims cross-platform reader identities on %s",
+    (platform) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const require = NodeModule.createRequire(import.meta.url);
+          const os = require("node:os") as typeof NodeOS;
+          const childProcess = require("node:child_process") as typeof NodeChildProcess;
+          const platformSpy = vi.spyOn(os, "platform").mockReturnValue(platform);
+          const scan = vi.spyOn(childProcess, "spawnSync").mockReturnValue({
+            pid: 1,
+            output: [null, "current-start", ""],
+            stdout: "current-start",
+            stderr: "",
+            status: 0,
+            signal: null,
+          });
+          NodeModule.syncBuiltinESMExports();
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              scan.mockRestore();
+              platformSpy.mockRestore();
+              NodeModule.syncBuiltinESMExports();
+            }),
+          );
+          const host = HostLock.make(directory);
+          const release = yield* host.acquireRead;
+          const readers = NodePath.join(directory, "readers");
+          const [reader] = NodeFS.readdirSync(readers);
+          assert.equal(
+            NodeFS.readFileSync(NodePath.join(readers, reader!), "utf8"),
+            "current-start",
+          );
+          yield* release;
+          NodeFS.writeFileSync(NodePath.join(readers, `${process.pid}-stale`), "previous-start");
+          assert.equal(
+            yield* host.withWrite(
+              Effect.succeed("installed"),
+              Effect.die(new Error("reused reader blocked installation")),
+            ),
+            "installed",
+          );
+          assert.deepEqual(NodeFS.readdirSync(readers), []);
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.each(["legacy", "durable", "durable unknown"] as const)(
+    "retains Windows descendants after their parent and supervisor exit (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          NodeFS.writeFileSync(
+            HostLock.installLeasePath(directory),
+            JSON.stringify({
+              pid: 101,
+              identity: "root-start",
+              ...(mode !== "legacy"
+                ? { descendants: [{ pid: 103, identity: "helper-start" }] }
+                : {}),
+            }),
+          );
+          const require = NodeModule.createRequire(import.meta.url);
+          const os = require("node:os") as typeof NodeOS;
+          const childProcess = require("node:child_process") as typeof NodeChildProcess;
+          const platformSpy = vi.spyOn(os, "platform").mockReturnValue("win32");
+          let rootAlive = true;
+          let helperAlive = true;
+          let helperStart = "helper-start";
+          let unknownIdentity = false;
+          const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+            if (
+              (pid === 101 && rootAlive) ||
+              (pid === 103 && helperAlive) ||
+              (pid === 102 && rootAlive)
+            )
+              return true;
+            throw Object.assign(new Error("gone"), { code: "ESRCH" });
+          });
+          const scan = vi.spyOn(childProcess, "spawnSync").mockImplementation((_command, args) => {
+            const command = args?.join(" ") ?? "";
+            const stdout = command.includes("ProcessId =")
+              ? command.includes("101")
+                ? "root-start"
+                : command.includes("102")
+                  ? "parent-start"
+                  : unknownIdentity
+                    ? ""
+                    : helperStart
+              : rootAlive
+                ? `101|1|root-start\n102|101|parent-start\n103|102|${helperStart}\n`
+                : helperAlive
+                  ? `103|102|${helperStart}\n`
+                  : "";
+            return {
+              pid: 1,
+              output: [null, stdout, ""],
+              stdout,
+              stderr: "",
+              status: 0,
+              signal: null,
+            };
+          });
+          NodeModule.syncBuiltinESMExports();
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              scan.mockRestore();
+              kill.mockRestore();
+              platformSpy.mockRestore();
+              NodeModule.syncBuiltinESMExports();
+            }),
+          );
+          assert.isTrue(HostLock.installIsAlive(directory));
+          rootAlive = false;
+          assert.isTrue(HostLock.installIsAlive(directory), "orphaned grandchild still writes");
+          const recovered = yield* fs.makeTempDirectoryScoped();
+          NodeFS.writeFileSync(
+            HostLock.installLeasePath(recovered),
+            JSON.stringify({
+              pid: 101,
+              identity: "root-start",
+              descendants: [
+                { pid: 102, identity: "parent-start" },
+                { pid: 103, identity: "helper-start" },
+              ],
+            }),
+          );
+          assert.isTrue(
+            HostLock.installIsAlive(recovered),
+            "durable identities survive a new observer",
+          );
+          helperStart = "reused-helper-start";
+          assert.isFalse(
+            HostLock.installIsAlive(directory),
+            "reused grandchild cannot pin the old lease",
+          );
+          const replacing = yield* fs.makeTempDirectoryScoped();
+          NodeFS.copyFileSync(
+            HostLock.installLeasePath(directory),
+            HostLock.installLeasePath(replacing),
+          );
+          rootAlive = true;
+          helperStart = "helper-start";
+          assert.isTrue(HostLock.installIsAlive(replacing));
+          helperStart = "replacement-helper-start";
+          assert.isTrue(HostLock.installIsAlive(replacing));
+          rootAlive = false;
+          unknownIdentity = mode === "durable unknown";
+          assert.isTrue(
+            HostLock.installIsAlive(replacing),
+            "a replacement helper observed under the live installer remains owned",
+          );
+          helperAlive = false;
+          assert.isFalse(HostLock.installIsAlive(replacing));
+          assert.isFalse(HostLock.installIsAlive(directory));
+          if (mode === "durable unknown") {
+            helperAlive = true;
+            rootAlive = true;
+            unknownIdentity = false;
+            helperStart = "helper-start";
+            const fresh = yield* fs.makeTempDirectoryScoped();
+            NodeFS.copyFileSync(
+              HostLock.installLeasePath(directory),
+              HostLock.installLeasePath(fresh),
+            );
+            assert.isTrue(HostLock.installIsAlive(fresh));
+            rootAlive = false;
+            helperStart = "replacement-helper-start";
+            unknownIdentity = true;
+            NodeFS.writeFileSync(
+              HostLock.installLeasePath(fresh),
+              JSON.stringify({
+                pid: 101,
+                identity: "root-start",
+                descendants: [{ pid: 103, identity: helperStart }],
+              }),
+            );
+            assert.isTrue(
+              HostLock.installIsAlive(fresh),
+              "a new durable generation retains admission when its identity query fails",
+            );
+            helperAlive = false;
+            assert.isFalse(HostLock.installIsAlive(fresh));
+            helperAlive = true;
+            unknownIdentity = false;
+            helperStart = "unrelated-helper-start";
+            assert.isFalse(
+              HostLock.installIsAlive(fresh),
+              "transient identity uncertainty cannot pin a later unrelated PID",
+            );
+          }
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("returns the durable result when the supervisor exits during the liveness check", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const file = NodePath.join(directory, "provider-updates", "codex.json");
+        const result = {
+          stdout: "installed",
+          stderr: "",
+          exitCode: 0,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        };
+        const require = NodeModule.createRequire(import.meta.url);
+        const childProcess = require("node:child_process") as typeof NodeChildProcess;
+        const mutableFS = require("node:fs") as typeof NodeFS;
+        const readFile = NodeFS.readFileSync;
+        const spawn = vi.spyOn(childProcess, "spawn").mockImplementation(() => {
+          NodeFS.writeFileSync(
+            file,
+            JSON.stringify({ ...InstallSupervisor.readReceipt(file), pid: 101 }),
+          );
+          const child = new childProcess.ChildProcess();
+          queueMicrotask(() => child.emit("spawn"));
+          return child;
+        });
+        const read = vi
+          .spyOn(mutableFS, "readFileSync")
+          .mockImplementation((...args: Parameters<typeof readFile>) => {
+            if (args[0] === HostLock.installLeasePath(directory)) {
+              NodeFS.writeFileSync(
+                file,
+                JSON.stringify({ ...InstallSupervisor.readReceipt(file), result }),
+              );
+              throw Object.assign(new Error("supervisor finished"), { code: "ENOENT" });
+            }
+            return readFile(...args);
+          });
+        NodeModule.syncBuiltinESMExports();
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            spawn.mockRestore();
+            read.mockRestore();
+            NodeModule.syncBuiltinESMExports();
+          }),
+        );
+        const supervisor = yield* InstallSupervisor.ProviderInstallSupervisor.pipe(
+          Effect.provide(
+            InstallSupervisor.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.succeed(ServerConfig.ServerConfig, {
+                    stateDir: directory,
+                  } as ServerConfig.ServerConfig["Service"]),
+                  Layer.succeed(HostLock.ProviderMaintenanceHostLock, {
+                    ...HostLock.make(directory),
+                    handoff: (effect) => effect,
+                  }),
+                ),
+              ),
+            ),
+          ),
+        );
+        assert.deepEqual(
+          yield* supervisor.run({
+            provider: CODEX_DRIVER,
+            instanceId: CODEX_INSTANCE_ID,
+            instanceIds: [CODEX_INSTANCE_ID],
+            startedAt: "2026-04-10T00:00:00.000Z",
+            command: "npm",
+            args: [],
+          }),
+          result,
+        );
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.live("reclaims an install lease whose live PID belongs to another process", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -2327,6 +3027,9 @@ describe("provider maintenance host leases", () => {
       if ((yield* HostProcess.Platform) !== "linux") return;
       const mutableFS = NodeModule.createRequire(import.meta.url)("node:fs") as typeof NodeFS;
       const readFile = NodeFS.readFileSync;
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+        throw Object.assign(new Error("denied"), { code: "EPERM" });
+      });
       const spy = vi
         .spyOn(mutableFS, "readFileSync")
         .mockImplementation((...args: Parameters<typeof readFile>) => {
@@ -2343,6 +3046,7 @@ describe("provider maintenance host leases", () => {
         assert.isTrue(HostLock.isProcessAlive(process.pid, "previous-start"));
       } finally {
         spy.mockRestore();
+        kill.mockRestore();
         NodeModule.syncBuiltinESMExports();
       }
     }),
@@ -3140,6 +3844,11 @@ describe("provider maintenance host leases", () => {
     "heartbeat-write-error",
     "installer-killed-with-live-child",
     "verbose-output",
+    "receipt-write-error",
+    "gate-release-error",
+    "descendant-scan-error",
+    "job-registration-error",
+    "output-read-error",
   ] as const)(
     "finishes the installer after %s",
     (mode) =>
@@ -3241,7 +3950,17 @@ describe("provider maintenance host leases", () => {
                  ? `const original = fs.default.utimesSync; let failed = false;
                fs.default.utimesSync = (...args) => { if (!failed) { failed = true; throw Object.assign(new Error("full disk"), {code: "ENOSPC"}); } return original(...args); };
                syncBuiltinESMExports();`
-                 : ""
+                 : mode === "receipt-write-error"
+                   ? `const original = fs.default.renameSync; fs.default.renameSync = (...args) => { if (fs.existsSync(${JSON.stringify(installed)}) && args[1] === ${JSON.stringify(file)}) throw new Error("receipt write failed"); return original(...args); }; syncBuiltinESMExports();`
+                   : mode === "gate-release-error"
+                     ? `const original = fs.default.rmSync; fs.default.rmSync = (...args) => { if (args[0] === ${JSON.stringify(NodePath.join(directory, "gate.lock"))}) throw new Error("gate removal failed"); return original(...args); }; syncBuiltinESMExports();`
+                     : mode === "descendant-scan-error"
+                       ? `const cp = await import("node:child_process"); const original = cp.default.spawnSync; let failed = false; cp.default.spawnSync = (...args) => { if (!failed && fs.existsSync(${JSON.stringify(installed)})) { failed = true; throw new Error("process table unavailable"); } return original(...args); }; syncBuiltinESMExports();`
+                       : mode === "job-registration-error"
+                         ? `const os = await import("node:os"); os.default.platform = () => "win32"; syncBuiltinESMExports();`
+                         : mode === "output-read-error"
+                           ? `const original = fs.default.readSync; fs.default.readSync = (...args) => { if (fs.existsSync(${JSON.stringify(installed)})) throw new Error("output read failed"); return original(...args); }; syncBuiltinESMExports();`
+                           : ""
              }
              await runInstallSubcommand("__provider-install", ${JSON.stringify([file, String(dead.pid)])});`,
                   ],
@@ -3264,7 +3983,7 @@ describe("provider maintenance host leases", () => {
             () => new Promise<number | null>((resolve) => child.once("exit", resolve)),
           );
           const finishedBeforeChildren = !NodeFS.existsSync(installed);
-          if (mode !== "runtime-replaced")
+          if (mode !== "runtime-replaced" && mode !== "job-registration-error")
             yield* Effect.callback<void>((resume) => {
               const complete = () => {
                 if (!NodeFS.existsSync(installed)) return;
@@ -3275,7 +3994,40 @@ describe("provider maintenance host leases", () => {
               complete();
               return Effect.sync(() => watcher.close());
             });
-          assert.equal(code, 0);
+          assert.equal(
+            code,
+            mode === "receipt-write-error" || mode === "gate-release-error" ? 1 : 0,
+          );
+          if (mode === "job-registration-error") {
+            assert.isFalse(
+              NodeFS.existsSync(installed),
+              "installer started without lifetime tracking",
+            );
+            assert.isFalse(NodeFS.existsSync(HostLock.installLeasePath(directory)));
+            assert.isTrue(
+              NodeFS.existsSync(NodePath.join(directory, "gate.lock")),
+              "unacknowledged supervisor opened the gate",
+            );
+            assert.equal(InstallSupervisor.readReceipt(file).result?.exitCode, null);
+            return;
+          }
+          if (mode === "output-read-error") {
+            assert.equal(InstallSupervisor.readReceipt(file).result?.exitCode, null);
+            assert.equal(InstallSupervisor.readReceipt(file).result?.stderr, "output read failed");
+            assert.isFalse(NodeFS.existsSync(HostLock.installLeasePath(directory)));
+            assert.isFalse(NodeFS.existsSync(NodePath.join(directory, "gate.lock")));
+            assert.equal(NodeFS.readFileSync(installed, "utf8"), "installed");
+            return;
+          }
+          if (mode === "receipt-write-error" || mode === "gate-release-error") {
+            assert.isFalse(
+              NodeFS.existsSync(HostLock.installLeasePath(directory)),
+              "install lease leaked after cleanup error",
+            );
+            if (mode === "gate-release-error")
+              NodeFS.utimesSync(NodePath.join(directory, "gate.lock"), 0, 0);
+            yield* HostLock.make(directory).withWrite(Effect.void);
+          }
           if (mode === "verbose-output") {
             assert.isAtMost(heartbeatOutputSize!, 20_000);
             assert.isTrue(InstallSupervisor.readReceipt(file).result?.stdoutTruncated);
@@ -3287,7 +4039,8 @@ describe("provider maintenance host leases", () => {
               "lease released before installer child finished",
             );
             assert.isFalse(HostLock.installIsAlive(directory));
-          } else assert.equal(InstallSupervisor.readReceipt(file).result?.exitCode, 0);
+          } else if (mode !== "receipt-write-error")
+            assert.equal(InstallSupervisor.readReceipt(file).result?.exitCode, 0);
           assert.equal(NodeFS.readFileSync(installed, "utf8"), "installed");
         }),
       ).pipe(Effect.provide(NodeServices.layer)),
