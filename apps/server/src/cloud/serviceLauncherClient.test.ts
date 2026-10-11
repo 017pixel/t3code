@@ -136,3 +136,21 @@ it.effect("rejects contradictory trial context instead of leaving activation clo
     expect(error.message).toBe("The service launcher supplied invalid startup context.");
   }),
 );
+
+it.effect("exposes migrated crash-loop failure while keeping the candidate active", () =>
+  Effect.gen(function* () {
+    const outcome = {
+      id: "crash-loop",
+      fromVersion: "1.0.0",
+      targetVersion: "1.1.0",
+      status: "failed" as const,
+      reason: "candidate-crash-loop: database schema changed; keeping candidate runtime",
+    };
+    const host = new FakeLauncherProcess({ protocol: 3, childVersion: "1.1.0", update: outcome });
+    const client = yield* makeClient(host, "1.1.0");
+    expect(client.managed).toBe(true);
+    expect(client.lastOutcome).toEqual(outcome);
+    expect(yield* client.prepareTrial).toEqual(outcome);
+    expect(host.sent).toEqual([]);
+  }),
+);
