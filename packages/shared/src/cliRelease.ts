@@ -65,14 +65,21 @@ export function cliReleaseDownloadBaseUrl(
   return `${origin.href.replace(/\/+$/, "")}/v${version}`;
 }
 
-/** Checks both configured mirrors and the final URL after HTTP redirects. */
+/**
+ * Checks both configured mirrors and the final URL after HTTP redirects. Local
+ * `file:` mirrors (SSH remote installs) never cross the network.
+ */
 export function validateCliReleaseDownloadUrl(url: string): URL {
   const origin = new URL(url);
   const loopback =
     origin.hostname === "localhost" ||
     origin.hostname === "[::1]" ||
     /^127\.\d+\.\d+\.\d+$/.test(origin.hostname);
-  if (origin.protocol !== "https:" && !(origin.protocol === "http:" && loopback)) {
+  if (
+    origin.protocol !== "https:" &&
+    origin.protocol !== "file:" &&
+    !(origin.protocol === "http:" && loopback)
+  ) {
     throw new Error("T3 release downloads require HTTPS (HTTP is allowed only on loopback).");
   }
   return origin;
