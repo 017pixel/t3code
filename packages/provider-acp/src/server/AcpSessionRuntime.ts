@@ -2540,6 +2540,9 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...(options.additionalDirectories?.length
+                ? { additionalDirectories: options.additionalDirectories }
+                : {}),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.LoadSessionRequest;
             return runLoadSessionWithReplayIdle(requestPayload, started.initializeResult);
@@ -2552,6 +2555,9 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...(options.additionalDirectories?.length
+                ? { additionalDirectories: options.additionalDirectories }
+                : {}),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.ResumeSessionRequest;
             return runLoggedRequest(
@@ -2568,6 +2574,9 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...(options.additionalDirectories?.length
+                ? { additionalDirectories: options.additionalDirectories }
+                : {}),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.ForkSessionRequest;
             return runLoggedRequest(

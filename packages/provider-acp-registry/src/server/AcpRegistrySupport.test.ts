@@ -639,6 +639,51 @@ describe("AcpRegistrySupport", () => {
     );
   });
 
+  it.effect("resolves the refreshed registry version after recreating the catalog", () => {
+    let version = "1.2.3";
+    const agent = () => ({
+      ...makeAgent({ binary: { "linux-x86_64": { archive: archiveUrl, cmd: "agent" } } }),
+      version,
+    });
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-acp-registry-restart-",
+      });
+      const options = { cacheDir, toolsDir: `${cacheDir}/tools`, registryUrl };
+      const original = yield* AcpRegistrySupport.makeAcpRegistryCatalog(options);
+      const first = yield* original.resolve(settings(), "/workspace");
+      version = "2.0.0";
+      yield* original.search({ query: "example-agent" });
+      const restarted = yield* AcpRegistrySupport.makeAcpRegistryCatalog(options);
+      const replacement = yield* restarted.resolve(settings(), "/workspace");
+      expect(first.agent?.version).toBe("1.2.3");
+      expect(replacement.agent?.version).toBe("2.0.0");
+      expect(replacement.spawn.command).toContain("/tools/example-agent/2.0.0/");
+      expect(replacement.spawn.command).not.toBe(first.spawn.command);
+      expect(yield* fileSystem.readFileString(first.spawn.command)).toBe("#!/bin/sh\necho 1.2.3\n");
+      expect(yield* fileSystem.readFileString(replacement.spawn.command)).toBe(
+        "#!/bin/sh\necho 2.0.0\n",
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerResolver((request) =>
+          Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response(
+                request.url === registryUrl
+                  ? makeRegistry(agent())
+                  : `#!/bin/sh\necho ${version}\n`,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
+
   it.effect(
     "prepares the registry version despite an older PATH binary and permits explicit overrides",
     () => {

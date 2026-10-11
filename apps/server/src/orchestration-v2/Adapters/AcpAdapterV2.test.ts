@@ -13,6 +13,8 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  ChatAttachmentId,
+  ChatImageAttachment,
   CheckpointId,
   EnvironmentId,
   MessageId,
@@ -12091,6 +12093,359 @@ describe("AcpAdapterV2", () => {
       }
       assert.equal(continuationTerminal, "completed");
     }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.live.each([
+    { before: "load", after: "resume", preferResume: false, action: "resume" },
+    { before: "resume", after: "load", preferResume: false, action: "resume" },
+    { before: "resume", after: "none", preferResume: false, action: "resume" },
+    { before: "load", after: "stale", preferResume: false, action: "resume" },
+    { before: "both", after: "both", preferResume: true, action: "resume" },
+    { before: "resume", after: "load", preferResume: false, action: "snapshot" },
+    { before: "load", after: "resume", preferResume: false, action: "snapshot" },
+    { before: "resume", after: "load", preferResume: false, action: "fork" },
+    { before: "load", after: "resume", preferResume: false, action: "fork" },
+  ] as const)(
+    "renegotiates ACP session activation after respawn: $before -> $after ($action)",
+    ({ before, after, preferResume, action }) =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const instanceId = ProviderInstanceId.make("acp-renegotiate");
+        const threadId = ThreadId.make("thread-acp-renegotiate");
+        const runtimeInputs: Array<AcpAdapterV2RuntimeInput> = [];
+        const activationMethods: string[] = [];
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        const setCredentials = (token: string) =>
+          mcpSessions.set({
+            environmentId: EnvironmentId.make("environment-acp-renegotiate"),
+            threadId,
+            providerSessionId: "mcp-session-acp-renegotiate",
+            providerInstanceId: instanceId,
+            endpoint: "http://127.0.0.1:43123/mcp",
+            authorizationHeader: token,
+            browserToolsAvailable: false,
+          });
+        yield* setCredentials("Bearer before-restart");
+        const makeRuntime = makeMockRuntime({
+          childProcessSpawner,
+          mockAgentPath,
+          protocolEvents,
+          environment: (ordinal) =>
+            ordinal === 1
+              ? { T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1" }
+              : after === "stale"
+                ? { T3_ACP_FAIL_LOAD_SESSION: "1" }
+                : {},
+          ownDetachedProcessGroup: true,
+          wrapRuntime: (nativeRuntime, ordinal) => {
+            const method = ordinal === 1 ? before : after;
+            const initialized = nativeRuntime.initialize().pipe(
+              Effect.map((result) => {
+                const {
+                  resume: _resume,
+                  close: _close,
+                  fork: _fork,
+                  ...sessionCapabilities
+                } = result.agentCapabilities?.sessionCapabilities ?? {};
+                return {
+                  ...result,
+                  agentCapabilities: {
+                    ...result.agentCapabilities,
+                    loadSession: method === "load" || method === "both" || method === "stale",
+                    promptCapabilities: {
+                      ...result.agentCapabilities?.promptCapabilities,
+                      image: method === "load",
+                    },
+                    sessionCapabilities: {
+                      ...sessionCapabilities,
+                      ...(method === "load" || method === "stale" ? { close: {}, fork: {} } : {}),
+                      ...(method === "resume" || method === "both" ? { resume: {} } : {}),
+                    },
+                  },
+                };
+              }),
+            );
+            const unavailable = (unsupportedMethod: string) =>
+              Effect.fail(
+                new EffectAcpErrors.AcpRequestError({
+                  code: -32601,
+                  method: unsupportedMethod,
+                  errorMessage: "Replacement agent no longer supports this method",
+                }),
+              );
+            return {
+              ...nativeRuntime,
+              initialize: () => initialized,
+              start: () =>
+                nativeRuntime
+                  .start()
+                  .pipe(
+                    Effect.flatMap((result) =>
+                      initialized.pipe(
+                        Effect.map((initializeResult) => ({ ...result, initializeResult })),
+                      ),
+                    ),
+                  ),
+              loadSession: (id, options) => {
+                activationMethods.push("load");
+                return method === "load" || method === "both" || method === "stale"
+                  ? nativeRuntime
+                      .loadSession(id, options)
+                      .pipe(
+                        Effect.flatMap((result) =>
+                          initialized.pipe(
+                            Effect.map((initializeResult) => ({ ...result, initializeResult })),
+                          ),
+                        ),
+                      )
+                  : unavailable("session/load");
+              },
+              forkSession: (id, options) => {
+                activationMethods.push("fork");
+                return nativeRuntime
+                  .forkSession(id, options)
+                  .pipe(
+                    Effect.flatMap((result) =>
+                      initialized.pipe(
+                        Effect.map((initializeResult) => ({ ...result, initializeResult })),
+                      ),
+                    ),
+                  );
+              },
+              resumeSession: (id, options) => {
+                activationMethods.push("resume");
+                return method === "resume" || method === "both"
+                  ? nativeRuntime
+                      .resumeSession(id, options)
+                      .pipe(
+                        Effect.flatMap((result) =>
+                          initialized.pipe(
+                            Effect.map((initializeResult) => ({ ...result, initializeResult })),
+                          ),
+                        ),
+                      )
+                  : unavailable("session/resume");
+              },
+            };
+          },
+        });
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            restartRuntimeAfterInterrupt: true,
+            terminateRuntimeProcessGroupOnInterrupt: true,
+            preferResumeSession: preferResume,
+            makeRuntime: (input) =>
+              Effect.sync(() => runtimeInputs.push(input)).pipe(Effect.andThen(makeRuntime(input))),
+          },
+          selfInvocation,
+        });
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const sessionScope = yield* Scope.make();
+        const runtime = yield* adapter
+          .openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("provider-session-acp-renegotiate"),
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.provideService(Scope.Scope, sessionScope));
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+          }),
+        );
+        yield* Stream.fromQueue(protocolEvents).pipe(
+          Stream.filter(
+            (event) =>
+              event.direction === "outgoing" && rawProtocolMethod(event) === "session/prompt",
+          ),
+          Stream.runHead,
+        );
+        const started = yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "provider_turn.updated"),
+          Stream.runHead,
+        );
+        assert.isTrue(Option.isSome(started));
+        if (Option.isNone(started) || started.value.type !== "provider_turn.updated") return;
+        yield* runtime.interruptTurn({
+          providerThread,
+          providerTurnId: started.value.providerTurn.id,
+          requestRuntimeRestart: true,
+        });
+        yield* pollProtocolMethods(protocolEvents);
+        yield* setCredentials("Bearer after-restart");
+        const resumed = yield* (
+          action === "resume"
+            ? runtime.resumeThread({ providerThread, modelSelection, runtimePolicy })
+            : action === "snapshot"
+              ? runtime
+                  .readThreadSnapshot({ providerThread })
+                  .pipe(Effect.map((result) => result.providerThread))
+              : runtime.forkThread({
+                  sourceProviderThread: providerThread,
+                  targetThreadId: threadId,
+                  modelSelection,
+                  runtimePolicy,
+                })
+        ).pipe(Effect.result);
+        if (after === "none" || after === "stale") {
+          assert.equal(resumed._tag, "Failure");
+          if (resumed._tag === "Failure")
+            assert.include(
+              String(resumed.failure.cause),
+              after === "none" ? "cannot load or resume" : "Mock load session failure",
+            );
+          const methods = yield* pollProtocolMethods(protocolEvents);
+          assert.notInclude(methods, "session/load");
+          if (after === "none") assert.notInclude(methods, "session/resume");
+          else assert.include(methods, "session/resume");
+          assert.deepEqual(activationMethods, after === "none" ? [] : ["load"]);
+          const replacement = yield* runtime.ensureThread({
+            threadId,
+            modelSelection,
+            runtimePolicy,
+          });
+          assert.isNotNull(replacement.nativeThreadRef);
+          assert.equal(replacement.status, "idle");
+          const next = makeTurnInput({
+            threadId,
+            providerThread: replacement,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 2,
+            messageText: "portable context: pf05-amber-sparrow",
+          });
+          yield* runtime.startTurn(next);
+          const terminal = yield* runtime.events.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "turn.terminal" &&
+                event.providerTurnId !== started.value.providerTurn.id,
+            ),
+            Stream.runHead,
+          );
+          assert.isTrue(Option.isSome(terminal));
+          if (Option.isSome(terminal) && terminal.value.type === "turn.terminal")
+            assert.equal(terminal.value.status, "completed");
+        } else if (action !== "resume" && after === "resume") {
+          assert.equal(resumed._tag, "Failure");
+          assert.deepEqual(activationMethods, []);
+        } else {
+          assert.equal(resumed._tag, "Success");
+          if (resumed._tag === "Success") assert.isNotNull(resumed.success.nativeThreadRef);
+          assert.deepEqual(activationMethods, [
+            action === "fork"
+              ? "fork"
+              : action === "snapshot"
+                ? "load"
+                : preferResume
+                  ? "resume"
+                  : after,
+          ]);
+          // ACP v2 carries both replaying load and native resume through session/resume.
+          assert.include(
+            yield* pollProtocolMethods(protocolEvents),
+            action === "fork" ? "session/fork" : "session/resume",
+          );
+          assert.equal(
+            runtime.providerSession.capabilities.threads.canReadThreadSnapshot,
+            after === "load" || after === "both",
+          );
+        }
+        if (action === "resume" && (after === "resume" || after === "load")) {
+          const snapshot = yield* runtime
+            .readThreadSnapshot({
+              providerThread: {
+                ...providerThread,
+                nativeThreadRef: {
+                  driver: ACP_TEST_DRIVER,
+                  nativeId: "another-session",
+                  strength: "strong",
+                },
+              },
+            })
+            .pipe(Effect.result);
+          assert.equal(snapshot._tag, after === "load" ? "Success" : "Failure");
+          const fork = yield* runtime
+            .forkThread({
+              sourceProviderThread: providerThread,
+              targetThreadId: ThreadId.make("thread-acp-renegotiate-fork"),
+              modelSelection,
+              runtimePolicy,
+            })
+            .pipe(Effect.result);
+          assert.equal(fork._tag, after === "load" ? "Success" : "Failure");
+        }
+        if (action === "resume" && after === "resume") {
+          const imageTurn = makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 2,
+          });
+          const rejected = yield* runtime
+            .startTurn({
+              ...imageTurn,
+              message: {
+                ...imageTurn.message,
+                attachments: [
+                  ChatImageAttachment.make({
+                    type: "image",
+                    id: ChatAttachmentId.make("pf05-image-12345678-1234-1234-1234-123456789abc"),
+                    name: "image.png",
+                    mimeType: "image/png",
+                    sizeBytes: 1,
+                  }),
+                ],
+              },
+            })
+            .pipe(Effect.result);
+          assert.equal(rejected._tag, "Failure");
+          if (rejected._tag === "Failure")
+            assert.include(
+              String(rejected.failure.cause),
+              "did not negotiate image prompt support",
+            );
+        }
+        yield* pollProtocolMethods(protocolEvents);
+        yield* Scope.close(sessionScope, Exit.void);
+        const finalizerMethods = yield* pollProtocolMethods(protocolEvents);
+        assert.equal(
+          finalizerMethods.filter((method) => method === "session/close").length,
+          after === "load" || after === "stale" ? 1 : 0,
+        );
+        assert.lengthOf(runtimeInputs, 2);
+        assert.equal(
+          runtimeInputs[1]?.processEnvironment?.T3_ACP_MCP_AUTHORIZATION,
+          "Bearer after-restart",
+        );
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("restarts the ACP child process before the next prompt after interrupt", () =>
