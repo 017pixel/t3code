@@ -359,9 +359,12 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       sourceRecords.messages.find((message) => message.id === id),
     );
     if (pendingMessages.some((message) => message === undefined)) return;
+    // An undelivered initial prompt can also be pending steering; send it once.
     const promptMessages = [
       ...(replacementMessage ? [replacementMessage] : []),
-      ...pendingMessages.filter((message) => message !== undefined),
+      ...pendingMessages
+        .filter((message) => message !== undefined)
+        .filter((message) => message.id !== replacementMessage?.id),
     ];
     const prompt =
       promptMessages.length > 0
