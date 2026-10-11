@@ -54,7 +54,7 @@ import { projectFaviconCache } from "../assets/projectFaviconCache";
 import { layer as browserCryptoLayer } from "../cloud/dpop";
 import {
   forgetBootEnvironment,
-  readBootSnapshot,
+  readBootCacheSnapshot,
   recordBootServerConfig,
   recordBootShell,
 } from "../bootSnapshot";
@@ -68,23 +68,27 @@ const SERVER_CONFIG_STORE_NAME = "server-config";
 const VCS_REFS_STORE_NAME = "vcs-refs";
 const CATALOG_KEY = "document";
 const StoredShellSnapshot = StoredOrchestrationShellSnapshot;
-const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
+const StoredShellSnapshotJson = Schema.suspend(() => Schema.fromJsonString(StoredShellSnapshot));
 const StoredThreadSnapshot = StoredOrchestrationThreadSnapshot;
-const StoredThreadSnapshotJson = Schema.fromJsonString(StoredThreadSnapshot);
+const StoredThreadSnapshotJson = Schema.suspend(() => Schema.fromJsonString(StoredThreadSnapshot));
 const StoredServerConfig = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   environmentId: EnvironmentId,
   config: ServerConfig,
 });
-const StoredServerConfigJson = Schema.fromJsonString(StoredServerConfig);
+const StoredServerConfigJson = Schema.suspend(() => Schema.fromJsonString(StoredServerConfig));
 const StoredVcsRefs = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   environmentId: EnvironmentId,
   cwd: Schema.String,
   refs: VcsListRefsResult,
 });
-const StoredVcsRefsJson = Schema.fromJsonString(StoredVcsRefs);
-const ConnectionCatalogDocumentJson = Schema.fromJsonString(ConnectionCatalogDocument);
+const StoredVcsRefsJson = Schema.suspend(() => Schema.fromJsonString(StoredVcsRefs));
+// Compile a cache's codec only when it is read or written. A same-build boot
+// snapshot needs neither the shell nor config decoder before first paint.
+const ConnectionCatalogDocumentJson = Schema.suspend(() =>
+  Schema.fromJsonString(ConnectionCatalogDocument),
+);
 const decodeConnectionCatalogDocument = Schema.decodeUnknownEffect(ConnectionCatalogDocumentJson);
 const encodeConnectionCatalogDocument = Schema.encodeEffect(ConnectionCatalogDocumentJson);
 const decodeStoredShellSnapshot = Schema.decodeUnknownEffect(StoredShellSnapshotJson);
@@ -525,11 +529,11 @@ const bootServerConfigsTaken = new Set<EnvironmentId>();
 function takeBootValue<A>(
   taken: Set<EnvironmentId>,
   environmentId: EnvironmentId,
-  read: (snapshot: NonNullable<ReturnType<typeof readBootSnapshot>>) => A | undefined,
+  read: (snapshot: NonNullable<ReturnType<typeof readBootCacheSnapshot>>) => A | undefined,
 ): A | undefined {
   if (taken.has(environmentId)) return undefined;
   taken.add(environmentId);
-  const snapshot = readBootSnapshot();
+  const snapshot = readBootCacheSnapshot();
   return snapshot === null ? undefined : read(snapshot);
 }
 
