@@ -41,7 +41,8 @@ import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStr
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
-const UPDATE_FORCE_KILL_AFTER = Duration.seconds(5);
+const UPDATE_FORCE_KILL_AFTER = Duration.seconds(1);
+const UPDATE_SHUTDOWN_DRAIN = Duration.seconds(3);
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
 // Every progress publish resends the provider list to each client, so the
 // installer's output is sampled rather than forwarded line by line.
@@ -130,7 +131,17 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
             ),
           );
         yield* Effect.addFinalizer(() =>
-          child.kill({ forceKillAfter: UPDATE_FORCE_KILL_AFTER }).pipe(Effect.ignore),
+          // Give an interrupted installer time to finish its current writes before
+          // terminating it, within the desktop backend's five-second quit budget.
+          child.exitCode.pipe(
+            Effect.timeoutOption(UPDATE_SHUTDOWN_DRAIN),
+            Effect.orElseSucceed(() => Option.none()),
+            Effect.flatMap((exit) =>
+              Option.isSome(exit)
+                ? Effect.void
+                : child.kill({ forceKillAfter: UPDATE_FORCE_KILL_AFTER }).pipe(Effect.ignore),
+            ),
+          ),
         );
 
         // Holds the newest output line not yet reported; the sampler takes it.
