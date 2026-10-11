@@ -341,10 +341,12 @@ export const migrationEntries = [
   [
     63,
     "ProjectionThreadReadPayload",
-    Effect.promise(() => import("./Migrations/063_ProjectionThreadReadPayload.ts")).pipe(
-      Effect.flatMap((module) => module.migrateThreadReadProjection),
-      Effect.asVoid,
-    ),
+    // knip traces a destructured `await import`, not a property read off the module.
+    Effect.promise(async () => {
+      const { migrateThreadReadProjection } =
+        await import("./Migrations/063_ProjectionThreadReadPayload.ts");
+      return migrateThreadReadProjection;
+    }).pipe(Effect.flatten, Effect.asVoid),
   ],
 ] as const;
 
