@@ -19,6 +19,8 @@ export type {
   CommitMessageGenerationResult,
   PrContentGenerationInput,
   PrContentGenerationResult,
+  ReviewGuideGenerationInput,
+  ReviewGuideGenerationResult,
   ThreadTitleGenerationInput,
   ThreadTitleGenerationResult,
 } from "@t3tools/provider-core/server/textGeneration";
@@ -34,7 +36,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateReviewGuide";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -77,6 +80,10 @@ export const make = Effect.gen(function* () {
     generateBranchName: (input) =>
       instanceFor("generateBranchName", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => launch(textGeneration.generateBranchName(input))),
+      ),
+    generateReviewGuide: (input) =>
+      instanceFor("generateReviewGuide", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => launch(textGeneration.generateReviewGuide(input))),
       ),
     generateThreadTitle: (input) =>
       instanceFor("generateThreadTitle", input.modelSelection.instanceId).pipe(
