@@ -6,6 +6,8 @@ import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 import { WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
 
 const decodeLegacyLifecycleSubscription = Schema.decodeExit(Schema.Struct({}));
+const decodeLegacyConfigSubscription = Schema.decodeExit(Schema.Struct({}));
+const decodeConfigSubscription = Schema.decodeSync(WsSubscribeServerConfigRpc.payloadSchema);
 
 /**
  * The client always sends `environmentThemes`, including to servers built
@@ -30,6 +32,13 @@ describe("subscribeServerConfig payload compatibility", () => {
   it("stays optional, so a client that never sends it still subscribes", () => {
     const decoded = Schema.decodeSync(WsSubscribeServerConfigRpc.payloadSchema)({});
     expect(decoded).toEqual({});
+  });
+
+  it("negotiates provider update origins without rejecting older clients or servers", () => {
+    const payload = { providerUpdateOrigins: true };
+    expect(Exit.isSuccess(decodeLegacyConfigSubscription(payload))).toBe(true);
+    expect(decodeConfigSubscription(payload)).toEqual(payload);
+    expect(decodeConfigSubscription({})).toEqual({});
   });
 });
 

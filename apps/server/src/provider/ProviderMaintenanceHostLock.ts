@@ -10,6 +10,12 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
 import * as Semaphore from "effect/Semaphore";
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
+
+const HeldWrite = Context.Reference<{ readonly owner: object; active: boolean } | null>(
+  "t3/provider/ProviderMaintenanceHostLock/HeldWrite",
+  { defaultValue: () => null },
+);
 
 // Linux exposes a process start identity, so recycled PIDs cannot pin a dead reader.
 const processIdentity = (pid: number) => {
@@ -24,6 +30,7 @@ const processIdentity = (pid: number) => {
  * an installer closes admission before waiting for active turns to drain.
  */
 export const make = (directory: string) => {
+  const owner = {};
   const readers = NodePath.join(directory, "readers");
   const prepare = Effect.sync(() => NodeFS.mkdirSync(readers, { recursive: true }));
   const acquireGate = Effect.uninterruptibleMask((restore) =>
@@ -60,34 +67,44 @@ export const make = (directory: string) => {
   const readPermit = Semaphore.makeUnsafe(1);
   let readCount = 0;
   let readFile: string | undefined;
+  const registerRead = Effect.sync(() => {
+    const file = NodePath.join(readers, `${process.pid}-${NodeCrypto.randomUUID()}`);
+    NodeFS.writeFileSync(file, processIdentity(process.pid) ?? "", { flag: "wx" });
+    return file;
+  });
   // A provider can launch helper CLIs while its turn holds a read lease.
   // Joining that lease must not wait behind an installer draining this turn.
-  const acquireRead = Effect.uninterruptible(
-    readPermit.withPermits(1)(
-      Effect.gen(function* () {
-        if (readCount === 0) {
-          readFile = yield* withGate(
-            Effect.sync(() => {
-              const file = NodePath.join(readers, `${process.pid}-${NodeCrypto.randomUUID()}`);
-              NodeFS.writeFileSync(file, processIdentity(process.pid) ?? "", { flag: "wx" });
-              return file;
-            }),
-          );
-        }
-        readCount++;
-        let released = false;
-        return readPermit.withPermits(1)(
-          Effect.sync(() => {
-            if (released) return;
-            released = true;
-            if (--readCount === 0 && readFile !== undefined) {
-              NodeFS.rmSync(readFile, { force: true });
-              readFile = undefined;
-            }
-          }),
-        );
-      }),
-    ),
+  const acquireRead = Effect.flatMap(HeldWrite, (held) =>
+    held?.owner === owner && held.active
+      ? // A scoped verification can outlive the install. Its own reader remains
+        // visible to the next writer without admitting unrelated launches here.
+        registerRead.pipe(
+          Effect.map((file) => Effect.sync(() => NodeFS.rmSync(file, { force: true }))),
+        )
+      : Effect.acquireUseRelease(
+          Effect.interruptible(readPermit.take(1)),
+          () =>
+            Effect.uninterruptible(
+              Effect.gen(function* () {
+                if (readCount === 0) {
+                  readFile = yield* withGate(registerRead);
+                }
+                readCount++;
+                let released = false;
+                return readPermit.withPermits(1)(
+                  Effect.sync(() => {
+                    if (released) return;
+                    released = true;
+                    if (--readCount === 0 && readFile !== undefined) {
+                      NodeFS.rmSync(readFile, { force: true });
+                      readFile = undefined;
+                    }
+                  }),
+                );
+              }),
+            ),
+          () => Effect.asVoid(readPermit.release(1)),
+        ),
   );
   const withRead = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     Effect.acquireUseRelease(
@@ -134,7 +151,14 @@ export const make = (directory: string) => {
           if (onBusy) yield* onBusy;
           while (!(yield* drained)) yield* Effect.sleep("100 millis");
         }
-        return yield* effect;
+        return yield* Effect.acquireUseRelease(
+          Effect.sync(() => ({ owner, active: true })),
+          (token) => effect.pipe(Effect.provideService(HeldWrite, token)),
+          (token) =>
+            Effect.sync(() => {
+              token.active = false;
+            }),
+        );
       }),
     );
   return { directory, acquireRead, withRead, withWrite };
@@ -165,4 +189,21 @@ export class ProviderMaintenanceHostLock extends Context.Reference<ReturnType<ty
   },
 ) {}
 
-export const layer = Layer.sync(ProviderMaintenanceHostLock, () => make(userDirectory()));
+export const layer = Layer.effectContext(
+  Effect.sync(() => {
+    const host = make(userDirectory());
+    const admission = Maintenance.ProviderMaintenanceAdmission.defaultValue();
+    return Context.make(ProviderMaintenanceHostLock, host).pipe(
+      Context.add(Maintenance.ProviderMaintenanceAdmission, {
+        // Taking the host lease first prevents a probe nested in an update
+        // window from waiting behind a writer that needs local admission.
+        withPermit: (effect) => host.withRead(admission.withPermit(effect)),
+        withLaunchPermit: (effect) => host.withRead(admission.withLaunchPermit(effect)),
+        withScopedLaunchPermit: (effect) =>
+          Effect.acquireRelease(host.acquireRead, (release) => release, {
+            interruptible: true,
+          }).pipe(Effect.andThen(admission.withScopedLaunchPermit(effect))),
+      }),
+    );
+  }),
+);

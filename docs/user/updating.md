@@ -80,8 +80,8 @@ no client has been used for 15 minutes, and no scheduled task or usage-limit res
 is due within 5 minutes. Tasks that repeat more often than every 15 minutes only
 hold updates back while they run. Then it installs:
 
-- provider CLI updates that have a one-click update, when **Provider update
-  checks** is also on;
+- provider CLI updates that have a one-click update and a recognized installation,
+  when **Provider update checks** is also on;
 - the newest T3 Code release on its channel, when it runs as a background service
   (`t3 service install`). It downloads first and restarts only inside that window.
   If a newer release is published while one waits, the newer one replaces it.
@@ -99,6 +99,8 @@ it. While `settings.json` cannot be read, automatic updates stay off.
 
 ACP Registry agents, including Antigravity, and local ACP commands do not offer
 one-click updates and are not updated by this setting.
+If T3 Code cannot identify a CLI's installation, its update button can still run
+the CLI's own updater manually, but automatic updates leave it alone.
 
 **Settings → Providers** shows provider updates for the selected environment.
 **Update all** updates every outdated provider on every connected environment
@@ -115,7 +117,7 @@ the machine instead.
 
 The same page lets you refresh provider status and update supported providers.
 These controls require a connected environment and permission to operate it.
-Provider update checks and restart continuation preferences are in
+Automatic updates, provider update checks, and restart continuation preferences are in
 **Settings → Maintenance**. If provider update checks are disabled, enable them
 there before refreshing to find newer versions.
 
