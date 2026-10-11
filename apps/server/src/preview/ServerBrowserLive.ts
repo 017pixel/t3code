@@ -2278,22 +2278,19 @@ export const make = Effect.gen(function* () {
     ),
     Effect.forkScoped,
   );
-  // The page came back, for example after its DevTools closed. Reconnect now
-  // rather than on the next viewer or agent, or the tab's URL and title stop
-  // reaching every client in the meantime.
-  yield* desktopChannel.attached.pipe(
-    Stream.runForEach((key) =>
-      Effect.gen(function* () {
-        if (tabs.has(tabKey(key.threadId, key.tabId))) return;
-        const { sessions } = yield* manager.list({ threadId: ThreadId.make(key.threadId) });
-        const snapshot = sessions.find(
-          (session) => session.tabId === key.tabId && session.runtime === "server",
-        );
-        if (snapshot) yield* Effect.promise(() => ensureTab(snapshot).catch(constVoid));
-      }).pipe(Effect.ignore),
-    ),
-    Effect.forkScoped,
-  );
+  // The page attached, at the desktop's boot or after its DevTools closed.
+  // Reconnect now rather than on the next viewer or agent, or the tab's URL and
+  // title stop reaching every client in the meantime. ServerBrowser.ts listens
+  // from boot, before this module loads, and forwards each attach here.
+  const reconnectDesktopTab = (key: DesktopBrowserChannel.DesktopTabKey) =>
+    Effect.gen(function* () {
+      if (tabs.has(tabKey(key.threadId, key.tabId))) return;
+      const { sessions } = yield* manager.list({ threadId: ThreadId.make(key.threadId) });
+      const snapshot = sessions.find(
+        (session) => session.tabId === key.tabId && session.runtime === "server",
+      );
+      if (snapshot) yield* Effect.promise(() => ensureTab(snapshot).catch(constVoid));
+    }).pipe(Effect.ignore);
   yield* Effect.sync(closeIdleAgentTabs).pipe(
     Effect.repeat(Schedule.spaced(IDLE_SWEEP_INTERVAL)),
     Effect.forkScoped,
@@ -2313,6 +2310,7 @@ export const make = Effect.gen(function* () {
   return {
     handleRequest,
     mirrorManagerEvent,
+    reconnectDesktopTab,
     onHostConnected: (connectionId: string) =>
       Effect.sync(() => {
         hostConnectionId = connectionId;
