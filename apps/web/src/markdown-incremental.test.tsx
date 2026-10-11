@@ -8,7 +8,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { remarkCodexDirectives } from "@t3tools/shared/codexMarkdownDirectives";
 import { remarkGithubAlerts } from "@t3tools/shared/markdownGithubAlerts";
-import { createIncrementalMarkdownPlugin } from "./markdown-incremental";
+import {
+  createCachedMarkdownPlugin,
+  createIncrementalMarkdownPlugin,
+} from "./markdown-incremental";
 import { remarkNormalizeListItemIndentation } from "@t3tools/shared/markdownListIndentation";
 
 const CHAT_MARKDOWN_REHYPE_PLUGINS = chatMarkdownRehypePlugins(await loadRehypeRaw());
@@ -49,6 +52,17 @@ function render(source: string, incremental?: Plugin<[], Root>, parsedSources?: 
 const prefix = "# Before\n\n```ts\nconst values = [1, 2];\n```\n\n";
 
 describe("incremental Markdown parsing", () => {
+  it("reuses a parsed document across mounts without retaining mutated transforms", () => {
+    const source = "> [!NOTE]\n> cached alert\n\n- a\n\n[link]: /target";
+    const expected = render(source);
+    expect(render(source, createCachedMarkdownPlugin())).toEqual(expected);
+    const parsedSources: string[] = [];
+    expect(render(source, createCachedMarkdownPlugin(), parsedSources)).toEqual(expected);
+    expect(parsedSources).not.toContain(source);
+    const edited = source + "\n\n[link]";
+    expect(render(edited, createCachedMarkdownPlugin())).toEqual(render(edited));
+    expect(render(source, createCachedMarkdownPlugin())).toEqual(expected);
+  });
   it("keeps the document prefix cached when list recovery parses contain fences", () => {
     const source =
       prefix +

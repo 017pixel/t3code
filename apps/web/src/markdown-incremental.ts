@@ -3,6 +3,54 @@ import type { Parser as UnifiedParser, Plugin } from "unified";
 
 type Parser = UnifiedParser<Root>;
 
+const parsedDocuments = new Map<number, { source: string; root: Root; bytes: number }>();
+let parsedDocumentBytes = 0;
+const MAX_PARSED_DOCUMENT_BYTES = 8 * 1024 * 1024;
+
+/** Share pristine parse trees across virtualized row mounts. Transforms receive
+ * their own tree, so alerts, directives and list recovery cannot mutate the cache.
+ * Only the standard parser configuration uses this cache.
+ */
+export function createCachedMarkdownPlugin(): Plugin<[], Root> {
+  return function () {
+    const original = this.parser;
+    if (!original) return;
+    let documentParsed = false;
+    this.parser = (source, file) => {
+      if (documentParsed) return original(source, file);
+      documentParsed = true;
+      let hash = 2166136261;
+      for (let index = 0; index < source.length; index++) {
+        hash = Math.imul(hash ^ source.charCodeAt(index), 16777619);
+      }
+      const cached = parsedDocuments.get(hash);
+      if (cached?.source === source) {
+        parsedDocuments.delete(hash);
+        parsedDocuments.set(hash, cached);
+        return structuredClone(cached.root);
+      }
+      const root = original(source, file) as Root;
+      // Account for positions and AST nodes as well as source text, and cap
+      // both bytes and entry count. Oversized documents are never retained.
+      const bytes = source.length * 16 + 1024;
+      if (bytes <= MAX_PARSED_DOCUMENT_BYTES) {
+        if (cached) {
+          parsedDocumentBytes -= cached.bytes;
+          parsedDocuments.delete(hash);
+        }
+        parsedDocuments.set(hash, { source, root: structuredClone(root), bytes });
+        parsedDocumentBytes += bytes;
+        while (parsedDocumentBytes > MAX_PARSED_DOCUMENT_BYTES || parsedDocuments.size > 128) {
+          const oldest = parsedDocuments.keys().next().value!;
+          parsedDocumentBytes -= parsedDocuments.get(oldest)!.bytes;
+          parsedDocuments.delete(oldest);
+        }
+      }
+      return root;
+    };
+  };
+}
+
 interface ParsedPrefix {
   source: string;
   offset: number;

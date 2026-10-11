@@ -1377,10 +1377,39 @@ index 40e87cd..93aac74 100644
        recycleItems,
        refreshControl: refreshControlElement ? stylePaddingTopState > 0 ? React2.cloneElement(refreshControlElement, {
 diff --git a/react-native.web.js b/react-native.web.js
-index 914d2da..8b88b09 100644
 --- a/react-native.web.js
 +++ b/react-native.web.js
-@@ -5651,6 +5651,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -5348,7 +5348,7 @@
+         top: entry.contentRect.top,
+         width: borderBoxSize.inlineSize
+       } : (_a4 = target == null ? void 0 : target.getBoundingClientRect()) != null ? _a4 : entry.contentRect;
+-      const previousRect = prevRect != null ? prevRect : getContainerLayoutBaseline(element);
++      const previousRect = prevRect;
+       const didSizeChange = previousRect === void 0 || rectObserved.width !== previousRect.width || rectObserved.height !== previousRect.height;
+       prevRect = rectObserved;
+       const shouldResyncLayout = !!(webLayoutResync == null ? void 0 : webLayoutResync());
+@@ -5415,11 +5415,6 @@
+     scheduleWebShrinkMeasurement(state, () => {
+       var _a4;
+       if (state.itemKey === currentItemKey) {
+-        const element = ref.current;
+-        const rect = (_a4 = element == null ? void 0 : element.getBoundingClientRect) == null ? void 0 : _a4.call(element);
+-        if (rect) {
+-          layout = { height: rect.height, width: rect.width };
+-        }
+         applyLayout();
+       }
+     });
+@@ -5474,7 +5469,7 @@
+   });
+   const { onLayout } = useOnLayoutSync(
+     {
+-      measureInLayoutEffect: !IsNewArchitecture,
++      measureInLayoutEffect: false,
+       onLayoutChange,
+       ref,
+       webLayoutResync: () => isInMVCPActiveMode(ctx.state)
+@@ -5651,6 +5646,18 @@
  });
  
  // src/utils/reordering.ts
@@ -1399,7 +1428,7 @@ index 914d2da..8b88b09 100644
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5690,9 +5702,9 @@ function sortDOMElements(container, indexByElement) {
+@@ -5690,9 +5697,9 @@
          }
        }
        if (nextStableElement) {
@@ -1412,10 +1441,39 @@ index 914d2da..8b88b09 100644
      }
    }
 diff --git a/react-native.web.mjs b/react-native.web.mjs
-index 95465f2..d7cbe1c 100644
 --- a/react-native.web.mjs
 +++ b/react-native.web.mjs
-@@ -5630,6 +5630,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -5327,7 +5327,7 @@
+         top: entry.contentRect.top,
+         width: borderBoxSize.inlineSize
+       } : (_a4 = target == null ? void 0 : target.getBoundingClientRect()) != null ? _a4 : entry.contentRect;
+-      const previousRect = prevRect != null ? prevRect : getContainerLayoutBaseline(element);
++      const previousRect = prevRect;
+       const didSizeChange = previousRect === void 0 || rectObserved.width !== previousRect.width || rectObserved.height !== previousRect.height;
+       prevRect = rectObserved;
+       const shouldResyncLayout = !!(webLayoutResync == null ? void 0 : webLayoutResync());
+@@ -5394,11 +5394,6 @@
+     scheduleWebShrinkMeasurement(state, () => {
+       var _a4;
+       if (state.itemKey === currentItemKey) {
+-        const element = ref.current;
+-        const rect = (_a4 = element == null ? void 0 : element.getBoundingClientRect) == null ? void 0 : _a4.call(element);
+-        if (rect) {
+-          layout = { height: rect.height, width: rect.width };
+-        }
+         applyLayout();
+       }
+     });
+@@ -5453,7 +5448,7 @@
+   });
+   const { onLayout } = useOnLayoutSync(
+     {
+-      measureInLayoutEffect: !IsNewArchitecture,
++      measureInLayoutEffect: false,
+       onLayoutChange,
+       ref,
+       webLayoutResync: () => isInMVCPActiveMode(ctx.state)
+@@ -5630,6 +5625,18 @@
  });
  
  // src/utils/reordering.ts
@@ -1434,7 +1492,7 @@ index 95465f2..d7cbe1c 100644
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5669,9 +5681,9 @@ function sortDOMElements(container, indexByElement) {
+@@ -5669,9 +5676,9 @@
          }
        }
        if (nextStableElement) {
@@ -1447,10 +1505,9 @@ index 95465f2..d7cbe1c 100644
      }
    }
 diff --git a/react.js b/react.js
-index 914d2da..0c2917d 100644
 --- a/react.js
 +++ b/react.js
-@@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
+@@ -4702,7 +4702,8 @@
        contentBelowAnchor = Math.max(0, contentBelowAnchor - ctx.scrollAxisGap);
        contentBelowAnchor += (ctx.values.get("footerSize") || 0) + getStylePaddingEnd(state.props);
        isReady = !hasUnknownTailSize;
@@ -1460,7 +1517,7 @@ index 914d2da..0c2917d 100644
      } else if (anchorIndex >= 0) {
        isReady = false;
      }
-@@ -4722,6 +4723,12 @@ function maybeUpdateAnchoredEndSpace(ctx) {
+@@ -4722,6 +4723,12 @@
        updateScroll(ctx, state.scroll, true, { markHasScrolled: false });
      }
      (_b = anchoredEndSpace == null ? void 0 : anchoredEndSpace.onReady) == null ? void 0 : _b.call(anchoredEndSpace, { anchorIndex: nextAnchorIndex, anchorKey: nextAnchorKey, size: nextSize });
@@ -1473,7 +1530,37 @@ index 914d2da..0c2917d 100644
    }
    return nextSize;
  }
-@@ -5651,6 +5658,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -5348,7 +5355,7 @@
+         top: entry.contentRect.top,
+         width: borderBoxSize.inlineSize
+       } : (_a4 = target == null ? void 0 : target.getBoundingClientRect()) != null ? _a4 : entry.contentRect;
+-      const previousRect = prevRect != null ? prevRect : getContainerLayoutBaseline(element);
++      const previousRect = prevRect;
+       const didSizeChange = previousRect === void 0 || rectObserved.width !== previousRect.width || rectObserved.height !== previousRect.height;
+       prevRect = rectObserved;
+       const shouldResyncLayout = !!(webLayoutResync == null ? void 0 : webLayoutResync());
+@@ -5415,11 +5422,6 @@
+     scheduleWebShrinkMeasurement(state, () => {
+       var _a4;
+       if (state.itemKey === currentItemKey) {
+-        const element = ref.current;
+-        const rect = (_a4 = element == null ? void 0 : element.getBoundingClientRect) == null ? void 0 : _a4.call(element);
+-        if (rect) {
+-          layout = { height: rect.height, width: rect.width };
+-        }
+         applyLayout();
+       }
+     });
+@@ -5474,7 +5476,7 @@
+   });
+   const { onLayout } = useOnLayoutSync(
+     {
+-      measureInLayoutEffect: !IsNewArchitecture,
++      measureInLayoutEffect: false,
+       onLayoutChange,
+       ref,
+       webLayoutResync: () => isInMVCPActiveMode(ctx.state)
+@@ -5651,6 +5653,18 @@
  });
  
  // src/utils/reordering.ts
@@ -1492,7 +1579,7 @@ index 914d2da..0c2917d 100644
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5690,9 +5709,9 @@ function sortDOMElements(container, indexByElement) {
+@@ -5690,9 +5704,9 @@
          }
        }
        if (nextStableElement) {
@@ -1504,7 +1591,7 @@ index 914d2da..0c2917d 100644
        }
      }
    }
-@@ -6446,8 +6465,8 @@ function ScrollAdjust() {
+@@ -6446,8 +6460,8 @@
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -1515,10 +1602,9 @@ index 914d2da..0c2917d 100644
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
 diff --git a/react.mjs b/react.mjs
-index 95465f2..b73bfdf 100644
 --- a/react.mjs
 +++ b/react.mjs
-@@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
+@@ -4681,7 +4681,8 @@
        contentBelowAnchor = Math.max(0, contentBelowAnchor - ctx.scrollAxisGap);
        contentBelowAnchor += (ctx.values.get("footerSize") || 0) + getStylePaddingEnd(state.props);
        isReady = !hasUnknownTailSize;
@@ -1528,7 +1614,7 @@ index 95465f2..b73bfdf 100644
      } else if (anchorIndex >= 0) {
        isReady = false;
      }
-@@ -4701,6 +4702,12 @@ function maybeUpdateAnchoredEndSpace(ctx) {
+@@ -4701,6 +4702,12 @@
        updateScroll(ctx, state.scroll, true, { markHasScrolled: false });
      }
      (_b = anchoredEndSpace == null ? void 0 : anchoredEndSpace.onReady) == null ? void 0 : _b.call(anchoredEndSpace, { anchorIndex: nextAnchorIndex, anchorKey: nextAnchorKey, size: nextSize });
@@ -1541,7 +1627,37 @@ index 95465f2..b73bfdf 100644
    }
    return nextSize;
  }
-@@ -5630,6 +5637,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -5327,7 +5334,7 @@
+         top: entry.contentRect.top,
+         width: borderBoxSize.inlineSize
+       } : (_a4 = target == null ? void 0 : target.getBoundingClientRect()) != null ? _a4 : entry.contentRect;
+-      const previousRect = prevRect != null ? prevRect : getContainerLayoutBaseline(element);
++      const previousRect = prevRect;
+       const didSizeChange = previousRect === void 0 || rectObserved.width !== previousRect.width || rectObserved.height !== previousRect.height;
+       prevRect = rectObserved;
+       const shouldResyncLayout = !!(webLayoutResync == null ? void 0 : webLayoutResync());
+@@ -5394,11 +5401,6 @@
+     scheduleWebShrinkMeasurement(state, () => {
+       var _a4;
+       if (state.itemKey === currentItemKey) {
+-        const element = ref.current;
+-        const rect = (_a4 = element == null ? void 0 : element.getBoundingClientRect) == null ? void 0 : _a4.call(element);
+-        if (rect) {
+-          layout = { height: rect.height, width: rect.width };
+-        }
+         applyLayout();
+       }
+     });
+@@ -5453,7 +5455,7 @@
+   });
+   const { onLayout } = useOnLayoutSync(
+     {
+-      measureInLayoutEffect: !IsNewArchitecture,
++      measureInLayoutEffect: false,
+       onLayoutChange,
+       ref,
+       webLayoutResync: () => isInMVCPActiveMode(ctx.state)
+@@ -5630,6 +5632,18 @@
  });
  
  // src/utils/reordering.ts
@@ -1560,7 +1676,7 @@ index 95465f2..b73bfdf 100644
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5669,9 +5688,9 @@ function sortDOMElements(container, indexByElement) {
+@@ -5669,9 +5683,9 @@
          }
        }
        if (nextStableElement) {
@@ -1572,7 +1688,7 @@ index 95465f2..b73bfdf 100644
        }
      }
    }
-@@ -6425,8 +6444,8 @@ function ScrollAdjust() {
+@@ -6425,8 +6439,8 @@
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
