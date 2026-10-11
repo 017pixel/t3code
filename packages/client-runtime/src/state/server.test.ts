@@ -122,6 +122,84 @@ it("treats an announced background restart as resuming and clears it on ready, i
   ).toBeUndefined();
 });
 
+it.each(["rolled-back", "failed"] as const)(
+  "keeps a background %s outcome visible after reconnect until the next successful update",
+  (status) => {
+    const active = {} as RpcSession;
+    const stale = {} as RpcSession;
+    const outcome = {
+      id: "background",
+      fromVersion: "1.0.0",
+      targetVersion: "1.1.0",
+      status,
+      reason: "candidate-crash-loop",
+    };
+    const state = { currentSession: active, welcomeSession: active, welcome: null };
+    const ready = applyServerWelcomeEvent(state, active, {
+      type: "ready",
+      payload: { updateOutcome: outcome },
+    });
+    const version = status === "failed" ? "1.1.0" : "1.0.0";
+    expect(
+      serverUpdateStateForServerVersion(
+        serverUpdateStateForAnnouncedRestart(
+          { status: "idle" },
+          undefined,
+          ready.updateOutcome,
+          version,
+        ),
+        version,
+      ),
+    ).toEqual({
+      status: "failed",
+      stage: "resuming",
+      fromVersion: version,
+      targetVersion: "1.1.0",
+      message: "candidate-crash-loop",
+    });
+    expect(
+      serverUpdateStateForAnnouncedRestart({ status: "idle" }, undefined, outcome, version),
+    ).toBe(serverUpdateStateForAnnouncedRestart({ status: "idle" }, undefined, outcome, version));
+    expect(
+      applyServerWelcomeEvent(state, stale, {
+        type: "ready",
+        payload: { updateOutcome: outcome },
+      }),
+    ).toBe(state);
+    const running = {
+      status: "running",
+      stage: "installing",
+      fromVersion: version,
+      targetVersion: "1.2.0",
+    } as const;
+    expect(serverUpdateStateForAnnouncedRestart(running, undefined, outcome, version)).toBe(
+      running,
+    );
+    const manualFailure = {
+      status: "failed",
+      stage: "installing",
+      fromVersion: version,
+      targetVersion: outcome.targetVersion,
+      message: "manual retry failed",
+    } as const;
+    expect(serverUpdateStateForAnnouncedRestart(manualFailure, undefined, outcome, version)).toBe(
+      manualFailure,
+    );
+    const success = applyServerWelcomeEvent(ready, active, {
+      type: "ready",
+      payload: { updateOutcome: { ...outcome, status: "committed", targetVersion: "1.2.0" } },
+    });
+    expect(
+      serverUpdateStateForAnnouncedRestart(
+        { status: "idle" },
+        undefined,
+        success.updateOutcome,
+        "1.2.0",
+      ),
+    ).toEqual({ status: "idle" });
+  },
+);
+
 describe("update restart reconnect nudges", () => {
   it.effect("retries a desktop commit that was lost before delivery", () =>
     Effect.gen(function* () {

@@ -7,6 +7,7 @@ import {
   type ServerLifecycleStreamUpdateRestartEvent,
   type ServerSelfUpdateProgressEvent,
   type ServerSelfUpdateResult,
+  type ServerSelfUpdateOutcome,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -309,18 +310,42 @@ export function serverUpdateStateForServerVersion(
     : IDLE_SERVER_UPDATE_STATE;
 }
 
+const updateOutcomeStates = new WeakMap<ServerSelfUpdateOutcome, ServerUpdateState>();
+
 export function serverUpdateStateForAnnouncedRestart(
   state: ServerUpdateState,
   restart: ServerLifecycleStreamUpdateRestartEvent["payload"] | undefined,
+  outcome?: ServerSelfUpdateOutcome,
+  serverVersion: string | null = null,
 ): ServerUpdateState {
-  return restart !== undefined && state.status !== "running"
-    ? {
-        status: "running",
-        stage: "resuming",
-        fromVersion: restart.fromVersion,
-        targetVersion: restart.targetVersion,
-      }
-    : state;
+  if (restart !== undefined && state.status !== "running")
+    return {
+      status: "running",
+      stage: "resuming",
+      fromVersion: restart.fromVersion,
+      targetVersion: restart.targetVersion,
+    };
+  if (
+    state.status === "running" ||
+    outcome === undefined ||
+    outcome.status === "committed" ||
+    (serverVersion !== outcome.fromVersion && serverVersion !== outcome.targetVersion) ||
+    state.status === "failed"
+  )
+    return state;
+  const cached = updateOutcomeStates.get(outcome);
+  if (cached?.status === "failed" && cached.fromVersion === serverVersion) return cached;
+  const failure: ServerUpdateState = {
+    status: "failed",
+    stage: "resuming",
+    fromVersion: serverVersion,
+    targetVersion: outcome.targetVersion,
+    message: outcome.reason ?? `The t3@${outcome.targetVersion} update ${outcome.status}.`,
+  };
+  // Existing notice dismissal tracks the state object, so config refreshes must
+  // retain it until a different launcher outcome arrives.
+  updateOutcomeStates.set(outcome, failure);
+  return failure;
 }
 
 export function serverUpdateFailureMessage(error: unknown): string {
@@ -510,8 +535,12 @@ export function applyServerWelcomeEvent(
       restart: event.payload as ServerLifecycleStreamUpdateRestartEvent["payload"],
     };
   }
-  if (event.type === "ready")
-    return current.restart === undefined ? current : { ...current, restart: undefined };
+  if (event.type === "ready") {
+    const payload = event.payload as ServerLifecycleStreamReadyEvent["payload"];
+    return current.restart === undefined && current.updateOutcome === payload.updateOutcome
+      ? current
+      : { ...current, restart: undefined, updateOutcome: payload.updateOutcome };
+  }
   return event.type === "welcome" && current.currentSession === session
     ? {
         ...current,
@@ -526,6 +555,7 @@ export interface EnvironmentServerWelcomeState {
   readonly welcomeSession: RpcSession | null;
   readonly welcome: ServerLifecycleWelcomePayload | null;
   readonly restart?: ServerLifecycleStreamUpdateRestartEvent["payload"] | undefined;
+  readonly updateOutcome?: ServerSelfUpdateOutcome | undefined;
 }
 
 export function resolveServerWelcomeState(
@@ -724,7 +754,12 @@ export function createServerEnvironmentAtoms<R, E>(
           const lifecycle = Option.getOrNull(
             AsyncResult.value(get(welcomeStateFamily(environmentId))),
           );
-          return serverUpdateStateForAnnouncedRestart(manual, lifecycle?.restart);
+          return serverUpdateStateForAnnouncedRestart(
+            manual,
+            lifecycle?.restart,
+            lifecycle?.updateOutcome,
+            get(configValueAtom(environmentId))?.environment.serverVersion ?? null,
+          );
         })(),
         get(configValueAtom(environmentId))?.environment.serverVersion ?? null,
       ),
