@@ -5501,7 +5501,7 @@ const queueResumeDisabledInstanceProjectId = ProjectId.make(
 
 const layerQueueResumeDisabledInstanceTest = Layer.mergeAll(
   RuntimeLayer.layer,
-  RuntimeLayer.layerEventSink,
+  ProjectLayers.layerEventSink,
   ProjectStore.layer,
   ProjectionStore.layer,
   EffectOutbox.layer,
