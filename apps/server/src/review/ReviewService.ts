@@ -1,5 +1,3 @@
-import * as Cache from "effect/Cache";
-import * as Duration from "effect/Duration";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -124,9 +122,11 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const readDiffPreview: ReviewService["Service"]["getDiffPreview"] = Effect.fn(
+  const getDiffPreview: ReviewService["Service"]["getDiffPreview"] = Effect.fn(
     "ReviewService.getDiffPreview",
   )(function* (input) {
+    yield* assertWorkspaceBoundCwd("ReviewService.getDiffPreview", input.cwd);
+
     const handle = yield* vcsRegistry.detect({ cwd: input.cwd, requestedKind: "auto" });
     if (!handle) {
       return {
@@ -150,32 +150,6 @@ export const make = Effect.gen(function* () {
 
     return yield* getDriverDiffPreview(input);
   });
-
-  // Surfaces asking for the same epoch while a preview loads share that read.
-  // A finished preview is not kept: a terminal or outside edit changes the
-  // workspace without changing the epoch. Legacy callers always read fresh.
-  const previews = yield* Cache.make({
-    lookup: (key: string) => readDiffPreview(JSON.parse(key) as ReviewDiffPreviewInput),
-    capacity: 32,
-    timeToLive: Duration.zero,
-  });
-  const getDiffPreview: ReviewService["Service"]["getDiffPreview"] = (input) =>
-    assertWorkspaceBoundCwd("ReviewService.getDiffPreview", input.cwd).pipe(
-      Effect.andThen(
-        input.cacheKey === undefined
-          ? readDiffPreview(input)
-          : Cache.get(
-              previews,
-              JSON.stringify({
-                cwd: input.cwd,
-                ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
-                ...(input.baseRef ? { baseRef: input.baseRef } : {}),
-                ignoreWhitespace: input.ignoreWhitespace ?? false,
-                ...(input.file ? { file: input.file } : {}),
-              }),
-            ),
-      ),
-    );
 
   const getDiffFileContents: ReviewService["Service"]["getDiffFileContents"] = Effect.fn(
     "ReviewService.getDiffFileContents",

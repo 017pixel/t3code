@@ -67,50 +67,6 @@ function layer(input: {
 }
 
 describe("ReviewService", () => {
-  it.effect("reads fresh for legacy clients without an epoch", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-workspace-" });
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-base-" });
-      const detectCalls: Array<{ readonly cwd: string }> = [];
-      yield* Effect.gen(function* () {
-        const review = yield* ReviewService.ReviewService;
-        const results = yield* Effect.all(
-          [
-            review.getDiffPreview({ cwd: workspaceRoot }),
-            review.getDiffPreview({ cwd: workspaceRoot, ignoreWhitespace: false }),
-          ],
-          { concurrency: "unbounded" },
-        );
-        assert.strictEqual(detectCalls.length, 2);
-        assert.deepStrictEqual(results[0], results[1]);
-        yield* review.getDiffPreview({ cwd: workspaceRoot });
-        assert.strictEqual(detectCalls.length, 3);
-      }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, detectCalls })));
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("reads a finished preview again, whatever its epoch", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-workspace-" });
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-base-" });
-      const detectCalls: Array<{ readonly cwd: string }> = [];
-      yield* Effect.gen(function* () {
-        const review = yield* ReviewService.ReviewService;
-        const input = { cwd: workspaceRoot, cacheKey: "mutation-1" };
-        yield* review.getDiffPreview(input);
-        // A terminal `git stash` keeps the epoch, so a remount reads again.
-        yield* review.getDiffPreview(input);
-        assert.strictEqual(detectCalls.length, 2);
-        yield* review.getDiffPreview({ ...input, cacheKey: "mutation-2" });
-        yield* review.getDiffPreview({ ...input, ignoreWhitespace: true });
-        yield* review.getDiffPreview({ ...input, baseRef: "main" });
-        assert.strictEqual(detectCalls.length, 5);
-      }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, detectCalls })));
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
   it.effect("rejects diff preview cwd outside the configured workspace roots", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

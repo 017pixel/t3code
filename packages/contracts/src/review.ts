@@ -5,8 +5,6 @@ import { VcsError } from "./vcs.ts";
 
 export const ReviewDiffPreviewInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
-  /** Freshness epoch supplied by clients that invalidate on mutation and explicit refresh. */
-  cacheKey: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(1024))),
   baseRef: Schema.optional(TrimmedNonEmptyString),
   ignoreWhitespace: Schema.optionalKey(Schema.Boolean),
   file: Schema.optionalKey(
