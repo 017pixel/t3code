@@ -6,6 +6,8 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
+import { SERVICE_LAUNCHER_CONTEXT_ENV } from "../cloud/serviceProtocol.ts";
+
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
 interface Identity {
@@ -240,6 +242,8 @@ export async function make(input: {
   readonly ownerPid?: number;
   readonly controller?: ProcessController;
   readonly installLeaseDirectory?: string;
+  /** Servers publish their identity so cleanup in another environment never stops them. */
+  readonly registerServer?: boolean;
   readonly platform: NodeJS.Platform;
   readonly environment: NodeJS.ProcessEnv;
   readonly hostname: string;
@@ -249,14 +253,47 @@ export async function make(input: {
   const directory = NodePath.join(input.stateDir, "provider-processes");
   NodeFS.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const ownerPid = input.ownerPid ?? process.pid;
-  const owner = (await controller.snapshot()).find((p) => p.pid === ownerPid && !p.zombie);
+  const initial = await controller.snapshot();
+  const owner = initial.find((p) => p.pid === ownerPid && !p.zombie);
   if (!owner) throw new Error("Could not identify the provider process owner");
+  const launcher =
+    environment[SERVICE_LAUNCHER_CONTEXT_ENV] === undefined
+      ? undefined
+      : initial.find((p) => p.pid === owner.ppid && !p.zombie);
   const instanceId = NodeCrypto.randomUUID();
   const tracked = new Map<string, Entry>();
   const write = (file: string, entry: Entry) => {
     const temporary = `${file}.tmp`;
     NodeFS.writeFileSync(temporary, JSON.stringify(entry), { mode: 0o600 });
     NodeFS.renameSync(temporary, file);
+  };
+  // Servers can be launched from a tracked terminal in another environment.
+  // Publish their identities before cleanup so neither server owns the other.
+  const servers =
+    input.installLeaseDirectory === undefined
+      ? undefined
+      : NodePath.join(input.installLeaseDirectory, "servers");
+  const registration =
+    servers === undefined || !input.registerServer
+      ? undefined
+      : NodePath.join(servers, `${instanceId}.json`);
+  if (servers !== undefined) NodeFS.mkdirSync(servers, { recursive: true, mode: 0o700 });
+  if (registration !== undefined)
+    write(registration, {
+      version: 1,
+      instanceId,
+      hostname,
+      stateDir: input.stateDir,
+      owner: { pid: owner.pid, startTime: owner.startTime },
+      processes:
+        launcher === undefined
+          ? []
+          : [{ pid: launcher.pid, startTime: launcher.startTime, pgid: launcher.pgid }],
+    });
+  const release = () => {
+    // The managed launcher stays alive between replacement children.
+    if (registration !== undefined && launcher === undefined)
+      NodeFS.rmSync(registration, { force: true });
   };
   const survivors = (entry: Entry, table: ReadonlyArray<ObservedProcess>) =>
     table.filter((p) => !p.zombie && entry.processes.some((owned) => same(owned, p)));
@@ -328,6 +365,53 @@ export async function make(input: {
       ),
     };
   };
+  const withoutServers = (entry: Entry, table: ReadonlyArray<ObservedProcess>): Entry => {
+    const owners: Array<Identity> = same(entry.owner, owner)
+      ? []
+      : launcher === undefined
+        ? [owner]
+        : [owner, launcher];
+    if (servers !== undefined) {
+      for (const name of NodeFS.readdirSync(servers)) {
+        if (!name.endsWith(".json")) continue;
+        let server: Entry;
+        try {
+          server = decodeEntry(NodeFS.readFileSync(NodePath.join(servers, name), "utf8"));
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw cause;
+        }
+        if (server.hostname !== hostname || same(server.owner, entry.owner)) continue;
+        const live = table.find((p) => same(p, server.owner) && !p.zombie);
+        const managed = table.filter(
+          (p) => !p.zombie && server.processes.some((owned) => same(p, owned)),
+        );
+        if (live || managed.length > 0) {
+          if (live) owners.push(live);
+          owners.push(...managed);
+        } else if (
+          !table.some((p) => p.pid === server.owner.pid) &&
+          controller.exists(server.owner.pid)
+        )
+          throw new Error("Could not verify a live server during provider cleanup");
+        else NodeFS.rmSync(NodePath.join(servers, name), { force: true });
+      }
+    }
+    const protectedPids = new Set(owners.map((p) => p.pid));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const p of table) {
+        if (!protectedPids.has(p.pid) && protectedPids.has(p.ppid)) {
+          protectedPids.add(p.pid);
+          changed = true;
+        }
+      }
+    }
+    return { ...entry, processes: entry.processes.filter((p) => !protectedPids.has(p.pid)) };
+  };
+  const protectedEntry = (entry: Entry, table: ReadonlyArray<ObservedProcess>) =>
+    withoutServers(withoutInstaller(entry, table), table);
   const reap = async (file: string, entry: Entry) => {
     let table = await controller.snapshot();
     const liveOwner = table.find((p) => same(entry.owner, p));
@@ -340,7 +424,7 @@ export async function make(input: {
     ) {
       throw new Error("Could not verify the recorded provider owner");
     }
-    let next = withoutInstaller(discover(entry, table), table);
+    let next = protectedEntry(discover(entry, table), table);
     if (platform !== "win32") {
       // Freeze to a fixed point. A child may fork while its parent is being stopped.
       const stopped = new Set<string>();
@@ -354,14 +438,15 @@ export async function make(input: {
           stopped.add(`${p.pid}:${p.startTime}`);
         }
         table = await controller.snapshot();
-        next = withoutInstaller(discover(next, table), table);
+        next = protectedEntry(discover(next, table), table);
         if (attempt === 99) throw new Error("Provider process tree did not stop for cleanup");
       }
     }
     // Persist newly discovered children before signalling: recovery can itself be killed.
     write(file, next);
-    for (const p of survivors(next, await controller.snapshot()).toReversed())
-      await signal(p, "SIGKILL");
+    table = await controller.snapshot();
+    next = protectedEntry(next, table);
+    for (const p of survivors(next, table).toReversed()) await signal(p, "SIGKILL");
     for (let attempt = 0; attempt < 100; attempt++) {
       table = await controller.snapshot();
       if (
@@ -380,23 +465,28 @@ export async function make(input: {
     throw new Error("Recorded provider processes did not stop");
   };
   // Await every reap before exposing the spawn hook, and therefore before restart recovery launches work.
-  for (const name of NodeFS.readdirSync(directory)) {
-    if (!/^[\da-f-]+\.json$/.test(name)) continue;
-    const file = NodePath.join(directory, name);
-    let entry: Entry;
-    try {
-      entry = decodeEntry(NodeFS.readFileSync(file, "utf8"));
-    } catch {
-      // Records are not fsynced, so power loss can leave an empty one. It names
-      // no process to reap, and keeping it would fail every later startup.
-      NodeFS.rmSync(file, { force: true });
-      continue;
+  try {
+    for (const name of NodeFS.readdirSync(directory)) {
+      if (!/^[\da-f-]+\.json$/.test(name)) continue;
+      const file = NodePath.join(directory, name);
+      let entry: Entry;
+      try {
+        entry = decodeEntry(NodeFS.readFileSync(file, "utf8"));
+      } catch {
+        // Records are not fsynced, so power loss can leave an empty one. It names
+        // no process to reap, and keeping it would fail every later startup.
+        NodeFS.rmSync(file, { force: true });
+        continue;
+      }
+      if (entry.hostname !== hostname || entry.stateDir !== input.stateDir) {
+        NodeFS.rmSync(file, { force: true });
+        continue;
+      }
+      await reap(file, entry);
     }
-    if (entry.hostname !== hostname || entry.stateDir !== input.stateDir) {
-      NodeFS.rmSync(file, { force: true });
-      continue;
-    }
-    await reap(file, entry);
+  } catch (cause) {
+    release();
+    throw cause;
   }
   let pendingSnapshot: Promise<ReadonlyArray<ObservedProcess>> | undefined;
   const spawnSnapshot = () => {
@@ -440,14 +530,23 @@ export async function make(input: {
       }
     } catch (cause) {
       // The first root write may fail before the initial descendant query.
+      let latest = table;
       try {
-        entry = discover(entry, await spawnSnapshot());
+        latest = await spawnSnapshot();
+        entry = discover(entry, latest);
       } catch {
         /* Still stop the identities already established. */
       }
-      for (const child of entry.processes.toReversed()) await signal(child, "SIGKILL");
+      let safe: Entry;
+      try {
+        safe = protectedEntry(entry, latest);
+      } catch {
+        // Only the new root is certainly ours when other servers cannot be verified.
+        safe = { ...entry, processes: entry.processes.filter((p) => p.pid === root.pid) };
+      }
+      for (const child of safe.processes.toReversed()) await signal(child, "SIGKILL");
       throw cause;
     }
   };
-  return { track, refresh };
+  return { track, refresh, release };
 }

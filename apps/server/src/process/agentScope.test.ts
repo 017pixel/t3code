@@ -7,10 +7,15 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
+import { vi } from "vite-plus/test";
+
 import { ChildProcessSpawner } from "effect/process";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProviderProcessLedger from "./ProviderProcessLedger.ts";
+import { SERVICE_LAUNCHER_CONTEXT_ENV } from "../cloud/serviceProtocol.ts";
 import { agentSliceMemoryLimits, classifyScope, make, type ScopeState } from "./agentScope.ts";
 
 const GiB = 1024 ** 3;
@@ -191,6 +196,109 @@ describe("provider process restart ownership", () => {
       Effect.scoped,
     );
 
+  it.effect("samples all tracked trees once per 30 seconds, not once per second", () =>
+    scenario(({ directory, controller }) =>
+      Effect.gen(function* () {
+        let snapshots = 0;
+        const counted = {
+          ...controller,
+          snapshot: () => {
+            snapshots++;
+            return controller.snapshot();
+          },
+        };
+        const ledger = yield* ProviderProcessLedger.make({
+          stateDir: directory,
+          ownerPid: 10,
+          controller: counted,
+        });
+        yield* ledger.track(20);
+        const initial = snapshots;
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("29 seconds");
+        expect(snapshots).toBe(initial);
+        yield* TestClock.adjust("1 second");
+        expect(snapshots).toBe(initial + 1);
+      }).pipe(Effect.scoped),
+    ),
+  );
+
+  it.effect("shares one process query between concurrent spawn registrations", () =>
+    scenario(({ directory, controller }) =>
+      Effect.gen(function* () {
+        let snapshots = 0;
+        let pending: Promise<Awaited<ReturnType<typeof controller.snapshot>>> | undefined;
+        const counted = {
+          ...controller,
+          snapshot: () => {
+            snapshots++;
+            return pending ?? controller.snapshot();
+          },
+        };
+        const ledger = yield* ProviderProcessLedger.make({
+          stateDir: directory,
+          ownerPid: 10,
+          controller: counted,
+        });
+        const query = Promise.withResolvers<Awaited<ReturnType<typeof controller.snapshot>>>();
+        pending = query.promise;
+        const registrations = yield* Effect.all([ledger.track(20), ledger.track(30)], {
+          concurrency: "unbounded",
+        }).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        query.resolve(yield* Effect.promise(async () => controller.snapshot()));
+        yield* Fiber.join(registrations);
+        expect(snapshots).toBe(2); // Owner query plus one shared spawn query.
+        pending = undefined;
+      }).pipe(Effect.scoped),
+    ),
+  );
+
+  it.effect("keeps the server responsive while a Windows process query is pending", () =>
+    scenario(({ directory, processes }) =>
+      Effect.gen(function* () {
+        const started = NodePath.join(directory, "query-started");
+        const released = NodePath.join(directory, "query-release");
+        const executable = NodePath.join(directory, "powershell.exe");
+        // Stand in for CIM with a real child blocked on the server's acknowledgement.
+        NodeFS.writeFileSync(
+          executable,
+          `#!${process.execPath}
+const fs = require("node:fs");
+const finish = () => {
+  if (!fs.existsSync(${JSON.stringify(released)})) return;
+  process.stdout.write(${JSON.stringify(JSON.stringify([...processes.values()]))});
+  watcher.close();
+};
+const watcher = fs.watch(${JSON.stringify(directory)}, finish);
+fs.writeFileSync(${JSON.stringify(started)}, "queried");
+finish();
+`,
+          { mode: 0o700 },
+        );
+        const queried = Promise.withResolvers<void>();
+        const watcher = NodeFS.watch(directory, () => {
+          if (NodeFS.existsSync(started)) queried.resolve();
+        });
+        vi.stubEnv("PATH", `${directory}${NodePath.delimiter}${process.env.PATH ?? ""}`);
+        try {
+          const fiber = yield* ProviderProcessLedger.make({
+            stateDir: directory,
+            ownerPid: 10,
+          }).pipe(Effect.provideService(HostProcess.Platform, "win32"), Effect.forkScoped);
+          yield* Effect.promise(() => queried.promise);
+          // The server must be able to acknowledge the query before it returns.
+          NodeFS.writeFileSync(released, "responsive");
+          yield* Fiber.join(fiber);
+          expect(NodeFS.readFileSync(released, "utf8")).toBe("responsive");
+        } finally {
+          watcher.close();
+          vi.unstubAllEnvs();
+        }
+      }).pipe(Effect.scoped),
+    ),
+  );
+
   it.effect("reaps an orphan provider and its forked children before exposing the spawn hook", () =>
     scenario(({ directory, processes, signals, controller }) =>
       Effect.gen(function* () {
@@ -314,6 +422,121 @@ describe("provider process restart ownership", () => {
       }),
     ),
   );
+  it.effect.each(["empty", "corrupt", "unreadable"] as const)(
+    "refuses orphan cleanup when the install lease is %s",
+    (mode) =>
+      scenario(({ directory, processes, signals, controller }) =>
+        Effect.gen(function* () {
+          processes.set(70, {
+            pid: 70,
+            ppid: 20,
+            pgid: 70,
+            startTime: "supervisor",
+            zombie: false,
+          });
+          processes.set(71, { pid: 71, ppid: 70, pgid: 70, startTime: "installer", zombie: false });
+          yield* record(directory, controller);
+          processes.delete(10);
+          const leases = NodePath.join(directory, "leases");
+          NodeFS.mkdirSync(leases);
+          const lease = NodePath.join(leases, "install.json");
+          if (mode === "unreadable") NodeFS.mkdirSync(lease);
+          else NodeFS.writeFileSync(lease, mode === "empty" ? "" : "70 partial");
+          const result = yield* ProviderProcessLedger.make({
+            stateDir: directory,
+            ownerPid: 90,
+            controller,
+            installLeaseDirectory: leases,
+          }).pipe(Effect.scoped, Effect.exit);
+          expect(result._tag).toBe("Failure");
+          expect(signals).toEqual([]);
+          expect(processes.has(71)).toBe(true);
+        }),
+      ),
+  );
+  it.effect("never reaps the replacement server launched from an orphaned terminal", () =>
+    scenario(({ directory, processes, signals, controller }) =>
+      Effect.gen(function* () {
+        processes.set(90, { ...processes.get(90)!, ppid: 20, pgid: 20 });
+        processes.set(91, {
+          pid: 91,
+          ppid: 90,
+          pgid: 20,
+          startTime: "new-provider",
+          zombie: false,
+        });
+        yield* record(directory, controller);
+        processes.delete(10);
+        yield* restart(directory, controller);
+        expect(processes.has(20)).toBe(false);
+        expect(processes.has(90)).toBe(true);
+        expect(processes.has(91)).toBe(true);
+        expect(signals.some((s) => /^(90|91):/.test(s))).toBe(false);
+      }),
+    ),
+  );
+  it.effect.each([
+    { platform: "linux", handoff: false },
+    { platform: "win32", handoff: false },
+    { platform: "linux", handoff: true },
+    { platform: "win32", handoff: true },
+  ] as const)(
+    "preserves another environment's nested server and launcher on $platform, handoff=$handoff",
+    ({ platform, handoff }) =>
+      scenario(({ directory, processes, signals, controller }) =>
+        Effect.gen(function* () {
+          processes.set(60, { pid: 60, ppid: 20, pgid: 60, startTime: "launcher", zombie: false });
+          processes.set(70, {
+            pid: 70,
+            ppid: 60,
+            pgid: 60,
+            startTime: "second-server",
+            zombie: false,
+          });
+          processes.set(71, {
+            pid: 71,
+            ppid: 70,
+            pgid: 71,
+            startTime: "second-provider",
+            zombie: false,
+          });
+          if (platform === "win32")
+            for (const [pid, p] of processes) processes.set(pid, { ...p, pgid: 0 });
+          yield* record(directory, controller);
+          const leases = NodePath.join(directory, "leases");
+          const second = ProviderProcessLedger.make({
+            stateDir: NodePath.join(directory, "second"),
+            ownerPid: 70,
+            controller,
+            installLeaseDirectory: leases,
+          }).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (handoff) {
+                  processes.delete(70);
+                  processes.delete(71);
+                }
+              }),
+            ),
+            Effect.provideService(HostProcess.Environment, {
+              [SERVICE_LAUNCHER_CONTEXT_ENV]: "managed",
+            }),
+          );
+          yield* handoff ? second.pipe(Effect.scoped) : second;
+          processes.delete(10);
+          yield* ProviderProcessLedger.make({
+            stateDir: directory,
+            ownerPid: 90,
+            controller,
+            installLeaseDirectory: leases,
+          });
+          expect(processes.has(20)).toBe(false);
+          for (const pid of handoff ? [60, 90] : [60, 70, 71, 90])
+            expect(processes.has(pid)).toBe(true);
+          expect(signals.some((s) => /^(60|70|71|90):/.test(s))).toBe(false);
+        }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, platform)),
+      ),
+  );
   it.effect("starts after power loss leaves an empty process record", () =>
     scenario(({ directory, processes, signals, controller }) =>
       Effect.gen(function* () {
@@ -416,22 +639,68 @@ describe("provider process restart ownership", () => {
       }),
     ),
   );
-  it.effect("stops the new tree if its durable ownership record cannot be written", () =>
-    scenario(({ directory, processes, controller }) =>
+  it.effect.each([false, true])(
+    "stops the new tree if its durable ownership record cannot be written (direct identity: %s)",
+    (direct) =>
+      scenario(({ directory, processes, controller }) =>
+        Effect.gen(function* () {
+          const ledger = yield* ProviderProcessLedger.make({
+            stateDir: directory,
+            ownerPid: 10,
+            controller: direct
+              ? { ...controller, identity: (pid) => processes.get(pid) }
+              : controller,
+          }).pipe(Effect.scoped);
+          const records = NodePath.join(directory, "provider-processes");
+          NodeFS.rmSync(records, { recursive: true });
+          NodeFS.writeFileSync(records, "unwritable records directory");
+          const result = yield* ledger.track(20).pipe(Effect.exit);
+          expect(result._tag).toBe("Failure");
+          expect(processes.has(20)).toBe(false);
+          expect(processes.has(30)).toBe(false);
+        }),
+      ),
+  );
+  it.effect("a failed process record write leaves a nested live server running", () =>
+    scenario(({ directory, processes, signals, controller }) =>
       Effect.gen(function* () {
+        const leases = NodePath.join(directory, "leases");
         const ledger = yield* ProviderProcessLedger.make({
           stateDir: directory,
           ownerPid: 10,
           controller,
-        }).pipe(Effect.scoped);
+          installLeaseDirectory: leases,
+        });
+        processes.set(70, {
+          pid: 70,
+          ppid: 20,
+          pgid: 70,
+          startTime: "second-server",
+          zombie: false,
+        });
+        processes.set(71, {
+          pid: 71,
+          ppid: 70,
+          pgid: 70,
+          startTime: "second-provider",
+          zombie: false,
+        });
+        yield* ProviderProcessLedger.make({
+          stateDir: NodePath.join(directory, "second"),
+          ownerPid: 70,
+          controller,
+          installLeaseDirectory: leases,
+        });
         const records = NodePath.join(directory, "provider-processes");
         NodeFS.rmSync(records, { recursive: true });
-        NodeFS.writeFileSync(records, "unwritable records directory");
+        NodeFS.writeFileSync(records, "full disk");
         const result = yield* ledger.track(20).pipe(Effect.exit);
         expect(result._tag).toBe("Failure");
         expect(processes.has(20)).toBe(false);
-        expect(processes.has(30)).toBe(false);
-      }),
+        expect(processes.has(70)).toBe(true);
+        expect(processes.has(71)).toBe(true);
+        expect(signals.some((s) => /^(70|71):/.test(s))).toBe(false);
+      }).pipe(Effect.scoped),
     ),
   );
 });
