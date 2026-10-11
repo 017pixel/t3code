@@ -122,13 +122,37 @@ describe("threadHistoryMerge", () => {
       files: [],
       capturedAt: DateTime.add(NOW, { minutes: ordinal }),
     });
-    const current = { ...v2Projection, runs: [run(2)], checkpoints: [checkpoint(2)] };
+    const attempt = (runOrdinal: number, attemptOrdinal: number, completed: boolean) => ({
+      id: `attempt-${runOrdinal}-${attemptOrdinal}` as never,
+      runId: `run-${runOrdinal}` as never,
+      attemptOrdinal,
+      rootNodeId: `node-${runOrdinal}` as never,
+      providerInstanceId: "codex" as never,
+      providerThreadId: "provider-thread" as never,
+      providerTurnId: null,
+      reason: attemptOrdinal === 1 ? ("initial" as const) : ("steering_restart" as const),
+      status: completed ? ("completed" as const) : ("running" as const),
+      startedAt: NOW,
+      completedAt: completed ? NOW : null,
+    });
+    const current = {
+      ...v2Projection,
+      runs: [run(2)],
+      attempts: [attempt(2, 1, true)],
+      checkpoints: [checkpoint(2)],
+    };
     const merged = mergeOlderHistoryIntoProjection(current, [], {
       nodes: [],
       checkpoints: [checkpoint(1), checkpoint(3)],
       runs: [run(1), run(3)],
-      attempts: [],
+      // A steer restart on the held run, read before its live event lands.
+      attempts: [attempt(1, 1, true), attempt(2, 2, false)],
     });
+    expect(merged.attempts.map((value) => value.id)).toEqual([
+      "attempt-1-1",
+      "attempt-2-1",
+      "attempt-2-2",
+    ]);
     expect(merged.runs.map((value) => value.ordinal)).toEqual([1, 2, 3]);
     expect(merged.checkpoints.map((value) => value.id)).toEqual([
       "checkpoint-1",

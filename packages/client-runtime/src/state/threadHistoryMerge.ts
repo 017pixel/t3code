@@ -133,6 +133,7 @@ export function mergeOlderHistoryIntoProjection(
 }
 
 const ACTIVE_NODE_STATUSES = new Set(["pending", "running", "waiting"]);
+const ACTIVE_ATTEMPT_STATUSES = new Set(["pending", "running"]);
 
 /**
  * Support also carries active entities, so a page read ahead of the live
@@ -147,6 +148,13 @@ function mergeHistorySupport(
   const newRunIds = new Set(
     support.runs.filter((run) => run.ordinal > latestRunOrdinal).map((run) => run.id),
   );
+  // A steer restart, retry or recovery adds an attempt to a run already held.
+  const latestAttemptOrdinal = new Map<string, number>();
+  for (const attempt of projection.attempts) {
+    const held = latestAttemptOrdinal.get(attempt.runId) ?? 0;
+    if (attempt.attemptOrdinal > held)
+      latestAttemptOrdinal.set(attempt.runId, attempt.attemptOrdinal);
+  }
   const latestCapture = projection.checkpoints.reduce(
     (max, checkpoint) => Math.max(max, DateTime.toEpochMillis(checkpoint.capturedAt)),
     Number.NEGATIVE_INFINITY,
@@ -165,8 +173,13 @@ function mergeHistorySupport(
       (checkpoint) => DateTime.toEpochMillis(checkpoint.capturedAt) > latestCapture,
     ),
     runs: mergeHistoryEntities(projection.runs, support.runs, (run) => newRunIds.has(run.id)),
-    attempts: mergeHistoryEntities(projection.attempts, support.attempts, (attempt) =>
-      newRunIds.has(attempt.runId),
+    attempts: mergeHistoryEntities(
+      projection.attempts,
+      support.attempts,
+      (attempt) =>
+        newRunIds.has(attempt.runId) ||
+        ACTIVE_ATTEMPT_STATUSES.has(attempt.status) ||
+        attempt.attemptOrdinal > (latestAttemptOrdinal.get(attempt.runId) ?? Infinity),
     ),
   };
 }
