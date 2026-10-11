@@ -4,6 +4,7 @@ import type {
   OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
 import { isOrchestrationV2TurnItemVisible } from "@t3tools/shared/orchestrationV2Timeline";
+import * as DateTime from "effect/DateTime";
 
 export type ThreadHistoryMeta = {
   readonly historyCursor: string | null;
@@ -70,16 +71,7 @@ export function mergeOlderHistoryIntoProjection(
   olderItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
   support?: OrchestrationV2ThreadHistoryPage["support"],
 ): OrchestrationV2ThreadProjection {
-  const withSupport =
-    support === undefined
-      ? projection
-      : {
-          ...projection,
-          nodes: mergeHistoryEntities(projection.nodes, support.nodes),
-          checkpoints: mergeHistoryEntities(projection.checkpoints, support.checkpoints),
-          runs: mergeHistoryEntities(projection.runs, support.runs),
-          attempts: mergeHistoryEntities(projection.attempts, support.attempts),
-        };
+  const withSupport = support === undefined ? projection : mergeHistorySupport(projection, support);
   if (olderItems.length === 0) return withSupport;
 
   const currentByKey = new Map(
@@ -140,14 +132,58 @@ export function mergeOlderHistoryIntoProjection(
   };
 }
 
+const ACTIVE_NODE_STATUSES = new Set(["pending", "running", "waiting"]);
+
+/**
+ * Support also carries active entities, so a page read ahead of the live
+ * stream can hold ones the stream has not applied yet. Those are newer than
+ * anything held and go last, keeping newest-last order; the rest is history.
+ */
+function mergeHistorySupport(
+  projection: OrchestrationV2ThreadProjection,
+  support: NonNullable<OrchestrationV2ThreadHistoryPage["support"]>,
+): OrchestrationV2ThreadProjection {
+  const latestRunOrdinal = projection.runs.reduce((max, run) => Math.max(max, run.ordinal), 0);
+  const newRunIds = new Set(
+    support.runs.filter((run) => run.ordinal > latestRunOrdinal).map((run) => run.id),
+  );
+  const latestCapture = projection.checkpoints.reduce(
+    (max, checkpoint) => Math.max(max, DateTime.toEpochMillis(checkpoint.capturedAt)),
+    Number.NEGATIVE_INFINITY,
+  );
+  return {
+    ...projection,
+    nodes: mergeHistoryEntities(
+      projection.nodes,
+      support.nodes,
+      (node) =>
+        ACTIVE_NODE_STATUSES.has(node.status) || (node.runId !== null && newRunIds.has(node.runId)),
+    ),
+    checkpoints: mergeHistoryEntities(
+      projection.checkpoints,
+      support.checkpoints,
+      (checkpoint) => DateTime.toEpochMillis(checkpoint.capturedAt) > latestCapture,
+    ),
+    runs: mergeHistoryEntities(projection.runs, support.runs, (run) => newRunIds.has(run.id)),
+    attempts: mergeHistoryEntities(projection.attempts, support.attempts, (attempt) =>
+      newRunIds.has(attempt.runId),
+    ),
+  };
+}
+
 /** Historical pages fill missing entities without replacing newer live values. */
 function mergeHistoryEntities<T extends { readonly id: string }>(
   current: ReadonlyArray<T>,
   older: ReadonlyArray<T>,
+  isNewer: (value: T) => boolean,
 ): ReadonlyArray<T> {
   const ids = new Set(current.map((value) => value.id));
   const missing = older.filter((value) => !ids.has(value.id));
-  return missing.length === 0 ? current : [...missing, ...current];
+  if (missing.length === 0) return current;
+  const newer = missing.filter(isNewer);
+  return newer.length === 0
+    ? [...missing, ...current]
+    : [...missing.filter((value) => !newer.includes(value)), ...current, ...newer];
 }
 
 export function applyHistoryPageMeta(

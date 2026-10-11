@@ -90,6 +90,52 @@ describe("threadHistoryMerge", () => {
       expect(hydrated.visibleTurnItems).toBe(current.visibleTurnItems);
     }
   });
+  it("keeps support entities the live stream has not applied yet newest-last", () => {
+    const run = (ordinal: number) => ({
+      id: `run-${ordinal}` as never,
+      threadId: v2ThreadId,
+      ordinal,
+      providerInstanceId: "codex" as never,
+      modelSelection: { instanceId: "codex" as never, model: "gpt-5" },
+      providerThreadId: null,
+      userMessageId: `message-${ordinal}` as never,
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: ordinal === 3 ? ("running" as const) : ("completed" as const),
+      requestedAt: NOW,
+      startedAt: NOW,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    });
+    const checkpoint = (ordinal: number) => ({
+      id: `checkpoint-${ordinal}` as never,
+      threadId: v2ThreadId,
+      scopeId: "scope" as never,
+      runId: `run-${ordinal}` as never,
+      nodeId: `node-${ordinal}` as never,
+      parentCheckpointId: null,
+      ordinalWithinScope: ordinal,
+      appRunOrdinal: ordinal,
+      ref: `refs/t3/${ordinal}` as never,
+      status: "ready" as const,
+      files: [],
+      capturedAt: DateTime.add(NOW, { minutes: ordinal }),
+    });
+    const current = { ...v2Projection, runs: [run(2)], checkpoints: [checkpoint(2)] };
+    const merged = mergeOlderHistoryIntoProjection(current, [], {
+      nodes: [],
+      checkpoints: [checkpoint(1), checkpoint(3)],
+      runs: [run(1), run(3)],
+      attempts: [],
+    });
+    expect(merged.runs.map((value) => value.ordinal)).toEqual([1, 2, 3]);
+    expect(merged.checkpoints.map((value) => value.id)).toEqual([
+      "checkpoint-1",
+      "checkpoint-2",
+      "checkpoint-3",
+    ]);
+  });
   it("fills activity around partial messages in canonical order and preserves live edits", () => {
     const initial = { ...v2Projection, turnItems: [row(4).item], visibleTurnItems: [row(4)] };
     const preview = [row(1), row(3)];
