@@ -356,6 +356,24 @@ describe("RpcSessionFactory", () => {
     expect(late.providers[0]).toBe(other);
     const unchangedOrder = applyServerConfigDelta(previous, diffServerConfig(previous, next, "x"));
     expect(unchangedOrder.settings).toBe(previous.settings);
+    // A field set to undefined, as a sign-out clears usage limits, is cleared on the client.
+    const limited = {
+      ...previous,
+      providers: [{ ...provider, usageLimits: { checkedAt: "2026-08-27T00:00:00Z", windows: [] } }],
+    };
+    const signedOut = { ...limited, providers: [{ ...provider, usageLimits: undefined }] };
+    // Through JSON, as on the wire.
+    const signedOutWire = decodeServerConfigStreamEvent(
+      JSON.parse(
+        JSON.stringify(
+          encodeServerConfigStreamEvent(diffServerConfig(limited, signedOut, "signed-out")),
+        ),
+      ),
+    );
+    if (signedOutWire.type !== "configDelta") throw new Error("expected a config delta");
+    expect(
+      applyServerConfigDelta(limited, signedOutWire).providers[0]?.usageLimits,
+    ).toBeUndefined();
   });
 
   it.effect("deduplicates discovery calls and invalidates on explicit refresh", () =>
