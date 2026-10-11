@@ -13,9 +13,14 @@ export function suspendStackTracesForAppImport(): void {
   Error.stackTraceLimit = 0;
 }
 
-/** Restores stack traces; main calls this before its own startup code runs. */
-export function restoreStackTraces(): void {
-  if (suspendedLimit === undefined) return;
+/**
+ * Restores stack traces; main calls this before its own startup code runs.
+ * Returns whether they were still off, i.e. the app graph never finished
+ * evaluating.
+ */
+export function restoreStackTraces(): boolean {
+  if (suspendedLimit === undefined) return false;
   Error.stackTraceLimit = suspendedLimit;
   suspendedLimit = undefined;
+  return true;
 }

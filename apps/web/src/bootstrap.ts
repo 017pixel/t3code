@@ -7,6 +7,11 @@ suspendStackTracesForAppImport();
 void import("./main")
   .then(({ startup }) => startup)
   .catch((error: unknown) => {
-    restoreStackTraces();
+    const duringAppImport = restoreStackTraces();
     showBootError(error);
+    if (duringAppImport) {
+      console.error(
+        "Stack traces were off while the app's modules loaded (Error.stackTraceLimit = 0), so this error has no stack frames.",
+      );
+    }
   });
