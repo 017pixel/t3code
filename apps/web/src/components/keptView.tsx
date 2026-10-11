@@ -345,6 +345,13 @@ export function holdTextForUrlRouteTarget(viewTargetKey: string, text: string): 
   return true;
 }
 
+/** Backspace on the way to a kept thread takes back the last character held for it. */
+export function eraseHeldText(viewTargetKey: string): void {
+  if (heldText === null || !isUrlRouteTargetElsewhere(viewTargetKey)) return;
+  if (heldText.targetKey !== urlRouteTargetKey) return;
+  heldText = { ...heldText, text: heldText.text.slice(0, -1) };
+}
+
 /** Text typed for this view while the view the user left was still shown. */
 export function takeHeldText(viewTargetKey: string): string | null {
   const held = heldText;

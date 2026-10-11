@@ -254,70 +254,102 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
       reason: "remote-unavailable",
       detail: `${connection.label} config subscription ended.`,
     });
-    const serverConfigSource = protocolClient[WS_METHODS.subscribeServerConfig]({
-      ...serverConfigInput,
-      configDeltas: true,
-      ...(cachedConfig === undefined ? {} : { knownConfigVersion: cachedConfig.version }),
-    }).pipe(
-      Stream.runForEach((wireEvent) =>
-        Effect.gen(function* () {
-          // Restore only after this server acknowledges the cache. Older
-          // servers ignore the opt-in and send their ordinary full snapshot.
-          const event =
-            wireEvent.type === "configUnchanged" && cachedConfig !== undefined
-              ? { version: 1 as const, type: "snapshot" as const, config: cachedConfig.config }
-              : wireEvent;
-          const buffered = yield* Ref.modify(serverConfigState, (current) => {
-            const projection = applyServerConfigProjection(
-              Option.map(current, (state) => state.projection),
-              event,
-            );
-            if (Option.isNone(projection)) {
-              return [Option.none<BufferedServerConfigEvent>(), current] as const;
-            }
-            const next = {
-              projection: projection.value,
-              revision: Option.match(current, {
-                onNone: () => 1,
-                onSome: (state) => state.revision + 1,
-              }),
-              themesEvent:
-                event.type === "environmentThemesUpdated"
-                  ? event
-                  : event.type === "snapshot" &&
-                      event.config.environment.capabilities.environmentThemes !== true
-                    ? undefined
-                    : Option.getOrUndefined(current)?.themesEvent,
-              sourcesEvent:
-                event.type === "usageLimitSourcesUpdated"
-                  ? event
-                  : event.type === "snapshot" &&
-                      event.config.environment.capabilities.usageLimitSources !== true
-                    ? undefined
-                    : Option.getOrUndefined(current)?.sourcesEvent,
-            } satisfies ServerConfigReplayState;
-            return [
-              Option.some({ event, replay: next, revision: next.revision }),
-              Option.some(next),
-            ] as const;
-          });
-          if (Option.isSome(buffered)) {
-            if ("configVersion" in wireEvent && wireEvent.configVersion !== undefined) {
-              configCache.delete(connection.environmentId);
-              configCache.set(connection.environmentId, {
-                config: withoutEnvironmentThemes(buffered.value.replay.projection.config),
-                version: wireEvent.configVersion,
-              });
-              if (configCache.size > 32) configCache.delete(configCache.keys().next().value!);
-            } else if (wireEvent.type === "snapshot") {
-              // A downgraded environment must not keep a newer wire version.
-              configCache.delete(connection.environmentId);
-            }
-            yield* PubSub.publish(serverConfigUpdates, buffered.value);
-            yield* Deferred.succeed(initialConfigDeferred, buffered.value.replay.projection.config);
+    // Returns false for a delta that left out a provider it patched: this build
+    // could not read the patch, or the provider it patches. Later deltas cannot
+    // restore that provider, so its version is not cached.
+    const handleConfigEvent = (wireEvent: ServerConfigStreamEvent) =>
+      Effect.gen(function* () {
+        // Restore only after this server acknowledges the cache. Older
+        // servers ignore the opt-in and send their ordinary full snapshot.
+        const event =
+          wireEvent.type === "configUnchanged" && cachedConfig !== undefined
+            ? { version: 1 as const, type: "snapshot" as const, config: cachedConfig.config }
+            : wireEvent;
+        const buffered = yield* Ref.modify(serverConfigState, (current) => {
+          const projection = applyServerConfigProjection(
+            Option.map(current, (state) => state.projection),
+            event,
+          );
+          if (Option.isNone(projection)) {
+            return [Option.none<BufferedServerConfigEvent>(), current] as const;
           }
-        }),
-      ),
+          const next = {
+            projection: projection.value,
+            revision: Option.match(current, {
+              onNone: () => 1,
+              onSome: (state) => state.revision + 1,
+            }),
+            themesEvent:
+              event.type === "environmentThemesUpdated"
+                ? event
+                : event.type === "snapshot" &&
+                    event.config.environment.capabilities.environmentThemes !== true
+                  ? undefined
+                  : Option.getOrUndefined(current)?.themesEvent,
+            sourcesEvent:
+              event.type === "usageLimitSourcesUpdated"
+                ? event
+                : event.type === "snapshot" &&
+                    event.config.environment.capabilities.usageLimitSources !== true
+                  ? undefined
+                  : Option.getOrUndefined(current)?.sourcesEvent,
+          } satisfies ServerConfigReplayState;
+          return [
+            Option.some({ event, replay: next, revision: next.revision }),
+            Option.some(next),
+          ] as const;
+        });
+        if (Option.isNone(buffered)) return true;
+        const config = buffered.value.replay.projection.config;
+        const lostProvider =
+          wireEvent.type === "configDelta" &&
+          wireEvent.providerChanges.some(
+            (patch) =>
+              !config.providers.some((provider) => provider.instanceId === patch.instanceId),
+          );
+        if (lostProvider) {
+          configCache.delete(connection.environmentId);
+        } else if ("configVersion" in wireEvent && wireEvent.configVersion !== undefined) {
+          configCache.delete(connection.environmentId);
+          configCache.set(connection.environmentId, {
+            config: withoutEnvironmentThemes(config),
+            version: wireEvent.configVersion,
+          });
+          if (configCache.size > 32) configCache.delete(configCache.keys().next().value!);
+        } else if (wireEvent.type === "snapshot") {
+          // A downgraded environment must not keep a newer wire version.
+          configCache.delete(connection.environmentId);
+        }
+        yield* PubSub.publish(serverConfigUpdates, buffered.value);
+        yield* Deferred.succeed(initialConfigDeferred, config);
+        return !lostProvider;
+      });
+    // Resubscribing starts from a full snapshot, which brings the provider back
+    // once this build can read it. It names a version no config hashes to: a
+    // server defers editors and catalogs only for a subscription without one,
+    // and their late delta would patch the unreadable provider again.
+    const runConfigSubscription = (
+      knownConfigVersion: string | undefined,
+    ): Effect.Effect<void, ServerConfigSubscriptionError> =>
+      Effect.suspend(() => {
+        let resync = false;
+        return protocolClient[WS_METHODS.subscribeServerConfig]({
+          ...serverConfigInput,
+          configDeltas: true,
+          ...(knownConfigVersion === undefined ? {} : { knownConfigVersion }),
+        }).pipe(
+          Stream.runForEachWhile((wireEvent) =>
+            handleConfigEvent(wireEvent).pipe(
+              Effect.map((keep) => {
+                resync = !keep;
+                return keep;
+              }),
+            ),
+          ),
+          Effect.flatMap(() => (resync ? runConfigSubscription("resync") : Effect.void)),
+        );
+      });
+    const serverConfigSource = runConfigSubscription(cachedConfig?.version).pipe(
       Effect.onExit((exit) => {
         if (Exit.isSuccess(exit)) {
           return Effect.all([

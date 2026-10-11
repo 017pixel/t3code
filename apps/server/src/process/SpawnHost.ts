@@ -142,6 +142,21 @@ class HostedChildProcess
     // Node destroys a child's stdin when it exits.
     this.stdin?.destroy();
     this.emit("exit", code, signal);
+    // Like Node's flushStdio: output nobody reads any more, for example after a
+    // timeout or an output limit unpiped it, drains to EOF so its socket closes.
+    process.nextTick(() => {
+      for (const stream of this.stdio) {
+        if (
+          stream &&
+          "resume" in stream &&
+          stream.readable &&
+          stream.listenerCount("data") === 0 &&
+          stream.listenerCount("readable") === 0
+        ) {
+          stream.resume();
+        }
+      }
+    });
   }
 
   markFailed(error: Error): void {
@@ -250,8 +265,12 @@ class SpawnHostClient {
   }
 
   #send(child: HostedChildProcess): void {
+    const host = this.#host;
+    // Between the host's IPC EOF and its `close`, a send would only error. The
+    // child stays queued, and `close` hands it to the next host.
+    if (!host?.connected) return;
     child.state = "sent";
-    this.#host?.send(child.request);
+    host.send(child.request);
   }
 
   #start(): void {
@@ -283,7 +302,8 @@ class SpawnHostClient {
         this.#onEvent(event as SpawnHostEvent, socket as NodeNet.Socket | undefined);
       }
     });
-    host.once("error", (cause) => this.#lose(host, cause));
+    // Persistent: a host can emit more than one error, and an unhandled one would end the server.
+    host.on("error", (cause) => this.#lose(host, cause));
     // `close` follows the last IPC message, so every exit the host reported is handled first.
     host.once("close", (code, signal) =>
       this.#lose(host, new Error(`The spawn host exited (code ${code}, signal ${signal}).`)),
@@ -341,6 +361,10 @@ class SpawnHostClient {
       } else if (child.state === "sent") {
         // It may have started; spawning again could run it twice.
         child.markFailed(new Error("The spawn host exited before reporting the spawn."));
+      } else if (!child.referenced) {
+        // Its exit status left with the host. A scope release leaves an
+        // unreferenced child, such as a detached editor, running; so does this.
+        child.markExited(null, null);
       } else if (child.pid !== undefined) {
         // Its exit status left with the host. Stop the group it leads, as a scope release would.
         killGroupOrProcess(child.pid, "SIGKILL");

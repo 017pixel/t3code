@@ -347,10 +347,32 @@ export function ThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
   return <EnabledThreadPullRequestsPanel threadRef={threadRef} />;
 }
 
+/**
+ * The live shell lists the linked pull requests, with trimmed snapshots. The thread
+ * detail has full snapshots, but after a reload it may be a cached copy until it
+ * syncs. Each link takes the detail's snapshot unless the shell's was synced later.
+ */
+function freshestPullRequests(
+  shellLinks: ReadonlyArray<ThreadPullRequestLink> | undefined,
+  detailLinks: ReadonlyArray<ThreadPullRequestLink> | undefined,
+): ReadonlyArray<ThreadPullRequestLink> {
+  if (shellLinks === undefined || detailLinks === undefined) return shellLinks ?? detailLinks ?? [];
+  const key = (link: ThreadPullRequestLink) => `${link.host}/${link.repository}#${link.number}`;
+  const detailSnapshots = new Map(detailLinks.map((link) => [key(link), link.snapshot]));
+  return shellLinks.map((link) => {
+    const full = detailSnapshots.get(key(link));
+    return full != null && link.snapshot !== null && full.syncedAt >= link.snapshot.syncedAt
+      ? { ...link, snapshot: full }
+      : link;
+  });
+}
+
 function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThreadRef }) {
   const shell = useThreadShell(threadRef);
   const detail = useThreadProjection(threadRef);
   const thread = detail?.projection.thread ?? shell;
+  const shellPullRequests = shell?.pullRequests;
+  const detailPullRequests = detail?.projection.thread.pullRequests;
   const projects = useProjects();
   const environmentProjects = useMemo(
     () =>
@@ -369,7 +391,10 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
   const watch = useAtomCommand(threadEnvironment.watchPullRequest, { reportFailure: true });
   const capabilities = useServerConfigs().get(threadRef.environmentId)?.environment.capabilities;
   const supportsWatch = capabilities?.threadPullRequestWatch === true;
-  const links = useMemo(() => visibleThreadPullRequests(thread?.pullRequests ?? []), [thread]);
+  const links = useMemo(
+    () => visibleThreadPullRequests(freshestPullRequests(shellPullRequests, detailPullRequests)),
+    [shellPullRequests, detailPullRequests],
+  );
   const lines = useMemo(() => pullRequestListLines(resolveThreadPullRequestChains(links)), [links]);
   const handleUnlink = useCallback(
     (link: ThreadPullRequestLink) => {

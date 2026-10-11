@@ -174,7 +174,8 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
             {allFiles.length === 0 ? (
               <Text className="text-foreground-secondary text-sm leading-normal">
                 {gitStatus.error ??
-                  (gitStatus.isPending
+                  // A live status stays pending after each value, so only a missing one is loading.
+                  (gitStatus.isPending && gitStatus.data === null
                     ? "Loading files..."
                     : "No changed files are available to commit.")}
               </Text>

@@ -60,12 +60,16 @@ export function compactThreadFieldEvent(
 
 export class DatabaseCompactionError extends Schema.TaggedError<DatabaseCompactionError>()(
   "DatabaseCompactionError",
-  { cause: Schema.Defect() },
+  { cause: Schema.Defect(), backupPath: Schema.optional(Schema.String) },
 ) {
   override get message() {
-    return "Database compaction stopped; see the cause for details. Event rewrites commit only after verification.";
+    return this.backupPath === undefined
+      ? "Database compaction stopped; see the cause for details. Event rewrites commit only after verification."
+      : `Database compaction stopped after committing its verified rewrites; see the cause for details. The database from before compaction is kept at ${this.backupPath}.`;
   }
 }
+
+const isDatabaseCompactionError = Schema.is(DatabaseCompactionError);
 
 export class DatabaseCompaction extends Context.Service<
   DatabaseCompaction,
@@ -127,6 +131,18 @@ const assertStopped = async (databasePath: string) => {
   throw new Error("Stop the server before running t3 db compact.");
 };
 
+/** Scratch directories of a run that died before removing its own. */
+const removeStaleScratch = async (databasePath: string, current: string) => {
+  const directory = NodePath.dirname(databasePath);
+  const prefix = `${NodePath.basename(databasePath)}.compact-`;
+  for (const entry of await NodeFSP.readdir(directory)) {
+    const path = NodePath.join(directory, entry);
+    if (entry.startsWith(prefix) && path !== current) {
+      await NodeFSP.rm(path, { recursive: true, force: true });
+    }
+  }
+};
+
 const syncFile = async (filename: string) => {
   const handle = await NodeFSP.open(filename, "r+");
   try {
@@ -169,6 +185,9 @@ const compact = Effect.fn("DatabaseCompaction.compact")(
       }),
       (db) => Effect.sync(() => db.close()),
     );
+    // The write lock keeps any other compaction of this database out.
+    yield* Effect.tryPromise(() => removeStaleScratch(databasePath, scratch));
+    let committed = false;
     const result = yield* Effect.gen(function* () {
       progress("Backing up the stopped database before any changes...");
       yield* Effect.tryPromise(async () => {
@@ -361,6 +380,7 @@ const compact = Effect.fn("DatabaseCompaction.compact")(
       );
       yield* Effect.tryPromise(() => assertStopped(databasePath));
       yield* Effect.try(() => database.exec("COMMIT"));
+      committed = true;
       progress(
         "Verified rewrites committed. Running VACUUM; interruption leaves a valid compacted log and the backup.",
       );
@@ -380,11 +400,24 @@ const compact = Effect.fn("DatabaseCompaction.compact")(
         afterBytes,
         verifiedTables,
       };
-    });
+    }).pipe(
+      // Nothing changed without a commit, so the backup is only clutter. After one, the
+      // backup is the database from before compaction.
+      Effect.onError(() =>
+        committed
+          ? Effect.void
+          : Effect.tryPromise(() => NodeFSP.rm(backupPath, { force: true })).pipe(Effect.ignore),
+      ),
+      Effect.mapError((cause) =>
+        committed ? new DatabaseCompactionError({ cause, backupPath }) : cause,
+      ),
+    );
     return result;
   },
   Effect.scoped,
-  Effect.mapError((cause) => new DatabaseCompactionError({ cause })),
+  Effect.mapError((cause) =>
+    isDatabaseCompactionError(cause) ? cause : new DatabaseCompactionError({ cause }),
+  ),
 );
 
 export const layer = Layer.succeed(DatabaseCompaction, { compact });

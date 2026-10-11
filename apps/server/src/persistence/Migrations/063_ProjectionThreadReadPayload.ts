@@ -20,16 +20,19 @@ import {
  *
  * ProjectionStore's readers join this table, so it cannot depend on migration 63 running: a
  * database that recorded another build's migration at or above 63 skips it. runMigrations also
- * runs this after every migration pass, and its schema cache skips that pass only while the table
- * and triggers exist: change its check when this creates other objects. This does nothing once
- * the table and triggers exist.
+ * runs the default export after every migration pass, and its schema cache skips that pass only
+ * while the table and triggers exist: change its check when this creates other objects. The
+ * default export does nothing once the table and triggers exist.
  */
-const ensureInTransaction = (sql: SqlClient.SqlClient) =>
+const ensureInTransaction = (sql: SqlClient.SqlClient, rebuild: boolean) =>
   Effect.gen(function* () {
     const columns = yield* sql<{ readonly name: string }>`
       SELECT name FROM pragma_table_info('orchestration_v2_projection_thread_reads')
     `;
-    if (!columns.some((column) => column.name === "source_stale")) {
+    const current = columns.some((column) => column.name === "source_stale");
+    if (current && rebuild) {
+      yield* sql`DELETE FROM orchestration_v2_projection_thread_reads`;
+    } else if (!current) {
       // Development builds of this change created the table without `source_stale`. It is derived
       // from the thread rows, so rebuild it.
       yield* sql`DROP TABLE IF EXISTS orchestration_v2_projection_thread_reads`;
@@ -41,6 +44,8 @@ const ensureInTransaction = (sql: SqlClient.SqlClient) =>
           payload_json TEXT NOT NULL
         )
       `;
+    }
+    if (!current || rebuild) {
       const decode = Schema.decodeUnknownEffect(
         Schema.fromJsonString(OrchestrationV2AppThreadJson),
       );
@@ -90,9 +95,19 @@ const ensureInTransaction = (sql: SqlClient.SqlClient) =>
     `;
   });
 
+/** Creates the projection when it is missing. */
 const ensureThreadReadProjection = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  yield* sql.withTransaction(ensureInTransaction(sql));
+  yield* sql.withTransaction(ensureInTransaction(sql, false));
 });
 
 export default ensureThreadReadProjection;
+
+/**
+ * Migration 63 itself rebuilds every row. Early builds of this change ran it as 62 and wrote
+ * compact rows in an older format that the triggers never mark stale.
+ */
+export const migrateThreadReadProjection = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql.withTransaction(ensureInTransaction(sql, true));
+});

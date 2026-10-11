@@ -544,12 +544,10 @@ export class Launcher {
         prepared = await prepareServiceDatabaseBackup(pending.dbPath, stagingDir);
       }
     } catch {
-      // A failed online copy must not turn into a long outage.
-      const failed = terminalUpdate({ pending, status: "failed", reason: "db-backup-failed" });
-      this.#state = { ...this.#state, update: failed };
-      await writeServiceState(this.#statePath, this.#state);
-      await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
-      return;
+      // The active server accepted the update and refuses another while it waits for the
+      // handoff, so the update goes on with the stopped copy in #startTrial, as before online
+      // copies. That copy failing restarts the previous version with the failure.
+      prepared = undefined;
     }
     this.#child = null;
     try {

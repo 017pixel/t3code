@@ -26,6 +26,7 @@ if (
   // leave a root-owned cache there.
   const uncached =
     command === "__spawn-host" ||
+    command === "__load-bundle" ||
     command === "__claude-history" ||
     command === "acp-mcp-bridge" ||
     command === "acp-mcp-call" ||
@@ -59,6 +60,12 @@ if (
   } else if (command === "__spawn-host") {
     const { runSpawnHost } = await import("./process/spawnHostProcess.ts");
     runSpawnHost();
+  } else if (command === "__load-bundle") {
+    const { loadBundle } = await import("./loadBundle.ts");
+    const chunks = await loadBundle(import.meta.url);
+    process.stdout.write(`t3 v${packageJson.version}: loaded ${chunks} bundle chunks\n`);
+    // A chunk may start timers or handles at load, as it would in the server.
+    process.exit(0);
   } else {
     const { runCli } = await import("./binCli.ts");
     runCli();

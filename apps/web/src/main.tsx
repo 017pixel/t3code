@@ -16,7 +16,12 @@ import {
   syncDocumentWindowControlsOverlayClass,
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
-import { isSpeculativeLoadPending, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+import {
+  isRoutePreloadPending,
+  isSpeculativeLoadFailure,
+  isSpeculativeLoadPending,
+  reloadOnceForChunkLoadError,
+} from "./lib/chunkReloadGuard";
 import { restoreStackTraces } from "./lib/bootStackTraces";
 
 // Every import above has evaluated; startup code runs with full stacks.
@@ -51,15 +56,24 @@ const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string
 // entry URL names the build, and the error names the asset (except in
 // Safari), so each failed asset of each build gets one reload. Later
 // failures while that reload is pending keep their rejection and their reload.
-// A failure while an idle or hover preload runs may be the preload's own; it
-// keeps its rejection, and the chunk's first real use reloads.
+// An idle or hover preload claims its own failure (see chunkReloadGuard), so
+// it keeps its rejection, and the chunk's first real use reloads.
 let reloadScheduled = false;
 window.addEventListener("vite:preloadError", (event) => {
-  if (reloadScheduled || isSpeculativeLoadPending()) return;
-  if (reloadOnceForChunkLoadError(import.meta.url, String(event.payload))) {
-    reloadScheduled = true;
-    event.preventDefault();
+  if (reloadScheduled || isRoutePreloadPending()) return;
+  const reload = () => {
+    if (reloadScheduled) return false;
+    reloadScheduled = reloadOnceForChunkLoadError(import.meta.url, String(event.payload));
+    return reloadScheduled;
+  };
+  if (!isSpeculativeLoadPending()) {
+    if (reload()) event.preventDefault();
+    return;
   }
+  // A real load overlapping a preload keeps its rejection and still reloads.
+  setTimeout(() => {
+    if (!isSpeculativeLoadFailure(event.payload)) reload();
+  }, 0);
 });
 
 const app = <AppRoot router={router} />;

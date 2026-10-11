@@ -336,10 +336,15 @@ export const migrationEntries = [
     "ProjectionThreadSweepIndexes",
     loadMigration(() => import("./Migrations/062_ProjectionThreadSweepIndexes.ts")),
   ],
+  // The migration rebuilds every read row. runMigrations runs the module's default export after
+  // every pass, which only creates the projection when it is missing.
   [
     63,
     "ProjectionThreadReadPayload",
-    loadMigration(() => import("./Migrations/063_ProjectionThreadReadPayload.ts")),
+    Effect.promise(() => import("./Migrations/063_ProjectionThreadReadPayload.ts")).pipe(
+      Effect.flatMap((module) => module.migrateThreadReadProjection),
+      Effect.asVoid,
+    ),
   ],
 ] as const;
 

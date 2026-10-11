@@ -166,6 +166,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import {
+  eraseHeldText,
   holdTextForUrlRouteTarget,
   isUrlRouteTargetElsewhere,
   KeptViewWarmingContext,
@@ -741,21 +742,16 @@ const ThreadPullRequestsPanel = lazy(() =>
   })),
 );
 let loadedTerminalDrawer: (typeof import("./ThreadTerminalDrawer"))["default"] | null = null;
-let terminalDrawerLoad: Promise<typeof import("./ThreadTerminalDrawer")> | null = null;
 const loadTerminalDrawer = () =>
-  (terminalDrawerLoad ??= import("./ThreadTerminalDrawer").then(
-    (module) => {
-      loadedTerminalDrawer = module.default;
-      return module;
-    },
-    (error: unknown) => {
-      terminalDrawerLoad = null;
-      throw error;
-    },
-  ));
+  import("./ThreadTerminalDrawer").then((module) => {
+    loadedTerminalDrawer = module.default;
+    return module;
+  });
 const LazyThreadTerminalDrawer = lazy(loadTerminalDrawer);
 // A drawer the saved terminal state opens starts loading with this chunk, so
-// it paints with the composer instead of pushing it up a moment later.
+// it paints with the composer instead of pushing it up a moment later. A
+// drawer that mounts meanwhile imports it again (the browser shares the
+// fetch), so a failed chunk reloads the page for it.
 if (
   Object.values(useTerminalUiStateStore.getState().terminalUiStateByThreadKey).some(
     (state) => state.terminalOpen,
@@ -887,6 +883,16 @@ function isComposerTextKey(event: KeyboardEvent): boolean {
   if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return false;
   return (
     event.key.length === 1 &&
+    event.target instanceof Element &&
+    event.target.closest('[data-testid="composer-editor"]') !== null
+  );
+}
+
+/** Enter or Backspace pressed in the chat composer itself. */
+function isComposerEditKey(event: KeyboardEvent): boolean {
+  return (
+    !event.isComposing &&
+    (event.key === "Enter" || event.key === "Backspace") &&
     event.target instanceof Element &&
     event.target.closest('[data-testid="composer-editor"]') !== null
   );
@@ -1964,8 +1970,26 @@ export default function ChatView(props: ChatViewProps) {
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const composerFilesRef = useRef<ComposerFileAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
-  const localComposerRef = useRef<ChatComposerHandle | null>(null);
-  const composerRef = useComposerHandleContext() ?? localComposerRef;
+  // This view's own composer. The palette, the file browser and composer menus
+  // reach the shown view's composer through the shared ref, which only the
+  // shown view publishes (see keptViewWarming below).
+  const composerRef = useRef<ChatComposerHandle | null>(null);
+  const sharedComposerRef = useComposerHandleContext();
+  const publishesComposerRef = useRef(false);
+  const setComposerHandle = useCallback(
+    (handle: ChatComposerHandle | null) => {
+      const previous = composerRef.current;
+      composerRef.current = handle;
+      if (
+        sharedComposerRef !== null &&
+        publishesComposerRef.current &&
+        sharedComposerRef.current === previous
+      ) {
+        sharedComposerRef.current = handle;
+      }
+    },
+    [sharedComposerRef],
+  );
   const branchToolbarRef = useRef<BranchToolbarHandle>(null);
   const pasteAsTextShortcutUntilRef = useRef(0);
   const [restingComposerControlsHost, setRestingComposerControlsHost] =
@@ -3073,6 +3097,17 @@ export default function ChatView(props: ChatViewProps) {
 
   // A kept view warming up out of sight is not being viewed (see ThreadRouteView).
   const keptViewWarming = useContext(KeptViewWarmingContext);
+  // A warming view lays out with live effects, so it must not take the shared
+  // composer ref over. A view that hides clears it only while it still owns it.
+  useLayoutEffect(() => {
+    if (sharedComposerRef === null || keptViewWarming) return;
+    publishesComposerRef.current = true;
+    sharedComposerRef.current = composerRef.current;
+    return () => {
+      publishesComposerRef.current = false;
+      if (sharedComposerRef.current === composerRef.current) sharedComposerRef.current = null;
+    };
+  }, [keptViewWarming, sharedComposerRef]);
   // Hiding a kept view ends the visit, so showing it again counts as reopening
   // the thread, as it did when a single view switched threads.
   useEffect(
@@ -8213,6 +8248,14 @@ export default function ChatView(props: ChatViewProps) {
         event.stopPropagation();
         return;
       }
+      // Enter would send this thread's draft and Backspace would edit it.
+      // Backspace takes back held text instead, and Enter does nothing.
+      if (isUrlRouteTargetElsewhere(viewRouteTargetKey) && isComposerEditKey(event)) {
+        if (event.key === "Backspace") eraseHeldText(viewRouteTargetKey);
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
 
       if (typesToComposer) {
         if (composerRef.current?.insertTextAtEnd(event.key)) {
@@ -11873,7 +11916,7 @@ export default function ChatView(props: ChatViewProps) {
                                 true
                               }
                               onMultipleModelSelectionsChange={setMultipleModelSelections}
-                              composerRef={composerRef}
+                              composerRef={setComposerHandle}
                               composerDraftTarget={composerDraftTarget}
                               environmentId={environmentId}
                               attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}

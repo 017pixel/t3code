@@ -15,7 +15,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
-import { ChildProcessSpawner } from "effect/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
@@ -441,6 +441,29 @@ describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", (
   let pidFiles = 0;
   const tempPidFile = () =>
     NodePath.join(NodeOS.tmpdir(), `t3-spawn-host-${process.pid}-${++pidFiles}.pid`);
+  const readPid = (pidFile: string) =>
+    Effect.gen(function* () {
+      while (!NodeFS.existsSync(pidFile)) yield* Effect.sleep("20 millis");
+      yield* Effect.sleep("50 millis");
+      const pid = Number(NodeFS.readFileSync(pidFile, "utf8"));
+      NodeFS.rmSync(pidFile);
+      return pid;
+    });
+  /** `pid (comm) state ppid ...` */
+  const parentPid = (pid: number) =>
+    Number(NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.split(" ")[1]);
+  /** This process's open sockets by inode, so a reused fd number is not taken for the old socket. */
+  const openSockets = () =>
+    new Set(
+      NodeFS.readdirSync("/proc/self/fd").flatMap((fd) => {
+        try {
+          const target = NodeFS.readlinkSync(`/proc/self/fd/${fd}`);
+          return target.startsWith("socket:") ? [target] : [];
+        } catch {
+          return [];
+        }
+      }),
+    );
 
   it.live("streams stdin, stdout, stderr and the exit code", () =>
     Effect.gen(function* () {
@@ -487,25 +510,61 @@ describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", (
   );
 
   it.live.skipIf(hostPlatform !== "linux")(
+    "closes the sockets of output nobody reads once the child exits",
+    () =>
+      Effect.gen(function* () {
+        // Starts the host first, so its channel is not counted.
+        yield* run({ command: "true", args: [] });
+        const before = openSockets();
+        // The limit stops the reader with output still buffered in the socket.
+        const error = yield* run({ command: "yes", args: [], maxOutputBytes: 1_000 }).pipe(
+          Effect.flip,
+        );
+        expect(error._tag).toBe("ProcessOutputLimitError");
+        const leaked = () => [...openSockets()].filter((socket) => !before.has(socket));
+        for (let attempt = 0; attempt < 100 && leaked().length > 0; attempt++) {
+          yield* Effect.sleep("20 millis");
+        }
+        expect(leaked()).toEqual([]);
+      }).pipe(Effect.provide(layer)),
+  );
+
+  it.live.skipIf(hostPlatform !== "linux")(
     "fails and stops a running child when the host dies, then starts a new host",
     () =>
       Effect.gen(function* () {
+        // An unreferenced child, like an editor the launcher detaches, outlives the host.
+        const keptPidFile = tempPidFile();
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        yield* spawner
+          .spawn(
+            ChildProcess.make("sh", ["-c", `echo $$ > '${keptPidFile}'; exec sleep 30`], {
+              detached: true,
+              stdin: "ignore",
+              stdout: "ignore",
+              stderr: "ignore",
+            }),
+          )
+          .pipe(
+            Effect.flatMap((handle) => handle.unref),
+            Effect.asVoid,
+            Effect.scoped,
+          );
+        const keptPid = yield* readPid(keptPidFile);
         const pidFile = tempPidFile();
         const running = yield* run(sleeper(pidFile)).pipe(Effect.flip, Effect.forkScoped);
-        while (!NodeFS.existsSync(pidFile)) yield* Effect.sleep("20 millis");
-        yield* Effect.sleep("50 millis");
-        const childPid = Number(NodeFS.readFileSync(pidFile, "utf8"));
-        NodeFS.rmSync(pidFile);
-        // The child's parent is the host: `pid (comm) state ppid ...`.
-        const hostPid = Number(
-          NodeFS.readFileSync(`/proc/${childPid}/stat`, "utf8").split(") ")[1]?.split(" ")[1],
-        );
+        const childPid = yield* readPid(pidFile);
+        // The children's parent is the host.
+        const hostPid = parentPid(childPid);
         expect(hostPid).not.toBe(process.pid);
+        expect(parentPid(keptPid)).toBe(hostPid);
         process.kill(hostPid, "SIGKILL");
 
         const error = yield* Fiber.join(running);
         expect(error._tag).toBe("ProcessReadError");
         expect(isAlive(childPid)).toBe(false);
+        expect(isAlive(keptPid)).toBe(true);
+        process.kill(-keptPid, "SIGKILL");
         expect(hostFailures.at(-1)).toMatchObject({ failures: 1, disabled: false });
 
         const after = yield* run({ command: "echo", args: ["again"] });

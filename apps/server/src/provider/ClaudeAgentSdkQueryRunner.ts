@@ -7,7 +7,9 @@ import type {
   ClaudeAgentSdkSubagentLookupInput,
 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
 import type * as Crypto from "effect/Crypto";
@@ -39,12 +41,14 @@ export const layer: Layer.Layer<
   ClaudeAgentSdkQueryRunner,
   Effect.gen(function* () {
     const context = yield* Effect.context<Layer.Services<typeof layer> | Scope.Scope>();
-    const service = yield* Effect.cached(
+    // A failed load is not kept, so the next session retries it.
+    const service = yield* Effect.cachedWithTTL(
       Effect.promise(() => import("../orchestration-v2/Adapters/ClaudeAdapterV2.ts")).pipe(
         Effect.flatMap((adapter) => Layer.build(adapter.layerQueryRunner)),
         Effect.map((services) => Context.get(services, ClaudeAgentSdkQueryRunner)),
         Effect.provideContext(context),
       ),
+      (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
     );
     return ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: service.pipe(Effect.flatMap((value) => value.allocateSessionId)),

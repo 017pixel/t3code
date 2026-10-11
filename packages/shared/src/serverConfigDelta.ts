@@ -9,10 +9,12 @@ function changedFields<T extends object>(previous: T, next: T) {
   const changes: Partial<T> = {};
   const removed: string[] = [];
   for (const key of Object.keys(next) as Array<keyof T & string>) {
+    if (next[key] === undefined) continue;
     if (JSON.stringify(previous[key]) !== JSON.stringify(next[key])) changes[key] = next[key];
   }
-  for (const key of Object.keys(previous)) {
-    if (!(key in next)) removed.push(key);
+  // JSON drops a field set to undefined, as the config hash does, so it is a removal.
+  for (const key of Object.keys(previous) as Array<keyof T & string>) {
+    if (previous[key] !== undefined && next[key] === undefined) removed.push(key);
   }
   return { changes, removed };
 }

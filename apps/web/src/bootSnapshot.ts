@@ -17,12 +17,14 @@ const STORAGE_KEY = "t3code:boot-snapshot:v1";
 const FORMAT = 1;
 // localStorage allows 5 MB per origin. Safari and Firefox count it as UTF-16,
 // about 2.5M characters; Chromium and Electron allow 10 MB and store ASCII at
-// a byte per character. Drafts keep image attachments there too, so the
-// snapshot only takes room the rest of the app leaves free.
+// a byte per character. Drafts keep pasted images there too, as data URLs, so
+// the snapshot only takes room the rest of the app leaves free. In Safari and
+// Firefox it leaves at least 2M characters free, room for a pasted screenshot
+// of over 1 MB.
 const ORIGIN_CHARACTER_BUDGET =
   typeof navigator !== "undefined" && /\bChrom(?:e|ium)\//.test(navigator.userAgent)
     ? 4_500_000
-    : 2_000_000;
+    : 1_000_000;
 const RESERVED_FOR_OTHER_KEYS = 500_000;
 const DATE_MARKER = "$t3date";
 const DURATION_MARKER = "$t3duration";
@@ -279,6 +281,8 @@ const serverConfigs = new Map<EnvironmentId, ServerConfig>();
 const encoded = new WeakMap<object, string | null>();
 let seeded = false;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
+// What this page last stored, after savedAt, so an unchanged document is not rewritten.
+let storedBody: string | null = null;
 let listening = false;
 let discarded = false;
 
@@ -414,16 +418,18 @@ function flush() {
     const json = encode(config);
     if (json !== null) configParts.push(`${JSON.stringify(environmentId)}:${json}`);
   }
-  const serialized =
-    `{"format":${FORMAT},"build":${JSON.stringify(BUILD_ID)},"savedAt":${Date.now()},` +
+  const head = `{"format":${FORMAT},"build":${JSON.stringify(BUILD_ID)},"savedAt":${Date.now()},`;
+  const body =
     `"catalog":${JSON.stringify(catalog)},"shells":{${parts.join(",")}},` +
     `"serverConfigs":{${configParts.join(",")}}}`;
-  if (parts.length === 0 || serialized.length > limit) {
+  if (parts.length === 0 || head.length + body.length > limit) {
     removeStoredBootSnapshot(store);
     return;
   }
+  if (body === storedBody) return;
   try {
-    store.setItem(STORAGE_KEY, serialized);
+    store.setItem(STORAGE_KEY, head + body);
+    storedBody = body;
   } catch {
     // Quota or a disabled store: an older document must not outlive this one.
     removeStoredBootSnapshot(store);
@@ -431,6 +437,7 @@ function flush() {
 }
 
 function removeStoredBootSnapshot(store: Storage) {
+  storedBody = null;
   try {
     store.removeItem(STORAGE_KEY);
   } catch {

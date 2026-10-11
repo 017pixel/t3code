@@ -14,6 +14,7 @@ import type * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewManager from "./Manager.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { resolveRootCliCommand } from "../cli/invocation.ts";
@@ -142,6 +143,7 @@ const make = Effect.gen(function* () {
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const manager = yield* PreviewManager.PreviewManager;
+  const desktopChannel = yield* DesktopBrowserChannel.DesktopBrowserChannel;
   let current: Effect.Success<typeof import("./ServerBrowserLive.ts").make> | undefined;
   let connectionId: string | undefined;
   let profiles: PreviewReportProfilesInput | undefined;
@@ -194,6 +196,17 @@ const make = Effect.gen(function* () {
   yield* manager.events.pipe(
     Stream.runForEach((event) =>
       live.pipe(Effect.flatMap((value) => value.mirrorManagerEvent(event))),
+    ),
+    Effect.forkScoped,
+  );
+  // The channel drops attaches nobody listens for, so listen from boot: a
+  // desktop that restores its tabs at startup gets them driven again.
+  yield* desktopChannel.attached.pipe(
+    Stream.runForEach((key) =>
+      live.pipe(
+        Effect.flatMap((value) => value.reconnectDesktopTab(key)),
+        Effect.ignoreCause({ log: true }),
+      ),
     ),
     Effect.forkScoped,
   );
