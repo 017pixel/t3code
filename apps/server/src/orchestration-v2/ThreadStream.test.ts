@@ -1,6 +1,7 @@
 import {
   EventId,
   MessageId,
+  RunId,
   OrchestrationV2ThreadStreamItem,
   ThreadId,
   TurnItemId,
@@ -228,7 +229,10 @@ describe("decideThreadResume", () => {
       creationSource: "web" as const,
       createdAt: NOW,
     };
-    const visibleTurnItems = [{ ...first, item: user }, ...base.visibleTurnItems.slice(1)];
+    const runId = RunId.make("viewport-run");
+    const visibleTurnItems = [{ ...first, item: user }, ...base.visibleTurnItems.slice(1)].map(
+      (row) => ({ ...row, item: { ...row.item, runId } }),
+    );
     const projection = {
       ...base,
       visibleTurnItems,
@@ -242,7 +246,12 @@ describe("decideThreadResume", () => {
     });
     expect(legacy.projection.visibleTurnItems).toHaveLength(100);
     expect(legacy.hasMoreHistory).toBe(false);
-    expect(viewport.projection.visibleTurnItems).toHaveLength(75);
+    // The truncated turn keeps its prompt above the 75-row window.
+    expect(viewport.projection.visibleTurnItems).toHaveLength(76);
+    expect(viewport.projection.visibleTurnItems[0]?.item.id).toBe(user.id);
+    expect(viewport.projection.visibleTurnItems[1]?.item.id).toBe(
+      base.visibleTurnItems[25]?.item.id,
+    );
     expect(viewport.hasMoreHistory).toBe(true);
     expect(viewport.historyCursor).not.toBeNull();
     expect(viewport.payloadBudgetExceeded).toBe(false);

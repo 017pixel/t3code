@@ -1080,6 +1080,112 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         });
         assert.lengthOf(sharedNodeSnapshot.projection.visibleTurnItems, 76);
         assert.deepEqual(sharedNodeSnapshot.projection.nodes, snapshot.projection.nodes);
+
+        // A viewport that starts inside the long run keeps the run's prompt.
+        const promptId = TurnItemId.make("item:bounded-node-history:prompt");
+        yield* projectionStore.apply({
+          id: EventId.make("event:bounded-node-history:prompt"),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: promptId,
+            threadId,
+            runId,
+            nodeId: rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "user_message",
+            messageId: MessageId.make("message:bounded-node-history:prompt"),
+            text: "Start the long run",
+            attachments: [],
+            inputIntent: "turn_start",
+            createdBy: "user",
+            creationSource: "web",
+          },
+        });
+        const promptViewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: 75,
+          deferHistoricalSupport: true,
+        });
+        assert.strictEqual(promptViewport.projection.visibleTurnItems[0]?.sourceItemId, promptId);
+        assert.lengthOf(promptViewport.projection.visibleTurnItems, 76);
+        const promptLegacy = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: 75,
+        });
+        assert.isFalse(
+          promptLegacy.projection.visibleTurnItems.some((row) => row.sourceItemId === promptId),
+        );
+
+        // Viewport reads list the latest turns for the Diff panel without their files.
+        const files = [
+          { path: "a.ts", kind: "modified", additions: 1, deletions: 0 },
+          { path: "b.ts", kind: "added", additions: 2, deletions: 0 },
+        ];
+        for (let ordinal = 1; ordinal <= 12; ordinal += 1) {
+          const checkpointRunId =
+            ordinal === 12 ? runId : RunId.make(`run:bounded-node-history:old-${ordinal}`);
+          yield* projectionStore.apply({
+            id: EventId.make(`event:bounded-node-history:checkpoint:${ordinal}`),
+            type: "checkpoint.captured",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: CheckpointId.make(`checkpoint:bounded-node-history:${ordinal}`),
+              threadId,
+              scopeId: CheckpointScopeId.make(`scope:bounded-node-history:${ordinal}`),
+              runId: checkpointRunId,
+              nodeId:
+                ordinal === 12
+                  ? rootNodeId
+                  : NodeId.make(`node:bounded-node-history:old-${ordinal}`),
+              parentCheckpointId: null,
+              ordinalWithinScope: 1,
+              appRunOrdinal: ordinal,
+              ref: CheckpointRef.make(`refs/t3/bounded-node-history/${ordinal}`),
+              status: "ready",
+              files,
+              capturedAt: now,
+            },
+          });
+        }
+        const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: 75,
+          deferHistoricalSupport: true,
+        });
+        assert.deepEqual(
+          viewport.projection.checkpoints.map((checkpoint) => [
+            checkpoint.appRunOrdinal,
+            checkpoint.files.length,
+            checkpoint.deferredFileCount,
+          ]),
+          [
+            [12, 2, undefined],
+            ...Array.from({ length: 9 }, (_, index) => [index + 3, 0, 2]),
+          ].toSorted((left, right) => {
+            // Rows come back in scope ID order, which compares ordinals as text.
+            const [a, b] = [String(left[0]), String(right[0])];
+            return a < b ? -1 : a > b ? 1 : 0;
+          }),
+        );
+        const legacyWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: 75,
+        });
+        assert.deepEqual(
+          legacyWindow.projection.checkpoints.map((checkpoint) => checkpoint.appRunOrdinal),
+          [12],
+        );
       }),
   );
 

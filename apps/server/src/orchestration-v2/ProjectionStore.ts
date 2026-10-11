@@ -2949,6 +2949,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     )
                     AND request.type = 'run_interrupt_request'
                   UNION
+                  -- A viewport can start inside a long turn; keep that turn's prompt.
+                  SELECT start.item_rowid, start.ordinal, start.turn_item_id
+                  FROM (
+                    SELECT rowid AS item_rowid, ordinal, turn_item_id
+                    FROM orchestration_v2_projection_turn_items
+                    WHERE ${window.deferHistoricalSupport ? 1 : 0} = 1
+                      AND run_id = (
+                        SELECT run_id FROM selected ORDER BY ordinal ASC, turn_item_id ASC LIMIT 1
+                      )
+                      AND type = 'user_message'
+                      AND json_extract(payload_json, '$.inputIntent') IN ('turn_start', 'queued_turn')
+                    ORDER BY ordinal ASC
+                    LIMIT 1
+                  ) AS start
+                  UNION
                   SELECT latest.item_rowid, latest.ordinal, latest.turn_item_id
                   FROM (
                     SELECT rowid AS item_rowid, ordinal, turn_item_id
@@ -3038,6 +3053,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         const cohortMessageIds = cohortJson("messageId");
         const cohortPlanIds = cohortJson("planId");
         const cohortCheckpointIds = cohortJson("checkpointId");
+        const checkpointNodeIds = window?.deferHistoricalSupport
+          ? cohortJson("nodeId")
+          : cohortNodeIds;
         const cohortHandoffIds = cohortJson("contextHandoffId");
 
         const [
@@ -3285,12 +3303,32 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             ORDER BY scope_id ASC, ordinal_within_scope ASC
           `
               : sql<PayloadRow>`
-            SELECT payload_json FROM orchestration_v2_projection_checkpoints
+            SELECT CASE
+                WHEN status IN ('pending','capturing')
+                  OR checkpoint_id IN (SELECT value FROM json_each(${cohortCheckpointIds}))
+                  OR run_id IN (SELECT value FROM json_each(${cohortRunIds}))
+                  OR node_id IN (SELECT value FROM json_each(${checkpointNodeIds}))
+                THEN payload_json
+                ELSE json_set(payload_json, '$.files', json('[]'),
+                  '$.deferredFileCount', json_array_length(payload_json, '$.files'))
+              END AS payload_json
+            FROM orchestration_v2_projection_checkpoints
             WHERE thread_id = ${threadId}
               AND (status IN ('pending','capturing')
                 OR checkpoint_id IN (SELECT value FROM json_each(${cohortCheckpointIds}))
                 OR run_id IN (SELECT value FROM json_each(${cohortRunIds}))
-                OR node_id IN (SELECT value FROM json_each(${window.deferHistoricalSupport ? cohortJson("nodeId") : cohortNodeIds})))
+                OR node_id IN (SELECT value FROM json_each(${checkpointNodeIds}))
+                -- A viewport keeps the latest turns listed for the Diff panel and
+                -- Review; their file lists arrive with the rows' history page.
+                OR (${window.deferHistoricalSupport ? 1 : 0} = 1 AND app_run_ordinal >= (
+                  SELECT MIN(app_run_ordinal) FROM (
+                    SELECT DISTINCT app_run_ordinal
+                    FROM orchestration_v2_projection_checkpoints
+                    WHERE thread_id = ${threadId} AND app_run_ordinal IS NOT NULL
+                    ORDER BY app_run_ordinal DESC
+                    LIMIT ${THREAD_HISTORY_PAGE_POLICY.maxUserTurns}
+                  )
+                )))
             ORDER BY scope_id ASC, ordinal_within_scope ASC
           `,
           fields !== undefined && !fields.includes("contextHandoffs")

@@ -483,11 +483,13 @@ export function buildBoundedThreadProjection(input: {
       ? {
           // Ancestor nodes can belong to old runs with enormous checkpoints.
           // Their file lists hydrate with the corresponding history page.
+          // Recent turns outside the window stay listed without their files.
           checkpoints: input.projection.checkpoints.filter(
             (checkpoint) =>
               (checkpoint.runId !== null && retainedRunIds.has(checkpoint.runId)) ||
               retainedNodeIds.has(checkpoint.nodeId) ||
-              retainedCheckpointIds.has(checkpoint.id),
+              retainedCheckpointIds.has(checkpoint.id) ||
+              checkpoint.deferredFileCount !== undefined,
           ),
         }
       : {}),
@@ -534,7 +536,22 @@ export function buildBoundedThreadProjection(input: {
     policy: windowPolicy,
     rowEncodedBytes: (row) => projectedRowBoundedSnapshotEncodedBytes(row, threadId),
   });
-  const visibleTurnItems = renumberPositions(window.items);
+  // A viewport that starts inside a long turn keeps that turn's prompt above
+  // the gap. The cursor still points at the window, so paging fills the gap.
+  const oldestWindowRow = window.items[0];
+  const truncatedTurnStart =
+    input.viewportWindow === true &&
+    oldestWindowRow !== undefined &&
+    !isThreadHistoryTurnStart(oldestWindowRow.item) &&
+    oldestWindowRow.item.runId !== null
+      ? controlProjection.visibleTurnItems.find(
+          (row) =>
+            row.item.runId === oldestWindowRow.item.runId && isThreadHistoryTurnStart(row.item),
+        )
+      : undefined;
+  const visibleTurnItems = renumberPositions(
+    truncatedTurnStart === undefined ? window.items : [truncatedTurnStart, ...window.items],
+  );
   const windowTurnItems = localTurnItemsForVisibleWindow(controlProjection, visibleTurnItems);
   const dependencyTurnItems = retainedInterruptRequestTurnItems(
     controlProjection,

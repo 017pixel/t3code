@@ -136,6 +136,45 @@ describe("threadHistoryMerge", () => {
       "checkpoint-3",
     ]);
   });
+
+  it("replaces a checkpoint listed without files when its history page arrives", () => {
+    const full = {
+      id: "checkpoint-listed" as never,
+      threadId: v2ThreadId,
+      scopeId: "scope-listed" as never,
+      runId: "run-listed" as never,
+      nodeId: "node-listed" as never,
+      parentCheckpointId: null,
+      ordinalWithinScope: 1,
+      appRunOrdinal: 3,
+      ref: "refs/t3/listed" as never,
+      status: "ready" as const,
+      files: [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }],
+      capturedAt: NOW,
+    };
+    const listed = { ...full, files: [], deferredFileCount: 1 };
+    const current = {
+      ...v2Projection,
+      checkpoints: [listed],
+      turnItems: [row(4).item],
+      visibleTurnItems: [row(4)],
+    };
+    const merged = mergeOlderHistoryIntoProjection(current, [row(1)], {
+      nodes: [],
+      checkpoints: [full],
+      runs: [],
+      attempts: [],
+    });
+    expect(merged.checkpoints).toEqual([full]);
+    const kept = mergeOlderHistoryIntoProjection({ ...current, checkpoints: [full] }, [row(1)], {
+      nodes: [],
+      checkpoints: [listed],
+      runs: [],
+      attempts: [],
+    });
+    expect(kept.checkpoints[0]).toBe(full);
+  });
+
   it("fills activity around partial messages in canonical order and preserves live edits", () => {
     const initial = { ...v2Projection, turnItems: [row(4).item], visibleTurnItems: [row(4)] };
     const preview = [row(1), row(3)];

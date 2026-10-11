@@ -786,7 +786,17 @@ const ConversationTimeline = memo(function ConversationTimeline({
       return;
     // A row window can start inside a folded turn. Hydrate its missing activity
     // only when the reader opens it, stopping once a response boundary precedes it.
-    const openingRunIds = timelineRunIdsOpeningWindow(timelineEntries);
+    // The server keeps a long turn's prompt above the gap, so a prompt that
+    // opens the window still names its run.
+    const openingRunIds = new Set(timelineRunIdsOpeningWindow(timelineEntries));
+    const firstEntry = timelineEntries[0];
+    if (
+      firstEntry?.kind === "message" &&
+      firstEntry.message.role === "user" &&
+      firstEntry.message.runId != null
+    ) {
+      openingRunIds.add(firstEntry.message.runId);
+    }
     for (const runId of paintedExpandedRunIds) {
       if (openingRunIds.has(runId)) {
         historyControls.onLoadEarlier(runId);

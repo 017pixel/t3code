@@ -186,6 +186,22 @@ describe("threadHistoryPaging", () => {
       viewportWindow: true,
     });
     expect(current.projection.checkpoints).toEqual([recent]);
+    const listed = {
+      id: "listed",
+      runId: "listed-run",
+      nodeId: "listed-node",
+      files: [],
+      deferredFileCount: 3,
+    };
+    const withListed = buildBoundedThreadProjection({
+      projection: {
+        ...withCheckpoints,
+        checkpoints: [historical, listed, recent],
+      } as unknown as typeof projection,
+      snapshotSequence: 1,
+      viewportWindow: true,
+    });
+    expect(withListed.projection.checkpoints).toEqual([listed, recent]);
     expect(current.projection.visibleTurnItems).toHaveLength(75);
     expect(current.payloadBudgetExceeded).toBe(false);
     const legacy = buildBoundedThreadProjection({
