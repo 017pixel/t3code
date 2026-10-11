@@ -3251,9 +3251,34 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                     ),
                   ),
                 );
+                const readHistory = sdkCall("session.messages", { sessionID: sessionId }, () =>
+                  client.session.messages({ sessionID: sessionId }),
+                ).pipe(
+                  Effect.map((response) => unwrapData("session.messages", response)),
+                  Effect.tapError((cause) =>
+                    finalizeTurn(state, turn, "failed", {
+                      failure: makeProviderFailure({ cause, class: "provider_error" }),
+                    }),
+                  ),
+                );
+                const idle =
+                  statuses[sessionId] === undefined || statuses[sessionId]?.type === "idle";
+                const idleHistory = idle ? yield* readHistory : undefined;
                 // Live events may have finished the surviving run meanwhile.
                 if (turn.finalized || state.activeTurn !== turn) return;
-                if (statuses[sessionId] === undefined || statuses[sessionId]?.type === "idle") {
+                // An idle session whose newest prompt T3 never settled, answered by
+                // a clean final reply, finished the cut run while T3 was down.
+                const lastPrompt = idleHistory?.findLast((entry) => entry.info.role === "user");
+                const lastInfo = idleHistory?.at(-1)?.info;
+                const finishedWhileDown =
+                  lastPrompt !== undefined &&
+                  lastPrompt.info.id !==
+                    turnInput.providerThread.nativeConversationHeadRef?.nativeId &&
+                  lastInfo?.role === "assistant" &&
+                  lastInfo.time.completed !== undefined &&
+                  lastInfo.error === undefined &&
+                  lastInfo.finish !== "tool-calls";
+                if (idle && !finishedWhileDown) {
                   turn.usage.followingRestart = false;
                 } else {
                   // A server that outlived T3 still owns this turn; follow it
@@ -3263,18 +3288,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   const admissionAction = advanceOpenCodePromptAdmission(turn, "accepted");
                   yield* Deferred.succeed(admissionSettled, undefined);
                   turn.admissionAbortController = null;
-                  const history = unwrapData(
-                    "session.messages",
-                    yield* sdkCall("session.messages", { sessionID: sessionId }, () =>
-                      client.session.messages({ sessionID: sessionId }),
-                    ).pipe(
-                      Effect.tapError((cause) =>
-                        finalizeTurn(state, turn, "failed", {
-                          failure: makeProviderFailure({ cause, class: "provider_error" }),
-                        }),
-                      ),
-                    ),
-                  );
+                  const history = idleHistory ?? (yield* readHistory);
                   const userIndex = history.findLastIndex((entry) => entry.info.role === "user");
                   for (const entry of userIndex < 0 ? [] : history.slice(userIndex)) {
                     if (turn.finalized) break;
@@ -3304,7 +3318,9 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                     }
                   }
                   turn.usage.followingRestart = false;
-                  if (admissionAction === "reconcile-idle") {
+                  if (idle) {
+                    if (!turn.finalized) yield* finalizeTurn(state, turn, "completed");
+                  } else if (admissionAction === "reconcile-idle") {
                     yield* reconcilePromptAdmission(state, turn);
                   }
                   return;
