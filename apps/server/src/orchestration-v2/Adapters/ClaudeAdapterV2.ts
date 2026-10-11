@@ -747,9 +747,12 @@ export const layerQueryRunner: Layer.Layer<
         const { mcpServers, ...queryOptions } = input.options;
         // The SDK spawns a native binary as `path ...executableArgs ...sdkArgs`,
         // which lets the agent scope wrapper go in front of the CLI while the
-        // SDK keeps its own stderr capture and exit reporting. The SDK runs a
-        // script entry through node instead, so those launch unwrapped.
+        // SDK keeps its own stderr capture and exit reporting. A script entry
+        // needs its interpreter inside the parent-death wrapper too.
         const binaryPath = queryOptions.pathToClaudeCodeExecutable;
+        const isScript =
+          binaryPath !== undefined &&
+          CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext));
         const parentDeathSignal =
           (yield* HostProcess.Platform) === "linux"
             ? yield* resolveCommandPath("setpriv", {
@@ -761,27 +764,35 @@ export const layerQueryRunner: Layer.Layer<
               )
             : Option.none<string>();
         const launch =
-          binaryPath === undefined ||
-          CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext))
+          binaryPath === undefined || (isScript && Option.isNone(parentDeathSignal))
             ? undefined
             : yield* agentScope.wrap({
                 // stdin EOF does not stop Claude's background work. A crashed
                 // server must end its CLI before recovery resumes the transcript.
                 command: Option.isSome(parentDeathSignal) ? parentDeathSignal.value : binaryPath,
-                args: Option.isSome(parentDeathSignal)
-                  ? ["--pdeathsig", "TERM", "--", binaryPath]
-                  : [],
+                args: [
+                  ...(Option.isSome(parentDeathSignal)
+                    ? [
+                        "--pdeathsig",
+                        "TERM",
+                        "--",
+                        isScript ? (queryOptions.executable ?? "node") : binaryPath,
+                      ]
+                    : []),
+                  ...(queryOptions.executableArgs ?? []),
+                  ...(isScript ? [binaryPath] : []),
+                ],
                 name: "claude",
                 threadId: input.threadId,
                 env: queryOptions.env,
               });
         const options =
-          launch === undefined || launch.args.length === 0
+          launch === undefined
             ? queryOptions
             : {
                 ...queryOptions,
                 pathToClaudeCodeExecutable: launch.command,
-                executableArgs: [...launch.args, ...(queryOptions.executableArgs ?? [])],
+                executableArgs: [...launch.args],
               };
         // The CLI is running once query() returns, so it is closed if anything
         // before the session is handed out fails or is interrupted.

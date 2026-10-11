@@ -424,7 +424,7 @@ const history = {
 };
 
 it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
-  it.effect.each([false, true])(
+  it.effect.each([false, true, "note"])(
     "follows a surviving execution after a T3 restart (buffered=%s) without another prompt",
     (buffered) =>
       Effect.gen(function* () {
@@ -449,7 +449,18 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         );
         yield* runtime.startTurn({
           ...turnInput(thread),
-          restartContinuationOfRunId: RunId.make("interrupted-run"),
+          ...(buffered === "note"
+            ? {
+                restartContinuationSource: {
+                  nativeTurnRef: {
+                    driver: OPENCODE_PROVIDER,
+                    nativeId: history.data[0]!.id,
+                    strength: "weak" as const,
+                  },
+                  message: turnInput(thread).message,
+                },
+              }
+            : { restartContinuationOfRunId: RunId.make("interrupted-run") }),
         });
         const collected = yield* Fiber.join(events);
         assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
@@ -464,8 +475,17 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect.each(["empty", "already settled", "failed"] as const)(
-    "prompts after a restart with %s history instead of following an earlier completion",
+  it.effect.each([
+    "empty",
+    "already settled",
+    "failed",
+    "different admission",
+    "unrecorded admission",
+    "unknown admission",
+    "earlier admission",
+    "lost question",
+  ] as const)(
+    "reconciles a restart with %s history without following an earlier completion",
     (previous) =>
       Effect.gen(function* () {
         const { runtime, thread } = yield* resumed([
@@ -474,7 +494,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
           reply("message.list", {
             data:
-              previous === "empty"
+              previous === "empty" || previous === "lost question"
                 ? []
                 : history.data
                     .toReversed()
@@ -485,9 +505,60 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
                     ),
             cursor: {},
           }),
-          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
-          promptAccepted,
-          event("session.execution.succeeded", { sessionID: SESSION }),
+          ...(previous === "different admission" ||
+          previous === "unrecorded admission" ||
+          previous === "earlier admission"
+            ? [
+                out("message.list", {
+                  sessionID: SESSION,
+                  order: "desc",
+                  limit: "50",
+                  type: "user",
+                }),
+                reply("message.list", {
+                  data: [history.data[0]!],
+                  cursor: previous === "earlier admission" ? { next: "older" } : {},
+                }),
+                ...(previous === "earlier admission"
+                  ? [
+                      out("message.list", {
+                        sessionID: SESSION,
+                        cursor: "older",
+                        limit: "50",
+                        type: "user",
+                      }),
+                      reply("message.list", {
+                        data: [{ ...history.data[0]!, id: "msg_not_admitted" }],
+                        cursor: {},
+                      }),
+                    ]
+                  : []),
+              ]
+            : []),
+          ...(previous === "lost question"
+            ? []
+            : [
+                out("session.prompt", {
+                  sessionID: SESSION,
+                  text:
+                    previous === "different admission" ||
+                    previous === "unrecorded admission" ||
+                    previous === "unknown admission"
+                      ? "original request before the crash"
+                      : previous === "earlier admission"
+                        ? "hi"
+                        : "<any>",
+                  ...(previous === "different admission"
+                    ? { id: "msg_not_admitted" }
+                    : previous === "unrecorded admission"
+                      ? { id: `msg_t3_turn_${SESSION}:attempt:not-admitted` }
+                      : previous === "earlier admission"
+                        ? { id: `msg_t3_turn_${SESSION}:attempt:opencode2-adapter` }
+                        : {}),
+                }),
+                promptAccepted,
+                event("session.execution.succeeded", { sessionID: SESSION }),
+              ]),
         ]);
         const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
         yield* runtime.startTurn({
@@ -504,8 +575,38 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
               : thread,
           ),
           restartContinuationOfRunId: RunId.make("interrupted-run"),
+          ...(previous === "different admission" ||
+          previous === "unrecorded admission" ||
+          previous === "unknown admission" ||
+          previous === "earlier admission" ||
+          previous === "lost question"
+            ? {
+                restartContinuationSource: {
+                  attemptId:
+                    previous === "unknown admission"
+                      ? null
+                      : RunAttemptId.make("attempt:not-admitted"),
+                  nativeTurnRef:
+                    previous === "unrecorded admission" || previous === "unknown admission"
+                      ? null
+                      : {
+                          driver: OPENCODE_PROVIDER,
+                          nativeId: "msg_not_admitted",
+                          strength: "weak" as const,
+                        },
+                  message: {
+                    ...turnInput(thread).message,
+                    text: "original request before the crash",
+                  },
+                  awaitingUser: previous === "lost question",
+                },
+              }
+            : {}),
         });
-        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+        assert.equal(
+          (yield* Fiber.join(terminal))?.status,
+          previous === "lost question" ? "interrupted" : "completed",
+        );
       }).pipe(Effect.scoped),
   );
 
@@ -721,21 +822,28 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("stops running turns on an external server when the session closes", () =>
-    Effect.gen(function* () {
-      const scope = yield* Scope.make();
-      const { runtime, thread } = yield* resumed(
-        [
-          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
-          promptAccepted,
-          out("session.interrupt", { sessionID: SESSION }),
-          reply("session.interrupt", { interrupted: true }),
-        ],
-        { external: true },
-      ).pipe(Scope.provide(scope));
-      yield* runtime.startTurn(turnInput(thread));
-      yield* Scope.close(scope, Exit.void);
-    }),
+  it.effect.each([false, true])(
+    "external shutdown preserves work only for restart=%s",
+    (restarting) =>
+      Effect.gen(function* () {
+        const scope = yield* Scope.make();
+        const { runtime, thread } = yield* resumed(
+          [
+            out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+            promptAccepted,
+            ...(restarting
+              ? []
+              : [
+                  out("session.interrupt", { sessionID: SESSION }),
+                  reply("session.interrupt", { interrupted: true }),
+                ]),
+          ],
+          { external: true },
+        ).pipe(Scope.provide(scope));
+        yield* runtime.startTurn(turnInput(thread));
+        yield* runtime.prepareForServerShutdown?.(restarting) ?? Effect.void;
+        yield* Scope.close(scope, Exit.void);
+      }),
   );
 
   it.effect("sends nothing for a turn stopped while it reads the workspace's commands", () =>

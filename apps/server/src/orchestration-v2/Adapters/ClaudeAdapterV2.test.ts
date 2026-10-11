@@ -2044,9 +2044,9 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
 });
 
 describe("ClaudeAdapterV2 native session identity", () => {
-  it.live(
-    "ends the native CLI when its hosting process crashes",
-    () =>
+  it.live.each(["native", "javascript", "shell wrapper", "agent scope"] as const)(
+    "ends the %s CLI when its hosting process crashes",
+    (launchKind) =>
       Effect.gen(function* () {
         const platform = yield* HostProcess.Platform;
         if (platform !== "linux") return;
@@ -2072,22 +2072,46 @@ describe("ClaudeAdapterV2 native session identity", () => {
           );
         const cliSource = [
           "const fs = require('node:fs');",
-          `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(stoppedPath)}, 'stopped'); process.exit(0); });`,
-          `fs.writeFileSync(${JSON.stringify(readyPath)}, String(process.pid));`,
+          "const publish = (file, text) => { fs.writeFileSync(file + '.tmp', text); fs.renameSync(file + '.tmp', file); };",
+          `process.on('SIGTERM', () => { publish(${JSON.stringify(stoppedPath)}, 'stopped'); process.exit(0); });`,
+          `publish(${JSON.stringify(readyPath)}, String(process.pid));`,
           "setInterval(() => {}, 1000);",
         ].join("\n");
+        const scriptPath = NodePath.join(directory, "cli.js");
+        NodeFS.writeFileSync(scriptPath, cliSource);
+        const shellPath = NodePath.join(directory, "cli.sh");
+        const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+        NodeFS.writeFileSync(
+          shellPath,
+          `#!/bin/sh\nexec ${shellQuote(executablePath)} ${shellQuote(scriptPath)} "$@"\n`,
+          { mode: 0o755 },
+        );
+        const binaryPath =
+          launchKind === "javascript"
+            ? scriptPath
+            : launchKind === "shell wrapper"
+              ? shellPath
+              : executablePath;
+        const executableArgs =
+          launchKind === "native" || launchKind === "agent scope" ? ["-e", cliSource, "--"] : [];
         const parentSource = [
           `import * as Effect from ${JSON.stringify(import.meta.resolve("effect/Effect"))};`,
           `import * as NodeServices from ${JSON.stringify(import.meta.resolve("@effect/platform-node/NodeServices"))};`,
           `import * as Adapter from ${JSON.stringify(import.meta.resolve("./ClaudeAdapterV2.ts"))};`,
           `import * as Loggers from ${JSON.stringify(import.meta.resolve("@t3tools/provider-core/server/ProviderEventLoggers"))};`,
+          `import { AgentScope, agentScopeCommand } from ${JSON.stringify(import.meta.resolve("@t3tools/shared/AgentScope"))};`,
           "await Effect.runPromise(Effect.scoped(Effect.gen(function* () {",
           "const runner = yield* Adapter.ClaudeAgentSdkQueryRunner;",
           "yield* runner.open({ threadId: 'parent-death', providerSessionId: 'parent-death', options: {",
-          `pathToClaudeCodeExecutable: process.execPath, executableArgs: ['-e', ${JSON.stringify(cliSource)}, '--'],`,
+          `pathToClaudeCodeExecutable: ${JSON.stringify(binaryPath)}, executableArgs: ${JSON.stringify(executableArgs)},`,
           "sessionId: '12345678-1234-4123-8123-123456789012', model: 'sonnet', tools: [], permissionMode: 'default', env: process.env }});",
           "yield* Effect.never;",
           "}).pipe(Effect.provide(Adapter.layerQueryRunner), Effect.provide(NodeServices.layer),",
+          ...(launchKind === "agent scope"
+            ? [
+                "Effect.provideService(AgentScope, { wrap: (input) => Effect.succeed(agentScopeCommand(input)), oomKilled: () => Effect.succeed(false), clear: () => Effect.void }),",
+              ]
+            : []),
           "Effect.provideService(Loggers.ProviderEventLoggers, Loggers.NoOpProviderEventLoggers))));",
         ].join("\n");
         const ready = yield* waitForFile(readyPath).pipe(Effect.forkScoped);

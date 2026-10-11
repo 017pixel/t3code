@@ -1450,7 +1450,6 @@ export const layer = Layer.effect(
             yield* sql`
             DELETE FROM scheduled_task_webhook_deliveries
             WHERE task_id = ${input.taskId}
-              AND delivery_id NOT IN (SELECT delivery_id FROM scheduled_task_webhook_queue)
               AND delivery_id NOT IN (
                 SELECT delivery_id FROM scheduled_task_webhook_deliveries
                 WHERE task_id = ${input.taskId}

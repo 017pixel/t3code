@@ -3084,18 +3084,21 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     // Subscribed before any session or prompt call, so no event of theirs is missed.
     yield* follow(yield* connection.events).pipe(Effect.forkScoped);
 
-    // A server T3 did not start keeps running after T3 stops, so stop the turns
-    // it would otherwise finish unseen. A spawned server stops with its owner.
+    let preserveExternalTurns = false;
+    // External executions survive a restart so recovery can follow them.
+    // A regular quit still stops them. A spawned server stops with its owner.
     if (connection.external) {
       yield* Effect.addFinalizer(() =>
-        Effect.forEach(
-          [...threads].filter(([, state]) => state.active !== undefined),
-          ([sessionId]) =>
-            client.session
-              .interrupt({ sessionID: Session.ID.make(sessionId) })
-              .pipe(Effect.timeout("1 second"), Effect.ignore({ log: true })),
-          { concurrency: 8, discard: true },
-        ),
+        preserveExternalTurns
+          ? Effect.void
+          : Effect.forEach(
+              [...threads].filter(([, state]) => state.active !== undefined),
+              ([sessionId]) =>
+                client.session
+                  .interrupt({ sessionID: Session.ID.make(sessionId) })
+                  .pipe(Effect.timeout("1 second"), Effect.ignore({ log: true })),
+              { concurrency: 8, discard: true },
+            ),
       );
     }
 
@@ -3524,6 +3527,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       state: ThreadState,
       turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
       awaitingStart: boolean,
+      admissionId?: string,
     ) =>
       Effect.gen(function* () {
         const startedAt = yield* DateTime.now;
@@ -3539,7 +3543,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           nativeTurnRef: ref(
             isContinuation(turnInput)
               ? wakeTurnId(state.sessionId, turnInput.attemptId)
-              : turnPromptId(state.sessionId, turnInput.attemptId),
+              : (admissionId ?? turnPromptId(state.sessionId, turnInput.attemptId)),
             "weak",
           ),
           ordinal: turnInput.providerTurnOrdinal,
@@ -3798,7 +3802,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const text = turnInput.message.text.trim();
       const bare = turnInput.message.attachments.length === 0;
       // The turn's own id, so fork and rollback cut before this turn's item.
-      const id = turnPromptId(sessionId, turnInput.attemptId);
+      const id = SessionMessage.ID.make(
+        promptOf(turn.providerTurn) ?? turnPromptId(sessionId, turnInput.attemptId),
+      );
       if (bare && text === "/compact") {
         if (!sending()) return;
         return yield* client.session.compact({ sessionID, id }).pipe(Effect.asVoid);
@@ -3854,6 +3860,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       // A background subagent keeps its session busy after its parent's turn,
       // and a held wake still needs its turn: idle release must wait for both.
       hasPendingBackgroundWork: Effect.sync(() => [...threads.values()].some(owesWork)),
+      prepareForServerShutdown: (restarting) =>
+        Effect.sync(() => {
+          preserveExternalTurns = restarting;
+        }),
       hasPendingBackgroundWorkForThread: (providerThread) =>
         Effect.sync(() => {
           const nativeId = providerThread.nativeThreadRef?.nativeId;
@@ -4009,6 +4019,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           // Its checks and setup take the session's gate, so a rollback or
           // fork sees either no turn or this one installed; the prompt after
           // it does not hold the gate.
+          let admissionId: string | undefined;
           const started = yield* exclusive(turnInput.providerThread)(
             Effect.gen(function* () {
               const sessionId = yield* sessionIdOf(turnInput.providerThread);
@@ -4027,7 +4038,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               }
               // OpenCode already ran this turn on its own; it prompts nothing.
               if (isContinuation(turnInput)) return yield* runWake(state, turnInput);
-              if (turnInput.restartContinuationOfRunId !== undefined && !state.unsettled) {
+              const reconcileRestart =
+                turnInput.restartContinuationOfRunId !== undefined ||
+                (connection.external && turnInput.restartContinuationSource !== undefined);
+              if (reconcileRestart && !state.unsettled) {
                 const followed = yield* lock.withPermit(
                   Effect.gen(function* () {
                     const active = yield* client.session
@@ -4044,12 +4058,57 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                     );
                     const prompt = history.at(-1);
                     const idle = history.find((message) => message.type === "idle");
+                    const source = turnInput.restartContinuationSource;
+                    const recordedId = source?.nativeTurnRef?.nativeId;
+                    const sourcePromptId =
+                      recordedId?.startsWith("msg_") === true
+                        ? recordedId
+                        : source?.attemptId != null
+                          ? turnPromptId(sessionId, source.attemptId)
+                          : undefined;
                     const finishedWhileDown =
                       prompt?.type === "user" &&
+                      (sourcePromptId === undefined
+                        ? source === undefined
+                        : prompt.id === sourcePromptId) &&
                       prompt.id !== turnInput.providerThread.nativeConversationHeadRef?.nativeId &&
                       idle?.type === "idle" &&
                       idle.outcome === "succeeded";
-                    if (!(sessionId in active) && !finishedWhileDown) return false;
+                    if (!(sessionId in active) && !finishedWhileDown) {
+                      if (source?.awaitingUser === true) {
+                        yield* beginTurn(state, turnInput, false);
+                        yield* finishTurn(state, { status: "interrupted" });
+                        return true;
+                      }
+                      if (
+                        source !== undefined &&
+                        (sourcePromptId === undefined || prompt?.id !== sourcePromptId)
+                      ) {
+                        // The latest prompt may be a later one; search user
+                        // history before retrying an original never admitted.
+                        const admitted =
+                          sourcePromptId !== undefined &&
+                          Option.isSome(
+                            yield* OpenCode2Client.paginate(
+                              {
+                                sessionID: Session.ID.make(sessionId),
+                                order: "desc" as const,
+                                limit: 50,
+                                type: "user" as const,
+                              },
+                              client.message.list,
+                            ).pipe(
+                              Stream.filter((message) => message.id === sourcePromptId),
+                              Stream.runHead,
+                            ),
+                          );
+                        if (!admitted) {
+                          turnInput = { ...turnInput, message: source.message };
+                          admissionId = sourcePromptId;
+                        }
+                      }
+                      return false;
+                    }
                     const turn = yield* beginTurn(state, turnInput, false);
                     yield* takeRunningWake(state);
                     if (state.active !== turn) return true;
@@ -4096,7 +4155,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                 }
               }
               // Installs the turn; every path after it ends the turn with a terminal.
-              const begin = beginTurn(state, turnInput, afterUnsettled);
+              const begin = beginTurn(state, turnInput, afterUnsettled, admissionId);
               if (stillStopping) {
                 yield* begin;
                 return yield* finishTurn(state, {

@@ -682,23 +682,40 @@ it.effect("a held request whose sender hung up mid-request still runs", () =>
 );
 
 it.effect("a held request runs once even after the log has trimmed it", () =>
-  withService(({ service, launches }) =>
-    Effect.gen(function* () {
-      const { task } = yield* service.upsert(yield* webhookTaskInput());
-      const first = yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "kept" }));
-      assert.equal(first._tag, "accepted");
-      yield* Queue.take(launches);
-      // Push the original row out of the 50-row delivery log.
-      const paused = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
-      yield* Effect.forEach(Array.from({ length: 55 }), () =>
-        service.triggerWebhook(requestFor(paused.task)),
-      );
-      yield* service.upsert(yield* webhookTaskInput());
-      const replay = yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "kept" }));
-      assert.equal(replay._tag, "accepted");
-      assert.equal(yield* Queue.size(launches), 0);
-    }),
-  ),
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          const first = yield* service.triggerWebhook(
+            requestFor(task, { relayDeliveryId: "kept" }),
+          );
+          assert.equal(first._tag, "accepted");
+          yield* Queue.take(launches);
+          // Push the original row out of the 50-row delivery log.
+          const paused = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
+          yield* Effect.forEach(Array.from({ length: 55 }), () =>
+            service.triggerWebhook(requestFor(paused.task)),
+          );
+          const { deliveries } = yield* service.listWebhookDeliveries({ id: task.id });
+          assert.lengthOf(deliveries, 50);
+          assert.isFalse(
+            deliveries.some(
+              (delivery) => delivery.id === (first._tag === "accepted" ? first.deliveryId : ""),
+            ),
+          );
+          yield* service.upsert(yield* webhookTaskInput());
+          const replay = yield* service.triggerWebhook(
+            requestFor(task, { relayDeliveryId: "kept" }),
+          );
+          assert.equal(replay._tag, "accepted");
+          assert.equal(yield* Queue.size(launches), 0);
+          yield* Deferred.succeed(gate, undefined);
+        }),
+      { gate },
+    );
+  }),
 );
 
 it.effect("a rate-limited held request can run on a later pass", () =>
