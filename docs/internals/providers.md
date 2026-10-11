@@ -100,6 +100,12 @@ installs drain host-wide provider leases before closing admission to CLI launche
 a session holding a lease may still need admission to finish launching. This order
 also protects another environment on the same machine from a binary being replaced.
 
+Installers run under a detached
+[supervisor](../../apps/server/src/provider/ProviderInstallSupervisor.ts) that owns the
+host install lease and writes a result receipt, so quitting or crashing the server never
+stops a half-written install. The next server reports the receipt's outcome. Admission
+stays closed until the installer exits, even if the supervisor itself dies.
+
 Ownership is cached per instance and re-read immediately before an update runs. The
 [runner](../../apps/server/src/provider/providerMaintenanceRunner.ts) refuses when the lock key
 changed since the advisory, and reports success only when the refreshed provider is still installed
