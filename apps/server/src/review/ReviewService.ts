@@ -162,12 +162,18 @@ export const make = Effect.gen(function* () {
       timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.seconds(5) : Duration.zero),
     },
   );
-  // Expired entries leave memory only when read again, so drop them all once
-  // no preview has been requested for the reuse window.
+  // Expired entries leave memory only when read again, so drop them once
+  // requests stop. Walking Cache.keys removes expired entries and keeps pending
+  // lookups, which re-arm this sweep when they finish.
   const previewSweep = yield* FiberHandle.make();
   const sweepPreviewsWhenIdle = FiberHandle.run(
     previewSweep,
-    Effect.sleep(Duration.seconds(5)).pipe(Effect.andThen(Cache.invalidateAll(previews))),
+    Effect.sleep(Duration.seconds(5)).pipe(
+      Effect.andThen(Cache.keys(previews)),
+      Effect.map((keys) => {
+        Array.from(keys);
+      }),
+    ),
   );
   const getDiffPreview: ReviewService["Service"]["getDiffPreview"] = (input) =>
     assertWorkspaceBoundCwd("ReviewService.getDiffPreview", input.cwd).pipe(

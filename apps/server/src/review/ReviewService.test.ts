@@ -1,9 +1,13 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import * as TestClock from "effect/testing/TestClock";
 import { ProjectId } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
@@ -17,6 +21,8 @@ function layer(input: {
   readonly workspaceRoot: string;
   readonly baseDir: string;
   readonly detectCalls?: Array<{ readonly cwd: string }>;
+  /** Holds each lookup after it is counted, to keep a preview in flight. */
+  readonly detectGate?: { wait: Effect.Effect<void> };
   readonly worktreesDirectory?: string;
   readonly previousWorktreesDirectories?: ReadonlyArray<string>;
   readonly projectRoots?: ReadonlyArray<string> | "unavailable";
@@ -50,8 +56,10 @@ function layer(input: {
         detect: (request) =>
           Effect.sync(() => {
             input.detectCalls?.push({ cwd: request.cwd });
-            return null;
-          }),
+          }).pipe(
+            Effect.andThen(Effect.suspend(() => input.detectGate?.wait ?? Effect.void)),
+            Effect.as(null),
+          ),
       }),
     ),
     Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
@@ -87,6 +95,39 @@ describe("ReviewService", () => {
         yield* review.getDiffPreview({ cwd: workspaceRoot });
         assert.strictEqual(detectCalls.length, 3);
       }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, detectCalls })));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps a preview that is still loading when the idle sweep runs", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-workspace-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-base-" });
+      const detectCalls: Array<{ readonly cwd: string }> = [];
+      const detectGate = { wait: Effect.void };
+      yield* Effect.gen(function* () {
+        const review = yield* ReviewService.ReviewService;
+        // A finished preview arms the idle sweep.
+        yield* review.getDiffPreview({ cwd: workspaceRoot, cacheKey: "finished" });
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        detectGate.wait = Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        );
+        const slow = { cwd: workspaceRoot, cacheKey: "slow" };
+        const first = yield* review.getDiffPreview(slow).pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        assert.strictEqual(detectCalls.length, 2);
+        yield* TestClock.adjust(Duration.seconds(5));
+        // Another surface asking during the slow read shares it, and the
+        // result stays cached for a remount.
+        const second = yield* review.getDiffPreview(slow).pipe(Effect.forkChild);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(first);
+        yield* Fiber.join(second);
+        yield* review.getDiffPreview(slow);
+        assert.strictEqual(detectCalls.length, 2);
+      }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, detectCalls, detectGate })));
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
