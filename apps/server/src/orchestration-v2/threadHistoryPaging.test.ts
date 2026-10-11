@@ -175,9 +175,14 @@ describe("threadHistoryPaging", () => {
         { id: "old-run", status: "completed" },
       ],
       checkpoints: [historical, recent],
-      visibleTurnItems: projection.visibleTurnItems.map((row) => ({
+      // The old run only reaches the store's rows above the 75-row window.
+      visibleTurnItems: projection.visibleTurnItems.map((row, index) => ({
         ...row,
-        item: { ...row.item, runId: "recent-run", nodeId: "recent-node" },
+        item: {
+          ...row.item,
+          runId: index < 15 ? "old-run" : "recent-run",
+          nodeId: index < 15 ? "old-node" : "recent-node",
+        },
       })),
     } as unknown as typeof projection;
     const current = buildBoundedThreadProjection({
@@ -185,7 +190,9 @@ describe("threadHistoryPaging", () => {
       snapshotSequence: 1,
       viewportWindow: true,
     });
-    expect(current.projection.checkpoints).toEqual([recent]);
+    // It stays listed for the Diff panel, without its files.
+    const deferredHistorical = { ...historical, files: [], deferredFileCount: 1 };
+    expect(current.projection.checkpoints).toEqual([deferredHistorical, recent]);
     const listed = {
       id: "listed",
       runId: "listed-run",
@@ -201,7 +208,7 @@ describe("threadHistoryPaging", () => {
       snapshotSequence: 1,
       viewportWindow: true,
     });
-    expect(withListed.projection.checkpoints).toEqual([listed, recent]);
+    expect(withListed.projection.checkpoints).toEqual([deferredHistorical, listed, recent]);
     expect(current.projection.visibleTurnItems).toHaveLength(75);
     expect(current.payloadBudgetExceeded).toBe(false);
     const legacy = buildBoundedThreadProjection({

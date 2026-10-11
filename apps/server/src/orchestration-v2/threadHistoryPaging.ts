@@ -481,15 +481,16 @@ export function buildBoundedThreadProjection(input: {
     ...input.projection,
     ...(input.viewportWindow
       ? {
-          // Ancestor nodes can belong to old runs with enormous checkpoints.
-          // Their file lists hydrate with the corresponding history page.
-          // Recent turns outside the window stay listed without their files.
-          checkpoints: input.projection.checkpoints.filter(
-            (checkpoint) =>
-              (checkpoint.runId !== null && retainedRunIds.has(checkpoint.runId)) ||
-              retainedNodeIds.has(checkpoint.nodeId) ||
-              retainedCheckpointIds.has(checkpoint.id) ||
-              checkpoint.deferredFileCount !== undefined,
+          // The store already bounds which turns are listed. Turns outside the
+          // window, including runs that only reach the store's surplus rows,
+          // stay listed without their files until their history page loads.
+          checkpoints: input.projection.checkpoints.map((checkpoint) =>
+            (checkpoint.runId !== null && retainedRunIds.has(checkpoint.runId)) ||
+            retainedNodeIds.has(checkpoint.nodeId) ||
+            retainedCheckpointIds.has(checkpoint.id) ||
+            checkpoint.deferredFileCount !== undefined
+              ? checkpoint
+              : { ...checkpoint, files: [], deferredFileCount: checkpoint.files.length },
           ),
         }
       : {}),
