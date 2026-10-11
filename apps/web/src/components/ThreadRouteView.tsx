@@ -132,9 +132,9 @@ const BOOT_SESSION_WAIT_MS = 750;
  * this view's frame, and the chat view renders after it, so its large first
  * render does not hold back that frame.
  *
- * Desktop renders the cached chat view after that first frame. For web, if
- * the environment's session answers within BOOT_SESSION_WAIT_MS, the
- * screen switches to live data and the chat view renders with it in one
+ * Desktop renders the cached chat view in one task after that first frame.
+ * For web, if the environment's session answers within BOOT_SESSION_WAIT_MS,
+ * the screen switches to live data and the chat view renders with it in one
  * task, with nothing left to redo. Otherwise it renders from the snapshot as
  * a transition, which yields so the connection keeps making progress, and the
  * switch to live data waits until it has painted.
@@ -161,13 +161,14 @@ function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
       release();
       setTimeout(() => setReady(true), 0);
     };
-    const renderFromSnapshot = () => {
+    const renderFromSnapshot = (urgent = false) => {
       if (mounted) return;
       mounted = true;
       stopWaiting();
       // Released after the chat view's own commit paints, or on unmount.
       pendingReleaseRef.current = release;
-      startTransition(() => setReady(true));
+      if (urgent) setReady(true);
+      else startTransition(() => setReady(true));
     };
     const afterFirstFrame = () => {
       const configAtom = sessionConfigAtom();
@@ -175,13 +176,15 @@ function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
       if (appAtomRegistry.get(configAtom) !== null) return renderLive();
       // A desktop backend is still booting. Let the user type from the cached
       // screen immediately; sending still waits for the authenticated session.
-      if (isElectron) return renderFromSnapshot();
+      // Not as a transition: the boot's other updates keep restarting one,
+      // which held the composer back by about 0.9 s.
+      if (isElectron) return renderFromSnapshot(true);
       // A task later, so the requests the session sends as it starts go out
       // before this render instead of queuing behind it.
       const unsubscribe = appAtomRegistry.subscribe(configAtom, (config) => {
         if (config !== null) setTimeout(renderLive, 0);
       });
-      const timeout = setTimeout(renderFromSnapshot, BOOT_SESSION_WAIT_MS);
+      const timeout = setTimeout(() => renderFromSnapshot(), BOOT_SESSION_WAIT_MS);
       stopWaiting = () => {
         unsubscribe();
         clearTimeout(timeout);
