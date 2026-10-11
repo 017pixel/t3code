@@ -1616,6 +1616,9 @@ export const make = (
         ),
       );
 
+    const agentScope = yield* AgentScope;
+    yield* agentScope.trackProcess?.(Number(child.pid)) ?? Effect.void;
+
     const posixOwnershipLedger = new Map<string, AcpOwnedPosixProcess>();
     const posixOwnershipFrontier = new Map<number, AcpOwnedPosixProcess>();
     const posixOwnershipChildQueues = new Map<number, Array<number>>();

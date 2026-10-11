@@ -1412,6 +1412,8 @@ const layerCodexAppServerClientFactoryCommand = (
                   }),
               ),
             );
+            const agentScope = yield* AgentScope;
+            yield* agentScope.trackProcess?.(Number(handle.pid)) ?? Effect.void;
             const context = yield* Layer.build(CodexClient.layerChildProcess(handle, options));
             return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
               Effect.provide(context),
@@ -1533,6 +1535,7 @@ export const layerAppServerClientFactory: Layer.Layer<
                 }),
             ),
           );
+          yield* agentScope.trackProcess?.(Number(handle.pid)) ?? Effect.void;
           const protocolLogger = makeCodexAppServerProtocolLogger({
             nativeEventLogger,
             threadId: input.threadId,

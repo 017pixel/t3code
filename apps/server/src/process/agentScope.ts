@@ -16,6 +16,8 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 
 import * as ProcessRunner from "../processRunner.ts";
+import * as ServerConfig from "../config.ts";
+import * as ProviderProcessLedger from "./ProviderProcessLedger.ts";
 
 /**
  * Agents and terminals share this slice. It sits in app.slice next to the
@@ -315,4 +317,12 @@ export const make = Effect.gen(function* () {
   } satisfies AgentScopeShape;
 });
 
-export const layer = Layer.effect(AgentScope, make).pipe(Layer.provide(ProcessRunner.layer));
+export const layer = Layer.effect(
+  AgentScope,
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const ledger = yield* ProviderProcessLedger.make({ stateDir: config.stateDir });
+    const scope = yield* make;
+    return { ...scope, trackProcess: ledger.track };
+  }),
+).pipe(Layer.provide(ProcessRunner.layer));

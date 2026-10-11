@@ -1,3 +1,4 @@
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -411,6 +412,9 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(
             }),
         ),
       );
+    const processScope = yield* AgentScope;
+    yield* processScope.trackProcess?.(Number(child.pid)) ?? Effect.void;
+
     const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),

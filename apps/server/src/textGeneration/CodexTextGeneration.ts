@@ -1,3 +1,4 @@
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -47,6 +48,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const processScope = yield* AgentScope;
   const serverConfig = yield* Effect.service(ServerConfig.ServerConfig);
   const resolvedEnvironment = environment ?? process.env;
 
@@ -237,6 +239,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
             normalizeCliError("codex", operation, cause, "Failed to spawn Codex CLI process"),
           ),
         );
+
+      yield* processScope.trackProcess?.(Number(child.pid)) ?? Effect.void;
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [

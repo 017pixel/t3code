@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- The SDK exposes a native spawn callback.
+import * as NodeChildProcess from "node:child_process";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
   dynamicToolTitle,
@@ -753,8 +755,9 @@ export const layerQueryRunner: Layer.Layer<
         const isScript =
           binaryPath !== undefined &&
           CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext));
+        const platform = yield* HostProcess.Platform;
         const parentDeathSignal =
-          (yield* HostProcess.Platform) === "linux"
+          platform === "linux"
             ? yield* resolveCommandPath("setpriv", {
                 env: queryOptions.env ?? (yield* HostProcess.Environment),
               }).pipe(
@@ -794,6 +797,23 @@ export const layerQueryRunner: Layer.Layer<
                 pathToClaudeCodeExecutable: launch.command,
                 executableArgs: [...launch.args],
               };
+        const spawnedPids: Array<number> = [];
+        if (agentScope.trackProcess && !options.spawnClaudeCodeProcess) {
+          options.spawnClaudeCodeProcess = ({ command, args, cwd, env, signal }) => {
+            const child = NodeChildProcess.spawn(command, args, {
+              cwd,
+              env,
+              signal,
+              windowsHide: true,
+              stdio: ["pipe", "pipe", "pipe"],
+              detached: platform !== "win32",
+            });
+            child.stderr.setEncoding("utf8");
+            child.stderr.on("data", (data: string) => queryOptions.stderr?.(data));
+            if (child.pid !== undefined) spawnedPids.push(child.pid);
+            return child;
+          };
+        }
         // The CLI is running once query() returns, so it is closed if anything
         // before the session is handed out fails or is interrupted.
         const queryRuntime = yield* Effect.uninterruptibleMask((restore) =>
@@ -804,6 +824,8 @@ export const layerQueryRunner: Layer.Layer<
             Effect.tap((queryRuntime) =>
               restore(
                 Effect.gen(function* () {
+                  for (const pid of spawnedPids)
+                    yield* agentScope.trackProcess?.(pid) ?? Effect.void;
                   if (mcpServers !== undefined) {
                     // A rejected request or a server that failed to connect
                     // leaves the turn without those tools, as `--mcp-config`

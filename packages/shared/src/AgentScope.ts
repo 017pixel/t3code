@@ -38,6 +38,8 @@ export interface AgentScopeShape {
    * it, even when the next session runs without one (Cursor, OpenCode).
    */
   readonly clear: (threadId: string) => Effect.Effect<void>;
+  /** Records a local provider or terminal before it can accept work. */
+  readonly trackProcess?: (pid: number) => Effect.Effect<void>;
 }
 
 export interface AgentScopeCommand {

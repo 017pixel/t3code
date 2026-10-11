@@ -748,6 +748,8 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           ),
         );
 
+      yield* agentScope.trackProcess?.(Number(child.pid)) ?? Effect.void;
+
       const killOpenCodeProcessGroup = (signal: NodeJS.Signals) =>
         hostPlatform === "win32"
           ? child.kill({ killSignal: signal, forceKillAfter: "1 second" }).pipe(Effect.asVoid)

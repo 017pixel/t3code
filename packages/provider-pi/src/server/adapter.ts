@@ -561,6 +561,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         env: launch.env,
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(AgentScope, agentScope),
         Effect.mapError(
           (cause) =>
             new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -3263,7 +3264,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 }
                 return file;
               }),
-            ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+            ).pipe(
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              Effect.provideService(AgentScope, agentScope),
+            );
             const now = yield* DateTime.now;
             return yield* registerThread(
               {
