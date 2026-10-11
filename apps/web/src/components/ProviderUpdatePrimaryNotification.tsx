@@ -45,7 +45,7 @@ type ActiveProviderUpdateToast =
       readonly kind: "update";
       readonly key: string;
       readonly providerInstanceIds: ReadonlySet<ProviderInstanceId>;
-      readonly providerCount: number;
+      providerCount: number;
     };
 
 function ProviderUpdateToastIcon({ provider }: { provider: ServerProvider }) {
@@ -237,7 +237,7 @@ export function ProviderUpdatePrimaryNotification() {
       }
       updateStarted = true;
 
-      const providerCount = oneClickProviders.length;
+      let providerCount = oneClickProviders.length;
       const providerInstanceIds = new Set(oneClickProviders.map((provider) => provider.instanceId));
       const activeUpdate: ActiveProviderUpdateToast = {
         kind: "update",
@@ -260,6 +260,8 @@ export function ProviderUpdatePrimaryNotification() {
             !isProviderUpdateCandidate(current) ||
             !canOneClickUpdateProviderCandidate(current, latestProvidersRef.current)
           ) {
+            providerInstanceIds.delete(provider.instanceId);
+            activeUpdate.providerCount = --providerCount;
             continue;
           }
           if (!readEnvironmentScope(primaryEnvironment.environmentId, AuthProvidersManageScope)) {
@@ -288,6 +290,11 @@ export function ProviderUpdatePrimaryNotification() {
 
         const activeUpdateToast = activeToastRef.current;
         if (activeUpdateToast !== activeUpdate) {
+          return;
+        }
+
+        if (providerCount === 0) {
+          activeToastRef.current = null;
           return;
         }
 

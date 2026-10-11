@@ -110,6 +110,7 @@ describe("cliRelease", () => {
       "http://localhost:4321",
       "http://127.0.0.2:4321",
       "http://[::1]:4321",
+      "file:///tmp/t3-mirror",
     ]) {
       expect(cliReleaseDownloadBaseUrl("1.0.0", origin)).toBe(`${origin}/v1.0.0`);
     }
