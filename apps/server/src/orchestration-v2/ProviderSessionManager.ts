@@ -1732,6 +1732,8 @@ export const layerWithOptions = (
       ): ProviderAdapter.ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const withSessionRead = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          Effect.suspend(() => hostLock.withRead(effect, hostLeases.get(runtime)));
         // Every provider's turn operations pass through here, so this is where they are
         // counted. Only turn starts are timed: until the provider accepts the turn.
         const turnMetrics = (operation: string, model?: string) =>
@@ -1771,11 +1773,10 @@ export const layerWithOptions = (
                   ),
                 ),
                 () =>
-                  hostLock.withRead(
+                  withSessionRead(
                     (compact ? runtime.compactThread!(input) : runtime.startTurn(input)).pipe(
                       turnMetrics("send", input.modelSelection.model),
                     ),
-                    hostLeases.get(runtime),
                   ),
                 (_, exit) =>
                   Exit.isFailure(exit)
@@ -1786,7 +1787,7 @@ export const layerWithOptions = (
                     : Effect.void,
               ),
             ),
-            hostLock.withRead,
+            withSessionRead,
           );
         return {
           ...runtime,
@@ -1803,7 +1804,7 @@ export const layerWithOptions = (
                 providerInstanceId: runtime.instanceId,
               }),
             ).pipe(
-              Effect.andThen(hostLock.withRead(runtime.ensureThread(input))),
+              Effect.andThen(withSessionRead(runtime.ensureThread(input))),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
                   providerSessionId,
@@ -1819,7 +1820,7 @@ export const layerWithOptions = (
           resumeThread: (input) => {
             const threadId = input.threadId ?? input.providerThread.appThreadId;
             if (threadId === null || threadId === undefined) {
-              return hostLock.withRead(runtime.resumeThread(input));
+              return withSessionRead(runtime.resumeThread(input));
             }
             const providerThreadKey = providerThreadLoadKey({
               providerThread: input.providerThread,
@@ -1849,7 +1850,7 @@ export const layerWithOptions = (
               Effect.flatMap((loaded) =>
                 loaded
                   ? Effect.succeed(input.providerThread)
-                  : hostLock.withRead(runtime.resumeThread(input)),
+                  : withSessionRead(runtime.resumeThread(input)),
               ),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
@@ -1877,7 +1878,7 @@ export const layerWithOptions = (
                 providerInstanceId: runtime.instanceId,
               }),
             ).pipe(
-              Effect.andThen(hostLock.withRead(runtime.forkThread(input))),
+              Effect.andThen(withSessionRead(runtime.forkThread(input))),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
                   providerSessionId,
@@ -1894,13 +1895,13 @@ export const layerWithOptions = (
                 }),
               ),
             ),
-          readThreadSnapshot: (input) => hostLock.withRead(runtime.readThreadSnapshot(input)),
-          rollbackThread: (input) => hostLock.withRead(runtime.rollbackThread(input)),
+          readThreadSnapshot: (input) => withSessionRead(runtime.readThreadSnapshot(input)),
+          rollbackThread: (input) => withSessionRead(runtime.rollbackThread(input)),
           ...(runtime.injectHistory === undefined
             ? {}
             : {
                 injectHistory: (input: Parameters<NonNullable<typeof runtime.injectHistory>>[0]) =>
-                  hostLock.withRead(runtime.injectHistory!(input)),
+                  withSessionRead(runtime.injectHistory!(input)),
               }),
           startTurn: (input) => startTurn(input),
           ...(runtime.compactThread === undefined
@@ -1911,26 +1912,20 @@ export const layerWithOptions = (
               }),
           steerTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
-              Effect.andThen(
-                hostLock
-                  .withRead(runtime.steerTurn(input), hostLeases.get(runtime))
-                  .pipe(turnMetrics("steer")),
-              ),
+              Effect.andThen(withSessionRead(runtime.steerTurn(input)).pipe(turnMetrics("steer"))),
             ),
           interruptTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(
-                hostLock
-                  .withRead(runtime.interruptTurn(input), hostLeases.get(runtime))
-                  .pipe(turnMetrics("interrupt")),
+                withSessionRead(runtime.interruptTurn(input)).pipe(turnMetrics("interrupt")),
               ),
             ),
           respondToRuntimeRequest: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(
-                hostLock
-                  .withRead(runtime.respondToRuntimeRequest(input), hostLeases.get(runtime))
-                  .pipe(turnMetrics("runtime-request-response")),
+                withSessionRead(runtime.respondToRuntimeRequest(input)).pipe(
+                  turnMetrics("runtime-request-response"),
+                ),
               ),
             ),
         };
