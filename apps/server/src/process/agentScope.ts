@@ -17,6 +17,7 @@ import * as Path from "effect/Path";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerConfig from "../config.ts";
+import * as HostLock from "../provider/ProviderMaintenanceHostLock.ts";
 import * as ProviderProcessLedger from "./ProviderProcessLedger.ts";
 
 /**
@@ -321,7 +322,10 @@ export const layer = Layer.effect(
   AgentScope,
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
-    const ledger = yield* ProviderProcessLedger.make({ stateDir: config.stateDir });
+    const ledger = yield* ProviderProcessLedger.make({
+      stateDir: config.stateDir,
+      installLeaseDirectory: HostLock.userDirectory(),
+    });
     const scope = yield* make;
     return { ...scope, trackProcess: ledger.track };
   }),

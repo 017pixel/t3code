@@ -10,6 +10,8 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import { installLeasePath } from "../provider/ProviderMaintenanceHostLock.ts";
+
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
 const Identity = Schema.Struct({
@@ -192,6 +194,8 @@ export const make = Effect.fn("ProviderProcessLedger.make")(function* (input: {
   readonly stateDir: string;
   readonly ownerPid?: number;
   readonly controller?: ProcessController;
+  /** Host install lease directory. Its supervisor's process group is never stopped. */
+  readonly installLeaseDirectory?: string;
 }) {
   const platform = yield* HostProcess.Platform;
   const environment = yield* HostProcess.Environment;
@@ -247,6 +251,36 @@ export const make = Effect.fn("ProviderProcessLedger.make")(function* (input: {
       if ((cause as NodeJS.ErrnoException).code !== "ESRCH") throw cause;
     }
   };
+  // A server started from a provider or terminal can descend from it with its own
+  // detached install supervisor. Stopping that group would corrupt a shared CLI.
+  const withoutInstaller = (entry: Entry, table: ReadonlyArray<ObservedProcess>): Entry => {
+    if (input.installLeaseDirectory === undefined) return entry;
+    let leader: number;
+    try {
+      leader = Number(NodeFS.readFileSync(installLeasePath(input.installLeaseDirectory), "utf8"));
+    } catch {
+      return entry;
+    }
+    if (!Number.isSafeInteger(leader) || leader <= 0) return entry;
+    // Windows has no process groups, so its installer is found through parents.
+    const installer = new Set([leader]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const p of table) {
+        if (!installer.has(p.pid) && (p.pgid === leader || installer.has(p.ppid))) {
+          installer.add(p.pid);
+          changed = true;
+        }
+      }
+    }
+    return {
+      ...entry,
+      processes: entry.processes.filter(
+        (p) => !table.some((observed) => installer.has(observed.pid) && same(p, observed)),
+      ),
+    };
+  };
   const reap = (file: string, entry: Entry) =>
     Effect.gen(function* () {
       let table = yield* Effect.promise(async () => controller.snapshot());
@@ -260,7 +294,7 @@ export const make = Effect.fn("ProviderProcessLedger.make")(function* (input: {
       ) {
         throw new Error("Could not verify the recorded provider owner");
       }
-      let next = discover(entry, table);
+      let next = withoutInstaller(discover(entry, table), table);
       if (platform !== "win32") {
         // Freeze to a fixed point. A child may fork while its parent is being stopped.
         const stopped = new Set<string>();
@@ -274,7 +308,7 @@ export const make = Effect.fn("ProviderProcessLedger.make")(function* (input: {
             stopped.add(`${p.pid}:${p.startTime}`);
           }
           table = yield* Effect.promise(async () => controller.snapshot());
-          next = discover(next, table);
+          next = withoutInstaller(discover(next, table), table);
           if (attempt === 99) throw new Error("Provider process tree did not stop for cleanup");
         }
       }
@@ -306,7 +340,16 @@ export const make = Effect.fn("ProviderProcessLedger.make")(function* (input: {
   for (const name of NodeFS.readdirSync(directory)) {
     if (!/^[\da-f-]+\.json$/.test(name)) continue;
     const file = NodePath.join(directory, name);
-    const entry = decodeEntry(NodeFS.readFileSync(file, "utf8"));
+    let entry: Entry;
+    try {
+      entry = decodeEntry(NodeFS.readFileSync(file, "utf8"));
+    } catch (cause) {
+      // Records are not fsynced, so power loss can leave an empty one. It names
+      // no process to reap, and keeping it would fail every later startup.
+      yield* Effect.logWarning("Discarding an unreadable provider process record", { cause });
+      NodeFS.rmSync(file, { force: true });
+      continue;
+    }
     if (entry.hostname !== hostname || entry.stateDir !== input.stateDir) {
       NodeFS.rmSync(file, { force: true });
       continue;

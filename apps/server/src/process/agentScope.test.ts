@@ -289,6 +289,48 @@ describe("provider process restart ownership", () => {
         }),
       ),
   );
+  it.effect("never stops a nested server's install supervisor or its installer", () =>
+    scenario(({ directory, processes, signals, controller }) =>
+      Effect.gen(function* () {
+        // A server launched from the provider started an install that outlives it.
+        processes.set(70, { pid: 70, ppid: 20, pgid: 70, startTime: "supervisor", zombie: false });
+        processes.set(71, { pid: 71, ppid: 70, pgid: 70, startTime: "installer", zombie: false });
+        yield* record(directory, controller);
+        processes.delete(10);
+        processes.set(70, { ...processes.get(70)!, ppid: 1 });
+        const leases = NodePath.join(directory, "leases");
+        NodeFS.mkdirSync(leases);
+        NodeFS.writeFileSync(NodePath.join(leases, "install.json"), "70");
+        yield* ProviderProcessLedger.make({
+          stateDir: directory,
+          ownerPid: 90,
+          controller,
+          installLeaseDirectory: leases,
+        }).pipe(Effect.scoped);
+        expect(processes.has(20)).toBe(false);
+        expect(processes.has(70)).toBe(true);
+        expect(processes.has(71)).toBe(true);
+        expect(signals.some((s) => /^(70|71):/.test(s))).toBe(false);
+      }),
+    ),
+  );
+  it.effect("starts after power loss leaves an empty process record", () =>
+    scenario(({ directory, processes, signals, controller }) =>
+      Effect.gen(function* () {
+        yield* record(directory, controller);
+        processes.delete(10);
+        const records = NodePath.join(directory, "provider-processes");
+        NodeFS.writeFileSync(
+          NodePath.join(records, "00000000-0000-0000-0000-000000000000-1.json"),
+          "",
+        );
+        yield* restart(directory, controller);
+        expect(processes.has(20)).toBe(false);
+        expect(signals).toContain("20:SIGKILL");
+        expect(NodeFS.readdirSync(records)).toEqual([]);
+      }),
+    ),
+  );
   it.effect("rejects copied state without signalling the original environment", () =>
     scenario(({ directory, processes, signals, controller }) =>
       Effect.gen(function* () {
