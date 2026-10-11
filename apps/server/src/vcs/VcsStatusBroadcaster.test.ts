@@ -208,6 +208,15 @@ describe("VcsStatusBroadcaster", () => {
     };
     return Effect.gen(function* () {
       const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const activeSnapshot = yield* Deferred.make<void>();
+      const activeStream = yield* broadcaster
+        .streamStatus({ cwd: "/active", includeRemote: false })
+        .pipe(
+          Stream.runForEach(() => Deferred.succeed(activeSnapshot, undefined)),
+          Effect.forkScoped,
+        );
+      yield* Deferred.await(activeSnapshot);
+      yield* broadcaster.getStatus({ cwd: "/active" });
       for (let index = 0; index < 300; index++) {
         yield* broadcaster.getStatus({ cwd: `/repo-${index}` });
       }
@@ -218,6 +227,18 @@ describe("VcsStatusBroadcaster", () => {
       const reloaded = yield* broadcaster.getStatus({ cwd: "/repo-0" });
       assert.equal(reloaded.refName, "fresh-branch");
       assert.equal(state.localStatusCalls, reads + 1);
+      state.currentRemoteStatus = remoteStatusWithPr;
+      assert.deepStrictEqual(
+        yield* broadcaster.refreshPullRequestStatus("/active"),
+        remoteStatusWithPr,
+      );
+      yield* Fiber.interrupt(activeStream);
+      for (let index = 0; index < 300; index++) {
+        yield* broadcaster.getStatus({ cwd: `/later-${index}` });
+      }
+      const remoteReads = state.remoteStatusCalls;
+      yield* broadcaster.getStatus({ cwd: "/active" });
+      assert.equal(state.remoteStatusCalls, remoteReads + 1);
     }).pipe(Effect.provide(layerTestFor(state)));
   });
 

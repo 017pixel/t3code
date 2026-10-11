@@ -220,15 +220,23 @@ function cacheStatus(
   cache: ReadonlyMap<string, CachedVcsStatus>,
   cwd: string,
   status: CachedVcsStatus,
+  activeCwds: ReadonlyMap<string, number>,
 ) {
   const next = new Map(cache);
   next.delete(cwd);
   next.set(cwd, status);
-  if (next.size > MAX_CACHED_WORKSPACES) {
-    const oldest = next.keys().next().value;
-    if (oldest !== undefined) next.delete(oldest);
+  return trimInactiveStatuses(next, activeCwds);
+}
+
+function trimInactiveStatuses(
+  cache: Map<string, CachedVcsStatus>,
+  activeCwds: ReadonlyMap<string, number>,
+) {
+  for (const cwd of cache.keys()) {
+    if (cache.size <= MAX_CACHED_WORKSPACES) break;
+    if (!activeCwds.has(cwd)) cache.delete(cwd);
   }
-  return next;
+  return cache;
 }
 
 const normalizeCwd = (cwd: string) =>
@@ -251,6 +259,7 @@ export const make = Effect.gen(function* () {
     Scope.close(scope, Exit.void),
   );
   const cacheRef = yield* Ref.make(new Map<string, CachedVcsStatus>());
+  const activeCwdsRef = yield* Ref.make(new Map<string, number>());
   // One permit per cwd for remote reads that write the cache. Without it a
   // periodic poll that started before `gh pr create` can finish after the
   // turn-end refresh and overwrite the fresh PR with its stale `pr: null`.
@@ -270,15 +279,21 @@ export const make = Effect.gen(function* () {
       const nextLocal = {
         value: local,
       } satisfies CachedValue<VcsStatusLocalResult>;
+      const activeCwds = yield* Ref.get(activeCwdsRef);
       const shouldPublish = yield* Ref.modify(cacheRef, (cache) => {
         const previous = cache.get(cwd) ?? { local: null, remote: null };
         if (previous.local !== null && sameLocalStatus(previous.local.value, local)) {
           return [false, cache] as const;
         }
-        const nextCache = cacheStatus(cache, cwd, {
-          ...previous,
-          local: nextLocal,
-        });
+        const nextCache = cacheStatus(
+          cache,
+          cwd,
+          {
+            ...previous,
+            local: nextLocal,
+          },
+          activeCwds,
+        );
         return [true, nextCache] as const;
       });
 
@@ -301,15 +316,21 @@ export const make = Effect.gen(function* () {
       const nextRemote = {
         value: remote,
       } satisfies CachedValue<VcsStatusRemoteResult | null>;
+      const activeCwds = yield* Ref.get(activeCwdsRef);
       const shouldPublish = yield* Ref.modify(cacheRef, (cache) => {
         const previous = cache.get(cwd) ?? { local: null, remote: null };
         if (previous.remote !== null && sameRemoteStatus(previous.remote.value, remote)) {
           return [false, cache] as const;
         }
-        const nextCache = cacheStatus(cache, cwd, {
-          ...previous,
-          remote: nextRemote,
-        });
+        const nextCache = cacheStatus(
+          cache,
+          cwd,
+          {
+            ...previous,
+            remote: nextRemote,
+          },
+          activeCwds,
+        );
         return [true, nextCache] as const;
       });
 
@@ -339,6 +360,7 @@ export const make = Effect.gen(function* () {
     const nextRemote = {
       value: remote,
     } satisfies CachedValue<VcsStatusRemoteResult | null>;
+    const activeCwds = yield* Ref.get(activeCwdsRef);
     const shouldPublish = yield* Ref.modify(cacheRef, (cache) => {
       const previous = cache.get(cwd) ?? { local: null, remote: null };
       if (
@@ -349,10 +371,15 @@ export const make = Effect.gen(function* () {
       ) {
         return [false, cache] as const;
       }
-      const nextCache = cacheStatus(cache, cwd, {
-        local: nextLocal,
-        remote: nextRemote,
-      });
+      const nextCache = cacheStatus(
+        cache,
+        cwd,
+        {
+          local: nextLocal,
+          remote: nextRemote,
+        },
+        activeCwds,
+      );
       return [true, nextCache] as const;
     });
 
@@ -727,6 +754,27 @@ export const make = Effect.gen(function* () {
     Stream.unwrap(
       Effect.gen(function* () {
         const cwd = yield* withFileSystem(normalizeCwd(input.cwd));
+        // A stream still needs its remote cache for turn-end PR refreshes.
+        yield* Effect.acquireRelease(
+          Ref.update(activeCwdsRef, (active) =>
+            new Map(active).set(cwd, (active.get(cwd) ?? 0) + 1),
+          ),
+          () =>
+            Effect.gen(function* () {
+              const active = yield* Ref.updateAndGet(activeCwdsRef, (current) => {
+                const next = new Map(current);
+                const count = next.get(cwd) ?? 0;
+                if (count <= 1) next.delete(cwd);
+                else next.set(cwd, count - 1);
+                return next;
+              });
+              yield* Ref.update(cacheRef, (cache) =>
+                cache.size <= MAX_CACHED_WORKSPACES
+                  ? cache
+                  : trimInactiveStatuses(new Map(cache), active),
+              );
+            }),
+        );
         const subscription = yield* PubSub.subscribe(changesPubSub);
         const initialLocal = yield* getOrLoadLocalStatus(cwd);
         const cachedStatus = yield* getCachedStatus(cwd);
