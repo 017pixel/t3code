@@ -15,6 +15,7 @@ import { ChildProcessSpawner } from "effect/process";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProviderProcessLedger from "./ProviderProcessLedger.ts";
+import * as OwnedProcesses from "./ownedProcesses.ts";
 import { SERVICE_LAUNCHER_CONTEXT_ENV } from "../cloud/serviceProtocol.ts";
 import { agentSliceMemoryLimits, classifyScope, make, type ScopeState } from "./agentScope.ts";
 
@@ -523,6 +524,20 @@ finish();
             }),
           );
           yield* handoff ? second.pipe(Effect.scoped) : second;
+          if (handoff) {
+            yield* Effect.promise(() =>
+              OwnedProcesses.make({
+                stateDir: NodePath.join(directory, "second"),
+                ownerPid: 60,
+                controller,
+                installLeaseDirectory: leases,
+                platform,
+                environment: {},
+                hostname: NodeOS.hostname(),
+              }),
+            );
+            expect(NodeFS.readdirSync(NodePath.join(leases, "servers"))).toHaveLength(1);
+          }
           processes.delete(10);
           yield* ProviderProcessLedger.make({
             stateDir: directory,
@@ -537,6 +552,140 @@ finish();
         }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, platform)),
       ),
   );
+  it.effect.each(["gone", "reused", "zombie"] as const)(
+    "prunes managed server registrations whose owner is %s without dropping live servers",
+    (mode) =>
+      scenario(({ directory, processes, signals, controller }) =>
+        Effect.gen(function* () {
+          const leases = NodePath.join(directory, "leases");
+          processes.set(60, { pid: 60, ppid: 20, pgid: 60, startTime: "launcher", zombie: false });
+          const publish = (pid: number) =>
+            Effect.promise(() =>
+              OwnedProcesses.make({
+                stateDir: NodePath.join(directory, String(pid)),
+                ownerPid: pid,
+                controller,
+                installLeaseDirectory: leases,
+                registerServer: true,
+                platform: "linux",
+                environment: { [SERVICE_LAUNCHER_CONTEXT_ENV]: "managed" },
+                hostname: "test-host",
+              }),
+            );
+          processes.set(70, {
+            pid: 70,
+            ppid: 60,
+            pgid: 60,
+            startTime: "live-server",
+            zombie: false,
+          });
+          const live = yield* publish(70);
+          const liveRegistration = NodePath.join(
+            leases,
+            "servers",
+            NodeFS.readdirSync(NodePath.join(leases, "servers"))[0]!,
+          );
+          for (let generation = 0; generation < 5; generation++) {
+            processes.set(80, {
+              pid: 80,
+              ppid: 60,
+              pgid: 60,
+              startTime: String(generation),
+              zombie: false,
+            });
+            const next = yield* publish(80);
+            expect(NodeFS.readdirSync(NodePath.join(leases, "servers"))).toHaveLength(2);
+            expect(NodeFS.existsSync(liveRegistration)).toBe(true);
+            next.release();
+            if (mode === "gone") processes.delete(80);
+            else
+              processes.set(80, {
+                ...processes.get(80)!,
+                startTime: "reused",
+                zombie: mode === "zombie",
+              });
+          }
+          // A launcher handoff retains protection until the replacement publishes.
+          yield* publish(90);
+          expect(NodeFS.readdirSync(NodePath.join(leases, "servers"))).toHaveLength(2);
+          expect(signals).toEqual([]);
+          live.release();
+        }),
+      ),
+  );
+
+  it.effect(
+    "retains a server registration when its live owner is missing from the process query",
+    () =>
+      scenario(({ directory, processes, controller }) =>
+        Effect.gen(function* () {
+          const leases = NodePath.join(directory, "leases");
+          const input = {
+            stateDir: directory,
+            ownerPid: 10,
+            controller,
+            installLeaseDirectory: leases,
+          };
+          const server = yield* ProviderProcessLedger.make(input);
+          yield* ProviderProcessLedger.make({
+            ...input,
+            stateDir: NodePath.join(directory, "second"),
+            ownerPid: 90,
+            controller: {
+              ...controller,
+              snapshot: () => [...processes.values()].filter((p) => p.pid !== 10),
+            },
+          });
+          expect(NodeFS.readdirSync(NodePath.join(leases, "servers"))).toHaveLength(2);
+          yield* server.track(20);
+        }).pipe(Effect.scoped),
+      ),
+  );
+
+  it.effect("does not delete a server registration published after the cleanup process query", () =>
+    scenario(({ directory, processes, controller }) =>
+      Effect.gen(function* () {
+        const leases = NodePath.join(directory, "leases");
+        const registration = NodePath.join(leases, "servers", "new-server.json");
+        processes.set(70, { pid: 70, ppid: 20, pgid: 70, startTime: "old-pid", zombie: false });
+        let publishing = 0;
+        const ledger = yield* ProviderProcessLedger.make({
+          stateDir: directory,
+          ownerPid: 10,
+          installLeaseDirectory: leases,
+          controller: {
+            ...controller,
+            snapshot: () => {
+              const table = [...processes.values()];
+              if (publishing > 0 && --publishing === 0) {
+                processes.set(70, { ...processes.get(70)!, startTime: "new-server" });
+                NodeFS.writeFileSync(
+                  registration,
+                  JSON.stringify({
+                    version: 1,
+                    instanceId: "new",
+                    hostname: NodeOS.hostname(),
+                    stateDir: NodePath.join(directory, "second"),
+                    owner: { pid: 70, startTime: "new-server" },
+                    processes: [],
+                  }),
+                );
+              }
+              return table;
+            },
+          },
+        });
+        const records = NodePath.join(directory, "provider-processes");
+        NodeFS.rmSync(records, { recursive: true });
+        NodeFS.writeFileSync(records, "unwritable");
+        publishing = 2;
+        expect((yield* ledger.track(20).pipe(Effect.exit))._tag).toBe("Failure");
+        expect(processes.has(70)).toBe(true);
+        expect(NodeFS.existsSync(registration)).toBe(true);
+      }).pipe(Effect.scoped),
+    ),
+  );
+
   it.effect("starts after power loss leaves an empty process record", () =>
     scenario(({ directory, processes, signals, controller }) =>
       Effect.gen(function* () {

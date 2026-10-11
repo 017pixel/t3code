@@ -295,6 +295,42 @@ export async function make(input: {
     if (registration !== undefined && launcher === undefined)
       NodeFS.rmSync(registration, { force: true });
   };
+  const pruneServers = async () => {
+    if (servers === undefined) return;
+    const records = NodeFS.readdirSync(servers).flatMap((name) => {
+      if (!name.endsWith(".json")) return [];
+      const file = NodePath.join(servers, name);
+      try {
+        return [{ file, entry: decodeEntry(NodeFS.readFileSync(file, "utf8")) }];
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw cause;
+      }
+    });
+    if (records.every(({ entry }) => entry.instanceId === instanceId)) return;
+    // Read records before sampling: a newer registration must not be judged
+    // against a process table taken before its server was born.
+    const table = await controller.snapshot();
+    const live = (p: Identity) => table.some((observed) => same(p, observed) && !observed.zombie);
+    const unknown = (p: Identity) =>
+      !table.some((observed) => observed.pid === p.pid) && controller.exists(p.pid);
+    const protectedLaunchers = records.flatMap(({ entry }) =>
+      entry.hostname === hostname && (live(entry.owner) || unknown(entry.owner))
+        ? entry.processes.filter(live)
+        : [],
+    );
+    for (const { file, entry } of records) {
+      if (entry.hostname !== hostname || live(entry.owner) || unknown(entry.owner)) continue;
+      if (entry.processes.some(unknown)) continue;
+      const managed = entry.processes.filter(live);
+      // Keep one handoff record until a replacement protects the live launcher.
+      if (managed.some((p) => !protectedLaunchers.some((other) => same(p, other)))) {
+        protectedLaunchers.push(...managed);
+        continue;
+      }
+      NodeFS.rmSync(file, { force: true });
+    }
+  };
   const survivors = (entry: Entry, table: ReadonlyArray<ObservedProcess>) =>
     table.filter((p) => !p.zombie && entry.processes.some((owned) => same(owned, p)));
   const refresh = async () => {
@@ -394,7 +430,6 @@ export async function make(input: {
           controller.exists(server.owner.pid)
         )
           throw new Error("Could not verify a live server during provider cleanup");
-        else NodeFS.rmSync(NodePath.join(servers, name), { force: true });
       }
     }
     const protectedPids = new Set(owners.map((p) => p.pid));
@@ -466,6 +501,7 @@ export async function make(input: {
   };
   // Await every reap before exposing the spawn hook, and therefore before restart recovery launches work.
   try {
+    await pruneServers();
     for (const name of NodeFS.readdirSync(directory)) {
       if (!/^[\da-f-]+\.json$/.test(name)) continue;
       const file = NodePath.join(directory, name);
