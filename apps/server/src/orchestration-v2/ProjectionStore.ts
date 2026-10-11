@@ -3319,8 +3319,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 OR run_id IN (SELECT value FROM json_each(${cohortRunIds}))
                 OR node_id IN (SELECT value FROM json_each(${checkpointNodeIds}))
                 -- A viewport keeps the runs of the latest user turns listed for
-                -- the Diff panel and Review, bounded like a turn-aligned page:
-                -- wake-up runs ride along without using up the turn budget.
+                -- the Diff panel and Review, bounded like a turn-aligned window:
+                -- from the run of the twelfth latest user turn (a page plus
+                -- two), or every run when there are fewer. Wake-up runs ride
+                -- along without using up the turn budget.
                 -- Their file lists arrive with the rows' history page.
                 OR (${window.deferHistoricalSupport ? 1 : 0} = 1 AND app_run_ordinal >= (
                   WITH turn_starts AS (
@@ -3337,17 +3339,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                         AND run.status = 'cancelled'
                       )
                     ORDER BY item.ordinal DESC
-                    LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS}
+                    LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
                   )
                   SELECT CASE
-                    WHEN TOTAL(by_user) = 0 AND COUNT(*) < ${THREAD_HISTORY_MAX_RAW_TURNS} THEN NULL
+                    WHEN TOTAL(by_user) = 0 AND COUNT(*) < ${THREAD_HISTORY_MAX_RAW_TURNS + 2} THEN NULL
                     ELSE MAX(
                       COALESCE((
                         SELECT run_ordinal FROM turn_starts WHERE by_user
                         ORDER BY run_ordinal DESC
-                        LIMIT 1 OFFSET ${THREAD_HISTORY_PAGE_POLICY.maxUserTurns - 1}
+                        LIMIT 1 OFFSET ${THREAD_HISTORY_PAGE_POLICY.maxUserTurns + 1}
                       ), 0),
-                      CASE WHEN COUNT(*) >= ${THREAD_HISTORY_MAX_RAW_TURNS} THEN MIN(run_ordinal) ELSE 0 END
+                      CASE WHEN COUNT(*) >= ${THREAD_HISTORY_MAX_RAW_TURNS + 2} THEN MIN(run_ordinal) ELSE 0 END
                     )
                   END
                   FROM turn_starts

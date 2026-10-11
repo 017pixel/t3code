@@ -1243,7 +1243,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       }),
   );
 
-  it.effect("viewport snapshots list the runs of the last 10 user turns", () =>
+  it.effect("viewport snapshots list the runs a turn-aligned window covers", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
       const now = yield* DateTime.now;
@@ -1390,14 +1390,15 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         rowLimit: 1,
         deferHistoricalSupport: true,
       });
-      // The tenth latest user turn is run 5; every run from there on is listed.
+      // Twelve user turns are not more than a turn-aligned window holds, so
+      // every run is listed, as a turn-aligned snapshot lists them.
       const listed = viewport.projection.checkpoints.map((checkpoint) => [
         checkpoint.appRunOrdinal ?? 0,
         checkpoint.deferredFileCount,
       ]);
       assert.deepEqual(
         listed.toSorted((left, right) => Number(left[0]) - Number(right[0])),
-        Array.from({ length: 20 }, (_, index) => [index + 5, index + 5 === 24 ? undefined : 1]),
+        Array.from({ length: 24 }, (_, index) => [index + 1, index + 1 === 24 ? undefined : 1]),
       );
     }),
   );
