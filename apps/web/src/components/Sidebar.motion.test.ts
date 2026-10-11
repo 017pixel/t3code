@@ -553,6 +553,72 @@ describe("sidebar list motion", () => {
     expectMove(row, -110);
   });
 
+  it("crossfades a row that changes variant instead of sliding it", () => {
+    const card = new TestRow("card");
+    const other = new TestRow("other");
+    const header = new TestRow("Settled", 32);
+    const slim = new TestRow("slim", 36);
+    for (const [node, variant] of [
+      [card, "card"],
+      [slim, "slim"],
+    ] as const) {
+      node.setAttribute("data-thread-item", "t");
+      node.setAttribute("data-sidebar-row-variant", variant);
+    }
+    const { motion, layout } = fixture([card, other, header]);
+    motion.update(true);
+    layout([other, header, slim]);
+    motion.update(true);
+    expect(card.clones).toHaveLength(1);
+    expect(card.clones[0]!.style.top).toBe("8px");
+    expect(slim.animate).toHaveBeenLastCalledWith(
+      [
+        { opacity: 0, transform: "translateY(83px)" },
+        { opacity: 1, transform: "translateY(0px)" },
+      ],
+      { duration: 150, easing: "ease-out" },
+    );
+    expectMove(header, 83);
+  });
+
+  it("fades a variant change out as the row that was on screen", () => {
+    let notify: MutationCallback = () => {};
+    vi.stubGlobal(
+      "MutationObserver",
+      class {
+        constructor(callback: MutationCallback) {
+          notify = callback;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const slot = new TestRow("slot");
+    const card = new TestRow("card");
+    const slim = new TestRow("slim", 36);
+    const other = new TestRow("other");
+    for (const [node, variant] of [
+      [slot, "card"],
+      [card, "card"],
+      [slim, "slim"],
+    ] as const) {
+      node.setAttribute("data-thread-item", "t");
+      node.setAttribute("data-sidebar-row-variant", variant);
+    }
+    const { motion, layout } = fixture([slot, other]);
+    motion.update(true);
+    // The observer swaps the measured slot for its rendered card.
+    layout([card, other]);
+    notify(
+      [{ addedNodes: [card], removedNodes: [slot] }] as unknown as MutationRecord[],
+      {} as MutationObserver,
+    );
+    layout([other, slim]);
+    motion.update(true);
+    expect(slot.clones).toHaveLength(0);
+    expect(card.clones).toHaveLength(1);
+  });
+
   it("skips fades when a large list change would clone too many rows", () => {
     const rows = Array.from({ length: 41 }, (_, index) => new TestRow(`row-${index}`));
     const { motion, layout, parent } = fixture(rows);

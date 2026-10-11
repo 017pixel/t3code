@@ -113,11 +113,16 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
       );
     }
     if (selective && positions) {
-      // A virtual slot and its rendered row share identity for motion.
+      // A virtual slot and its rendered row share identity for motion. A row
+      // that changed variant does not: the old one fades out as it was last
+      // rendered and the new one fades in at its slot.
       const nodesByKey = new Map(nodes.map((node) => [rowKey(node), node]));
-      const live = (old: RowPosition) =>
-        nodesByKey.get(old.key) ??
-        (typeof old.key === "string" ? rendered.get(old.key) : undefined);
+      const live = (old: RowPosition) => {
+        const current = nodesByKey.get(old.key);
+        if (current !== undefined && rowShape(current) === old.shape) return current;
+        const last = typeof old.key === "string" ? rendered.get(old.key) : undefined;
+        return last !== undefined && rowShape(last) === old.shape ? last : undefined;
+      };
       positions = new Map([...positions].map(([node, old]) => [live(old) ?? node, old]));
     }
     return next;
