@@ -496,6 +496,42 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect("removes a cache write that lands after a deletion", () =>
+    Effect.gen(function* () {
+      const writing = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const removed = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeHarness({
+            cached: BASE_PROJECTION,
+            saveThread: (_environmentId, snapshot) =>
+              snapshot.snapshotSequence === 8
+                ? Deferred.succeed(writing, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                : Effect.void,
+          });
+          yield* Queue.offer(h.inputs, titleUpdated("Before deletion", 8));
+          yield* awaitThreadState(
+            h.observed,
+            (value) => Option.getOrNull(value.data)?.thread.title === "Before deletion",
+          );
+          yield* TestClock.adjust("500 millis");
+          // The write passed the deleted check and waits, like web's idle wait.
+          yield* Deferred.await(writing);
+          yield* Queue.offer(h.inputs, deleted(9));
+          yield* awaitThreadState(h.observed, (value) => value.status === "deleted");
+          expect(yield* Ref.get(h.removedThreads)).toEqual([THREAD_ID]);
+          yield* Deferred.succeed(release, undefined);
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            if ((yield* Ref.get(h.removedThreads)).length >= 2) break;
+            yield* Effect.yieldNow;
+          }
+          return h.removedThreads;
+        }),
+      );
+      expect(yield* Ref.get(removed)).toEqual([THREAD_ID, THREAD_ID]);
+    }),
+  );
+
   it.effect("does not resume past a canceled event whose data was not applied", () =>
     Effect.gen(function* () {
       const resumeCache: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]> = {
