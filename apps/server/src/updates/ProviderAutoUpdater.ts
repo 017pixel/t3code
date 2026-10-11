@@ -94,7 +94,7 @@ export const layer = Layer.effectDiscard(
         // Installed after the window releases admission: the runner first drains host
         // leases, and a session holding one may still need admission to launch its CLI.
         yield* runner
-          .updateProvider({ ...picked.value, instanceId, quiet: true, background: true })
+          .updateProvider({ ...picked.value, instanceId, quiet: true, origin: "background" })
           .pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("Background provider update failed", { instanceId, cause }),

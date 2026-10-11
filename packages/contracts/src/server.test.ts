@@ -31,6 +31,24 @@ const baseProviderSnapshot = {
 };
 
 describe("ServerProvider", () => {
+  it.each([undefined, "manual", "background"])(
+    "preserves update origin %s across the wire",
+    (origin) => {
+      const parsed = decodeServerProvider({
+        ...baseProviderSnapshot,
+        updateState: {
+          status: "failed",
+          ...(origin === undefined ? {} : { origin }),
+          startedAt: null,
+          finishedAt: null,
+          message: "Installer failed",
+          output: null,
+        },
+      });
+      expect(parsed.updateState?.origin).toBe(origin);
+      expect(parsed.updateState?.message).toBe("Installer failed");
+    },
+  );
   it.each([undefined, true, false])("decodes workspace command discovery pending=%s", (pending) => {
     const workspace = {
       cwd: "/workspace/project",

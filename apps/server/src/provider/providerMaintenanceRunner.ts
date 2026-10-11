@@ -69,8 +69,8 @@ export interface ProviderMaintenanceRunnerShape {
           readonly targetVersion?: string | undefined;
           /** Skips installer output progress, for background installs nobody watches. */
           readonly quiet?: boolean | undefined;
-          /** Requires proven ownership and pins the checked release when supported. */
-          readonly background?: boolean | undefined;
+          /** Background installs require proven ownership and pin the checked release. */
+          readonly origin?: ServerProviderUpdateState["origin"];
         },
   ) => Effect.Effect<ServerProviderUpdatedPayload, ServerProviderUpdateError>;
 }
@@ -431,7 +431,8 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         : (target.instanceId ?? defaultInstanceIdForDriver(provider));
     const targetVersion = typeof target === "string" ? undefined : target.targetVersion;
     const quiet = typeof target !== "string" && target.quiet === true;
-    const background = typeof target !== "string" && target.background === true;
+    const origin = typeof target === "string" ? "manual" : (target.origin ?? "manual");
+    const background = origin === "background";
     const targetKey = `instance:${instanceId}`;
     const capabilities = yield* providerRegistry.getProviderMaintenanceCapabilitiesForInstance(
       instanceId,
@@ -449,7 +450,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       providerRegistry.setProviderMaintenanceActionState({
         instanceId,
         action: "update",
-        state,
+        state: state === null ? null : { ...state, origin },
       });
     const setQueuedState = setUpdateState(
       makeUpdateState({

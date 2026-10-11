@@ -274,6 +274,34 @@ const makeTestRunner = (
   );
 
 describe("providerMaintenanceRunner", () => {
+  it.effect.each([
+    { origin: "manual" as const, exitCode: 0 },
+    { origin: "manual" as const, exitCode: 1 },
+  ])("carries $origin origin through every update state ($exitCode)", ({ origin, exitCode }) =>
+    Effect.gen(function* () {
+      const { registry, updateStatesRef } = yield* makeRegistry(baseNativeCliProvider);
+      const runner = yield* makeTestRunner(registry);
+      const result = yield* runner.updateProvider({
+        provider: NATIVE_CLI_DRIVER,
+        origin,
+      });
+      assert.strictEqual(
+        result.providers[0]?.updateState?.status,
+        exitCode === 0 ? "succeeded" : "failed",
+      );
+      const states = yield* Ref.get(updateStatesRef);
+      assert.isAtLeast(states.length, 3);
+      assert.isTrue(states.every((state) => state.origin === origin));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("0.0.0"),
+          layerMockSpawner(() => ({ stdout: "installer output", code: exitCode })),
+        ),
+      ),
+    ),
+  );
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {
@@ -288,6 +316,7 @@ describe("providerMaintenanceRunner", () => {
         },
       ]);
       assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+      assert.strictEqual(result.providers[0]?.updateState?.origin, "manual");
       assert.deepStrictEqual(
         (yield* Ref.get(updateStatesRef)).map((state) => [state.status, state.message]),
         [
@@ -1125,7 +1154,7 @@ it.effect.each([
     const sibling = ProviderInstanceId.make("codex-work");
     const unrelated = ProviderInstanceId.make("codex-other");
     return Effect.gen(function* () {
-      const { registry, providersRef } = yield* makeRegistry([
+      const { registry, providersRef, updateStatesRef } = yield* makeRegistry([
         baseProvider,
         { ...baseProvider, instanceId: sibling },
         { ...baseProvider, instanceId: unrelated },
@@ -1165,7 +1194,7 @@ it.effect.each([
         provider: CODEX_DRIVER,
         ...(exitCode === 0 ? { targetVersion } : {}),
         quiet: true,
-        background: true,
+        origin: "background",
       });
       assert.deepStrictEqual(calls, [`install -g --prefix /owned @openai/codex@${targetVersion}`]);
       assert.deepStrictEqual(refreshed, [CODEX_INSTANCE_ID, CODEX_INSTANCE_ID, sibling]);
@@ -1175,6 +1204,8 @@ it.effect.each([
       );
       assert.strictEqual(result.providers[1]?.version, targetVersion);
       assert.strictEqual(result.providers[2]?.version, "0.0.0");
+      // Background installs need proven ownership, so their origin is covered here.
+      assert.isTrue((yield* Ref.get(updateStatesRef)).every((s) => s.origin === "background"));
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -1218,7 +1249,7 @@ it.effect.each(["2.0.0", "3.0.0", "v3.0.0", "unknown"])(
       });
       const result = yield* runner.updateProvider({
         provider: CODEX_DRIVER,
-        background: true,
+        origin: "background",
       });
       assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
     }).pipe(
@@ -1262,7 +1293,7 @@ it.effect.each([false, true])(
       });
       const result = yield* runner.updateProvider({
         provider: CODEX_DRIVER,
-        background: true,
+        origin: "background",
       });
       assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
       assert.deepStrictEqual(calls, []);
@@ -1384,7 +1415,7 @@ it.effect(
                       instanceId: target.instanceId,
                       targetVersion: target.targetVersion,
                     });
-                    assert.strictEqual(target.background, true);
+                    assert.strictEqual(target.origin, "background");
                     assert.strictEqual(target.quiet, true);
                     return yield* new ServerProviderUpdateError({
                       provider: CODEX_DRIVER,
@@ -1497,7 +1528,7 @@ it.effect(
       const result = yield* runner.updateProvider({
         provider: CODEX_DRIVER,
         targetVersion: "2.0.0",
-        background: true,
+        origin: "background",
       });
       assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
       assert.deepStrictEqual(calls, []);
