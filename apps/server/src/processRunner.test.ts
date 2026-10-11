@@ -441,6 +441,18 @@ describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", (
   let pidFiles = 0;
   const tempPidFile = () =>
     NodePath.join(NodeOS.tmpdir(), `t3-spawn-host-${process.pid}-${++pidFiles}.pid`);
+  /** This process's open sockets by inode, so a reused fd number is not taken for the old socket. */
+  const openSockets = () =>
+    new Set(
+      NodeFS.readdirSync("/proc/self/fd").flatMap((fd) => {
+        try {
+          const target = NodeFS.readlinkSync(`/proc/self/fd/${fd}`);
+          return target.startsWith("socket:") ? [target] : [];
+        } catch {
+          return [];
+        }
+      }),
+    );
 
   it.live("streams stdin, stdout, stderr and the exit code", () =>
     Effect.gen(function* () {
@@ -484,6 +496,26 @@ describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", (
       expect(error._tag).toBe("ProcessTimeoutError");
       expect(isAlive(pid)).toBe(false);
     }).pipe(Effect.provide(layer)),
+  );
+
+  it.live.skipIf(hostPlatform !== "linux")(
+    "closes the sockets of output nobody reads once the child exits",
+    () =>
+      Effect.gen(function* () {
+        // Starts the host first, so its channel is not counted.
+        yield* run({ command: "true", args: [] });
+        const before = openSockets();
+        // The limit stops the reader with output still buffered in the socket.
+        const error = yield* run({ command: "yes", args: [], maxOutputBytes: 1_000 }).pipe(
+          Effect.flip,
+        );
+        expect(error._tag).toBe("ProcessOutputLimitError");
+        const leaked = () => [...openSockets()].filter((socket) => !before.has(socket));
+        for (let attempt = 0; attempt < 100 && leaked().length > 0; attempt++) {
+          yield* Effect.sleep("20 millis");
+        }
+        expect(leaked()).toEqual([]);
+      }).pipe(Effect.provide(layer)),
   );
 
   it.live.skipIf(hostPlatform !== "linux")(

@@ -142,6 +142,21 @@ class HostedChildProcess
     // Node destroys a child's stdin when it exits.
     this.stdin?.destroy();
     this.emit("exit", code, signal);
+    // Like Node's flushStdio: output nobody reads any more, for example after a
+    // timeout or an output limit unpiped it, drains to EOF so its socket closes.
+    process.nextTick(() => {
+      for (const stream of this.stdio) {
+        if (
+          stream &&
+          "resume" in stream &&
+          stream.readable &&
+          stream.listenerCount("data") === 0 &&
+          stream.listenerCount("readable") === 0
+        ) {
+          stream.resume();
+        }
+      }
+    });
   }
 
   markFailed(error: Error): void {
