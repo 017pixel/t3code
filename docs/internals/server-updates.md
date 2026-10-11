@@ -66,8 +66,8 @@ Restart continuation is an environment-owned preference, on by default. The
 [v2 recovery service](../../apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts)
 requires matching durable run, provider thread, session, and native resume identity.
 Queued runs never started, so recovery holds them and continues the run they wait
-behind. A finished run qualifies only when the restart cancelled its background work;
-its continuation tells the provider what will not report back.
+behind. Cancelled background work is reported on the next user turn; it does not
+wake a finished run. Undelivered steering can still qualify as unfinished input.
 
 Recovery retires effects tied to the lost process and records continuation intent
 in the durable outbox. That intent survives another restart before provider startup.
@@ -80,8 +80,10 @@ The [continuation handler](../../apps/server/src/orchestration-v2/RestartContinu
 rechecks the preference, archive state, provider selection, newer user work, a stop
 the user requested, and maintenance turns such as `/compact` before dispatching. Stable
 command and message IDs prevent duplicate submissions after an outbox retry. Codex
-resumes without adding provider prompt text unless the turn lost background work;
-other adapters receive the continuation message through their normal turn path.
+first resumes without prompt text when its native thread has history; a fresh
+thread or an active goal that rejects empty input receives the continuation prompt.
+Recovered steering and background-work notes also require prompt text. Other
+adapters receive the continuation message through their normal turn path.
 
 Delegated tasks (`delegate_task` child threads) are reconciled as their own threads,
 never as the parent's background work. The orchestrator settles child results and
