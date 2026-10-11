@@ -889,13 +889,23 @@ function isComposerTextKey(event: KeyboardEvent): boolean {
   );
 }
 
-/** Enter or Backspace pressed in the chat composer itself. */
+const COMPOSER_EDIT_KEYS = new Set(["Enter", "Backspace", "Delete", "ArrowUp", "ArrowDown"]);
+const COMPOSER_EDIT_SHORTCUT_KEYS = new Set(["x", "v", "z", "y"]);
+
+/**
+ * A key that sends, edits or recalls a prompt in the chat composer itself:
+ * Enter, Backspace, Delete, the arrows that recall earlier prompts, and cut,
+ * paste, undo and redo.
+ */
 function isComposerEditKey(event: KeyboardEvent): boolean {
+  if (event.isComposing) return false;
+  if (!(event.target instanceof Element)) return false;
+  if (event.target.closest('[data-testid="composer-editor"]') === null) return false;
+  if (COMPOSER_EDIT_KEYS.has(event.key)) return true;
   return (
-    !event.isComposing &&
-    (event.key === "Enter" || event.key === "Backspace") &&
-    event.target instanceof Element &&
-    event.target.closest('[data-testid="composer-editor"]') !== null
+    (event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    COMPOSER_EDIT_SHORTCUT_KEYS.has(event.key.toLowerCase())
   );
 }
 
@@ -8241,8 +8251,8 @@ export default function ChatView(props: ChatViewProps) {
         event.stopPropagation();
         return;
       }
-      // Enter would send this thread's draft and Backspace would edit it.
-      // Backspace takes back held text instead, and Enter does nothing.
+      // The other keys would send, edit or recall in this thread's draft.
+      // Backspace takes back held text instead, and the rest do nothing.
       if (isUrlRouteTargetElsewhere(viewRouteTargetKey) && isComposerEditKey(event)) {
         if (event.key === "Backspace") eraseHeldText(viewRouteTargetKey);
         event.preventDefault();
