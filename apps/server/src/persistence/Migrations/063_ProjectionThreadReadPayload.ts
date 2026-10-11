@@ -20,7 +20,9 @@ import {
  *
  * ProjectionStore's readers join this table, so it cannot depend on migration 63 running: a
  * database that recorded another build's migration at or above 63 skips it. runMigrations also
- * runs this after every migration pass, and it does nothing once the table and triggers exist.
+ * runs this after every migration pass, and its schema cache skips that pass only while the table
+ * and triggers exist: change its check when this creates other objects. This does nothing once
+ * the table and triggers exist.
  */
 const ensureInTransaction = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {

@@ -383,12 +383,27 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     const cacheTables = yield* sql`SELECT name FROM sqlite_master WHERE name = 't3_schema_cache'`;
     if (cacheTables.length > 0) {
       const version = yield* sql<{ schema_version: number }>`PRAGMA schema_version`;
-      const cached = yield* sql<{ manifest: string; schema_version: number }>`
-        SELECT manifest, schema_version FROM t3_schema_cache WHERE id = 1
+      // The cache also requires what 063's startup step keeps outside the migrator. Running
+      // that step here would take a write lock on every start, so check for its objects.
+      const cached = yield* sql<{
+        manifest: string;
+        schema_version: number;
+        read_projection_objects: number;
+      }>`
+        SELECT manifest, schema_version, (
+          SELECT COUNT(*) FROM sqlite_master
+          WHERE name IN (
+              'orchestration_v2_projection_thread_reads_stale_on_insert',
+              'orchestration_v2_projection_thread_reads_stale_on_update'
+            )
+            OR (name = 'orchestration_v2_projection_thread_reads' AND sql LIKE '%source_stale%')
+        ) AS read_projection_objects
+        FROM t3_schema_cache WHERE id = 1
       `;
       if (
         cached[0]?.manifest === manifestKey &&
-        cached[0]?.schema_version === version[0]?.schema_version
+        cached[0]?.schema_version === version[0]?.schema_version &&
+        cached[0]?.read_projection_objects === 3
       ) {
         yield* Effect.logDebug("Database schema is current");
         return [];

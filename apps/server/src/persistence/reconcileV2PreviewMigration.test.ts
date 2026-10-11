@@ -181,5 +181,22 @@ it.effect("revalidates a cached schema after another build changes its ledger or
     yield* runMigrations();
     assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_projection_thread_reads`, []);
     assert.deepStrictEqual(yield* runMigrations(), []);
+
+    // A cache that matches a schema without the read projection's table or a trigger does not
+    // skip the step that restores them.
+    for (const drop of [
+      sql`DROP TABLE orchestration_v2_projection_thread_reads`,
+      sql`DROP TRIGGER orchestration_v2_projection_thread_reads_stale_on_update`,
+    ]) {
+      yield* drop;
+      const version = yield* sql<{ schema_version: number }>`PRAGMA schema_version`;
+      yield* sql`UPDATE t3_schema_cache SET schema_version = ${version[0]!.schema_version}`;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+    }
+    assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_projection_thread_reads`, []);
+    assert.lengthOf(
+      yield* sql`SELECT name FROM sqlite_master WHERE name LIKE 'orchestration_v2_projection_thread_reads_stale_on_%'`,
+      2,
+    );
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
