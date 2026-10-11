@@ -424,6 +424,66 @@ const history = {
 };
 
 it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
+  it.effect.each(["permission", "form"] as const)(
+    "restores a parent %s arriving between resume and restart attachment",
+    (kind) =>
+      Effect.gen(function* () {
+        const duringRestart = { data: history.data.slice(0, 2).toReversed(), cursor: {} };
+        const { runtime, thread } = yield* resumed(
+          [
+            kind === "permission" ? shellAskEvent : event("form.created", { form: colorForm }),
+            out("session.active"),
+            replyData("session.active", { [SESSION]: { type: "running" } }),
+            out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+            reply("message.list", duringRestart),
+            out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+            reply("message.list", duringRestart),
+            out("permission.list", { sessionID: SESSION }),
+            replyData("permission.list", kind === "permission" ? [shellAsk.data] : []),
+            out("session.form.list", { sessionID: SESSION }),
+            replyData("session.form.list", kind === "form" ? [colorForm] : []),
+            ...(kind === "permission"
+              ? [
+                  out("permission.reply", {
+                    sessionID: SESSION,
+                    requestID: shellAsk.data.id,
+                    decision: "once",
+                  }),
+                  reply("permission.reply", null),
+                ]
+              : [
+                  out("session.form.reply", {
+                    sessionID: SESSION,
+                    formID: colorForm.id,
+                    answer: { q0: "Red" },
+                  }),
+                  reply("session.form.reply", null),
+                ]),
+            event("session.execution.succeeded", { sessionID: SESSION }),
+          ],
+          { external: true },
+        );
+        const requested = yield* requestOf(runtime).pipe(Effect.forkScoped);
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({
+          ...turnInput(thread),
+          restartContinuationOfRunId: RunId.make("cut-run"),
+        });
+        const request = yield* Fiber.join(requested);
+        assert.equal(request?.status, "pending");
+        assert.equal(
+          request?.nativeRequestRef?.nativeId,
+          kind === "permission" ? shellAsk.data.id : colorForm.id,
+        );
+        yield* runtime.respondToRuntimeRequest({
+          requestId: request!.id,
+          decision: "accept",
+          ...(kind === "form" ? { answers: { q0: "Red" } } : {}),
+        });
+        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+      }).pipe(Effect.scoped),
+  );
+
   it.effect.each([false, true, "note"])(
     "follows a surviving execution after a T3 restart (buffered=%s) without another prompt",
     (buffered) =>
@@ -438,6 +498,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             reply("message.list", duringRestart),
             out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
             reply("message.list", duringRestart),
+            ...noOpenRequests,
             event("session.execution.succeeded", { sessionID: SESSION }),
           ],
           { external: true },
@@ -1081,6 +1142,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
                   replyData("session.form.list", [{ ...colorForm, sessionID: CHILD }]),
                 ]
               : []),
+            ...noOpenRequests,
             out("session.form.reply", {
               sessionID: CHILD,
               formID: colorForm.id,
@@ -3608,6 +3670,158 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     collected.flatMap((event) =>
       event.type === "turn_item.updated" ? [`${event.turnItem.type}:${event.turnItem.status}`] : [],
     );
+
+  it.effect.each(["first", "reused", "attached"] as const)(
+    "replays a foreground child's %s turn when its entire execution was missed",
+    (execution) =>
+      Effect.gen(function* () {
+        const ordinal = execution === "reused" ? 2 : 1;
+        const childHistory = {
+          data: [
+            { id: "msg_child_idle", type: "idle", time: { created: 4 }, outcome: "succeeded" },
+            {
+              ...history.data[1],
+              id: "msg_child_answer",
+              content: [{ type: "text", text: "Recovered child answer" }],
+            },
+            { id: "msg_child_prompt", type: "user", time: { created: 2 }, text: "Find the answer" },
+            ...(ordinal === 2
+              ? [
+                  {
+                    id: "msg_previous_idle",
+                    type: "idle",
+                    time: { created: 1 },
+                    outcome: "succeeded",
+                  },
+                  {
+                    ...history.data[1],
+                    id: "msg_previous_answer",
+                    content: [{ type: "text", text: "Earlier child answer" }],
+                  },
+                  {
+                    id: "msg_previous_prompt",
+                    type: "user",
+                    time: { created: 0 },
+                    text: "Earlier question",
+                  },
+                ]
+              : []),
+          ],
+          cursor: {},
+        };
+        const parentHistory = {
+          data: [
+            {
+              ...history.data[1],
+              id: "msg_parent_answer",
+              content: [
+                {
+                  type: "tool",
+                  id: "call_missed_child",
+                  name: "subagent",
+                  executed: true,
+                  state: {
+                    status: "completed",
+                    input: { prompt: "Find the answer", description: "Answer" },
+                    content: [{ type: "text", text: "Recovered child answer" }],
+                    metadata: execution === "attached" ? {} : { sessionID: CHILD },
+                  },
+                  time: { created: 2, ran: 2, completed: 4 },
+                },
+              ],
+            },
+            { id: PROMPT_ID, type: "user", time: { created: 1 }, text: "hi" },
+          ],
+          cursor: {},
+        };
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+          promptAccepted,
+          event("session.execution.started", { sessionID: SESSION }),
+          ...(execution === "attached"
+            ? [
+                event("session.tool.input.started", {
+                  sessionID: SESSION,
+                  assistantMessageID: "msg_parent_answer",
+                  id: "call_missed_child",
+                  name: "subagent",
+                }),
+                event("session.tool.called", {
+                  sessionID: SESSION,
+                  assistantMessageID: "msg_parent_answer",
+                  id: "call_missed_child",
+                  name: "subagent",
+                  input: { prompt: "Find the answer", description: "Answer" },
+                  executed: false,
+                }),
+                event("session.created", childCreated(CHILD)),
+                event("session.tool.progress", {
+                  sessionID: SESSION,
+                  assistantMessageID: "msg_parent_answer",
+                  id: "call_missed_child",
+                  metadata: { sessionID: CHILD },
+                }),
+              ]
+            : []),
+          { type: "runtime_exit", status: "success" },
+          out("event.subscribe"),
+          out("session.active"),
+          replyData("session.active", { [SESSION]: { type: "running" } }),
+          out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+          reply("message.list", parentHistory),
+          ...(execution === "attached"
+            ? []
+            : [
+                out("session.update", { sessionID: CHILD, permissions: t3Rules }),
+                reply("session.update", null),
+              ]),
+          out("message.list", { sessionID: CHILD, order: "desc", limit: "50" }),
+          reply("message.list", childHistory),
+          out("message.list", { sessionID: CHILD, order: "desc", limit: "50" }),
+          reply("message.list", childHistory),
+          ...openRequests([]),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        const events = yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(withLineage(thread));
+        const collected = yield* Fiber.join(events);
+        const child = collected.findLast((event) => event.type === "subagent.updated");
+        assert.equal(
+          child?.type === "subagent.updated" ? child.subagent.status : undefined,
+          "completed",
+        );
+        const childThreadId =
+          child?.type === "subagent.updated" ? child.subagent.childThreadId : undefined;
+        assert.isNotNull(childThreadId);
+        assert.isTrue(
+          collected.some(
+            (event) =>
+              event.type === "message.updated" &&
+              event.message.threadId === childThreadId &&
+              event.message.text === "Recovered child answer",
+          ),
+        );
+        assert.isTrue(
+          collected.some(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.nativeTurnRef?.nativeId === `${CHILD}:turn:${ordinal}` &&
+              event.providerTurn.status === "completed",
+          ),
+        );
+        assert.isFalse(
+          collected.some(
+            (event) =>
+              event.type === "message.updated" && event.message.text === "Earlier child answer",
+          ),
+        );
+        assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+      }).pipe(Effect.scoped),
+  );
 
   it.effect("does not end a turn from an earlier turn's history when its prompt is not there", () =>
     Effect.gen(function* () {

@@ -344,6 +344,49 @@ finish();
       }),
     ),
   );
+  it.effect(
+    "resumes frozen providers when the final server protection query cannot verify a live pid",
+    () =>
+      scenario(({ directory, processes, signals, controller }) =>
+        Effect.gen(function* () {
+          yield* record(directory, controller);
+          const leases = NodePath.join(directory, "leases");
+          processes.set(70, {
+            pid: 70,
+            ppid: 1,
+            pgid: 70,
+            startTime: "live-server",
+            zombie: false,
+          });
+          yield* ProviderProcessLedger.make({
+            stateDir: NodePath.join(directory, "second"),
+            ownerPid: 70,
+            controller,
+            installLeaseDirectory: leases,
+          });
+          processes.delete(10);
+          let frozenQueries = 0;
+          const result = yield* ProviderProcessLedger.make({
+            stateDir: directory,
+            ownerPid: 90,
+            installLeaseDirectory: leases,
+            controller: {
+              ...controller,
+              identity: (pid) => processes.get(pid),
+              snapshot: () => {
+                if (signals.filter((signal) => signal.endsWith(":SIGSTOP")).length === 2)
+                  frozenQueries++;
+                return [...processes.values()].filter((p) => frozenQueries < 2 || p.pid !== 70);
+              },
+            },
+          }).pipe(Effect.exit);
+          expect(result._tag).toBe("Failure");
+          expect(signals).toEqual(["20:SIGSTOP", "30:SIGSTOP", "20:SIGCONT", "30:SIGCONT"]);
+          expect(processes.has(20)).toBe(true);
+          expect(processes.has(30)).toBe(true);
+        }).pipe(Effect.scoped),
+      ),
+  );
   it.effect("leaves every child of a live owning server alone", () =>
     scenario(({ directory, processes, signals, controller }) =>
       Effect.gen(function* () {

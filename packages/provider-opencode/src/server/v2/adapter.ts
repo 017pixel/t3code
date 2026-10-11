@@ -2823,16 +2823,15 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               call.background ||
               stringField(metadata, "status") === "running" ||
               input?.["background"] === true;
-            const childId = stringField(metadata, "sessionID");
+            const childId = stringField(metadata, "sessionID") ?? call.child?.sessionId;
             const restoringChild = childId !== undefined && call.child === undefined;
             if (childId !== undefined) yield* attachChild(call, childId);
             if (part.state.status === "error") {
               yield* settleCall(call, "failed", part.state.error.message);
-            } else if (part.state.status === "completed" && !call.background) {
-              yield* settleCall(call, "completed", subagentOutput(textOf(part.state.content)));
             } else {
+              const completed = part.state.status === "completed" && !call.background;
               yield* emitSubagent(call);
-              if (restoringChild) {
+              if (restoringChild || (completed && call.child?.subagent?.turns === 0)) {
                 if (
                   call.background &&
                   activeSessions !== undefined &&
@@ -2842,20 +2841,24 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                   continue;
                 }
                 const sessionID = Session.ID.make(childId!);
-                if (activeSessions?.has(childId!) && call.child !== undefined) {
+                if ((activeSessions?.has(childId!) || completed) && call.child !== undefined) {
                   const history = yield* OpenCode2Client.paginate(
                     { sessionID, order: "desc" as const, limit: 50 },
                     client.message.list,
                   ).pipe(Stream.runCollect);
+                  // A completed execution's final idle ends this turn, not the
+                  // earlier turn its history must begin after.
+                  const recent =
+                    completed && history[0]?.type === "idle" ? history.slice(1) : history;
                   const child = call.child;
                   child.subagent!.turns = Math.max(
                     child.subagent!.turns,
-                    history.filter((entry) => entry.type === "idle").length,
+                    recent.filter((entry) => entry.type === "idle").length,
                   );
                   if (child.active === undefined) {
                     yield* startChildTurn(child);
                     child.active!.before =
-                      history.find(
+                      recent.find(
                         (entry) =>
                           entry.type === "user" ||
                           entry.type === "synthetic" ||
@@ -2863,13 +2866,20 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                       )?.id ?? null;
                   }
                   yield* backfill(childId!, child, activeSessions);
+                  if (completed) yield* finishTurn(child, { status: "completed" });
                 }
-                const [permissions, forms] = yield* Effect.all([
-                  client.permission.list({ sessionID }),
-                  client.session.form.list({ sessionID }),
-                ]);
-                for (const request of permissions) yield* onAsked({ type: "permission", request });
-                for (const form of forms) yield* onAsked({ type: "form", form });
+                if (!completed) {
+                  const [permissions, forms] = yield* Effect.all([
+                    client.permission.list({ sessionID }),
+                    client.session.form.list({ sessionID }),
+                  ]);
+                  for (const request of permissions)
+                    yield* onAsked({ type: "permission", request });
+                  for (const form of forms) yield* onAsked({ type: "form", form });
+                }
+              }
+              if (part.state.status === "completed" && completed) {
+                yield* settleCall(call, "completed", subagentOutput(textOf(part.state.content)));
               }
             }
             continue;
@@ -4120,15 +4130,29 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                         nativeTurnRef: ref(prompt.id, "weak"),
                       };
                       yield* emitProviderTurn(state, turn, turn.providerTurn);
-                      yield* backfill(sessionId, state, new Set(Object.keys(active))).pipe(
-                        Effect.tapError((cause) =>
-                          finishTurn(state, {
-                            status: "failed",
-                            failure: makeProviderFailure({ cause, class: "provider_error" }),
-                          }),
-                        ),
-                      );
                     }
+                    yield* Effect.gen(function* () {
+                      if (prompt?.type === "user") {
+                        yield* backfill(sessionId, state, new Set(Object.keys(active)));
+                      }
+                      if (sessionId in active) {
+                        const sessionID = Session.ID.make(sessionId);
+                        const [permissions, forms] = yield* Effect.all([
+                          client.permission.list({ sessionID }),
+                          client.session.form.list({ sessionID }),
+                        ]);
+                        for (const request of permissions)
+                          yield* onAsked({ type: "permission", request });
+                        for (const form of forms) yield* onAsked({ type: "form", form });
+                      }
+                    }).pipe(
+                      Effect.tapError((cause) =>
+                        finishTurn(state, {
+                          status: "failed",
+                          failure: makeProviderFailure({ cause, class: "provider_error" }),
+                        }),
+                      ),
+                    );
                     if (finishedWhileDown && !(sessionId in active)) {
                       yield* finishTurn(state, { status: "completed" });
                     }

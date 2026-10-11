@@ -482,13 +482,13 @@ export async function make(input: {
       }
       // Persist newly discovered children before signalling: recovery can itself be killed.
       write(file, next);
+      table = await controller.snapshot();
+      next = protectedEntry(next, table);
     } catch (error) {
       // Never leave a frozen tree behind: resume it so the next cleanup can retry.
       for (const p of stopped.values()) await signal(p, "SIGCONT").catch(() => undefined);
       throw error;
     }
-    table = await controller.snapshot();
-    next = protectedEntry(next, table);
     // A process found to be protected after it was frozen is left running, not stopped.
     for (const p of stopped.values()) {
       if (!next.processes.some((owned) => same(owned, p))) {
