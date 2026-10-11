@@ -12,6 +12,7 @@ import type { DraftId, DraftSessionState } from "./composerDraftStore";
  */
 export interface PendingLandingDraft {
   readonly draftId: DraftId;
+  /** Where the draft sat when it opened; a move by the user from there drops the landing. */
   readonly projectRef: ScopedProjectRef;
   /** The draft's workspace context when it opened; a user change keeps theirs. */
   readonly openedWith: LandingDraftContext;
