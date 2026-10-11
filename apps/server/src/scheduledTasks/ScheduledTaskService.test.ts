@@ -351,3 +351,34 @@ it.effect(
       );
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
+
+it.effect("update windows exclude frequent due intervals but retain their running tasks", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const now = "2026-09-09T12:00:00.000Z";
+    for (const row of [
+      { id: "frequent", next: now, enabled: 1, status: "never" },
+      { id: "running", next: null, enabled: 0, status: "running" },
+      {
+        id: "slow",
+        next: now,
+        enabled: 1,
+        status: "never",
+        scheduleJson: '{"type":"interval","everyMs":900000}',
+      },
+      {
+        id: "later",
+        next: "2026-09-09T13:00:00.000Z",
+        enabled: 1,
+        status: "never",
+        scheduleJson: '{"type":"interval","everyMs":900000}',
+      },
+    ])
+      yield* insertRow(sql, row, now);
+    const tasks = yield* ScheduledTaskService.listRunningOrDueTasks(
+      DateTime.makeUnsafe(now),
+      900000,
+    );
+    assert.deepEqual(tasks.map((task) => task.id).sort(), ["running", "slow"]);
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);

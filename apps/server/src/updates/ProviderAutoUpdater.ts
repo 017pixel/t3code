@@ -55,7 +55,7 @@ export const layer = Layer.effectDiscard(
       if (!settings.automaticUpdates || !settings.enableProviderUpdateChecks) return;
       const installations = new Set<string>();
       for (const { instanceId } of yield* providers.getProviders) {
-        const install = Effect.gen(function* () {
+        const pick = Effect.gen(function* () {
           const settings = yield* serverSettings.getSettings;
           if (!settings.automaticUpdates || !settings.enableProviderUpdateChecks) return;
           const current = (yield* providers.getProviders).find(
@@ -85,22 +85,21 @@ export const layer = Layer.effectDiscard(
             fromVersion: current.version,
             targetVersion,
           });
-          yield* runner
-            .updateProvider({
-              provider: current.driver,
-              instanceId,
-              targetVersion,
-              quiet: true,
-              background: true,
-            })
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("Background provider update failed", { instanceId, cause }),
-              ),
-            );
+          return { provider: current.driver, targetVersion };
         });
         // Rechecked per install: the previous one may have run for minutes.
-        if (Option.isNone(yield* updateWindow.runIfOpen(install))) return;
+        const picked = yield* updateWindow.runIfOpen(pick);
+        if (Option.isNone(picked)) return;
+        if (picked.value === undefined) continue;
+        // Installed after the window releases admission: the runner first drains host
+        // leases, and a session holding one may still need admission to launch its CLI.
+        yield* runner
+          .updateProvider({ ...picked.value, instanceId, quiet: true, background: true })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Background provider update failed", { instanceId, cause }),
+            ),
+          );
       }
     }).pipe(
       Effect.catchCause((cause) =>

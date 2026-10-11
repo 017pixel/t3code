@@ -1,3 +1,4 @@
+import * as Maintenance from "./maintenance.ts";
 import { describe, it, assert } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -658,3 +659,47 @@ describe("makeManagedServerProvider", () => {
     ).pipe(Effect.provide(layerAlwaysRunTest)),
   );
 });
+
+it.effect("snapshot refresh waits outside its mutex so updater verification cannot deadlock", () =>
+  Effect.gen(function* () {
+    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+    const entered = yield* Deferred.make<void>();
+    const queued = yield* Deferred.make<void>();
+    const initialDone = yield* Deferred.make<void>();
+    let checks = 0;
+    const provider = yield* makeManagedServerProvider<TestSettings>({
+      resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+      getSettings: Effect.succeed({ enabled: true }),
+      streamSettings: Stream.empty,
+      haveSettingsChanged: () => false,
+      initialSnapshot: () => Effect.succeed(initialSnapshot),
+      checkProvider: Effect.sync(() => {
+        checks++;
+      }).pipe(
+        Effect.andThen(Deferred.succeed(initialDone, undefined)),
+        Effect.as(refreshedSnapshot),
+      ),
+      refreshOnInterval: false,
+    });
+    yield* Deferred.await(initialDone);
+    const pending = yield* Deferred.await(entered).pipe(
+      Effect.andThen(Deferred.succeed(queued, undefined)),
+      Effect.andThen(provider.refresh),
+      Effect.forkScoped,
+    );
+    const verifying = yield* admission
+      .withPermit(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(queued);
+          yield* Effect.yieldNow;
+          assert.isTrue(pending.pollUnsafe() === undefined);
+          return yield* provider.refresh;
+        }),
+      )
+      .pipe(Effect.forkScoped);
+    assert.deepEqual(yield* Fiber.join(verifying), refreshedSnapshot);
+    assert.deepEqual(yield* Fiber.join(pending), refreshedSnapshot);
+    assert.strictEqual(checks, 3);
+  }).pipe(Effect.provide(layerAlwaysRunTest)),
+);

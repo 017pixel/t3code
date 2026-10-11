@@ -396,12 +396,16 @@ export const listDueTasks = Effect.fn("ScheduledTaskService.listDueTasks")(funct
 
 /** Tasks running now or due by `by`, for background work that must not start under them. */
 export const listRunningOrDueTasks = Effect.fn("ScheduledTaskService.listRunningOrDueTasks")(
-  function* (by: DateTime.DateTime) {
+  function* (by: DateTime.DateTime, minimumIntervalMs = 0) {
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<ScheduledTaskRow>`
       SELECT * FROM scheduled_tasks
       WHERE last_run_status = 'running'
-        OR (enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ${iso(by)})
+        OR (enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ${iso(by)}
+          AND CASE WHEN json_valid(schedule_json) THEN
+            json_extract(schedule_json, '$.type') IS NOT 'interval'
+              OR json_extract(schedule_json, '$.everyMs') >= ${minimumIntervalMs}
+            ELSE 1 END)
     `;
     return yield* decodeTaskRowsLeniently(rows);
   },

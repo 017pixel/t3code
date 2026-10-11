@@ -1,4 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off - Separate processes exercise host-wide maintenance leases.
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Option from "effect/Option";
+import * as ThreadContracts from "@t3tools/contracts";
 import { describe, it, assert } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -1646,6 +1653,30 @@ describe("provider maintenance host leases", () => {
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.live("drains host leases before an install closes CLI admission", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+        const release = yield* HostLock.make(directory).acquireRead;
+        const entered = yield* Deferred.make<void>();
+        const gate = waitForGate(directory);
+        const install = yield* coordinatedWrite(
+          directory,
+          Deferred.succeed(entered, undefined),
+        ).pipe(Effect.forkScoped);
+        yield* gate;
+        // A session holding a lease can still launch its CLI while the install waits.
+        assert.equal(yield* admission.withLaunchPermit(Effect.succeed("launched")), "launched");
+        assert.isFalse(yield* Deferred.isDone(entered));
+        yield* release;
+        yield* Fiber.join(install);
+        assert.isTrue(yield* Deferred.isDone(entered));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.live("reclaims a dead reader whose PID has been reused", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1690,3 +1721,180 @@ describe("provider maintenance host leases", () => {
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 });
+describe("update window short circuit", () => {
+  it.effect("does not query threads, providers or tasks during the quiet period", () =>
+    Effect.gen(function* () {
+      const context = yield* Layer.build(
+        UpdateWindow.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+              Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+              Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+                sinceLastClientInteraction: Effect.succeed(Duration.minutes(14)),
+              }),
+              SqlitePersistence.layerMemory,
+              Layer.mock(ServerSettings.ServerSettingsService)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            ),
+          ),
+        ),
+      );
+      const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
+      let ran = false;
+      assert.isTrue(
+        Option.isNone(
+          yield* window.runIfOpen(
+            Effect.sync(() => {
+              ran = true;
+            }),
+          ),
+        ),
+      );
+      assert.isFalse(ran);
+    }),
+  );
+
+  it.effect("stops at active work after exactly fifteen quiet minutes", () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const context = yield* Layer.build(
+        UpdateWindow.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                getRecoveryThreadIds: () =>
+                  Effect.sync(() => {
+                    reads++;
+                    return [ThreadContracts.ThreadId.make("busy")];
+                  }),
+              }),
+              Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+              Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+                sinceLastClientInteraction: Effect.succeed(Duration.minutes(15)),
+              }),
+              SqlitePersistence.layerMemory,
+              Layer.mock(ServerSettings.ServerSettingsService)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            ),
+          ),
+        ),
+      );
+      const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
+      assert.isTrue(Option.isNone(yield* window.runIfOpen(Effect.die("must not install"))));
+      assert.strictEqual(reads, 1);
+    }),
+  );
+
+  it.effect("stops at provider background work before reading update state or SQL", () =>
+    Effect.gen(function* () {
+      const context = yield* Layer.build(
+        UpdateWindow.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                getRecoveryThreadIds: () => Effect.succeed([]),
+              }),
+              Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+                hasPendingBackgroundWork: Effect.succeed(true),
+              }),
+              Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+                sinceLastClientInteraction: Effect.succeed(Duration.minutes(15)),
+              }),
+              SqlitePersistence.layerMemory,
+              Layer.mock(ServerSettings.ServerSettingsService)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            ),
+          ),
+        ),
+      );
+      const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
+      assert.isTrue(Option.isNone(yield* window.runIfOpen(Effect.die("must not install"))));
+    }),
+  );
+});
+
+it.effect("manual updates wait for admission and verify under the same permit", () =>
+  Effect.gen(function* () {
+    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const holder = yield* admission
+      .withPermit(
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      )
+      .pipe(Effect.forkScoped);
+    yield* Deferred.await(entered);
+    const { registry } = yield* makeRegistry(baseNativeCliProvider);
+    const updater = yield* makeTestRunner({
+      ...registry,
+      refreshInstance: () => admission.withPermit(registry.getProviders),
+    });
+    const update = yield* updater.updateProvider(NATIVE_CLI_DRIVER).pipe(Effect.forkScoped);
+    yield* Effect.yieldNow;
+    assert.isTrue(update.pollUnsafe() === undefined);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(holder);
+    const result = yield* Fiber.join(update);
+    assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        layerNonWindowsPlatform,
+        layerLatestVersionHttpClient("0.0.0"),
+        layerMockSpawner(() => ({ stdout: "updated" })),
+      ),
+    ),
+  ),
+);
+
+it.effect.each([
+  {
+    name: "open provider window",
+    interaction: false,
+    expected: true,
+  },
+  {
+    name: "interaction arriving during blocker reads",
+    interaction: true,
+    expected: false,
+  },
+])("rechecks the update window for $name", (scenario) =>
+  Effect.gen(function* () {
+    let quietReads = 0;
+    let installs = 0;
+    const context = yield* Layer.build(
+      UpdateWindow.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([]),
+              getLimitRecoveryCandidates: () => Effect.succeed([]),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              hasPendingBackgroundWork: Effect.succeed(false),
+            }),
+            Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+              sinceLastClientInteraction: Effect.sync(() =>
+                Duration.minutes(++quietReads > 1 && scenario.interaction ? 0 : 15),
+              ),
+            }),
+            SqlitePersistence.layerMemory,
+            Layer.mock(ServerSettings.ServerSettingsService)({
+              getSettings: Effect.succeed(ThreadContracts.DEFAULT_SERVER_SETTINGS),
+            }),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          ),
+        ),
+      ),
+    );
+    const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
+    const result = yield* window.runIfOpen(
+      Effect.sync(() => {
+        installs++;
+      }),
+    );
+    assert.strictEqual(Option.isSome(result), scenario.expected);
+    assert.strictEqual(installs, scenario.expected ? 1 : 0);
+  }),
+);

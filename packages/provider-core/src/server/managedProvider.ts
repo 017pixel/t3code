@@ -16,6 +16,7 @@ import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ProviderHost from "./ProviderHost.ts";
+import * as Maintenance from "./maintenance.ts";
 import { applyUsageLimitsUpdate, resolveUsageLimitsAfterProbe } from "./usageLimits.ts";
 import type { ManagedServerProvider } from "./snapshot.ts";
 
@@ -59,6 +60,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   Scope.Scope | ProviderHost.ProviderHost
 > {
   const host = yield* ProviderHost.ProviderHost;
+  const admission = yield* Maintenance.ProviderMaintenanceAdmission;
   const refreshSemaphore = yield* Semaphore.make(1);
   const changesPubSub = yield* Effect.acquireRelease(
     PubSub.unbounded<ServerProvider>(),
@@ -117,7 +119,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         getSnapshot: Ref.get(snapshotStateRef).pipe(Effect.map((state) => state.snapshot)),
         publishSnapshot: (nextSnapshot) => publishEnrichedSnapshot(generation, nextSnapshot),
       })
-      .pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(scope));
+      .pipe(admission.withLaunchPermit, Effect.ignoreCause({ log: true }), Effect.forkIn(scope));
 
     yield* Ref.set(enrichmentFiberRef, fiber);
   });
@@ -191,7 +193,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     return nextSnapshot;
   });
   const applySnapshot = (nextSettings: Settings, options?: { readonly forceRefresh?: boolean }) =>
-    refreshSemaphore.withPermits(1)(applySnapshotBase(nextSettings, options));
+    admission.withLaunchPermit(
+      refreshSemaphore.withPermits(1)(applySnapshotBase(nextSettings, options)),
+    );
 
   /**
    * Runtime usage updates arrive between probes. They patch only

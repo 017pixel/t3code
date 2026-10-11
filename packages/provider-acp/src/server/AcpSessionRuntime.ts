@@ -1,3 +1,4 @@
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -1601,6 +1602,10 @@ export const make = (
         }),
       )
       .pipe(
+        (effect) =>
+          Effect.flatMap(Maintenance.ProviderMaintenanceAdmission, (admission) =>
+            admission.withLaunchPermit(effect),
+          ),
         Effect.provideService(Scope.Scope, runtimeScope),
         Effect.mapError(
           (cause) =>

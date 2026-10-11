@@ -2,6 +2,22 @@ import type { EnvironmentRpcSubscriptionObservation } from "@t3tools/client-runt
 import { type BackgroundScope, type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+const INTERACTION_WINDOW_MS = 30_000;
+let lastInteractionAt = Number.NEGATIVE_INFINITY;
+let lastInteractionReportAt = Number.NEGATIVE_INFINITY;
+
+export function recordMobileInteraction(): void {
+  lastInteractionAt = performance.now();
+  if (lastInteractionAt - lastInteractionReportAt >= 1_000) {
+    lastInteractionReportAt = lastInteractionAt;
+    notify();
+  }
+}
+
+export function mobileRecentlyInteracted(now = performance.now()): boolean {
+  return now >= lastInteractionAt && now - lastInteractionAt < INTERACTION_WINDOW_MS;
+}
+
 interface RetainedScope {
   readonly environmentId: EnvironmentId;
   readonly scope: BackgroundScope;

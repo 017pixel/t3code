@@ -1,3 +1,5 @@
+import * as Layer from "effect/Layer";
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
@@ -604,3 +606,35 @@ describe("ACP Registry probe", () => {
     ).toBe("probe_failed");
   });
 });
+
+it.effect(
+  "ACP discovery waits before resolving an installable CLI during provider maintenance",
+  () =>
+    Effect.gen(function* () {
+      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const install = yield* admission
+        .withPermit(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      // Resolving an agent can install it. None of its dependencies may be read yet.
+      const probe = yield* probeAcpRegistryConfiguration({
+        instanceId,
+        settings: decodeSettings({ agentId: "probe-agent" }),
+        cwd: "/workspace",
+        environment: {},
+      }).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      expect(probe.pollUnsafe() === undefined).toBe(true);
+      yield* Fiber.interrupt(probe);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(install);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, Layer.mock(AcpRegistrySupport.AcpRegistryCatalog)({})),
+      ),
+    ),
+);
