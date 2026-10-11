@@ -28,6 +28,7 @@ class TestRow {
   style: Record<string, string> = {};
   inert = false;
   attributes: { name: string; value: string }[] = [];
+  parentNode: unknown = null;
   children: TestRow[] = [];
   clones: TestRow[] = [];
   remove = vi.fn();
@@ -38,6 +39,9 @@ class TestRow {
   ) {}
   getBoundingClientRect() {
     return { top: this.offsetTop + this.dragTranslate, height: this.offsetHeight };
+  }
+  getAttribute(name: string) {
+    return this.attributes.find((attribute) => attribute.name === name)?.value ?? null;
   }
   setAttribute(name: string, value: string) {
     this.removeAttribute(name);
@@ -90,6 +94,7 @@ function fixture(rows: TestRow[], frames?: FrameRequestCallback[]) {
     let top = 8;
     for (const row of next) {
       row.offsetTop = top;
+      row.parentNode = parent;
       top += row.offsetHeight + 1;
     }
     parent.children = [
@@ -507,6 +512,45 @@ describe("sidebar list motion", () => {
     expect(entry.cancel).not.toHaveBeenCalled();
     // Remaining 27px of the 36px entry plus the new 40px shift.
     expectMove(y, -13);
+  });
+
+  it("continues a slot's entry on the row that replaces it", () => {
+    let notify: MutationCallback = () => {};
+    vi.stubGlobal(
+      "MutationObserver",
+      class {
+        constructor(callback: MutationCallback) {
+          notify = callback;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const slot = new TestRow("slot", 36);
+    const row = new TestRow("row", 36);
+    const above = new TestRow("above");
+    for (const node of [slot, row]) {
+      node.setAttribute("data-thread-item", "t");
+      node.setAttribute("data-sidebar-row-variant", "slim");
+    }
+    const { motion, layout } = fixture([]);
+    motion.update(true);
+    layout([slot]);
+    motion.update(true);
+    const entry = slot.animations[0]!;
+    entry.progress = 0.25;
+    // The observer swaps the slot for its rendered row after the motion pass.
+    layout([row]);
+    notify(
+      [{ addedNodes: [row], removedNodes: [slot] }] as unknown as MutationRecord[],
+      {} as MutationObserver,
+    );
+    expect(entry.effect).toHaveProperty("target", row);
+    expect(entry.cancel).not.toHaveBeenCalled();
+    layout([above, row]);
+    motion.update(true);
+    // Remaining 27px of the row's 36px entry plus the new 83px shift.
+    expectMove(row, -110);
   });
 
   it("skips fades when a large list change would clone too many rows", () => {

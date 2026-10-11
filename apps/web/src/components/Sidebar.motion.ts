@@ -37,6 +37,9 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
   const running = new Map<HTMLElement, { animation: Animation; offset: number }>();
   const entering = new Map<HTMLElement, { animation: Animation; travel: number }>();
   const exiting = new Map<HTMLElement, Animation>();
+  // The element each thread row last put on screen: its virtual slot or the
+  // rendered row that replaced it.
+  const rendered = new Map<string, HTMLElement>();
   // Visual tops at drag release, relative to the list, so the release
   // commit can glide every row from where dnd-kit left it into its slot.
   let released: Map<HTMLElement, number> | null = null;
@@ -112,9 +115,10 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
     if (selective && positions) {
       // A virtual slot and its rendered row share identity for motion.
       const nodesByKey = new Map(nodes.map((node) => [rowKey(node), node]));
-      positions = new Map(
-        [...positions].map(([node, old]) => [nodesByKey.get(old.key) ?? node, old]),
-      );
+      const live = (old: RowPosition) =>
+        nodesByKey.get(old.key) ??
+        (typeof old.key === "string" ? rendered.get(old.key) : undefined);
+      positions = new Map([...positions].map(([node, old]) => [live(old) ?? node, old]));
     }
     return next;
   };
@@ -147,6 +151,65 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
           if (observedWidth !== null && observedWidth !== width) scheduleBaseline();
           observedWidth = width;
         });
+
+  // Forget a row's animation when it finishes, unless a newer one replaced it.
+  const track = <Entry extends { animation: Animation }>(
+    map: Map<HTMLElement, Entry>,
+    node: HTMLElement,
+    entry: Entry,
+  ) => {
+    map.set(node, entry);
+    entry.animation.addEventListener(
+      "finish",
+      () => {
+        if (map.get(node) === entry) map.delete(node);
+      },
+      { once: true },
+    );
+  };
+  const adopt = <Entry extends { animation: Animation }>(
+    map: Map<HTMLElement, Entry>,
+    from: HTMLElement,
+    to: HTMLElement,
+  ) => {
+    const entry = map.get(from);
+    if (entry === undefined) return;
+    map.delete(from);
+    const effect = entry.animation.effect as KeyframeEffect | null;
+    if (effect) effect.target = to;
+    track(map, to, entry);
+  };
+  // A virtual slot swaps in its rendered row, or back, outside any motion
+  // pass. Track which element is on screen, and let the replacement continue
+  // an in-flight animation instead of popping in at rest.
+  const swaps =
+    typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver((records) => {
+          const added = new Map<string, HTMLElement>();
+          for (const record of records) {
+            for (const node of record.addedNodes) {
+              if (!(node instanceof HTMLElement) || node.parentNode !== parent) continue;
+              const key = rowKey(node);
+              if (typeof key === "string") added.set(key, node);
+            }
+          }
+          for (const record of records) {
+            for (const node of record.removedNodes) {
+              if (!(node instanceof HTMLElement)) continue;
+              const key = rowKey(node);
+              if (typeof key !== "string") continue;
+              if (rendered.get(key) === node) rendered.delete(key);
+              const replacement = added.get(key);
+              if (!replacement || replacement === node) continue;
+              if (rowShape(replacement) !== rowShape(node)) continue;
+              adopt(entering, node, replacement);
+              adopt(running, node, replacement);
+            }
+          }
+          for (const [key, node] of added) rendered.set(key, node);
+        });
+  swaps?.observe(parent, { childList: true });
 
   const remainingOffset = (node: HTMLElement) => {
     const current = running.get(node);
@@ -235,14 +298,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
       [{ transform: `translateY(${offset}px)` }, { transform: "translateY(0px)" }],
       motionTiming,
     );
-    running.set(node, { animation, offset });
-    animation.addEventListener(
-      "finish",
-      () => {
-        if (running.get(node)?.animation === animation) running.delete(node);
-      },
-      { once: true },
-    );
+    track(running, node, { animation, offset });
   };
 
   return {
@@ -328,14 +384,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
                 ],
                 motionTiming,
               );
-              entering.set(node, { animation, travel });
-              animation.addEventListener(
-                "finish",
-                () => {
-                  if (entering.get(node)?.animation === animation) entering.delete(node);
-                },
-                { once: true },
-              );
+              track(entering, node, { animation, travel });
             }
             continue;
           }
@@ -377,6 +426,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
     suspend,
     dispose() {
       stopObserving?.();
+      swaps?.disconnect();
       suspend();
       disposed = true;
     },
