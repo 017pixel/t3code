@@ -28,6 +28,7 @@ import {
 } from "@t3tools/provider-core/server/subagentProjection";
 import {
   cancelledRosterTaskWork,
+  cancelledSubagentWork,
   cancelledTurnItemWork,
   isWorktreeContinuationRun,
   mergeRestartCancelledBackgroundWork,
@@ -180,6 +181,26 @@ function latestStartedRun(
   );
 }
 
+function withPendingSteering(projection: ProjectionStore.ProjectionRuntimeRecoveryState) {
+  return {
+    ...projection,
+    runs: projection.runs.map((run) => {
+      const pending = (projection.pendingSteering ?? []).filter((item) => item.runId === run.id);
+      return pending.length === 0
+        ? run
+        : {
+            ...run,
+            restartPendingMessageIds: [
+              ...new Set([
+                ...(run.restartPendingMessageIds ?? []),
+                ...pending.map((item) => item.messageId),
+              ]),
+            ],
+          };
+    }),
+  };
+}
+
 export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -197,6 +218,7 @@ export const make = Effect.gen(function* () {
       >,
     ) {
       const now = yield* DateTime.now;
+      projection = withPendingSteering(projection);
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
         if (run.status === "waiting") {
@@ -300,18 +322,31 @@ export const make = Effect.gen(function* () {
       };
       // Queued runs have not started provider work. Preserve their execution
       // identities and order, but require explicit consent before draining them.
-      // A handoff's sole continuation already has that consent, and the old
+      // A handoff's continuation already has that consent, and the old
       // session was detached to run it in the newly bound worktree.
       const queuedRuns = projection.runs.filter((run) => run.status === "queued");
       const handoffContinuation =
         continueAfterRestart &&
         projection.thread.worktreePath != null &&
-        queuedRuns.length === 1 &&
-        queuedRuns[0]!.queueHeld !== true &&
-        isWorktreeContinuationRun(queuedRuns[0]!)
-          ? queuedRuns[0]
+        queuedRuns.filter((run) => run.queueHeld !== true && isWorktreeContinuationRun(run))
+          .length === 1
+          ? queuedRuns.find((run) => run.queueHeld !== true && isWorktreeContinuationRun(run))
           : undefined;
       for (const run of projection.runs) {
+        if (
+          (projection.pendingSteering ?? []).some((item) => item.runId === run.id) &&
+          !runs.some((candidate) => candidate.id === run.id)
+        ) {
+          events.push({
+            id: yield* allocateEventId(),
+            type: "run.updated",
+            threadId: projection.thread.id,
+            runId: run.id,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: now,
+            payload: run,
+          });
+        }
         if (run.status !== "queued" || run.queueHeld === true || run === handoffContinuation)
           continue;
         events.push({
@@ -496,6 +531,23 @@ export const make = Effect.gen(function* () {
       // No provider process outlives the server, so a native subagent still open
       // here never reports its end, whatever state its run and item are in.
       for (const subagent of projection.subagents ?? []) {
+        if (
+          subagent.origin === "provider_native" &&
+          isNonterminalNodeStatus(subagent.status) &&
+          !projection.turnItems.some(
+            (item) => item.type === "subagent" && item.subagentId === subagent.id,
+          )
+        ) {
+          const run = projection.runs.find((candidate) => candidate.id === subagent.runId);
+          recordCancelledBackgroundWork(
+            run?.providerThreadId ??
+              projection.nodes.find((node) => node.id === subagent.parentNodeId)?.providerThreadId,
+            cancelledSubagentWork(subagent),
+          );
+          if (subagent.nativeTaskRef?.nativeId != null) {
+            cancelledBackgroundNativeIds.add(subagent.nativeTaskRef.nativeId);
+          }
+        }
         events.push(
           ...(yield* endOrphanedNativeSubagent({
             projection,
@@ -812,7 +864,7 @@ export const make = Effect.gen(function* () {
 
   // Snapshot intent only while providers are live. A provider may finish while
   // this commits; reconciliation reads fresh state after shutdown, and delivery
-  // rejects any source run that actually completed.
+  // rejects a completed source unless it still has undelivered steering.
   const prepareForShutdown = Effect.gen(function* () {
     const enabled = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
     if (!enabled) return;
@@ -825,7 +877,7 @@ export const make = Effect.gen(function* () {
             .continueThreadsAfterServerUpdate
         )
           return;
-        const run = restartContinuationRun(projection, yield* DateTime.now);
+        const run = restartContinuationRun(withPendingSteering(projection), yield* DateTime.now);
         if (!run) return;
         const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
         yield* eventSink.writeWithEffects({

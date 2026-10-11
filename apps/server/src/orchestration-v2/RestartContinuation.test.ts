@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  ComposerContextId,
   MessageId,
   NodeId,
   ProjectId,
@@ -1016,12 +1017,14 @@ it.effect.each([
       yield* recovery.reconcile(trigger);
       const held =
         alreadyHeld ||
-        events.some((event) => event.type === "run.updated" && event.payload.queueHeld === true);
-      assert.equal(held, !enabled || alreadyHeld || extraQueue);
-      assert.lengthOf(
-        effects,
-        trigger === "startup" && enabled && !alreadyHeld && !extraQueue ? 1 : 0,
-      );
+        events.some(
+          (event) =>
+            event.type === "run.updated" &&
+            event.payload.id === queuedFollowUp.id &&
+            event.payload.queueHeld === true,
+        );
+      assert.equal(held, !enabled || alreadyHeld);
+      assert.lengthOf(effects, trigger === "startup" && enabled && !alreadyHeld ? 1 : 0);
       if (effects.length > 0) assert.equal(effects[0]!.request.type, "provider-runtime.continue");
     }),
 );
@@ -1045,6 +1048,16 @@ it.effect("delivers a queued handoff prompt once and respects cancellation befor
       providerTurns: [],
     } as unknown as OrchestrationV2ThreadProjection;
     assert.deepEqual(yield* continuationTexts(projection), [message.text]);
+    assert.deepEqual(
+      yield* continuationTexts({
+        ...projection,
+        runs: [
+          ...projection.runs,
+          { ...queuedFollowUp, id: RunId.make("run:mixed-queue"), queueHeld: true },
+        ],
+      } as OrchestrationV2ThreadProjection),
+      [message.text],
+    );
     for (const status of ["queued", "cancelled"] as const) {
       assert.deepEqual(
         yield* continuationTexts({
@@ -1423,4 +1436,150 @@ it.effect.each(["settled", "running", "stopped"] as const)(
         firstStatus === "stopped" ? 0 : 1,
       );
     }),
+);
+
+it.effect.each(["cancelled", "completed"] as const)(
+  "delivers pending native steering after a %s turn with attachments and context",
+  (status) =>
+    Effect.gen(function* () {
+      const base = cutMidTurn();
+      const messageId = MessageId.make("message:pending-steer");
+      const attachment = {
+        type: "file" as const,
+        id: "file_steer",
+        name: "steering.txt",
+        mimeType: "text/plain",
+        sizeBytes: 4,
+      };
+      const context = {
+        version: 1 as const,
+        records: [
+          {
+            version: 1 as const,
+            contextId: ComposerContextId.make("ctx_steer"),
+            kind: "file" as const,
+            label: "steering.txt",
+            attachmentId: attachment.id,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            sizeBytes: attachment.sizeBytes,
+          },
+        ],
+      };
+      const projection = {
+        ...base,
+        runs: [{ ...base.runs[0]!, status, restartPendingMessageIds: [messageId] }],
+        messages: [
+          {
+            id: messageId,
+            threadId,
+            runId,
+            nodeId: null,
+            role: "user" as const,
+            text: "Use the steering input.",
+            attachments: [attachment],
+            context,
+            createdBy: "user" as const,
+            creationSource: "web" as const,
+            streaming: false,
+            createdAt: testNow,
+            updatedAt: testNow,
+          },
+        ],
+      } as OrchestrationV2ThreadProjection;
+      const commands = yield* continuationDispatches(projection);
+      assert.lengthOf(commands, 1);
+      const command = commands[0]!;
+      assert.equal(command.type, "message.dispatch");
+      if (command.type !== "message.dispatch") return;
+      assert.equal(command.text, "Use the steering input.");
+      assert.deepEqual(command.attachments, [attachment]);
+      assert.deepEqual(command.context, context);
+      const earlierId = MessageId.make("message:earlier-steer");
+      const earlierRunId = RunId.make("run:earlier-steer");
+      assert.deepEqual(
+        yield* continuationTexts({
+          ...projection,
+          runs: [
+            {
+              ...projection.runs[0]!,
+              id: earlierRunId,
+              ordinal: 0,
+              restartPendingMessageIds: [earlierId],
+            },
+            { ...projection.runs[0]!, restartContinuationOfRunId: earlierRunId },
+          ],
+          messages: [
+            { ...projection.messages[0]!, id: earlierId, text: "Earlier input." },
+            ...projection.messages,
+          ],
+        }),
+        ["Earlier input.\n\nUse the steering input."],
+      );
+      for (const turnStatus of ["failed", "interrupted"] as const) {
+        assert.deepEqual(
+          yield* continuationTexts({
+            ...projection,
+            providerTurns: projection.providerTurns.map((turn) => ({
+              ...turn,
+              status: turnStatus,
+            })),
+          }),
+          [],
+        );
+      }
+    }),
+);
+
+it.effect("prepares pending native steering on a settled run before graceful shutdown", () =>
+  Effect.gen(function* () {
+    const base = makeProjection();
+    const messageId = MessageId.make("message:shutdown-pending-steer");
+    const projection = {
+      ...base,
+      runs: [{ ...base.runs[0]!, status: "completed" }],
+      providerTurns: [{ ...base.providerTurns[0]!, status: "completed" }],
+      pendingSteering: [{ runId, messageId }],
+    } as unknown as ProjectionStore.ProjectionRuntimeRecoveryState;
+    const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = [];
+    const events: Array<
+      Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0]["events"][number]
+    > = [];
+    const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerSettings.layerTest(),
+          IdAllocator.layer,
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getRecoveryThreadIds: () => Effect.succeed([threadId]),
+            getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+          }),
+          Layer.mock(EventSink.EventSinkV2)({
+            writeWithEffects: (input) => {
+              effects.push(...input.effects);
+              return Effect.succeed([]);
+            },
+            commitCommand: (input) => {
+              events.push(...input.events);
+              return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+            },
+          }),
+          Layer.mock(EffectOutbox.EffectOutboxV2)({
+            signalCancellations: () => Effect.void,
+            reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+          }),
+        ),
+      ),
+    );
+    yield* recovery.prepareForShutdown;
+    assert.lengthOf(effects, 1);
+    yield* recovery.reconcile("shutdown");
+    assert.isTrue(
+      events.some(
+        (event) =>
+          event.type === "run.updated" &&
+          event.payload.restartPendingMessageIds?.includes(messageId),
+      ),
+    );
+  }),
 );

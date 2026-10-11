@@ -4571,17 +4571,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           source.queueHeld !== true &&
           isWorktreeContinuationRun(source) &&
           projection.thread.worktreePath != null &&
-          projection.runs.filter((run) => run.status === "queued").length === 1 &&
+          projection.runs.filter(
+            (run) =>
+              run.status === "queued" && run.queueHeld !== true && isWorktreeContinuationRun(run),
+          ).length === 1 &&
           !projection.runs.some(isBlockingRun);
         if (
           !source ||
-          (source.status !== "cancelled" && !worktreeContinuation) ||
+          (source.status !== "cancelled" &&
+            !worktreeContinuation &&
+            (source.restartPendingMessageIds?.length ?? 0) === 0) ||
           (isWorktreeContinuationRun(source) &&
             source.status === "cancelled" &&
             !projection.providerTurns.some(
               (turn) => turn.runAttemptId === source.activeAttemptId,
             )) ||
-          isRestartNoteSource(source, projection.providerTurns) ||
+          (isRestartNoteSource(source, projection.providerTurns) &&
+            (source.restartPendingMessageIds?.length ?? 0) === 0) ||
           restartContinuationBlocked(
             { ...projection, turnItems: secretRequests.turnItems },
             source,

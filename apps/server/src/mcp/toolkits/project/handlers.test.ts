@@ -28,7 +28,7 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
-it.effect("attributes a launched thread's first message to the calling thread", () =>
+it.effect("attributes launch messages and keeps restart retry identities", () =>
   Effect.gen(function* () {
     const sourceThreadId = ThreadId.make("source-thread");
     const projectId = ProjectId.make("project");
@@ -46,6 +46,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       deletedAt: null,
     } as OrchestrationV2ThreadShell;
     let launchedSender: ThreadId | undefined;
+    const launches: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
@@ -65,6 +66,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
         launch: (input) => {
+          launches.push(input);
           launchedSender = input.initialMessage?.senderThreadId;
           return Effect.succeed({
             threadId: input.threadId,
@@ -96,6 +98,46 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
     expect(launchedSender).toBe(sourceThreadId);
+    const invoke = (
+      clientRequestId: string | undefined,
+      providerSessionId: string,
+      requestNamespace = "session",
+    ) =>
+      Effect.gen(function* () {
+        const dependencies = Layer.mergeAll(
+          layerDependencies,
+          Layer.succeed(McpInvocationContext.McpInvocationContext, {
+            environmentId: EnvironmentId.make("environment"),
+            requestNamespace,
+            thread: { threadId: sourceThreadId, providerInstanceId, providerSessionId },
+            client: undefined,
+            issuedAt: 0,
+            capabilities: new Set(["orchestration" as const]),
+          }),
+        );
+        const retryToolkit = yield* ProjectToolkit.pipe(
+          Effect.provide(
+            McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+              Layer.provide(dependencies),
+            ),
+          ),
+        );
+        return yield* retryToolkit
+          .handle("t3_thread_launch", {
+            title: "Audit",
+            message: "Review the change",
+            ...(clientRequestId ? { clientRequestId } : {}),
+          })
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      });
+    yield* invoke("retry-launch", "before-restart");
+    yield* invoke("retry-launch", "after-restart");
+    expect(launches[1]?.commandId).toBe(launches[2]?.commandId);
+    expect(launches[1]?.threadId).toBe(launches[2]?.threadId);
+    expect(launches[1]?.initialMessage?.messageId).toBe(launches[2]?.initialMessage?.messageId);
+    yield* invoke("retry-launch", "other-parent", "other-thread");
+    yield* invoke(undefined, "after-restart");
+    expect(new Set(launches.map((input) => input.threadId)).size).toBe(4);
   }),
 );
 

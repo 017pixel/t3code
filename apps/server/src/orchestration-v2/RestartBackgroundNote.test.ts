@@ -256,3 +256,21 @@ it("counts a prompted mid-turn or chained continuation as delivering the note", 
     [],
   );
 });
+
+it("carries pending native steering through repeated crashes until its prompt completes", () => {
+  const messageId = MessageId.make("message:pending-native-steer");
+  const source = run(1, codexThread, {
+    status: "cancelled",
+    restartPendingMessageIds: [messageId],
+  });
+  const continuation = run(2, codexThread, {
+    status: "cancelled",
+    restartContinuationOfRunId: source.id,
+  });
+  const again = run(3, codexThread, { restartContinuationOfRunId: continuation.id });
+  const runs = [source, continuation, again];
+  assert.isTrue(isRestartNoteContinuation(again, runs, [], []));
+  assert.isFalse(isRestartNoteContinuation(again, runs, [turnFor(continuation)], []));
+  // A pre-existing completed turn cannot have delivered a still-pending steer.
+  assert.isTrue(isRestartNoteContinuation(continuation, runs, [turnFor(source)], []));
+});

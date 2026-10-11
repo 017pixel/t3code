@@ -1843,4 +1843,110 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       );
     }),
   );
+
+  it.effect.each(["mixed-handoff", "settled-steering"] as const)(
+    "dispatches a %s restart continuation through the real orchestrator once",
+    (scenario) =>
+      Effect.gen(function* () {
+        const projects = yield* ProjectService.ProjectService;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`thread:restart-dispatch:${scenario}`);
+        const projectId = ProjectId.make(`project:restart-dispatch:${scenario}`);
+        yield* projects.create({
+          commandId: CommandId.make(`command:${scenario}:project`),
+          projectId,
+          title: scenario,
+          workspaceRoot: `/workspace/${scenario}`,
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`command:${scenario}:thread`),
+          threadId,
+          projectId,
+          title: scenario,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: `/workspace/${scenario}`,
+        });
+        const firstMessageId = MessageId.make(`message:${scenario}:first`);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`command:${scenario}:first`),
+          threadId,
+          messageId: firstMessageId,
+          text: "Pending steering input.",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+        });
+        if (scenario === "mixed-handoff") {
+          for (const [messageId, text] of [
+            [
+              MessageId.make("message:mcp:test:worktree-continuation:mixed"),
+              "Handoff continuation.",
+            ],
+            [MessageId.make("message:mixed:held"), "Held user input."],
+          ])
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "agent",
+              creationSource: "mcp",
+              commandId: CommandId.make(`command:${messageId}`),
+              threadId,
+              messageId: MessageId.make(messageId!),
+              text: text!,
+              attachments: [],
+              dispatchMode: { type: "queue_after_active" },
+            });
+        }
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        const source = before.runs[scenario === "mixed-handoff" ? 1 : 0]!;
+        yield* eventSink.write({
+          commandId: CommandId.make(`command:${scenario}:cut`),
+          events: before.runs.map((run) => ({
+            id: EventId.make(`event:${scenario}:${run.ordinal}`),
+            type: "run.updated" as const,
+            threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload:
+              scenario === "settled-steering"
+                ? {
+                    ...run,
+                    status: "completed" as const,
+                    completedAt: now,
+                    restartPendingMessageIds: [firstMessageId],
+                  }
+                : run.ordinal === 1
+                  ? { ...run, status: "cancelled" as const, completedAt: now }
+                  : run.ordinal === 3
+                    ? { ...run, queueHeld: true }
+                    : run,
+          })),
+        });
+        const continuation = continueRestartedRun({ threadId, sourceRunId: source.id }).pipe(
+          Effect.provide(ServerSettings.layerTest()),
+        );
+        yield* continuation;
+        yield* continuation;
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        const resumed = after.runs.filter((run) => run.restartContinuationOfRunId === source.id);
+        assert.lengthOf(resumed, 1);
+        assert.equal(
+          after.messages.find((message) => message.id === resumed[0]!.userMessageId)?.text,
+          scenario === "mixed-handoff" ? "Handoff continuation." : "Pending steering input.",
+        );
+        if (scenario === "mixed-handoff") {
+          assert.equal(after.runs.find((run) => run.id === source.id)?.status, "cancelled");
+          assert.isTrue(after.runs.find((run) => run.ordinal === 3)?.queueHeld);
+        }
+      }),
+  );
 });

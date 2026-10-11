@@ -21,6 +21,7 @@ import {
   restartCancelledBackgroundWorkNote,
   restartContinuationNote,
   restartPromptSource,
+  restartPendingMessageIds,
 } from "./RestartBackgroundNote.ts";
 
 const CONTINUE_PROMPT = "Continue where you left off.";
@@ -51,7 +52,7 @@ export function hasRestorableOpenCodeRequest(
   );
 }
 
-/** A recorded intent must not wake held threads, unbindable requests, or settled provider turns. */
+/** A recorded intent must not wake held threads, unbindable requests, or turns with no new input. */
 export function restartContinuationBlocked(
   projection: Pick<
     ProjectionRuntimeRecoveryState,
@@ -74,7 +75,9 @@ export function restartContinuationBlocked(
   const turn = latestProviderTurnForAttempt(projection.providerTurns, source.activeAttemptId);
   return (
     (turn !== undefined &&
-      (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted")) ||
+      (turn.status === "failed" ||
+        turn.status === "interrupted" ||
+        (turn.status === "completed" && (source.restartPendingMessageIds?.length ?? 0) === 0))) ||
     projection.runtimeRequests.some(
       (request) =>
         !hasRestorableOpenCodeRequest({ ...projection, runtimeRequests: [request] }, source) &&
@@ -109,6 +112,7 @@ export function restartContinuationBlocked(
 /**
  * Resume only an unfinished root turn. Leftover background work is cleaned up
  * separately and reported on the next user turn; it must not wake a settled run.
+ * Undelivered steering is unfinished input even when the root turn settled.
  */
 export function restartContinuationRun(
   projection: Pick<
@@ -138,14 +142,16 @@ export function restartContinuationRun(
     (run.restartContinuationOfRunId !== undefined ||
       restartPromptSource(run, projection.runs, projection.providerTurns, projection.attempts) !==
         undefined);
+  const pendingSteering = (run.restartPendingMessageIds?.length ?? 0) > 0;
   if (
     run.status !== "running" &&
     !preparedContinuation &&
+    !pendingSteering &&
     !(run.status === "waiting" && hasRestorableOpenCodeRequest(projection, run))
   )
     return;
   if (restartContinuationBlocked(projection, run, now)) return;
-  const liveTurnRequired = !preparedContinuation;
+  const liveTurnRequired = !preparedContinuation && !pendingSteering;
   if (projection.thread.providerInstanceId !== run.providerInstanceId) return;
   const providerThread = projection.providerThreads.find(
     (thread) => thread.id === run.providerThreadId,
@@ -216,7 +222,10 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       source.queueHeld !== true &&
       isWorktreeContinuationRun(source) &&
       projection.thread.worktreePath != null &&
-      projection.runs.filter((run) => run.status === "queued").length === 1 &&
+      projection.runs.filter(
+        (run) =>
+          run.status === "queued" && run.queueHeld !== true && isWorktreeContinuationRun(run),
+      ).length === 1 &&
       !projection.runs.some((run) =>
         ["preparing", "starting", "running", "waiting"].includes(run.status),
       );
@@ -224,12 +233,15 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     // including waiting runs that reconciliation subsequently cancelled.
     if (
       !source ||
-      (source.status !== "cancelled" && !worktreeContinuation) ||
+      (source.status !== "cancelled" &&
+        !worktreeContinuation &&
+        (source.restartPendingMessageIds?.length ?? 0) === 0) ||
       (isWorktreeContinuationRun(source) &&
         source.status === "cancelled" &&
         !projection.providerTurns.some((turn) => turn.runAttemptId === source.activeAttemptId)) ||
       restartContinuationBlocked(projection, source, yield* DateTime.now) ||
-      isRestartNoteSource(source, projection.providerTurns)
+      (isRestartNoteSource(source, projection.providerTurns) &&
+        (source.restartPendingMessageIds?.length ?? 0) === 0)
     )
       return;
     // A user submission after reconciliation takes precedence over an automatic
@@ -266,11 +278,20 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       projection.providerTurns,
       projection.attempts,
     );
+    const pendingMessageIds = restartPendingMessageIds(
+      source,
+      projection.runs,
+      projection.providerTurns,
+    );
     const sourceRecords = yield* threads.getThreadRecords(
       input.threadId,
       ["messages", "turnItems"],
       {
-        messageIds: [source.userMessageId, ...(promptSource ? [promptSource.userMessageId] : [])],
+        messageIds: [
+          source.userMessageId,
+          ...(promptSource ? [promptSource.userMessageId] : []),
+          ...pendingMessageIds,
+        ],
         turnItemRunIds: [source.id],
         turnItemTypes: ["run_interrupt_request"],
       },
@@ -291,7 +312,18 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         ? undefined
         : sourceRecords.messages.find((message) => message.id === promptSource.userMessageId);
     if (promptSource !== undefined && replacementMessage === undefined) return;
-    const prompt = replacementMessage?.text ?? CONTINUE_PROMPT;
+    const pendingMessages = pendingMessageIds.map((id) =>
+      sourceRecords.messages.find((message) => message.id === id),
+    );
+    if (pendingMessages.some((message) => message === undefined)) return;
+    const promptMessages = [
+      ...(replacementMessage ? [replacementMessage] : []),
+      ...pendingMessages.filter((message) => message !== undefined),
+    ];
+    const prompt =
+      promptMessages.length > 0
+        ? promptMessages.map((message) => message.text).join("\n\n")
+        : CONTINUE_PROMPT;
     const note = restartContinuationNote(
       source,
       projection.runs,
@@ -301,7 +333,11 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     const noteText =
       note.work.length === 0 ? undefined : restartCancelledBackgroundWorkNote(note.work);
     const text =
-      noteText === undefined ? prompt : note.settled ? noteText : `${noteText}\n\n${prompt}`;
+      noteText === undefined
+        ? prompt
+        : note.settled && pendingMessages.length === 0
+          ? noteText
+          : `${noteText}\n\n${prompt}`;
     yield* threads.dispatch({
       type: "message.dispatch",
       commandId: CommandId.make(`command:restart-continuation:${input.sourceRunId}`),
@@ -313,7 +349,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       text,
       // Shown as a work log row; the prompt the agent got is its detail. A
       // replacement prompt keeps its own message, attachments and context.
-      ...(replacementMessage === undefined
+      ...(replacementMessage === undefined && pendingMessages.length === 0
         ? {
             notification: {
               source: { kind: "system" as const },
@@ -325,8 +361,15 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
             },
           }
         : {}),
-      attachments: replacementMessage?.attachments ?? [],
-      ...(replacementMessage?.context === undefined ? {} : { context: replacementMessage.context }),
+      attachments: promptMessages.flatMap((message) => message.attachments),
+      ...(promptMessages.some((message) => message.context !== undefined)
+        ? {
+            context: {
+              version: 1 as const,
+              records: promptMessages.flatMap((message) => message.context?.records ?? []),
+            },
+          }
+        : {}),
       modelSelection: source.modelSelection,
       dispatchMode: { type: "start_immediately" },
       createdBy: "agent",

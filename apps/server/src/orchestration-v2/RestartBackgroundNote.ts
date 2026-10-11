@@ -4,6 +4,8 @@ import type {
   OrchestrationV2RestartCancelledBackgroundWork,
   OrchestrationV2Run,
   OrchestrationV2RunAttempt,
+  OrchestrationV2Subagent,
+  MessageId,
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -50,6 +52,15 @@ export function cancelledTurnItemWork(item: OrchestrationV2TurnItem): Work | und
     default:
       return undefined;
   }
+}
+
+/** A native subagent can be recorded before its turn item arrives. */
+export function cancelledSubagentWork(subagent: OrchestrationV2Subagent): Work {
+  return {
+    kind: "subagent",
+    label: compactLabel(subagent.title) ?? compactLabel(subagent.prompt) ?? "subagent",
+    id: subagent.id,
+  };
 }
 
 function restartWorkKind(task: OrchestrationV2PendingBackgroundTask): Work["kind"] {
@@ -187,6 +198,29 @@ export function restartPromptSource(
   }
 }
 
+/** Unsettled steering follows a continuation until a completed turn proves delivery. */
+export function restartPendingMessageIds(
+  source: OrchestrationV2Run,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  providerTurns: ReadonlyArray<Pick<ProviderTurnState, "runAttemptId" | "status">>,
+): ReadonlyArray<MessageId> {
+  const visited = new Set<string>();
+  const messages: Array<MessageId> = [];
+  let current: OrchestrationV2Run | undefined = source;
+  while (current !== undefined && !visited.has(current.id)) {
+    visited.add(current.id);
+    messages.unshift(...(current.restartPendingMessageIds ?? []));
+    if (
+      providerTurns.some(
+        (turn) => turn.runAttemptId === current?.activeAttemptId && turn.status === "completed",
+      )
+    )
+      break;
+    current = runs.find((run) => run.id === current?.restartContinuationOfRunId);
+  }
+  return [...new Set(messages)];
+}
+
 /**
  * A restart continuation prompted with the note or an undelivered steering restart.
  * A turn cut mid-way that lost background work is prompted too, so the note
@@ -204,7 +238,8 @@ export function isRestartNoteContinuation(
       : runs.find((candidate) => candidate.id === run.restartContinuationOfRunId);
   return (
     source !== undefined &&
-    (restartContinuationNote(source, runs, providerTurns, attempts).work.length > 0 ||
+    (restartPendingMessageIds(source, runs, providerTurns).length > 0 ||
+      restartContinuationNote(source, runs, providerTurns, attempts).work.length > 0 ||
       restartPromptSource(source, runs, providerTurns, attempts) !== undefined)
   );
 }

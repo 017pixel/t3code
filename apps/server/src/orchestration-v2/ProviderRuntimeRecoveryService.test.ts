@@ -1212,12 +1212,29 @@ it.effect.each([true, false])(
           driver: ProviderDriverKind.make("claude"),
           providerInstanceId: claudeInstanceId,
           status: "idle",
-          pendingBackgroundTasks: [],
+          ownerNodeId: null,
+          pendingBackgroundTasks: hasTurnItem
+            ? []
+            : [
+                {
+                  taskId: "native-before-item",
+                  kind: "subagent",
+                  status: "running",
+                  description: "recover native child",
+                },
+              ],
         },
       ],
       providerTurns: [],
       // Settled run: the stale-item loop owns it, not the nonterminal loop.
-      runs: [{ id: settledRunId, status: "completed", providerInstanceId: claudeInstanceId }],
+      runs: [
+        {
+          id: settledRunId,
+          status: "completed",
+          providerThreadId,
+          providerInstanceId: claudeInstanceId,
+        },
+      ],
       attempts: [],
       nodes: [
         { id: staleSubagentNodeId, runId: settledRunId, status: "running" },
@@ -1226,6 +1243,9 @@ it.effect.each([true, false])(
       subagents: [
         {
           id: staleSubagentNodeId,
+          title: "recover native child",
+          prompt: "native task prompt",
+          nativeTaskRef: { driver: "claude", nativeId: "native-before-item", strength: "strong" },
           runId: settledRunId,
           origin: "provider_native",
           driver: ProviderDriverKind.make("claude"),
@@ -1330,6 +1350,17 @@ it.effect.each([true, false])(
         nodeCancel?.type === "node.updated" ? nodeCancel.payload.id : null,
         staleSubagentNodeId,
       );
+
+      const note = events.find((event) => event.type === "run.background-work-cancelled");
+      assert.equal(
+        note?.type === "run.background-work-cancelled"
+          ? note.payload.restartCancelledBackgroundWork.length
+          : 0,
+        1,
+      );
+      if (!hasTurnItem && note?.type === "run.background-work-cancelled") {
+        assert.equal(note.payload.restartCancelledBackgroundWork[0]?.label, "recover native child");
+      }
 
       // The already-completed subagent and node are left untouched.
       assert.isFalse(

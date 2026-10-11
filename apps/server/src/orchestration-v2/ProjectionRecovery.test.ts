@@ -794,3 +794,139 @@ it.effect("marks fork descendants unreadable when their source is missing or cor
     );
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("retains a native subagent's owning run when no turn item arrived", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const now = yield* DateTime.now;
+    const threadId = yield* createThread("native-before-item");
+    const runId = yield* createRun(threadId, "completed");
+    yield* createRun(threadId, "completed", { ordinal: 2 });
+    yield* projections.apply({
+      id: EventId.make("event:native-before-item"),
+      type: "subagent.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: NodeId.make("node:native-before-item"),
+        threadId,
+        runId,
+        parentNodeId: NodeId.make("node:native-parent"),
+        origin: "provider_native",
+        createdBy: "agent",
+        driver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "unfinished task",
+        title: null,
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      },
+    });
+    assert.deepEqual(
+      (yield* projections.getRuntimeRecoveryProjection(threadId)).runs.map((run) => run.id),
+      [runId, RunId.make(`run:${threadId}:2`)],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "snapshots unsettled native steering and excludes delivered input and mailbox deliveries",
+  () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const now = yield* DateTime.now;
+      const threadId = yield* createThread("steering-recovery");
+      const runId = yield* createRun(threadId, "running");
+      const ids: Array<MessageId> = [];
+      for (const [index, mailbox] of [false, false, true, false].entries()) {
+        const messageId = MessageId.make(`message:steering:${index}`);
+        ids.push(messageId);
+        yield* projections.apply({
+          id: EventId.make(`event:${messageId}`),
+          type: "message.updated",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: {
+            id: messageId,
+            threadId,
+            runId,
+            nodeId: null,
+            role: "user",
+            text: `steer ${index}`,
+            attachments: [],
+            streaming: false,
+            createdBy: "user",
+            creationSource: "web",
+            createdAt: now,
+            updatedAt: now,
+            ...(mailbox
+              ? { delegatedCompletion: { parentRunId: runId, generation: 1, taskIds: [] } }
+              : {}),
+          },
+        });
+        yield* outbox.enqueue([
+          {
+            id: `effect:steering:${index}`,
+            commandId: CommandId.make(`command:steering:${index}`),
+            threadId,
+            request: {
+              type: "provider-turn.steer",
+              messageId,
+              providerSessionId: ProviderSessionId.make("session:steering"),
+              providerThreadId: ProviderThreadId.make("provider-thread:steering"),
+              providerTurnId: ProviderTurnId.make("provider-turn:steering"),
+            },
+          },
+        ]);
+      }
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'succeeded' WHERE effect_id = 'effect:steering:1'`;
+      yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'failed' WHERE effect_id = 'effect:steering:3'`;
+      const recovered = yield* projections.getRuntimeRecoveryProjection(threadId);
+      assert.deepEqual(recovered.pendingSteering, [{ runId, messageId: ids[0]! }]);
+      let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
+      yield* ProviderRuntimeRecovery.make.pipe(
+        Effect.flatMap((recovery) => recovery.reconcile("startup")),
+        Effect.provide(
+          Layer.mergeAll(
+            ServerSettings.layerTest(),
+            IdAllocator.layer,
+            Layer.mock(EventSink.EventSinkV2)({
+              commitCommand: (input) => {
+                committed = input;
+                return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+              },
+            }),
+          ),
+        ),
+      );
+      const event = committed?.events.find((event) => event.type === "run.updated");
+      assert.deepEqual(
+        event?.type === "run.updated" ? event.payload.restartPendingMessageIds : [],
+        [ids[0]!],
+      );
+      const stale = (yield* projections.getThreadProjection(threadId)).runs[0]!;
+      if (event !== undefined) yield* projections.apply(event);
+      yield* projections.apply({
+        id: EventId.make("event:steering-stale"),
+        type: "run.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload: { ...stale, status: "cancelled" },
+      });
+      assert.deepEqual(
+        (yield* projections.getThreadProjection(threadId)).runs[0]?.restartPendingMessageIds,
+        [ids[0]!],
+      );
+    }).pipe(Effect.provide(layerTest)),
+);

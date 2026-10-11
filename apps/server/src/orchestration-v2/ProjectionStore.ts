@@ -278,7 +278,12 @@ export type ProjectionRuntimeRecoveryState = Pick<
   | "runtimeRequests"
   | "messages"
   | "turnItems"
->;
+> & {
+  readonly pendingSteering?: ReadonlyArray<{
+    readonly runId: RunId;
+    readonly messageId: MessageId;
+  }>;
+};
 
 export type ProjectionPendingUserInputs = Pick<
   OrchestrationV2ThreadProjection,
@@ -678,6 +683,10 @@ function preserveRunRecordedFields(
     ...next,
     ...(next.delegatedCompletion === undefined && current.delegatedCompletion !== undefined
       ? { delegatedCompletion: current.delegatedCompletion }
+      : {}),
+    ...(next.restartPendingMessageIds === undefined &&
+    current.restartPendingMessageIds !== undefined
+      ? { restartPendingMessageIds: current.restartPendingMessageIds }
       : {}),
     ...(next.restartCancelledBackgroundWork === undefined &&
     current.restartCancelledBackgroundWork !== undefined
@@ -1961,7 +1970,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 requested_at = excluded.requested_at,
                 completed_at = excluded.completed_at,
                 payload_json = ${keepRecordedRunField(
-                  keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                  keepRecordedRunField(
+                    keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                    "$.restartPendingMessageIds",
+                  ),
                   "$.restartCancelledBackgroundWork",
                 )}
             `;
@@ -4086,6 +4098,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                         ELSE 0 END
                   )
                   OR run.run_id IN (
+                    SELECT subagent.run_id FROM orchestration_v2_projection_subagents AS subagent
+                    WHERE subagent.thread_id = ${threadId} AND subagent.origin = 'provider_native'
+                      AND subagent.status IN ('pending', 'running', 'waiting')
+                  )
+                  OR run.run_id IN (
+                    SELECT message.run_id FROM orchestration_v2_projection_messages AS message
+                    JOIN orchestration_v2_effect_outbox AS effect
+                      ON json_extract(effect.payload_json, '$.messageId') = message.message_id
+                    WHERE effect.thread_id = ${threadId} AND effect.effect_type = 'provider-turn.steer'
+                      AND effect.status IN ('pending', 'running')
+                  )
+                  OR run.run_id IN (
                     SELECT item.run_id FROM orchestration_v2_projection_turn_items AS item
                     WHERE item.thread_id = ${threadId}
                       AND item.type IN ('command_execution', 'dynamic_tool', 'subagent')
@@ -4172,7 +4196,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       SELECT run.provider_thread_id
                       FROM orchestration_v2_projection_runs AS run
                       WHERE run.thread_id = ${threadId}
-                        AND run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                        AND (
+                          run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                          OR run.run_id IN (
+                            SELECT message.run_id FROM orchestration_v2_projection_messages AS message
+                            JOIN orchestration_v2_effect_outbox AS effect
+                              ON json_extract(effect.payload_json, '$.messageId') = message.message_id
+                            WHERE effect.thread_id = ${threadId} AND effect.effect_type = 'provider-turn.steer'
+                              AND effect.status IN ('pending', 'running')
+                          )
+                        )
                     )
                   )
                 )
@@ -4202,7 +4235,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   OR provider_thread.provider_thread_id IN (
                     SELECT run.provider_thread_id FROM orchestration_v2_projection_runs AS run
                     WHERE run.thread_id = ${threadId}
-                      AND run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                      AND (
+                        run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                        OR run.run_id IN (
+                          SELECT message.run_id FROM orchestration_v2_projection_messages AS message
+                          JOIN orchestration_v2_effect_outbox AS effect
+                            ON json_extract(effect.payload_json, '$.messageId') = message.message_id
+                          WHERE effect.thread_id = ${threadId} AND effect.effect_type = 'provider-turn.steer'
+                            AND effect.status IN ('pending', 'running')
+                        )
+                      )
                   )
                   OR provider_thread.provider_thread_id IN (
                     SELECT item.provider_thread_id
@@ -4294,7 +4336,25 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           decodeRows(decodeMessagePayload, threadId)(messageRows),
           decodeRows(decodeTurnItemPayload, threadId)(turnItemRows),
         ]);
+        const pendingSteering = yield* sql<{
+          readonly run_id: string;
+          readonly message_id: string;
+        }>`
+          SELECT message.run_id, message.message_id
+          FROM orchestration_v2_effect_outbox AS effect
+          JOIN orchestration_v2_projection_messages AS message
+            ON message.thread_id = effect.thread_id
+              AND message.message_id = json_extract(effect.payload_json, '$.messageId')
+          WHERE effect.thread_id = ${threadId} AND effect.effect_type = 'provider-turn.steer'
+            AND effect.status IN ('pending', 'running')
+            AND json_extract(message.payload_json, '$.delegatedCompletion') IS NULL
+          ORDER BY message.created_at ASC, message.message_id ASC
+        `;
         return {
+          pendingSteering: pendingSteering.map((row) => ({
+            runId: RunId.make(row.run_id),
+            messageId: MessageId.make(row.message_id),
+          })),
           thread,
           runs,
           attempts,
