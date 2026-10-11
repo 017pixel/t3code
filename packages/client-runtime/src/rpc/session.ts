@@ -231,8 +231,11 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
       options !== undefined
         ? rawClient[WS_METHODS.serverDiscoverSourceControl](input, options)
         : input.refresh === true
-          ? invalidateDiscovery.pipe(
+          ? // A plain call already in flight is not cancelled by the first
+            // invalidate and would store its older result; the second drops it.
+            invalidateDiscovery.pipe(
               Effect.andThen(rawClient[WS_METHODS.serverDiscoverSourceControl](input)),
+              Effect.tap(() => invalidateDiscovery),
             )
           : discoverSourceControl;
     const protocolClient: WsRpcProtocolClient = {

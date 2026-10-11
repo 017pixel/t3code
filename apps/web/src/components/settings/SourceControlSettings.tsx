@@ -23,6 +23,7 @@ import { useSettingsScope } from "./SettingsScopeContext";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { cn } from "../../lib/utils";
 import { useEnvironmentQuery } from "../../state/query";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { sourceControlEnvironment } from "../../state/sourceControl";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -535,6 +536,13 @@ export function SourceControlSettingsPanel() {
           input: { refresh: true },
         }),
   );
+  // The publish dialog and the palette read discovery without a rescan, and
+  // kept thread views keep that query mounted; each scan here refreshes it.
+  const scanned = discovery.data;
+  useEffect(() => {
+    if (environmentId === null || !scanned) return;
+    appAtomRegistry.refresh(sourceControlEnvironment.discovery({ environmentId, input: {} }));
+  }, [environmentId, scanned]);
   const result = discovery.data ?? EMPTY_DISCOVERY_RESULT;
   const hasVersionControlSystems = result.versionControlSystems.length > 0;
   const hasDiscoveryItems = hasVersionControlSystems || result.sourceControlProviders.length > 0;
