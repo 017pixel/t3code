@@ -76,9 +76,7 @@ import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ProjectionThreadSweepIndexes.ts";
-import Migration0063, {
-  ensureThreadReadProjection,
-} from "./Migrations/063_ProjectionThreadReadPayload.ts";
+import Migration0063 from "./Migrations/063_ProjectionThreadReadPayload.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -245,7 +243,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   // ProjectionStore reads this table, so it must exist even when its migration was skipped.
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 63) {
-    yield* ensureThreadReadProjection;
+    yield* Migration0063;
   }
   return executedMigrations;
 });

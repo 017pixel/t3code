@@ -228,11 +228,7 @@ function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
  * Rendered by KeptChatSurface rather than by the two leaf routes, since an
  * element only survives a route swap when the same parent renders it.
  */
-export const ThreadRouteView = memo(function ThreadRouteView({
-  target,
-}: {
-  target: ThreadRouteTarget;
-}) {
+const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   const navigate = useNavigate();
   const draftId = target.kind === "draft" ? target.draftId : null;
   const draftSession = useComposerDraftStore((store) =>

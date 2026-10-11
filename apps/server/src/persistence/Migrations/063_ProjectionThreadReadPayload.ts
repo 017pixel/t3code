@@ -88,7 +88,7 @@ const ensureInTransaction = (sql: SqlClient.SqlClient) =>
     `;
   });
 
-export const ensureThreadReadProjection = Effect.gen(function* () {
+const ensureThreadReadProjection = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql.withTransaction(ensureInTransaction(sql));
 });

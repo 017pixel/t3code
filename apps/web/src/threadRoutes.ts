@@ -147,7 +147,7 @@ export interface KeptThreadView {
 }
 
 /** Recently shown server threads stay rendered, so a revisit only reveals them. */
-export const KEPT_THREAD_VIEW_LIMIT = 4;
+const KEPT_THREAD_VIEW_LIMIT = 4;
 
 function retarget(
   view: KeptThreadView,
