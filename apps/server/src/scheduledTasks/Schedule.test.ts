@@ -134,3 +134,29 @@ describe("scheduled task schedule calculation", () => {
     ).toBe(true);
   });
 });
+
+it.each([
+  ["spring gap", "2026-03-08T08:00:00.000Z", "02:30", "2026-03-08T10:30:00.000Z"],
+  ["after spring gap", "2026-03-08T10:31:00.000Z", "02:30", "2026-03-09T09:30:00.000Z"],
+  ["fall fold", "2026-11-01T07:00:00.000Z", "01:30", "2026-11-01T08:30:00.000Z"],
+  ["after first fall slot", "2026-11-01T08:31:00.000Z", "01:30", "2026-11-02T09:30:00.000Z"],
+  ["after second fall slot", "2026-11-01T09:31:00.000Z", "01:30", "2026-11-02T09:30:00.000Z"],
+])("preserves daily wall-clock scheduling across %s", (_name, instant, timeOfDay, expected) => {
+  const from = DateTime.makeZonedUnsafe(instant, { timeZone: "America/Los_Angeles" });
+  const next = nextScheduledRunAt({ type: "fixed_time", timeOfDay }, from);
+  expect(next && DateTime.formatIso(DateTime.toUtc(next))).toBe(expected);
+});
+
+it("keeps interval elapsed time across DST and applies weekdays in the server zone", () => {
+  const from = DateTime.makeZonedUnsafe("2026-03-08T09:55:00.000Z", {
+    timeZone: "America/Los_Angeles",
+  });
+  const next = nextScheduledRunAt({ type: "interval", everyMs: 15 * 60_000 }, from)!;
+  expect(DateTime.formatIso(DateTime.toUtc(next))).toBe("2026-03-08T10:10:00.000Z");
+  expect(DateTime.toParts(next).hour).toBe(3);
+  const sunday = nextScheduledRunAt(
+    { type: "fixed_time", timeOfDay: "23:30", weekdays: [0] },
+    DateTime.makeZonedUnsafe("2026-07-06T01:00:00.000Z", { timeZone: "America/Los_Angeles" }),
+  );
+  expect(sunday && DateTime.formatIso(DateTime.toUtc(sunday))).toBe("2026-07-06T06:30:00.000Z");
+});

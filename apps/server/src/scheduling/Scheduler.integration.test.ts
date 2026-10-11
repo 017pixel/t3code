@@ -11,6 +11,15 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
+import * as Option from "effect/Option";
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as CodexInstallation from "../provider/CodexInstallation.ts";
+import * as AntigravityInstallation from "../provider/AntigravityInstallation.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as UpdateWindow from "../updates/UpdateWindow.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -153,4 +162,76 @@ it.effect.each(["on time", "after restart"])(
         });
       }).pipe(Effect.provide(layerWorkers));
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect.each([
+  ["exact five-minute horizon", 15 * 60_000, 5 * 60_000, true, "succeeded", false],
+  ["one millisecond beyond horizon", 15 * 60_000, 5 * 60_000 + 1, true, "succeeded", true],
+  ["interval just under fifteen minutes", 15 * 60_000 - 1, 60_000, true, "succeeded", true],
+  ["interval exactly fifteen minutes", 15 * 60_000, 60_000, true, "succeeded", false],
+  ["disabled due task", 15 * 60_000, 60_000, false, "succeeded", true],
+  ["disabled running task", 60_000, 60_000, false, "running", false],
+  ["frequent running task", 60_000, 60_000, true, "running", false],
+  ["accepted webhook waiting for dispatch", 0, 0, true, "never", false],
+  ["paused webhook waiting for dispatch", 0, 0, false, "never", true],
+] as const)("update window handles %s", ([, everyMs, dueIn, enabled, status, open]) =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const sql = yield* SqlClient.SqlClient;
+    const timestamp = DateTime.formatIso(now);
+    yield* sql`INSERT INTO scheduled_tasks ${sql.insert({
+      task_id: "task:window",
+      title: "Work",
+      prompt: "Run",
+      enabled: enabled ? 1 : 0,
+      schedule_json: JSON.stringify(
+        everyMs === 0 ? { type: "webhook", signature: null } : { type: "interval", everyMs },
+      ),
+      project_id: "project:test",
+      thread_id: null,
+      workspace_strategy_json: '{"type":"root"}',
+      model_selection_json: '{"instanceId":"codex","model":"gpt-5"}',
+      runtime_mode: "full-access",
+      interaction_mode: "default",
+      created_by: "user",
+      creation_source: "web",
+      created_at: timestamp,
+      updated_at: timestamp,
+      next_run_at:
+        everyMs === 0 ? null : DateTime.formatIso(DateTime.add(now, { milliseconds: dueIn })),
+      last_run_at: timestamp,
+      last_run_status: status,
+      last_run_error: null,
+      run_count: 1,
+    })}`;
+    if (everyMs === 0)
+      yield* sql`INSERT INTO scheduled_task_webhook_queue (delivery_id, task_id, task_created_at, prompt)
+      VALUES ('pending', 'task:window', ${timestamp}, 'Handle body')`;
+    const dependencies = Layer.mergeAll(
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getRecoveryThreadIds: () => Effect.succeed([]),
+        getLimitRecoveryCandidates: () => Effect.succeed([]),
+      }),
+      Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+        hasPendingBackgroundWork: Effect.succeed(false),
+      }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+      Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+        sinceLastClientInteraction: Effect.succeed(Duration.minutes(15)),
+      }),
+      Layer.mock(ServerSettings.ServerSettingsService)({
+        getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+      }),
+      Layer.mock(TerminalManager.TerminalManager)({}),
+      Layer.mock(CodexInstallation.CodexInstallation)({ managedDirectory: "/tmp/codex" }),
+      Layer.mock(AntigravityInstallation.AntigravityInstallation)({
+        managedDirectory: "/tmp/antigravity",
+      }),
+    );
+    const result = yield* Effect.gen(function* () {
+      const window = yield* UpdateWindow.UpdateWindow;
+      return yield* window.runIfOpen(Effect.succeed("installed"));
+    }).pipe(Effect.provide(UpdateWindow.layer.pipe(Layer.provide(dependencies))));
+    assert.equal(Option.isSome(result), open);
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

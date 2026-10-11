@@ -5,6 +5,7 @@ import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import { ScheduledTaskUpsertInput, SecretRequestError } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -14,6 +15,7 @@ import * as Queue from "effect/Queue";
 import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { ServerActivation } from "../serverActivation.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -976,4 +978,276 @@ it.effect("counts each handled request by what happened to it", () =>
       assert.equal((yield* deliveriesCounted("duplicate", "relay")) - before.duplicate, 1);
     }),
   ),
+);
+
+it.effect.each([null, "thread:bound"])(
+  "replays an accepted webhook and its untruncated body after shutdown (binding %s)",
+  (threadId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const deliveries = yield* Queue.unbounded<{ commandId: string; text: string }>();
+      const dispatchStarted = yield* Deferred.make<void>();
+      const accepted = yield* Deferred.make<void>();
+      const bodyText = JSON.stringify({ text: "x".repeat(70_000) });
+      const dependencies = (hold: boolean) =>
+        Layer.mergeAll(
+          NodePlatformCrypto.layer,
+          Scheduler.layer,
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+            launch: (input) =>
+              Queue.offer(deliveries, {
+                commandId: input.commandId,
+                text: input.initialMessage!.text,
+              }).pipe(
+                Effect.andThen(Deferred.succeed(dispatchStarted, undefined)),
+                Effect.andThen(hold ? Effect.never : Effect.void),
+                Effect.as({} as never),
+              ),
+          }),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            sendToThread: (input) =>
+              Queue.offer(deliveries, { commandId: input.commandId, text: input.text }).pipe(
+                Effect.andThen(Deferred.succeed(dispatchStarted, undefined)),
+                Effect.andThen(hold ? Effect.never : Effect.void),
+                Effect.as({} as never),
+              ),
+          }),
+        );
+      let request: ScheduledTaskService.WebhookTriggerRequest;
+      const first = yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const { task } = yield* service.upsert(
+          yield* webhookTaskInput({ threadId, prompt: "Handle {{body}}" }),
+        );
+        request = requestFor(task, {
+          relayDeliveryId: "durable",
+          bodyText,
+          body: new TextEncoder().encode(bodyText),
+        });
+        assert.equal((yield* service.triggerWebhook(request))._tag, "accepted");
+        yield* Deferred.succeed(accepted, undefined);
+        return yield* Effect.never;
+      }).pipe(
+        Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies(true)))),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(accepted);
+      yield* Deferred.await(dispatchStarted);
+      const initial = yield* Queue.take(deliveries);
+      yield* Fiber.interrupt(first);
+      const pending = yield* sql<{
+        prompt: string;
+      }>`SELECT prompt FROM scheduled_task_webhook_queue`;
+      assert.equal(pending[0]?.prompt, "Handle " + bodyText);
+      const replayed = yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const duplicate = yield* service.triggerWebhook(request!);
+        assert.equal(duplicate._tag === "accepted" && duplicate.outcome, "duplicate");
+        const ready = yield* Deferred.make<void>();
+        const completed = yield* service.subscribeList().pipe(
+          Stream.tap(() => Deferred.succeed(ready, undefined)),
+          Stream.filter((list) => list.tasks[0]?.lastRunStatus === "succeeded"),
+          Stream.runHead,
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(ready);
+        yield* TestClock.adjust("5 seconds");
+        const delivered = yield* Queue.take(deliveries);
+        yield* Fiber.join(completed);
+        assert.equal((yield* service.list()).tasks[0]?.lastRunStatus, "succeeded");
+        yield* TestClock.adjust("5 seconds");
+        assert.equal(yield* Queue.size(deliveries), 0);
+        return delivered;
+      }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies(false)))));
+      assert.deepEqual(replayed, initial);
+      assert.equal((yield* sql`SELECT * FROM scheduled_task_webhook_queue`).length, 0);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("keeps acceptance durable when shutdown precedes the dispatch fork", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const launches = yield* Queue.unbounded<LaunchInput>();
+    const dependencies = Layer.mergeAll(
+      NodePlatformCrypto.layer,
+      Scheduler.layer,
+      Layer.mock(SecretRequests.SecretRequests)({}),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+        launch: (input) => Queue.offer(launches, input).pipe(Effect.as({} as never)),
+      }),
+    );
+    let request: ScheduledTaskService.WebhookTriggerRequest;
+    // The request has committed, but no background dispatch may run until activation.
+    const activation = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      request = requestFor(task, { relayDeliveryId: "before-dispatch" });
+      assert.equal((yield* service.triggerWebhook(request))._tag, "accepted");
+    }).pipe(
+      Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))),
+      Effect.provideService(ServerActivation, Deferred.await(activation)),
+    );
+    assert.equal(yield* Queue.size(launches), 0);
+    assert.equal((yield* sql`SELECT * FROM scheduled_task_webhook_queue`).length, 1);
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const duplicate = yield* service.triggerWebhook(request!);
+      assert.equal(duplicate._tag === "accepted" && duplicate.outcome, "duplicate");
+      yield* TestClock.adjust("5 seconds");
+      const launch = yield* Queue.take(launches);
+      assert.equal(
+        launch.initialMessage?.text,
+        "Review this PR: https://github.com/org/repo/pull/45",
+      );
+    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("rolls back relay deduplication when the acceptance write fails", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const dependencies = Layer.mergeAll(
+      NodePlatformCrypto.layer,
+      Scheduler.layer,
+      Layer.mock(SecretRequests.SecretRequests)({}),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+        launch: () => Effect.succeed({} as never),
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      yield* sql`CREATE TRIGGER fail_accept BEFORE INSERT ON scheduled_task_webhook_deliveries
+        BEGIN SELECT RAISE(FAIL, 'disk write failed'); END`;
+      const request = requestFor(task, { relayDeliveryId: "write-failure" });
+      yield* service.triggerWebhook(request).pipe(Effect.flip);
+      assert.equal((yield* sql`SELECT * FROM scheduled_task_webhook_relay_deliveries`).length, 0);
+      yield* sql`DROP TRIGGER fail_accept`;
+      const retried = yield* service.triggerWebhook(request);
+      assert.equal(retried._tag === "accepted" && retried.outcome, "accepted");
+    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("rolls back a relay claim when a full queue cannot release it", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const gate = yield* Deferred.make<void>();
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          for (let index = 0; index < 20; index += 1) {
+            assert.equal((yield* service.triggerWebhook(requestFor(task)))._tag, "accepted");
+          }
+          yield* Queue.take(launches);
+          yield* sql`CREATE TRIGGER fail_claim_release BEFORE DELETE ON scheduled_task_webhook_relay_deliveries
+        BEGIN SELECT RAISE(FAIL, 'disk write failed'); END`;
+          const request = requestFor(task, { relayDeliveryId: "full-queue-retry" });
+          yield* service.triggerWebhook(request).pipe(Effect.flip);
+          assert.equal(
+            (yield* sql`SELECT * FROM scheduled_task_webhook_relay_deliveries`).length,
+            0,
+          );
+          yield* sql`DROP TRIGGER fail_claim_release`;
+          const retried = yield* service.triggerWebhook(request);
+          assert.equal(retried._tag, "rate_limited");
+          assert.equal(
+            (yield* sql`SELECT * FROM scheduled_task_webhook_relay_deliveries`).length,
+            0,
+          );
+          yield* Deferred.succeed(gate, undefined);
+        }),
+      { gate },
+    );
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("rejects a webhook whose task was replaced before acceptance commits", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const allocating = yield* Deferred.make<void>();
+    const proceed = yield* Deferred.make<void>();
+    let holdAllocation = false;
+    const crypto = Layer.effect(
+      Crypto.Crypto,
+      Effect.gen(function* () {
+        const underlying = yield* Crypto.Crypto;
+        return {
+          ...underlying,
+          randomUUIDv4: Effect.suspend(() =>
+            holdAllocation
+              ? Deferred.succeed(allocating, undefined).pipe(
+                  Effect.andThen(Deferred.await(proceed)),
+                  Effect.andThen(underlying.randomUUIDv4),
+                )
+              : underlying.randomUUIDv4,
+          ),
+        };
+      }),
+    ).pipe(Layer.provide(NodePlatformCrypto.layer));
+    const dependencies = Layer.mergeAll(
+      crypto,
+      Scheduler.layer,
+      Layer.mock(SecretRequests.SecretRequests)({}),
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+        launch: () => Effect.succeed({} as never),
+      }),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      holdAllocation = true;
+      const receiving = yield* service.triggerWebhook(requestFor(task)).pipe(Effect.forkScoped);
+      yield* Deferred.await(allocating);
+      holdAllocation = false;
+      yield* service.delete({ id: task.id });
+      const replacement = yield* service.upsert(yield* webhookTaskInput());
+      assert.equal(replacement.task.createdAt, task.createdAt);
+      yield* Deferred.succeed(proceed, undefined);
+      assert.equal((yield* Fiber.join(receiving))._tag, "not_found");
+      assert.equal((yield* service.listWebhookDeliveries({ id: task.id })).deliveries.length, 0);
+      assert.equal((yield* sql`SELECT * FROM scheduled_task_webhook_queue`).length, 0);
+    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("does not dispatch a deleted delivery into a task recreated at the same instant", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          yield* service.triggerWebhook(requestFor(task));
+          yield* Queue.take(launches);
+          yield* service.triggerWebhook(requestFor(task));
+          yield* service.delete({ id: task.id });
+          const replacement = yield* service.upsert(
+            yield* webhookTaskInput({ prompt: "Replacement task" }),
+          );
+          assert.equal(replacement.task.createdAt, task.createdAt);
+          const subscribed = yield* Deferred.make<void>();
+          const oldCompletion = yield* service.subscribeList().pipe(
+            Stream.tap(() => Deferred.succeed(subscribed, undefined)),
+            Stream.drop(1),
+            Stream.runHead,
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(subscribed);
+          yield* Deferred.succeed(gate, undefined);
+          yield* Fiber.join(oldCompletion);
+          yield* TestClock.adjust("5 seconds");
+          assert.equal(yield* Queue.size(launches), 0);
+          assert.equal((yield* service.list()).tasks[0]?.lastRunStatus, "never");
+          assert.equal((yield* service.list()).tasks[0]?.runCount, 0);
+        }).pipe(Effect.scoped),
+      { gate },
+    );
+  }),
 );
