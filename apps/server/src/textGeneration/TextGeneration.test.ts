@@ -239,50 +239,69 @@ it.effect("holds the host lease until the text generation provider completes", (
   }),
 );
 
-it.effect("holds shared admission through CLI-backed text generation", () =>
-  Effect.gen(function* () {
-    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-    const instanceId = ProviderInstanceId.make("codex");
-    const entered = yield* Deferred.make<void>();
-    const release = yield* Deferred.make<void>();
-    const instance = makeStubInstance(
-      instanceId,
-      makeStubTextGeneration({
-        generateBranchName: () =>
-          Deferred.succeed(entered, undefined).pipe(
-            Effect.andThen(Deferred.await(release)),
-            Effect.as({ branch: "generated" }),
-          ),
-      }),
-    );
-    const generation = yield* TextGeneration.make.pipe(
-      Effect.provideService(
-        ProviderInstanceRegistry.ProviderInstanceRegistry,
-        makeStubRegistry([instance]),
-      ),
-      Effect.provide(
-        Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
-          resolveLink: () => undefined,
+it.effect.each(["generateBranchName", "generateReviewGuide"] as const)(
+  "holds shared admission through CLI-backed %s",
+  (operation) =>
+    Effect.gen(function* () {
+      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+      const instanceId = ProviderInstanceId.make("codex");
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const instance = makeStubInstance(
+        instanceId,
+        makeStubTextGeneration({
+          generateBranchName: () =>
+            Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.as({ branch: "generated" }),
+            ),
+          generateReviewGuide: () =>
+            Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.as({ stops: [] }),
+            ),
         }),
-      ),
-    );
-    const running = yield* generation
-      .generateBranchName({
-        cwd: "/workspace",
-        message: "make a branch",
-        modelSelection: createModelSelection(instanceId, "gpt-5"),
-      })
-      .pipe(Effect.forkScoped);
-    yield* Deferred.await(entered);
-    // Launches share admission, so a long generation never delays a turn start.
-    expect(yield* admission.withLaunchPermit(Effect.succeed("turn"))).toBe("turn");
-    const install = yield* admission
-      .withPermit(Effect.succeed("installed"))
-      .pipe(Effect.forkScoped);
-    yield* Effect.yieldNow;
-    expect(install.pollUnsafe() === undefined).toBe(true);
-    yield* Deferred.succeed(release, undefined);
-    expect(yield* Fiber.join(running)).toEqual({ branch: "generated" });
-    expect(yield* Fiber.join(install)).toBe("installed");
-  }),
+      );
+      const generation = yield* TextGeneration.make.pipe(
+        Effect.provideService(
+          ProviderInstanceRegistry.ProviderInstanceRegistry,
+          makeStubRegistry([instance]),
+        ),
+        Effect.provide(
+          Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+            resolveLink: () => undefined,
+          }),
+        ),
+      );
+      const modelSelection = createModelSelection(instanceId, "gpt-5");
+      const running = yield* (
+        operation === "generateBranchName"
+          ? generation
+              .generateBranchName({ cwd: "/workspace", message: "make a branch", modelSelection })
+              .pipe(Effect.as("generated"))
+          : generation
+              .generateReviewGuide({
+                cwd: "/workspace",
+                number: 1,
+                title: "Guide",
+                description: "",
+                baseBranch: "main",
+                baseCommit: "base",
+                settledReview: "",
+                modelSelection,
+              })
+              .pipe(Effect.as("generated"))
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      // Launches share admission, so a long generation never delays a turn start.
+      expect(yield* admission.withLaunchPermit(Effect.succeed("turn"))).toBe("turn");
+      const install = yield* admission
+        .withPermit(Effect.succeed("installed"))
+        .pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      expect(install.pollUnsafe() === undefined).toBe(true);
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* Fiber.join(running)).toBe("generated");
+      expect(yield* Fiber.join(install)).toBe("installed");
+    }),
 );

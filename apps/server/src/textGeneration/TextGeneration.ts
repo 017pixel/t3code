@@ -82,8 +82,8 @@ export const make = Effect.gen(function* () {
         Effect.flatMap((textGeneration) => launch(textGeneration.generateBranchName(input))),
       ),
     generateReviewGuide: (input) =>
-      resolveInstance(registry, "generateReviewGuide", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateReviewGuide(input)),
+      instanceFor("generateReviewGuide", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => launch(textGeneration.generateReviewGuide(input))),
       ),
     generateThreadTitle: (input) =>
       instanceFor("generateThreadTitle", input.modelSelection.instanceId).pipe(
