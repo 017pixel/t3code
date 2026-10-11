@@ -401,6 +401,8 @@ export const OpenCodeDriver: ProviderDriver<
               generation.pipe(Effect.flatMap((value) => value.generateBranchName(input))),
             generateThreadTitle: (input) =>
               generation.pipe(Effect.flatMap((value) => value.generateThreadTitle(input))),
+            generateReviewGuide: (input) =>
+              generation.pipe(Effect.flatMap((value) => value.generateReviewGuide(input))),
           };
           return deferred;
         }),
