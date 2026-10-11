@@ -385,3 +385,27 @@ it.effect("Codex first installs wait for admission before changing state or down
     expect(h.downloads()).toBe(1);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("other providers keep launching while a Codex first install downloads", () =>
+  Effect.gen(function* () {
+    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+    const downloading = yield* Deferred.make<void>();
+    const finish = yield* Deferred.make<void>();
+    const h = yield* makeHarness({
+      body: Stream.fromEffect(
+        Deferred.succeed(downloading, undefined).pipe(
+          Effect.andThen(Deferred.await(finish)),
+          Effect.as(new Uint8Array(archive)),
+        ),
+      ),
+    });
+    yield* h.installation.start;
+    yield* Deferred.await(downloading);
+    expect(yield* admission.withLaunchPermit(Effect.succeed("launched"))).toBe("launched");
+    // Codex itself only resolves a completed, activated release.
+    expect(Exit.isFailure(yield* h.installation.resolve().pipe(Effect.exit))).toBe(true);
+    yield* Deferred.succeed(finish, undefined);
+    expect((yield* terminalState(h.installation)).phase).toBe("succeeded");
+    expect((yield* h.installation.resolve()).source).toBe("managed");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
