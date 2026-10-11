@@ -28,7 +28,7 @@ import { useFileContextMenuHandler } from "../fileContextMenu";
 import { type DraftId } from "../composerDraftStore";
 import { openDiffFilePrimaryAction } from "../diffFileActions";
 import { useCheckpointDiff } from "~/lib/checkpointDiffState";
-import { cn, randomUUID } from "~/lib/utils";
+import { cn } from "~/lib/utils";
 import { selectThreadDiffPanelSelection, useDiffPanelStore } from "../diffPanelStore";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useTheme } from "../hooks/useTheme";
@@ -184,10 +184,11 @@ function DiffFileHeaderSuffix({
   );
 }
 
-// Local save revisions must not alias another client's revision on the server.
-const diffCacheClientId = randomUUID();
 // Preserve explicit refresh epochs across short panel remounts.
 const diffRefreshVersions = new Map<string, number>();
+// The cache key each review scope's preview last loaded, so a workspace
+// change while the panel was closed still refreshes it on reopen.
+const loadedPreviewCacheKeys = new Map<string, string>();
 
 interface DiffPanelProps {
   mode?: DiffPanelMode;
@@ -360,12 +361,7 @@ export default function DiffPanel({
   const savedFileRevision = useAtomValue(
     reviewWorkspaceRevision(activeThread?.environmentId, activeCwd ?? undefined),
   );
-  const reviewCacheKey = JSON.stringify([
-    diffCacheClientId,
-    workspaceMutationId,
-    savedFileRevision,
-    version,
-  ]);
+  const reviewCacheKey = JSON.stringify([workspaceMutationId, savedFileRevision, version]);
   const refreshBranchDiffPreview = useCallback(() => {
     const next = Math.max(Date.now(), (diffRefreshVersions.get(reviewScope) ?? 0) + 1);
     if (diffRefreshVersions.size >= 64 && !diffRefreshVersions.has(reviewScope))
@@ -373,19 +369,31 @@ export default function DiffPanel({
     diffRefreshVersions.set(reviewScope, next);
     setRefreshVersion({ scope: reviewScope, version: next });
   }, [reviewScope, setRefreshVersion]);
+  const previewEnabled = canReadFiles && selectedRunId === null && activeThread && activeCwd;
+  // One preview per scope: a new cache key refreshes it in place, so a
+  // superseded preview is never kept beside the current one.
   const requestedBranchDiffPreview = useEnvironmentQuery(
-    canReadFiles && selectedRunId === null && activeThread && activeCwd
+    previewEnabled
       ? reviewEnvironment.diffPreview({
           environmentId: activeThread.environmentId,
           input: {
             cwd: activeCwd,
-            cacheKey: reviewCacheKey,
             ...(selectedBaseRef ? { baseRef: selectedBaseRef } : {}),
             ignoreWhitespace: diffIgnoreWhitespace,
           },
         })
       : null,
   );
+  const refreshPreviewQuery = requestedBranchDiffPreview.refresh;
+  useEffect(() => {
+    if (!previewEnabled) return;
+    const loaded = loadedPreviewCacheKeys.get(reviewScope);
+    if (loaded === reviewCacheKey) return;
+    if (loadedPreviewCacheKeys.size >= 64 && loaded === undefined)
+      loadedPreviewCacheKeys.delete(loadedPreviewCacheKeys.keys().next().value!);
+    loadedPreviewCacheKeys.set(reviewScope, reviewCacheKey);
+    if (loaded !== undefined) refreshPreviewQuery();
+  }, [previewEnabled, refreshPreviewQuery, reviewCacheKey, reviewScope]);
   const [previousPreview, setPreviousPreview] = useState({
     scope: reviewScope,
     data: requestedBranchDiffPreview.data,
