@@ -5,7 +5,7 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
-import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - Version output must flush before Electron exits, without acquiring the runtime.
@@ -239,7 +239,7 @@ const layerDesktopClerk = DesktopClerk.layer.pipe(
 
 const layerDesktopApplicationRuntime = layerDesktopApplication.pipe(
   Layer.provideMerge(NodeServices.layer),
-  Layer.provideMerge(NodeHttpClient.layerUndici),
+  Layer.provideMerge(FetchHttpClient.layer),
   Layer.provideMerge(NetService.layer),
   Layer.provideMerge(layerElectron),
 );
