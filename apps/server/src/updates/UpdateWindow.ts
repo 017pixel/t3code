@@ -58,10 +58,16 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const providers = yield* ProviderRegistry.ProviderRegistry;
   const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
-  const terminals = yield* TerminalManager.TerminalManager;
+  const terminals = yield* Effect.serviceOption(TerminalManager.TerminalManager);
   const managedInstalls = [
-    yield* CodexInstallation.CodexInstallation,
-    yield* AntigravityInstallation.AntigravityInstallation,
+    Option.map(
+      yield* Effect.serviceOption(CodexInstallation.CodexInstallation),
+      (service) => service.state,
+    ),
+    Option.map(
+      yield* Effect.serviceOption(AntigravityInstallation.AntigravityInstallation),
+      (service) => service.state,
+    ),
   ];
 
   /** Returns what keeps the window closed; empty means open. */
@@ -91,11 +97,11 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
         provider.updateState?.status === "queued" || provider.updateState?.status === "running",
     );
     if (providerUpdating) return ["provider-update"];
-    if (restartsServer && (yield* terminals.hasBusyTerminals)) return ["terminal-work"];
     // A first install downloads inside this server, so a restart would discard it.
     if (restartsServer) {
       for (const installation of managedInstalls) {
-        const { phase } = yield* installation.state;
+        if (Option.isNone(installation)) return ["provider-install"];
+        const { phase } = yield* installation.value;
         if (phase === "downloading" || phase === "extracting" || phase === "verifying") {
           return ["provider-install"];
         }
@@ -169,20 +175,25 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
   const runIfOpen: UpdateWindow["Service"]["runIfOpen"] = (install, options) =>
     admission.withPermit(
       blockers(options?.restartsServer === true).pipe(
-        Effect.flatMap((found) =>
-          found.length > 0
-            ? Effect.logDebug("Background update waiting for the update window", {
-                blockers: found,
-              }).pipe(Effect.as(Option.none()))
-            : // Interaction may have arrived during the blocker reads.
-              backgroundPolicy.sinceLastClientInteraction.pipe(
-                Effect.flatMap((quiet) =>
-                  Duration.isLessThan(quiet, QUIET_PERIOD)
-                    ? Effect.succeed(Option.none())
-                    : Effect.asSome(install),
-                ),
-              ),
-        ),
+        Effect.flatMap((found) => {
+          if (found.length > 0)
+            return Effect.logDebug("Background update waiting for the update window", {
+              blockers: found,
+            }).pipe(Effect.as(Option.none()));
+          const stillQuiet = backgroundPolicy.sinceLastClientInteraction.pipe(
+            Effect.flatMap((quiet) =>
+              Duration.isLessThan(quiet, QUIET_PERIOD)
+                ? Effect.succeed(Option.none())
+                : Effect.asSome(install),
+            ),
+          );
+          if (options?.restartsServer !== true) return stillQuiet;
+          return Option.match(terminals, {
+            onNone: () => Effect.succeed(Option.none()),
+            onSome: (manager) =>
+              manager.withIdleTerminals(stillQuiet).pipe(Effect.map(Option.flatten)),
+          });
+        }),
       ),
     );
 

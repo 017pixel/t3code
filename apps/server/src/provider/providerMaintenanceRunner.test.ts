@@ -6,6 +6,9 @@ import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionMana
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Option from "effect/Option";
 import * as ThreadContracts from "@t3tools/contracts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as CodexInstallation from "./CodexInstallation.ts";
+import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import { describe, it, assert } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -1947,18 +1950,48 @@ it.effect("manual updates wait for admission and verify under the same permit", 
 it.effect.each([
   {
     name: "open provider window",
+    restart: false,
+    busy: false,
+    installing: false,
     interaction: false,
     expected: true,
   },
   {
+    name: "open restart window",
+    restart: true,
+    busy: false,
+    installing: false,
+    interaction: false,
+    expected: true,
+  },
+  {
+    name: "busy terminal",
+    restart: true,
+    busy: true,
+    installing: false,
+    interaction: false,
+    expected: false,
+  },
+  {
+    name: "managed first install",
+    restart: true,
+    busy: false,
+    installing: true,
+    interaction: false,
+    expected: false,
+  },
+  {
     name: "interaction arriving during blocker reads",
+    restart: false,
+    busy: false,
+    installing: false,
     interaction: true,
     expected: false,
   },
 ])("rechecks the update window for $name", (scenario) =>
   Effect.gen(function* () {
     let quietReads = 0;
-    let installs = 0;
+    let handoffs = 0;
     const context = yield* Layer.build(
       UpdateWindow.layer.pipe(
         Layer.provide(
@@ -1980,6 +2013,38 @@ it.effect.each([
               getSettings: Effect.succeed(ThreadContracts.DEFAULT_SERVER_SETTINGS),
             }),
             Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+            Layer.mock(CodexInstallation.CodexInstallation)({
+              managedDirectory: "/managed/codex",
+              state: Effect.succeed({
+                driver: ProviderDriverKind.make("codex"),
+                phase: scenario.installing ? "verifying" : "idle",
+                operationId: null,
+                downloadedBytes: 0,
+                totalBytes: null,
+                version: null,
+                installedVersion: null,
+                canRemove: false,
+                message: null,
+              }),
+            }),
+            Layer.mock(AntigravityInstallation.AntigravityInstallation)({
+              managedDirectory: "/managed/antigravity",
+              state: Effect.succeed({
+                driver: ProviderDriverKind.make("antigravity"),
+                phase: "idle",
+                operationId: null,
+                downloadedBytes: 0,
+                totalBytes: null,
+                version: null,
+                installedVersion: null,
+                canRemove: false,
+                message: null,
+              }),
+            }),
+            Layer.mock(TerminalManager.TerminalManager)({
+              withIdleTerminals: (effect) =>
+                scenario.busy ? Effect.succeed(Option.none()) : Effect.asSome(effect),
+            }),
           ),
         ),
       ),
@@ -1987,10 +2052,11 @@ it.effect.each([
     const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
     const result = yield* window.runIfOpen(
       Effect.sync(() => {
-        installs++;
+        handoffs++;
       }),
+      { restartsServer: scenario.restart },
     );
     assert.strictEqual(Option.isSome(result), scenario.expected);
-    assert.strictEqual(installs, scenario.expected ? 1 : 0);
+    assert.strictEqual(handoffs, scenario.expected ? 1 : 0);
   }),
 );

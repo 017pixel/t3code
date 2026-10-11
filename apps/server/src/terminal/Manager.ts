@@ -61,6 +61,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
@@ -220,9 +221,6 @@ export class TerminalManager extends Context.Service<
       readonly terminalId?: string;
     }) => Effect.Effect<void>;
 
-    /** True while a terminal starts, runs a command, or its last subprocess poll failed. */
-    readonly hasBusyTerminals: Effect.Effect<boolean>;
-
     /**
      * Subscribe to terminal runtime events with a direct callback.
      *
@@ -231,6 +229,13 @@ export class TerminalManager extends Context.Service<
     readonly subscribe: (
       listener: (event: TerminalEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
+
+    /** Fresh activity check, including root-pid commands and failed reads. */
+    readonly hasBusyTerminals: Effect.Effect<boolean>;
+    /** Holds terminal launches and input until an idle restart handoff finishes. */
+    readonly withIdleTerminals: <A, E, R>(
+      effect: Effect.Effect<A, E, R>,
+    ) => Effect.Effect<Option.Option<A>, E, R>;
 
     /**
      * Subscribe to lightweight terminal metadata with an initial full snapshot.
@@ -252,6 +257,7 @@ interface TerminalSubprocessInspectResult {
 interface TerminalSubprocessInspector {
   (
     terminalPid: number,
+    includeShellChildren?: boolean,
   ): Effect.Effect<TerminalSubprocessInspectResult, TerminalSubprocessCheckError>;
 }
 
@@ -311,6 +317,9 @@ interface TerminalSessionState {
   /** Normalized child command name when `hasRunningSubprocess`; cleared when idle. */
   childCommandLabel: string | null;
   runtimeEnv: Record<string, string> | null;
+  tracksPrompt: boolean;
+  commandPending: boolean;
+  promptTail: string;
 }
 
 interface PersistHistoryRequest {
@@ -667,6 +676,19 @@ function isRetryableShellSpawnError(error: PtyAdapter.PtySpawnError): boolean {
   );
 }
 
+const PROMPT_READY = "\u001b]133;A\u0007";
+const SHELL_COMMANDS = new Set([
+  "bash",
+  "zsh",
+  "sh",
+  "dash",
+  "fish",
+  "ksh",
+  "pwsh",
+  "powershell",
+  "cmd",
+]);
+
 interface TerminalProcessTableSnapshot {
   readonly childrenByParent: ReadonlyMap<number, ReadonlyArray<number>>;
   readonly commandById: ReadonlyMap<number, string>;
@@ -718,19 +740,25 @@ function deriveSubprocessInspectResult(
   snapshot: TerminalProcessTableSnapshot,
   terminalPid: number,
   platform: NodeJS.Platform,
+  includeShellChildren = false,
 ): TerminalSubprocessInspectResult {
   const commandName = (pid: number) =>
     normalizeChildCommandName(snapshot.commandById.get(pid) ?? "", platform);
   const shellName = commandName(terminalPid);
-  // Async prompt themes fork the shell into a helper that waits with no
-  // children of its own. That copy is not a command the user started.
+  if (shellName === null && !snapshot.childrenByParent.has(terminalPid)) {
+    return { hasRunningSubprocess: true, childCommand: null, processIds: [terminalPid] };
+  }
+  // Polling ignores shell copies used by async prompts. Restart/close checks
+  // also count childless shell jobs, which can execute builtins without children.
+  const rootIsCommand = shellName !== null && !SHELL_COMMANDS.has(shellName);
   const childPid = (snapshot.childrenByParent.get(terminalPid) ?? []).find(
     (pid) =>
       shellName === null ||
-      commandName(pid) !== shellName ||
+      ((includeShellChildren || commandName(pid) !== shellName) &&
+        !/^gitstatusd(?:-|$)/.test(commandName(pid) ?? "")) ||
       (snapshot.childrenByParent.get(pid)?.length ?? 0) > 0,
   );
-  if (childPid === undefined) {
+  if (!rootIsCommand && childPid === undefined) {
     return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
   }
   const processIds = new Set<number>([terminalPid]);
@@ -744,7 +772,7 @@ function deriveSubprocessInspectResult(
       pending.push(pid);
     }
   }
-  const normalized = commandName(childPid);
+  const normalized = commandName(rootIsCommand ? terminalPid : childPid!);
   return {
     hasRunningSubprocess: true,
     childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
@@ -1500,6 +1528,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   // `options.env` is the test seam.
   const baseEnv = options.env ?? process.env;
   const shellResolver = options.shellResolver ?? (() => defaultShellResolver(platform, baseEnv));
+  const restartPermit = yield* Semaphore.make(1);
+  const bashInitPath = path.join(options.logsDir, "shell-init.bash");
+  const bashInit = `if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+__t3_prompt_ready() { printf '\x1b]133;A\x07'; }
+if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a '* ]]; then
+  PROMPT_COMMAND+=(__t3_prompt_ready)
+else
+  PROMPT_COMMAND="\${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}__t3_prompt_ready"
+fi
+`;
+  const powerShellInit =
+    "$global:__t3_original_prompt = $function:prompt; function global:prompt { [Console]::Write([char]27 + ']133;A' + [char]7); & $global:__t3_original_prompt }";
+  let bashInitWritten = false;
+  const zshInitDir = path.join(options.logsDir, "zsh-init");
+  let zshInitWritten = false;
+  const posixInitPath = path.join(options.logsDir, "shell-init.sh");
+  let posixInitWritten = false;
+  const zshSource = (name: string) => `ZDOTDIR=$T3_TERMINAL_ZDOTDIR
+if [[ -f $ZDOTDIR/${name} ]]; then source $ZDOTDIR/${name}; fi
+`;
+
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const resolveLaunchInputEnvironment = Effect.fn("terminal.resolveLaunchInputEnvironment")(
     function* <Input extends TerminalOpenInput | TerminalAttachInput | TerminalRestartInput>(
@@ -1572,8 +1621,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             readonly inspector: TerminalSubprocessInspector;
             readonly snapshotSucceeded: boolean;
           } => ({
-            inspector: (terminalPid) =>
-              Effect.succeed(deriveSubprocessInspectResult(snapshot, terminalPid, platform)),
+            inspector: (terminalPid, includeShellChildren) =>
+              Effect.succeed(
+                deriveSubprocessInspectResult(
+                  snapshot,
+                  terminalPid,
+                  platform,
+                  includeShellChildren,
+                ),
+              ),
             snapshotSucceeded,
           }),
         );
@@ -2172,7 +2228,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     index = 0,
     lastError: PtyAdapter.PtySpawnError | null = null,
   ): Effect.fn.Return<
-    { process: PtyAdapter.PtyProcess; shellLabel: string },
+    { process: PtyAdapter.PtyProcess; shellLabel: string; tracksPrompt: boolean },
     PtyAdapter.PtySpawnError
   > {
     if (index >= shellCandidates.length) {
@@ -2194,9 +2250,68 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       );
     }
 
+    const shellName = normalizeChildCommandName(candidate.shell, platform);
+    let args = candidate.args ?? [];
+    const tracksPrompt = shellName !== null && SHELL_COMMANDS.has(shellName);
+    if (shellName === "bash") {
+      if (!bashInitWritten) {
+        yield* fileSystem.makeDirectory(options.logsDir, { recursive: true }).pipe(Effect.orDie);
+        yield* fileSystem.writeFileString(bashInitPath, bashInit).pipe(Effect.orDie);
+        bashInitWritten = true;
+      }
+      args = ["--rcfile", bashInitPath, ...args];
+    } else if (shellName === "zsh") {
+      if (!zshInitWritten) {
+        yield* fileSystem.makeDirectory(zshInitDir, { recursive: true }).pipe(Effect.orDie);
+        for (const name of [".zshenv", ".zprofile"]) {
+          yield* fileSystem
+            .writeFileString(
+              path.join(zshInitDir, name),
+              zshSource(name) + "ZDOTDIR=$T3_TERMINAL_INIT_DIR\n",
+            )
+            .pipe(Effect.orDie);
+        }
+        yield* fileSystem
+          .writeFileString(
+            path.join(zshInitDir, ".zshrc"),
+            zshSource(".zshrc") +
+              "__t3_prompt_ready() { printf '\\x1b]133;A\\x07'; }\nprecmd_functions+=(__t3_prompt_ready)\n",
+          )
+          .pipe(Effect.orDie);
+        zshInitWritten = true;
+      }
+      spawnEnv = {
+        ...spawnEnv,
+        T3_TERMINAL_ZDOTDIR: spawnEnv.ZDOTDIR ?? spawnEnv.HOME ?? "",
+        T3_TERMINAL_INIT_DIR: zshInitDir,
+        ZDOTDIR: zshInitDir,
+      };
+    } else if (shellName === "pwsh" || shellName === "powershell") {
+      args = [...args, "-NoExit", "-Command", powerShellInit];
+    } else if (shellName === "fish") {
+      args = [
+        ...args,
+        "--init-command",
+        "functions -c fish_prompt __t3_original_fish_prompt; function fish_prompt; printf '\\x1b]133;A\\x07'; __t3_original_fish_prompt; end",
+      ];
+    } else if (shellName === "cmd") {
+      spawnEnv = { ...spawnEnv, PROMPT: PROMPT_READY + (spawnEnv.PROMPT ?? "$P$G") };
+    } else if (shellName === "sh" || shellName === "dash" || shellName === "ksh") {
+      if (!posixInitWritten) {
+        yield* fileSystem.makeDirectory(options.logsDir, { recursive: true }).pipe(Effect.orDie);
+        yield* fileSystem
+          .writeFileString(
+            posixInitPath,
+            '[ -z "$T3_TERMINAL_ENV" ] || [ ! -f "$T3_TERMINAL_ENV" ] || . "$T3_TERMINAL_ENV"\nPS1=\'$(printf "\\033]133;A\\007")\'"$PS1"\n',
+          )
+          .pipe(Effect.orDie);
+        posixInitWritten = true;
+      }
+      spawnEnv = { ...spawnEnv, T3_TERMINAL_ENV: spawnEnv.ENV ?? "", ENV: posixInitPath };
+    }
     const launch = yield* agentScope.wrap({
       command: candidate.shell,
-      args: candidate.args ?? [],
+      args,
       name: "terminal",
       env: spawnEnv,
     });
@@ -2215,6 +2330,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return {
         process: attempt.success,
         shellLabel: formatShellCandidate(candidate),
+        tracksPrompt,
       };
     }
 
@@ -2307,6 +2423,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             }
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
+            session.tracksPrompt = spawnResult.tracksPrompt;
+            session.commandPending = true;
+            session.promptTail = "";
             startedShell = spawnResult.shellLabel;
 
             const processPid = ptyProcess.pid;
@@ -2322,6 +2441,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.status = "running";
               // onExit may replay an exit immediately; accept it before subscribing.
               session.unsubscribeData = spawnResult.process.onData((data) => {
+                const promptText = session.promptTail + data;
+                if (session.tracksPrompt && promptText.includes(PROMPT_READY))
+                  session.commandPending = false;
+                session.promptTail = promptText.slice(-(PROMPT_READY.length - 1));
                 if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
                   return;
                 }
@@ -2439,8 +2562,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
   });
 
-  // A failed inspection leaves cached activity stale, so busy checks distrust it.
-  let lastSubprocessPollSucceeded = true;
   const pollSubprocessActivity = Effect.fn("terminal.pollSubprocessActivity")(function* () {
     const state = yield* readManagerState;
     const runningSessions = [...state.sessions.values()].filter(
@@ -2469,7 +2590,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
 
     if (Option.isNone(inspectorOption)) {
-      lastSubprocessPollSucceeded = false;
       return false;
     }
 
@@ -2492,7 +2612,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       );
 
       if (Option.isNone(inspectResult)) {
-        lastSubprocessPollSucceeded = false;
         return;
       }
 
@@ -2539,8 +2658,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }
     });
 
-    // `snapshotSucceeded` only drives backoff: the ps fallback still reads a fresh table.
-    lastSubprocessPollSucceeded = true;
     yield* Effect.forEach(runningSessions, checkSubprocessActivity, {
       concurrency: "unbounded",
       discard: true,
@@ -2637,6 +2754,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         updatedAt: yield* nowIso,
         eventSequence: 0,
         inputCount: 0,
+        tracksPrompt: false,
+        commandPending: true,
+        promptTail: "",
         cols,
         rows,
         process: null,
@@ -2740,9 +2860,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
 
   const open: TerminalManager["Service"]["open"] = (input) =>
-    withThreadLock(
-      input.threadId,
-      resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
+    restartPermit.withPermit(
+      withThreadLock(
+        input.threadId,
+        resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
+      ),
     );
 
   const openOrAttachForStream = (input: TerminalAttachInput) =>
@@ -2889,7 +3011,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   };
 
   const attachStream: TerminalManager["Service"]["attachStream"] = (input, listener) =>
-    streamSession(input, openOrAttachForStream(input), listener);
+    streamSession(input, restartPermit.withPermit(openOrAttachForStream(input)), listener);
 
   const observeStream: TerminalManager["Service"]["observeStream"] = (input, listener) =>
     streamSession(
@@ -2995,6 +3117,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       });
     }
     session.inputCount += 1;
+    // Cursor/device replies come from the terminal emulator, not the user.
+    const terminalReply =
+      input.data.startsWith("\u001b[") && /^\[(?:\d+;\d+R|[?>=][\d;]*c)$/.test(input.data.slice(1));
+    if (input.data.length > 0 && !terminalReply) {
+      session.commandPending = true;
+      session.promptTail = "";
+    }
     yield* Effect.try({
       try: () => process.write(input.data),
       catch: (cause) =>
@@ -3005,7 +3134,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           cause,
         }),
     });
-  });
+  }, restartPermit.withPermit);
 
   const resizeLocked = Effect.fn("terminal.resize")(function* (input: TerminalResizeInput) {
     const session = yield* getSession(input.threadId, input.terminalId);
@@ -3077,6 +3206,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           updatedAt: yield* nowIso,
           eventSequence: 0,
           inputCount: 0,
+          tracksPrompt: false,
+          commandPending: true,
+          promptTail: "",
           cols,
           rows,
           process: null,
@@ -3127,13 +3259,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     });
 
   const restart: TerminalManager["Service"]["restart"] = (input) =>
-    withThreadLock(
-      input.threadId,
-      resolveLaunchInputEnvironment(input).pipe(
-        Effect.flatMap((resolved) =>
-          withWorkspaceLease(
-            path.resolve(resolved.worktreePath ?? resolved.cwd),
-            restartResolved(resolved),
+    restartPermit.withPermit(
+      withThreadLock(
+        input.threadId,
+        resolveLaunchInputEnvironment(input).pipe(
+          Effect.flatMap((resolved) =>
+            withWorkspaceLease(
+              path.resolve(resolved.worktreePath ?? resolved.cwd),
+              restartResolved(resolved),
+            ),
           ),
         ),
       ),
@@ -3186,9 +3320,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         yield* Effect.forEach(
           running,
           (session) =>
-            inspector(session.pid).pipe(
+            inspector(session.pid, true).pipe(
               Effect.flatMap((result) =>
                 result.hasRunningSubprocess ||
+                !session.tracksPrompt ||
+                session.commandPending ||
                 activityMark(session) !== marks.get(session.terminalId)
                   ? Effect.void
                   : closeSession(input.threadId, session.terminalId, false),
@@ -3207,16 +3343,38 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ),
     );
 
-  const hasBusyTerminals: TerminalManager["Service"]["hasBusyTerminals"] = readManagerState.pipe(
-    Effect.map((state) =>
-      [...state.sessions.values()].some(
-        (session) =>
-          session.status === "starting" ||
-          (session.status === "running" &&
-            (session.hasRunningSubprocess || !lastSubprocessPollSucceeded)),
+  const hasBusyTerminals: TerminalManager["Service"]["hasBusyTerminals"] = Effect.gen(function* () {
+    const before = yield* readManagerState;
+    const sessions = [...before.sessions.values()];
+    if (sessions.some((session) => session.status === "starting")) return true;
+    const running = sessions.filter((session) => session.status === "running");
+    if (running.length === 0) return false;
+    const activityMark = (session: TerminalSessionState) =>
+      session.eventSequence + session.inputCount;
+    const marks = new Map(running.map((session) => [session, activityMark(session)]));
+    const { inspector, snapshotSucceeded } = yield* acquireSubprocessInspector;
+    if (!snapshotSucceeded) return true;
+    for (const session of running) {
+      if (session.pid === null || !session.tracksPrompt || session.commandPending) return true;
+      if ((yield* inspector(session.pid, true)).hasRunningSubprocess) return true;
+    }
+    const after = yield* readManagerState;
+    return [...after.sessions.values()].some(
+      (session) =>
+        session.status === "starting" ||
+        (session.status === "running" &&
+          (marks.get(session) !== activityMark(session) ||
+            session.commandPending ||
+            session.pendingProcessEventIndex < session.pendingProcessEvents.length)),
+    );
+  }).pipe(Effect.catch(() => Effect.succeed(true)));
+
+  const withIdleTerminals: TerminalManager["Service"]["withIdleTerminals"] = (effect) =>
+    restartPermit.withPermit(
+      hasBusyTerminals.pipe(
+        Effect.flatMap((busy) => (busy ? Effect.succeed(Option.none()) : Effect.asSome(effect))),
       ),
-    ),
-  );
+    );
 
   return TerminalManager.of({
     open,
@@ -3228,9 +3386,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     restart,
     close,
     closeIdle,
-    hasBusyTerminals,
     subscribe,
     subscribeMetadata,
+    hasBusyTerminals,
+    withIdleTerminals,
   });
 });
 
