@@ -464,31 +464,27 @@ export const layer: Layer.Layer<
             runId,
             activeAttemptId: attempt.id,
             expectedStatus: "starting",
-            // An answer or approval that lands while the failure is written wins
-            // over cancelling the request it resolved.
-            guardPendingRequestCancellations: true,
-            // A provider-native child the earlier attempt still reports on can
-            // finish between the inherited-work read and this commit.
-            guardSettledWork: true,
-            events:
-              status === "failed"
-                ? [
-                    // Failing the run matters more than settling what it
-                    // inherited: a read that fails here must not leave it
-                    // `starting`.
-                    ...(yield* inheritedWorkSettlement({ run, now }).pipe(
-                      Effect.catchCause((cause) =>
-                        Cause.hasInterruptsOnly(cause)
-                          ? Effect.failCause(cause)
-                          : Effect.logWarning(
-                              "provider turn start could not settle the work a failed run inherited",
-                              { threadId: projection.thread.id, runId, cause: Cause.pretty(cause) },
-                            ).pipe(Effect.as([])),
-                      ),
-                    )),
-                    ...events,
-                  ]
-                : events,
+            // The sink rechecks this in the transaction: an answer, or a
+            // provider-native child the earlier attempt still reports on, can
+            // land between the inherited-work read and this commit.
+            ...(status === "failed"
+              ? {
+                  // Failing the run matters more than settling what it
+                  // inherited: a read that fails here must not leave it
+                  // `starting`.
+                  settlement: yield* inheritedWorkSettlement({ run, now }).pipe(
+                    Effect.catchCause((cause) =>
+                      Cause.hasInterruptsOnly(cause)
+                        ? Effect.failCause(cause)
+                        : Effect.logWarning(
+                            "provider turn start could not settle the work a failed run inherited",
+                            { threadId: projection.thread.id, runId, cause: Cause.pretty(cause) },
+                          ).pipe(Effect.as([])),
+                    ),
+                  ),
+                }
+              : {}),
+            events,
           });
         },
       );

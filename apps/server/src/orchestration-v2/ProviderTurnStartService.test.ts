@@ -19,6 +19,7 @@ import {
   ProjectId,
   type OrchestrationV2AppThread,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2Subagent,
@@ -1078,8 +1079,29 @@ function makePersistedStartFailureHarness() {
   const layerStores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
     Layer.provideMerge(layerDatabase),
   );
-  const layerSink = EventSink.layer.pipe(Layer.provide(layerStores));
-  const layerPersistence = Layer.mergeAll(layerStores, layerSink, IdAllocator.layer);
+  // The sink can read through its own view of the projection store.
+  const layerPersistence = (
+    sinkStore?: (
+      store: ProjectionStore.ProjectionStoreV2Shape,
+    ) => ProjectionStore.ProjectionStoreV2Shape,
+  ) =>
+    Layer.mergeAll(
+      layerStores,
+      EventSink.layer.pipe(
+        Layer.provide(
+          sinkStore === undefined
+            ? Layer.empty
+            : Layer.effect(
+                ProjectionStore.ProjectionStoreV2,
+                Effect.gen(function* () {
+                  return sinkStore(yield* ProjectionStore.ProjectionStoreV2);
+                }),
+              ),
+        ),
+        Layer.provide(layerStores),
+      ),
+      IdAllocator.layer,
+    );
   // `beforeFailureWrite` runs once the start has read its projection and
   // given up on the provider, right before the failure is committed.
   const run_ = (options: {
@@ -1093,6 +1115,10 @@ function makePersistedStartFailureHarness() {
     readonly projectionStore?: (
       store: ProjectionStore.ProjectionStoreV2Shape,
       eventSink: EventSink.EventSinkV2Shape,
+    ) => ProjectionStore.ProjectionStoreV2Shape;
+    /** What the event sink reads inside its write transaction. */
+    readonly sinkProjectionStore?: (
+      store: ProjectionStore.ProjectionStoreV2Shape,
     ) => ProjectionStore.ProjectionStoreV2Shape;
   }) =>
     Effect.gen(function* () {
@@ -1162,13 +1188,14 @@ function makePersistedStartFailureHarness() {
       );
       yield* service.start({ threadId, runId });
       return yield* store.getThreadProjection(threadId);
-    }).pipe(Effect.provide(Layer.fresh(layerPersistence)));
+    }).pipe(Effect.provide(Layer.fresh(layerPersistence(options.sinkProjectionStore))));
   return {
     now,
     driver,
     instanceId,
     threadId,
     runId,
+    attemptId,
     rootNodeId,
     providerThreadId,
     approvalRequest,
@@ -1421,4 +1448,125 @@ effectIt.effect("keeps a native subagent that completed while a failed start is 
       result: "Found it",
     });
   }),
+);
+
+// The guarded settlement is optional; failing the run is not.
+const unavailable = (threadId: ThreadId) =>
+  Effect.fail(
+    new ProjectionStore.ProjectionStoreReadError({ threadId, cause: "database unavailable" }),
+  );
+const failingRechecks: ReadonlyArray<
+  readonly [
+    string,
+    (store: ProjectionStore.ProjectionStoreV2Shape) => ProjectionStore.ProjectionStoreV2Shape,
+  ]
+> = [
+  ["request", (store) => ({ ...store, getRuntimeRequest: unavailable })],
+  ["records", (store) => ({ ...store, getThreadRecords: unavailable })],
+  ["turn item", (store) => ({ ...store, getTurnItem: ({ threadId }) => unavailable(threadId) })],
+];
+for (const [read, sinkProjectionStore] of failingRechecks) {
+  effectIt.effect(`fails the run when the write cannot recheck an inherited ${read}`, () =>
+    Effect.gen(function* () {
+      const harness = makePersistedStartFailureHarness();
+      const projection = yield* harness.run({ sinkProjectionStore });
+
+      expect(projection.runs.map((run) => run.status)).toEqual(["failed"]);
+      expect(projection.attempts.map((attempt) => attempt.status)).toEqual(["failed"]);
+      expect(projection.nodes.find((node) => node.id === harness.rootNodeId)?.status).toBe(
+        "failed",
+      );
+      // The settlement it could not recheck is left as it was.
+      expect(projection.runtimeRequests).toMatchObject([{ status: "pending" }]);
+      expect(projection.turnItems).toMatchObject([
+        { type: "approval_request", status: "waiting" },
+        { type: "error", title: "Provider session failed to open" },
+      ]);
+    }),
+  );
+}
+
+effectIt.effect(
+  "keeps replies and provider turns that moved on while a failed start is written",
+  () =>
+    Effect.gen(function* () {
+      const harness = makePersistedStartFailureHarness();
+      const base = { threadId: harness.threadId, runId: harness.runId, occurredAt: harness.now };
+      const reply = (
+        id: string,
+        update: { readonly text: string; readonly streaming: boolean },
+      ): OrchestrationV2DomainEvent => ({
+        ...base,
+        id: EventId.make(`event-${id}-${update.text.length}`),
+        type: "message.updated",
+        nodeId: harness.rootNodeId,
+        payload: {
+          id: MessageId.make(id),
+          threadId: harness.threadId,
+          runId: harness.runId,
+          nodeId: harness.rootNodeId,
+          role: "assistant",
+          createdBy: "agent",
+          creationSource: "provider",
+          attachments: [],
+          createdAt: harness.now,
+          updatedAt: harness.now,
+          ...update,
+        },
+      });
+      const providerTurn: OrchestrationV2ProviderTurn = {
+        id: ProviderTurnId.make("provider-turn-earlier-attempt"),
+        providerThreadId: harness.providerThreadId,
+        nodeId: harness.rootNodeId,
+        runAttemptId: harness.attemptId,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running",
+        startedAt: harness.now,
+        completedAt: null,
+      };
+      const turn = (status: "running" | "completed"): OrchestrationV2DomainEvent => ({
+        ...base,
+        id: EventId.make(`event-provider-turn-${status}`),
+        type: "provider-turn.updated",
+        nodeId: harness.rootNodeId,
+        payload: {
+          ...providerTurn,
+          status,
+          completedAt: status === "completed" ? harness.now : null,
+        },
+      });
+      const projection = yield* harness.run({
+        seed: [
+          reply("message-finished", { text: "Partial", streaming: true }),
+          reply("message-growing", { text: "Still", streaming: true }),
+          turn("running"),
+        ],
+        // The earlier attempt's session still reports after the failure read
+        // these as streaming and running: one reply finishes, the other grows,
+        // and the provider turn completes.
+        beforeFailureWrite: Effect.gen(function* () {
+          yield* (yield* EventSink.EventSinkV2).write({
+            events: [
+              reply("message-finished", { text: "Partial reply, now final", streaming: false }),
+              reply("message-growing", { text: "Still writing more", streaming: true }),
+              turn("completed"),
+            ],
+          });
+        }),
+      });
+
+      expect(projection.runs.map((run) => run.status)).toEqual(["failed"]);
+      expect(
+        projection.messages
+          .filter((message) => message.role === "assistant")
+          .map(({ id, text, streaming }) => ({ id, text, streaming })),
+      ).toEqual([
+        { id: "message-finished", text: "Partial reply, now final", streaming: false },
+        { id: "message-growing", text: "Still writing more", streaming: false },
+      ]);
+      expect(projection.providerTurns.find((row) => row.id === providerTurn.id)?.status).toBe(
+        "completed",
+      );
+    }),
 );
