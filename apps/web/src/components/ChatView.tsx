@@ -8612,13 +8612,15 @@ export default function ChatView(props: ChatViewProps) {
     if (text !== null) composerRef.current?.insertTextAtEnd(text);
   }, [composerRef, viewRouteTargetKey]);
 
-  // A focused desktop browser page forwards these chords as menu actions.
+  // A focused desktop browser page forwards these chords as menu actions. They
+  // are for the shown thread, not one warming up out of sight.
   useEffect(() => {
+    if (keptViewWarming) return;
     return window.desktopBridge?.onMenuAction((action) => {
       if (action === "rightPanel.toggle") toggleRightPanel();
       else if (action === "rightPanel.toggleMaximized") toggleRightPanelMaximized();
     });
-  }, [toggleRightPanel, toggleRightPanelMaximized]);
+  }, [keptViewWarming, toggleRightPanel, toggleRightPanelMaximized]);
 
   // Paste-to-focus: the resting composer blurs on a click into the timeline,
   // so a paste that follows has no editable target and would be dropped.
