@@ -265,8 +265,12 @@ class SpawnHostClient {
   }
 
   #send(child: HostedChildProcess): void {
+    const host = this.#host;
+    // Between the host's IPC EOF and its `close`, a send would only error. The
+    // child stays queued, and `close` hands it to the next host.
+    if (!host?.connected) return;
     child.state = "sent";
-    this.#host?.send(child.request);
+    host.send(child.request);
   }
 
   #start(): void {
@@ -298,7 +302,8 @@ class SpawnHostClient {
         this.#onEvent(event as SpawnHostEvent, socket as NodeNet.Socket | undefined);
       }
     });
-    host.once("error", (cause) => this.#lose(host, cause));
+    // Persistent: a host can emit more than one error, and an unhandled one would end the server.
+    host.on("error", (cause) => this.#lose(host, cause));
     // `close` follows the last IPC message, so every exit the host reported is handled first.
     host.once("close", (code, signal) =>
       this.#lose(host, new Error(`The spawn host exited (code ${code}, signal ${signal}).`)),
