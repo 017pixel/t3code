@@ -50,27 +50,45 @@ const DRIVER_KIND = ProviderDriverKind.make("grok");
 const GROK_NPM_PACKAGE = "@xai-official/grok";
 // Native updates target GROK_HOME; package-manager installs stay with their owner.
 const UPDATE: ProviderMaintenanceCapabilitiesResolver = {
-  resolve: (context) => {
-    const home = (
-      context?.env.GROK_HOME || (context?.env.HOME ? `${context.env.HOME}/.grok` : undefined)
-    )
-      ?.trim()
-      .replace(/[\\/]+$/, "");
-    return resolvePackageManagedProviderMaintenance(
-      {
-        provider: DRIVER_KIND,
-        npmPackageName: GROK_NPM_PACKAGE,
-        nativeUpdate: {
-          args: ["update"],
-          isCommandPath: (value) =>
-            Boolean(home) &&
-            normalizeCommandPath(value).replace(/\.exe$/, "") ===
-              normalizeCommandPath(`${home}/bin/grok`),
+  resolve: (context) =>
+    Effect.gen(function* () {
+      const home = (
+        context?.env.GROK_HOME || (context?.env.HOME ? `${context.env.HOME}/.grok` : undefined)
+      )
+        ?.trim()
+        .replace(/[\\/]+$/, "");
+      const fs = yield* FileSystem.FileSystem;
+      const realHome = home
+        ? yield* fs.realPath(home).pipe(Effect.orElseSucceed(() => home))
+        : undefined;
+      const bin = context?.env.GROK_BIN_DIR || (home ? `${home}/bin` : undefined);
+      const activePath = bin
+        ? yield* fs.realPath(`${bin}/grok`).pipe(Effect.orElseSucceed(() => undefined))
+        : undefined;
+      return yield* resolvePackageManagedProviderMaintenance(
+        {
+          provider: DRIVER_KIND,
+          npmPackageName: GROK_NPM_PACKAGE,
+          nativeUpdate: {
+            args: ["update"],
+            isCommandPath: (value) =>
+              Boolean(realHome) &&
+              (normalizeCommandPath(value).replace(/\.exe$/, "") ===
+                normalizeCommandPath(`${realHome}/bin/grok`) ||
+                (value === activePath &&
+                  context?.resolvedCommandPath !== value &&
+                  !/[\\/]downloads[\\/]grok-/.test(context?.binaryPath ?? "") &&
+                  normalizeCommandPath(value).startsWith(
+                    `${normalizeCommandPath(realHome!)}/downloads/`,
+                  ) &&
+                  /\/grok-(?:linux|macos|windows)-(?:x86_64|aarch64)(?:\.exe)?$/.test(
+                    normalizeCommandPath(value),
+                  ))),
+          },
         },
-      },
-      context,
-    );
-  },
+        context,
+      );
+    }),
 };
 
 export type GrokDriverEnv =

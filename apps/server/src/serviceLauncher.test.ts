@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - Launcher recovery injects native filesystem failures.
+// @effect-diagnostics nodeBuiltinImport:off globalDateInEffect:off - Launcher recovery uses native filesystem failures and wall clocks.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
@@ -6,6 +6,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
+import * as NodeSqlite from "node:sqlite";
 
 vi.mock("node:fs/promises", { spy: true });
 
@@ -206,8 +208,250 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
+  it.effect.each([
+    "unchanged",
+    "restart",
+    "clock-jump",
+    "before-prepared",
+    "after-commit",
+    "wal-migration",
+    "unreadable",
+    "untracked-ddl",
+  ] as const)(
+    "supervises committed crash loops with schema %s without restoring accepted work",
+    (schema) =>
+      Effect.gen(function* () {
+        const compatible =
+          schema === "unchanged" || schema === "restart" || schema === "clock-jump";
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-crash-loop-" });
+        const statePath = path.join(root, "runtime", "service-state.json");
+        const dbPath = path.join(root, "database");
+        const db = new NodeSqlite.DatabaseSync(dbPath);
+        db.exec(
+          "CREATE TABLE effect_sql_migrations (migration_id INTEGER PRIMARY KEY, name TEXT); INSERT INTO effect_sql_migrations VALUES (1, 'initial'); CREATE TABLE receipts (id TEXT PRIMARY KEY)",
+        );
+        db.close();
+        const pending = {
+          id: "crash-loop",
+          fromVersion: "1.0.0",
+          targetVersion: "1.1.0",
+          dbPath,
+          status: "pending" as const,
+        };
+        const migrate =
+          "db.exec(\"INSERT INTO effect_sql_migrations VALUES (2, 'candidate'); CREATE TABLE candidate_data (id TEXT)\");";
+        const source = `
+const fs = require("node:fs");
+const { DatabaseSync } = require("node:sqlite");
+const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
+fs.appendFileSync(${JSON.stringify(path.join(root, "starts"))}, context.childVersion + "\\n");
+if (context.update.status === "rolled-back" || context.update.status === "failed") {
+  const ready = ${JSON.stringify(path.join(root, "ready"))};
+  fs.writeFileSync(ready + ".staging", JSON.stringify(context));
+  fs.renameSync(ready + ".staging", ready);
+  setInterval(() => {}, 1000);
+} else if (context.update.status === "pending") {
+  const db = new DatabaseSync(${JSON.stringify(dbPath)});
+  ${schema === "before-prepared" ? migrate : ""}
+  db.close();
+  process.send({ type: "prepared", updateId: context.update.id });
+  process.on("message", message => {
+    if (message.type !== "committed") return;
+    const db = new DatabaseSync(${JSON.stringify(dbPath)});
+    ${schema === "wal-migration" ? 'db.exec("PRAGMA journal_mode=WAL");' : ""}
+    db.exec("INSERT INTO receipts VALUES ('accepted')");
+    ${schema === "after-commit" || schema === "wal-migration" ? migrate : schema === "unreadable" ? 'db.exec("DROP TABLE effect_sql_migrations");' : schema === "untracked-ddl" ? 'db.exec("CREATE TABLE untracked (id TEXT)");' : ""}
+    ${schema === "wal-migration" ? "" : "db.close();"}
+    process.exit(42);
+  });
+} else {
+  process.exit(42);
+}
+`;
+        for (const version of ["1.0.0", "1.1.0"]) {
+          yield* writeFakeRuntime(
+            fs,
+            path,
+            path.join(root, "runtime", "versions", version),
+            source,
+          );
+        }
+        yield* Effect.promise(() =>
+          writeServiceState(statePath, {
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: "1.0.0",
+            update: pending,
+          }),
+        );
+        const ready = Promise.withResolvers<void>();
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            NodeFS.watch(root, (_event, name) => {
+              if (name === "ready") ready.resolve();
+            }),
+          ),
+          (watcher) => Effect.sync(() => watcher.close()),
+        );
+        if (schema === "clock-jump") {
+          let now = 0;
+          yield* Effect.acquireRelease(
+            Effect.sync(() => vi.spyOn(Date, "now").mockImplementation(() => (now += 600_000))),
+            (clock) => Effect.sync(() => clock.mockRestore()),
+          );
+        }
+        if (schema === "restart") {
+          const crashed = Promise.withResolvers<void>();
+          yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              NodeFS.watch(path.dirname(statePath), (_event, name) => {
+                if (name === "service-state.json")
+                  void readServiceState(statePath).then(
+                    (state) => {
+                      if (state.crashRecovery?.crashes === 1) crashed.resolve();
+                    },
+                    () => {},
+                  );
+              }),
+            ),
+            (watcher) => Effect.sync(() => watcher.close()),
+          );
+          const first = new Launcher(
+            root,
+            yield* Effect.promise(() => readServiceState(statePath)),
+          );
+          yield* Effect.acquireRelease(
+            Effect.sync(() => {
+              void first.run().catch(crashed.reject);
+            }),
+            () => Effect.promise(() => first.stop("SIGTERM")),
+          );
+          yield* Effect.promise(() => crashed.promise);
+          yield* Effect.promise(() => first.stop("SIGTERM"));
+        }
+        const launcher = new Launcher(
+          root,
+          yield* Effect.promise(() => readServiceState(statePath)),
+        );
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            void launcher.run().catch(ready.reject);
+          }),
+          () => Effect.promise(() => launcher.stop("SIGTERM")),
+        );
+        yield* Effect.promise(() => ready.promise);
+        const state = yield* Effect.promise(() => readServiceState(statePath));
+        assert.equal(state.activeVersion, compatible ? "1.0.0" : "1.1.0");
+        assert.equal(state.update?.status, compatible ? "rolled-back" : "failed");
+        assert.include(
+          state.update?.status === "pending" ? "" : (state.update?.reason ?? ""),
+          "crash-loop",
+        );
+        const context = JSON.parse(yield* fs.readFileString(path.join(root, "ready")));
+        assert.equal(context.childVersion, state.activeVersion);
+        assert.deepEqual(context.update, state.update);
+        assert.deepEqual((yield* fs.readFileString(path.join(root, "starts"))).trim().split("\n"), [
+          "1.1.0",
+          "1.1.0",
+          "1.1.0",
+          state.activeVersion,
+        ]);
+        const current = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+        try {
+          assert.deepEqual(
+            current
+              .prepare("SELECT id FROM receipts")
+              .all()
+              .map((row) => row.id),
+            ["accepted"],
+          );
+          if (
+            schema === "before-prepared" ||
+            schema === "after-commit" ||
+            schema === "wal-migration"
+          ) {
+            assert.equal(
+              current.prepare("SELECT MAX(migration_id) AS id FROM effect_sql_migrations").get()
+                ?.id,
+              2,
+            );
+          }
+        } finally {
+          current.close();
+        }
+        assert.isFalse(yield* fs.exists(path.join(root, "runtime", "db-backup", pending.id)));
+      }),
+    { timeout: 15_000 },
+  );
+
+  it.effect.each(["expired", "backward-clock"] as const)(
+    "does not downgrade outside the bounded crash window: %s",
+    (clock) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-crash-window-" });
+        const dbPath = path.join(root, "database");
+        yield* fs.writeFileString(dbPath, "accepted work");
+        for (const version of ["1.0.0", "1.1.0"]) {
+          yield* writeFakeRuntime(
+            fs,
+            path,
+            path.join(root, "runtime", "versions", version),
+            "process.exit(42);\n",
+          );
+        }
+        const pending = {
+          id: "window",
+          fromVersion: "1.0.0",
+          targetVersion: "1.1.0",
+          dbPath,
+          status: "pending" as const,
+        };
+        const statePath = path.join(root, "runtime", "service-state.json");
+        yield* Effect.promise(() =>
+          writeServiceState(statePath, {
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: "1.1.0",
+            update: {
+              id: pending.id,
+              fromVersion: pending.fromVersion,
+              targetVersion: pending.targetVersion,
+              status: "committed",
+            },
+            crashRecovery: {
+              update: pending,
+              schema: "baseline",
+              crashes: 2,
+              committedAt: Date.now() + (clock === "expired" ? -600_000 : 600_000),
+            },
+          }),
+        );
+        const launcher = new Launcher(
+          root,
+          yield* Effect.promise(() => readServiceState(statePath)),
+        );
+        yield* Effect.promise(() =>
+          launcher.run().then(
+            () => {
+              throw new Error("unexpected completion");
+            },
+            (error) => {
+              assert.include(String(error), "outside the update crash window");
+            },
+          ),
+        );
+        const state = yield* Effect.promise(() => readServiceState(statePath));
+        assert.equal(state.activeVersion, "1.1.0");
+        assert.equal(state.update?.status, "committed");
+        assert.isUndefined(state.crashRecovery);
+        assert.equal(yield* fs.readFileString(dbPath), "accepted work");
+      }),
+  );
+
   it.effect.each([false, true])(
-    "restores the database after a post-commit crash (wall clock jumps: %s)",
+    "preserves accepted work after a post-commit crash (wall clock jumps: %s)",
     (clockJumps) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -224,7 +468,7 @@ if (context.update?.status === "pending") {
   process.send({ type: "prepared", updateId: context.update.id });
   process.on("message", (message) => {
     if (message.type === "committed") {
-      require("node:fs").writeFileSync(${encodedDatabasePath}, "post-commit migration");
+      require("node:fs").writeFileSync(${encodedDatabasePath}, "accepted command receipt");
       setTimeout(() => process.exit(42), 100);
     }
   });
@@ -232,7 +476,8 @@ if (context.update?.status === "pending") {
   process.send({ type: "request-update", targetVersion: "1.1.0", dbPath: ${encodedDatabasePath} });
   setInterval(() => {}, 1_000);
 } else {
-  process.exit(0);
+  require("node:fs").writeFileSync(${JSON.stringify(path.join(root, "ready"))}, "ready");
+  setInterval(() => {}, 1_000);
 }
 `;
         for (const version of ["1.0.0", "1.1.0"]) {
@@ -261,21 +506,27 @@ if (context.update?.status === "pending") {
             (clock) => Effect.sync(() => clock.mockRestore()),
           );
         }
-        yield* Effect.promise(() =>
-          launcher.run().then(
-            () => Promise.reject(new Error("launcher unexpectedly completed")),
-            () => Promise.resolve(),
+        const ready = Promise.withResolvers<void>();
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            NodeFS.watch(root, (_event, name) => {
+              if (name === "ready") ready.resolve();
+            }),
           ),
+          (watcher) => Effect.sync(() => watcher.close()),
         );
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            void launcher.run().catch(ready.reject);
+          }),
+          () => Effect.promise(() => launcher.stop("SIGTERM")),
+        );
+        yield* Effect.promise(() => ready.promise);
 
         const state = yield* Effect.promise(() => readServiceState(statePath));
-        assert.equal(state.activeVersion, "1.0.0");
-        assert.equal(state.update?.status, "rolled-back");
-        assert.equal(
-          state.update?.status === "rolled-back" ? state.update.reason : undefined,
-          "candidate-exited-after-commit:42",
-        );
-        assert.equal(yield* fs.readFileString(databasePath), "before trial");
+        assert.equal(state.activeVersion, "1.1.0");
+        assert.equal(state.update?.status, "committed");
+        assert.equal(yield* fs.readFileString(databasePath), "accepted command receipt");
         assert.isUndefined(state.rollback);
       }),
   );
@@ -295,7 +546,7 @@ if (context.update?.status === "pending") {
         yield* fs.writeFileString(path.join(backup, "database"), "original database");
         yield* fs.writeFileString(`${dbPath}-wal`, "trial wal");
         yield* fs.writeFileString(`${dbPath}-shm`, "trial shm");
-        if (checkpoint === "restore-interrupted") {
+        if (checkpoint === "restore-interrupted" || checkpoint === "restore-disk-full") {
           yield* fs.writeFileString(path.join(backup, ".restore-pending"), "");
           yield* fs.writeFileString(dbPath, "partially restored database");
         }
@@ -357,18 +608,27 @@ if (context.update?.status === "pending") {
           yield* Effect.promise(() => retry.run().catch(() => undefined));
         }
         const state = yield* Effect.promise(() => readServiceState(statePath));
-        assert.equal(state.activeVersion, "1.0.0");
-        assert.equal(state.update?.status, "rolled-back");
-        assert.equal(yield* fs.readFileString(dbPath), "original database");
-        assert.isFalse(yield* fs.exists(`${dbPath}-wal`));
-        assert.isFalse(yield* fs.exists(`${dbPath}-shm`));
+        if (checkpoint === "committed") {
+          assert.equal(state.activeVersion, "1.1.0");
+          assert.equal(state.update?.status, "committed");
+          assert.equal(yield* fs.readFileString(dbPath), "migrated database");
+          assert.equal(yield* fs.readFileString(`${dbPath}-wal`), "trial wal");
+          assert.equal(yield* fs.readFileString(`${dbPath}-shm`), "trial shm");
+          assert.isUndefined(state.rollback);
+        } else {
+          assert.equal(state.activeVersion, "1.0.0");
+          assert.equal(state.update?.status, "rolled-back");
+          assert.equal(yield* fs.readFileString(dbPath), "original database");
+          assert.isFalse(yield* fs.exists(`${dbPath}-wal`));
+          assert.isFalse(yield* fs.exists(`${dbPath}-shm`));
+        }
         assert.isFalse(yield* fs.exists(backup));
       }),
   );
 
-  it.effect(
-    "prunes staged runtimes while preserving launcher, active, rollback and current staging",
-    () =>
+  it.effect.each(["legacy", "crash-recovery"] as const)(
+    "prunes staged runtimes while preserving launcher, active and %s recovery",
+    (recovery) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -392,7 +652,16 @@ if (context.update?.status === "pending") {
             activeVersion: "1.2.0",
             launcherVersion: "1.0.0",
             update: { ...update, status: "committed" },
-            rollback: { update, healthyAfter: 60_000 },
+            ...(recovery === "legacy"
+              ? { rollback: { update, healthyAfter: 60_000 } }
+              : {
+                  crashRecovery: {
+                    update,
+                    schema: "baseline",
+                    committedAt: Date.now(),
+                    crashes: 1,
+                  },
+                }),
           }),
         );
         yield* Effect.promise(() => pruneServiceRuntimes(root, new Set(["1.4.0"])));

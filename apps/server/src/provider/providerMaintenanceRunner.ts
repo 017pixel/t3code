@@ -26,6 +26,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as NodeUtil from "node:util";
 
 import * as ModelManifest from "./ModelManifest.ts";
+import * as InstallSupervisor from "./ProviderInstallSupervisor.ts";
+import * as HostLock from "./ProviderMaintenanceHostLock.ts";
 import { resolveProviderCompatibility } from "./providerCompatibility.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
@@ -40,7 +42,6 @@ import type { ProviderMaintenanceCapabilities } from "@t3tools/provider-core/ser
 import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 
-const UPDATE_TIMEOUT_MS = 5 * 60_000;
 const UPDATE_FORCE_KILL_AFTER = Duration.seconds(1);
 const UPDATE_SHUTDOWN_DRAIN = Duration.seconds(3);
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
@@ -100,8 +101,9 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
     readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
     readonly command: string;
     readonly args: ReadonlyArray<string>;
-    readonly env?: NodeJS.ProcessEnv;
-    readonly onProgress?: (line: string) => Effect.Effect<void>;
+    readonly env?: NodeJS.ProcessEnv | undefined;
+    readonly onProgress?: ((line: string) => Effect.Effect<void>) | undefined;
+    readonly inheritOutput?: boolean;
   }) {
     const collectCommandResult = Effect.fn("ProviderMaintenanceRunner.collectCommandResult")(
       function* () {
@@ -118,6 +120,8 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
           .spawn(
             ChildProcess.make(resolved.command, resolved.args, {
               shell: resolved.shell,
+              detached: false,
+              ...(input.inheritOutput ? { stdout: "inherit", stderr: "inherit" } : {}),
               // An installer that ignores SIGTERM must not hold up the update forever.
               forceKillAfter: UPDATE_FORCE_KILL_AFTER,
               ...(input.env ? { env: input.env, extendEnv: true } : {}),
@@ -210,26 +214,12 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
       },
     );
 
-    return yield* collectCommandResult().pipe(
-      Effect.scoped,
-      Effect.timeoutOption(Duration.millis(UPDATE_TIMEOUT_MS)),
-      Effect.map((result) =>
-        Option.match(result, {
-          onSome: (value) => value,
-          onNone: () =>
-            ({
-              stdout: "",
-              stderr: "",
-              exitCode: null,
-              timedOut: true,
-              stdoutTruncated: false,
-              stderrTruncated: false,
-            }) satisfies ProviderMaintenanceCommandResult,
-        }),
-      ),
-    );
+    // An installer owns its lifetime. A timeout or quit cannot safely stop it mid-write.
+    return yield* collectCommandResult().pipe(Effect.scoped);
   },
 );
+
+export { runProviderMaintenanceCommandWithSpawner };
 
 /**
  * Split a chunk of installer output into complete lines. `\r` ends a line too,
@@ -315,20 +305,10 @@ function makeUpdateState(input: {
 export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const manifestService = yield* ModelManifest.ModelManifest;
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const supervisor = yield* InstallSupervisor.ProviderInstallSupervisor;
+  const host = yield* HostLock.ProviderMaintenanceHostLock;
   const httpClient = yield* HttpClient.HttpClient;
   const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
-  const runMaintenanceCommand = (
-    update: ProviderMaintenanceCommandAction,
-    onProgress: (line: string) => Effect.Effect<void>,
-  ) =>
-    runProviderMaintenanceCommandWithSpawner({
-      spawner,
-      command: update.executable,
-      args: update.args,
-      onProgress,
-      ...(update.env ? { env: update.env } : {}),
-    });
   const commandCoordinator = yield* makeProviderMaintenanceCommandCoordinator({
     makeAlreadyRunningError: () =>
       new ServerProviderUpdateError({
@@ -623,10 +603,19 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               );
             }
             yield* setRunningMessage(`Running ${describeCommand(command)}`);
-            const result = yield* runMaintenanceCommand(
-              command,
-              quiet ? () => Effect.void : setRunningMessage,
-            );
+            const result = yield* supervisor.run({
+              command: command.executable,
+              args: command.args,
+              ...(command.env ? { env: command.env } : {}),
+              provider,
+              instanceId,
+              instanceIds: affectedInstances,
+              origin,
+              startedAt,
+              ...(candidateVersion ? { targetVersion: candidateVersion } : {}),
+              exactVersion: targetVersion !== undefined || (background && pinnedCommand !== null),
+              onProgress: quiet ? () => Effect.void : setRunningMessage,
+            });
             const finishedAt = yield* nowIso;
             if (result.timedOut || result.exitCode !== 0) {
               yield* refreshInstallationInstances(provider, affectedInstances);
@@ -763,6 +752,98 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         ),
       );
   });
+
+  // A previous server may have quit while its detached installer kept running.
+  // Refresh only these receipts, once complete; normal discovery stays unchanged.
+  yield* supervisor.receipts.pipe(
+    Effect.flatMap((receipts) =>
+      Effect.forEach(
+        receipts,
+        (receipt) =>
+          Effect.gen(function* () {
+            yield* providerRegistry.setProviderMaintenanceActionState({
+              instanceId: receipt.instanceId,
+              action: "update",
+              state: {
+                status: "running",
+                startedAt: receipt.startedAt,
+                finishedAt: null,
+                message: "Waiting for provider installation to finish.",
+                output: null,
+                ...(receipt.origin ? { origin: receipt.origin } : {}),
+              },
+            });
+            // Host admission also waits for an installer orphaned by its supervisor.
+            yield* host.withRead(
+              Effect.gen(function* () {
+                const current = (yield* supervisor.receipts).find((item) => item.id === receipt.id);
+                if (!current) return;
+                const providers = yield* refreshInstallationInstances(
+                  current.provider,
+                  current.instanceIds,
+                ).pipe(Effect.andThen(providerRegistry.getProviders));
+                const capabilities =
+                  yield* providerRegistry.getProviderMaintenanceCapabilitiesForInstance(
+                    current.instanceId,
+                    current.provider,
+                    { fresh: true },
+                  );
+                const installed = providers.filter((item) =>
+                  current.instanceIds.includes(item.instanceId),
+                );
+                const verified =
+                  installed.length > 0 &&
+                  installed.every(
+                    (item) =>
+                      item.installed &&
+                      (!current.targetVersion ||
+                        (current.exactVersion === false
+                          ? Boolean(
+                              item.version &&
+                              (capabilities.compareVersions ?? compareSemverVersions)(
+                                item.version,
+                                current.targetVersion,
+                              ) >= 0,
+                            )
+                          : item.version?.replace(/^v/, "") === current.targetVersion)),
+                  );
+                yield* providerRegistry.setProviderMaintenanceActionState({
+                  instanceId: current.instanceId,
+                  action: "update",
+                  state: {
+                    status:
+                      current.result?.exitCode === 0
+                        ? verified
+                          ? "succeeded"
+                          : "unchanged"
+                        : "failed",
+                    startedAt: current.startedAt,
+                    finishedAt: current.finishedAt ?? (yield* nowIso),
+                    message:
+                      current.result?.exitCode === 0 && verified
+                        ? "Provider updated."
+                        : current.result?.exitCode === 0
+                          ? "Update command completed, but T3 Code could not verify the provider version."
+                          : current.result
+                            ? failureMessage(current.result)
+                            : "Provider install supervisor exited without a result.",
+                    output: current.result ? commandOutput(current.result) : null,
+                    ...(current.origin ? { origin: current.origin } : {}),
+                  },
+                });
+              }),
+            );
+          }),
+        { concurrency: "unbounded", discard: true },
+      ),
+    ),
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Could not recover provider update receipts", {
+        cause: Cause.pretty(cause),
+      }),
+    ),
+    Effect.forkScoped,
+  );
 
   return ProviderMaintenanceRunner.of({
     updateProvider,
