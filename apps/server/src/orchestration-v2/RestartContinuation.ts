@@ -384,44 +384,61 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         : note.settled && pendingMessages.length === 0
           ? noteText
           : `${noteText}\n\n${prompt}`;
-    yield* threads.dispatch({
-      type: "message.dispatch",
-      commandId: CommandId.make(`command:restart-continuation:${input.sourceRunId}`),
-      threadId: input.threadId,
-      messageId,
-      ...(sourceMessage?.scheduledTaskId === undefined
-        ? {}
-        : { scheduledTaskId: sourceMessage.scheduledTaskId }),
-      text,
-      // Shown as a work log row; the prompt the agent got is its detail. A
-      // replacement prompt keeps its own message, attachments and context.
-      ...(replacementMessage === undefined && pendingMessages.length === 0
-        ? {
-            notification: {
-              source: { kind: "system" as const },
-              outcome: "updated" as const,
-              summary: note.settled
-                ? "T3 Code restarted and stopped background work"
-                : "T3 Code restarted and resumed this turn",
-              detail: text,
-            },
-          }
-        : {}),
-      attachments: promptMessages.flatMap((message) => message.attachments),
-      ...(promptMessages.some((message) => message.context !== undefined)
-        ? {
-            context: {
-              version: 1 as const,
-              records: promptMessages.flatMap((message) => message.context?.records ?? []),
-            },
-          }
-        : {}),
-      modelSelection: source.modelSelection,
-      dispatchMode: { type: "start_immediately" },
-      createdBy: "agent",
-      creationSource: "server",
-      restartContinuationOfRunId: input.sourceRunId,
-    });
+    yield* threads
+      .dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`command:restart-continuation:${input.sourceRunId}`),
+        threadId: input.threadId,
+        messageId,
+        ...(sourceMessage?.scheduledTaskId === undefined
+          ? {}
+          : { scheduledTaskId: sourceMessage.scheduledTaskId }),
+        text,
+        // Shown as a work log row; the prompt the agent got is its detail. A
+        // replacement prompt keeps its own message, attachments and context.
+        ...(replacementMessage === undefined && pendingMessages.length === 0
+          ? {
+              notification: {
+                source: { kind: "system" as const },
+                outcome: "updated" as const,
+                summary: note.settled
+                  ? "T3 Code restarted and stopped background work"
+                  : "T3 Code restarted and resumed this turn",
+                detail: text,
+              },
+            }
+          : {}),
+        attachments: promptMessages.flatMap((message) => message.attachments),
+        ...(promptMessages.some((message) => message.context !== undefined)
+          ? {
+              context: {
+                version: 1 as const,
+                records: promptMessages.flatMap((message) => message.context?.records ?? []),
+              },
+            }
+          : {}),
+        modelSelection: source.modelSelection,
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "agent",
+        creationSource: "server",
+        restartContinuationOfRunId: input.sourceRunId,
+      })
+      .pipe(
+        // The project turned this instance off since the restart. No turn
+        // resumes, and the success path below still runs so a delegated
+        // child waiting on this run is recovered immediately instead of
+        // after EffectWorker exhausts its retries on a refusal that will
+        // not change.
+        Effect.catchTags({
+          ThreadManagementProviderInstanceDisabledError: (error) =>
+            Effect.logInfo("orchestration-v2.restart-continuation.instance-disabled", {
+              threadId: input.threadId,
+              sourceRunId: input.sourceRunId,
+              projectId: error.projectId,
+              instanceId: error.instanceId,
+            }),
+        }),
+      );
   },
   // A delegated child this declined to continue still owes its parent a
   // result. Once a continuation run exists this is a no-op; that run settles it.

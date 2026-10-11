@@ -9,9 +9,10 @@ import * as ThreadContracts from "@t3tools/contracts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
-import { describe, it, assert } from "@effect/vitest";
+import { describe, it, assert, vi } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -2291,6 +2292,73 @@ describe("provider maintenance host leases", () => {
       if (NodeFS.existsSync(gate)) resume(Effect.void);
       return Effect.sync(() => watcher.close());
     });
+
+  it.live.each(["second check", "lease removal"] as const)(
+    "releases the acquired gate when %s fails",
+    (failure) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped();
+          const host = HostLock.make(directory);
+          const leaseFile = HostLock.installLeasePath(directory);
+          const injected = new Error("injected lease failure");
+          let checks = 0;
+          const mutableFS = NodeModule.createRequire(import.meta.url)("node:fs") as typeof NodeFS;
+          const readFile = NodeFS.readFileSync;
+          const remove = NodeFS.rmSync;
+          const spy =
+            failure === "second check"
+              ? vi
+                  .spyOn(mutableFS, "readFileSync")
+                  .mockImplementation((...args: Parameters<typeof readFile>) => {
+                    if (args[0] === leaseFile && ++checks === 2) throw injected;
+                    return readFile(...args);
+                  })
+              : vi
+                  .spyOn(mutableFS, "rmSync")
+                  .mockImplementation((...args: Parameters<typeof remove>) => {
+                    if (args[0] === leaseFile) throw injected;
+                    return remove(...args);
+                  });
+          NodeModule.syncBuiltinESMExports();
+          yield* Effect.addFinalizer(() =>
+            Effect.promise(async () => {
+              spy.mockRestore();
+              NodeModule.syncBuiltinESMExports();
+              const { unlock } = await import("proper-lockfile");
+              await unlock(NodePath.join(directory, "gate"), { realpath: false }).catch(() => {});
+            }),
+          );
+          const exit = yield* Effect.exit(host.withRead(Effect.void));
+          spy.mockRestore();
+          NodeModule.syncBuiltinESMExports();
+          assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit)) assert.strictEqual(Cause.squash(exit.cause), injected);
+          assert.isFalse(NodeFS.existsSync(NodePath.join(directory, "gate.lock")));
+          yield* HostLock.make(directory).withWrite(Effect.void);
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("a joined helper keeps reentrancy after the original session lease releases", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const host = HostLock.make(yield* fs.makeTempDirectoryScoped());
+        const release = yield* host.acquireRead;
+        const waiting = yield* Deferred.make<void>();
+        const installed = yield* Deferred.make<void>();
+        const writer = yield* host
+          .withWrite(Deferred.succeed(installed, undefined), Deferred.succeed(waiting, undefined))
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(waiting);
+        yield* host.withRead(release.pipe(Effect.andThen(host.withRead(Effect.void))), release);
+        yield* Fiber.join(writer);
+        assert.isTrue(yield* Deferred.isDone(installed));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.live("server admission keeps probes behind another server's install", () =>
     Effect.scoped(
