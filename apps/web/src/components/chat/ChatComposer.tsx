@@ -1446,42 +1446,25 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 // Handle exposed to ChatView
 // --------------------------------------------------------------------------
 
+// Local transactions have already painted in ProseMirror, so typing does not render this.
+// `promptVersion` moves on every rewrite from outside the editor (recall, chips, stash, send,
+// reload), which re-renders this memo with the new value.
 const ComposerDraftEditor = memo(function ComposerDraftEditor({
   target,
-  promptRef,
   readCursor,
+  promptVersion: _promptVersion,
   value: overriddenValue,
   ...props
 }: Omit<ComposerPromptEditorProps, "value"> & {
   target: ComposerThreadTarget;
-  promptRef: React.RefObject<string>;
   readCursor: () => number;
+  promptVersion: number;
   value: string | undefined;
 }) {
   "use no memo"; // The caret is imperative; caching readCursor() would rewind typed text.
-  const draftPrompt = useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
-  const locallyEditedPrompt = useRef<string | null>(null);
-  const externalPrompt = useRef(draftPrompt);
-  // Local transactions have already painted in ProseMirror. Only external rewrites
-  // (recall, chips, reload, send) need to send a controlled value through React.
-  useComposerThreadDraftSelector(target, (draft) => {
-    if (draft.prompt !== locallyEditedPrompt.current) externalPrompt.current = draft.prompt;
-    return externalPrompt.current;
-  });
-  const value = overriddenValue ?? draftPrompt;
-  const onChange = useCallback<ComposerPromptEditorProps["onChange"]>(
-    (...args) => {
-      locallyEditedPrompt.current = args[0];
-      props.onChange(...args);
-    },
-    [props.onChange],
-  );
-  useLayoutEffect(() => {
-    promptRef.current = value;
-  }, [promptRef, value]);
-  return (
-    <ComposerPromptEditor {...props} onChange={onChange} value={value} cursor={readCursor()} />
-  );
+  const value =
+    overriddenValue ?? useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
+  return <ComposerPromptEditor {...props} value={value} cursor={readCursor()} />;
 });
 
 const ComposerDraftPromptText = memo(function ComposerDraftPromptText({
@@ -1968,6 +1951,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const questionPreparations = useQuestionAttachmentPreparation((state) => state.counts);
   const prompt =
     useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.prompt ?? "";
+  // The prompt the editor shows. onPromptChange records a local edit before it reaches the
+  // store, so the version moves only for rewrites from outside the editor.
+  const shownPromptRef = useRef(prompt);
+  const promptVersionRef = useRef(0);
+  const promptVersion = useComposerThreadDraftSelector(composerDraftTarget, (draft) => {
+    if (draft.prompt !== shownPromptRef.current) {
+      shownPromptRef.current = draft.prompt;
+      promptVersionRef.current += 1;
+    }
+    return promptVersionRef.current;
+  });
   const composerImages = attachmentDraft.images;
   const composerFiles = attachmentDraft.files;
   // A question answer has no chips: its files live in the question draft and show in the
@@ -3563,13 +3557,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
   }, [composerSubmissionError, prompt]);
 
+  // A local edit already cleared it in onPromptChange.
   useEffect(() => {
     setProviderInputSubmissionError(null);
   }, [
     composerPreviewAnnotations,
     composerReviewComments,
     composerTerminalContexts,
-    prompt,
+    promptVersion,
     selectedModel,
     selectedPromptEffort,
     selectedProvider,
@@ -3858,6 +3853,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       onTypingGuardDraftChange();
       promptRef.current = nextPrompt;
+      shownPromptRef.current = nextPrompt;
       composerCursorRef.current = nextCursor;
       setPrompt(nextPrompt);
       // Any edit ends browsing, even one later undone by hand: typing a
@@ -5846,9 +5842,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setIsStashMenuOpen(false);
     }
   }, [composerMenuOpen]);
+  // A local edit already closed it in onPromptChange.
   useEffect(() => {
     setIsStashMenuOpen(false);
-  }, [prompt]);
+  }, [promptVersion]);
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
@@ -7614,8 +7611,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <ComposerContextActionsContext value={composerContextActions}>
                   <ComposerDraftEditor
                     target={composerDraftTarget}
-                    promptRef={promptRef}
                     readCursor={readComposerCursor}
+                    promptVersion={promptVersion}
                     ariaLabel="Message"
                     suggestionListId={composerSuggestionListId}
                     activeSuggestionId={
