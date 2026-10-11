@@ -194,12 +194,15 @@ function LinkRow({
           // Match the full PR list: diff counts up top, checks under the lifecycle glyph, the
           // verdict by the author. Each is absent rather than neutral when the host said
           // nothing, so a row without them reads as unknown, not as fine.
+          // A compact shell snapshot has no counts yet; the thread's own data fills them in.
           status={
-            <PullRequestDiffStat
-              additions={snapshot?.additions ?? 0}
-              deletions={snapshot?.deletions ?? 0}
-              className="font-mono"
-            />
+            snapshot?.additions === undefined && snapshot?.deletions === undefined ? null : (
+              <PullRequestDiffStat
+                additions={snapshot?.additions ?? 0}
+                deletions={snapshot?.deletions ?? 0}
+                className="font-mono"
+              />
+            )
           }
           meta={
             <>
