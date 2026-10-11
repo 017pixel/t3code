@@ -600,6 +600,10 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
       attributes: true,
       attributeFilter: ["class", "data-composer-label"],
     });
+    mutations.observe(element.ownerDocument.documentElement, {
+      attributes: true,
+      attributeFilter: ["style", "class"],
+    });
     document.fonts.addEventListener("loadingdone", measure);
     return () => {
       stopObserving();

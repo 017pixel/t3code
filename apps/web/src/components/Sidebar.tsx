@@ -718,7 +718,7 @@ function SortableThreadRow(props: {
         data-sidebar-row-displaced={bag.transform?.x || bag.transform?.y ? "" : undefined}
         className="list-none"
         style={{
-          height: props.variant === "card" ? 82 : 36,
+          height: props.variant === "card" ? "5.125rem" : "2.25rem",
           transform: CSS.Translate.toString(bag.transform),
           transition: bag.transition,
           visibility: bag.transform?.scaleY === 0 ? "hidden" : undefined,
@@ -2307,12 +2307,17 @@ function SidebarSearchResultSlot(props: {
 }) {
   const [node, setNode] = useState<HTMLLIElement | null>(null);
   const [visible] = useSidebarRowViewport(node, props.index < 24);
-  const [height, setHeight] = useState(props.hasExcerpt ? 60 : 36);
+  const [height, setHeight] = useState(props.hasExcerpt ? "3.75rem" : "2.25rem");
   useEffect(() => {
     if (!node || (!visible && !props.keepMounted)) return;
     return observeResize(node, ([entry]) => {
       const size = entry?.borderBoxSize[0]?.blockSize;
-      if (size !== undefined && size > 0) setHeight(size);
+      if (size !== undefined && size > 0) {
+        const rem = Number.parseFloat(
+          getComputedStyle(node.ownerDocument.documentElement).fontSize,
+        );
+        setHeight(`${size / rem}rem`);
+      }
     });
   }, [node, visible, props.keepMounted]);
   return visible || props.keepMounted ? (
