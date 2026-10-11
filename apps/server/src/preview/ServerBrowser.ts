@@ -193,9 +193,13 @@ const make = Effect.gen(function* () {
     Effect.forever,
     Effect.forkScoped,
   );
+  // A failed load costs only its event: the next one loads it again.
   yield* manager.events.pipe(
     Stream.runForEach((event) =>
-      live.pipe(Effect.flatMap((value) => value.mirrorManagerEvent(event))),
+      live.pipe(
+        Effect.flatMap((value) => value.mirrorManagerEvent(event)),
+        Effect.ignoreCause({ log: true }),
+      ),
     ),
     Effect.forkScoped,
   );
