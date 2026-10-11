@@ -3123,9 +3123,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     planModeEnabled: settings.planModeEnabled,
     isComposerOwned: true,
   } satisfies Omit<Parameters<typeof renderProviderTraitsPicker>[0], "prompt">;
-  const providerTraitsPicker = (
-    <ComposerDraftTraits target={composerDraftTarget} {...providerTraitsPickerInput} />
-  );
+  const providerTraitsPicker = renderProviderTraitsPicker({
+    ...providerTraitsPickerInput,
+    prompt,
+  });
   const [inlineRestingControlsHost, setInlineRestingControlsHost] =
     useElementState<HTMLDivElement>();
   const {
