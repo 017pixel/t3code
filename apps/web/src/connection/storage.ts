@@ -54,7 +54,7 @@ import { projectFaviconCache } from "../assets/projectFaviconCache";
 import { layer as browserCryptoLayer } from "../cloud/dpop";
 import {
   forgetBootEnvironment,
-  readBootCacheSnapshot,
+  readBootSnapshot,
   recordBootServerConfig,
   recordBootShell,
 } from "../bootSnapshot";
@@ -543,11 +543,11 @@ const bootServerConfigsTaken = new Set<EnvironmentId>();
 function takeBootValue<A>(
   taken: Set<EnvironmentId>,
   environmentId: EnvironmentId,
-  read: (snapshot: NonNullable<ReturnType<typeof readBootCacheSnapshot>>) => A | undefined,
+  read: (snapshot: NonNullable<ReturnType<typeof readBootSnapshot>>) => A | undefined,
 ): A | undefined {
   if (taken.has(environmentId)) return undefined;
   taken.add(environmentId);
-  const snapshot = readBootCacheSnapshot();
+  const snapshot = readBootSnapshot();
   return snapshot === null ? undefined : read(snapshot);
 }
 

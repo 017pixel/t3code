@@ -271,11 +271,6 @@ export function readBootSnapshot(): BootSnapshot | null {
   return paintApplies ? loadStoredBootSnapshot() : null;
 }
 
-/** The same-build cache can skip schema decoding on new tabs too, without enabling early paint. */
-export function readBootCacheSnapshot(): BootSnapshot | null {
-  return loadStoredBootSnapshot();
-}
-
 // ── Writing ────────────────────────────────────────────────────────────────
 
 let catalog: ReadonlyArray<BootCatalogEntry> | null = null;
