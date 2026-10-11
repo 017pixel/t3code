@@ -3318,16 +3318,39 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 OR checkpoint_id IN (SELECT value FROM json_each(${cohortCheckpointIds}))
                 OR run_id IN (SELECT value FROM json_each(${cohortRunIds}))
                 OR node_id IN (SELECT value FROM json_each(${checkpointNodeIds}))
-                -- A viewport keeps the latest turns listed for the Diff panel and
-                -- Review; their file lists arrive with the rows' history page.
+                -- A viewport keeps the runs of the latest user turns listed for
+                -- the Diff panel and Review, bounded like a turn-aligned page:
+                -- wake-up runs ride along without using up the turn budget.
+                -- Their file lists arrive with the rows' history page.
                 OR (${window.deferHistoricalSupport ? 1 : 0} = 1 AND app_run_ordinal >= (
-                  SELECT MIN(app_run_ordinal) FROM (
-                    SELECT DISTINCT app_run_ordinal
-                    FROM orchestration_v2_projection_checkpoints
-                    WHERE thread_id = ${threadId} AND app_run_ordinal IS NOT NULL
-                    ORDER BY app_run_ordinal DESC
-                    LIMIT ${THREAD_HISTORY_PAGE_POLICY.maxUserTurns}
+                  WITH turn_starts AS (
+                    SELECT run.ordinal AS run_ordinal,
+                      json_extract(item.payload_json, '$.createdBy') = 'user' AS by_user
+                    FROM orchestration_v2_projection_turn_items AS item
+                    JOIN orchestration_v2_projection_runs AS run ON run.run_id = item.run_id
+                    WHERE item.thread_id = ${threadId}
+                      AND item.type = 'user_message'
+                      AND json_extract(item.payload_json, '$.inputIntent') IN ('turn_start', 'queued_turn')
+                      AND run.status <> 'rolled_back'
+                      AND NOT (
+                        json_extract(item.payload_json, '$.inputIntent') = 'queued_turn'
+                        AND run.status = 'cancelled'
+                      )
+                    ORDER BY item.ordinal DESC
+                    LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS}
                   )
+                  SELECT CASE
+                    WHEN TOTAL(by_user) = 0 AND COUNT(*) < ${THREAD_HISTORY_MAX_RAW_TURNS} THEN NULL
+                    ELSE MAX(
+                      COALESCE((
+                        SELECT run_ordinal FROM turn_starts WHERE by_user
+                        ORDER BY run_ordinal DESC
+                        LIMIT 1 OFFSET ${THREAD_HISTORY_PAGE_POLICY.maxUserTurns - 1}
+                      ), 0),
+                      CASE WHEN COUNT(*) >= ${THREAD_HISTORY_MAX_RAW_TURNS} THEN MIN(run_ordinal) ELSE 0 END
+                    )
+                  END
+                  FROM turn_starts
                 )))
             ORDER BY scope_id ASC, ordinal_within_scope ASC
           `,

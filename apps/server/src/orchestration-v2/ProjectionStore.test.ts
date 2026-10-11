@@ -1217,6 +1217,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           rowLimit: 75,
           deferHistoricalSupport: true,
         });
+        // One user turn is fewer than a page of turns, so every turn stays listed.
         assert.deepEqual(
           viewport.projection.checkpoints.map((checkpoint) => [
             checkpoint.appRunOrdinal,
@@ -1225,7 +1226,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           ]),
           [
             [12, 2, undefined],
-            ...Array.from({ length: 9 }, (_, index) => [index + 3, 0, 2]),
+            ...Array.from({ length: 11 }, (_, index) => [index + 1, 0, 2]),
           ].toSorted((left, right) => {
             // Rows come back in scope ID order, which compares ordinals as text.
             const [a, b] = [String(left[0]), String(right[0])];
@@ -1240,6 +1241,165 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           [12],
         );
       }),
+  );
+
+  it.effect("viewport snapshots list the runs of the last 10 user turns", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:viewport-turn-coverage");
+      yield* projectionStore.apply({
+        id: EventId.make("event:viewport-turn-coverage:thread"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project:viewport-turn-coverage"),
+          title: "Viewport turn coverage",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      // Twelve user turns, each followed by a run that a delegated task's
+      // result woke up. Wake-up runs must not use up the turn budget.
+      for (let ordinal = 1; ordinal <= 24; ordinal += 1) {
+        const runId = RunId.make(`run:viewport-turn-coverage:${ordinal}`);
+        const nodeId = NodeId.make(`node:viewport-turn-coverage:${ordinal}`);
+        const byUser = ordinal % 2 === 1;
+        yield* projectionStore.apply({
+          id: EventId.make(`event:viewport-turn-coverage:run:${ordinal}`),
+          type: "run.created",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: {
+            id: runId,
+            threadId,
+            ordinal,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make(`message:viewport-turn-coverage:${ordinal}`),
+            rootNodeId: nodeId,
+            activeAttemptId: null,
+            status: "completed",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: now,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        });
+        yield* projectionStore.apply({
+          id: EventId.make(`event:viewport-turn-coverage:node:${ordinal}`),
+          type: "node.updated",
+          threadId,
+          runId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: nodeId,
+            threadId,
+            runId,
+            rootNodeId: nodeId,
+            parentNodeId: null,
+            kind: "root_turn",
+            status: "completed",
+            countsForRun: true,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: now,
+          },
+        });
+        yield* projectionStore.apply({
+          id: EventId.make(`event:viewport-turn-coverage:prompt:${ordinal}`),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`item:viewport-turn-coverage:${ordinal}`),
+            threadId,
+            runId,
+            nodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: ordinal * 100,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "user_message",
+            messageId: MessageId.make(`message:viewport-turn-coverage:${ordinal}`),
+            text: byUser ? "Next step" : "Delegated task finished",
+            attachments: [],
+            inputIntent: byUser ? "turn_start" : "queued_turn",
+            createdBy: byUser ? "user" : "agent",
+            creationSource: byUser ? "web" : "server",
+          },
+        });
+        yield* projectionStore.apply({
+          id: EventId.make(`event:viewport-turn-coverage:checkpoint:${ordinal}`),
+          type: "checkpoint.captured",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: CheckpointId.make(`checkpoint:viewport-turn-coverage:${ordinal}`),
+            threadId,
+            scopeId: CheckpointScopeId.make(`scope:viewport-turn-coverage:${ordinal}`),
+            runId,
+            nodeId,
+            parentCheckpointId: null,
+            ordinalWithinScope: 1,
+            appRunOrdinal: ordinal,
+            ref: CheckpointRef.make(`refs/t3/viewport-turn-coverage/${ordinal}`),
+            status: "ready",
+            files: [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }],
+            capturedAt: now,
+          },
+        });
+      }
+      const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+        rowLimit: 1,
+        deferHistoricalSupport: true,
+      });
+      // The tenth latest user turn is run 5; every run from there on is listed.
+      const listed = viewport.projection.checkpoints.map((checkpoint) => [
+        checkpoint.appRunOrdinal ?? 0,
+        checkpoint.deferredFileCount,
+      ]);
+      assert.deepEqual(
+        listed.toSorted((left, right) => Number(left[0]) - Number(right[0])),
+        Array.from({ length: 20 }, (_, index) => [index + 5, index + 5 === 24 ? undefined : 1]),
+      );
+    }),
   );
 
   it.effect("reads a fixed SQL turn-item window for long histories and repeated clients", () =>
