@@ -3012,6 +3012,27 @@ it.layer(
     }),
   );
 
+  it.effect("rejects a busy terminal without scanning the process table", () =>
+    Effect.gen(function* () {
+      let scans = 0;
+      const { manager } = yield* createManager(5, {
+        shellResolver: () => "/bin/bash",
+        subprocessPollIntervalMs: 60_000,
+        processTable: Effect.sync(() => {
+          scans++;
+          return [{ pid: 9000, ppid: 1, name: "bash" }];
+        }),
+      });
+      yield* manager.open(openInput());
+      const before = scans;
+      expect(yield* manager.hasBusyTerminals).toBe(true);
+      expect(Option.isNone(yield* manager.withIdleTerminals(Effect.die("must not restart")))).toBe(
+        true,
+      );
+      expect(scans).toBe(before);
+    }),
+  );
+
   it.effect("tracks PowerShell in-process work until its next prompt", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
