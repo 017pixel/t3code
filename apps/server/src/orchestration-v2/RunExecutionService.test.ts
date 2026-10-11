@@ -934,7 +934,7 @@ it.effect("refreshes MCP credential liveness before calling the provider", () =>
   }).pipe(Effect.provide(layerRunExecutionTest)),
 );
 
-it.effect("starts the provider when checkpoint baseline capture fails", () =>
+it.effect("fails the run without starting the provider when baseline capture fails", () =>
   Effect.gen(function* () {
     const threadId = ThreadId.make("thread:run-execution-baseline-failure");
     const runId = RunId.make("run:run-execution-baseline-failure");
@@ -970,6 +970,11 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
               ),
           }),
           Layer.mock(EventSink.EventSinkV2)({
+            writeIfRunCurrent: (input) =>
+              Ref.update(writes, (current) => [
+                ...current,
+                { events: input.events, effects: input.effects ?? [] },
+              ]).pipe(Effect.as({ committed: true, storedEvents: [] })),
             writeWithEffects: (input) =>
               Ref.update(writes, (current) => [
                 ...current,
@@ -1015,7 +1020,7 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
         providerTurnOrdinal: 1,
         message: {
           messageId: MessageId.make("message:run-execution-baseline-failure"),
-          text: "Start the provider without a baseline.",
+          text: "Keep provider startup behind the baseline.",
           attachments: [],
           createdBy: "user",
           creationSource: "web",
@@ -1035,7 +1040,7 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
       });
     }).pipe(Effect.provide(layerTest));
 
-    assert.equal(yield* Ref.get(providerStarts), 1);
+    assert.equal(yield* Ref.get(providerStarts), 0);
 
     const events = (yield* Ref.get(writes)).flatMap((write) => [...write.events]);
     const failedEvent = events.find(
@@ -1045,11 +1050,11 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
           event.type === "node.updated") &&
         event.payload.status === "failed",
     );
-    assert.isUndefined(failedEvent);
+    assert.isDefined(failedEvent);
     const errorItem = events.find(
       (event) => event.type === "turn-item.updated" && event.payload.type === "error",
     );
-    assert.isUndefined(errorItem);
+    assert.isDefined(errorItem);
   }),
 );
 

@@ -103,3 +103,65 @@ it.effect.each([false, true, "interrupt"] as const)(
     }).pipe(Effect.provide(layerTest));
   },
 );
+
+it.effect.each([false, true, "failure", "interrupt"] as const)(
+  "baseline repository probe preserves non-Git workspaces and fails closed (%s)",
+  (probe) => {
+    const scope: OrchestrationV2CheckpointScope = {
+      id: CheckpointScopeId.make("checkpoint-scope:baseline-probe"),
+      threadId: ThreadId.make("thread:baseline-probe"),
+      runId: RunId.make("run:baseline-probe"),
+      nodeId: NodeId.make("node:baseline-probe"),
+      parentScopeId: null,
+      providerThreadId: ProviderThreadId.make("provider-thread:baseline-probe"),
+      kind: "root_run",
+      ordinalWithinParent: 0,
+      advancesAppRunCount: true,
+      cwd: "/repo",
+      createdAt: DateTime.makeUnsafe("2026-07-28T00:00:00.000Z"),
+    };
+    const failure = new VcsProcessTimeoutError({
+      operation: "test.detect",
+      command: "git",
+      cwd: scope.cwd,
+      timeoutMs: 30000,
+    });
+    const hasCheckpointRef = vi.fn(() => Effect.succeed(false));
+    const captureCheckpoint = vi.fn(() => Effect.void);
+    const layer = CheckpointService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          Layer.mock(CheckpointStore.CheckpointStore)({
+            isGitRepository: () =>
+              probe === "interrupt"
+                ? Effect.interrupt
+                : probe === "failure"
+                  ? Effect.fail(failure)
+                  : Effect.succeed(probe),
+            hasCheckpointRef,
+            captureCheckpoint,
+          }),
+        ),
+      ),
+      Layer.provide(NodeCrypto.layer),
+    );
+    return Effect.gen(function* () {
+      const checkpoints = yield* CheckpointService.CheckpointServiceV2;
+      const exit = yield* Effect.exit(
+        checkpoints.captureBaseline({ scope, ordinalWithinScope: 0 }),
+      );
+      if (probe === "interrupt") assert.isTrue(Exit.hasInterrupts(exit));
+      else if (probe === "failure") {
+        const error = Exit.findErrorOption(exit);
+        assert.isTrue(error._tag === "Some");
+        if (error._tag === "Some") {
+          assert.equal(error.value._tag, "CheckpointBaselineCaptureError");
+          assert.equal(error.value.cause, failure);
+        }
+      } else assert.isTrue(Exit.isSuccess(exit));
+      assert.equal(hasCheckpointRef.mock.calls.length, probe === true ? 1 : 0);
+      assert.equal(captureCheckpoint.mock.calls.length, probe === true ? 1 : 0);
+    }).pipe(Effect.provide(layer));
+  },
+);

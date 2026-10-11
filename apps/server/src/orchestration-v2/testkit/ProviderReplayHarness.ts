@@ -383,6 +383,7 @@ export function layerWithRegistry<Error>(
   const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerCheckpointServiceProvided,
         layerContextHandoffServiceProvided,
         layerEventSinkProvided,
         IdAllocator.layer,

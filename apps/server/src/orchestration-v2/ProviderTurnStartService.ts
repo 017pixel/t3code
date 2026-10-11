@@ -25,6 +25,7 @@ import * as Schema from "effect/Schema";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
+import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
@@ -87,6 +88,7 @@ export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   never,
   | EventSink.EventSinkV2
+  | CheckpointService.CheckpointServiceV2
   | ContextHandoffService.ContextHandoffServiceV2
   | IdAllocator.IdAllocatorV2
   | FileSystem.FileSystem
@@ -101,6 +103,7 @@ export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
+    const checkpoints = yield* CheckpointService.CheckpointServiceV2;
     const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const fileSystem = yield* FileSystem.FileSystem;
@@ -503,9 +506,26 @@ export const layer: Layer.Layer<
           runs: current.runs,
           turnItems: current.turnItems,
         });
-      const inheritedBackgroundTurnItems = yield* projectionStore
-        .getRuntimeRecoveryProjection(projection.thread.id)
-        .pipe(Effect.map(selectInheritedBackgroundItems));
+      // These reads cannot start a workspace-capable provider. Do them while
+      // Git captures the baseline, then gate every session operation below.
+      const [inheritedBackgroundTurnItems, resolvedRuntimePolicy, baseline] = yield* Effect.all(
+        [
+          projectionStore
+            .getRuntimeRecoveryProjection(projection.thread.id)
+            .pipe(Effect.map(selectInheritedBackgroundItems)),
+          runtimePolicy.resolve({
+            thread: projection.thread,
+            modelSelection: run.modelSelection,
+          }),
+          checkpoints
+            .captureBaseline({
+              scope: checkpointScope,
+              ordinalWithinScope: Math.max(0, run.ordinal - 1),
+            })
+            .pipe(Effect.result),
+        ],
+        { concurrency: "unbounded" },
+      );
       const providerSessionId = providerThread.providerSessionId;
       const runControls = makeRunControls({
         threadId: projection.thread.id,
@@ -517,32 +537,8 @@ export const layer: Layer.Layer<
       });
       const { isCurrentAttemptInStatus } = runControls;
 
-      const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
-        thread: projection.thread,
-        modelSelection: run.modelSelection,
-      });
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
-      );
-      const sessionResult = yield* Effect.result(
-        providerSessions.open({
-          threadId: projection.thread.id,
-          providerSessionId,
-          modelSelection: run.modelSelection,
-          runtimePolicy: resolvedRuntimePolicy,
-          ...(existingSessionProjection === undefined
-            ? {}
-            : { resumeFromSession: existingSessionProjection }),
-          ...(providerThread.nativeThreadRef?.nativeId == null
-            ? {}
-            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-            ? {}
-            : {
-                initialProviderItemIdentityVersion:
-                  providerThread.nativeMetadata.itemIdentityVersion,
-              }),
-        }),
       );
       // The last start attempt fails the run with the provider's own reason
       // instead of leaving it `starting` after the effect gives up. A run that
@@ -552,6 +548,7 @@ export const layer: Layer.Layer<
         readonly signal: string;
         readonly title: string;
         readonly error: Error;
+        readonly failureClass?: "unknown";
       }) =>
         Effect.gen(function* () {
           const nestedCause = "cause" in failed.error ? failed.error.cause : undefined;
@@ -572,11 +569,46 @@ export const layer: Layer.Layer<
                     : typeof nestedCause === "string"
                       ? nestedCause
                       : failed.error.message,
-                class: "provider_error",
+                class: failed.failureClass ?? "provider_error",
               }),
             },
           });
         });
+      // Session open and native thread setup can run hooks and MCP servers
+      // before a prompt. Capture their edits in the turn, never in its baseline.
+      if (baseline._tag === "Failure") {
+        if (input.willRetry === true) {
+          return yield* new ProviderTurnStartError({ runId, cause: baseline.failure });
+        }
+        yield* settleStartFailure({
+          signal: "checkpoint-baseline-capture-failure",
+          title: "Workspace baseline failed to capture",
+          error: baseline.failure,
+          failureClass: "unknown",
+        });
+        return;
+      }
+      if (!(yield* isCurrentAttemptInStatus("starting"))) return;
+      const sessionResult = yield* Effect.result(
+        providerSessions.open({
+          threadId: projection.thread.id,
+          providerSessionId,
+          modelSelection: run.modelSelection,
+          runtimePolicy: resolvedRuntimePolicy,
+          ...(existingSessionProjection === undefined
+            ? {}
+            : { resumeFromSession: existingSessionProjection }),
+          ...(providerThread.nativeThreadRef?.nativeId == null
+            ? {}
+            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+            ? {}
+            : {
+                initialProviderItemIdentityVersion:
+                  providerThread.nativeMetadata.itemIdentityVersion,
+              }),
+        }),
+      );
       if (sessionResult._tag === "Failure") {
         if (input.willRetry === true) return yield* sessionResult.failure;
         yield* settleStartFailure({
@@ -1232,6 +1264,7 @@ export const layer: Layer.Layer<
         run: runningRun,
         rootNode: runningRootNode,
         checkpointScope,
+        baselineCaptured: true,
         providerThread: runningProviderThread,
         attempt: runningAttempt,
         attemptId: attempt.id,
