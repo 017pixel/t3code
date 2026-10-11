@@ -133,6 +133,92 @@ it("requires matching saved native state for an unfinished root run", () => {
     assert.isUndefined(restartContinuationRun(invalid as OrchestrationV2ThreadProjection, testNow));
 });
 
+it("checks the thread, run, turn and request recovery decision table", () => {
+  const base = makeProjection();
+  const holds = [
+    [{}, false],
+    [{ archivedAt: testNow }, true],
+    [{ deletedAt: testNow }, true],
+    [{ settledOverride: "settled" }, true],
+    [{ settledOverride: "unsettled" }, false],
+    [{ snoozedUntil: DateTime.add(testNow, { minutes: 1 }) }, true],
+    [{ snoozedUntil: testNow }, false],
+    [{ snoozedUntil: DateTime.subtract(testNow, { minutes: 1 }) }, false],
+  ] as const;
+  const requests = [
+    [undefined, false],
+    [{ kind: "user_input", status: "pending", responseCapability: { type: "live" } }, true],
+    [{ kind: "command", status: "pending", responseCapability: { type: "live" } }, true],
+    [{ kind: "user_input", status: "pending", responseCapability: { type: "message" } }, false],
+    [{ kind: "user_input", status: "resolved", responseCapability: { type: "live" } }, false],
+    [
+      { kind: "user_input", status: "expired", responseCapability: { type: "not_resumable" } },
+      true,
+    ],
+    [{ kind: "command", status: "cancelled", responseCapability: { type: "not_resumable" } }, true],
+    [{ kind: "dynamic_tool_call", status: "pending", responseCapability: { type: "live" } }, false],
+    [{ kind: "auth_refresh", status: "pending", responseCapability: { type: "live" } }, false],
+  ] as const;
+  for (const status of [
+    "queued",
+    "preparing",
+    "starting",
+    "running",
+    "waiting",
+    "completed",
+    "failed",
+    "interrupted",
+    "cancelled",
+    "rolled_back",
+  ] as const)
+    for (const pending of [false, true])
+      for (const [thread, held] of holds)
+        for (const turnStatus of [
+          "running",
+          "completed",
+          "failed",
+          "interrupted",
+          "cancelled",
+        ] as const)
+          for (const [request, blocked] of requests) {
+            const eligible = status === "running" || pending;
+            const turnBlocked =
+              turnStatus === "failed" ||
+              turnStatus === "interrupted" ||
+              (turnStatus === "completed" && !pending);
+            const projection = {
+              ...base,
+              thread: { ...base.thread, ...thread },
+              runs: [
+                {
+                  ...base.runs[0]!,
+                  status,
+                  ...(pending
+                    ? { restartPendingMessageIds: [MessageId.make("message:matrix-steer")] }
+                    : {}),
+                },
+              ],
+              providerTurns: [{ ...base.providerTurns[0]!, status: turnStatus }],
+              runtimeRequests:
+                request === undefined
+                  ? []
+                  : [{ ...request, providerTurnId: base.providerTurns[0]!.id }],
+            } as unknown as OrchestrationV2ThreadProjection;
+            const expected =
+              !["queued", "failed", "interrupted", "rolled_back"].includes(status) &&
+              eligible &&
+              !held &&
+              !blocked &&
+              !turnBlocked &&
+              (pending || turnStatus === "running");
+            assert.equal(
+              restartContinuationRun(projection, testNow) !== undefined,
+              expected,
+              JSON.stringify({ status, pending, thread, turnStatus, request }),
+            );
+          }
+});
+
 it.effect.each([
   ["user_input", "pending", "live", false],
   ["user_input", "expired", "not_resumable", false],
@@ -193,6 +279,27 @@ it.effect.each([
         ),
       );
       assert.lengthOf(dispatch, shouldContinue ? 1 : 0);
+    }),
+);
+
+it.effect.each(["failed", "interrupted", "rolled_back"] as const)(
+  "never revives a %s run with saved pending steering",
+  (status) =>
+    Effect.gen(function* () {
+      const source = {
+        ...cutMidTurn({
+          status,
+          restartPendingMessageIds: [MessageId.make("message:user")],
+        }),
+        messages: [
+          {
+            id: MessageId.make("message:user"),
+            text: "Undelivered steering.",
+            attachments: [],
+          } as never,
+        ],
+      };
+      assert.deepEqual(yield* continuationTexts(source), []);
     }),
 );
 
@@ -1971,3 +2078,41 @@ it.effect("recovers an unstarted continuation after a second restart with a back
     );
   }),
 );
+
+it("selects a later continuation after its provider settled and the clock moved backward", () => {
+  const base = makeProjection();
+  const earlier = {
+    ...base.runs[0]!,
+    status: "completed" as const,
+    completedAt: DateTime.makeUnsafe("2026-10-03T10:00:00.000Z"),
+  };
+  const current = {
+    ...earlier,
+    id: RunId.make("run:backward-pending-steer"),
+    ordinal: 2,
+    restartContinuationOfRunId: earlier.id,
+    restartPendingMessageIds: [MessageId.make("message:backward-pending-steer")],
+    activeAttemptId: RunAttemptId.make("attempt:backward-pending-steer"),
+    completedAt: DateTime.makeUnsafe("2026-10-03T09:00:00.000Z"),
+  };
+  assert.equal(
+    restartContinuationRun(
+      {
+        ...base,
+        runs: [earlier, current],
+        providerTurns: [
+          { ...base.providerTurns[0]!, ordinal: 1, status: "completed" },
+          {
+            ...base.providerTurns[0]!,
+            id: ProviderTurnId.make("turn:backward-pending-steer"),
+            runAttemptId: current.activeAttemptId,
+            ordinal: 2,
+            status: "completed",
+          },
+        ],
+      },
+      testNow,
+    )?.id,
+    current.id,
+  );
+});

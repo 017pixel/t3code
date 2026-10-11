@@ -1,4 +1,3 @@
-import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
@@ -32,6 +31,7 @@ import {
   cancelledTurnItemWork,
   isWorktreeContinuationRun,
   mergeRestartCancelledBackgroundWork,
+  restartRunRanAfter,
 } from "./RestartBackgroundNote.ts";
 
 export class ProviderRuntimeRecoveryError extends Schema.TaggedError<ProviderRuntimeRecoveryError>()(
@@ -184,7 +184,14 @@ function latestStartedRun(
       run.providerThreadId === providerThreadId &&
       run.status !== "queued" &&
       run.status !== "rolled_back" &&
-      (latest === undefined || runRanAfter(run, latest))
+      (latest === undefined ||
+        restartRunRanAfter(
+          run,
+          latest,
+          projection.providerTurns,
+          projection.runs,
+          projection.attempts,
+        ))
         ? run
         : latest,
     undefined,

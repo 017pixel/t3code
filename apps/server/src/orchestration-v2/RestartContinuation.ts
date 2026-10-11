@@ -1,4 +1,3 @@
-import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
@@ -67,6 +66,9 @@ export function restartContinuationBlocked(
   // service counts (a run that completed or failed after the snooze) cannot
   // apply here: the source is the latest run and it was cut, not finished.
   if (
+    source.status === "failed" ||
+    source.status === "interrupted" ||
+    source.status === "rolled_back" ||
     projection.thread.archivedAt !== null ||
     projection.thread.deletedAt !== null ||
     projection.thread.settledOverride === "settled" ||
@@ -130,7 +132,15 @@ export function restartContinuationRun(
   // Queued runs never started; recovery holds them behind the cut run.
   const run = projection.runs.reduce<OrchestrationV2Run | undefined>(
     (latest, candidate) =>
-      candidate.status !== "queued" && (!latest || runRanAfter(candidate, latest))
+      candidate.status !== "queued" &&
+      (!latest ||
+        restartRunRanAfter(
+          candidate,
+          latest,
+          projection.providerTurns,
+          projection.runs,
+          projection.attempts,
+        ))
         ? candidate
         : latest,
     undefined,

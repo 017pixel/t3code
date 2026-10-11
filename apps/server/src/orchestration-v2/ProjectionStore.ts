@@ -4055,22 +4055,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         if (threadRows[0] === undefined) {
           return yield* new ProjectionStoreThreadNotFoundError({ threadId });
         }
-        const [
-          thread,
-          runRows,
-          attemptRows,
-          nodeRows,
-          subagentRows,
-          providerSessionRows,
-          providerThreadRows,
-          providerTurnRows,
-          runtimeRequestRows,
-          messageRows,
-          turnItemRows,
-        ] = yield* Effect.all([
-          decodeThreadPayload(threadRows[0].payload_json),
-          sql<PayloadRow>`
-              SELECT payload_json FROM orchestration_v2_projection_runs AS run
+        const runRows = yield* sql<PayloadRow>`
+              WITH RECURSIVE native_run_ordinals AS (
+                SELECT attempt.run_id, turn.provider_thread_id, MAX(turn.ordinal) AS ordinal
+                FROM orchestration_v2_projection_provider_turns AS turn
+                JOIN orchestration_v2_projection_run_attempts AS attempt
+                  ON attempt.attempt_id = turn.run_attempt_id
+                WHERE turn.thread_id = ${threadId}
+                GROUP BY attempt.run_id, turn.provider_thread_id
+              ), recovery_runs(run_id, payload_json) AS (
+              SELECT run_id, payload_json FROM orchestration_v2_projection_runs AS run
               WHERE run.thread_id = ${threadId}
                 AND (
                   run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
@@ -4084,11 +4078,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   OR run.run_id IN (
                     SELECT (
                       SELECT ended.run_id FROM orchestration_v2_projection_runs AS ended
+                      LEFT JOIN native_run_ordinals AS native
+                        ON native.run_id = ended.run_id
+                          AND native.provider_thread_id = roster.provider_thread_id
                       WHERE ended.thread_id = ${threadId}
                         AND ended.provider_thread_id = roster.provider_thread_id
                         AND ended.status NOT IN ('queued', 'rolled_back')
-                      ORDER BY ended.completed_at IS NULL DESC, ended.completed_at DESC,
-                        ended.ordinal DESC
+                      ORDER BY ended.completed_at IS NULL DESC,
+                        native.ordinal DESC,
+                        ended.completed_at DESC, ended.ordinal DESC
                       LIMIT 1
                     )
                     FROM orchestration_v2_projection_provider_threads AS roster
@@ -4111,23 +4109,43 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   )
                   OR run.run_id IN (
                     SELECT item.run_id FROM orchestration_v2_projection_turn_items AS item
+                      INDEXED BY orchestration_v2_projection_turn_items_recovery_idx
                     WHERE item.thread_id = ${threadId}
                       AND item.type IN ('command_execution', 'dynamic_tool', 'subagent')
                       AND item.status IN ('pending', 'running', 'waiting')
                       AND item.run_id IS NOT NULL
                   )
                 )
-              ORDER BY run.ordinal ASC
-            `,
+              UNION
+              SELECT ancestor.run_id, ancestor.payload_json
+              FROM orchestration_v2_projection_runs AS ancestor
+              JOIN recovery_runs AS child
+                ON ancestor.run_id = json_extract(child.payload_json, '$.restartContinuationOfRunId')
+              WHERE ancestor.thread_id = ${threadId}
+              )
+              SELECT payload_json FROM recovery_runs
+              ORDER BY json_extract(payload_json, '$.ordinal') ASC
+            `;
+        const runs = yield* decodeRows(decodeRunPayload, threadId)(runRows);
+        const recoveryRunIds = runs.map((run) => run.id);
+        const [
+          thread,
+          attemptRows,
+          nodeRows,
+          subagentRows,
+          providerSessionRows,
+          providerThreadRows,
+          providerTurnRows,
+          runtimeRequestRows,
+          messageRows,
+          turnItemRows,
+        ] = yield* Effect.all([
+          decodeThreadPayload(threadRows[0].payload_json),
           sql<PayloadRow>`
               SELECT attempt.payload_json
               FROM orchestration_v2_projection_run_attempts AS attempt
               WHERE attempt.thread_id = ${threadId}
-                AND attempt.run_id IN (
-                  SELECT run_id FROM orchestration_v2_projection_runs
-                  WHERE thread_id = ${threadId}
-                    AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-                )
+                AND attempt.run_id IN ${sql.in(recoveryRunIds)}
               ORDER BY attempt.run_id ASC, attempt.attempt_ordinal ASC
             `,
           sql<PayloadRow>`
@@ -4196,16 +4214,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       SELECT run.provider_thread_id
                       FROM orchestration_v2_projection_runs AS run
                       WHERE run.thread_id = ${threadId}
-                        AND (
-                          run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-                          OR run.run_id IN (
-                            SELECT message.run_id FROM orchestration_v2_projection_messages AS message
-                            JOIN orchestration_v2_effect_outbox AS effect
-                              ON json_extract(effect.payload_json, '$.messageId') = message.message_id
-                            WHERE effect.thread_id = ${threadId} AND effect.effect_type = 'provider-turn.steer'
-                              AND effect.status IN ('pending', 'running')
-                          )
-                        )
+                        AND run.run_id IN ${sql.in(recoveryRunIds)}
                     )
                   )
                 )
@@ -4235,16 +4244,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   OR provider_thread.provider_thread_id IN (
                     SELECT run.provider_thread_id FROM orchestration_v2_projection_runs AS run
                     WHERE run.thread_id = ${threadId}
-                      AND (
-                        run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-                        OR run.run_id IN (
-                          SELECT message.run_id FROM orchestration_v2_projection_messages AS message
-                          JOIN orchestration_v2_effect_outbox AS effect
-                            ON json_extract(effect.payload_json, '$.messageId') = message.message_id
-                          WHERE effect.thread_id = ${threadId} AND effect.effect_type = 'provider-turn.steer'
-                            AND effect.status IN ('pending', 'running')
-                        )
-                      )
+                      AND run.run_id IN ${sql.in(recoveryRunIds)}
                   )
                   OR provider_thread.provider_thread_id IN (
                     SELECT item.provider_thread_id
@@ -4279,11 +4279,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   OR provider_turn.run_attempt_id IN (
                     SELECT attempt_id FROM orchestration_v2_projection_run_attempts
                     WHERE thread_id = ${threadId}
-                      AND run_id IN (
-                        SELECT run_id FROM orchestration_v2_projection_runs
-                        WHERE thread_id = ${threadId}
-                          AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-                      )
+                      AND run_id IN ${sql.in(recoveryRunIds)}
                   )
                 )
               ORDER BY provider_turn.provider_thread_id ASC, provider_turn.ordinal ASC
@@ -4328,7 +4324,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `,
         ]);
         const [
-          runs,
           attempts,
           nodes,
           subagents,
@@ -4339,7 +4334,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           messages,
           turnItems,
         ] = yield* Effect.all([
-          decodeRows(decodeRunPayload, threadId)(runRows),
           decodeRows(decodeRunAttemptPayload, threadId)(attemptRows),
           decodeRows(decodeNodePayload, threadId)(nodeRows),
           decodeRows(decodeSubagentPayload, threadId)(subagentRows),
@@ -4362,7 +4356,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           WHERE effect.thread_id = ${threadId} AND effect.effect_type = 'provider-turn.steer'
             AND effect.status IN ('pending', 'running')
             AND json_extract(message.payload_json, '$.delegatedCompletion') IS NULL
-          ORDER BY message.created_at ASC, message.message_id ASC
+          ORDER BY effect.rowid ASC
         `;
         return {
           pendingSteering: pendingSteering.map((row) => ({

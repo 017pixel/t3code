@@ -13,6 +13,7 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
+  RunAttemptId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -35,6 +36,176 @@ import { restartContinuationRun } from "./RestartContinuation.ts";
 
 const layerTest = Layer.mergeAll(ProjectionStore.layer, EffectOutbox.layer).pipe(
   Layer.provideMerge(SqlitePersistence.layerMemory),
+);
+
+it.effect.each(["running", "completed", "failed", "interrupted"] as const)(
+  "retains continuation ancestors and the latest %s phase for pending steering",
+  (status) =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = yield* createThread(`steering-chain-${status}`);
+      const providerThreadId = ProviderThreadId.make(`provider-thread:${threadId}`);
+      const sessionId = ProviderSessionId.make(`session:${threadId}`);
+      const nodeId = NodeId.make(`node:${threadId}`);
+      const sourceAttempt = RunAttemptId.make(`attempt:${threadId}:1`);
+      const currentAttempt = RunAttemptId.make(`attempt:${threadId}:2`);
+      const messageId = MessageId.make(`steering:${threadId}`);
+      const source = yield* createRun(threadId, "cancelled", {
+        providerThreadId,
+        activeAttemptId: sourceAttempt,
+        restartPendingMessageIds: [messageId],
+        completedAt: now,
+      });
+      const current = yield* createRun(threadId, status === "running" ? "starting" : "completed", {
+        ordinal: 2,
+        providerThreadId,
+        activeAttemptId: currentAttempt,
+        restartContinuationOfRunId: source,
+        ...(status === "running" ? {} : { restartPendingMessageIds: [messageId] }),
+      });
+      yield* projections.apply({
+        id: EventId.make(`session:${threadId}`),
+        type: "provider-session.attached",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: sessionId,
+          driver,
+          providerInstanceId,
+          status: "stopped",
+          cwd: "/workspace",
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+      });
+      yield* projections.apply({
+        id: EventId.make(`provider-thread:${threadId}`),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: providerThreadId,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          driver,
+          providerInstanceId,
+          providerSessionId: sessionId,
+          nativeThreadRef: { driver, nativeId: "native", strength: "strong" },
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 2,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      for (const [runId, attemptId, ordinal] of [
+        [source, sourceAttempt, 1],
+        [current, currentAttempt, 2],
+      ] as const) {
+        yield* projections.apply({
+          id: EventId.make(`attempt:${attemptId}`),
+          type: "run-attempt.created",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: attemptId,
+            runId,
+            attemptOrdinal: 1,
+            rootNodeId: nodeId,
+            providerInstanceId,
+            providerThreadId,
+            providerTurnId: null,
+            reason: "initial",
+            status: "cancelled",
+            startedAt: now,
+            completedAt: now,
+          },
+        });
+        if (ordinal === 2 && status === "running") continue;
+        yield* projections.apply({
+          id: EventId.make(`turn:${attemptId}`),
+          type: "provider-turn.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: ProviderTurnId.make(`turn:${attemptId}`),
+            providerThreadId,
+            nodeId,
+            runAttemptId: attemptId,
+            nativeTurnRef: null,
+            ordinal,
+            status: ordinal === 1 ? "cancelled" : status,
+            startedAt: now,
+            completedAt: now,
+          },
+        });
+      }
+      if (status !== "running") {
+        yield* projections.apply({
+          id: EventId.make(`message:${threadId}`),
+          type: "message.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: messageId,
+            threadId,
+            runId: current,
+            nodeId: null,
+            role: "user",
+            text: "steer",
+            attachments: [],
+            streaming: false,
+            createdBy: "user",
+            creationSource: "web",
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* (yield* EffectOutbox.EffectOutboxV2).enqueue([
+          {
+            id: `effect:${threadId}`,
+            commandId: CommandId.make(`command:${threadId}`),
+            threadId,
+            request: {
+              type: "provider-turn.steer",
+              messageId,
+              providerSessionId: sessionId,
+              providerThreadId,
+              providerTurnId: ProviderTurnId.make(`turn:${currentAttempt}`),
+            },
+          },
+        ]);
+      }
+      const recovered = yield* projections.getRuntimeRecoveryProjection(threadId);
+      assert.deepEqual(
+        recovered.runs.map((run) => run.id),
+        [source, current],
+      );
+      assert.deepEqual(
+        recovered.attempts.map((attempt) => attempt.id),
+        [sourceAttempt, currentAttempt],
+      );
+      assert.lengthOf(recovered.providerTurns, status === "running" ? 1 : 2);
+      const withSteering = {
+        ...recovered,
+        runs: recovered.runs.map((run) =>
+          run.id === current && status !== "running"
+            ? { ...run, restartPendingMessageIds: [messageId] }
+            : run,
+        ),
+      };
+      assert.equal(
+        restartContinuationRun(withSteering, now)?.id,
+        status === "failed" || status === "interrupted" ? undefined : current,
+      );
+    }).pipe(Effect.provide(layerTest)),
 );
 const providerInstanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId: providerInstanceId, model: "gpt-5.4" };
@@ -758,6 +929,62 @@ it.effect("reads the run that owns a background roster, not a queued or resumed 
     });
     yield* withRoster(resumed);
     assert.deepEqual(yield* runIds(resumed), [resumedRun, continuationRun]);
+    // A backward clock and a later turn on another provider must not move
+    // the roster's owning run back to an earlier native turn.
+    const clock = yield* createThread("roster-backward-clock");
+    const clockProviderThreadId = ProviderThreadId.make(`provider-thread:${clock}`);
+    const clockRuns: RunId[] = [];
+    for (const ordinal of [1, 2, 3]) {
+      const attemptId = RunAttemptId.make(`attempt:${clock}:${ordinal}`);
+      const runId = yield* createRun(clock, "completed", {
+        ordinal,
+        providerThreadId: ordinal === 3 ? null : clockProviderThreadId,
+        activeAttemptId: attemptId,
+        completedAt: DateTime.makeUnsafe(
+          ordinal === 2 ? "2026-10-03T09:00:00Z" : "2026-10-03T10:00:00Z",
+        ),
+      });
+      clockRuns.push(runId);
+      if (ordinal === 3) continue;
+      yield* projections.apply({
+        id: EventId.make(`event:${attemptId}`),
+        type: "run-attempt.created",
+        threadId: clock,
+        occurredAt: now,
+        payload: {
+          id: attemptId,
+          runId,
+          attemptOrdinal: 1,
+          rootNodeId: NodeId.make(`node:${clock}:${ordinal}`),
+          providerInstanceId,
+          providerThreadId: clockProviderThreadId,
+          providerTurnId: null,
+          reason: "initial",
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      });
+      yield* projections.apply({
+        id: EventId.make(`event:turn:${attemptId}`),
+        type: "provider-turn.updated",
+        threadId: clock,
+        occurredAt: now,
+        payload: {
+          id: ProviderTurnId.make(`turn:${attemptId}`),
+          providerThreadId: clockProviderThreadId,
+          nodeId: NodeId.make(`node:${clock}:${ordinal}`),
+          runAttemptId: attemptId,
+          nativeTurnRef: null,
+          ordinal,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      });
+    }
+    yield* withRoster(clock);
+    assert.deepEqual(yield* runIds(clock), clockRuns.slice(1));
     // Without a roster, settled history is not read.
     const quiet = yield* createThread("no-roster-before-queue");
     yield* createRun(quiet, "completed");
@@ -929,4 +1156,55 @@ it.effect(
         [ids[0]!],
       );
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("preserves steering submission order across equal and backward clocks", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = yield* createThread("steering-order");
+    const runId = yield* createRun(threadId, "completed");
+    const messageIds = ["z", "y", "a"].map((id) => MessageId.make(`message:steering-order:${id}`));
+    for (const [index, messageId] of messageIds.entries()) {
+      const now = DateTime.makeUnsafe(index < 2 ? "2026-10-03T10:00:00Z" : "2026-10-03T09:00:00Z");
+      yield* projections.apply({
+        id: EventId.make(`event:${messageId}`),
+        type: "message.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: messageId,
+          threadId,
+          runId,
+          nodeId: null,
+          role: "user",
+          text: String(index),
+          attachments: [],
+          streaming: false,
+          createdBy: "user",
+          creationSource: "web",
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* outbox.enqueue([
+        {
+          id: `effect:${messageId}`,
+          commandId: CommandId.make(`command:${messageId}`),
+          threadId,
+          request: {
+            type: "provider-turn.steer",
+            messageId,
+            providerSessionId: ProviderSessionId.make("session:steering-order"),
+            providerThreadId: ProviderThreadId.make("provider-thread:steering-order"),
+            providerTurnId: ProviderTurnId.make("turn:steering-order"),
+          },
+        },
+      ]);
+    }
+    assert.deepEqual(
+      (yield* projections.getRuntimeRecoveryProjection(threadId)).pendingSteering,
+      messageIds.map((messageId) => ({ runId, messageId })),
+    );
+  }).pipe(Effect.provide(layerTest)),
 );

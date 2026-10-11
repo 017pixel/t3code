@@ -14,6 +14,7 @@ import {
   TurnItemId,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -1619,3 +1620,92 @@ it.effect("notes native child cancellation on its parent", () => {
     assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect.each(["startup", "shutdown"] as const)(
+  "records lost background work on the last native turn after a backward clock on %s",
+  (trigger) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:clock-background");
+      const providerThreadId = ProviderThreadId.make("provider-thread:clock-background");
+      const earlierId = RunId.make("run:clock-background:earlier");
+      const latestId = RunId.make("run:clock-background:latest");
+      const earlierAttempt = RunAttemptId.make("attempt:clock-background:earlier");
+      const latestAttempt = RunAttemptId.make("attempt:clock-background:latest");
+      const events: Parameters<
+        EventSink.EventSinkV2["Service"]["commitCommand"]
+      >[0]["events"][number][] = [];
+      const projection = {
+        thread: { id: threadId },
+        runtimeRequests: [],
+        providerSessions: [],
+        attempts: [],
+        nodes: [],
+        subagents: [],
+        messages: [],
+        providerThreads: [
+          {
+            id: providerThreadId,
+            ownerNodeId: null,
+            status: "idle",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            pendingBackgroundTasks: [
+              { kind: "command", taskId: "background", description: "watch build" },
+            ],
+          },
+        ],
+        runs: [
+          {
+            id: earlierId,
+            ordinal: 1,
+            status: "completed",
+            providerThreadId,
+            activeAttemptId: earlierAttempt,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            completedAt: DateTime.makeUnsafe("2026-10-03T10:00:00Z"),
+          },
+          {
+            id: latestId,
+            ordinal: 2,
+            status: "completed",
+            providerThreadId,
+            activeAttemptId: latestAttempt,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            completedAt: DateTime.makeUnsafe("2026-10-03T09:00:00Z"),
+          },
+        ],
+        providerTurns: [
+          { providerThreadId, runAttemptId: earlierAttempt, ordinal: 1, status: "completed" },
+          { providerThreadId, runAttemptId: latestAttempt, ordinal: 2, status: "completed" },
+        ],
+        turnItems: [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      yield* ProviderRuntimeRecovery.make.pipe(
+        Effect.flatMap((recovery) => recovery.reconcile(trigger)),
+        Effect.provide(
+          Layer.mergeAll(
+            ServerSettings.layerTest(),
+            IdAllocator.layer,
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([threadId]),
+              getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              commitCommand: (input) => {
+                events.push(...input.events);
+                return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+              },
+            }),
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+            }),
+          ),
+        ),
+      );
+      assert.deepEqual(
+        events.flatMap((event) =>
+          event.type === "run.background-work-cancelled" ? [event.runId] : [],
+        ),
+        [latestId],
+      );
+    }),
+);

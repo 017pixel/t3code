@@ -62,6 +62,9 @@ it.effect.each([
   "completed",
   "failed",
   "interrupted",
+  "run-failed",
+  "run-interrupted",
+  "run-rolled_back",
 ] as const)("rechecks %s state when dispatching recorded restart intent", (state) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -136,6 +139,27 @@ it.effect.each([
               threadId,
             },
       );
+    } else if (
+      state === "run-failed" ||
+      state === "run-interrupted" ||
+      state === "run-rolled_back"
+    ) {
+      yield* projections.apply({
+        id: EventId.make(`ended-run-restart-${state}`),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          ...before.runs[0]!,
+          status:
+            state === "run-failed"
+              ? "failed"
+              : state === "run-interrupted"
+                ? "interrupted"
+                : "rolled_back",
+          restartPendingMessageIds: [source.userMessageId],
+        },
+      });
     } else if (state === "completed" || state === "failed" || state === "interrupted") {
       yield* projections.apply({
         id: EventId.make(`settled-turn-restart-${state}`),
