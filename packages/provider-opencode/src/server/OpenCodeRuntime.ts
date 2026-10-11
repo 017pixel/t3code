@@ -1,3 +1,4 @@
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import * as NodeURL from "node:url";
 
 import type { ChatAttachment, ProviderApprovalDecision, RuntimeMode } from "@t3tools/contracts";
@@ -594,6 +595,7 @@ function ensureRuntimeError(
 }
 
 const makeOpenCodeRuntime = Effect.gen(function* () {
+  const admission = yield* Maintenance.ProviderMaintenanceAdmission;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const netService = yield* NetService.NetService;
   const hostPlatform = yield* HostProcess.Platform;
@@ -648,6 +650,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       } satisfies OpenCodeCommandResult;
     }).pipe(
       Effect.scoped,
+      admission.withLaunchPermit,
       Effect.mapError((cause) =>
         ensureRuntimeError(
           "runOpenCodeCommand",
@@ -733,6 +736,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           }),
         )
         .pipe(
+          admission.withLaunchPermit,
           Effect.provideService(Scope.Scope, runtimeScope),
           Effect.mapError(
             (cause) =>

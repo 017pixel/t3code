@@ -101,15 +101,6 @@ export class DesktopUpdateChannelPersistenceError extends Schema.TaggedError<Des
   }
 }
 
-export class DesktopUpdateChannelStagedError extends Schema.TaggedError<DesktopUpdateChannelStagedError>()(
-  "DesktopUpdateChannelStagedError",
-  { requestedChannel: DesktopUpdateChannelSchema },
-) {
-  override get message(): string {
-    return "Install the downloaded update by quitting and reopening the app before changing channels on macOS.";
-  }
-}
-
 export class DesktopUpdatePollerError extends Schema.TaggedError<DesktopUpdatePollerError>()(
   "DesktopUpdatePollerError",
   {
@@ -163,7 +154,6 @@ export type DesktopUpdateConfigureError = never;
 export const DesktopUpdateSetChannelError = Schema.Union([
   DesktopUpdateActionInProgressError,
   DesktopUpdateChannelPersistenceError,
-  DesktopUpdateChannelStagedError,
 ]);
 export type DesktopUpdateSetChannelError = typeof DesktopUpdateSetChannelError.Type;
 
@@ -194,6 +184,8 @@ export class DesktopUpdates extends Context.Service<
     readonly check: (reason: string) => Effect.Effect<DesktopUpdateCheckResult>;
     readonly download: Effect.Effect<DesktopUpdateActionResult>;
     readonly install: Effect.Effect<DesktopUpdateActionResult>;
+    /** Called after backend shutdown on a real quit, never a settings relaunch. */
+    readonly installOnQuit: Effect.Effect<boolean>;
     readonly installPrepared: (
       expectedVersion: string,
     ) => Effect.Effect<DesktopPreparedUpdateInstallResult>;
@@ -300,8 +292,6 @@ export const make = Effect.gen(function* () {
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const failedBackgroundDownloadRef = yield* Ref.make<string | null>(null);
-  // Native macOS staging cannot be cancelled once Squirrel has the download.
-  const nativeUpdateStagedRef = yield* Ref.make(false);
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
       environment.appVersion,
@@ -481,17 +471,7 @@ export const make = Effect.gen(function* () {
       return { accepted: false, completed: false };
     }
 
-    // A failed download leaves nothing to install on quit: electron-updater drops
-    // the previous installer, and on macOS update-downloaded fires before Squirrel
-    // stages the download, so a later failure means nothing was staged.
-    const stagedBefore = yield* Ref.get(nativeUpdateStagedRef);
-    const releaseFailedDownload = Effect.all(
-      [
-        Ref.set(nativeUpdateStagedRef, stagedBefore),
-        electronUpdater.setAutoInstallOnAppQuit(false),
-      ],
-      { discard: true },
-    );
+    const releaseFailedDownload = electronUpdater.setAutoInstallOnAppQuit(false);
 
     return yield* Effect.gen(function* () {
       yield* setState(reduceDesktopUpdateStateOnDownloadStart(state));
@@ -932,11 +912,10 @@ export const make = Effect.gen(function* () {
             });
             return;
           }
-          if (environment.platform === "darwin") {
-            yield* Ref.set(nativeUpdateStagedRef, true);
-          }
+          // Squirrel applies a staged update on every process exit, including a
+          // settings relaunch. Defer staging until the lifecycle requests a real quit.
           // Installing a .deb asks for a password, which must not appear on quit.
-          if (!isDebPackage) {
+          if (environment.platform !== "darwin" && !isDebPackage) {
             yield* electronUpdater.setAutoInstallOnAppQuit(true);
           }
           yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, info.version));
@@ -1051,10 +1030,6 @@ export const make = Effect.gen(function* () {
           return state;
         }
 
-        if (yield* Ref.get(nativeUpdateStagedRef)) {
-          return yield* new DesktopUpdateChannelStagedError({ requestedChannel: nextChannel });
-        }
-
         yield* desktopSettings
           .setUpdateChannel(nextChannel)
           .pipe(
@@ -1102,6 +1077,18 @@ export const make = Effect.gen(function* () {
         state: yield* Ref.get(updateStateRef),
       };
     }).pipe(Effect.withSpan("desktop.updates.download")),
+    installOnQuit: Effect.gen(function* () {
+      const state = yield* Ref.get(updateStateRef);
+      if (environment.platform !== "darwin" || state.downloadedVersion === null) return false;
+      yield* electronUpdater.quitAndInstall({ isSilent: true, isForceRunAfter: false });
+      return true;
+    }).pipe(
+      Effect.catchCause((cause) =>
+        logUpdaterError("Could not install the downloaded update on quit.", { cause }).pipe(
+          Effect.as(false),
+        ),
+      ),
+    ),
     install: installWithExpectedVersion().pipe(
       Effect.map(({ accepted, completed, state }) => ({ accepted, completed, state })),
     ),

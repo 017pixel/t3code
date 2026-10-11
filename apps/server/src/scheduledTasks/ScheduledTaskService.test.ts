@@ -557,7 +557,11 @@ it.effect("uses both partial indexes for the inclusive update horizon", () =>
     assert.deepEqual(selected.map((task) => task.id).sort(), ["exact-horizon", "running-disabled"]);
     const plan = yield* sql<{ detail: string }>`EXPLAIN QUERY PLAN SELECT * FROM scheduled_tasks
       WHERE last_run_status = 'running'
-        OR (enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ${horizon})
+        OR (enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ${horizon}
+          AND CASE WHEN json_valid(schedule_json) THEN
+            json_extract(schedule_json, '$.type') IS NOT 'interval'
+              OR json_extract(schedule_json, '$.everyMs') >= ${900000}
+            ELSE 1 END)
       UNION SELECT task.* FROM scheduled_task_webhook_queue AS delivery
       CROSS JOIN scheduled_tasks AS task
       WHERE task.task_id = delivery.task_id AND task.created_at = delivery.task_created_at
@@ -565,5 +569,36 @@ it.effect("uses both partial indexes for the inclusive update horizon", () =>
     assert.isTrue(plan.some((row) => row.detail.includes("idx_scheduled_tasks_running")));
     assert.isTrue(plan.some((row) => row.detail.includes("idx_scheduled_tasks_due")));
     assert.isFalse(plan.some((row) => /SCAN (scheduled_tasks|task)\b/.test(row.detail)));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("update windows exclude frequent due intervals but retain their running tasks", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const now = "2026-09-09T12:00:00.000Z";
+    for (const row of [
+      { id: "frequent", next: now, enabled: 1, status: "never" },
+      { id: "running", next: null, enabled: 0, status: "running" },
+      {
+        id: "slow",
+        next: now,
+        enabled: 1,
+        status: "never",
+        scheduleJson: '{"type":"interval","everyMs":900000}',
+      },
+      {
+        id: "later",
+        next: "2026-09-09T13:00:00.000Z",
+        enabled: 1,
+        status: "never",
+        scheduleJson: '{"type":"interval","everyMs":900000}',
+      },
+    ])
+      yield* insertRow(sql, row, now);
+    const tasks = yield* ScheduledTaskService.listRunningOrDueTasks(
+      DateTime.makeUnsafe(now),
+      900000,
+    );
+    assert.deepEqual(tasks.map((task) => task.id).sort(), ["running", "slow"]);
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

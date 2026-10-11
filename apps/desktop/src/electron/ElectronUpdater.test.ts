@@ -1,5 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { beforeEach, vi } from "vite-plus/test";
 
 const { autoUpdaterMock } = vi.hoisted(() => ({
@@ -8,6 +12,7 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
     allowPrerelease: false,
     autoDownload: true,
     autoInstallOnAppQuit: true,
+    autoRunAppAfterInstall: true,
     channel: "latest",
     disableDifferentialDownload: false,
     fullChangelog: false,
@@ -19,6 +24,12 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
     setFeedURL: vi.fn(),
   },
 }));
+
+vi.mock("electron", async () => {
+  const { EventEmitter } = await import("node:events");
+  return { autoUpdater: new EventEmitter() };
+});
+import * as Electron from "electron";
 
 vi.mock("electron-updater", () => ({
   autoUpdater: autoUpdaterMock,
@@ -44,6 +55,32 @@ describe("ElectronUpdater", () => {
     autoUpdaterMock.removeListener.mockClear();
     autoUpdaterMock.setFeedURL.mockClear();
   });
+
+  it.effect.each(["downloaded", "error", "timeout"])(
+    "finishes a macOS real quit after native %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        autoUpdaterMock.quitAndInstall.mockImplementationOnce(() => {
+          if (outcome === "downloaded") Electron.autoUpdater.emit("update-downloaded");
+          if (outcome === "error") Electron.autoUpdater.emit("error", new Error("staging failed"));
+        });
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        const quit = yield* updater
+          .quitAndInstall({ isSilent: true, isForceRunAfter: false })
+          .pipe(Effect.exit, Effect.forkChild);
+        yield* Effect.yieldNow;
+        if (outcome === "timeout") yield* TestClock.adjust(Duration.seconds(5));
+        const result = yield* Fiber.join(quit);
+        assert.equal(result._tag, outcome === "downloaded" ? "Success" : "Failure");
+        assert.isFalse(autoUpdaterMock.autoRunAppAfterInstall);
+        assert.equal(Electron.autoUpdater.listenerCount("error"), 0);
+        assert.equal(Electron.autoUpdater.listenerCount("update-downloaded"), 0);
+      }).pipe(
+        Effect.provide(ElectronUpdater.layer),
+        Effect.provideService(HostProcess.Platform, "darwin"),
+        Effect.provide(TestClock.layer()),
+      ),
+  );
 
   it.effect("scopes updater event listeners", () =>
     Effect.gen(function* () {
@@ -134,6 +171,7 @@ describe("ElectronUpdater", () => {
       );
       assert.notInclude(error.message, cause.message);
       assert.deepEqual(autoUpdaterMock.quitAndInstall.mock.calls, [[true, false]]);
+      assert.isFalse(autoUpdaterMock.autoRunAppAfterInstall);
     }).pipe(Effect.provide(ElectronUpdater.layer)),
   );
 });

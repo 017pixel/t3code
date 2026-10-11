@@ -1,3 +1,10 @@
+import * as Layer from "effect/Layer";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
+import { withCodexAppServerClient } from "./CodexProvider.ts";
 import { assert, it } from "@effect/vitest";
 
 import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
@@ -171,3 +178,30 @@ it("ignores custom models that shadow a preferred slug", () => {
 
   assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-5.4");
 });
+
+it.effect("Codex account model and skills clients wait before resolving or launching a CLI", () =>
+  Effect.gen(function* () {
+    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const install = yield* admission
+      .withPermit(
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      )
+      .pipe(Effect.forkScoped);
+    yield* Deferred.await(entered);
+    // No process or home service exists: reaching either before admission is a defect.
+    const client = yield* Effect.scoped(
+      withCodexAppServerClient({
+        binaryPath: "codex",
+        homePath: "~/.codex",
+        cwd: "/workspace",
+      }),
+    ).pipe(Effect.forkScoped);
+    yield* Effect.yieldNow;
+    assert.isTrue(client.pollUnsafe() === undefined);
+    yield* Fiber.interrupt(client);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(install);
+  }).pipe(Effect.provide(Layer.mock(ChildProcessSpawner.ChildProcessSpawner)({}))),
+);

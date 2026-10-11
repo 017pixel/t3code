@@ -45,6 +45,18 @@ export function canUpdateEnvironmentProvider(provider: ServerProvider) {
   );
 }
 
+/** Background outcomes stay quiet except for a neutral diagnostic in settings. */
+export function providerUpdateSettingsNotice(provider: ServerProvider) {
+  const state = provider.updateState;
+  if (!state || state.status === "idle") return null;
+  const background = state.origin === "background";
+  if (background && state.status !== "failed" && state.status !== "unchanged") return null;
+  return {
+    message: state.message ?? `Update ${state.status}`,
+    failed: !background && state.status === "failed",
+  };
+}
+
 const Releases = Schema.Array(
   Schema.Struct({
     tag_name: Schema.String,

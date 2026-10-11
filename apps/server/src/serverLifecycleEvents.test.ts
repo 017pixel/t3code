@@ -2,6 +2,8 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import { assertTrue } from "@effect/vitest/utils";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
+import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -73,4 +75,33 @@ it.effect(
       const migration = snapshot.events.find((event) => event.type === "legacyThreadMigration");
       assert.equal(migration?.payload.status, "complete");
     }).pipe(Effect.provide(ServerLifecycleEvents.layer)),
+);
+
+it.effect("announces restarts only to capable clients and expires abandoned handoffs", () =>
+  Effect.gen(function* () {
+    const lifecycle = yield* ServerLifecycleEvents.ServerLifecycleEvents;
+    yield* lifecycle.publish({
+      version: 1,
+      type: "updateRestart",
+      payload: {
+        fromVersion: "1.0.0",
+        targetVersion: "1.1.0",
+        updateId: "background",
+        expiresAt: 300_000,
+      },
+    });
+    const events = Stream.fromIterable((yield* lifecycle.snapshot).events);
+    assert.equal(
+      (yield* ServerLifecycleEvents.eventsForClient(events, { updateRestarts: true }).pipe(
+        Stream.runCollect,
+      )).length,
+      1,
+    );
+    assert.equal(
+      (yield* ServerLifecycleEvents.eventsForClient(events, {}).pipe(Stream.runCollect)).length,
+      0,
+    );
+    yield* TestClock.adjust("5 minutes");
+    assert.equal((yield* lifecycle.snapshot).events.length, 0);
+  }).pipe(Effect.provide(ServerLifecycleEvents.layer)),
 );

@@ -1,4 +1,8 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Electron from "electron";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
+import * as Option from "effect/Option";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -138,18 +142,53 @@ export const make = ElectronUpdater.of({
     }).pipe(Effect.asVoid);
   }),
   quitAndInstall: ({ isSilent, isForceRunAfter }) =>
-    Effect.suspend(() => {
+    Effect.gen(function* () {
       const channel = autoUpdater.channel;
-      return Effect.try({
-        try: () => autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
-        catch: (cause) =>
-          new ElectronUpdaterQuitAndInstallError({
-            channel,
-            isSilent,
-            isForceRunAfter,
-            cause,
+      const makeError = (cause: unknown) =>
+        new ElectronUpdaterQuitAndInstallError({
+          channel,
+          isSilent,
+          isForceRunAfter,
+          cause,
+        });
+      const install = () => {
+        // MacUpdater ignores the positional flags and reads this property.
+        autoUpdater.autoRunAppAfterInstall = isForceRunAfter;
+        autoUpdater.quitAndInstall(isSilent, isForceRunAfter);
+      };
+      if ((yield* HostProcess.Platform) !== "darwin" || isForceRunAfter) {
+        return yield* Effect.try({ try: install, catch: makeError });
+      }
+      // A real quit must still exit if Squirrel cannot stage the archive.
+      const staged = yield* Effect.tryPromise({
+        try: (signal) =>
+          new Promise<void>((resolve, reject) => {
+            const native = Electron.autoUpdater;
+            const cleanup = () => {
+              native.removeListener("update-downloaded", downloaded);
+              native.removeListener("error", failed);
+              signal.removeEventListener("abort", cleanup);
+            };
+            const downloaded = () => {
+              cleanup();
+              resolve();
+            };
+            const failed = (cause: unknown) => {
+              cleanup();
+              reject(cause);
+            };
+            native.once("update-downloaded", downloaded);
+            native.once("error", failed);
+            signal.addEventListener("abort", cleanup, { once: true });
+            try {
+              install();
+            } catch (cause) {
+              failed(cause);
+            }
           }),
-      });
+        catch: makeError,
+      }).pipe(Effect.timeoutOption(Duration.seconds(5)));
+      if (Option.isNone(staged)) return yield* makeError(new Error("Squirrel staging timed out."));
     }),
   on: (eventName, listener) => {
     const eventTarget = autoUpdater as unknown as {

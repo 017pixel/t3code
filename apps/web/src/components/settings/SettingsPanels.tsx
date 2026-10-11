@@ -269,11 +269,14 @@ function backgroundActivityProfileSettings(profile: BackgroundActivityProfile) {
   };
 }
 
-function AboutVersionTitle() {
+export function AboutVersionTitle() {
+  const updateState = useDesktopUpdateState();
   return (
     <span className="inline-flex items-baseline gap-2">
       <span>Version</span>
-      <code className="text-2xs font-medium text-muted-foreground">{APP_VERSION}</code>
+      <code className="text-2xs font-medium text-muted-foreground">
+        {updateState?.currentVersion ?? APP_VERSION}
+      </code>
     </span>
   );
 }
@@ -2925,7 +2928,7 @@ export function GeneralSettingsPanel() {
           serverScoped
           settingKeys={["automaticUpdates"]}
           {...searchableSetting("automatic-updates")}
-          description="Install provider CLI and background service updates on the selected environments while nothing is running."
+          description="Install one-click provider CLI updates and background service updates on the selected environments while nothing is running."
           status={
             !supportsAutomaticUpdates
               ? "All selected connected environments must support automatic updates."

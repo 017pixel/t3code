@@ -212,6 +212,15 @@ export function canOneClickUpdateProviderCandidate(
   );
 }
 
+/** Refresh a launch prompt when live progress changes which updates it can start. */
+export function providerUpdatePromptActionKey(providers: ReadonlyArray<ServerProvider>): string {
+  return collectProviderUpdateCandidates(providers)
+    .filter((provider) => canOneClickUpdateProviderCandidate(provider, providers))
+    .map((provider) => provider.instanceId)
+    .toSorted()
+    .join("|");
+}
+
 export function providerUpdateNotificationKey(
   providers: ReadonlyArray<ProviderUpdateCandidate>,
 ): string | null {
@@ -452,7 +461,9 @@ export function getProviderUpdateSidebarPillView(
   providers: ReadonlyArray<ServerProvider>,
   options?: ProviderUpdateSidebarPillOptions,
 ): ProviderUpdateSidebarPillView | null {
-  const dedupedProviders = dedupeProvidersByDriver(providers);
+  const dedupedProviders = dedupeProvidersByDriver(
+    providers.filter((provider) => provider.updateState?.origin !== "background"),
+  );
   const activeProviders = dedupedProviders.filter(isProviderUpdateActive);
   if (activeProviders.length > 0) {
     const activeProvider = activeProviders[0]!;

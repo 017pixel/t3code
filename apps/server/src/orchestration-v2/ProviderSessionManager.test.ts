@@ -51,9 +51,16 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as HostLock from "../provider/ProviderMaintenanceHostLock.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 
+const layerHostLock = Layer.succeed(HostLock.ProviderMaintenanceHostLock, {
+  directory: "",
+  acquireRead: Effect.succeed(Effect.void),
+  withRead: (effect) => effect,
+  withWrite: (effect) => effect,
+});
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
   Layer.provide(layerTestDatabase),
@@ -480,6 +487,7 @@ function layerTest(input: {
   readonly serverRestartPending?: Effect.Effect<boolean>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
+  readonly hostLock?: ReturnType<typeof HostLock.make>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
@@ -546,6 +554,9 @@ function layerTest(input: {
       Layer.provide(
         Layer.mergeAll(
           layerRegistry.pipe(Layer.provideMerge(McpProviderSessions.layer)),
+          input.hostLock === undefined
+            ? layerHostLock
+            : Layer.succeed(HostLock.ProviderMaintenanceHostLock, input.hostLock),
           layerConfiguredEventSink,
           IdAllocator.layer,
           layerProviderEventIngestorTest,
@@ -4803,4 +4814,105 @@ it.effect(
       });
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
+);
+
+it.effect("ProviderSessionManagerV2 holds the host lease through terminal background work", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const pending = yield* Ref.make(true);
+    const held = yield* Ref.make(0);
+    const hostLock = {
+      directory: "",
+      withRead: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      withWrite: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      acquireRead: Ref.update(held, (value) => value + 1).pipe(
+        Effect.as(Ref.update(held, (value) => value - 1)),
+      ),
+    };
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-host-maintenance-background");
+      const providerSessionId = idAllocator.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator,
+        threadId,
+        providerSessionId,
+        now,
+        nativeThreadId: "native-host-maintenance",
+      });
+      const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+      yield* runtime.startTurn({
+        appThread: (yield* projectionStore.getThreadProjection(threadId)).thread,
+        threadId,
+        runId,
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+        rootNodeId: idAllocator.derive.rootNode({ runId }),
+        providerThread,
+        message: {
+          createdBy: "user",
+          creationSource: "web",
+          messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+          text: "turn",
+          attachments: [],
+        },
+        modelSelection,
+        runtimePolicy,
+      });
+      assert.equal(yield* Ref.get(held), 1);
+      const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+      const terminal = {
+        type: "turn.terminal" as const,
+        driver: CODEX_DRIVER,
+        providerThreadId: providerThread.id,
+        providerTurnId: idAllocator.derive.providerTurn({
+          driver: CODEX_DRIVER,
+          nativeTurnId: "native-host-turn",
+        }),
+        runOrdinal: 1,
+        status: "completed" as const,
+        failure: null,
+        threadDisposition: "reusable" as const,
+      };
+      for (const background of [true, false]) {
+        yield* Ref.set(pending, background);
+        const subscription = yield* runtime.subscribeEvents!;
+        const observed = yield* subscription.events.pipe(
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* Queue.offer(queue, terminal);
+        yield* Fiber.join(observed);
+        assert.equal(yield* Ref.get(held), background ? 1 : 0);
+      }
+      yield* manager.close(providerSessionId);
+      assert.equal(yield* Ref.get(held), 0);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          hostLock,
+          hasPendingBackgroundWork: Ref.get(pending),
+          idleTimeoutMs: 60_000,
+        }),
+      ),
+    );
+  }),
 );

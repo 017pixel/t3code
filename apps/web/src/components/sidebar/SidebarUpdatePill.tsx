@@ -61,7 +61,7 @@ export function openSidebarUpdateReleaseNotesPopoverOnForwardTab(
   flushSync(() => handle.open(triggerId));
 }
 
-function resolveSidebarUpdatePresentation({
+export function resolveSidebarUpdatePresentation({
   action,
   isDownloading,
   showCheckIcon,
@@ -71,7 +71,8 @@ function resolveSidebarUpdatePresentation({
   readonly showCheckIcon: boolean;
 }) {
   const showUpdateDetails = action !== "none" || isDownloading;
-  const iconStatus = showCheckIcon
+  const showChecking = showCheckIcon && !showUpdateDetails;
+  const iconStatus = showChecking
     ? "checking"
     : action === "install"
       ? "downloaded"
@@ -84,7 +85,7 @@ function resolveSidebarUpdatePresentation({
   return {
     iconStatus,
     showUpdateDetails,
-    showUpdateIconState: showUpdateDetails && !showCheckIcon,
+    showUpdateIconState: showUpdateDetails && !showChecking,
   } as const;
 }
 
@@ -133,11 +134,14 @@ function SidebarUpdateControl() {
 
   const action = state ? resolveDesktopUpdateButtonAction(state) : "none";
   const isDownloading = state?.status === "downloading";
-  const showCheckIcon = shouldShowDesktopUpdateCheckIcon({
-    isAnimationLatched: isCheckAnimationLatched,
-    isChecking: state?.status === "checking",
-    prefersReducedMotion,
-  });
+  const showCheckIcon =
+    action === "none" &&
+    !isDownloading &&
+    shouldShowDesktopUpdateCheckIcon({
+      isAnimationLatched: isCheckAnimationLatched,
+      isChecking: state?.status === "checking",
+      prefersReducedMotion,
+    });
   const { iconStatus, showUpdateDetails, showUpdateIconState } = resolveSidebarUpdatePresentation({
     action,
     isDownloading,

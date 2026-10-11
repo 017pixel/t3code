@@ -7,6 +7,14 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
+import * as Option from "effect/Option";
+import * as Layer from "effect/Layer";
+import * as ServerLifecycleEvents from "../serverLifecycleEvents.ts";
+import * as ServerAutoUpdater from "../updates/ServerAutoUpdater.ts";
+import * as UpdateWindow from "../updates/UpdateWindow.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -82,6 +90,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
                 status: "ready",
                 version: "1.1.0",
                 launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
+                orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION,
               };
         return {
           stdout: JSON.stringify(result),
@@ -110,7 +119,11 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const config = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
+  const lifecycle = yield* ServerLifecycleEvents.ServerLifecycleEvents.pipe(
+    Effect.provide(ServerLifecycleEvents.layer),
+  );
   const selfUpdate = yield* ServerSelfUpdate.make().pipe(
+    Effect.provideService(ServerLifecycleEvents.ServerLifecycleEvents, lifecycle),
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
     Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, launcher),
     Effect.provideService(
@@ -125,12 +138,112 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
     Effect.provideService(HostProcess.Architecture, "x64"),
     Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
   );
-  return { selfUpdate, order };
+  return { selfUpdate, order, lifecycle };
 });
 
 const withoutStaging = { capability: null, stage: () => Effect.die("unused") } as const;
 
 it.layer(NodeServices.layer)("server self update", (it) => {
+  it.effect("announces an accepted service restart to every lifecycle subscriber", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, lifecycle } = yield* makeHarness();
+      const result = yield* selfUpdate.update({ targetVersion: "1.1.0" });
+      const snapshot = yield* lifecycle.snapshot;
+      expect(snapshot.events).toContainEqual({
+        version: 1,
+        sequence: 1,
+        type: "updateRestart",
+        payload: {
+          fromVersion: "0.0.45",
+          targetVersion: "1.1.0",
+          updateId: result.updateId,
+          expiresAt: 300_000,
+        },
+      });
+    }),
+  );
+
+  it.effect("expires an accepted handoff without permitting concurrent updates", () =>
+    Effect.gen(function* () {
+      const { selfUpdate } = yield* makeHarness();
+      yield* selfUpdate.update({ targetVersion: "1.1.0" });
+      expect((yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason).toBe(
+        "A server update is already in progress.",
+      );
+      yield* TestClock.adjust("5 minutes");
+      expect((yield* selfUpdate.update({ targetVersion: "1.1.0" })).updateId).toBe("launcher-id");
+    }),
+  );
+
+  it.effect("rechecks a staged release after a closed window and refuses a withdrawn target", () =>
+    Effect.gen(function* () {
+      let latest = "1.1.0";
+      let open = false;
+      const staged: string[] = [];
+      const installed: string[] = [];
+      const config = yield* ServerConfig.ServerConfig.pipe(
+        Effect.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-background-update-test-" }),
+        ),
+      );
+      const { run: pass } = yield* ServerAutoUpdater.makeUpdatePass().pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ServerConfig.layer({ ...config, devUrl: undefined }),
+            ServerSettings.layerTest({ automaticUpdates: true }),
+          ),
+        ),
+        Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, {
+          managed: true,
+          lastOutcome: undefined,
+          requestUpdate: () => Effect.succeed("id"),
+          prepareTrial: Effect.undefined,
+        }),
+        Effect.provideService(ServerSelfUpdate.ServerSelfUpdate, {
+          capability: "boot-service",
+          commitDesktopUpdate: () => Effect.never,
+          stage: (target) =>
+            Effect.sync(() => {
+              staged.push(target);
+              return { orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION };
+            }),
+          update: ({ targetVersion }) =>
+            Effect.sync(() => {
+              installed.push(targetVersion);
+              return { targetVersion, method: "boot-service" as const };
+            }),
+        }),
+        Effect.provideService(UpdateWindow.UpdateWindow, {
+          runIfOpen: (effect) =>
+            open ? Effect.map(effect, Option.some) : Effect.succeed(Option.none()),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.sync(() =>
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(JSON.stringify([{ tag_name: `v${latest}` }])),
+              ),
+            ),
+          ),
+        ),
+      );
+      yield* pass;
+      expect(staged).toEqual(["1.1.0"]);
+      latest = "1.2.0";
+      yield* TestClock.adjust("1 hour");
+      yield* pass;
+      expect(staged).toEqual(["1.1.0", "1.2.0"]);
+      latest = "1.0.0";
+      open = true;
+      const handoff = yield* pass.pipe(Effect.forkChild);
+      yield* TestClock.adjust("5 minutes");
+      yield* Fiber.join(handoff);
+      expect(installed).toEqual([]);
+    }),
+  );
+
   it.effect("marks running threads at the boot-service handoff", () =>
     Effect.gen(function* () {
       const events: string[] = [];
