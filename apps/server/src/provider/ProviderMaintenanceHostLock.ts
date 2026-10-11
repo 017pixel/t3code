@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 
 const HeldWrite = Context.Reference<{ readonly owner: object; active: boolean } | null>(
@@ -34,13 +35,6 @@ const HeldGate = Context.Reference<{
   readonly resume: Effect.Effect<void>;
 } | null>("t3/provider/ProviderMaintenanceHostLock/HeldGate", { defaultValue: () => null });
 
-// Linux exposes a process start identity, so recycled PIDs cannot pin a dead reader.
-const processIdentity = (pid: number) => {
-  if (NodeOS.platform() !== "linux") return null;
-  const fields = NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)!.split(" ");
-  return fields[0] === "Z" ? "" : fields[19]!;
-};
-
 export const installLeasePath = (directory: string) => NodePath.join(directory, "install.json");
 
 /** Start identity includes the Linux boot so leases cannot survive a reboot's PID reuse. */
@@ -49,7 +43,12 @@ export const readProcessIdentity = (pid: number): string | null => {
   try {
     const platform = NodeOS.platform();
     if (platform === "linux") {
-      const start = processIdentity(pid);
+      const fields = NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8")
+        .split(") ")
+        .at(-1)!
+        .split(" ");
+      if (fields[0] === "Z" || fields[0] === "X") return "";
+      const start = fields[19];
       return start
         ? `${NodeFS.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()}:${start}`
         : null;
@@ -67,68 +66,164 @@ export const readProcessIdentity = (pid: number): string | null => {
             ],
             { encoding: "utf8", timeout: 10_000, windowsHide: true },
           )
-        : NodeChildProcess.spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+        : NodeChildProcess.spawnSync("ps", ["-p", String(pid), "-o", "stat=", "-o", "lstart="], {
             encoding: "utf8",
             timeout: 10_000,
             env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
           });
-    return scan.error || scan.status !== 0 ? null : scan.stdout.trim() || null;
+    if (scan.error || scan.status !== 0) return null;
+    const value = scan.stdout.trim();
+    if (platform === "darwin") {
+      const state = /^([A-Z][A-Z+<NLsEs]*?)\s+(.*)$/.exec(value);
+      if (state) return state[1]!.startsWith("Z") ? "" : state[2]!;
+    }
+    return value || null;
   } catch {
     return null;
   }
 };
 
-export const isProcessAlive = (pid: number, identity?: string | null) => {
-  try {
-    process.kill(pid, 0);
-    if (processIdentity(pid) === "") return false;
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      (error.code === "ESRCH" || error.code === "ENOENT")
-    )
-      return false;
-    return true;
+/** Unknown identities keep admission closed; only death or a different start proves release safe. */
+export const isProcessAlive = (pid: number, identity?: string | null, observed?: string | null) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  // A live table row is already a liveness observation. Rechecking death here
+  // could lose a helper spawned between the scan and its parent's exit.
+  if (observed === undefined) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ESRCH") return false;
+      // Permission to signal and permission to read creation identity can differ.
+    }
   }
-  if (identity == null) return true;
-  const current = readProcessIdentity(pid);
-  return current === null || current === identity;
+  const current = observed === undefined ? readProcessIdentity(pid) : observed;
+  if (current === "") return false;
+  if (!identity || current === null) return true;
+  // Readers written by older Linux servers contain only the start tick.
+  return (
+    current === identity ||
+    (NodeOS.platform() === "linux" && /^\d+$/.test(identity) && current.endsWith(`:${identity}`))
+  );
 };
 
+// A named Windows job retains every descendant in the kernel, even when a
+// short-lived parent exits between observations or the supervisor is killed.
+const windowsJobApi = `
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class T3InstallJob {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int kind, IntPtr info, uint size, IntPtr returned);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static int[] Processes(string name, int pid, bool create) {
+    IntPtr job = create ? CreateJobObject(IntPtr.Zero, name) : OpenJobObject(4, false, name);
+    if (job == IntPtr.Zero) {
+      int error = Marshal.GetLastWin32Error();
+      if (!create && error == 2) return new int[0];
+      throw new Win32Exception(error);
+    }
+    try {
+      if (create) {
+        IntPtr process = OpenProcess(0x101, false, pid);
+        if (process == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try {
+          if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        } finally { CloseHandle(process); }
+      }
+      IntPtr info = Marshal.AllocHGlobal(65536);
+      try {
+        if (!QueryInformationJobObject(job, 3, info, 65536, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        int count = Marshal.ReadInt32(info, 4);
+        int[] pids = new int[count];
+        for (int i = 0; i < count; i++) pids[i] = Marshal.ReadIntPtr(info, 8 + i * IntPtr.Size).ToInt32();
+        return pids;
+      } finally { Marshal.FreeHGlobal(info); }
+    } finally { CloseHandle(job); }
+  }
+}`;
+const ownedJobs = new Set<string>();
+const windowsJobProcesses = (
+  pid: number,
+  job: string,
+  create: boolean,
+  includeRoot = false,
+  identity?: string | null,
+) => {
+  if (!/^t3-provider-install-[a-f0-9-]+$/.test(job) || !Number.isSafeInteger(pid) || pid <= 0)
+    throw new Error("Invalid provider install job");
+  const scan = NodeChildProcess.spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${windowsJobApi}\n'@; [T3InstallJob]::Processes('Global\\${job}', ${pid}, $${create})`,
+    ],
+    { encoding: "utf8", timeout: 10_000, windowsHide: true },
+  );
+  if (scan.error || scan.status !== 0)
+    throw new Error("Could not inspect provider installer processes");
+  const children = scan.stdout
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map(Number);
+  if (children.some((child) => !Number.isSafeInteger(child) || child <= 0))
+    throw new Error("Could not inspect provider installer processes");
+  const local = pid === process.pid && ownedJobs.has(job);
+  const current = includeRoot || local || !identity ? null : readProcessIdentity(pid);
+  const supervisor =
+    !includeRoot &&
+    (local || (identity != null && current !== null && isProcessAlive(pid, identity, current)));
+  return children.some(
+    (child) => child !== scan.pid && (includeRoot || child !== pid || !supervisor),
+  );
+};
+export const createInstallJob = (pid: number, job: string) => {
+  if (NodeOS.platform() !== "win32") return;
+  windowsJobProcesses(pid, job, true);
+  if (pid === process.pid) ownedJobs.add(job);
+};
+
+const ProcessIdentity = Schema.Struct({
+  pid: Schema.Number,
+  identity: Schema.optional(Schema.NullOr(Schema.String)),
+});
 const decodeInstallLease = Schema.decodeSync(
   Schema.fromJsonString(
     Schema.Union([
       Schema.Number,
       Schema.Struct({
-        pid: Schema.Number,
-        identity: Schema.optional(Schema.NullOr(Schema.String)),
+        ...ProcessIdentity.fields,
+        descendants: Schema.optional(Schema.Array(ProcessIdentity)),
+        job: Schema.optional(Schema.String),
       }),
     ]),
   ),
 );
-
-/** A dead supervisor's installer still owns admission until its entire process group exits. */
-export const installIsAlive = (directory: string): boolean => {
-  const file = installLeasePath(directory);
-  let pid: number;
-  let identity: string | null | undefined;
-  try {
-    const lease = decodeInstallLease(NodeFS.readFileSync(file, "utf8"));
-    pid = typeof lease === "number" ? lease : lease.pid;
-    identity = typeof lease === "number" ? undefined : lease.identity;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
-    throw error;
+export type InstallDescendants = Map<number, string | null>;
+const installs = new Map<
+  string,
+  {
+    pid: number;
+    identity: string | null | undefined;
+    job: string | undefined;
+    descendants: InstallDescendants;
   }
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid provider install lease");
-  if (isProcessAlive(pid, identity)) return true;
-  return installChildrenAreAlive(pid);
-};
+>();
 
-/** The installer can leave children writing after its root exits. Failed scans keep admission closed. */
-export const installChildrenAreAlive = (pid: number): boolean => {
+/** Retain ancestors for the lease's whole lifetime, including after they exit or are reparented. */
+export const installChildrenAreAlive = (
+  pid: number,
+  identity?: string | null,
+  descendants: InstallDescendants = new Map(),
+  job?: string,
+): boolean => {
   const windows = NodeOS.platform() === "win32";
+  if (windows && job) return windowsJobProcesses(pid, job, false, false, identity);
   const scan = windows
     ? NodeChildProcess.spawnSync(
         "powershell.exe",
@@ -136,7 +231,7 @@ export const installChildrenAreAlive = (pid: number): boolean => {
           "-NoProfile",
           "-NonInteractive",
           "-Command",
-          'Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { Write-Output "$($_.ProcessId)|$($_.ParentProcessId)" }',
+          "Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { Write-Output \"$($_.ProcessId)|$($_.ParentProcessId)|$($_.CreationDate.ToUniversalTime().ToString('o'))\" }",
         ],
         { encoding: "utf8", timeout: 10_000, windowsHide: true },
       )
@@ -146,43 +241,118 @@ export const installChildrenAreAlive = (pid: number): boolean => {
       });
   if (scan.error || scan.status !== 0)
     throw new Error("Could not inspect provider installer processes");
-  if (windows) {
-    const descendants = new Set([pid]);
-    const rows = scan.stdout
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => line.split("|").map(Number));
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const [child, parent] of rows) {
-        if (
-          parent !== undefined &&
-          child !== undefined &&
-          child !== scan.pid &&
-          descendants.has(parent) &&
-          !descendants.has(child)
-        ) {
-          descendants.add(child);
-          changed = true;
-        }
+  const rows = scan.stdout
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map((line) => {
+      const [child, parent, state] = windows ? line.split("|") : line.trim().split(/\s+/);
+      if (
+        !Number.isSafeInteger(Number(child)) ||
+        Number(child) <= 0 ||
+        !Number.isSafeInteger(Number(parent)) ||
+        !state
+      )
+        throw new Error("Could not inspect provider installer processes");
+      return {
+        pid: Number(child),
+        parent: Number(parent),
+        identity: windows ? state : undefined,
+        zombie: !windows && state.startsWith("Z"),
+      };
+    });
+  const groupAlive =
+    !windows &&
+    rows.some(
+      (row) => row.pid !== pid && row.pid !== scan.pid && row.parent === pid && !row.zombie,
+    );
+  const roots = new Map(descendants);
+  roots.set(pid, identity ?? null);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      const retained = descendants.has(row.pid);
+      if (
+        row.pid === pid ||
+        row.pid === scan.pid ||
+        row.zombie ||
+        (retained && (windows ? descendants.get(row.pid) === row.identity : row.parent !== pid))
+      )
+        continue;
+      if (!windows) {
+        if (row.parent !== pid) continue;
+      } else {
+        if (!roots.has(row.parent)) continue;
+        const parent = rows.find((candidate) => candidate.pid === row.parent);
+        const expected = roots.get(row.parent);
+        // Replacing a retained PID needs live ancestry, not an orphan's stale parent PID.
+        if (retained && !parent) continue;
+        // A recycled ancestor cannot introduce descendants belonging to its new owner.
+        if (parent && expected && parent.identity !== expected) continue;
+        const parentStart = expected ? Date.parse(expected) : NaN;
+        if (Number.isFinite(parentStart) && Date.parse(row.identity!) < parentStart) continue;
       }
+      const start = row.identity ?? readProcessIdentity(row.pid);
+      if (start === "" || (retained && descendants.get(row.pid) === start)) continue;
+      descendants.set(row.pid, start);
+      roots.set(row.pid, start);
+      changed = true;
     }
-    if (descendants.size > 1) return true;
-  } else if (
-    scan.stdout.split(/\r?\n/).some((line) => {
-      const [child, group, state] = line.trim().split(/\s+/);
+  }
+  return (
+    groupAlive ||
+    Array.from(descendants).some(([child, start]) => {
+      const row = rows.find((candidate) => candidate.pid === child);
       return (
-        Number(child) !== pid &&
-        Number(child) !== scan.pid &&
-        Number(group) === pid &&
-        state !== undefined &&
-        !state.startsWith("Z")
+        !row?.zombie &&
+        isProcessAlive(child, start, row ? (row.identity ?? readProcessIdentity(child)) : undefined)
       );
     })
-  )
-    return true;
-  return false;
+  );
+};
+
+/** Observe even live supervisors so a later scan can retain orphaned Windows helpers. */
+export const installIsAlive = (directory: string): boolean => {
+  let lease;
+  try {
+    lease = decodeInstallLease(NodeFS.readFileSync(installLeasePath(directory), "utf8"));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      installs.delete(directory);
+      return false;
+    }
+    throw error;
+  }
+  const pid = typeof lease === "number" ? lease : lease.pid;
+  const identity = typeof lease === "number" ? undefined : lease.identity;
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid provider install lease");
+  const job = typeof lease === "number" ? undefined : lease.job;
+  if (NodeOS.platform() === "win32" && job) return windowsJobProcesses(pid, job, false, true);
+  let tracked = installs.get(directory);
+  if (!tracked || tracked.pid !== pid || tracked.identity !== identity || tracked.job !== job) {
+    tracked = { pid, identity, job, descendants: new Map() };
+    installs.set(directory, tracked);
+  }
+  const uncertain: number[] = [];
+  if (typeof lease !== "number") {
+    for (const descendant of lease.descendants ?? []) {
+      if (!Number.isSafeInteger(descendant.pid) || descendant.pid <= 0)
+        throw new Error("Invalid provider install descendant");
+      const durable = descendant.identity ?? null;
+      // A stale receipt cannot replace a newer observation of the same helper PID.
+      if (!tracked.descendants.has(descendant.pid)) {
+        tracked.descendants.set(descendant.pid, durable);
+      } else if (durable !== null && tracked.descendants.get(descendant.pid) !== durable) {
+        const current = readProcessIdentity(descendant.pid);
+        if (current === durable) tracked.descendants.set(descendant.pid, durable);
+        // Retry conflicting generations next time without erasing either ownership observation.
+        else if (current === null) uncertain.push(descendant.pid);
+      }
+    }
+  }
+  const supervisor = isProcessAlive(pid, identity);
+  const children = installChildrenAreAlive(pid, identity, tracked.descendants, job);
+  return supervisor || children || uncertain.some((child) => isProcessAlive(child));
 };
 
 /**
@@ -283,12 +453,16 @@ export const make = (directory: string) => {
     );
   // Stop this process's heartbeat and exit hook without opening the gate. The
   // acknowledged supervisor maintains the same gate, then releases it on exit.
-  const handoff = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  const handoff = <A, E, R, E2 = never, R2 = never>(
+    effect: Effect.Effect<A, E, R>,
+    acknowledge: Effect.Effect<void, E2, R2> = Effect.void,
+  ) =>
     Effect.flatMap(HeldGate, (gate) =>
       gate === null
         ? Effect.die(new Error("Provider install requires the host write lease"))
         : Effect.uninterruptibleMask((restore) =>
             gate.handoff.pipe(
+              Effect.andThen(acknowledge),
               Effect.andThen(restore(effect)),
               Effect.onExit((exit) =>
                 exit._tag === "Failure" && Cause.hasInterrupts(exit.cause)
@@ -301,41 +475,70 @@ export const make = (directory: string) => {
 
   const readPermit = Semaphore.makeUnsafe(1);
   const readTokens = new WeakMap<Effect.Effect<void>, ReadToken>();
-  const registerRead = Effect.sync(() => {
-    const file = NodePath.join(readers, `${process.pid}-${NodeCrypto.randomUUID()}`);
-    NodeFS.writeFileSync(file, processIdentity(process.pid) ?? "", { flag: "wx" });
+  // A stale reader file can pin admission for this process's entire lifetime.
+  const retryReadCleanup = <A>(cleanup: () => A) =>
+    Effect.try(cleanup).pipe(Effect.retry(Schedule.spaced("1 second")), Effect.orDie);
+  const registerRead = Effect.gen(function* () {
+    const file = yield* Effect.sync(() =>
+      NodePath.join(readers, `${process.pid}-${NodeCrypto.randomUUID()}`),
+    );
+    yield* Effect.sync(() =>
+      NodeFS.writeFileSync(file, readProcessIdentity(process.pid) ?? "", { flag: "wx" }),
+    ).pipe(
+      Effect.onError((cause) => {
+        const error = Cause.squash(cause);
+        return error instanceof Error && "code" in error && error.code === "EEXIST"
+          ? Effect.void
+          : retryReadCleanup(() => NodeFS.rmSync(file, { force: true }));
+      }),
+    );
     return file;
   });
   // A provider can launch helper CLIs while its turn holds a read lease.
   // Joining that lease must not wait behind an installer draining this turn.
   const acquireRead = Effect.uninterruptible(
     Effect.gen(function* () {
-      const inherited = yield* HeldRead;
-      const held = yield* HeldWrite;
-      const lease =
-        inherited?.lease.owner === owner && inherited.active
-          ? inherited.lease
-          : {
-              owner,
-              // An install's scoped verification keeps its own reader if it outlives the writer.
-              file: yield* held?.owner === owner && held.active
-                ? registerRead
-                : Effect.acquireUseRelease(
-                    Effect.interruptible(readPermit.take(1)),
-                    () => withGate(registerRead),
-                    () => Effect.asVoid(readPermit.release(1)),
-                  ),
-              users: 0,
-            };
-      lease.users++;
-      const token = { lease, active: true };
-      const release = Effect.sync(() => {
-        if (!token.active) return;
-        token.active = false;
-        if (--lease.users === 0) NodeFS.rmSync(lease.file, { force: true });
-      });
-      readTokens.set(release, token);
-      return release;
+      let created: string | undefined;
+      const register = Effect.tap(registerRead, (file) =>
+        Effect.sync(() => {
+          created = file;
+        }),
+      );
+      return yield* Effect.gen(function* () {
+        const inherited = yield* HeldRead;
+        const held = yield* HeldWrite;
+        const lease =
+          inherited?.lease.owner === owner && inherited.active
+            ? inherited.lease
+            : {
+                owner,
+                // An install's scoped verification keeps its own reader if it outlives the writer.
+                file: yield* held?.owner === owner && held.active
+                  ? register
+                  : Effect.acquireUseRelease(
+                      Effect.interruptible(readPermit.take(1)),
+                      () => withGate(register),
+                      () => Effect.asVoid(readPermit.release(1)),
+                    ),
+                users: 0,
+              };
+        lease.users++;
+        const token = { lease, active: true };
+        const release = retryReadCleanup(() => {
+          if (!token.active) return;
+          if (lease.users === 1) NodeFS.rmSync(lease.file, { force: true });
+          lease.users--;
+          token.active = false;
+        });
+        readTokens.set(release, token);
+        return release;
+      }).pipe(
+        Effect.onError(() =>
+          retryReadCleanup(() => {
+            if (created) NodeFS.rmSync(created, { force: true });
+          }),
+        ),
+      );
     }),
   );
   const withRead = <A, E, R>(
@@ -353,28 +556,17 @@ export const make = (directory: string) => {
   const drained = Effect.sync(() => {
     let busy = false;
     for (const file of NodeFS.readdirSync(readers)) {
+      const path = NodePath.join(readers, file);
       const pid = Number(file.split("-")[0]);
+      let identity;
       try {
-        process.kill(pid, 0);
-        const identity = processIdentity(pid);
-        if (
-          identity !== null &&
-          identity !== NodeFS.readFileSync(NodePath.join(readers, file), "utf8")
-        ) {
-          NodeFS.rmSync(NodePath.join(readers, file), { force: true });
-        } else {
-          busy = true;
-        }
+        identity = NodeFS.readFileSync(path, "utf8");
       } catch (error) {
-        if (
-          !(error instanceof Error) ||
-          !("code" in error) ||
-          (error.code !== "ESRCH" && error.code !== "ENOENT")
-        ) {
-          throw error;
-        }
-        NodeFS.rmSync(NodePath.join(readers, file), { force: true });
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+        throw error;
       }
+      if (isProcessAlive(pid, identity)) busy = true;
+      else NodeFS.rmSync(path, { force: true });
     }
     return !busy;
   });
