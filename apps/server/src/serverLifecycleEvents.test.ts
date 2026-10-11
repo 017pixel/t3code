@@ -91,17 +91,26 @@ it.effect("announces restarts only to capable clients and expires abandoned hand
       },
     });
     const events = Stream.fromIterable((yield* lifecycle.snapshot).events);
+    yield* TestClock.adjust("1 minute");
+    const capable = yield* ServerLifecycleEvents.eventsForClient(events, {
+      updateRestarts: true,
+    }).pipe(Stream.runCollect);
+    assert.equal(capable.length, 1);
     assert.equal(
-      (yield* ServerLifecycleEvents.eventsForClient(events, { updateRestarts: true }).pipe(
-        Stream.runCollect,
-      )).length,
-      1,
+      capable[0]?.type === "updateRestart" ? capable[0].payload.expiresInMs : undefined,
+      240_000,
     );
     assert.equal(
       (yield* ServerLifecycleEvents.eventsForClient(events, {}).pipe(Stream.runCollect)).length,
       0,
     );
-    yield* TestClock.adjust("5 minutes");
+    yield* TestClock.adjust("4 minutes");
     assert.equal((yield* lifecycle.snapshot).events.length, 0);
+    assert.equal(
+      (yield* ServerLifecycleEvents.eventsForClient(events, { updateRestarts: true }).pipe(
+        Stream.runCollect,
+      )).length,
+      0,
+    );
   }).pipe(Effect.provide(ServerLifecycleEvents.layer)),
 );

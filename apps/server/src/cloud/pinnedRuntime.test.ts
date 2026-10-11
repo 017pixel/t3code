@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -63,6 +63,45 @@ const extractingRunner = (fs: FileSystem.FileSystem, path: Path.Path, commands: 
   });
 
 it.layer(NodeServices.layer)("ensurePinnedRuntimeInstalled", (it) => {
+  it.effect.each(["http://mirror.example/hop", "http://127.0.0.1:1234/hop"])(
+    "refuses an HTTPS redirect through %s",
+    (location) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const checksums = yield* validChecksums;
+        const requests: string[] = [];
+        const httpClient = yield* HttpClient.HttpClient.pipe(Effect.provide(FetchHttpClient.layer));
+        const result = yield* ensurePinnedRuntimeInstalled({
+          baseDir: yield* fs.makeTempDirectoryScoped({ prefix: "t3-pinned-redirect-hop-" }),
+          version,
+          fs,
+          path,
+          platform: "linux",
+          arch: "x64",
+          httpClient,
+          runner: extractingRunner(fs, path),
+          validate: () => Effect.void,
+        }).pipe(
+          Effect.provideService(FetchHttpClient.Fetch, async (input, init) => {
+            const url = String(input);
+            requests.push(url);
+            const response =
+              init?.redirect === "manual"
+                ? new Response(null, {
+                    status: 302,
+                    headers: { location },
+                  })
+                : new Response(url.endsWith("/SHA256SUMS") ? checksums : archiveBytes);
+            Object.defineProperty(response, "url", { value: "https://mirror.example/final" });
+            return response;
+          }),
+          Effect.result,
+        );
+        assert.equal(result._tag, "Failure");
+        assert.equal(requests.length, 1);
+      }),
+  );
   it.effect("refuses a plaintext release mirror before fetching checksums or executing it", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

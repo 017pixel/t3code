@@ -112,6 +112,7 @@ export const makeUpdatePass = () =>
           const newest = yield* resolveNewestVersion(cliReleaseChannelOf(currentVersion)).pipe(
             Effect.provideService(HttpClient.HttpClient, httpClient),
           );
+          if (!(yield* automaticUpdatesEnabled)) return;
           if (newest !== targetVersion) {
             pendingTarget = undefined;
             nextReleaseCheckAt = 0;

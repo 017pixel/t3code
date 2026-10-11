@@ -564,9 +564,9 @@ describe("server state projection", () => {
     expect(resolveServerWelcomeState(afterBufferedOldWelcome)).toBeNull();
   });
 
-  it.effect(
-    "observes a background restart from the lifecycle stream and nudges reconnect until ready",
-    () =>
+  it.effect.each(["ready", "expiry", "expiry with server clock ahead"] as const)(
+    "observes a background restart and clears it on %s",
+    (completion) =>
       Effect.gen(function* () {
         const events = yield* Queue.unbounded<{
           readonly type: "updateRestart" | "ready";
@@ -605,7 +605,13 @@ describe("server state projection", () => {
             );
             yield* Queue.offer(events, {
               type: "updateRestart",
-              payload: { fromVersion: "1.0.0", targetVersion: "1.1.0", updateId: "background" },
+              payload: {
+                fromVersion: "1.0.0",
+                targetVersion: "1.1.0",
+                updateId: "background",
+                expiresAt: completion === "expiry with server clock ahead" ? 3_602_000 : 2_000,
+                expiresInMs: 2_000,
+              },
             });
             expect(Option.getOrThrow(yield* Fiber.join(announced)).restart?.updateId).toBe(
               "background",
@@ -621,7 +627,12 @@ describe("server state projection", () => {
               Stream.runHead,
               Effect.forkChild,
             );
-            yield* Queue.offer(events, { type: "ready", payload: {} });
+            if (completion === "ready") yield* Queue.offer(events, { type: "ready", payload: {} });
+            else {
+              yield* TestClock.adjust("1 second");
+              expect((yield* SubscriptionRef.get(state)).restart).toBeUndefined();
+              return;
+            }
             expect(Option.getOrThrow(yield* Fiber.join(resumed)).restart).toBeUndefined();
           }),
         );

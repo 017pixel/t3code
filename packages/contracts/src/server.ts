@@ -955,6 +955,7 @@ export const ServerLifecycleStreamUpdateRestartEvent = Schema.Struct({
     targetVersion: TrimmedNonEmptyString,
     updateId: TrimmedNonEmptyString,
     expiresAt: Schema.optionalKey(NonNegativeInt),
+    expiresInMs: Schema.optionalKey(NonNegativeInt),
   }),
 });
 export type ServerLifecycleStreamUpdateRestartEvent =

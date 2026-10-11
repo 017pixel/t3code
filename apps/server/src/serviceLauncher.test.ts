@@ -1,8 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off - Launcher recovery injects native filesystem failures.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as NodeFSP from "node:fs/promises";
+
+vi.mock("node:fs/promises", { spy: true });
 
 import {
   Launcher,
@@ -201,9 +206,9 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
-  it.effect(
-    "rolls back and restores the database when a prepared candidate crashes after commit",
-    () =>
+  it.effect.each([false, true])(
+    "restores the database after a post-commit crash (wall clock jumps: %s)",
+    (clockJumps) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -220,7 +225,7 @@ if (context.update?.status === "pending") {
   process.on("message", (message) => {
     if (message.type === "committed") {
       require("node:fs").writeFileSync(${encodedDatabasePath}, "post-commit migration");
-      process.exit(42);
+      setTimeout(() => process.exit(42), 100);
     }
   });
 } else if (context.update === undefined) {
@@ -249,6 +254,13 @@ if (context.update?.status === "pending") {
           root,
           yield* Effect.promise(() => readServiceState(statePath)),
         );
+        if (clockJumps) {
+          let now = 0;
+          yield* Effect.acquireRelease(
+            Effect.sync(() => vi.spyOn(Date, "now").mockImplementation(() => (now += 600_000))),
+            (clock) => Effect.sync(() => clock.mockRestore()),
+          );
+        }
         yield* Effect.promise(() =>
           launcher.run().then(
             () => Promise.reject(new Error("launcher unexpectedly completed")),
@@ -268,9 +280,9 @@ if (context.update?.status === "pending") {
       }),
   );
 
-  it.effect(
-    "recovers a committed candidate crash using the retained backup after launcher restart",
-    () =>
+  it.effect.each(["committed", "pending", "restore-interrupted", "restore-disk-full"] as const)(
+    "recovers a retained database backup after %s",
+    (checkpoint) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -281,6 +293,12 @@ if (context.update?.status === "pending") {
         const backup = path.join(root, "runtime", "db-backup", "health-update");
         yield* fs.makeDirectory(backup, { recursive: true });
         yield* fs.writeFileString(path.join(backup, "database"), "original database");
+        yield* fs.writeFileString(`${dbPath}-wal`, "trial wal");
+        yield* fs.writeFileString(`${dbPath}-shm`, "trial shm");
+        if (checkpoint === "restore-interrupted") {
+          yield* fs.writeFileString(path.join(backup, ".restore-pending"), "");
+          yield* fs.writeFileString(dbPath, "partially restored database");
+        }
         for (const version of ["1.0.0", "1.1.0"]) {
           yield* writeFakeRuntime(
             fs,
@@ -299,21 +317,51 @@ if (context.update?.status === "pending") {
         yield* Effect.promise(() =>
           writeServiceState(statePath, {
             protocol: SERVICE_LAUNCHER_PROTOCOL,
-            activeVersion: "1.1.0",
+            activeVersion: checkpoint === "pending" ? "1.0.0" : "1.1.0",
             launcherVersion: "1.0.0",
-            update: { ...update, status: "committed" },
-            rollback: { update, healthyAfter: 60_000 },
+            ...(checkpoint === "pending"
+              ? { update }
+              : {
+                  update: { ...update, status: "committed" },
+                  rollback: { update, healthyAfter: 60_000 },
+                }),
           }),
         );
         const launcher = new Launcher(
           root,
           yield* Effect.promise(() => readServiceState(statePath)),
         );
+        const diskFull =
+          checkpoint === "restore-disk-full"
+            ? yield* Effect.acquireRelease(
+                Effect.sync(() =>
+                  vi
+                    .spyOn(NodeFSP, "copyFile")
+                    .mockRejectedValue(Object.assign(new Error("disk full"), { code: "ENOSPC" })),
+                ),
+                (copy) => Effect.sync(() => copy.mockRestore()),
+              )
+            : undefined;
         yield* Effect.promise(() => launcher.run().catch(() => undefined));
+        if (diskFull !== undefined) {
+          assert.equal(
+            (yield* Effect.promise(() => readServiceState(statePath))).activeVersion,
+            "1.1.0",
+          );
+          assert.isTrue(yield* fs.exists(path.join(backup, ".restore-pending")));
+          diskFull.mockRestore();
+          const retry = new Launcher(
+            root,
+            yield* Effect.promise(() => readServiceState(statePath)),
+          );
+          yield* Effect.promise(() => retry.run().catch(() => undefined));
+        }
         const state = yield* Effect.promise(() => readServiceState(statePath));
         assert.equal(state.activeVersion, "1.0.0");
         assert.equal(state.update?.status, "rolled-back");
         assert.equal(yield* fs.readFileString(dbPath), "original database");
+        assert.isFalse(yield* fs.exists(`${dbPath}-wal`));
+        assert.isFalse(yield* fs.exists(`${dbPath}-shm`));
         assert.isFalse(yield* fs.exists(backup));
       }),
   );

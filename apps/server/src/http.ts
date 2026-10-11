@@ -5,6 +5,7 @@ import {
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -546,24 +547,26 @@ const loadImmutableBuildAssets = Effect.gen(function* () {
       Effect.orElseSucceed(() => emptyBuildAssetCache),
     );
     const currentAssets = [...current].filter(isHashedBuildAsset);
+    const savedCurrent = new Set(saved.current);
     const sameBuild =
-      currentAssets.length === saved.current.length &&
-      currentAssets.every((asset) => saved.current.includes(asset));
+      currentAssets.length === savedCurrent.size &&
+      currentAssets.every((asset) => savedCurrent.has(asset));
     const previous = sameBuild ? saved.previous : saved.current;
     const retained = new Set([...currentAssets, ...previous].filter(isHashedBuildAsset));
     const filesDir = path.join(cacheDir, "assets");
     yield* fileSystem.makeDirectory(filesDir, { recursive: true });
-    for (const asset of current) {
-      if (!isHashedBuildAsset(asset)) continue;
-      yield* fileSystem.copyFile(path.join(staticDir, asset), path.join(cacheDir, asset));
+    for (const asset of currentAssets) {
+      const cached = path.join(cacheDir, asset);
+      if (savedCurrent.has(asset) && (yield* fileSystem.exists(cached))) continue;
+      yield* fileSystem.copyFile(path.join(staticDir, asset), cached);
     }
     for (const file of yield* fileSystem.readDirectory(filesDir)) {
       if (!retained.has(`assets/${file}`)) yield* fileSystem.remove(path.join(filesDir, file));
     }
-    yield* fileSystem.writeFileString(
-      manifestPath,
-      yield* encodeBuildAssetCache({ current: currentAssets, previous }),
-    );
+    yield* writeFileStringAtomically({
+      filePath: manifestPath,
+      contents: yield* encodeBuildAssetCache({ current: currentAssets, previous }),
+    });
     return new Set([...current, ...retained]);
   }).pipe(
     Effect.catchCause((cause) =>
