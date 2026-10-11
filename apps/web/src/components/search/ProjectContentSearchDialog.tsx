@@ -1,7 +1,7 @@
 import { Spinner } from "~/components/ui/spinner";
 import { AuthFilesystemReadScope, type ProjectContentMatch } from "@t3tools/contracts";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 
 import { useActiveProjectTarget, type ActiveProjectTarget } from "~/hooks/useActiveProjectTarget";
 import { useTheme } from "~/hooks/useTheme";
@@ -112,6 +112,9 @@ function OpenContentSearchDialog(props: {
   const { target } = props;
   const { resolvedTheme } = useTheme();
   const [query, setQuery] = useState(props.initialQuery ?? "");
+  useLayoutEffect(() => {
+    setQuery(props.initialQuery ?? "");
+  }, [props.initialQuery]);
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [wholeWord, setWholeWord] = useState(false);
   const [useRegex, setUseRegex] = useState(false);

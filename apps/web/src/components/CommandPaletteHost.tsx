@@ -59,9 +59,13 @@ const OVERLAY_MODE_BY_COMMAND = {
 } as const satisfies Partial<Record<string, SearchOverlayMode>>;
 
 /** Whether the open view has rendered its text input, which then takes the keys. */
-function paletteTextInputMounted(): boolean {
+function paletteTextInputMounted(mode: SearchOverlayMode): boolean {
   const palette = document.getElementById(COMMAND_PALETTE_ELEMENT_ID);
-  return palette?.querySelector("input, textarea, [contenteditable='true']") != null;
+  return (
+    palette?.dataset.paletteMode === mode &&
+    palette?.contains(document.activeElement) === true &&
+    document.activeElement?.matches("input, textarea, [contenteditable='true']") === true
+  );
 }
 
 /**
@@ -106,6 +110,10 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     mode: "command",
     openIntent: null,
   });
+  const requestedModeRef = useRef<SearchOverlayMode>("command");
+  useLayoutEffect(() => {
+    requestedModeRef.current = state.mode;
+  }, [state.mode]);
   // Stays mounted after the first open so closing still animates out.
   const [CommandPaletteDialog, setCommandPaletteDialog] = useState<ReturnType<
     typeof lazyCommandPaletteDialog
@@ -118,10 +126,11 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     setCommandPaletteDialog(null);
     setOpen(false);
   }, [setOpen]);
-  const toggleMode = useCallback(
-    (mode: SearchOverlayMode) => dispatch({ _tag: "ToggleMode", mode }),
-    [],
-  );
+  const toggleMode = useCallback((mode: SearchOverlayMode) => {
+    // Keys can arrive before React replaces the old mode's focused input.
+    requestedModeRef.current = mode;
+    dispatch({ _tag: "ToggleMode", mode });
+  }, []);
   const openAddProject = useCallback(() => dispatch({ _tag: "OpenAddProject" }), []);
   const openNewThreadIn = useCallback(() => dispatch({ _tag: "OpenNewThreadIn" }), []);
   const clearOpenIntent = useCallback(() => dispatch({ _tag: "ClearOpenIntent" }), []);
@@ -179,12 +188,19 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
         : null;
   useLayoutEffect(() => {
     if (!state.open || loadingQuery === null) return;
+    let query = loadingQuery;
+    let queryMode = state.mode;
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (paletteTextInputMounted() || event.isComposing) return;
+      const mode = requestedModeRef.current;
+      if (paletteTextInputMounted(mode) || event.isComposing) return;
+      if (queryMode !== mode) {
+        queryMode = mode;
+        query = "";
+      }
       const text = typedText(event);
       if (text === null && event.key !== "Backspace" && event.key !== "Escape") return;
       if (event.key === "Escape") {
-        if (state.mode !== "command") return;
+        if (mode !== "command") return;
         event.preventDefault();
         event.stopPropagation();
         setOpen(false);
@@ -192,7 +208,12 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
       }
       event.preventDefault();
       event.stopPropagation();
-      const query = text === null ? loadingQuery.slice(0, -1) : loadingQuery + text;
+      const palette = document.getElementById(COMMAND_PALETTE_ELEMENT_ID);
+      // Replacement views can carry an initial query while waiting for focus.
+      if (query === "" && palette?.dataset.paletteMode === mode) {
+        query = palette.querySelector<HTMLInputElement>('input[role="combobox"]')?.value ?? "";
+      }
+      query = text === null ? query.slice(0, -1) : query + text;
       dispatch({ _tag: "TypeAhead", query });
     };
     window.addEventListener("keydown", onKeyDown, true);
