@@ -2927,6 +2927,63 @@ function createMockStorage() {
 }
 
 describe("composer draft persistence", () => {
+  it("selection-only prompt writes keep the original persistence deadline", async () => {
+    await useComposerDraftStore.persist.clearStorage();
+    vi.useFakeTimers();
+    const threadId = ThreadId.make("unchanged-prompt");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    const notices = vi.fn();
+    const unsubscribe = useComposerDraftStore.subscribe(notices);
+    try {
+      useComposerDraftStore.getState().setPrompt(threadRef, "Keep this draft");
+      await vi.advanceTimersByTimeAsync(200);
+      useComposerDraftStore.getState().setPrompt(threadRef, "Keep this draft");
+      expect(notices).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(100);
+      resetComposerDraftStore();
+      await useComposerDraftStore.persist.rehydrate();
+      expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe("Keep this draft");
+    } finally {
+      unsubscribe();
+      await useComposerDraftStore.persist.clearStorage();
+      vi.useRealTimers();
+      resetComposerDraftStore();
+    }
+  });
+
+  it("waits for idle to serialize and cancels the pending idle write when typing resumes", async () => {
+    await useComposerDraftStore.persist.clearStorage();
+    vi.useFakeTimers();
+    const callbacks: Array<() => void> = [];
+    const requestIdleCallback = vi.fn((callback: () => void) => callbacks.push(callback));
+    const cancelIdleCallback = vi.fn();
+    vi.stubGlobal("window", { requestIdleCallback, cancelIdleCallback });
+    const stringify = vi.spyOn(JSON, "stringify");
+    const threadId = ThreadId.make("idle-prompt");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    try {
+      useComposerDraftStore.getState().setPrompt(threadRef, "First draft");
+      await vi.advanceTimersByTimeAsync(300);
+      expect(requestIdleCallback).toHaveBeenCalledTimes(1);
+      expect(stringify).not.toHaveBeenCalled();
+      useComposerDraftStore.getState().setPrompt(threadRef, "Latest draft");
+      expect(cancelIdleCallback).toHaveBeenCalledWith(1);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(stringify).not.toHaveBeenCalled();
+      callbacks[1]!();
+      expect(stringify).toHaveBeenCalledTimes(1);
+      resetComposerDraftStore();
+      await useComposerDraftStore.persist.rehydrate();
+      expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe("Latest draft");
+    } finally {
+      stringify.mockRestore();
+      await useComposerDraftStore.persist.clearStorage();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+      resetComposerDraftStore();
+    }
+  });
+
   it("defers attachment reads and serialization until typing stops, then restores the last draft", async () => {
     await useComposerDraftStore.persist.clearStorage();
     vi.useFakeTimers();

@@ -75,7 +75,7 @@ import {
 import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
-import { createDeferredStorage, createMemoryStorage } from "./lib/storage";
+import { createMemoryStorage } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
@@ -102,18 +102,57 @@ type ComposerPersistState =
   | { capturedState: ComposerDraftStoreState }
   | PersistedComposerDraftStoreState;
 
-const composerDebouncedStorage = createDeferredStorage<StorageValue<ComposerPersistState>>(
-  typeof localStorage !== "undefined" ? localStorage : createMemoryStorage(),
-  (value) =>
-    JSON.stringify({
-      state:
-        "capturedState" in value.state
-          ? partializeComposerDraftStoreState(value.state.capturedState)
-          : value.state,
-      version: value.version,
-    }),
-  COMPOSER_PERSIST_DEBOUNCE_MS,
-);
+const composerBaseStorage =
+  typeof localStorage !== "undefined" ? localStorage : createMemoryStorage();
+let pendingComposerWrite: { name: string; value: StorageValue<ComposerPersistState> } | null = null;
+let composerPersistTimer: ReturnType<typeof setTimeout> | undefined;
+let composerPersistIdle: number | undefined;
+
+function cancelComposerPersistSchedule() {
+  clearTimeout(composerPersistTimer);
+  composerPersistTimer = undefined;
+  if (composerPersistIdle !== undefined) window.cancelIdleCallback(composerPersistIdle);
+  composerPersistIdle = undefined;
+}
+
+// Keep typing writes in memory. Serialize once after idle, or synchronously on unload.
+const composerDebouncedStorage = {
+  getItem: (name: string) => composerBaseStorage.getItem(name),
+  setItem: (name: string, value: StorageValue<ComposerPersistState>) => {
+    pendingComposerWrite = { name, value };
+    cancelComposerPersistSchedule();
+    composerPersistTimer = setTimeout(() => {
+      composerPersistTimer = undefined;
+      if (typeof window !== "undefined" && typeof window.requestIdleCallback === "function") {
+        composerPersistIdle = window.requestIdleCallback(() => composerDebouncedStorage.flush(), {
+          timeout: 1000,
+        });
+      } else composerDebouncedStorage.flush();
+    }, COMPOSER_PERSIST_DEBOUNCE_MS);
+  },
+  removeItem: (name: string) => {
+    pendingComposerWrite = null;
+    cancelComposerPersistSchedule();
+    composerBaseStorage.removeItem(name);
+  },
+  flush: () => {
+    cancelComposerPersistSchedule();
+    const pending = pendingComposerWrite;
+    if (!pending) return;
+    pendingComposerWrite = null;
+    const { name, value } = pending;
+    composerBaseStorage.setItem(
+      name,
+      JSON.stringify({
+        state:
+          "capturedState" in value.state
+            ? partializeComposerDraftStoreState(value.state.capturedState)
+            : value.state,
+        version: value.version,
+      }),
+    );
+  },
+};
 
 const composerPersistStorage: PersistStorage<ComposerPersistState> = {
   getItem: (name) => {
@@ -132,8 +171,10 @@ const composerPersistStorage: PersistStorage<ComposerPersistState> = {
 
 // Flush pending composer draft writes before page unload to prevent data loss.
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-  window.addEventListener("beforeunload", () => {
-    composerDebouncedStorage.flush();
+  window.addEventListener("beforeunload", () => composerDebouncedStorage.flush());
+  window.addEventListener("pagehide", () => composerDebouncedStorage.flush());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") composerDebouncedStorage.flush();
   });
 }
 
@@ -3090,6 +3131,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           });
         },
         setPrompt: (threadRef, prompt) => {
+          if (getComposerDraftState(get(), threadRef)?.prompt === prompt) return;
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
             return;
@@ -4492,6 +4534,16 @@ export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): vo
     };
   });
   composerDebouncedStorage.flush();
+}
+
+/** Subscribe only to the draft fields a composer part presents. */
+export function useComposerThreadDraftSelector<T>(
+  threadRef: ComposerThreadTarget,
+  select: (draft: ComposerThreadDraftState) => T,
+): T {
+  return useComposerDraftStore((state) =>
+    select(getComposerDraftState(state, threadRef) ?? EMPTY_THREAD_DRAFT),
+  );
 }
 
 export function useComposerThreadDraft(threadRef: ComposerThreadTarget): ComposerThreadDraftState {

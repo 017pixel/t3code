@@ -52,6 +52,7 @@ type TraitsRenderInput = {
   reportedModelSelection?: ModelSelection | null | undefined;
   prompt: string;
   onPromptChange: (prompt: string) => void;
+  getPrompt?: () => string;
   planModeEnabled: boolean;
   size?: ComposerControlSize;
   hidden?: boolean;
@@ -175,6 +176,7 @@ function renderTraitsControl(
     reportedModelSelection,
     prompt,
     onPromptChange,
+    getPrompt,
     planModeEnabled,
     size,
     hidden,
@@ -214,6 +216,7 @@ function renderTraitsControl(
       reportedModelSelection={reportedModelSelection}
       prompt={prompt}
       onPromptChange={onPromptChange}
+      {...(getPrompt ? { getPrompt } : {})}
       planModeEnabled={planModeEnabled}
       {...(size !== undefined ? { size } : {})}
       {...(hidden !== undefined ? { hidden } : {})}

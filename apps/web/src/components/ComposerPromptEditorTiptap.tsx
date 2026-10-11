@@ -990,6 +990,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       if (previousSnapshot.value === nextValue && nextValue !== latestValueRef.current) {
         return;
       }
+      latestValueRef.current = nextValue;
       snapshotRef.current = {
         value: nextValue,
         cursor: nextCursor,
@@ -1480,11 +1481,10 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
           return true;
         },
       },
-      onUpdate: ({ editor: updated }) => {
-        handleEditorChange(updated);
-      },
-      onSelectionUpdate: ({ editor: updated }) => {
-        handleEditorChange(updated);
+      onTransaction: ({ editor: updated, transaction, appendedTransactions }) => {
+        if ([transaction, ...appendedTransactions].some((tr) => tr.docChanged || tr.selectionSet)) {
+          handleEditorChange(updated);
+        }
       },
     },
     [],
