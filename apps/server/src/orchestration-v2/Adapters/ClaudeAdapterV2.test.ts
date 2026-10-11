@@ -1,6 +1,9 @@
-// @effect-diagnostics nodeBuiltinImport:off - the fake Claude CLI hands the SDK Node streams.
+// @effect-diagnostics nodeBuiltinImport:off - the fake Claude CLI hands the SDK Node streams and exercises process death.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeEvents from "node:events";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 
 import type {
@@ -2034,7 +2037,82 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
 });
 
 describe("ClaudeAdapterV2 native session identity", () => {
-  it.effect("rejects a missing transcript before accepting a resume", () =>
+  it.live(
+    "ends the native CLI when its hosting process crashes",
+    () =>
+      Effect.gen(function* () {
+        const platform = yield* HostProcess.Platform;
+        if (platform !== "linux") return;
+        const executablePath = yield* HostProcess.ExecutablePath;
+        const directory = NodeFS.mkdtempSync(
+          NodePath.join(NodeOS.tmpdir(), "t3-claude-parent-death-"),
+        );
+        const readyPath = NodePath.join(directory, "ready");
+        const stoppedPath = NodePath.join(directory, "stopped");
+        const waitForFile = (file: string) =>
+          Effect.callback<void>((resume) => {
+            const check = () => {
+              if (NodeFS.existsSync(file)) resume(Effect.void);
+            };
+            const watcher = NodeFS.watch(directory, check);
+            check();
+            return Effect.sync(() => watcher.close());
+          }).pipe(
+            Effect.timeoutOrElse({
+              duration: "5 seconds",
+              orElse: () => Effect.die(new Error(`No process milestone at ${file}`)),
+            }),
+          );
+        const cliSource = [
+          "const fs = require('node:fs');",
+          `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(stoppedPath)}, 'stopped'); process.exit(0); });`,
+          `fs.writeFileSync(${JSON.stringify(readyPath)}, String(process.pid));`,
+          "setInterval(() => {}, 1000);",
+        ].join("\n");
+        const parentSource = [
+          `import * as Effect from ${JSON.stringify(import.meta.resolve("effect/Effect"))};`,
+          `import * as NodeServices from ${JSON.stringify(import.meta.resolve("@effect/platform-node/NodeServices"))};`,
+          `import * as Adapter from ${JSON.stringify(import.meta.resolve("./ClaudeAdapterV2.ts"))};`,
+          `import * as Loggers from ${JSON.stringify(import.meta.resolve("@t3tools/provider-core/server/ProviderEventLoggers"))};`,
+          "await Effect.runPromise(Effect.scoped(Effect.gen(function* () {",
+          "const runner = yield* Adapter.ClaudeAgentSdkQueryRunner;",
+          "yield* runner.open({ threadId: 'parent-death', providerSessionId: 'parent-death', options: {",
+          `pathToClaudeCodeExecutable: process.execPath, executableArgs: ['-e', ${JSON.stringify(cliSource)}, '--'],`,
+          "sessionId: '12345678-1234-4123-8123-123456789012', model: 'sonnet', tools: [], permissionMode: 'default', env: process.env }});",
+          "yield* Effect.never;",
+          "}).pipe(Effect.provide(Adapter.layerQueryRunner), Effect.provide(NodeServices.layer),",
+          "Effect.provideService(Loggers.ProviderEventLoggers, Loggers.NoOpProviderEventLoggers))));",
+        ].join("\n");
+        const ready = yield* waitForFile(readyPath).pipe(Effect.forkScoped);
+        const parent = NodeChildProcess.spawn(
+          executablePath,
+          ["--input-type=module", "-e", parentSource],
+          {
+            stdio: ["ignore", "ignore", "inherit"],
+          },
+        );
+        let cliPid: number | undefined;
+        try {
+          yield* Fiber.join(ready);
+          cliPid = Number(NodeFS.readFileSync(readyPath, "utf8"));
+          const stopped = yield* waitForFile(stoppedPath).pipe(Effect.forkScoped);
+          parent.kill("SIGKILL");
+          yield* Fiber.join(stopped);
+          assert.equal(NodeFS.readFileSync(stoppedPath, "utf8"), "stopped");
+        } finally {
+          parent.kill("SIGKILL");
+          if (cliPid !== undefined) {
+            try {
+              process.kill(cliPid, "SIGKILL");
+            } catch {}
+          }
+          NodeFS.rmSync(directory, { recursive: true, force: true });
+        }
+      }),
+    15000,
+  );
+
+  it.effect("rejects missing or unusable transcripts before accepting a resume", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -2078,9 +2156,25 @@ describe("ClaudeAdapterV2 native session identity", () => {
           assert.equal(missing.failure._tag, "ProviderAdapterResumeThreadError");
         const directory = path.join(configDir, "projects", "-workspace");
         yield* fileSystem.makeDirectory(directory, { recursive: true });
+        const transcriptPath = path.join(
+          directory,
+          `${providerThread.nativeThreadRef!.nativeId}.jsonl`,
+        );
+        for (const transcript of [
+          "",
+          "{broken\n",
+          '{"type":"summary","summary":"summary only"}\n',
+          '{"type":"user","uuid":"sidechain","isSidechain":true,"message":{"role":"user","content":"subagent only"}}\n',
+        ]) {
+          yield* fileSystem.writeFileString(transcriptPath, transcript);
+          const unusable = yield* runtime.resumeThread(resumeInput).pipe(Effect.result);
+          assert.equal(unusable._tag, "Failure", transcript);
+          if (unusable._tag === "Failure")
+            assert.equal(unusable.failure._tag, "ProviderAdapterResumeThreadError");
+        }
         yield* fileSystem.writeFileString(
-          path.join(directory, `${providerThread.nativeThreadRef!.nativeId}.jsonl`),
-          '{"type":"user","message":{"role":"user","content":"previous prompt"}}\n',
+          transcriptPath,
+          '{broken\n{"type":"user","uuid":"saved-prompt","message":{"role":"user","content":"previous prompt"}}\n{incomplete',
         );
         const resumed = yield* runtime.resumeThread(resumeInput);
         assert.deepEqual(resumed.nativeThreadRef, providerThread.nativeThreadRef);

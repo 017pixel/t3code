@@ -33,6 +33,7 @@ import type {
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { resolveCommandPath } from "@t3tools/shared/shell";
 import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
 import {
   CLAUDE_RESUME_COMPACTION_NEVER_ANSWER,
@@ -659,13 +660,40 @@ export const layerQueryRunner: Layer.Layer<
               () => Effect.succeed([]),
             ),
           );
+          const isConversationMessage = Schema.is(
+            Schema.Struct({
+              type: Schema.Literals(["user", "assistant"]),
+              uuid: Schema.String,
+              isSidechain: Schema.optional(Schema.Boolean),
+              message: Schema.Struct({
+                role: Schema.Literals(["user", "assistant"]),
+                content: Schema.Union([Schema.String, Schema.Array(Schema.Unknown)]),
+              }),
+            }),
+          );
           for (const directory of directories) {
-            if (
-              yield* fileSystem.exists(
-                path.join(projectsDir, directory, `${input.sessionId}.jsonl`),
-              )
-            )
-              return true;
+            // The CLI cannot resume an empty or metadata-only transcript.
+            // Ignore damaged lines as it does, and stop at the first usable message.
+            const message = yield* fileSystem
+              .stream(path.join(projectsDir, directory, `${input.sessionId}.jsonl`))
+              .pipe(
+                Stream.decodeText,
+                Stream.splitLines,
+                Stream.filter((line) => {
+                  try {
+                    const entry: unknown = JSON.parse(line);
+                    return isConversationMessage(entry) && entry.isSidechain !== true;
+                  } catch {
+                    return false;
+                  }
+                }),
+                Stream.runHead,
+                Effect.catchIf(
+                  (error) => error.reason._tag === "NotFound",
+                  () => Effect.succeed(Option.none()),
+                ),
+              );
+            if (Option.isSome(message)) return true;
           }
           return false;
         },
@@ -698,13 +726,27 @@ export const layerQueryRunner: Layer.Layer<
         // SDK keeps its own stderr capture and exit reporting. The SDK runs a
         // script entry through node instead, so those launch unwrapped.
         const binaryPath = queryOptions.pathToClaudeCodeExecutable;
+        const parentDeathSignal =
+          (yield* HostProcess.Platform) === "linux"
+            ? yield* resolveCommandPath("setpriv", {
+                env: queryOptions.env ?? (yield* HostProcess.Environment),
+              }).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+                Effect.option,
+              )
+            : Option.none<string>();
         const launch =
           binaryPath === undefined ||
           CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext))
             ? undefined
             : yield* agentScope.wrap({
-                command: binaryPath,
-                args: [],
+                // stdin EOF does not stop Claude's background work. A crashed
+                // server must end its CLI before recovery resumes the transcript.
+                command: Option.isSome(parentDeathSignal) ? parentDeathSignal.value : binaryPath,
+                args: Option.isSome(parentDeathSignal)
+                  ? ["--pdeathsig", "TERM", "--", binaryPath]
+                  : [],
                 name: "claude",
                 threadId: input.threadId,
                 env: queryOptions.env,
@@ -8311,7 +8353,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 if (!(yield* queryRunner.hasSession({ sessionId: nativeThreadId, configDir }))) {
                   return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                     driver: CLAUDE_PROVIDER,
-                    detail: "The saved Claude session transcript is missing.",
+                    detail: "The saved Claude session transcript is missing or unusable.",
                   });
                 }
               }
