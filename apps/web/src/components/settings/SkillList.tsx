@@ -26,7 +26,7 @@ import {
  */
 
 /** Keeps a click on a control inside a clickable row from also opening the row. */
-const stopRowClick = (event: MouseEvent) => event.stopPropagation();
+export const stopRowClick = (event: MouseEvent) => event.stopPropagation();
 
 export interface SkillListRow {
   readonly row: SkillRow;
