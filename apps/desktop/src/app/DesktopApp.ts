@@ -343,10 +343,16 @@ const startup = Effect.gen(function* () {
   );
   yield* logStartupInfo("app ready");
   if (environment.platform === "linux") {
-    const selectedBackend = yield* safeStorage.selectedStorageBackend;
-    yield* logStartupInfo("safe storage ready", {
-      backend: Option.getOrElse(selectedBackend, () => "unknown"),
-    });
+    yield* Effect.forkScoped(
+      shellEnvironment.secretStorageReady.pipe(
+        Effect.andThen(safeStorage.selectedStorageBackend),
+        Effect.flatMap((selectedBackend) =>
+          logStartupInfo("safe storage ready", {
+            backend: Option.getOrElse(selectedBackend, () => "unknown"),
+          }),
+        ),
+      ),
+    );
   }
   yield* appIdentity.configure;
   yield* previewPasskeys.configure;

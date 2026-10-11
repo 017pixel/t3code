@@ -87,6 +87,7 @@ function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.De
         DesktopAppSettings.layerTest(),
         Layer.succeed(DesktopShellEnvironment.DesktopShellEnvironment, {
           installIntoProcess: Effect.void,
+          secretStorageReady: Effect.void,
         }),
         DesktopWslEnvironment.layerTest(),
         ElectronDialog.layer,
