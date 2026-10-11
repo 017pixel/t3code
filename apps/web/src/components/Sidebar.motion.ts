@@ -1,3 +1,5 @@
+import { observeResize } from "../lib/observeResize";
+
 const motionTiming = { duration: 150, easing: "ease-out" };
 // Rows normally ride their displaced neighbour's travel. Absent a moving
 // neighbour, a row still travels on its own, clamped so a tall card does not
@@ -10,7 +12,14 @@ const rowTravel = (height: number) => Math.min(height, 40);
 // so only the fade count decides whether an update animates.
 const MAX_FADED_ROWS_PER_UPDATE = 40;
 
-type RowPosition = { top: number; left: number; width: number; height: number };
+type RowPosition = {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+  key: string | HTMLElement;
+  shape: string;
+};
 
 function progress(animation: Animation) {
   return animation.playState === "finished"
@@ -37,18 +46,78 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
     Array.from(parent.children).filter(
       (node): node is HTMLElement => node instanceof HTMLElement && !exiting.has(node),
     );
-  const measure = () =>
-    new Map(
-      rows().map((node) => [
+  const rowKey = (node: HTMLElement) => node.getAttribute?.("data-thread-item") ?? node;
+  const rowShape = (node: HTMLElement) =>
+    node.getAttribute?.("data-sidebar-row-variant") ?? node.className ?? "";
+  const measure = (selective = false) => {
+    const nodes = rows();
+    const previous = selective && positions ? [...positions.values()] : [];
+    const byKey = new Map(previous.map((position) => [position.key, position]));
+    let start = 0;
+    while (
+      start < nodes.length &&
+      start < previous.length &&
+      rowKey(nodes[start]!) === previous[start]!.key &&
+      rowShape(nodes[start]!) === previous[start]!.shape
+    )
+      start++;
+    let suffix = nodes.length;
+    let oldSuffix = previous.length;
+    while (
+      suffix > start &&
+      oldSuffix > start &&
+      rowKey(nodes[suffix - 1]!) === previous[oldSuffix - 1]!.key &&
+      rowShape(nodes[suffix - 1]!) === previous[oldSuffix - 1]!.shape
+    ) {
+      suffix--;
+      oldSuffix--;
+    }
+    const next = new Map<HTMLElement, RowPosition>();
+    let suffixDelta = 0;
+    let prefixDelta = 0;
+    // Read the changed range and the first retained suffix row before any
+    // animation or clone writes. Fixed row shapes let the unchanged prefix
+    // and the rest of the suffix reuse their boxes, even as content virtualizes.
+    for (const [index, node] of nodes.entries()) {
+      const key = rowKey(node);
+      const shape = rowShape(node);
+      const old = byKey.get(key);
+      if (index < start && old && typeof key === "string") {
+        next.set(node, { ...old, top: old.top + prefixDelta });
+        continue;
+      }
+      if (index > suffix && old && typeof key === "string") {
+        next.set(node, { ...old, top: old.top + suffixDelta });
+        continue;
+      }
+      const top = node.offsetTop;
+      if (old) {
+        if (index < start) prefixDelta = top - old.top;
+        if (index >= suffix) suffixDelta = top - old.top;
+      }
+      next.set(
         node,
-        {
-          top: node.offsetTop,
-          left: node.offsetLeft,
-          width: node.offsetWidth,
-          height: node.offsetHeight,
-        },
-      ]),
-    );
+        old?.shape === shape
+          ? { ...old, top }
+          : {
+              top,
+              left: node.offsetLeft,
+              width: node.offsetWidth,
+              height: node.offsetHeight,
+              key,
+              shape,
+            },
+      );
+    }
+    if (selective && positions) {
+      // A virtual slot and its rendered row share identity for motion.
+      const nodesByKey = new Map(nodes.map((node) => [rowKey(node), node]));
+      positions = new Map(
+        [...positions].map(([node, old]) => [nodesByKey.get(old.key) ?? node, old]),
+      );
+    }
+    return next;
+  };
   const cancelBaseline = () => {
     if (baselineFrame !== null) view?.cancelAnimationFrame(baselineFrame);
     baselineFrame = null;
@@ -68,6 +137,16 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
       if (!disposed && positions === null) positions = measure();
     });
   };
+  let observedWidth: number | null = null;
+  const stopObserving =
+    typeof ResizeObserver === "undefined"
+      ? null
+      : observeResize(parent, ([entry]) => {
+          if (!entry) return;
+          const width = entry.contentRect.width;
+          if (observedWidth !== null && observedWidth !== width) scheduleBaseline();
+          observedWidth = width;
+        });
 
   const remainingOffset = (node: HTMLElement) => {
     const current = running.get(node);
@@ -176,7 +255,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
         return;
       }
       cancelBaseline();
-      const next = measure();
+      const next = measure(true);
       let fadeCount = 0;
       if (positions !== null) {
         for (const [node, position] of positions) {
@@ -187,6 +266,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
         }
       }
       const shouldAnimate =
+        released === null &&
         animate &&
         positions !== null &&
         !reducedMotion?.matches &&
@@ -276,21 +356,28 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
       }
       positions = next;
     },
-    /** Called on drag release, before the commit that clears dnd-kit's
-     * transforms. Takes every row's visual top, including the lifted row
-     * under the pointer and the peers holding the label gaps open, so the
-     * next update glides each of them into its committed slot. */
+    /** Capture transformed rows before dnd-kit clears its preview. Retain
+     * layout boxes so the release commit reads only the changed range. */
     release() {
+      const baseline = positions;
       suspend();
+      positions = baseline;
       const origin = parent.getBoundingClientRect().top;
       released = new Map(
         Array.from(parent.children)
-          .filter((node): node is HTMLElement => node instanceof HTMLElement && !exiting.has(node))
+          .filter(
+            (node): node is HTMLElement =>
+              node instanceof HTMLElement &&
+              !exiting.has(node) &&
+              (typeof rowKey(node) !== "string" ||
+                (node.style.transform !== "" && node.style.transform !== "none")),
+          )
           .map((node) => [node, node.getBoundingClientRect().top - origin]),
       );
     },
     suspend,
     dispose() {
+      stopObserving?.();
       suspend();
       disposed = true;
     },

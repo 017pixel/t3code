@@ -1,6 +1,9 @@
 import { pullRequestHostOf, type SourceControlProviderKind } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { useProjects, useServerConfigs, useThreadShells } from "~/state/entities";
+import { useProjects, useServerConfigs } from "~/state/entities";
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { environmentThreadShells } from "~/state/threads";
 import {
   threadPullRequestKeysEqual,
   visibleThreadPullRequests,
@@ -753,7 +756,6 @@ function PullRequestSurfaceIcon({
   const resolvedEnvironmentId =
     (surface.environmentId as EnvironmentId | undefined) ?? environmentId;
   const projects = useProjects();
-  const threads = useThreadShells();
   const project = projects.find(
     (entry) => entry.environmentId === resolvedEnvironmentId && entry.id === surface.projectId,
   );
@@ -768,10 +770,25 @@ function PullRequestSurfaceIcon({
     resolvedEnvironmentId === null
       ? undefined
       : configs.get(resolvedEnvironmentId)?.environment.capabilities;
-  const linkedSnapshot =
-    capabilities?.threadPullRequests === true
-      ? (resolvePullRequestTabLink(threads, resolvedEnvironmentId, host, surface)?.snapshot ?? null)
-      : null;
+  const linksSupported = capabilities?.threadPullRequests === true;
+  const linkedSnapshotAtom = useMemo(
+    () =>
+      Atom.make((get) =>
+        linksSupported
+          ? (resolvePullRequestTabLink(
+              get(environmentThreadShells.threadShellsAtom),
+              resolvedEnvironmentId,
+              host,
+              {
+                repository: surface.repository,
+                number: surface.number,
+              },
+            )?.snapshot ?? null)
+          : null,
+      ),
+    [linksSupported, resolvedEnvironmentId, host, surface.repository, surface.number],
+  );
+  const linkedSnapshot = useAtomValue(linkedSnapshotAtom);
   const detail = useEnvironmentQuery(
     resolvedEnvironmentId === null || capabilities?.pullRequests !== true || linkedSnapshot !== null
       ? null

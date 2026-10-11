@@ -531,9 +531,12 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
-    for (const [label, previousRect] of previousRects) {
-      if (!label.isConnected) continue;
-      const nextWidth = label.getBoundingClientRect().width;
+    const widths = [...previousRects].flatMap(([label, previousRect]) =>
+      label.isConnected
+        ? [{ label, previousRect, nextWidth: label.getBoundingClientRect().width }]
+        : [],
+    );
+    for (const { label, previousRect, nextWidth } of widths) {
       if (Math.abs(previousRect.width - nextWidth) < 0.5) continue;
 
       // Animate the space occupied by each label so flex layout keeps the
@@ -572,19 +575,36 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     [],
   );
 
-  // Label widths can change without the strip box moving (font family or
-  // size preferences), so re-measure on every render as well as on resize
-  // and font loads.
   useLayoutEffect(() => {
     measure();
-  });
+  }, [element, measure]);
 
   useEffect(() => {
     if (!element) return;
     const stopObserving = observeResize(element, measure);
+    let frame: number | null = null;
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        measure();
+      });
+    };
+    // Child labels and hosted controls may resize while the strip itself
+    // stays fixed. Observe those changes instead of measuring every render.
+    const mutations = new MutationObserver(schedule);
+    mutations.observe(element, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["class", "data-composer-label"],
+    });
     document.fonts.addEventListener("loadingdone", measure);
     return () => {
       stopObserving();
+      mutations.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
       document.fonts.removeEventListener("loadingdone", measure);
     };
   }, [element, measure]);

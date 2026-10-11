@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 /** Minute-quantized UI clock ("YYYY-MM-DDTHH:MM"). One module-level timer
     feeds every consumer through useSyncExternalStore. */
@@ -63,4 +63,13 @@ function getSnapshot(): string {
 
 export function useNowMinute(): string {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** Subscribe to a clock-derived value, notifying React only when that value changes. */
+export function useMinuteValue(read: () => string): string {
+  const snapshot = useCallback(() => {
+    getSnapshot();
+    return read();
+  }, [read]);
+  return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
