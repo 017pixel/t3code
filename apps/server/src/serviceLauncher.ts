@@ -507,6 +507,9 @@ export class Launcher {
         "t3",
         "provider-maintenance",
       ),
+    }).catch(() => {
+      // Never let cleanup stop the launcher. A newer child repeats it and a
+      // failing child stays in crash-loop recovery, which keeps the service up.
     });
   }
 
