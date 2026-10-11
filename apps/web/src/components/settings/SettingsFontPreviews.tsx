@@ -10,8 +10,19 @@ const TerminalPreview = lazy(() =>
   import("./SettingsFontPreviewContents").then((m) => ({ default: m.TerminalFontPreview })),
 );
 
+/**
+ * Each preview's height at the default font sizes. A placeholder holds it until
+ * the preview loads, so rows below do not move and a settings search jump lands
+ * on its row.
+ */
+export const FONT_PREVIEW_PLACEHOLDER = {
+  prompt: "mt-1 mb-2 h-16.5",
+  code: "mt-1 mb-2 h-31.5",
+  terminal: "mt-1 mb-2 h-52",
+} as const;
+
 /** Load and mount real preview surfaces once their row enters the viewport. */
-function VisiblePreview({ children }: { children: ReactNode }) {
+function VisiblePreview({ placeholder, children }: { placeholder: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -29,26 +40,29 @@ function VisiblePreview({ children }: { children: ReactNode }) {
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  return <div ref={ref}>{visible ? <Suspense fallback={null}>{children}</Suspense> : null}</div>;
+  const reserved = <div className={placeholder} />;
+  return (
+    <div ref={ref}>{visible ? <Suspense fallback={reserved}>{children}</Suspense> : reserved}</div>
+  );
 }
 
 export function PromptFontPreview() {
   return (
-    <VisiblePreview>
+    <VisiblePreview placeholder={FONT_PREVIEW_PLACEHOLDER.prompt}>
       <PromptPreview />
     </VisiblePreview>
   );
 }
 export function CodeFontPreview() {
   return (
-    <VisiblePreview>
+    <VisiblePreview placeholder={FONT_PREVIEW_PLACEHOLDER.code}>
       <CodePreview />
     </VisiblePreview>
   );
 }
 export function TerminalFontPreview(props: { family: string; size: number }) {
   return (
-    <VisiblePreview>
+    <VisiblePreview placeholder={FONT_PREVIEW_PLACEHOLDER.terminal}>
       <TerminalPreview {...props} />
     </VisiblePreview>
   );

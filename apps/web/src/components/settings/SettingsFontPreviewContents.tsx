@@ -8,6 +8,7 @@ import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
 import { resolveDiffThemeName, type DiffThemeName } from "../../lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "../../lib/syntaxHighlighting";
 import { GhosttyTerminalSurface } from "~/terminal/ghostty/surface";
+import { FONT_PREVIEW_PLACEHOLDER } from "./SettingsFontPreviews";
 
 // The font previews are the real surfaces, not lookalikes: the composer's
 // Tiptap editor, the diff panel's file diff, and the Ghostty canvas
@@ -135,7 +136,7 @@ export function CodeFontPreview() {
       cancelled = true;
     };
   }, [themeName]);
-  if (htmlByFile === null) return <div />;
+  if (htmlByFile === null) return <div className={FONT_PREVIEW_PLACEHOLDER.code} />;
   return (
     <div className="mt-1 mb-2 space-y-2">
       {htmlByFile.map((html) => (
