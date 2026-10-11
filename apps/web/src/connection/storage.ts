@@ -27,8 +27,21 @@ import {
   gitHubRoutingConnectionKey,
   gitHubRoutingPermissionFor,
 } from "@t3tools/client-runtime/connection";
-import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  OrchestrationV2ThreadShellJson,
+  ServerConfig,
+  ThreadId,
+  TurnItemId,
+  VcsListRefsResult,
+} from "@t3tools/contracts";
+import {
+  boundedSnapshotProjection,
+  omitCheckpointItemFiles,
+  omitLocalVisibleTurnItems,
+} from "@t3tools/shared/orchestrationV2BoundedSnapshot";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -38,6 +51,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { projectFaviconCache } from "../assets/projectFaviconCache";
+import { layer as browserCryptoLayer } from "../cloud/dpop";
 import {
   forgetBootEnvironment,
   readBootSnapshot,
@@ -75,8 +89,33 @@ const decodeConnectionCatalogDocument = Schema.decodeUnknownEffect(ConnectionCat
 const encodeConnectionCatalogDocument = Schema.encodeEffect(ConnectionCatalogDocumentJson);
 const decodeStoredShellSnapshot = Schema.decodeUnknownEffect(StoredShellSnapshotJson);
 const encodeStoredShellSnapshot = Schema.encodeEffect(StoredShellSnapshotJson);
+const decodeStoredShellObject = Schema.decodeUnknownEffect(StoredShellSnapshot);
+const encodeShellRow = Schema.encodeEffect(Schema.fromJsonString(OrchestrationV2ThreadShellJson));
+const ShellRows = Schema.Struct({
+  format: Schema.Literal("shell-rows-1"),
+  generation: Schema.String,
+  header: Schema.String,
+  threads: Schema.Array(Schema.String),
+  archivedThreads: Schema.Array(Schema.String),
+});
+const isShellRows = Schema.is(ShellRows);
+const shellCacheGeneration = Crypto.Crypto.pipe(
+  Effect.flatMap((crypto) => crypto.randomUUIDv4),
+  Effect.provide(browserCryptoLayer),
+  Effect.mapError((cause) => persistenceError("save-shell", cause)),
+);
+const shellRowsPrefix = (environmentId: EnvironmentId) => `${environmentId}\u0000`;
+const shellRowKey = (environmentId: EnvironmentId, section: string, id: string) =>
+  `${shellRowsPrefix(environmentId)}${section}\u0000${id}`;
 const decodeStoredThreadSnapshot = Schema.decodeUnknownEffect(StoredThreadSnapshotJson);
 const encodeStoredThreadSnapshot = Schema.encodeEffect(StoredThreadSnapshotJson);
+const CompactThreadCache = Schema.Struct({
+  format: Schema.Literal("compact-thread-1"),
+  data: Schema.String,
+  omitLocal: Schema.Boolean,
+  checkpointItemIds: Schema.Array(TurnItemId),
+});
+const isCompactThreadCache = Schema.is(CompactThreadCache);
 const decodeStoredServerConfig = Schema.decodeUnknownEffect(StoredServerConfigJson);
 const encodeStoredServerConfig = Schema.encodeEffect(StoredServerConfigJson);
 const decodeStoredVcsRefs = Schema.decodeUnknownEffect(StoredVcsRefsJson);
@@ -273,6 +312,109 @@ function writeDatabaseValueOnConnection(
     }
   }).pipe(Effect.withSpan("web.connectionStorage.writeDatabaseValue"));
 }
+
+/** Read the cursor and its rows in one transaction, including across tabs. */
+function readShellRowsOnConnection(database: IDBDatabase, environmentId: EnvironmentId) {
+  return Effect.callback<unknown, ConnectionTransientError>((resume) => {
+    try {
+      const store = database
+        .transaction(SHELL_STORE_NAME, "readonly")
+        .objectStore(SHELL_STORE_NAME);
+      const request = store.get(environmentId);
+      const fail = (cause: unknown) => resume(Effect.fail(catalogError("read", cause)));
+      request.addEventListener("error", () => fail(request.error));
+      request.addEventListener("success", () => {
+        const raw: unknown = request.result;
+        if (!isShellRows(raw)) {
+          resume(Effect.succeed(raw));
+          return;
+        }
+        try {
+          const value = JSON.parse(raw.header) as {
+            snapshot: { threads: unknown[]; archivedThreads: unknown[] };
+          };
+          let remaining = 2;
+          for (const section of ["threads", "archivedThreads"] as const) {
+            const prefix = `${shellRowsPrefix(environmentId)}${section}\u0000`;
+            const rows = store.getAll(IDBKeyRange.bound(prefix, `${prefix}\uffff`));
+            rows.addEventListener("error", () => fail(rows.error));
+            rows.addEventListener("success", () => {
+              try {
+                const byId = new Map<string, unknown>();
+                for (const row of rows.result) {
+                  if (typeof row !== "string") throw new Error("Invalid shell cache row.");
+                  const parsed = JSON.parse(row) as { readonly id: string };
+                  byId.set(parsed.id, parsed);
+                }
+                value.snapshot[section] = raw[section].map((id) => {
+                  if (!byId.has(id)) throw new Error("Missing shell cache row.");
+                  return byId.get(id);
+                });
+                if (--remaining === 0) resume(Effect.succeed(value));
+              } catch (cause) {
+                fail(cause);
+              }
+            });
+          }
+        } catch (cause) {
+          fail(cause);
+        }
+      });
+    } catch (cause) {
+      resume(Effect.fail(catalogError("read", cause)));
+    }
+  });
+}
+
+/** A generation check makes incremental writes safe when another build or tab wrote last. */
+function writeShellRowsOnConnection(
+  database: IDBDatabase,
+  environmentId: EnvironmentId,
+  manifest: typeof ShellRows.Type,
+  rows: ReadonlyMap<string, string>,
+  previous: { readonly generation: string; readonly rows: ReadonlyMap<string, string> } | undefined,
+) {
+  return Effect.callback<void, ConnectionTransientError>((resume) => {
+    try {
+      const transaction = database.transaction(SHELL_STORE_NAME, "readwrite");
+      transaction.addEventListener("abort", () =>
+        resume(Effect.fail(catalogError("write", transaction.error))),
+      );
+      transaction.addEventListener("complete", () => resume(Effect.void));
+      const store = transaction.objectStore(SHELL_STORE_NAME);
+      const request = store.get(environmentId);
+      request.addEventListener("success", () => {
+        try {
+          const raw: unknown = request.result;
+          const incremental = isShellRows(raw) && raw.generation === previous?.generation;
+          for (const [key, value] of rows) {
+            if (!incremental || previous?.rows.get(key) !== value) store.put(value, key);
+          }
+          const prefix = shellRowsPrefix(environmentId);
+          const keys = store.getAllKeys(IDBKeyRange.bound(prefix, `${prefix}\uffff`));
+          keys.addEventListener("success", () => {
+            for (const key of keys.result)
+              if (typeof key === "string" && !rows.has(key)) store.delete(key);
+          });
+          store.put(manifest, environmentId);
+        } catch {
+          transaction.abort();
+        }
+      });
+    } catch (cause) {
+      resume(Effect.fail(catalogError("write", cause)));
+    }
+  });
+}
+
+const waitForCacheIdle = Effect.callback<void>((resume) => {
+  if (typeof window === "undefined" || typeof window.requestIdleCallback !== "function") {
+    resume(Effect.void);
+    return;
+  }
+  const id = window.requestIdleCallback(() => resume(Effect.void), { timeout: 1000 });
+  return Effect.sync(() => window.cancelIdleCallback(id));
+});
 
 function removeDatabaseValueOnConnection(
   database: IDBDatabase,
@@ -634,6 +776,11 @@ export const layer = Layer.effectContext(
     );
     const catalog = yield* makeCatalogStore(makeCatalogBackend(database));
     const githubRoutingPermissions = makeBrowserGitHubRoutingPermissions();
+    const encodedShellRows = new WeakMap<OrchestrationV2ThreadShellJson, string>();
+    const savedShellRows = new Map<
+      EnvironmentId,
+      { readonly generation: string; readonly rows: ReadonlyMap<string, string> }
+    >();
 
     const targetStore = Persistence.ConnectionTargetStore.of({
       list: catalog.read.pipe(
@@ -745,14 +892,19 @@ export const layer = Layer.effectContext(
             Effect.as(Option.some(boot)),
           );
         }
-        return readDatabaseValue(database, SHELL_STORE_NAME, environmentId).pipe(
+        return withDatabase(database, (opened) =>
+          readShellRowsOnConnection(opened, environmentId),
+        ).pipe(
           Effect.tap(() => Effect.promise(() => projectFaviconCache.hydrate())),
           Effect.flatMap((raw) => {
-            if (typeof raw !== "string") {
+            if (raw === undefined) {
               return Effect.succeedNone;
             }
             return decodeOrDiscardOrchestrationCache(
-              decodeStoredShellSnapshot(raw).pipe(
+              (typeof raw === "string"
+                ? decodeStoredShellSnapshot(raw)
+                : decodeStoredShellObject(raw)
+              ).pipe(
                 Effect.mapError((cause) => persistenceError("load-shell", cause)),
                 Effect.map((stored) =>
                   stored.environmentId === environmentId
@@ -768,12 +920,42 @@ export const layer = Layer.effectContext(
       },
       saveShell: (environmentId, snapshot) =>
         Effect.gen(function* () {
-          const encoded = yield* encodeStoredShellSnapshot({
+          yield* waitForCacheIdle;
+          const rows = new Map<string, string>();
+          for (const section of ["threads", "archivedThreads"] as const) {
+            for (const thread of snapshot[section]) {
+              let encoded = encodedShellRows.get(thread);
+              if (encoded === undefined) {
+                encoded = yield* encodeShellRow(thread).pipe(
+                  Effect.mapError((cause) => persistenceError("save-shell", cause)),
+                );
+                encodedShellRows.set(thread, encoded);
+              }
+              rows.set(shellRowKey(environmentId, section, thread.id), encoded);
+            }
+          }
+          const header = yield* encodeStoredShellSnapshot({
             schemaVersion: ORCHESTRATION_CACHE_SCHEMA_VERSION,
             environmentId,
-            snapshot,
+            snapshot: { ...snapshot, threads: [], archivedThreads: [] },
           }).pipe(Effect.mapError((cause) => persistenceError("save-shell", cause)));
-          yield* writeDatabaseValue(database, SHELL_STORE_NAME, environmentId, encoded);
+          const generation = yield* shellCacheGeneration;
+          yield* withDatabase(database, (opened) =>
+            writeShellRowsOnConnection(
+              opened,
+              environmentId,
+              {
+                format: "shell-rows-1",
+                generation,
+                header,
+                threads: snapshot.threads.map((thread) => thread.id),
+                archivedThreads: snapshot.archivedThreads.map((thread) => thread.id),
+              },
+              rows,
+              savedShellRows.get(environmentId),
+            ),
+          );
+          savedShellRows.set(environmentId, { generation, rows });
           recordBootShell(environmentId, snapshot);
         }).pipe(
           Effect.mapError((cause) =>
@@ -829,15 +1011,26 @@ export const layer = Layer.effectContext(
           threadCacheKey(environmentId, threadId),
         ).pipe(
           Effect.flatMap((raw) => {
-            if (typeof raw !== "string") {
+            const compaction = isCompactThreadCache(raw) ? raw : undefined;
+            const encoded = compaction?.data ?? raw;
+            if (typeof encoded !== "string") {
               return Effect.succeedNone;
             }
             return decodeOrDiscardOrchestrationCache(
-              decodeStoredThreadSnapshot(raw).pipe(
+              decodeStoredThreadSnapshot(encoded).pipe(
                 Effect.mapError((cause) => persistenceError("load-thread", cause)),
                 Effect.map((stored) =>
                   stored.environmentId === environmentId && stored.threadId === threadId
-                    ? Option.some(stored.snapshot)
+                    ? Option.some({
+                        ...stored.snapshot,
+                        projection: boundedSnapshotProjection({
+                          ...stored.snapshot,
+                          ...(compaction?.omitLocal === true
+                            ? { turnItemsOmitLocalVisible: true as const }
+                            : {}),
+                          checkpointFilesOmittedItemIds: compaction?.checkpointItemIds,
+                        }),
+                      })
                     : Option.none(),
                 ),
               ),
@@ -852,17 +1045,32 @@ export const layer = Layer.effectContext(
         ),
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
+          yield* waitForCacheIdle;
+          const withoutLocal = omitLocalVisibleTurnItems(snapshot.projection);
+          const withoutFiles = omitCheckpointItemFiles(withoutLocal ?? snapshot.projection);
+          const compact = withoutLocal !== null || withoutFiles !== null;
           const encoded = yield* encodeStoredThreadSnapshot({
             schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
             environmentId,
             threadId: snapshot.projection.thread.id,
-            snapshot,
+            snapshot: {
+              ...snapshot,
+              projection: withoutFiles?.projection ?? withoutLocal ?? snapshot.projection,
+            },
           }).pipe(Effect.mapError((cause) => persistenceError("save-thread", cause)));
           yield* writeDatabaseValue(
             database,
             THREAD_STORE_NAME,
             threadCacheKey(environmentId, snapshot.projection.thread.id),
-            encoded,
+            // Older builds ignore object-valued cache entries and fetch live data.
+            compact
+              ? {
+                  format: "compact-thread-1",
+                  data: encoded,
+                  omitLocal: withoutLocal !== null,
+                  checkpointItemIds: withoutFiles?.itemIds ?? [],
+                }
+              : encoded,
           );
         }).pipe(
           Effect.mapError((cause) =>
@@ -935,8 +1143,17 @@ export const layer = Layer.effectContext(
         Effect.all(
           [
             Effect.sync(() => forgetBootEnvironment(environmentId)),
+            Effect.sync(() => savedShellRows.delete(environmentId)),
             Effect.promise(() => projectFaviconCache.clearEnvironment(environmentId)),
             removeDatabaseValue(database, SHELL_STORE_NAME, environmentId),
+            removeDatabaseValuesInRange(
+              database,
+              SHELL_STORE_NAME,
+              IDBKeyRange.bound(
+                shellRowsPrefix(environmentId),
+                `${shellRowsPrefix(environmentId)}\uffff`,
+              ),
+            ),
             removeDatabaseValuesInRange(
               database,
               THREAD_STORE_NAME,

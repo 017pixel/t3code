@@ -2,7 +2,7 @@ import {
   ConnectionTransientError,
   PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, TurnItemId, MessageId } from "@t3tools/contracts";
 import { ConnectionCatalogDocument, Persistence } from "@t3tools/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import { afterEach, vi } from "vite-plus/test";
 
 import * as ConnectionStorage from "./storage";
+import { makeThreadProjectionFixture } from "../test-fixtures";
 
 const emptyCatalog = {
   schemaVersion: 1,
@@ -135,6 +136,85 @@ describe("ConnectionStorage.makeCatalogBackend", () => {
 });
 
 describe("environment cache removal", () => {
+  it.effect("restores local turn items from a compact thread cache", () =>
+    Effect.gen(function* () {
+      vi.stubGlobal("window", {});
+      const values = new Map<IDBValidKey, unknown>();
+      const database = Object.assign(new EventTarget(), {
+        close: vi.fn(),
+        transaction: () => {
+          const transaction = new EventTarget();
+          return Object.assign(transaction, {
+            objectStore: () => ({
+              get: (key: IDBValidKey) => {
+                const request = Object.assign(new EventTarget(), {
+                  result: values.get(key),
+                  error: null,
+                });
+                queueMicrotask(() => request.dispatchEvent(new Event("success")));
+                return request;
+              },
+              put: (value: unknown, key: IDBValidKey) => {
+                values.set(key, value);
+                queueMicrotask(() => transaction.dispatchEvent(new Event("complete")));
+              },
+            }),
+          });
+        },
+      });
+      vi.stubGlobal("indexedDB", {
+        open: () => {
+          const request = Object.assign(new EventTarget(), { result: database, error: null });
+          queueMicrotask(() => request.dispatchEvent(new Event("success")));
+          return request;
+        },
+      });
+      const v2Projection = makeThreadProjectionFixture();
+      const v2Now = v2Projection.updatedAt;
+      const item = {
+        id: TurnItemId.make("cached-item"),
+        threadId: v2Projection.thread.id,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "completed" as const,
+        title: "Assistant",
+        startedAt: v2Now,
+        completedAt: v2Now,
+        updatedAt: v2Now,
+        type: "assistant_message" as const,
+        messageId: MessageId.make("cached-message"),
+        text: "cached reply",
+        streaming: false,
+      };
+      const projection = {
+        ...v2Projection,
+        turnItems: [item],
+        visibleTurnItems: [
+          {
+            position: 0,
+            visibility: "local" as const,
+            sourceThreadId: item.threadId,
+            sourceItemId: item.id,
+            item,
+          },
+        ],
+      };
+      yield* Effect.gen(function* () {
+        const cache = yield* Persistence.EnvironmentCacheStore;
+        const environmentId = EnvironmentId.make("env");
+        yield* cache.saveThread(environmentId, { snapshotSequence: 1, projection });
+        const loaded = Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId));
+        expect(loaded.projection.turnItems).toEqual([item]);
+        expect(loaded.projection.turnItems[0]).toBe(loaded.projection.visibleTurnItems[0]?.item);
+        expect(loaded.snapshotSequence).toBe(1);
+      }).pipe(Effect.provide(ConnectionStorage.layer));
+    }),
+  );
   it.effect("fails both removal operations when IndexedDB aborts their commits", () =>
     Effect.gen(function* () {
       vi.stubGlobal("window", {});

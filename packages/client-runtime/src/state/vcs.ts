@@ -2,7 +2,7 @@ import {
   type EnvironmentId,
   type VcsListRefsInput,
   type VcsListRefsResult,
-  type VcsStatusResult,
+  VcsStatusResult,
   WS_METHODS,
 } from "@t3tools/contracts";
 import { applyGitStatusStreamEvent } from "@t3tools/shared/git";
@@ -39,6 +39,7 @@ const VCS_REFS_IDLE_TTL_MS = 30_000;
 // Rows keep the last status they rendered, so the live stream only needs a
 // short grace period when virtualization or scrolling releases its consumer.
 const VCS_STATUS_IDLE_TTL_MS = 10_000;
+const sameVcsStatus = Schema.toEquivalence(VcsStatusResult);
 const VCS_REFS_RETRY_SCHEDULE = Schedule.exponential("1 second").pipe(
   Schedule.modifyDelay(({ duration }) =>
     Effect.succeed(Duration.min(duration, Duration.seconds(30))),
@@ -311,14 +312,16 @@ export function createVcsEnvironmentAtoms<R, E>(
             ).pipe(
               Stream.filterMap((event) => {
                 if (event._tag === "unchanged") return Result.failVoid;
-                current = applyGitStatusStreamEvent(current, event);
+                const next = applyGitStatusStreamEvent(current, event);
+                const unchanged = current !== null && sameVcsStatus(current, next);
+                if (!unchanged) current = next;
                 statuses.delete(key);
                 statuses.set(key, {
-                  status: current,
+                  status: current ?? next,
                   version: event._tag === "snapshot" ? event.version : undefined,
                 });
                 if (statuses.size > 128) statuses.delete(statuses.keys().next().value!);
-                return Result.succeed(current);
+                return unchanged ? Result.failVoid : Result.succeed(next);
               }),
             );
             return cached === undefined

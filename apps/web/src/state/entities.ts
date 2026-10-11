@@ -18,6 +18,7 @@ import { environmentServerConfigsAtom } from "./server";
 import {
   allEnvironmentProjectSnapshotsReadyAtom,
   allEnvironmentShellsBootstrappedAtom,
+  environmentSnapshotAtom,
 } from "./shell";
 import { environmentThreadDetails, environmentThreadShells } from "./threads";
 import { waitForAtomValue } from "./waitForAtomValue";
@@ -48,6 +49,10 @@ const EMPTY_VISIBLE_TURN_ITEMS_ATOM = Atom.make(EMPTY_VISIBLE_TURN_ITEMS).pipe(
 );
 const EMPTY_THREAD_HISTORY_ATOM = Atom.make<ThreadHistoryMeta>(EMPTY_THREAD_HISTORY_META).pipe(
   Atom.withLabel("web-thread-history:empty"),
+);
+const EMPTY_SHELL_BOOTSTRAPPED_ATOM = Atom.make(false);
+const shellBootstrappedAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get) => get(environmentSnapshotAtom(environmentId)) !== null),
 );
 
 const activeEnvironmentIdAtom = Atom.make<EnvironmentId | null>(null).pipe(
@@ -95,6 +100,12 @@ export function useThreadShells(enabled = true): ReadonlyArray<EnvironmentThread
 
 export function useAllEnvironmentShellsBootstrapped(): boolean {
   return useAtomValue(allEnvironmentShellsBootstrappedAtom);
+}
+
+export function useEnvironmentShellBootstrapped(environmentId: EnvironmentId | null): boolean {
+  return useAtomValue(
+    environmentId === null ? EMPTY_SHELL_BOOTSTRAPPED_ATOM : shellBootstrappedAtom(environmentId),
+  );
 }
 
 export function useAllEnvironmentProjectSnapshotsReady(): boolean {

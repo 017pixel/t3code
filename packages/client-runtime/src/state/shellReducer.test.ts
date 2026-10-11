@@ -27,6 +27,38 @@ const otherIdentity = {
 };
 
 describe("applyShellStreamEvent", () => {
+  it("shares unchanged shell fields across full wire row updates", () => {
+    const prior = {
+      ...v2ThreadShell,
+      lineage: { ...v2ThreadShell.lineage },
+      modelSelection: { ...v2ThreadShell.modelSelection },
+    };
+    const snapshot = { ...v2ShellSnapshot, threads: [prior] };
+    const next = applyShellStreamEvent(snapshot, {
+      kind: "thread.updated",
+      location: "active",
+      sequence: 1,
+      thread: {
+        ...prior,
+        title: "Renamed",
+        lineage: { ...prior.lineage },
+        modelSelection: { ...prior.modelSelection },
+      },
+    });
+    expect(next.threads[0]?.title).toBe("Renamed");
+    expect(next.threads[0]?.lineage).toBe(prior.lineage);
+    expect(next.threads[0]?.modelSelection).toBe(prior.modelSelection);
+    const switched = applyShellStreamEvent(next, {
+      kind: "thread.updated",
+      location: "active",
+      sequence: 2,
+      thread: {
+        ...next.threads[0]!,
+        modelSelection: { ...prior.modelSelection, model: "changed" },
+      },
+    });
+    expect(switched.threads[0]?.modelSelection.model).toBe("changed");
+  });
   it("updates a thread in place without moving its siblings", () => {
     const threads = ["a", "b", "c"].map((id) => ({ ...v2ThreadShell, id: ThreadId.make(id) }));
     const updated = { ...threads[1]!, title: "Streaming" };
