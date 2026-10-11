@@ -1122,6 +1122,75 @@ it.effect("cached checkpoint indexes still capture new ignore rules, flags and H
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
+it.effect("cached indexes remain valid when HEAD moves while normalizing a nested workspace", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const liveProcess = yield* VcsProcess.VcsProcess;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-head-race-" });
+    const { git } = yield* makeCheckpointFixture(driver, cwd);
+    const scope = path.join(cwd, "scope");
+    yield* fs.makeDirectory(scope);
+    yield* fs.writeFileString(path.join(scope, "inside.txt"), "inside\n");
+    yield* git(["add", "scope"]);
+    yield* git(["commit", "-m", "record nested workspace"]);
+    const head = (yield* git(["rev-parse", "HEAD"])).stdout.trim();
+    const outside = (yield* git(["show", `${head}:file.txt`])).stdout;
+    const blob = (yield* driver.execute({
+      operation: "checkpoint-test",
+      cwd,
+      args: ["hash-object", "-w", "--stdin"],
+      stdin: "raced outside\n",
+    })).stdout.trim();
+    const tree = (yield* driver.execute({
+      operation: "checkpoint-test",
+      cwd,
+      args: ["mktree"],
+      stdin: (yield* git(["ls-tree", head])).stdout.replace(
+        /blob [0-9a-f]+\tfile\.txt/,
+        `blob ${blob}\tfile.txt`,
+      ),
+    })).stdout.trim();
+    const movedHead = (yield* git([
+      "commit-tree",
+      tree,
+      "-p",
+      head,
+      "-m",
+      "move HEAD",
+    ])).stdout.trim();
+    const sourceIndex = yield* fs.readFile(path.join(cwd, ".git", "index"));
+    let moveHead = true;
+    const captureDriver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: Effect.fn(function* (input: VcsProcess.VcsProcessInput) {
+          if (moveHead && input.args.includes("read-tree")) {
+            moveHead = false;
+            yield* git(["update-ref", "HEAD", movedHead]).pipe(Effect.orDie);
+          }
+          return yield* liveProcess.run(input);
+        }),
+      }),
+    );
+    yield* captureDriver.checkpoints.captureCheckpoint({
+      cwd: scope,
+      checkpointRef: CheckpointRef.make("refs/t3/checkpoints/head-race/first"),
+    });
+    yield* git(["update-ref", "HEAD", head]);
+    const cached = CheckpointRef.make("refs/t3/checkpoints/head-race/cached");
+    yield* captureDriver.checkpoints.captureCheckpoint({ cwd: scope, checkpointRef: cached });
+    const fresh = CheckpointRef.make("refs/t3/checkpoints/head-race/fresh");
+    yield* driver.checkpoints.captureCheckpoint({ cwd: scope, checkpointRef: fresh });
+    assert.strictEqual((yield* git(["show", `${cached}:file.txt`])).stdout, outside);
+    assert.strictEqual(
+      (yield* git(["rev-parse", `${cached}^{tree}`])).stdout,
+      (yield* git(["rev-parse", `${fresh}^{tree}`])).stdout,
+    );
+    assert.deepEqual(yield* fs.readFile(path.join(cwd, ".git", "index")), sourceIndex);
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
 it.effect("cached checkpoints capture submodule HEAD changes without capturing its files", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

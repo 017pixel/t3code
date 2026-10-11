@@ -930,7 +930,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           });
           sparseCheckout = /--(?:\[no-\])?sparse\b/.test(`${help.stdout}${help.stderr}`);
         }
-        if (headExists) {
+        if (headCommit !== null) {
           const reusedIndex = yield* Effect.gen(function* () {
             if (Option.isNone(sourceIndexPath)) return false;
             const indexPath = sourceIndexPath.value;
@@ -963,11 +963,11 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             } else {
               yield* fileSystem.writeFile(tempIndexPath, source);
             }
-            // Retain stat data only where the copied index already matches HEAD.
+            // Pin normalization to the cache key even if HEAD moves during capture.
             yield* execute({
               operation,
               cwd: input.cwd,
-              args: [...indexConfig, "read-tree", "--reset", "HEAD"],
+              args: [...indexConfig, "read-tree", "--reset", headCommit],
               env: commitEnv,
             });
             // read-tree can rewrite the index, so restore its racy timestamp afterward.
