@@ -39,6 +39,7 @@ import {
 } from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { hasRestorableOpenCodeRequest } from "./RestartContinuation.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -1230,6 +1231,25 @@ export const layer: Layer.Layer<
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
+      const restartSourceRun = projection.runs.find(
+        (source) => source.id === run.restartContinuationOfRunId,
+      );
+      const restartSourceTurn = projection.providerTurns.findLast(
+        (turn) => turn.runAttemptId === restartSourceRun?.activeAttemptId,
+      );
+      const restartSourceRecords =
+        restartSourceRun === undefined
+          ? undefined
+          : yield* projectionStore.getThreadRecords(
+              input.threadId,
+              ["messages", "runtimeRequests"],
+              {
+                messageIds: [restartSourceRun.userMessageId],
+              },
+            );
+      const restartSourceMessage = restartSourceRecords?.messages.find(
+        (message) => message.id === restartSourceRun?.userMessageId,
+      );
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         appThread: projection.thread,
@@ -1262,6 +1282,34 @@ export const layer: Layer.Layer<
           (legacyInputRunIds.size > 0 &&
             sameNativeThread &&
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
+        ...(restartSourceMessage === undefined
+          ? {}
+          : {
+              restartContinuationSource: {
+                attemptId: restartSourceRun?.activeAttemptId ?? null,
+                nativeTurnRef: restartSourceTurn?.nativeTurnRef ?? null,
+                awaitingUser:
+                  restartSourceRun !== undefined &&
+                  restartSourceRecords !== undefined &&
+                  hasRestorableOpenCodeRequest(
+                    {
+                      providerTurns: projection.providerTurns,
+                      runtimeRequests: restartSourceRecords.runtimeRequests,
+                    },
+                    restartSourceRun,
+                  ),
+                ...(restartSourceRun === undefined
+                  ? {}
+                  : { startedAt: restartSourceRun.startedAt }),
+                message: {
+                  messageId: restartSourceMessage.id,
+                  text: restartSourceMessage.text,
+                  attachments: restartSourceMessage.attachments,
+                  createdBy: restartSourceMessage.createdBy,
+                  creationSource: restartSourceMessage.creationSource,
+                },
+              },
+            }),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,

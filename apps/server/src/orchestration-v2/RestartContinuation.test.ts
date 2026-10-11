@@ -194,6 +194,87 @@ it.effect.each([
     }),
 );
 
+it.effect.each(["pending", "cancelled"] as const)(
+  "rebinds OpenCode's %s question after restart",
+  (status) =>
+    Effect.gen(function* () {
+      const base = makeProjection();
+      const opencode = ProviderDriverKind.make("opencode");
+      const projection = {
+        ...base,
+        runs: [{ ...base.runs[0]!, status: "waiting" }],
+        providerThreads: [
+          {
+            ...base.providerThreads[0]!,
+            driver: opencode,
+            nativeThreadRef: { driver: opencode, nativeId: "native", strength: "strong" },
+          },
+        ],
+        providerSessions: [{ ...base.providerSessions[0]!, driver: opencode }],
+        providerTurns: [
+          {
+            ...base.providerTurns[0]!,
+            nativeTurnRef: { driver: opencode, nativeId: "msg_question", strength: "weak" },
+          },
+        ],
+        runtimeRequests: [
+          {
+            id: RuntimeRequestId.make("request:opencode"),
+            nodeId: NodeId.make("question-node"),
+            providerTurnId: base.providerTurns[0]!.id,
+            nativeRequestRef: { driver: opencode, nativeId: "que_question", strength: "strong" },
+            kind: "user_input",
+            status,
+            responseCapability:
+              status === "pending"
+                ? { type: "live", providerSessionId: sessionId }
+                : { type: "not_resumable", reason: "server restart" },
+          },
+        ],
+      } as unknown as OrchestrationV2ThreadProjection;
+      assert.equal(restartContinuationRun(projection, testNow)?.id, runId);
+      const dispatched: Parameters<
+        ThreadManagementService.ThreadManagementService["Service"]["dispatch"]
+      >[0][] = [];
+      yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(
+        Effect.provide(
+          Layer.merge(
+            ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadRecords: () =>
+                Effect.succeed({
+                  ...projection,
+                  runs: [{ ...projection.runs[0]!, status: "cancelled" as const }],
+                  providerTurns: [
+                    { ...projection.providerTurns[0]!, status: "cancelled" as const },
+                  ],
+                }),
+              dispatch: (command) => {
+                dispatched.push(command);
+                return Effect.succeed({} as never);
+              },
+              recoverDelegatedTask: () => Effect.void,
+            }),
+          ),
+        ),
+      );
+      assert.lengthOf(dispatched, 1);
+      const withOtherRequest = {
+        ...projection,
+        runtimeRequests: [
+          ...projection.runtimeRequests,
+          {
+            ...projection.runtimeRequests[0]!,
+            id: RuntimeRequestId.make("other-provider-request"),
+            status: "pending" as const,
+            nativeRequestRef: { driver, nativeId: "other", strength: "strong" as const },
+          },
+        ],
+      };
+      assert.isUndefined(restartContinuationRun(withOtherRequest, testNow));
+    }),
+);
+
 it("continues a live turn whose session the adapter never marked running", () => {
   const projection = makeProjection();
   // Codex, Claude, Cursor and ACP sessions stay "ready" for their whole life.

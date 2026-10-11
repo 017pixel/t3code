@@ -62,6 +62,8 @@ export class ProviderHost extends Context.Service<
     };
     /** Whether background work for `scope` should run now (client demand and host power). */
     readonly shouldRunBackgroundWork: (scope: BackgroundScope) => Effect.Effect<boolean>;
+    /** True only when shutdown hands off to a replacement server. */
+    readonly serverRestartPending?: Effect.Effect<boolean>;
     /**
      * Absolute path of a stored chat attachment, or `null` when its id does not
      * resolve inside the attachments directory.

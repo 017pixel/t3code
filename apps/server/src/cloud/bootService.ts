@@ -23,6 +23,7 @@ import {
 import {
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_RESTART_PENDING_FILE,
+  SERVICE_RESTART_MARKER_FILE,
   SERVICE_STATE_FILE,
   compareExactServiceVersions,
   parseServiceState,
@@ -916,12 +917,16 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     ) {
       return false;
     }
-    yield* runSteps(manager.stop);
-    yield* runSteps(manager.activate).pipe(
-      // Same recovery as a failed repair: a service that was running should
-      // not be left stopped because daemon-reload or enable failed.
-      Effect.tapError(() => runSteps(manager.restart).pipe(Effect.ignore)),
-    );
+    const restartMarkerPath = path.join(input.baseDir, "runtime", SERVICE_RESTART_MARKER_FILE);
+    yield* writeDurably(restartMarkerPath, "");
+    yield* Effect.gen(function* () {
+      yield* runSteps(manager.stop);
+      yield* runSteps(manager.activate).pipe(
+        // Same recovery as a failed repair: a service that was running should
+        // not be left stopped because daemon-reload or enable failed.
+        Effect.tapError(() => runSteps(manager.restart).pipe(Effect.ignore)),
+      );
+    }).pipe(Effect.ensuring(fs.remove(restartMarkerPath, { force: true }).pipe(Effect.ignore)));
     yield* fs.remove(restartPendingPath, { force: true });
     return true;
   }).pipe(

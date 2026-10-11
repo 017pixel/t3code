@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   type ModelSelection,
   type OrchestrationV2AppThread,
@@ -51,6 +52,7 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
@@ -321,6 +323,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly hangSessionScopeClose?: boolean;
     readonly startTurn?: Effect.Effect<void>;
     readonly beforeUnload?: Effect.Effect<void>;
+    readonly prepareForServerShutdown?: (restarting: boolean) => Effect.Effect<void>;
     /** Registers the process's closeCount finalizer before `beforeOpen` runs. */
     readonly spawnBeforeOpen?: boolean;
     /** Completed when a hanging scope close reaches its wedged finalizer. */
@@ -415,6 +418,11 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
               resumeCount: current.resumeCount + 1,
             })).pipe(Effect.as(threadInput.providerThread)),
           startTurn: () => options.startTurn ?? Effect.void,
+          ...(options.prepareForServerShutdown === undefined
+            ? {}
+            : {
+                prepareForServerShutdown: options.prepareForServerShutdown,
+              }),
           steerTurn: () => Effect.void,
           interruptTurn: () =>
             Ref.update(state, (current) => ({
@@ -468,6 +476,8 @@ function layerTest(input: {
   readonly hangSessionScopeClose?: boolean;
   readonly startTurn?: Effect.Effect<void>;
   readonly beforeUnload?: Effect.Effect<void>;
+  readonly prepareForServerShutdown?: (restarting: boolean) => Effect.Effect<void>;
+  readonly serverRestartPending?: Effect.Effect<boolean>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
@@ -498,6 +508,11 @@ function layerTest(input: {
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
       ...(input.startTurn === undefined ? {} : { startTurn: input.startTurn }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
+      ...(input.prepareForServerShutdown === undefined
+        ? {}
+        : {
+            prepareForServerShutdown: input.prepareForServerShutdown,
+          }),
       ...(input.spawnBeforeOpen === undefined ? {} : { spawnBeforeOpen: input.spawnBeforeOpen }),
       ...(input.scopeCloseReached === undefined
         ? {}
@@ -536,6 +551,27 @@ function layerTest(input: {
           layerProviderEventIngestorTest,
           layerConfiguredMcpRegistry,
           layerTestStores,
+          ...(input.serverRestartPending === undefined
+            ? []
+            : [
+                Layer.mock(ProviderHost.ProviderHost)({
+                  paths: {
+                    cwd: process.cwd(),
+                    baseDir: "/tmp",
+                    stateDir: "/tmp",
+                    providerStatusCacheDir: "/tmp",
+                    attachmentsDir: "/tmp",
+                  },
+                  settings: {
+                    get: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+                    withSnapshot: (use) => use(DEFAULT_SERVER_SETTINGS),
+                    changes: Stream.empty,
+                    subscribe: Effect.succeed(Stream.empty),
+                  },
+                  resolveAttachmentPath: () => null,
+                  serverRestartPending: input.serverRestartPending,
+                }),
+              ]),
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
         ),
@@ -1679,6 +1715,51 @@ it.effect("ProviderSessionManagerV2 releases live sessions when its layer shuts 
 
     assert.equal((yield* Ref.get(state)).closeCount, 1);
   }),
+);
+
+it.effect.each(["quit", "restart", "session-stop"] as const)(
+  "ProviderSessionManagerV2 captures %s intent before marker cleanup",
+  (action) =>
+    Effect.gen(function* () {
+      const restarting = action !== "quit";
+      const state = yield* Ref.make(emptyState);
+      const marker = yield* Ref.make(restarting);
+      const prepared: boolean[] = [];
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("shutdown-marker");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        yield* manager.prepareForServerShutdown!;
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        yield* Ref.set(marker, false);
+        if (action === "session-stop") yield* manager.close(providerSessionId);
+        else yield* manager.shutdown;
+        assert.deepEqual(prepared, [restarting, action === "session-stop" ? false : restarting]);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            serverRestartPending: Ref.get(marker),
+            prepareForServerShutdown: (intent) =>
+              Effect.sync(() => {
+                prepared.push(intent);
+              }),
+          }),
+        ),
+      );
+    }),
 );
 
 it.effect("ProviderSessionManagerV2 closes event subscriptions normally on server shutdown", () =>

@@ -50,6 +50,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as OpenCodeRuntime from "@t3tools/provider-opencode/server/OpenCodeRuntime";
 import * as OpenCodeServerLedger from "@t3tools/provider-opencode/server/OpenCodeServerLedger";
 import * as ProviderHostLive from "./provider/ProviderHostLive.ts";
+import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
@@ -486,6 +487,7 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provide(ProviderHostLive.layer),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderEventIngestor.layerAnalytics),
   Layer.provide(layerCheckpointStore),
@@ -858,7 +860,13 @@ const layerMakeServer = Layer.unwrap(
     const layerCloudDesiredLinkReconcile = Layer.effectDiscard(
       Effect.gen(function* () {
         const cloudLink = yield* CloudLink.CloudLink;
-        const releaseManagedTunnel = cloudLink.releaseManagedTunnelOnShutdown().pipe(
+        const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        // Provider cleanup reads the desktop restart marker before tunnel
+        // cleanup consumes it.
+        const releaseManagedTunnel = (
+          providerSessions.prepareForServerShutdown ?? Effect.void
+        ).pipe(
+          Effect.andThen(cloudLink.releaseManagedTunnelOnShutdown()),
           Effect.timeout("10 seconds"),
           Effect.tap((released) =>
             released ? Effect.logInfo("Released the managed tunnel on shutdown") : Effect.void,

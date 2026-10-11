@@ -17,6 +17,7 @@ import {
   parseServiceState,
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_RESTART_PENDING_FILE,
+  SERVICE_RESTART_MARKER_FILE,
   serviceStateHasPendingUpdate,
 } from "./serviceProtocol.ts";
 
@@ -150,6 +151,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     linger: string;
     enabled: boolean;
     active: boolean;
+    restartingAtStop?: boolean;
   } = {
     failCommand: undefined,
     linger: "yes",
@@ -164,6 +166,11 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       commands.push(command);
       timeouts.set(command, input.timeout);
       const failed = command === control.failCommand;
+      if (command === "systemctl --user stop t3code.service") {
+        control.restartingAtStop = yield* fs
+          .exists(path.join(baseDir, "runtime", SERVICE_RESTART_MARKER_FILE))
+          .pipe(Effect.orDie);
+      }
       if (!failed && command === "loginctl enable-linger --no-ask-password 501")
         control.linger = "yes";
       if (!failed && command === "systemctl --user enable t3code.service") control.enabled = true;
@@ -562,12 +569,21 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
 
   it.effect("restart stops and starts an installed service, and is a no-op otherwise", () =>
     Effect.gen(function* () {
-      const { service, commands } = yield* makeHarness();
+      const { service, commands, control, fs, statePath } = yield* makeHarness();
       expect(yield* service.restart).toBe(false);
       yield* service.install();
       commands.length = 0;
 
       expect(yield* service.restart).toBe(true);
+      expect(control.restartingAtStop).toBe(true);
+      expect(
+        yield* fs.exists(
+          (yield* Path.Path).join(
+            (yield* Path.Path).dirname(statePath),
+            SERVICE_RESTART_MARKER_FILE,
+          ),
+        ),
+      ).toBe(false);
       expect(
         commands.filter(
           (command) => command.startsWith("systemctl ") && !command.includes("show-environment"),
@@ -597,13 +613,18 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
 
   it.effect("restart brings the service back when activation fails", () =>
     Effect.gen(function* () {
-      const { service, commands, control } = yield* makeHarness();
+      const { service, commands, control, fs, statePath } = yield* makeHarness();
       yield* service.install();
       commands.length = 0;
       control.failCommand = "systemctl --user daemon-reload";
 
       const error = yield* service.restart.pipe(Effect.flip);
       expect(error._tag).toBe("BootServiceCommandError");
+      expect(control.restartingAtStop).toBe(true);
+      const path = yield* Path.Path;
+      expect(
+        yield* fs.exists(path.join(path.dirname(statePath), SERVICE_RESTART_MARKER_FILE)),
+      ).toBe(false);
       expect(
         commands.filter(
           (command) => command.startsWith("systemctl ") && !command.includes("show-environment"),

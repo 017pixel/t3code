@@ -50,6 +50,7 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
@@ -150,6 +151,7 @@ export const ProviderSessionManagerV2Error = Schema.Union([
 export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error.Type;
 
 export interface ProviderSessionManagerV2Shape {
+  readonly prepareForServerShutdown?: Effect.Effect<void>;
   readonly shutdown: Effect.Effect<void>;
   readonly open: (input: {
     readonly threadId: ThreadId;
@@ -347,6 +349,7 @@ export const layerWithOptions = (
     ProviderSessionManagerV2,
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      const providerHost = yield* Effect.serviceOption(ProviderHost.ProviderHost);
       const fileSystem = yield* FileSystem.FileSystem;
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -953,6 +956,9 @@ export const layerWithOptions = (
               onNone: () => Effect.void,
               onSome: (entry) =>
                 Effect.gen(function* () {
+                  if (input.reason !== "server_shutdown") {
+                    yield* entry.runtime.prepareForServerShutdown?.(false) ?? Effect.void;
+                  }
                   if (input.cancelIdleFiber !== false) {
                     yield* cancelIdleFiber(entry.idleFiber);
                   }
@@ -2007,7 +2013,20 @@ export const layerWithOptions = (
       // Parallel, so one session whose close hangs does not stop the rest from
       // closing within the time box.
       const sessionScopes = yield* Scope.make("parallel");
+      let shutdownRestartIntent: boolean | undefined;
+      const prepareForServerShutdown = Effect.gen(function* () {
+        // Tunnel cleanup consumes the desktop marker. Capture intent first,
+        // and keep it for sessions whose open completes during teardown.
+        shutdownRestartIntent ??= yield* Option.match(providerHost, {
+          onNone: () => Effect.succeed(false),
+          onSome: (host) => host.serverRestartPending ?? Effect.succeed(false),
+        });
+        for (const entry of (yield* Ref.get(sessions)).values()) {
+          yield* entry.runtime.prepareForServerShutdown?.(shutdownRestartIntent) ?? Effect.void;
+        }
+      });
       const shutdown = Effect.gen(function* () {
+        yield* prepareForServerShutdown;
         const activeSessions = [...(yield* Ref.get(sessions)).values()];
         yield* Effect.forEach(
           activeSessions,
@@ -2045,6 +2064,7 @@ export const layerWithOptions = (
       });
 
       return ProviderSessionManagerV2.of({
+        prepareForServerShutdown,
         shutdown,
         hasPendingBackgroundWork,
         open: (input) =>
@@ -2174,6 +2194,9 @@ export const layerWithOptions = (
                     attributes: { provider: adapter.driver, operation: "open" },
                   }),
                 );
+              if (shutdownRestartIntent !== undefined) {
+                yield* runtime.prepareForServerShutdown?.(shutdownRestartIntent) ?? Effect.void;
+              }
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());

@@ -25,7 +25,33 @@ import {
 
 const CONTINUE_PROMPT = "Continue where you left off.";
 
-/** A recorded intent must not wake held threads, unanswered requests, or settled provider turns. */
+/** OpenCode keeps these requests on its server and can list and rebind them. */
+export function hasRestorableOpenCodeRequest(
+  projection: Pick<ProjectionRuntimeRecoveryState, "runtimeRequests" | "providerTurns">,
+  source: OrchestrationV2Run,
+): boolean {
+  return (
+    source.activeAttemptId !== null &&
+    projection.runtimeRequests.some(
+      (request) =>
+        request.nativeRequestRef?.driver === "opencode" &&
+        request.kind !== "dynamic_tool_call" &&
+        request.kind !== "auth_refresh" &&
+        request.responseCapability.type !== "message" &&
+        (request.status === "pending" ||
+          ((request.status === "expired" || request.status === "cancelled") &&
+            request.responseCapability.type === "not_resumable")) &&
+        projection.providerTurns.some(
+          (turn) =>
+            turn.id === request.providerTurnId &&
+            turn.nativeTurnRef?.driver === "opencode" &&
+            turn.runAttemptId === source.activeAttemptId,
+        ),
+    )
+  );
+}
+
+/** A recorded intent must not wake held threads, unbindable requests, or settled provider turns. */
 export function restartContinuationBlocked(
   projection: Pick<
     ProjectionRuntimeRecoveryState,
@@ -51,6 +77,7 @@ export function restartContinuationBlocked(
       (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted")) ||
     projection.runtimeRequests.some(
       (request) =>
+        !hasRestorableOpenCodeRequest({ ...projection, runtimeRequests: [request] }, source) &&
         // Tool calls and auth refreshes do not wait on a person, and a
         // message-capable question stays answerable after the restart.
         request.kind !== "dynamic_tool_call" &&
@@ -111,7 +138,12 @@ export function restartContinuationRun(
     (run.restartContinuationOfRunId !== undefined ||
       restartPromptSource(run, projection.runs, projection.providerTurns, projection.attempts) !==
         undefined);
-  if (run.status !== "running" && !preparedContinuation) return;
+  if (
+    run.status !== "running" &&
+    !preparedContinuation &&
+    !(run.status === "waiting" && hasRestorableOpenCodeRequest(projection, run))
+  )
+    return;
   if (restartContinuationBlocked(projection, run, now)) return;
   const liveTurnRequired = !preparedContinuation;
   if (projection.thread.providerInstanceId !== run.providerInstanceId) return;

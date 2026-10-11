@@ -187,9 +187,11 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
     text = "hello",
     startProviderThread: OrchestrationV2ProviderThread = providerThread,
     restartContinuationOfRunId?: RunId,
+    restartContinuationSource?: ProviderAdapter.ProviderAdapterV2TurnInput["restartContinuationSource"],
   ) =>
     runtime.startTurn({
       ...(restartContinuationOfRunId === undefined ? {} : { restartContinuationOfRunId }),
+      ...(restartContinuationSource === undefined ? {} : { restartContinuationSource }),
       appThread: {
         id: threadId,
         projectId: ProjectId.make(`project-opencode-${suffix}`),
@@ -217,6 +219,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
       runId: RunId.make(`run-opencode-${suffix}`),
       runOrdinal: 1,
       providerTurnOrdinal: 1,
+      runStartedAt: now,
       attemptId: RunAttemptId.make(`attempt-opencode-${suffix}`),
       rootNodeId: NodeId.make(`node-opencode-${suffix}`),
       providerThread: startProviderThread,
@@ -243,7 +246,97 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
-  it.effect.each(["busy", "retry", "idle"] as const)(
+  it.effect("announces native admission before the prompt can be recorded by OpenCode", () =>
+    Effect.gen(function* () {
+      const nativeEvents = asyncEventStream();
+      const admission = promiseGate<string>();
+      const response = promiseGate<void>();
+      const harness = yield* makeOpenCodeRuntimeHarness("admission-persistence", "root", {
+        event: {
+          subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+            options.signal.addEventListener("abort", () => nativeEvents.close(), { once: true });
+            return { stream: nativeEvents.stream };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          promptAsync: async (input: { messageID: string }) => {
+            admission.resolve(input.messageID);
+            await response.promise;
+            return { data: true };
+          },
+          abort: async () => ({ data: true }),
+          children: async () => ({ data: [] }),
+        },
+      });
+      const announced = yield* harness.runtime.events.pipe(
+        Stream.filter((event) => event.type === "provider_turn.updated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const starting = yield* harness.startTurn().pipe(Effect.forkScoped);
+      const messageID = yield* Effect.promise(() => admission.promise);
+      const event = (yield* Fiber.join(announced))[0]!;
+      assert.equal(event.providerTurn.nativeTurnRef?.nativeId, messageID);
+      response.resolve();
+      yield* Fiber.join(starting);
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect("recreates admission when neither OpenCode nor T3 recorded the prompt", () =>
+    Effect.gen(function* () {
+      const prompts: Array<{ messageID: string; parts: Array<{ type: string; text?: string }> }> =
+        [];
+      const client = {
+        event: {
+          subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+            const nativeEvents = asyncEventStream();
+            options.signal.addEventListener("abort", () => nativeEvents.close(), { once: true });
+            return { stream: nativeEvents.stream };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          get: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          status: async () => ({ data: {} }),
+          messages: async () => ({ data: [] }),
+          promptAsync: async (input: (typeof prompts)[number]) => {
+            prompts.push(input);
+            return { data: true };
+          },
+          abort: async () => ({ data: true }),
+          children: async () => ({ data: [] }),
+        },
+      };
+      const original = yield* makeOpenCodeRuntimeHarness("durable-admission", "root", client);
+      yield* original.startTurn("original task");
+      const recovered = yield* makeOpenCodeRuntimeHarness("durable-recovery", "root", client);
+      yield* recovered.startTurn("Continue", recovered.providerThread, original.runId, {
+        nativeTurnRef: null,
+        attemptId: RunAttemptId.make("attempt-opencode-durable-admission"),
+        startedAt: original.now,
+        message: {
+          messageId: MessageId.make("original-input"),
+          text: "original task",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+      });
+      assert.lengthOf(prompts, 2);
+      assert.equal(prompts[1]!.messageID, prompts[0]!.messageID);
+      assert.deepEqual(prompts[1]!.parts, prompts[0]!.parts);
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect.each(["busy", "retry", "idle", "raced-busy"] as const)(
     "does not prompt a surviving %s session again after a T3 restart",
     (status) =>
       Effect.gen(function* () {
@@ -257,12 +350,26 @@ describe("OpenCodeAdapterV2", () => {
         };
         let prompts = 0;
         const harness = yield* makeOpenCodeRuntimeHarness(`restart-${status}`, "root", {
-          event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+          permission: { list: async () => ({ data: [] }) },
+          question: { list: async () => ({ data: [] }) },
+          event: {
+            subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+              options.signal.addEventListener("abort", () => nativeEvents.close(), { once: true });
+              return { stream: nativeEvents.stream };
+            },
+          },
           session: {
             create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
             get: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
-            status: async () => ({ data: { root: { type: status } } }),
+            status: async () => ({
+              data: { root: { type: status === "raced-busy" ? "idle" : status } },
+            }),
             messages: async () => {
+              if (status === "raced-busy")
+                await nativeEvents.push({
+                  type: "session.status",
+                  properties: { sessionID: "root", status: { type: "busy" } },
+                });
               // A live update lands while history loads; the older snapshot must not undo it.
               await nativeEvents.push({
                 type: "message.part.updated",
@@ -338,6 +445,736 @@ describe("OpenCodeAdapterV2", () => {
           assert.include(texts, "live, then more");
           assert.notInclude(texts, "live");
         }
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
+  );
+
+  it.effect.each([
+    "finished",
+    "unrecorded-admission",
+    "unrecorded-clock-skew",
+    "unrecorded-missing",
+    "note-survivor",
+    "waiting-user-gone",
+    "automatic-compaction-finished",
+    "automatic-compaction-unfinished",
+    "imported",
+    "missing-admission",
+    "already-settled",
+    "aborted",
+    "errored",
+    "tool-calls",
+    "length",
+    "missing-finish",
+    "wrong-parent",
+    "reverted-idle",
+    "reverted-busy",
+    "empty",
+    "unavailable-history",
+    "unavailable-status",
+    "unavailable-session",
+    "unavailable-permission",
+    "unavailable-question",
+  ] as const)("reconciles restart history for %s", (ending) =>
+    Effect.gen(function* () {
+      const nativeEvents = asyncEventStream();
+      const prompts: Array<{ parts: Array<{ type: string; text?: string }>; messageID: string }> =
+        [];
+      const busy =
+        ending === "reverted-busy" ||
+        ending === "note-survivor" ||
+        ending === "unavailable-permission" ||
+        ending === "unavailable-question";
+      const oldHistory = [
+        {
+          info: { id: "msg-old", role: "user", sessionID: "root", time: { created: 1 } },
+          parts: [],
+        },
+        {
+          info: {
+            id: "old-answer",
+            role: "assistant",
+            sessionID: "root",
+            parentID: "msg-old",
+            time: { created: 2, completed: 3 },
+            finish: "stop",
+          },
+          parts: [
+            {
+              id: "old-part",
+              type: "text",
+              messageID: "old-answer",
+              sessionID: "root",
+              text: "old answer",
+            },
+          ],
+        },
+      ];
+      const cutMessageId =
+        ending === "unrecorded-clock-skew" ? `msg_000000004001${"a".repeat(28)}` : "msg_cut";
+      const cutHistory = [
+        {
+          info: {
+            id: cutMessageId,
+            role: "user",
+            sessionID: "root",
+            time: { created: ending === "unrecorded-clock-skew" ? -1_000 : 4 },
+          },
+          parts: [{ type: "text", text: "original task" }],
+        },
+        {
+          info: {
+            id: "cut-answer",
+            role: "assistant",
+            sessionID: "root",
+            parentID: ending === "wrong-parent" ? "msg-other" : cutMessageId,
+            time: { created: 5, completed: 6 },
+            finish:
+              ending === "missing-finish" || ending === "waiting-user-gone"
+                ? undefined
+                : ending === "tool-calls"
+                  ? "tool-calls"
+                  : ending === "length"
+                    ? "length"
+                    : "stop",
+            ...(ending === "aborted"
+              ? { error: { name: "MessageAbortedError", data: { message: "aborted" } } }
+              : {}),
+            ...(ending === "errored"
+              ? { error: { name: "APIError", data: { message: "failed" } } }
+              : {}),
+          },
+          parts: [
+            {
+              id: "cut-part",
+              type: "text",
+              messageID: "cut-answer",
+              sessionID: "root",
+              text: "cut answer",
+            },
+          ],
+        },
+      ];
+      const history =
+        ending === "empty"
+          ? []
+          : ending === "imported" ||
+              ending === "missing-admission" ||
+              ending === "unrecorded-missing"
+            ? oldHistory
+            : [
+                ...oldHistory,
+                ...cutHistory,
+                ...(ending.startsWith("automatic-compaction-")
+                  ? [
+                      {
+                        info: {
+                          id: "msg_auto_compact",
+                          role: "user",
+                          sessionID: "root",
+                          time: { created: 7 },
+                        },
+                        parts: [{ type: "compaction", auto: true }],
+                      },
+                      {
+                        info: {
+                          id: "summary",
+                          role: "assistant",
+                          sessionID: "root",
+                          parentID: "msg_auto_compact",
+                          summary: true,
+                          time: { created: 8, completed: 9 },
+                          finish: "stop",
+                        },
+                        parts: [],
+                      },
+                      ...(ending === "automatic-compaction-finished"
+                        ? [
+                            {
+                              info: {
+                                id: "msg_synthetic_continue",
+                                role: "user",
+                                sessionID: "root",
+                                time: { created: 10 },
+                              },
+                              parts: [{ type: "text", text: "Continue", synthetic: true }],
+                            },
+                            {
+                              info: {
+                                id: "after-compact",
+                                role: "assistant",
+                                sessionID: "root",
+                                parentID: "msg_synthetic_continue",
+                                time: { created: 11, completed: 12 },
+                                finish: "stop",
+                              },
+                              parts: [
+                                {
+                                  id: "after-compact-text",
+                                  messageID: "after-compact",
+                                  sessionID: "root",
+                                  type: "text",
+                                  text: "after compaction",
+                                },
+                              ],
+                            },
+                          ]
+                        : []),
+                    ]
+                  : []),
+              ];
+      const harness = yield* makeOpenCodeRuntimeHarness(`restart-history-${ending}`, "root", {
+        event: {
+          subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+            options.signal.addEventListener("abort", () => nativeEvents.close(), { once: true });
+            return { stream: nativeEvents.stream };
+          },
+        },
+        permission: {
+          list: async () => {
+            if (ending === "unavailable-permission") throw new Error("permission unavailable");
+            return { data: [] };
+          },
+        },
+        question: {
+          list: async () => {
+            if (ending === "unavailable-question") throw new Error("question unavailable");
+            return { data: [] };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          get: async () => {
+            if (ending === "unavailable-session") throw new Error("session unavailable");
+            return {
+              data: {
+                id: "root",
+                time: { created: 1, updated: 6 },
+                ...(ending.startsWith("reverted-") ? { revert: { messageID: "msg_cut" } } : {}),
+              },
+            };
+          },
+          status: async () => {
+            if (ending === "unavailable-status") throw new Error("status unavailable");
+            return { data: busy ? { root: { type: "busy" } } : {} };
+          },
+          messages: async () => {
+            if (ending === "unavailable-history") throw new Error("history unavailable");
+            return { data: history };
+          },
+          promptAsync: async (input: (typeof prompts)[number]) => {
+            prompts.push(input);
+            return { data: true };
+          },
+          abort: async () => ({ data: true }),
+          children: async () => ({ data: [] }),
+        },
+      });
+      const terminal = yield* harness.runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const providerThread = {
+        ...harness.providerThread,
+        nativeConversationHeadRef:
+          ending === "imported" || ending === "finished"
+            ? null
+            : {
+                driver: OPENCODE_PROVIDER,
+                nativeId: ending === "already-settled" ? "msg_cut" : "msg-old",
+                strength: "weak" as const,
+              },
+      };
+      const source =
+        ending === "imported" || ending === "already-settled"
+          ? undefined
+          : {
+              nativeTurnRef: ending.startsWith("unrecorded-")
+                ? null
+                : {
+                    driver: OPENCODE_PROVIDER,
+                    nativeId: "msg_cut",
+                    strength: "weak" as const,
+                  },
+              startedAt: DateTime.makeUnsafe(4),
+              awaitingUser: ending === "waiting-user-gone",
+              message: {
+                messageId: MessageId.make("original-input"),
+                text: "original task",
+                attachments: [],
+                createdBy: "user" as const,
+                creationSource: "web" as const,
+              },
+            };
+      const started = yield* Effect.exit(
+        harness.startTurn(
+          "Continue where you left off.",
+          providerThread,
+          ending === "note-survivor" ? undefined : RunId.make("cut-run"),
+          source,
+        ),
+      );
+      const unavailable = ending.startsWith("unavailable-");
+      assert.equal(Exit.isFailure(started), unavailable);
+      assert.equal(
+        prompts.length,
+        ending === "finished" ||
+          ending === "automatic-compaction-finished" ||
+          ending === "unrecorded-admission" ||
+          ending === "unrecorded-clock-skew" ||
+          ending === "waiting-user-gone" ||
+          busy ||
+          unavailable
+          ? 0
+          : 1,
+      );
+      if (ending === "missing-admission" || ending === "empty" || ending === "reverted-idle") {
+        assert.deepEqual(prompts[0]?.parts, [{ type: "text", text: "original task" }]);
+        if (ending === "reverted-idle") assert.notEqual(prompts[0]?.messageID, "msg_cut");
+        else assert.equal(prompts[0]?.messageID, "msg_cut");
+      }
+      if (prompts.length > 0)
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "message.updated",
+            properties: {
+              sessionID: "root",
+              info: {
+                id: prompts[0]!.messageID,
+                role: "user",
+                sessionID: "root",
+                time: { created: 7 },
+              },
+            },
+          }),
+        );
+      if (prompts.length > 0 || busy)
+        yield* Effect.promise(() =>
+          nativeEvents.push({ type: "session.idle", properties: { sessionID: "root" } }),
+        );
+      const collected = yield* Fiber.join(terminal);
+      assert.deepInclude(collected.at(-1), {
+        type: "turn.terminal",
+        status: unavailable
+          ? "failed"
+          : ending === "waiting-user-gone"
+            ? "interrupted"
+            : "completed",
+      });
+      const texts = collected.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+          ? [event.turnItem.text]
+          : [],
+      );
+      if (ending === "finished") assert.include(texts, "cut answer");
+      if (ending === "automatic-compaction-finished") assert.include(texts, "after compaction");
+      if (ending.startsWith("reverted-")) assert.notInclude(texts, "cut answer");
+      if (ending === "reverted-busy") assert.include(texts, "old answer");
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect.each([
+    "permission-root",
+    "permission-child",
+    "permission-linked-child",
+    "question-root",
+    "question-child",
+    "question-linked-child",
+  ] as const)("recovers a pending %s after restart without prompting", (kind) =>
+    Effect.gen(function* () {
+      const nativeEvents = asyncEventStream();
+      const child = kind.endsWith("child");
+      const sessionID = child ? "child" : "root";
+      const permission = {
+        id: "permission-cut",
+        sessionID,
+        permission: "bash",
+        patterns: ["*"],
+        always: [],
+        metadata: {},
+      };
+      const question = {
+        id: "question-cut",
+        sessionID,
+        questions: [
+          {
+            header: "Choice",
+            question: "Which?",
+            options: [{ label: "Yes", description: "Proceed" }],
+          },
+        ],
+      };
+      const replies: unknown[] = [];
+      let prompts = 0;
+      const harness = yield* makeOpenCodeRuntimeHarness(kind, "root", {
+        event: {
+          subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+            options.signal.addEventListener("abort", () => nativeEvents.close(), { once: true });
+            return { stream: nativeEvents.stream };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          get: async ({ sessionID }: { sessionID: string }) => ({
+            data: {
+              id: sessionID,
+              ...(sessionID === "child" ? { parentID: "root" } : {}),
+              time: { created: 1, updated: 1 },
+            },
+          }),
+          status: async () => ({ data: { root: { type: "busy" }, child: { type: "busy" } } }),
+          messages: async ({ sessionID: nativeSessionId }: { sessionID: string }) => ({
+            data:
+              nativeSessionId === "child"
+                ? []
+                : [
+                    {
+                      info: {
+                        id: "msg_cut",
+                        role: "user",
+                        sessionID: "root",
+                        time: { created: 1 },
+                      },
+                      parts: [],
+                    },
+                    ...(kind.includes("linked")
+                      ? [
+                          {
+                            info: {
+                              id: "task-message",
+                              role: "assistant",
+                              sessionID: "root",
+                              parentID: "msg_cut",
+                              time: { created: 2 },
+                            },
+                            parts: [
+                              {
+                                id: "task-part",
+                                type: "tool",
+                                tool: "task",
+                                callID: "task-call",
+                                messageID: "task-message",
+                                sessionID: "root",
+                                state: {
+                                  status: "running",
+                                  input: { prompt: "child work", description: "Child" },
+                                  title: "Child",
+                                  metadata: { sessionId: "child" },
+                                  time: { start: 2 },
+                                },
+                              },
+                            ],
+                          },
+                        ]
+                      : []),
+                  ],
+          }),
+          update: async () => ({ data: true }),
+          promptAsync: async () => {
+            prompts++;
+            return { data: true };
+          },
+          abort: async () => ({ data: true }),
+          children: async () => ({ data: [] }),
+        },
+        permission: {
+          list: async () => ({ data: kind.startsWith("permission") ? [permission] : [] }),
+          reply: async (input: unknown) => {
+            replies.push(input);
+            return { data: true };
+          },
+        },
+        question: {
+          list: async () => ({ data: kind.startsWith("question") ? [question] : [] }),
+          reply: async (input: unknown) => {
+            replies.push(input);
+            return { data: true };
+          },
+        },
+      });
+      const requests = yield* harness.runtime.events.pipe(
+        Stream.filter((event) => event.type === "runtime_request.updated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* harness.startTurn("Continue", harness.providerThread, RunId.make("cut-run"));
+      const request = (yield* Fiber.join(requests))[0]!.runtimeRequest;
+      assert.equal(prompts, 0);
+      assert.equal(request.status, "pending");
+      yield* harness.runtime.respondToRuntimeRequest({
+        requestId: request.id,
+        ...(kind.startsWith("permission")
+          ? { decision: "accept" as const }
+          : { answers: { Choice: "Yes" } }),
+      });
+      assert.lengthOf(replies, 1);
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect.each(["busy", "idle", "aborted", "errored", "raced-idle"] as const)(
+    "replays a surviving task's %s child history and restores pending work",
+    (childStatus) =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        let prompts = 0;
+        const task = {
+          id: "task-part",
+          sessionID: "root",
+          messageID: "root-answer",
+          type: "tool",
+          tool: "task",
+          callID: "task-call",
+          state: {
+            status: "completed",
+            input: { prompt: "child work", description: "Child" },
+            title: "Child",
+            metadata: { sessionId: "child", background: true },
+            time: { start: 2, end: 3 },
+            output: "Background task started",
+          },
+        };
+        const history = (sessionID: string) => [
+          {
+            info: { id: `msg-${sessionID}`, sessionID, role: "user", time: { created: 1 } },
+            parts: [
+              {
+                id: `${sessionID}-input`,
+                sessionID,
+                messageID: `msg-${sessionID}`,
+                type: "text",
+                text: "child work",
+              },
+            ],
+          },
+          {
+            info: {
+              id: `${sessionID}-answer`,
+              sessionID,
+              role: "assistant",
+              parentID: `msg-${sessionID}`,
+              time: { created: 2 },
+              ...(sessionID === "child" && (childStatus === "aborted" || childStatus === "errored")
+                ? {
+                    error: {
+                      name: childStatus === "aborted" ? "MessageAbortedError" : "APIError",
+                      data: { message: "cut child" },
+                    },
+                  }
+                : {}),
+            },
+            parts:
+              sessionID === "root"
+                ? [task]
+                : [
+                    {
+                      id: "child-text",
+                      sessionID,
+                      messageID: "child-answer",
+                      type: "text",
+                      text: "work while T3 was down",
+                    },
+                  ],
+          },
+        ];
+        const harness = yield* makeOpenCodeRuntimeHarness("restart-child", "root", {
+          event: {
+            subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+              options.signal.addEventListener("abort", () => nativeEvents.close(), { once: true });
+              return { stream: nativeEvents.stream };
+            },
+          },
+          session: {
+            create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+            get: async ({ sessionID }: { sessionID: string }) => ({
+              data: {
+                id: sessionID,
+                ...(sessionID === "child" ? { parentID: "root" } : {}),
+                permission: [],
+                time: { created: 1, updated: 2 },
+              },
+            }),
+            update: async () => ({ data: true }),
+            status: async () => ({
+              data: {
+                root: { type: "busy" },
+                child: {
+                  type: childStatus === "busy" || childStatus === "raced-idle" ? "busy" : "idle",
+                },
+                unrelated: { type: "busy" },
+              },
+            }),
+            messages: async ({ sessionID }: { sessionID: string }) => {
+              if (sessionID === "child" && childStatus === "raced-idle")
+                await nativeEvents.push({ type: "session.idle", properties: { sessionID } });
+              return { data: history(sessionID) };
+            },
+            promptAsync: async () => {
+              prompts++;
+              return { data: true };
+            },
+            abort: async () => ({ data: true }),
+            children: async () => ({ data: [] }),
+          },
+          permission: { list: async () => ({ data: [] }) },
+          question: { list: async () => ({ data: [] }) },
+        });
+        const events = yield* harness.runtime.events.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "turn.terminal" &&
+              event.providerThreadId === harness.providerThread.id,
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* harness.startTurn("Continue", harness.providerThread, RunId.make("cut-root"));
+        assert.equal(prompts, 0);
+        assert.isTrue(yield* harness.runtime.hasPendingBackgroundWork!);
+        yield* Effect.promise(() =>
+          nativeEvents.push({ type: "session.idle", properties: { sessionID: "root" } }),
+        );
+        const collected = yield* Fiber.join(events);
+        if (childStatus !== "busy") {
+          const childTerminal = collected.findLast(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.providerThreadId !== harness.providerThread.id,
+          );
+          assert.deepInclude(
+            childTerminal?.type === "provider_turn.updated"
+              ? childTerminal.providerTurn
+              : undefined,
+            {
+              status:
+                childStatus === "aborted"
+                  ? "interrupted"
+                  : childStatus === "errored"
+                    ? "failed"
+                    : "completed",
+            },
+          );
+        }
+        assert.isTrue(
+          collected.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.text === "work while T3 was down",
+          ),
+        );
+        assert.equal(yield* harness.runtime.hasPendingBackgroundWork!, childStatus === "busy");
+        if (childStatus === "busy") {
+          yield* Effect.promise(() =>
+            nativeEvents.push({ type: "session.idle", properties: { sessionID: "child" } }),
+          );
+          assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
+        }
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
+  );
+
+  it.effect("follows surviving compaction without submitting summarize again", () =>
+    Effect.gen(function* () {
+      const nativeEvents = asyncEventStream();
+      let summarize = 0;
+      const harness = yield* makeOpenCodeRuntimeHarness("restart-compact", "root", {
+        event: {
+          subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+            options.signal.addEventListener("abort", () => nativeEvents.close(), { once: true });
+            return { stream: nativeEvents.stream };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          get: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          status: async () => ({ data: { root: { type: "busy" } } }),
+          messages: async () => ({ data: [] }),
+          summarize: async () => {
+            summarize++;
+            return { data: true };
+          },
+          abort: async () => ({ data: true }),
+          children: async () => ({ data: [] }),
+        },
+        permission: { list: async () => ({ data: [] }) },
+        question: { list: async () => ({ data: [] }) },
+      });
+      yield* harness.startTurn("/compact", harness.providerThread, RunId.make("cut-compact"));
+      const terminal = yield* harness.runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Effect.promise(() =>
+        nativeEvents.push({ type: "session.compacted", properties: { sessionID: "root" } }),
+      );
+      yield* Effect.promise(() =>
+        nativeEvents.push({ type: "session.idle", properties: { sessionID: "root" } }),
+      );
+      const events = yield* Fiber.join(terminal);
+      assert.equal(summarize, 0);
+      assert.isTrue(
+        events.some(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
+        ),
+      );
+      assert.deepInclude(events.at(-1), { type: "turn.terminal", status: "completed" });
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect.each([false, true])(
+    "external shutdown preserves work only for restart=%s",
+    (restarting) =>
+      Effect.gen(function* () {
+        const scope = yield* Scope.make();
+        const nativeEvents = asyncEventStream();
+        const calls: string[] = [];
+        const harness = yield* makeOpenCodeRuntimeHarness("shutdown-intent", "root", {
+          event: {
+            subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+              options.signal.addEventListener(
+                "abort",
+                () => {
+                  calls.push("stream.close");
+                  nativeEvents.close();
+                },
+                { once: true },
+              );
+              return { stream: nativeEvents.stream };
+            },
+          },
+          session: {
+            create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+            abort: async ({ sessionID }: { sessionID: string }) => {
+              calls.push(`abort:${sessionID}`);
+              return { data: true };
+            },
+            children: async ({ sessionID }: { sessionID: string }) => ({
+              data: sessionID === "root" ? [{ id: "child" }] : [],
+            }),
+          },
+        }).pipe(Effect.provideService(Scope.Scope, scope));
+        yield* harness.runtime.prepareForServerShutdown!(restarting);
+        yield* Scope.close(scope, Exit.void);
+        assert.deepEqual(
+          calls,
+          restarting ? ["stream.close"] : ["abort:root", "abort:child", "stream.close"],
+        );
       }).pipe(
         Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
         Effect.scoped,
