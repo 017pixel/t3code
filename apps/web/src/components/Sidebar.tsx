@@ -2303,7 +2303,7 @@ function SidebarSearchResultSlot(props: {
   index: number;
   keepMounted: boolean;
   hasExcerpt: boolean;
-  children: (ref: (node: HTMLLIElement | null) => void) => ReactNode;
+  children: (setSlotNode: (node: HTMLLIElement | null) => void) => ReactNode;
 }) {
   const [node, setNode] = useState<HTMLLIElement | null>(null);
   const [visible] = useSidebarRowViewport(node, props.index < 24);
@@ -2343,12 +2343,12 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   searchMatch: EnvironmentThreadSearchMatch | null;
   searchQuery: string;
   index: number;
-  slotRef: (node: HTMLLIElement | null) => void;
+  setSlotNode: (node: HTMLLIElement | null) => void;
   onHighlight: (index: number) => void;
   onSelect: (thread: SidebarThreadSummary) => void;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
 }) {
-  const { thread } = props;
+  const { thread, setSlotNode } = props;
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
     statusLabel: null,
@@ -2418,7 +2418,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
     return () => window.removeEventListener("dragend", clearFileDrag);
   }, [isFileDragOver]);
   return (
-    <li ref={props.slotRef} role="presentation" className="list-none" {...fileDropHandlers}>
+    <li ref={setSlotNode} role="presentation" className="list-none" {...fileDropHandlers}>
       <SidebarTooltip>
         <TooltipTrigger
           render={
@@ -5331,9 +5331,9 @@ export default function Sidebar() {
                           }),
                         )}
                       >
-                        {(slotRef) => (
+                        {(setSlotNode) => (
                           <SidebarSearchResultRow
-                            slotRef={slotRef}
+                            setSlotNode={setSlotNode}
                             isSettled={settledThreadKeys.has(threadKey)}
                             index={index}
                             thread={thread}
