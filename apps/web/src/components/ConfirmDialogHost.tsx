@@ -1,7 +1,8 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useState, useSyncExternalStore } from "react";
 
 import {
   completeConfirmDialogClose,
+  type ConfirmDialogState,
   readConfirmDialogState,
   registerConfirmDialogHost,
   respondToConfirmDialog,
@@ -61,6 +62,23 @@ export function ConfirmDialogHost() {
   useEffect(() => registerConfirmDialogHost(), []);
 
   if (state.status === "idle") return null;
+  return <ConfirmDialog state={state} />;
+}
+
+/**
+ * Mounts closed and opens before the first paint, so the popup starts from
+ * its starting style and animates in. Mounting open skips the transition.
+ */
+function ConfirmDialog({
+  state,
+}: {
+  readonly state: Exclude<ConfirmDialogState, { readonly status: "idle" }>;
+}) {
+  const [mounted, setMounted] = useState(false);
+  useLayoutEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- Opening after the closed mount is what starts the transition.
+    setMounted(true);
+  }, []);
 
   const copy = resolveConfirmDialogCopy(state.message);
   const onCancel = () => respondToConfirmDialog(false);
@@ -68,7 +86,7 @@ export function ConfirmDialogHost() {
 
   return (
     <AlertDialog
-      open={state.status === "confirming"}
+      open={mounted && state.status === "confirming"}
       onOpenChange={(open) => {
         if (!open) onCancel();
       }}
