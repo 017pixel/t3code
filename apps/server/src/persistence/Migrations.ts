@@ -2,7 +2,7 @@
  * Migration runner with an inline loader.
  *
  * Uses Migrator.make with fromRecord to define migrations inline.
- * All migrations are statically imported - no dynamic file system loading.
+ * Pending migrations load on demand through explicit module imports.
  *
  * `runMigrations` is called by the SQLite persistence layer at startup, so the
  * schema is always up to date before the application starts.
@@ -13,71 +13,15 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 
-// Import all migrations statically
-import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
-import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
-import Migration0003 from "./Migrations/003_CheckpointDiffBlobs.ts";
-import Migration0004 from "./Migrations/004_ProviderSessionRuntime.ts";
-import Migration0005 from "./Migrations/005_Projections.ts";
-import Migration0006 from "./Migrations/006_ProjectionThreadSessionRuntimeModeColumns.ts";
-import Migration0007 from "./Migrations/007_ProjectionThreadMessageAttachments.ts";
-import Migration0008 from "./Migrations/008_ProjectionThreadActivitySequence.ts";
-import Migration0009 from "./Migrations/009_ProviderSessionRuntimeMode.ts";
-import Migration0010 from "./Migrations/010_ProjectionThreadsRuntimeMode.ts";
-import Migration0011 from "./Migrations/011_OrchestrationThreadCreatedRuntimeMode.ts";
-import Migration0012 from "./Migrations/012_ProjectionThreadsInteractionMode.ts";
-import Migration0013 from "./Migrations/013_ProjectionThreadProposedPlans.ts";
-import Migration0014 from "./Migrations/014_ProjectionThreadProposedPlanImplementation.ts";
-import Migration0015 from "./Migrations/015_ProjectionTurnsSourceProposedPlan.ts";
-import Migration0016 from "./Migrations/016_CanonicalizeModelSelections.ts";
-import Migration0017 from "./Migrations/017_ProjectionThreadsArchivedAt.ts";
-import Migration0018 from "./Migrations/018_ProjectionThreadsArchivedAtIndex.ts";
-import Migration0019 from "./Migrations/019_ProjectionSnapshotLookupIndexes.ts";
-import Migration0020 from "./Migrations/020_AuthAccessManagement.ts";
-import Migration0021 from "./Migrations/021_AuthSessionClientMetadata.ts";
-import Migration0022 from "./Migrations/022_AuthSessionLastConnectedAt.ts";
-import Migration0023 from "./Migrations/023_ProjectionThreadShellSummary.ts";
-import Migration0024 from "./Migrations/024_BackfillProjectionThreadShellSummary.ts";
-import Migration0025 from "./Migrations/025_CleanupInvalidProjectionPendingApprovals.ts";
-import Migration0026 from "./Migrations/026_CanonicalizeModelSelectionOptions.ts";
-import Migration0027 from "./Migrations/027_ProviderSessionRuntimeInstanceId.ts";
-import Migration0028 from "./Migrations/028_ProjectionThreadSessionInstanceId.ts";
-import Migration0029 from "./Migrations/029_ProjectionThreadDetailOrderingIndexes.ts";
-import Migration0030 from "./Migrations/030_ProjectionThreadShellArchiveIndexes.ts";
-import Migration0031 from "./Migrations/031_AuthAuthorizationScopes.ts";
-import Migration0032 from "./Migrations/032_AuthPairingProofKeyThumbprint.ts";
-import Migration0033 from "./Migrations/033_ProjectionThreadsSettled.ts";
-import Migration0034 from "./Migrations/034_ProjectionThreadsSnoozed.ts";
-import Migration0035 from "./Migrations/035_ProjectionThreadTitleRegeneration.ts";
-import Migration0036 from "./Migrations/036_ProjectionThreadsPinned.ts";
-import Migration0037 from "./Migrations/037_ProjectionTurnsKeysetIndex.ts";
-import Migration0038 from "./Migrations/038_ProjectionThreadsPinOrderKey.ts";
-import Migration0039 from "./Migrations/039_ProjectionProjectsDefaultThreadEnvMode.ts";
-import Migration0040 from "./Migrations/040_ProjectionProjectFaviconPath.ts";
-import Migration0041 from "./Migrations/041_AuthSessionClientConnection.ts";
-import Migration0042 from "./Migrations/042_ProjectionThreadLinkedPullRequest.ts";
-import Migration0043 from "./Migrations/043_ProjectionThreadsUnsettledAt.ts";
-import Migration0044 from "./Migrations/044_ClearAutomaticProjectModelDefaults.ts";
-import Migration0045 from "./Migrations/045_ProjectionProjectsAutoPull.ts";
-import Migration0046 from "./Migrations/046_RepairAutomaticSettlementTimestamps.ts";
-import Migration0047 from "./Migrations/047_ProjectionProjectIcon.ts";
-import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts";
-import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
-import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
-import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
-import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
-import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
-import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
-import Migration0055 from "./Migrations/055_OrchestrationV2.ts";
-import Migration0056 from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
-import Migration0057 from "./Migrations/057_ScheduledTaskWebhooks.ts";
-import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
-import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
-import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
-import Migration0061 from "./Migrations/061_ProjectionThreadSweepIndexes.ts";
-import Migration0062, {
-  ensureThreadReadProjection,
-} from "./Migrations/062_ProjectionThreadReadPayload.ts";
+// The migrator only evaluates pending effects, so an up-to-date database never
+// loads historical schemas or their data transforms.
+const loadMigration = <A, E>(
+  load: () => Promise<{ default: Effect.Effect<A, E, SqlClient.SqlClient> }>,
+) =>
+  Effect.promise(load).pipe(
+    Effect.flatMap((module) => module.default),
+    Effect.asVoid,
+  );
 
 /**
  * Migration loader with all migrations defined inline.
@@ -90,75 +34,312 @@ import Migration0062, {
  * returns migrations sorted by ID.
  */
 export const migrationEntries = [
-  [1, "OrchestrationEvents", Migration0001],
-  [2, "OrchestrationCommandReceipts", Migration0002],
-  [3, "CheckpointDiffBlobs", Migration0003],
-  [4, "ProviderSessionRuntime", Migration0004],
-  [5, "Projections", Migration0005],
-  [6, "ProjectionThreadSessionRuntimeModeColumns", Migration0006],
-  [7, "ProjectionThreadMessageAttachments", Migration0007],
-  [8, "ProjectionThreadActivitySequence", Migration0008],
-  [9, "ProviderSessionRuntimeMode", Migration0009],
-  [10, "ProjectionThreadsRuntimeMode", Migration0010],
-  [11, "OrchestrationThreadCreatedRuntimeMode", Migration0011],
-  [12, "ProjectionThreadsInteractionMode", Migration0012],
-  [13, "ProjectionThreadProposedPlans", Migration0013],
-  [14, "ProjectionThreadProposedPlanImplementation", Migration0014],
-  [15, "ProjectionTurnsSourceProposedPlan", Migration0015],
-  [16, "CanonicalizeModelSelections", Migration0016],
-  [17, "ProjectionThreadsArchivedAt", Migration0017],
-  [18, "ProjectionThreadsArchivedAtIndex", Migration0018],
-  [19, "ProjectionSnapshotLookupIndexes", Migration0019],
-  [20, "AuthAccessManagement", Migration0020],
-  [21, "AuthSessionClientMetadata", Migration0021],
-  [22, "AuthSessionLastConnectedAt", Migration0022],
-  [23, "ProjectionThreadShellSummary", Migration0023],
-  [24, "BackfillProjectionThreadShellSummary", Migration0024],
-  [25, "CleanupInvalidProjectionPendingApprovals", Migration0025],
-  [26, "CanonicalizeModelSelectionOptions", Migration0026],
-  [27, "ProviderSessionRuntimeInstanceId", Migration0027],
-  [28, "ProjectionThreadSessionInstanceId", Migration0028],
-  [29, "ProjectionThreadDetailOrderingIndexes", Migration0029],
-  [30, "ProjectionThreadShellArchiveIndexes", Migration0030],
-  [31, "AuthAuthorizationScopes", Migration0031],
-  [32, "AuthPairingProofKeyThumbprint", Migration0032],
-  [33, "ProjectionThreadsSettled", Migration0033],
-  [34, "ProjectionThreadsSnoozed", Migration0034],
-  [35, "ProjectionThreadTitleRegeneration", Migration0035],
-  [36, "ProjectionThreadsPinned", Migration0036],
-  [37, "ProjectionTurnsKeysetIndex", Migration0037],
-  [38, "ProjectionThreadsPinOrderKey", Migration0038],
-  [39, "ProjectionProjectsDefaultThreadEnvMode", Migration0039],
-  [40, "ProjectionProjectFaviconPath", Migration0040],
-  [41, "AuthSessionClientConnection", Migration0041],
-  [42, "ProjectionThreadLinkedPullRequest", Migration0042],
-  [43, "ProjectionThreadsUnsettledAt", Migration0043],
-  [44, "ClearAutomaticProjectModelDefaults", Migration0044],
-  [45, "ProjectionProjectsAutoPull", Migration0045],
-  [46, "RepairAutomaticSettlementTimestamps", Migration0046],
-  [47, "ProjectionProjectIcon", Migration0047],
-  [48, "ProjectionThreadBranchPullRequest", Migration0048],
-  [49, "ProjectionThreadsActiveOrderKey", Migration0049],
-  [50, "ProjectionThreadPullRequests", Migration0050],
-  [51, "ProjectionThreadMessageContext", Migration0051],
-  [52, "ProjectionThreadTitleState", Migration0052],
-  [53, "PullRequestFilesViewed", Migration0053],
-  [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
+  [
+    1,
+    "OrchestrationEvents",
+    loadMigration(() => import("./Migrations/001_OrchestrationEvents.ts")),
+  ],
+  [
+    2,
+    "OrchestrationCommandReceipts",
+    loadMigration(() => import("./Migrations/002_OrchestrationCommandReceipts.ts")),
+  ],
+  [
+    3,
+    "CheckpointDiffBlobs",
+    loadMigration(() => import("./Migrations/003_CheckpointDiffBlobs.ts")),
+  ],
+  [
+    4,
+    "ProviderSessionRuntime",
+    loadMigration(() => import("./Migrations/004_ProviderSessionRuntime.ts")),
+  ],
+  [5, "Projections", loadMigration(() => import("./Migrations/005_Projections.ts"))],
+  [
+    6,
+    "ProjectionThreadSessionRuntimeModeColumns",
+    loadMigration(() => import("./Migrations/006_ProjectionThreadSessionRuntimeModeColumns.ts")),
+  ],
+  [
+    7,
+    "ProjectionThreadMessageAttachments",
+    loadMigration(() => import("./Migrations/007_ProjectionThreadMessageAttachments.ts")),
+  ],
+  [
+    8,
+    "ProjectionThreadActivitySequence",
+    loadMigration(() => import("./Migrations/008_ProjectionThreadActivitySequence.ts")),
+  ],
+  [
+    9,
+    "ProviderSessionRuntimeMode",
+    loadMigration(() => import("./Migrations/009_ProviderSessionRuntimeMode.ts")),
+  ],
+  [
+    10,
+    "ProjectionThreadsRuntimeMode",
+    loadMigration(() => import("./Migrations/010_ProjectionThreadsRuntimeMode.ts")),
+  ],
+  [
+    11,
+    "OrchestrationThreadCreatedRuntimeMode",
+    loadMigration(() => import("./Migrations/011_OrchestrationThreadCreatedRuntimeMode.ts")),
+  ],
+  [
+    12,
+    "ProjectionThreadsInteractionMode",
+    loadMigration(() => import("./Migrations/012_ProjectionThreadsInteractionMode.ts")),
+  ],
+  [
+    13,
+    "ProjectionThreadProposedPlans",
+    loadMigration(() => import("./Migrations/013_ProjectionThreadProposedPlans.ts")),
+  ],
+  [
+    14,
+    "ProjectionThreadProposedPlanImplementation",
+    loadMigration(() => import("./Migrations/014_ProjectionThreadProposedPlanImplementation.ts")),
+  ],
+  [
+    15,
+    "ProjectionTurnsSourceProposedPlan",
+    loadMigration(() => import("./Migrations/015_ProjectionTurnsSourceProposedPlan.ts")),
+  ],
+  [
+    16,
+    "CanonicalizeModelSelections",
+    loadMigration(() => import("./Migrations/016_CanonicalizeModelSelections.ts")),
+  ],
+  [
+    17,
+    "ProjectionThreadsArchivedAt",
+    loadMigration(() => import("./Migrations/017_ProjectionThreadsArchivedAt.ts")),
+  ],
+  [
+    18,
+    "ProjectionThreadsArchivedAtIndex",
+    loadMigration(() => import("./Migrations/018_ProjectionThreadsArchivedAtIndex.ts")),
+  ],
+  [
+    19,
+    "ProjectionSnapshotLookupIndexes",
+    loadMigration(() => import("./Migrations/019_ProjectionSnapshotLookupIndexes.ts")),
+  ],
+  [
+    20,
+    "AuthAccessManagement",
+    loadMigration(() => import("./Migrations/020_AuthAccessManagement.ts")),
+  ],
+  [
+    21,
+    "AuthSessionClientMetadata",
+    loadMigration(() => import("./Migrations/021_AuthSessionClientMetadata.ts")),
+  ],
+  [
+    22,
+    "AuthSessionLastConnectedAt",
+    loadMigration(() => import("./Migrations/022_AuthSessionLastConnectedAt.ts")),
+  ],
+  [
+    23,
+    "ProjectionThreadShellSummary",
+    loadMigration(() => import("./Migrations/023_ProjectionThreadShellSummary.ts")),
+  ],
+  [
+    24,
+    "BackfillProjectionThreadShellSummary",
+    loadMigration(() => import("./Migrations/024_BackfillProjectionThreadShellSummary.ts")),
+  ],
+  [
+    25,
+    "CleanupInvalidProjectionPendingApprovals",
+    loadMigration(() => import("./Migrations/025_CleanupInvalidProjectionPendingApprovals.ts")),
+  ],
+  [
+    26,
+    "CanonicalizeModelSelectionOptions",
+    loadMigration(() => import("./Migrations/026_CanonicalizeModelSelectionOptions.ts")),
+  ],
+  [
+    27,
+    "ProviderSessionRuntimeInstanceId",
+    loadMigration(() => import("./Migrations/027_ProviderSessionRuntimeInstanceId.ts")),
+  ],
+  [
+    28,
+    "ProjectionThreadSessionInstanceId",
+    loadMigration(() => import("./Migrations/028_ProjectionThreadSessionInstanceId.ts")),
+  ],
+  [
+    29,
+    "ProjectionThreadDetailOrderingIndexes",
+    loadMigration(() => import("./Migrations/029_ProjectionThreadDetailOrderingIndexes.ts")),
+  ],
+  [
+    30,
+    "ProjectionThreadShellArchiveIndexes",
+    loadMigration(() => import("./Migrations/030_ProjectionThreadShellArchiveIndexes.ts")),
+  ],
+  [
+    31,
+    "AuthAuthorizationScopes",
+    loadMigration(() => import("./Migrations/031_AuthAuthorizationScopes.ts")),
+  ],
+  [
+    32,
+    "AuthPairingProofKeyThumbprint",
+    loadMigration(() => import("./Migrations/032_AuthPairingProofKeyThumbprint.ts")),
+  ],
+  [
+    33,
+    "ProjectionThreadsSettled",
+    loadMigration(() => import("./Migrations/033_ProjectionThreadsSettled.ts")),
+  ],
+  [
+    34,
+    "ProjectionThreadsSnoozed",
+    loadMigration(() => import("./Migrations/034_ProjectionThreadsSnoozed.ts")),
+  ],
+  [
+    35,
+    "ProjectionThreadTitleRegeneration",
+    loadMigration(() => import("./Migrations/035_ProjectionThreadTitleRegeneration.ts")),
+  ],
+  [
+    36,
+    "ProjectionThreadsPinned",
+    loadMigration(() => import("./Migrations/036_ProjectionThreadsPinned.ts")),
+  ],
+  [
+    37,
+    "ProjectionTurnsKeysetIndex",
+    loadMigration(() => import("./Migrations/037_ProjectionTurnsKeysetIndex.ts")),
+  ],
+  [
+    38,
+    "ProjectionThreadsPinOrderKey",
+    loadMigration(() => import("./Migrations/038_ProjectionThreadsPinOrderKey.ts")),
+  ],
+  [
+    39,
+    "ProjectionProjectsDefaultThreadEnvMode",
+    loadMigration(() => import("./Migrations/039_ProjectionProjectsDefaultThreadEnvMode.ts")),
+  ],
+  [
+    40,
+    "ProjectionProjectFaviconPath",
+    loadMigration(() => import("./Migrations/040_ProjectionProjectFaviconPath.ts")),
+  ],
+  [
+    41,
+    "AuthSessionClientConnection",
+    loadMigration(() => import("./Migrations/041_AuthSessionClientConnection.ts")),
+  ],
+  [
+    42,
+    "ProjectionThreadLinkedPullRequest",
+    loadMigration(() => import("./Migrations/042_ProjectionThreadLinkedPullRequest.ts")),
+  ],
+  [
+    43,
+    "ProjectionThreadsUnsettledAt",
+    loadMigration(() => import("./Migrations/043_ProjectionThreadsUnsettledAt.ts")),
+  ],
+  [
+    44,
+    "ClearAutomaticProjectModelDefaults",
+    loadMigration(() => import("./Migrations/044_ClearAutomaticProjectModelDefaults.ts")),
+  ],
+  [
+    45,
+    "ProjectionProjectsAutoPull",
+    loadMigration(() => import("./Migrations/045_ProjectionProjectsAutoPull.ts")),
+  ],
+  [
+    46,
+    "RepairAutomaticSettlementTimestamps",
+    loadMigration(() => import("./Migrations/046_RepairAutomaticSettlementTimestamps.ts")),
+  ],
+  [
+    47,
+    "ProjectionProjectIcon",
+    loadMigration(() => import("./Migrations/047_ProjectionProjectIcon.ts")),
+  ],
+  [
+    48,
+    "ProjectionThreadBranchPullRequest",
+    loadMigration(() => import("./Migrations/048_ProjectionThreadBranchPullRequest.ts")),
+  ],
+  [
+    49,
+    "ProjectionThreadsActiveOrderKey",
+    loadMigration(() => import("./Migrations/049_ProjectionThreadsActiveOrderKey.ts")),
+  ],
+  [
+    50,
+    "ProjectionThreadPullRequests",
+    loadMigration(() => import("./Migrations/050_ProjectionThreadPullRequests.ts")),
+  ],
+  [
+    51,
+    "ProjectionThreadMessageContext",
+    loadMigration(() => import("./Migrations/051_ProjectionThreadMessageContext.ts")),
+  ],
+  [
+    52,
+    "ProjectionThreadTitleState",
+    loadMigration(() => import("./Migrations/052_ProjectionThreadTitleState.ts")),
+  ],
+  [
+    53,
+    "PullRequestFilesViewed",
+    loadMigration(() => import("./Migrations/053_PullRequestFilesViewed.ts")),
+  ],
+  [
+    54,
+    "ProjectionThreadsAutoSettleDisabledAt",
+    loadMigration(() => import("./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts")),
+  ],
   // Released as 53 and 54 in V2 previews; reconcileV2PreviewMigration preserves their ledger.
   // Preserve this migration's schema. Future V2 schema changes need new migrations.
-  [55, "OrchestrationV2", Migration0055],
-  [56, "RemoveRedundantProjectionIndexes", Migration0056],
-  [57, "ScheduledTaskWebhooks", Migration0057],
-  [58, "WebhookRelayDeliveries", Migration0058],
-  [59, "McpAppModelContext", Migration0059],
-  [60, "ThreadSnapshotWindowIndexes", Migration0060],
+  [55, "OrchestrationV2", loadMigration(() => import("./Migrations/055_OrchestrationV2.ts"))],
+  [
+    56,
+    "RemoveRedundantProjectionIndexes",
+    loadMigration(() => import("./Migrations/056_RemoveRedundantProjectionIndexes.ts")),
+  ],
+  [
+    57,
+    "ScheduledTaskWebhooks",
+    loadMigration(() => import("./Migrations/057_ScheduledTaskWebhooks.ts")),
+  ],
+  [
+    58,
+    "WebhookRelayDeliveries",
+    loadMigration(() => import("./Migrations/058_WebhookRelayDeliveries.ts")),
+  ],
+  [59, "McpAppModelContext", loadMigration(() => import("./Migrations/059_McpAppModelContext.ts"))],
+  [
+    60,
+    "ThreadSnapshotWindowIndexes",
+    loadMigration(() => import("./Migrations/060_ThreadSnapshotWindowIndexes.ts")),
+  ],
   // Published previews ran PeerLinks as 61, so their databases skip this one (runMigrations
   // warns). They only lose the sweep index: no query names it with INDEXED BY.
-  [61, "ProjectionThreadSweepIndexes", Migration0061],
-  [62, "ProjectionThreadReadPayload", Migration0062],
+  [
+    61,
+    "ProjectionThreadSweepIndexes",
+    loadMigration(() => import("./Migrations/061_ProjectionThreadSweepIndexes.ts")),
+  ],
+  [
+    62,
+    "ProjectionThreadReadPayload",
+    loadMigration(() => import("./Migrations/062_ProjectionThreadReadPayload.ts")),
+  ],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
+const manifestKey = migrationManifest.map(([id, name]) => `${id}_${name}`).join(",");
 
 const makeMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(
@@ -192,6 +373,23 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  const sql = yield* SqlClient.SqlClient;
+  if (toMigrationInclusive === undefined) {
+    const cacheTables = yield* sql`SELECT name FROM sqlite_master WHERE name = 't3_schema_cache'`;
+    if (cacheTables.length > 0) {
+      const version = yield* sql<{ schema_version: number }>`PRAGMA schema_version`;
+      const cached = yield* sql<{ manifest: string; schema_version: number }>`
+        SELECT manifest, schema_version FROM t3_schema_cache WHERE id = 1
+      `;
+      if (
+        cached[0]?.manifest === manifestKey &&
+        cached[0]?.schema_version === version[0]?.schema_version
+      ) {
+        yield* Effect.logDebug("Database schema is current");
+        return [];
+      }
+    }
+  }
   const previewMigrations =
     toMigrationInclusive === undefined || toMigrationInclusive >= 55
       ? yield* reconcileV2PreviewMigration()
@@ -209,7 +407,6 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   // migration under a shared id (local or fork builds) keeps that id and
   // silently skips this build's migration at it. Surface the divergence so the
   // skipped schema change is diagnosable.
-  const sql = yield* SqlClient.SqlClient;
   const recorded = yield* sql<{
     readonly migration_id: number;
     readonly name: string;
@@ -243,7 +440,45 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   // ProjectionStore reads this table, so it must exist even when its migration was skipped.
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 62) {
+    const { ensureThreadReadProjection } = yield* Effect.promise(
+      () => import("./Migrations/062_ProjectionThreadReadPayload.ts"),
+    );
     yield* ensureThreadReadProjection;
+  }
+  if (toMigrationInclusive === undefined && divergent.length === 0 && skipped.length === 0) {
+    // Other builds can share this database. Schema changes miss this cache; ledger
+    // writes invalidate it even when they do not change SQLite's schema version.
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        // Revalidate under the write transaction before caching a shared database.
+        const history = yield* sql<{ migration_id: number; name: string }>`
+          SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
+        `;
+        if (
+          history.length !== migrationManifest.length ||
+          history.some(
+            (row, index) =>
+              row.migration_id !== migrationManifest[index]?.[0] ||
+              row.name !== migrationManifest[index]?.[1],
+          )
+        )
+          return;
+        const { ensureThreadReadProjection } = yield* Effect.promise(
+          () => import("./Migrations/062_ProjectionThreadReadPayload.ts"),
+        );
+        yield* ensureThreadReadProjection;
+        yield* sql`CREATE TABLE IF NOT EXISTS t3_schema_cache (
+        id INTEGER PRIMARY KEY CHECK (id = 1), manifest TEXT NOT NULL, schema_version INTEGER NOT NULL
+      )`;
+        for (const operation of ["INSERT", "UPDATE", "DELETE"] as const) {
+          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS t3_schema_cache_${operation.toLowerCase()}
+          AFTER ${operation} ON effect_sql_migrations BEGIN DELETE FROM t3_schema_cache; END`);
+        }
+        const version = yield* sql<{ schema_version: number }>`PRAGMA schema_version`;
+        yield* sql`INSERT OR REPLACE INTO t3_schema_cache (id, manifest, schema_version)
+        VALUES (1, ${manifestKey}, ${version[0]!.schema_version})`;
+      }),
+    );
   }
   return executedMigrations;
 });
