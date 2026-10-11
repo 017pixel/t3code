@@ -715,6 +715,7 @@ function SortableThreadRow(props: {
         ref={attach}
         data-thread-item={props.id}
         data-sidebar-row-variant={props.variant}
+        data-sidebar-row-displaced={bag.transform?.x || bag.transform?.y ? "" : undefined}
         className="list-none"
         style={{
           height: props.variant === "card" ? 82 : 36,
@@ -1675,6 +1676,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const sortableRootProps = sortable
     ? {
         ref: sortable.setNodeRef,
+        "data-sidebar-row-displaced":
+          sortable.transform?.x || sortable.transform?.y ? "" : undefined,
         style: {
           transform: CSS.Translate.toString(sortable.transform),
           transition: sortable.transition,

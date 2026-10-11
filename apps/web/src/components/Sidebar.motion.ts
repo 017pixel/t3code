@@ -369,8 +369,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
             (node): node is HTMLElement =>
               node instanceof HTMLElement &&
               !exiting.has(node) &&
-              (typeof rowKey(node) !== "string" ||
-                (node.style.transform !== "" && node.style.transform !== "none")),
+              (typeof rowKey(node) !== "string" || node.hasAttribute("data-sidebar-row-displaced")),
           )
           .map((node) => [node, node.getBoundingClientRect().top - origin]),
       );
