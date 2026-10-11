@@ -208,8 +208,54 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
+  it.effect("starts the server when orphaned provider cleanup cannot run", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-reap-" });
+      const statePath = path.join(root, "runtime", "service-state.json");
+      const leases = path.join(root, "cache", "t3", "provider-maintenance");
+      yield* fs.makeDirectory(leases, { recursive: true });
+      yield* fs.writeFileString(path.join(leases, "install.json"), "corrupt");
+      yield* Effect.acquireRelease(
+        Effect.sync(() => vi.stubEnv("XDG_CACHE_HOME", path.join(root, "cache"))),
+        () => Effect.sync(() => vi.unstubAllEnvs()),
+      );
+      yield* writeFakeRuntime(
+        fs,
+        path,
+        path.join(root, "runtime", "versions", "1.0.0"),
+        `require("node:fs").writeFileSync(${JSON.stringify(path.join(root, "started"))}, "");\nsetInterval(() => {}, 1_000);\n`,
+      );
+      yield* Effect.promise(() =>
+        writeServiceState(statePath, {
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.0.0",
+        }),
+      );
+      const started = Promise.withResolvers<void>();
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          NodeFS.watch(root, (_event, name) => {
+            if (name === "started") started.resolve();
+          }),
+        ),
+        (watcher) => Effect.sync(() => watcher.close()),
+      );
+      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const running = launcher.run();
+      // A failed launcher would otherwise leave the child promise pending forever.
+      yield* Effect.promise(() => Promise.race([started.promise, running]));
+      assert.isTrue(yield* fs.exists(path.join(root, "started")));
+      yield* Effect.promise(() => launcher.stop("SIGTERM"));
+      yield* Effect.promise(() => running);
+    }),
+  );
+
   it.effect.each([
     "unchanged",
+    "orphan",
+    "orphan-restart",
     "restart",
     "clock-jump",
     "before-prepared",
@@ -217,12 +263,20 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     "wal-migration",
     "unreadable",
     "untracked-ddl",
+    "reverted-migration",
+    "same-count-schema",
+    "same-count-ledger",
   ] as const)(
     "supervises committed crash loops with schema %s without restoring accepted work",
     (schema) =>
       Effect.gen(function* () {
         const compatible =
-          schema === "unchanged" || schema === "restart" || schema === "clock-jump";
+          schema === "unchanged" ||
+          schema === "restart" ||
+          schema === "clock-jump" ||
+          schema === "orphan" ||
+          schema === "orphan-restart" ||
+          schema === "reverted-migration";
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-crash-loop-" });
@@ -242,11 +296,28 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
         };
         const migrate =
           "db.exec(\"INSERT INTO effect_sql_migrations VALUES (2, 'candidate'); CREATE TABLE candidate_data (id TEXT)\");";
+        const orphans = schema === "orphan" || schema === "orphan-restart";
+        const processes = path.join(root, "userdata", "provider-processes");
         const source = `
 const fs = require("node:fs");
 const { DatabaseSync } = require("node:sqlite");
 const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
 fs.appendFileSync(${JSON.stringify(path.join(root, "starts"))}, context.childVersion + "\\n");
+${
+  orphans
+    ? `
+if (context.childVersion === "1.1.0") {
+  const child = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  child.unref();
+  const boot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  const identity = pid => ({ pid, startTime: boot + ":" + fs.readFileSync("/proc/" + pid + "/stat", "utf8").split(") ").at(-1).split(" ")[19] });
+  fs.mkdirSync(${JSON.stringify(processes)}, { recursive: true });
+  fs.writeFileSync(${JSON.stringify(processes)} + "/" + process.pid + ".json", JSON.stringify({ version: 1, instanceId: "candidate", hostname: require("node:os").hostname(), stateDir: ${JSON.stringify(path.dirname(processes))}, owner: identity(process.pid), processes: [{ ...identity(child.pid), pgid: child.pid }] }));
+  fs.appendFileSync(${JSON.stringify(path.join(root, "orphans"))}, child.pid + "\\n");
+}
+`
+    : ""
+}
 if (context.update.status === "rolled-back" || context.update.status === "failed") {
   const ready = ${JSON.stringify(path.join(root, "ready"))};
   fs.writeFileSync(ready + ".staging", JSON.stringify(context));
@@ -263,6 +334,9 @@ if (context.update.status === "rolled-back" || context.update.status === "failed
     ${schema === "wal-migration" ? 'db.exec("PRAGMA journal_mode=WAL");' : ""}
     db.exec("INSERT INTO receipts VALUES ('accepted')");
     ${schema === "after-commit" || schema === "wal-migration" ? migrate : schema === "unreadable" ? 'db.exec("DROP TABLE effect_sql_migrations");' : schema === "untracked-ddl" ? 'db.exec("CREATE TABLE untracked (id TEXT)");' : ""}
+    ${schema === "reverted-migration" ? "db.exec(\"INSERT INTO effect_sql_migrations VALUES (2, 'candidate'); CREATE TABLE candidate_data (id TEXT); DROP TABLE candidate_data; DELETE FROM effect_sql_migrations WHERE migration_id = 2\");" : ""}
+    ${schema === "same-count-schema" ? 'db.exec("ALTER TABLE receipts ADD COLUMN candidate TEXT");' : ""}
+    ${schema === "same-count-ledger" ? "db.exec(\"UPDATE effect_sql_migrations SET name = 'replacement' WHERE migration_id = 1\");" : ""}
     ${schema === "wal-migration" ? "" : "db.close();"}
     process.exit(42);
   });
@@ -285,6 +359,21 @@ if (context.update.status === "rolled-back" || context.update.status === "failed
             update: pending,
           }),
         );
+        // Ensure a failing assertion also cleans up every child spawned by this case.
+        if (orphans)
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              const file = path.join(root, "orphans");
+              if (!NodeFS.existsSync(file)) return;
+              for (const pid of NodeFS.readFileSync(file, "utf8").trim().split("\n").map(Number)) {
+                try {
+                  process.kill(pid, "SIGKILL");
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+                }
+              }
+            }),
+          );
         const ready = Promise.withResolvers<void>();
         yield* Effect.acquireRelease(
           Effect.sync(() =>
@@ -301,7 +390,7 @@ if (context.update.status === "rolled-back" || context.update.status === "failed
             (clock) => Effect.sync(() => clock.mockRestore()),
           );
         }
-        if (schema === "restart") {
+        if (schema === "restart" || schema === "orphan-restart") {
           const crashed = Promise.withResolvers<void>();
           yield* Effect.acquireRelease(
             Effect.sync(() =>
@@ -341,6 +430,26 @@ if (context.update.status === "rolled-back" || context.update.status === "failed
           () => Effect.promise(() => launcher.stop("SIGTERM")),
         );
         yield* Effect.promise(() => ready.promise);
+        if (orphans) {
+          const pids = (yield* fs.readFileString(path.join(root, "orphans")))
+            .trim()
+            .split("\n")
+            .map(Number);
+          assert.lengthOf(pids, 3);
+          for (const pid of pids) {
+            let stat: string | undefined;
+            try {
+              stat = NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8");
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            }
+            assert.isTrue(
+              stat === undefined || stat.split(") ").at(-1)!.startsWith("Z "),
+              `orphan ${pid} survived previous-runtime fallback`,
+            );
+          }
+          assert.deepEqual(NodeFS.readdirSync(processes), []);
+        }
         const state = yield* Effect.promise(() => readServiceState(statePath));
         assert.equal(state.activeVersion, compatible ? "1.0.0" : "1.1.0");
         assert.equal(state.update?.status, compatible ? "rolled-back" : "failed");
