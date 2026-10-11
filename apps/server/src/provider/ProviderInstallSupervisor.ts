@@ -49,8 +49,12 @@ const decodeReceipt = Schema.decodeSync(Schema.fromJsonString(Receipt));
 export const readReceipt = (file: string) => decodeReceipt(NodeFS.readFileSync(file, "utf8"));
 const writeReceipt = (file: string, receipt: InstallReceipt) => {
   const temp = `${file}.${process.pid}.tmp`;
-  NodeFS.writeFileSync(temp, JSON.stringify(receipt), { mode: 0o600 });
-  NodeFS.renameSync(temp, file);
+  try {
+    NodeFS.writeFileSync(temp, JSON.stringify(receipt), { mode: 0o600 });
+    NodeFS.renameSync(temp, file);
+  } finally {
+    NodeFS.rmSync(temp, { force: true });
+  }
 };
 
 type InstallInput = Pick<
@@ -78,6 +82,15 @@ const installError = (cause: unknown) =>
     message: cause instanceof Error ? cause.message : "Provider installer could not run.",
     cause,
   });
+
+const failedResult = (error: unknown) => ({
+  stdout: "",
+  stderr: error instanceof Error ? error.message : String(error),
+  exitCode: null,
+  timedOut: false,
+  stdoutTruncated: false,
+  stderrTruncated: false,
+});
 
 export class ProviderInstallSupervisor extends Context.Service<
   ProviderInstallSupervisor,
@@ -153,28 +166,17 @@ export const layer = Layer.effect(
       }
       return yield* host.handoff(
         Effect.gen(function* () {
-          let started = false;
           let progress: string | undefined;
           while (true) {
             const current = yield* readCurrent;
             if (current.result) return current.result;
-            if (current.pid !== undefined && !started) {
-              // Only acknowledge after the durable lease is visible. A server dying
-              // before this write cannot authorize a late installer to start.
-              yield* Effect.try(() =>
-                NodeFS.writeFileSync(`${file}.start`, receipt.id, { mode: 0o600 }),
-              );
-              started = true;
-            }
             if (current.progress && current.progress !== progress) {
               progress = current.progress;
               if (input.onProgress) yield* input.onProgress(progress);
             }
-            if (!started && (yield* Clock.currentTimeMillis) >= deadline)
-              return yield* Effect.fail(
-                new ProviderInstallError({ message: "Provider install supervisor did not start." }),
-              );
-            if (started && !(yield* Effect.sync(() => HostLock.installIsAlive(host.directory)))) {
+            if (!(yield* Effect.sync(() => HostLock.installIsAlive(host.directory)))) {
+              const finished = yield* readCurrent;
+              if (finished.result) return finished.result;
               return yield* Effect.fail(
                 new ProviderInstallError({
                   message: "Provider install supervisor exited without a result.",
@@ -184,6 +186,8 @@ export const layer = Layer.effect(
             yield* Effect.sleep("1 second");
           }
         }),
+        // Authorize immediately after stopping the server heartbeat, before cancellation can interrupt polling.
+        Effect.try(() => NodeFS.writeFileSync(`${file}.start`, receipt.id, { mode: 0o600 })),
       );
     }, Effect.mapError(installError));
     return ProviderInstallSupervisor.of({
@@ -209,32 +213,39 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
     );
     NodeFS.writeFileSync(`${file}.stdout`, "", { mode: 0o600 });
     NodeFS.writeFileSync(`${file}.stderr`, "", { mode: 0o600 });
-    const stdout = NodeFS.openSync(`${file}.stdout`, "a", 0o600);
-    const stderr = NodeFS.openSync(`${file}.stderr`, "a", 0o600);
-    const child = NodeChildProcess.spawn(
-      invocation.command,
-      [
-        ...selfInvocationArgs(invocation, [
-          "__provider-install",
-          file,
-          String(process.pid),
-          HostLock.readProcessIdentity(process.pid) ?? "",
-        ]),
-      ],
-      {
-        detached: true,
-        stdio: ["ignore", stdout, stderr],
-        windowsHide: true,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      },
-    );
-    NodeFS.closeSync(stdout);
-    NodeFS.closeSync(stderr);
-    await new Promise<void>((resolve, reject) => {
-      child.once("spawn", resolve);
-      child.once("error", reject);
-    });
-    child.unref();
+    const outputs: number[] = [];
+    try {
+      outputs.push(NodeFS.openSync(`${file}.stdout`, "a", 0o600));
+      outputs.push(NodeFS.openSync(`${file}.stderr`, "a", 0o600));
+      const child = NodeChildProcess.spawn(
+        invocation.command,
+        [
+          ...selfInvocationArgs(invocation, [
+            "__provider-install",
+            file,
+            String(process.pid),
+            HostLock.readProcessIdentity(process.pid) ?? "",
+          ]),
+        ],
+        {
+          detached: true,
+          stdio: ["ignore", outputs[0]!, outputs[1]!],
+          windowsHide: true,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        },
+      );
+      await new Promise<void>((resolve, reject) => {
+        child.once("spawn", resolve);
+        child.once("error", reject);
+      });
+      child.unref();
+    } finally {
+      try {
+        if (outputs[1] !== undefined) NodeFS.closeSync(outputs[1]);
+      } finally {
+        if (outputs[0] !== undefined) NodeFS.closeSync(outputs[0]);
+      }
+    }
     return;
   }
   let receipt = readReceipt(file);
@@ -244,16 +255,26 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
     await new Promise((resolve) => setTimeout(resolve, 25));
   const lease = HostLock.installLeasePath(receipt.directory);
   const candidate = `${lease}.${process.pid}`;
-  NodeFS.writeFileSync(
-    candidate,
-    JSON.stringify({ pid: process.pid, identity: HostLock.readProcessIdentity(process.pid) }),
-    { flag: "wx", mode: 0o600 },
-  );
+  const identity = HostLock.readProcessIdentity(process.pid);
+  const descendants: HostLock.InstallDescendants = new Map();
+  const job = `t3-provider-install-${NodeCrypto.randomUUID()}`;
+  let registered = false;
   try {
+    NodeFS.writeFileSync(candidate, JSON.stringify({ pid: process.pid, identity }), {
+      flag: "wx",
+      mode: 0o600,
+    });
     // A delayed relay must never overwrite an already running install's owner.
     NodeFS.linkSync(candidate, lease);
-  } finally {
+    registered = true;
     NodeFS.rmSync(candidate, { force: true });
+  } catch (error) {
+    try {
+      if (registered) NodeFS.rmSync(lease, { force: true });
+    } finally {
+      NodeFS.rmSync(candidate, { force: true });
+    }
+    throw error;
   }
   // Quit signals must never interrupt an install. SIGKILL still leaves the
   // process group in the lease, which other servers inspect before reclaiming.
@@ -278,7 +299,26 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
   };
   let heartbeat: NodeJS.Timeout | undefined;
   let ownsGate = false;
-  let installerFinished = false;
+  const childrenAreAlive = () =>
+    HostLock.installChildrenAreAlive(process.pid, identity, descendants, job);
+  const persistChildren = () => {
+    const temp = `${candidate}.tmp`;
+    try {
+      NodeFS.writeFileSync(
+        temp,
+        JSON.stringify({
+          pid: process.pid,
+          identity,
+          job,
+          descendants: Array.from(descendants, ([pid, identity]) => ({ pid, identity })),
+        }),
+        { mode: 0o600 },
+      );
+      NodeFS.renameSync(temp, lease);
+    } finally {
+      NodeFS.rmSync(temp, { force: true });
+    }
+  };
   const beat = (format: (line: string) => string | null) => {
     NodeFS.utimesSync(lease, new Date(), new Date());
     NodeFS.utimesSync(NodePath.join(receipt.directory, "gate.lock"), new Date(), new Date());
@@ -294,7 +334,10 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
       writeReceipt(file, receipt);
     }
   };
+  let result: ProviderMaintenanceCommandResult | undefined;
   try {
+    HostLock.createInstallJob(process.pid, job);
+    persistChildren();
     // Once readiness is durable the server or desktop can replace these files.
     // Load every installer dependency before allowing that handoff.
     const { runProviderMaintenanceCommandWithSpawner, toProgressLine } =
@@ -318,12 +361,18 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
     NodeFS.rmSync(`${file}.start`, { force: true });
     heartbeat = setInterval(() => {
       try {
+        childrenAreAlive();
+        persistChildren();
+      } catch {
+        // Retry failed observation/persistence while the supervisor keeps admission closed.
+      }
+      try {
         beat(toProgressLine);
       } catch {
         // The live PID/process group still holds admission when disk writes fail.
       }
     }, 1_000);
-    const result = await Effect.runPromise(
+    result = await Effect.runPromise(
       Effect.gen(function* () {
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         return yield* runProviderMaintenanceCommandWithSpawner({
@@ -335,47 +384,50 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
         });
       }).pipe(Effect.provide(NodeServices.layer)),
     );
-    while (HostLock.installChildrenAreAlive(process.pid))
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    installerFinished = true;
-    const stdout = output(".stdout");
-    const stderr = output(".stderr");
-    writeReceipt(file, {
-      ...receipt,
-      finishedAt: new Date().toISOString(),
-      result: {
-        ...result,
-        stdout: stdout.text,
-        stderr: stderr.text,
-        stdoutTruncated: stdout.truncated,
-        stderrTruncated: stderr.truncated,
-      },
-    });
   } catch (error) {
-    if (ownsGate) {
-      while (HostLock.installChildrenAreAlive(process.pid))
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      installerFinished = true;
-    }
-    writeReceipt(file, {
-      ...receipt,
-      finishedAt: new Date().toISOString(),
-      result: {
-        stdout: "",
-        stderr: error instanceof Error ? error.message : String(error),
-        exitCode: null,
-        timedOut: false,
-        stdoutTruncated: false,
-        stderrTruncated: false,
-      },
-    });
+    result = failedResult(error);
   } finally {
-    clearInterval(heartbeat);
-    if (ownsGate && installerFinished)
-      NodeFS.rmSync(NodePath.join(receipt.directory, "gate.lock"), {
-        recursive: true,
-        force: true,
-      });
-    if (!ownsGate || installerFinished) NodeFS.rmSync(lease, { force: true });
+    try {
+      if (ownsGate) {
+        while (true) {
+          try {
+            if (!childrenAreAlive()) break;
+          } catch {
+            // An unavailable process table cannot authorize admission.
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+      }
+      clearInterval(heartbeat);
+      if (result) {
+        if (result.exitCode !== null) {
+          try {
+            const stdout = output(".stdout");
+            const stderr = output(".stderr");
+            result = {
+              ...result,
+              stdout: stdout.text,
+              stderr: stderr.text,
+              stdoutTruncated: stdout.truncated,
+              stderrTruncated: stderr.truncated,
+            };
+          } catch (error) {
+            result = failedResult(error);
+          }
+        }
+        writeReceipt(file, { ...receipt, finishedAt: new Date().toISOString(), result });
+      }
+    } finally {
+      clearInterval(heartbeat);
+      try {
+        if (ownsGate)
+          NodeFS.rmSync(NodePath.join(receipt.directory, "gate.lock"), {
+            recursive: true,
+            force: true,
+          });
+      } finally {
+        NodeFS.rmSync(lease, { force: true });
+      }
+    }
   }
 }
