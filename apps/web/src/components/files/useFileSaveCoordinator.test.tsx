@@ -23,6 +23,8 @@ vi.mock("./projectFilesQueryState", () => ({
 
 import { setMarkdownTaskChecked } from "./filePreviewMode";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { reviewWorkspaceRevision } from "~/state/review";
 
 const environmentId = EnvironmentId.make("save-lifecycle-audit");
 const onPendingChange = vi.fn();
@@ -76,6 +78,8 @@ afterEach(async () => {
 
 describe("file-save React lifecycle", () => {
   it("persists editor model changes after StrictMode setup replay", async () => {
+    const revision = reviewWorkspaceRevision(environmentId, defaultProps.cwd);
+    const before = appAtomRegistry.get(revision);
     mount();
     changeHandler()("AUDIT7907NATIVE\n");
     expect(onPendingChange).toHaveBeenCalledWith("file.txt", true);
@@ -91,6 +95,7 @@ describe("file-save React lifecycle", () => {
       "AUDIT7907NATIVE\n",
     );
     expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", false);
+    expect(appAtomRegistry.get(revision)).toBe(before + 1);
   });
 
   it("persists rendered Markdown task changes after StrictMode setup replay", async () => {
