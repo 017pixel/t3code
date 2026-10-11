@@ -9,6 +9,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
 import * as NodeSqlite from "node:sqlite";
 
 import type {
@@ -30,6 +31,8 @@ import {
   SERVICE_RESTART_PENDING_FILE,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
+
+import * as OwnedProcesses from "./process/ownedProcesses.ts";
 
 const HANDOFF_DELAY_MS = 2_000;
 const PREPARED_TIMEOUT_MS = 120_000;
@@ -492,8 +495,28 @@ export class Launcher {
     }
   }
 
+  async #reapProviders(): Promise<void> {
+    await OwnedProcesses.make({
+      stateDir: NodePath.join(this.#baseDir, "userdata"),
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+      platform: process.platform,
+      environment: process.env,
+      hostname: NodeOS.hostname(),
+      installLeaseDirectory: NodePath.join(
+        process.env.XDG_CACHE_HOME || NodePath.join(NodeOS.homedir(), ".cache"),
+        "t3",
+        "provider-maintenance",
+      ),
+    }).catch(() => {
+      // Never let cleanup stop the launcher. A newer child repeats it and a
+      // failing child stays in crash-loop recovery, which keeps the service up.
+    });
+  }
+
   async #startChild(version: string, role: ChildRole, update?: ServiceUpdateRecord): Promise<void> {
     if (this.#stopping) return;
+    // The previous runtime may predate reaping, including after a launcher restart.
+    await this.#reapProviders();
     if (!(await runtimeExists(this.#baseDir, version))) {
       throw new Error(`Selected t3@${version} runtime is missing or incomplete.`);
     }
@@ -772,6 +795,7 @@ export class Launcher {
       this.#child = null;
       await terminateChild(child.process);
     }
+    await this.#reapProviders();
     await restoreDatabaseBackup(this.#baseDir, pending);
     const outcome = terminalUpdate({ pending, status, reason });
     const { rollback: _rollback, ...state } = this.#state;

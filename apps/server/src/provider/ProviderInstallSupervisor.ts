@@ -264,6 +264,7 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
   };
   let heartbeat: NodeJS.Timeout | undefined;
   let ownsGate = false;
+  let installerFinished = false;
   const beat = (format: (line: string) => string | null) => {
     NodeFS.utimesSync(lease, new Date(), new Date());
     NodeFS.utimesSync(NodePath.join(receipt.directory, "gate.lock"), new Date(), new Date());
@@ -278,6 +279,11 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
     }
   };
   try {
+    // Once readiness is durable the server or desktop can replace these files.
+    // Load every installer dependency before allowing that handoff.
+    const { runProviderMaintenanceCommandWithSpawner, toProgressLine } =
+      await import("./providerMaintenanceRunner.ts");
+    const { ChildProcessSpawner } = await import("effect/process");
     receipt = { ...receipt, pid: process.pid };
     writeReceipt(file, receipt);
     const deadline = Date.now() + 30_000;
@@ -291,12 +297,15 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
       throw new Error("Provider install receipt replaced");
     ownsGate = true;
     NodeFS.rmSync(`${file}.start`, { force: true });
-    const { runProviderMaintenanceCommandWithSpawner, toProgressLine } =
-      await import("./providerMaintenanceRunner.ts");
-    heartbeat = setInterval(() => beat(toProgressLine), 1_000);
+    heartbeat = setInterval(() => {
+      try {
+        beat(toProgressLine);
+      } catch {
+        // The live PID/process group still holds admission when disk writes fail.
+      }
+    }, 1_000);
     const result = await Effect.runPromise(
       Effect.gen(function* () {
-        const { ChildProcessSpawner } = yield* Effect.promise(() => import("effect/process"));
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         return yield* runProviderMaintenanceCommandWithSpawner({
           spawner,
@@ -307,6 +316,9 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
         });
       }).pipe(Effect.provide(NodeServices.layer)),
     );
+    while (HostLock.installChildrenAreAlive(process.pid))
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    installerFinished = true;
     const stdout = output(".stdout");
     const stderr = output(".stderr");
     writeReceipt(file, {
@@ -321,6 +333,11 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
       },
     });
   } catch (error) {
+    if (ownsGate) {
+      while (HostLock.installChildrenAreAlive(process.pid))
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      installerFinished = true;
+    }
     writeReceipt(file, {
       ...receipt,
       finishedAt: new Date().toISOString(),
@@ -335,11 +352,11 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
     });
   } finally {
     clearInterval(heartbeat);
-    if (ownsGate)
+    if (ownsGate && installerFinished)
       NodeFS.rmSync(NodePath.join(receipt.directory, "gate.lock"), {
         recursive: true,
         force: true,
       });
-    NodeFS.rmSync(lease, { force: true });
+    if (!ownsGate || installerFinished) NodeFS.rmSync(lease, { force: true });
   }
 }
