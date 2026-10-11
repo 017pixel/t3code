@@ -1,22 +1,35 @@
 import type { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import { cacheInOwnerScope } from "@t3tools/shared/lazyService";
 import * as Effect from "effect/Effect";
-import * as Scope from "effect/Scope";
-import * as Fiber from "effect/Fiber";
+import { ProviderAdapterDriverCreateError } from "./adapterDriver.ts";
 import * as ProviderAdapter from "./ProviderAdapter.ts";
 
-/** Keep construction in the instance scope while sharing it across concurrent first uses. */
+/**
+ * Keep construction in the instance scope while sharing it across concurrent
+ * first uses. A failed construction, including a failed import of the
+ * adapter's module, surfaces as the method's typed error and is retried on
+ * the next use.
+ */
 export const makeLazyAdapter = <E, R>(
   instanceId: ProviderInstanceId,
   driver: ProviderDriverKind,
   make: Effect.Effect<ProviderAdapter.ProviderAdapterV2["Service"], E, R>,
 ) =>
   Effect.gen(function* () {
-    const context = yield* Effect.context<R | Scope.Scope>();
-    const scope = yield* Scope.Scope;
-    const fiber = yield* Effect.cached(
-      make.pipe(Effect.provideContext(context), Effect.forkIn(scope)),
+    const adapter = yield* cacheInOwnerScope(
+      make.pipe(
+        Effect.catchDefect((cause) =>
+          Effect.fail(
+            new ProviderAdapterDriverCreateError({
+              driver,
+              instanceId,
+              detail: "The adapter could not load.",
+              cause,
+            }),
+          ),
+        ),
+      ),
     );
-    const adapter = fiber.pipe(Effect.flatMap(Fiber.join));
     return ProviderAdapter.ProviderAdapterV2.of({
       instanceId,
       driver,

@@ -1,6 +1,7 @@
 import * as Exit from "effect/Exit";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ProviderAdapter from "./ProviderAdapter.ts";
+import { ProviderAdapterDriverCreateError } from "./adapterDriver.ts";
 import { makeLazyAdapter } from "./lazyAdapter.ts";
 import { describe, it, assert } from "@effect/vitest";
 import {
@@ -17,6 +18,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -797,4 +799,52 @@ it.effect(
       );
       assert.equal(finalized, 1);
     }),
+);
+
+const isDriverCreateError = Schema.is(ProviderAdapterDriverCreateError);
+
+it.effect("retries a lazy adapter whose construction or module import failed", () =>
+  Effect.gen(function* () {
+    let attempts = 0;
+    const driver = ProviderDriverKind.make("codex");
+    const adapter = yield* makeLazyAdapter(
+      ProviderInstanceId.make("lazy"),
+      driver,
+      Effect.suspend(() => {
+        attempts++;
+        // An upgrade replaced the adapter's chunk under the running server.
+        if (attempts === 1) return Effect.die(new Error("Cannot find module 'adapter-old.mjs'"));
+        if (attempts === 2) return Effect.fail("shadow home unavailable");
+        return Effect.succeed(
+          ProviderAdapter.ProviderAdapterV2.of({
+            instanceId: ProviderInstanceId.make("lazy"),
+            driver,
+            getCapabilities: () =>
+              Effect.fail(
+                new ProviderAdapter.ProviderAdapterCapabilitiesError({
+                  driver,
+                  cause: "from the adapter",
+                }),
+              ),
+            planSelectionTransition: () => Effect.die("unused"),
+            openSession: () => Effect.die("unused"),
+          }),
+        );
+      }),
+    );
+    const missingModule = yield* adapter.getCapabilities().pipe(Effect.flip);
+    assert.strictEqual(missingModule._tag, "ProviderAdapterCapabilitiesError");
+    const loadError = missingModule.cause;
+    if (!isDriverCreateError(loadError)) {
+      return assert.fail("Expected the failed import as a ProviderAdapterDriverCreateError");
+    }
+    assert.include(String(loadError.cause), "Cannot find module");
+    const failed = yield* adapter.getCapabilities().pipe(Effect.flip);
+    assert.strictEqual(failed.cause, "shadow home unavailable");
+    for (let call = 0; call < 2; call++) {
+      const built = yield* adapter.getCapabilities().pipe(Effect.flip);
+      assert.strictEqual(built.cause, "from the adapter");
+    }
+    assert.equal(attempts, 3);
+  }).pipe(Effect.scoped),
 );
