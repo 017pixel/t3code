@@ -16,7 +16,6 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -43,7 +42,6 @@ import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStr
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 
 const UPDATE_FORCE_KILL_AFTER = Duration.seconds(1);
-const UPDATE_SHUTDOWN_DRAIN = Duration.seconds(3);
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
 // Every progress publish resends the provider list to each client, so the
 // installer's output is sampled rather than forwarded line by line.
@@ -136,20 +134,6 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
                 }),
             ),
           );
-        yield* Effect.addFinalizer(() =>
-          // Give an interrupted installer time to finish its current writes before
-          // terminating it, within the desktop backend's five-second quit budget.
-          child.exitCode.pipe(
-            Effect.timeoutOption(UPDATE_SHUTDOWN_DRAIN),
-            Effect.orElseSucceed(() => Option.none()),
-            Effect.flatMap((exit) =>
-              Option.isSome(exit)
-                ? Effect.void
-                : child.kill({ forceKillAfter: UPDATE_FORCE_KILL_AFTER }).pipe(Effect.ignore),
-            ),
-          ),
-        );
-
         // Holds the newest output line not yet reported; the sampler takes it.
         const pendingProgress = yield* Ref.make<string | null>(null);
         const onProgress = input.onProgress;

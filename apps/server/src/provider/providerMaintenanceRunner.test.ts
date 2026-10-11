@@ -724,57 +724,6 @@ describe("providerMaintenanceRunner", () => {
     ),
   );
 
-  it.effect.each([true, false])(
-    "drains an interrupted installer before killing it (finishes: %s)",
-    (finishes) =>
-      Effect.gen(function* () {
-        const started = yield* Deferred.make<void>();
-        const finished = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
-        const draining = yield* Deferred.make<void>();
-        let killed = false;
-        let exitReads = 0;
-        const spawner = Layer.succeed(
-          ChildProcessSpawner.ChildProcessSpawner,
-          ChildProcessSpawner.make(() =>
-            Effect.sync(() => ({
-              ...mockHandle({}),
-              exitCode: Effect.suspend(() => {
-                exitReads++;
-                return Deferred.succeed(exitReads === 1 ? started : draining, undefined).pipe(
-                  Effect.andThen(Deferred.await(finished)),
-                );
-              }),
-              kill: () =>
-                Effect.sync(() => {
-                  killed = true;
-                }).pipe(Effect.andThen(Deferred.succeed(draining, undefined)), Effect.asVoid),
-            })),
-          ),
-        );
-        const { registry } = yield* makeRegistry(baseNativeCliProvider);
-        yield* Effect.gen(function* () {
-          const runner = yield* makeTestRunner(registry);
-          const install = yield* runner.updateProvider(NATIVE_CLI_DRIVER).pipe(Effect.forkChild);
-          yield* Deferred.await(started);
-          const interrupted = yield* Fiber.interrupt(install).pipe(Effect.forkChild);
-          yield* Deferred.await(draining);
-          assert.isFalse(killed);
-          if (finishes) yield* Deferred.succeed(finished, ChildProcessSpawner.ExitCode(0));
-          else yield* TestClock.adjust(Duration.seconds(3));
-          yield* Fiber.join(interrupted);
-          assert.equal(killed, !finishes);
-        }).pipe(Effect.provide(spawner));
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            TestClock.layer(),
-            layerNonWindowsPlatform,
-            layerLatestVersionHttpClient("1.0.0"),
-          ),
-        ),
-      ),
-  );
-
   it.effect("does not time out or kill an installer still writing after five minutes", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
