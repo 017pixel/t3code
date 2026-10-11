@@ -31,6 +31,7 @@ import {
   derivePhase,
   findLatestProposedPlan,
   isLatestRunSettled,
+  isStreamingProjectionTextUpdate,
   selectHandoffImageResources,
   selectMessageImageResources,
   createMessageAttachmentPreviewProjector,
@@ -1416,6 +1417,46 @@ describe("work-log failure policy (#7999/#7893)", () => {
 });
 
 describe("incremental v2 timeline entries", () => {
+  it("keeps token text in its row and exposes completion, metadata, and control changes", () => {
+    const fixture = makeStreamingTimelineFixture("Partial");
+    const rows = fixture.visibleTurnItems;
+    const last = rows.at(-1)!;
+    if (last.item.type !== "assistant_message") throw new Error("Expected assistant fixture");
+    const before = {
+      ...makeThreadProjectionFixture(),
+      turnItems: rows.map((row) => row.item),
+      visibleTurnItems: rows,
+    };
+    const token = {
+      ...last,
+      item: { ...last.item, text: "Next token", updatedAt: DateTime.makeUnsafe(fixture.time(8)) },
+    };
+    const after = {
+      ...before,
+      turnItems: [...before.turnItems.slice(0, -1), token.item],
+      visibleTurnItems: [...rows.slice(0, -1), token],
+    };
+    expect(isStreamingProjectionTextUpdate(before, after)).toBe(true);
+    for (const changed of [
+      { ...token, item: { ...token.item, streaming: false } },
+      { ...token, item: { ...token.item, runId: fixture.historyRunId } },
+      { ...token, sourceThreadId: ThreadId.make("inherited") },
+    ]) {
+      expect(
+        isStreamingProjectionTextUpdate(before, {
+          ...after,
+          turnItems: [...before.turnItems.slice(0, -1), changed.item],
+          visibleTurnItems: [...rows.slice(0, -1), changed],
+        }),
+      ).toBe(false);
+    }
+    expect(isStreamingProjectionTextUpdate(before, { ...after, runs: [...before.runs] })).toBe(
+      false,
+    );
+    expect(
+      isStreamingProjectionTextUpdate(before, { ...after, visibleTurnItems: rows.slice(1) }),
+    ).toBe(false);
+  });
   it("retains history and attachment previews through decoded streaming updates", () => {
     const fixture = makeStreamingTimelineFixture("Partial");
     const attachment = {

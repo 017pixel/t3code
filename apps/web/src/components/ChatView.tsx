@@ -434,15 +434,14 @@ import {
   useEnvironmentShellBootstrapped,
   useProject,
   useProjects,
-  useThreadProjection,
   useThreadStatus,
   useThreadHistory,
   useThreadShell,
   useChildThreadInputs,
   useThreadRefs,
-  useThreadVisibleTurnItems,
   waitForThreadShell,
 } from "../state/entities";
+import { useChatThreadPresentation } from "../hooks/useChatThreadPresentation";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
 import { isTimelineScrollTarget } from "./chat/timelineScrollTarget";
@@ -1825,8 +1824,9 @@ export default function ChatView(props: ChatViewProps) {
     shellExists: serverThread !== null,
     waitForShell: draftThread !== null,
   });
-  const serverThreadProjection = useThreadProjection(routeThreadDetailRef);
-  const serverProjection = serverThreadProjection?.projection ?? null;
+  const [isThreadFindActive, setIsThreadFindActive] = useState(false);
+  const { projection: serverProjection, visibleTurnItems: serverVisibleTurnItems } =
+    useChatThreadPresentation(routeThreadDetailRef, isThreadFindActive);
   const reportedModelSelection = serverProjection
     ? deriveReportedModelSelection(serverProjection)
     : null;
@@ -1843,7 +1843,6 @@ export default function ChatView(props: ChatViewProps) {
     () => latestProviderTurnTokenUsage(serverProjection?.providerTurns ?? []),
     [serverProjection?.providerTurns],
   );
-  const serverVisibleTurnItems = useThreadVisibleTurnItems(routeThreadDetailRef);
   const serverThreadHistory = useThreadHistory(routeThreadDetailRef);
   const threadHistoryControls = useMemo<MessagesTimelineHistoryControls | undefined>(() => {
     if (routeThreadDetailRef === null || !shouldShowLoadEarlierControl(serverThreadHistory)) {
@@ -8166,7 +8165,6 @@ export default function ChatView(props: ChatViewProps) {
     ? resolveProviderSkillsForCwd(activeProviderStatus, gitCwd)
     : EMPTY_PROVIDER_SKILLS;
   const threadFindControlsRef = useRef<ThreadFindControls | null>(null);
-  const [isThreadFindActive, setIsThreadFindActive] = useState(false);
   const openThreadFind = useCallback(() => threadFindControlsRef.current?.open(), []);
   const closeThreadFind = useCallback(() => threadFindControlsRef.current?.close(), []);
 

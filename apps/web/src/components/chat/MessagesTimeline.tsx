@@ -37,6 +37,7 @@ import {
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { environmentThreadDetails } from "../../state/threads";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
@@ -778,6 +779,26 @@ const ConversationTimeline = memo(function ConversationTimeline({
     const disclosureAnchorKey = disclosureAnchorKeyRef.current;
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   }, []);
+
+  useEffect(() => {
+    if (!historyControls?.hasMoreHistory || historyControls.loading || historyControls.error)
+      return;
+    // A row window can start inside a folded turn. Hydrate its missing activity
+    // only when the reader opens it, stopping once its user message is present.
+    for (const runId of paintedExpandedRunIds) {
+      if (
+        !timelineEntries.some(
+          (entry) =>
+            entry.kind === "message" &&
+            entry.message.role === "user" &&
+            entry.message.runId === runId,
+        )
+      ) {
+        historyControls.onLoadEarlier(runId);
+        break;
+      }
+    }
+  }, [historyControls, paintedExpandedRunIds, timelineEntries]);
 
   const onToggleTurnFold = useCallback(
     (runId: RunId) => {
@@ -2800,7 +2821,8 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
 
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const message = useStreamingFrameMessage(row.message, ctx.threadRef);
+  const messageText = message.text || (message.streaming ? "" : "(empty response)");
 
   return (
     <>
@@ -2818,7 +2840,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
               text={messageText}
               cwd={ctx.markdownCwd}
               threadRef={ctx.threadRef ?? undefined}
-              isStreaming={Boolean(row.message.streaming)}
+              isStreaming={Boolean(message.streaming)}
               lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
               skills={ctx.skills}
               headingLevelOffset={MESSAGE_HEADING_LEVEL}
@@ -2838,7 +2860,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           <AssistantMessageMeta
             className="mt-1.5"
             projectedItem={row.projectedItem}
-            message={row.message}
+            message={message}
             showCopyButton={row.showAssistantCopyButton}
             copyStreaming={row.assistantCopyStreaming}
           />
@@ -2846,6 +2868,47 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       </div>
     </>
   );
+}
+
+/** Coalesce markdown work for token bursts, and show the final text immediately. */
+function useStreamingFrameMessage(
+  message: ChatMessage,
+  threadRef: ScopedThreadRef | null,
+): ChatMessage {
+  const [painted, setPainted] = useState(message);
+  useEffect(() => {
+    if (!message.streaming || threadRef === null) return;
+    const atom = environmentThreadDetails.visibleTurnItemsAtom(threadRef);
+    let frame: number | undefined;
+    const paint = () => {
+      const item = appAtomRegistry
+        .get(atom)
+        .find(
+          (row) => row.item.type === "assistant_message" && row.item.messageId === message.id,
+        )?.item;
+      if (item?.type === "assistant_message") {
+        setPainted({
+          ...message,
+          text: item.text,
+          updatedAt: DateTime.formatIso(item.updatedAt),
+          streaming: item.streaming,
+        });
+      }
+    };
+    const unsubscribe = appAtomRegistry.subscribe(atom, () => {
+      if (frame !== undefined) return;
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        paint();
+      });
+    });
+    paint();
+    return () => {
+      unsubscribe();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
+  }, [message, threadRef]);
+  return message.streaming && painted.id === message.id ? painted : message;
 }
 
 function AssistantForkButton({
