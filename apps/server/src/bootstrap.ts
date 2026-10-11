@@ -150,6 +150,41 @@ const isUnavailableBootstrapFdError = Predicate.compose(
   (_) => _.code === "EBADF" || _.code === "ENOENT",
 );
 
+/**
+ * Chromium leaves descriptors without close-on-exec set in Electron's Node
+ * children. Node opens its own descriptors with close-on-exec; only the
+ * bootstrap's explicit channels and stdio should survive from the desktop.
+ * Run after reading the envelope, before services or the spawn host start.
+ */
+export const closeInheritedElectronDescriptors = Effect.fn("closeInheritedElectronDescriptors")(
+  function* (preservedFds: ReadonlyArray<number | undefined>) {
+    const platform = yield* HostProcess.Platform;
+    const environment = yield* HostProcess.Environment;
+    if (platform !== "linux" || environment.ELECTRON_RUN_AS_NODE !== "1") return;
+    const preserved = new Set([0, 1, 2, ...preservedFds]);
+    yield* Effect.sync(() => {
+      let descriptors: string[];
+      try {
+        descriptors = NodeFS.readdirSync("/proc/self/fd");
+      } catch {
+        return;
+      }
+      for (const descriptor of descriptors) {
+        const fd = Number(descriptor);
+        if (preserved.has(fd)) continue;
+        try {
+          const info = NodeFS.readFileSync(`/proc/self/fdinfo/${fd}`, "utf8");
+          const flags = /^flags:\s+([0-7]+)$/m.exec(info)?.[1];
+          if (flags === undefined || (Number.parseInt(flags, 8) & 0o2000000) !== 0) continue;
+          NodeFS.closeSync(fd);
+        } catch {
+          // A descriptor may already have closed; unavailable procfs is harmless.
+        }
+      }
+    });
+  },
+);
+
 const isFdReady = (fd: number) =>
   Effect.try({
     try: () => NodeFS.fstatSync(fd),

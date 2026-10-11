@@ -56,6 +56,58 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const windowsHost = HostProcess.Platform.defaultValue() === "win32";
+
+it.effect(
+  "closes inherited Electron descriptors while preserving explicit channels and Node fds",
+  () =>
+    Effect.gen(function* () {
+      if ((yield* HostProcess.Platform) !== "linux") return;
+      for (const [platform, electron, closesInherited] of [
+        ["linux", "1", true],
+        ["linux", "", false],
+        ["darwin", "1", false],
+      ] as const) {
+        const script = `
+        import * as fs from 'node:fs';
+        import * as Effect from ${JSON.stringify(import.meta.resolve("effect/Effect"))};
+        import * as HostProcess from ${JSON.stringify(import.meta.resolve("@t3tools/shared/HostProcess"))};
+        import { closeInheritedElectronDescriptors } from ${JSON.stringify(new URL("./bootstrap.ts", import.meta.url).href)};
+        const ownFd = fs.openSync('/dev/null', 'r');
+        await Effect.runPromise(closeInheritedElectronDescriptors([3]).pipe(
+          Effect.provideService(HostProcess.Platform, ${JSON.stringify(platform)}),
+          Effect.provideService(HostProcess.Environment, { ELECTRON_RUN_AS_NODE: ${JSON.stringify(electron)} }),
+        ));
+        let inheritedClosed = false;
+        try { fs.fstatSync(64); } catch (error) { inheritedClosed = error.code === 'EBADF'; }
+        fs.fstatSync(ownFd);
+        fs.writeSync(3, 'preserved');
+        console.log(inheritedClosed);
+      `;
+        const result = yield* Effect.sync(() =>
+          NodeChildProcess.spawnSync(
+            "bash",
+            [
+              "-c",
+              'exec 64</dev/null; exec "$@"',
+              "bash",
+              HostProcess.ExecutablePath.defaultValue(),
+              "--input-type=module",
+              "-e",
+              script,
+            ],
+            {
+              stdio: ["ignore", "pipe", "pipe", "pipe"],
+              encoding: "utf8",
+            },
+          ),
+        );
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stdout.trim(), String(closesInherited));
+        assert.equal(result.output[3], "preserved");
+      }
+    }),
+);
+
 const nullDevice = windowsHost ? "\\\\.\\NUL" : "/dev/null";
 const closeIfOpen = (fd: number) => {
   try {
