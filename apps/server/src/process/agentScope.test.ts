@@ -255,49 +255,74 @@ describe("provider process restart ownership", () => {
     ),
   );
 
-  it.effect("keeps the server responsive while a Windows process query is pending", () =>
-    scenario(({ directory, processes }) =>
-      Effect.gen(function* () {
-        const started = NodePath.join(directory, "query-started");
-        const released = NodePath.join(directory, "query-release");
-        const executable = NodePath.join(directory, "powershell.exe");
-        // Stand in for CIM with a real child blocked on the server's acknowledgement.
-        NodeFS.writeFileSync(
-          executable,
-          `#!${process.execPath}
+  it.effect.each(["table", "job"] as const)(
+    "keeps the server responsive while a Windows %s query is pending",
+    (query) =>
+      scenario(({ directory, processes, controller }) =>
+        Effect.gen(function* () {
+          const started = NodePath.join(directory, "query-started");
+          const released = NodePath.join(directory, "query-release");
+          const executable = NodePath.join(directory, "powershell.exe");
+          const leases = NodePath.join(directory, "leases");
+          if (query === "job") {
+            processes.set(71, {
+              pid: 71,
+              ppid: 20,
+              pgid: 0,
+              startTime: "installer",
+              zombie: false,
+            });
+            yield* record(directory, controller);
+            processes.delete(10);
+            processes.set(71, { ...processes.get(71)!, ppid: 1 });
+            NodeFS.mkdirSync(leases);
+            NodeFS.writeFileSync(
+              NodePath.join(leases, "install.json"),
+              JSON.stringify({ pid: 70, job: "t3-provider-install-abcd", descendants: [] }),
+            );
+          }
+          // Stand in for CIM with a real child blocked on the server's acknowledgement.
+          NodeFS.writeFileSync(
+            executable,
+            `#!${process.execPath}
 const fs = require("node:fs");
+if (${JSON.stringify(query)} === "job" && !process.argv.some(arg => arg.includes("T3InstallJob"))) {
+  process.stdout.write(${JSON.stringify(JSON.stringify([...processes.values()]))});
+  process.exit(0);
+}
 const finish = () => {
   if (!fs.existsSync(${JSON.stringify(released)})) return;
-  process.stdout.write(${JSON.stringify(JSON.stringify([...processes.values()]))});
+  process.stdout.write(${JSON.stringify(query === "job" ? "71\n" : JSON.stringify([...processes.values()]))});
   watcher.close();
 };
 const watcher = fs.watch(${JSON.stringify(directory)}, finish);
 fs.writeFileSync(${JSON.stringify(started)}, "queried");
 finish();
 `,
-          { mode: 0o700 },
-        );
-        const queried = Promise.withResolvers<void>();
-        const watcher = NodeFS.watch(directory, () => {
-          if (NodeFS.existsSync(started)) queried.resolve();
-        });
-        vi.stubEnv("PATH", `${directory}${NodePath.delimiter}${process.env.PATH ?? ""}`);
-        try {
-          const fiber = yield* ProviderProcessLedger.make({
-            stateDir: directory,
-            ownerPid: 10,
-          }).pipe(Effect.provideService(HostProcess.Platform, "win32"), Effect.forkScoped);
-          yield* Effect.promise(() => queried.promise);
-          // The server must be able to acknowledge the query before it returns.
-          NodeFS.writeFileSync(released, "responsive");
-          yield* Fiber.join(fiber);
-          expect(NodeFS.readFileSync(released, "utf8")).toBe("responsive");
-        } finally {
-          watcher.close();
-          vi.unstubAllEnvs();
-        }
-      }).pipe(Effect.scoped),
-    ),
+            { mode: 0o700 },
+          );
+          const queried = Promise.withResolvers<void>();
+          const watcher = NodeFS.watch(directory, () => {
+            if (NodeFS.existsSync(started)) queried.resolve();
+          });
+          vi.stubEnv("PATH", `${directory}${NodePath.delimiter}${process.env.PATH ?? ""}`);
+          try {
+            const fiber = yield* ProviderProcessLedger.make({
+              stateDir: directory,
+              ownerPid: query === "job" ? 90 : 10,
+              ...(query === "job" ? { controller, installLeaseDirectory: leases } : {}),
+            }).pipe(Effect.provideService(HostProcess.Platform, "win32"), Effect.forkScoped);
+            yield* Effect.promise(() => queried.promise);
+            // The server must be able to acknowledge the query before it returns.
+            NodeFS.writeFileSync(released, "responsive");
+            yield* Fiber.join(fiber);
+            expect(NodeFS.readFileSync(released, "utf8")).toBe("responsive");
+          } finally {
+            watcher.close();
+            vi.unstubAllEnvs();
+          }
+        }).pipe(Effect.scoped),
+      ),
   );
 
   it.effect("reaps an orphan provider and its forked children before exposing the spawn hook", () =>
@@ -472,30 +497,111 @@ finish();
         }),
       ),
   );
-  it.effect("never stops a nested server's install supervisor or its installer", () =>
-    scenario(({ directory, processes, signals, controller }) =>
-      Effect.gen(function* () {
-        // A server launched from the provider started an install that outlives it.
-        processes.set(70, { pid: 70, ppid: 20, pgid: 70, startTime: "supervisor", zombie: false });
-        processes.set(71, { pid: 71, ppid: 70, pgid: 70, startTime: "installer", zombie: false });
-        yield* record(directory, controller);
-        processes.delete(10);
-        processes.set(70, { ...processes.get(70)!, ppid: 1 });
-        const leases = NodePath.join(directory, "leases");
-        NodeFS.mkdirSync(leases);
-        NodeFS.writeFileSync(NodePath.join(leases, "install.json"), "70");
-        yield* ProviderProcessLedger.make({
-          stateDir: directory,
-          ownerPid: 90,
-          controller,
-          installLeaseDirectory: leases,
-        }).pipe(Effect.scoped);
-        expect(processes.has(20)).toBe(false);
-        expect(processes.has(70)).toBe(true);
-        expect(processes.has(71)).toBe(true);
-        expect(signals.some((s) => /^(70|71):/.test(s))).toBe(false);
-      }),
-    ),
+  it.effect.each([
+    { platform: "linux", lease: "legacy" },
+    { platform: "win32", lease: "legacy" },
+    { platform: "linux", lease: "structured" },
+    { platform: "win32", lease: "structured" },
+    { platform: "linux", lease: "orphan" },
+    { platform: "win32", lease: "orphan" },
+    { platform: "linux", lease: "reused" },
+    { platform: "win32", lease: "reused" },
+    { platform: "linux", lease: "root-reused" },
+    { platform: "win32", lease: "root-reused" },
+    { platform: "linux", lease: "group" },
+    { platform: "win32", lease: "job" },
+    { platform: "win32", lease: "job-failed" },
+  ] as const)(
+    "protects a nested installer on $platform with a $lease lease",
+    ({ platform, lease }) =>
+      scenario(({ directory, processes, signals, controller }) =>
+        Effect.gen(function* () {
+          // A server launched from the provider started an install that outlives it.
+          const childIdentity = platform === "win32" ? "2026-10-11T20:00:00.1234567Z" : "boot:123";
+          const childStart = platform === "win32" ? "639273456001234567" : childIdentity;
+          const rootReused = lease === "root-reused";
+          processes.set(70, {
+            pid: 70,
+            ppid: 20,
+            pgid: 70,
+            startTime: rootReused ? "replacement" : "supervisor",
+            zombie: false,
+          });
+          const reused = lease === "reused" || rootReused;
+          processes.set(71, {
+            pid: 71,
+            ppid: 70,
+            pgid: 70,
+            startTime: reused
+              ? platform === "win32"
+                ? "639273456001234568"
+                : "replacement"
+              : childStart,
+            zombie: false,
+          });
+          if (platform === "win32")
+            for (const [pid, p] of processes) processes.set(pid, { ...p, pgid: 0 });
+          yield* record(directory, controller);
+          processes.delete(10);
+          processes.set(70, { ...processes.get(70)!, ppid: 1 });
+          const job = lease === "job" || lease === "job-failed";
+          const orphan = lease === "orphan" || lease === "reused" || lease === "group" || job;
+          if (orphan) {
+            processes.delete(70);
+            processes.set(71, {
+              ...processes.get(71)!,
+              ppid: 1,
+              pgid: platform === "win32" ? 0 : lease === "group" ? 70 : 71,
+            });
+          }
+          const leases = NodePath.join(directory, "leases");
+          NodeFS.mkdirSync(leases);
+          NodeFS.writeFileSync(
+            NodePath.join(leases, "install.json"),
+            lease === "legacy"
+              ? "70"
+              : JSON.stringify({
+                  pid: 70,
+                  identity: "supervisor",
+                  ...(job ? { job: "t3-provider-install-abcd" } : {}),
+                  descendants:
+                    job || rootReused || lease === "group"
+                      ? []
+                      : [{ pid: 71, identity: childIdentity }],
+                }),
+          );
+          if (job)
+            NodeFS.writeFileSync(
+              NodePath.join(directory, "powershell.exe"),
+              `#!${process.execPath}\nprocess.stdout.write("71\\n"); process.exit(${lease === "job-failed" ? 1 : 0});\n`,
+              { mode: 0o700 },
+            );
+          const result = yield* ProviderProcessLedger.make({
+            stateDir: directory,
+            ownerPid: 90,
+            controller,
+            installLeaseDirectory: leases,
+          }).pipe(
+            Effect.provideService(HostProcess.Platform, platform),
+            Effect.provideService(HostProcess.Environment, {
+              ...process.env,
+              PATH: `${directory}${NodePath.delimiter}${process.env.PATH ?? ""}`,
+            }),
+            Effect.scoped,
+            Effect.exit,
+          );
+          expect(result._tag).toBe(lease === "job-failed" ? "Failure" : "Success");
+          if (lease === "job-failed") {
+            expect(signals).toEqual([]);
+            return;
+          }
+          expect(processes.has(20)).toBe(false);
+          expect(processes.has(70)).toBe(!orphan && !rootReused);
+          expect(processes.has(71)).toBe(!reused);
+          if (reused) expect(signals).toContain("71:SIGKILL");
+          else expect(signals.some((s) => /^(70|71):/.test(s))).toBe(false);
+        }),
+      ),
   );
   it.effect.each(["empty", "corrupt", "unreadable"] as const)(
     "refuses orphan cleanup when the install lease is %s",

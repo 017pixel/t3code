@@ -15,6 +15,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
 import * as Maintenance from "@t3tools/provider-core/server/maintenance";
+import * as WindowsInstallJob from "../process/windowsInstallJob.ts";
 
 const HeldWrite = Context.Reference<{ readonly owner: object; active: boolean } | null>(
   "t3/provider/ProviderMaintenanceHostLock/HeldWrite",
@@ -108,43 +109,6 @@ export const isProcessAlive = (pid: number, identity?: string | null, observed?:
 
 // A named Windows job retains every descendant in the kernel, even when a
 // short-lived parent exits between observations or the supervisor is killed.
-const windowsJobApi = `
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-public static class T3InstallJob {
-  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
-  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
-  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
-  [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-  [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int kind, IntPtr info, uint size, IntPtr returned);
-  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
-  public static int[] Processes(string name, int pid, bool create) {
-    IntPtr job = create ? CreateJobObject(IntPtr.Zero, name) : OpenJobObject(4, false, name);
-    if (job == IntPtr.Zero) {
-      int error = Marshal.GetLastWin32Error();
-      if (!create && error == 2) return new int[0];
-      throw new Win32Exception(error);
-    }
-    try {
-      if (create) {
-        IntPtr process = OpenProcess(0x101, false, pid);
-        if (process == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-        try {
-          if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        } finally { CloseHandle(process); }
-      }
-      IntPtr info = Marshal.AllocHGlobal(65536);
-      try {
-        if (!QueryInformationJobObject(job, 3, info, 65536, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        int count = Marshal.ReadInt32(info, 4);
-        int[] pids = new int[count];
-        for (int i = 0; i < count; i++) pids[i] = Marshal.ReadIntPtr(info, 8 + i * IntPtr.Size).ToInt32();
-        return pids;
-      } finally { Marshal.FreeHGlobal(info); }
-    } finally { CloseHandle(job); }
-  }
-}`;
 const ownedJobs = new Set<string>();
 const windowsJobProcesses = (
   pid: number,
@@ -153,34 +117,13 @@ const windowsJobProcesses = (
   includeRoot = false,
   identity?: string | null,
 ) => {
-  if (!/^t3-provider-install-[a-f0-9-]+$/.test(job) || !Number.isSafeInteger(pid) || pid <= 0)
-    throw new Error("Invalid provider install job");
-  const scan = NodeChildProcess.spawnSync(
-    "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition @'\n${windowsJobApi}\n'@; [T3InstallJob]::Processes('Global\\${job}', ${pid}, $${create})`,
-    ],
-    { encoding: "utf8", timeout: 10_000, windowsHide: true },
-  );
-  if (scan.error || scan.status !== 0)
-    throw new Error("Could not inspect provider installer processes");
-  const children = scan.stdout
-    .split(/\r?\n/)
-    .filter((line) => line.trim())
-    .map(Number);
-  if (children.some((child) => !Number.isSafeInteger(child) || child <= 0))
-    throw new Error("Could not inspect provider installer processes");
+  const children = WindowsInstallJob.processes(pid, job, create);
   const local = pid === process.pid && ownedJobs.has(job);
   const current = includeRoot || local || !identity ? null : readProcessIdentity(pid);
   const supervisor =
     !includeRoot &&
     (local || (identity != null && current !== null && isProcessAlive(pid, identity, current)));
-  return children.some(
-    (child) => child !== scan.pid && (includeRoot || child !== pid || !supervisor),
-  );
+  return children.some((child) => includeRoot || child !== pid || !supervisor);
 };
 export const createInstallJob = (pid: number, job: string) => {
   if (NodeOS.platform() !== "win32") return;

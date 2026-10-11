@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
 import { SERVICE_LAUNCHER_CONTEXT_ENV } from "../cloud/serviceProtocol.ts";
+import * as WindowsInstallJob from "./windowsInstallJob.ts";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
@@ -46,6 +47,32 @@ const identity = (value: unknown): value is Identity =>
   value.startTime.length > 0;
 const owned = (value: unknown): value is OwnedProcess =>
   identity(value) && "pgid" in value && Number.isSafeInteger(value.pgid);
+interface InstallProcess {
+  readonly pid: number;
+  readonly identity?: string | null;
+}
+const installProcess = (value: unknown): value is InstallProcess =>
+  object(value) &&
+  Number.isSafeInteger(value.pid) &&
+  Number(value.pid) > 0 &&
+  (value.identity === undefined || value.identity === null || typeof value.identity === "string");
+function decodeInstallLease(text: string) {
+  const value: unknown = JSON.parse(text);
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0)
+    return { pid: value, descendants: [] as ReadonlyArray<InstallProcess>, job: undefined };
+  if (
+    !installProcess(value) ||
+    ("job" in value && typeof value.job !== "string") ||
+    ("descendants" in value &&
+      (!Array.isArray(value.descendants) || !value.descendants.every(installProcess)))
+  )
+    throw new Error("Invalid provider install lease");
+  return {
+    ...value,
+    job: "job" in value ? (value.job as string) : undefined,
+    descendants: "descendants" in value ? (value.descendants as ReadonlyArray<InstallProcess>) : [],
+  };
+}
 function decodeEntry(text: string): Entry {
   const value: unknown = JSON.parse(text);
   if (
@@ -371,26 +398,69 @@ export async function make(input: {
   };
   // A server started from a provider or terminal can descend from it with its own
   // detached install supervisor. Stopping that group would corrupt a shared CLI.
-  const withoutInstaller = (entry: Entry, table: ReadonlyArray<ObservedProcess>): Entry => {
+  const withoutInstaller = async (
+    entry: Entry,
+    table: ReadonlyArray<ObservedProcess>,
+  ): Promise<Entry> => {
     if (input.installLeaseDirectory === undefined) return entry;
-    let leader: number;
+    let lease: ReturnType<typeof decodeInstallLease>;
     try {
-      leader = Number(
+      lease = decodeInstallLease(
         NodeFS.readFileSync(NodePath.join(input.installLeaseDirectory, "install.json"), "utf8"),
       );
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") return entry;
       throw cause;
     }
-    if (!Number.isSafeInteger(leader) || leader <= 0)
-      throw new Error("Invalid provider install lease");
+    const leader = lease.pid;
+    const matches = (record: InstallProcess, p: ObservedProcess) => {
+      if (record.pid !== p.pid || p.zombie) return false;
+      const start = record.identity;
+      if (start === undefined || start === null) return true;
+      if (start === p.startTime) return true;
+      // CIM leases use ISO dates; the ownership ledger stores .NET ticks.
+      if (platform !== "win32" || !/^\d+$/.test(p.startTime)) return false;
+      const milliseconds = Date.parse(start);
+      if (!Number.isFinite(milliseconds)) return false;
+      const fraction = /\.(\d{1,7})(?:Z|[+-]\d{2}:\d{2})$/.exec(start)?.[1] ?? "";
+      const ticks =
+        BigInt(milliseconds) * 10_000n +
+        621355968000000000n +
+        BigInt(fraction.padEnd(7, "0").slice(3));
+      return ticks.toString() === p.startTime;
+    };
+    const root = table.find((p) => p.pid === leader);
+    const records: ReadonlyArray<InstallProcess> = [lease, ...lease.descendants];
+    if (
+      records.some(
+        (record) => !table.some((p) => p.pid === record.pid) && controller.exists(record.pid),
+      )
+    )
+      throw new Error("Could not verify a provider installer during cleanup");
+    const installer = new Set(
+      table.filter((p) => records.some((record) => matches(record, p))).map((p) => p.pid),
+    );
+    if (platform === "win32" && lease.job)
+      for (const pid of await WindowsInstallJob.processesAsync(leader, lease.job, environment))
+        installer.add(pid);
+    // A surviving private POSIX group reserves its leader's PID after exit.
+    if (platform !== "win32" && (!root || matches(lease, { ...root, zombie: false })))
+      for (const p of table) if (p.pgid === leader && !p.zombie) installer.add(p.pid);
     // Windows has no process groups, so its installer is found through parents.
-    const installer = new Set([leader]);
     let changed = true;
+    const parents = new Map(table.map((p) => [p.pid, p]));
     while (changed) {
       changed = false;
       for (const p of table) {
-        if (!installer.has(p.pid) && (p.pgid === leader || installer.has(p.ppid))) {
+        const parent = installer.has(p.ppid) ? parents.get(p.ppid) : undefined;
+        const parentBirth = parent ? creationTime(parent) : undefined;
+        const childBirth = creationTime(p);
+        if (
+          !p.zombie &&
+          !installer.has(p.pid) &&
+          parent &&
+          (parentBirth === undefined || childBirth === undefined || childBirth >= parentBirth)
+        ) {
           installer.add(p.pid);
           changed = true;
         }
@@ -447,8 +517,8 @@ export async function make(input: {
     }
     return { ...entry, processes: entry.processes.filter((p) => !protectedPids.has(p.pid)) };
   };
-  const protectedEntry = (entry: Entry, table: ReadonlyArray<ObservedProcess>) =>
-    withoutServers(withoutInstaller(entry, table), table);
+  const protectedEntry = async (entry: Entry, table: ReadonlyArray<ObservedProcess>) =>
+    withoutServers(await withoutInstaller(entry, table), table);
   const reap = async (file: string, entry: Entry) => {
     let table = await controller.snapshot();
     const liveOwner = table.find((p) => same(entry.owner, p));
@@ -461,7 +531,7 @@ export async function make(input: {
     ) {
       throw new Error("Could not verify the recorded provider owner");
     }
-    let next = protectedEntry(discover(entry, table), table);
+    let next = await protectedEntry(discover(entry, table), table);
     const stopped = new Map<string, (typeof table)[number]>();
     try {
       if (platform !== "win32") {
@@ -476,14 +546,14 @@ export async function make(input: {
             stopped.set(`${p.pid}:${p.startTime}`, p);
           }
           table = await controller.snapshot();
-          next = protectedEntry(discover(next, table), table);
+          next = await protectedEntry(discover(next, table), table);
           if (attempt === 99) throw new Error("Provider process tree did not stop for cleanup");
         }
       }
       // Persist newly discovered children before signalling: recovery can itself be killed.
       write(file, next);
       table = await controller.snapshot();
-      next = protectedEntry(next, table);
+      next = await protectedEntry(next, table);
     } catch (error) {
       // Never leave a frozen tree behind: resume it so the next cleanup can retry.
       for (const p of stopped.values()) await signal(p, "SIGCONT").catch(() => undefined);
@@ -589,7 +659,7 @@ export async function make(input: {
       }
       let safe: Entry;
       try {
-        safe = protectedEntry(entry, latest);
+        safe = await protectedEntry(entry, latest);
       } catch {
         // Only the new root is certainly ours when other servers cannot be verified.
         safe = { ...entry, processes: entry.processes.filter((p) => p.pid === root.pid) };
