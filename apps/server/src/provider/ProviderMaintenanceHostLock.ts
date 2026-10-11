@@ -123,10 +123,17 @@ export const make = (directory: string) => {
     }
     return !busy;
   });
-  const withWrite = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  /** `onBusy` runs once if active turns or CLI calls, here or on another server, must drain first. */
+  const withWrite = <A, E, R, E2 = never, R2 = never>(
+    effect: Effect.Effect<A, E, R>,
+    onBusy?: Effect.Effect<void, E2, R2>,
+  ) =>
     withGate(
       Effect.gen(function* () {
-        while (!(yield* drained)) yield* Effect.sleep("100 millis");
+        if (!(yield* drained)) {
+          if (onBusy) yield* onBusy;
+          while (!(yield* drained)) yield* Effect.sleep("100 millis");
+        }
         return yield* effect;
       }),
     );

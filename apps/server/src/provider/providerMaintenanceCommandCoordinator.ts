@@ -11,6 +11,8 @@ export interface ProviderMaintenanceCommandCoordinatorShape<E> {
     readonly targetKey: string;
     readonly lockKey: string;
     readonly onQueued?: Effect.Effect<void, E, R>;
+    /** Runs once if turns on this or another server must finish first. */
+    readonly onWaitingForTurns?: Effect.Effect<void, E, R>;
     readonly onInterrupted?: Effect.Effect<void, E, R>;
     readonly run: Effect.Effect<A, E, R>;
   }) => Effect.Effect<A, E, R>;
@@ -46,6 +48,7 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
     targetKey,
     lockKey,
     onQueued,
+    onWaitingForTurns,
     onInterrupted,
     run,
   }) =>
@@ -58,7 +61,9 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
       return yield* (onQueued ?? Effect.void).pipe(
         // Host leases drain before admission closes: a session holding a lease
         // may still need admission to finish launching its CLI.
-        Effect.andThen(locks.withLock(lockKey, hostLock.withWrite(admission.withPermit(run)))),
+        Effect.andThen(
+          locks.withLock(lockKey, hostLock.withWrite(admission.withPermit(run), onWaitingForTurns)),
+        ),
         Effect.onInterrupt(() => onInterrupted ?? Effect.void),
         Effect.ensuring(releaseTarget(targetKey)),
       );

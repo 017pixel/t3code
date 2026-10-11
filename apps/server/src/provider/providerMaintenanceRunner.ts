@@ -690,6 +690,14 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         targetKey,
         lockKey: update.lockKey,
         onQueued: setQueuedState,
+        onWaitingForTurns: setUpdateState(
+          makeUpdateState({
+            status: "queued",
+            startedAt: null,
+            finishedAt: null,
+            message: "Waiting for running turns to finish.",
+          }),
+        ).pipe(Effect.asVoid),
         onInterrupted: Effect.gen(function* () {
           const current = (yield* providerRegistry.getProviders).find(
             (candidate) => candidate.instanceId === instanceId,

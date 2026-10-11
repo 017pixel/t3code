@@ -1722,6 +1722,57 @@ describe("provider maintenance host leases", () => {
     }),
   );
 
+  it.effect("shows a manual update waiting for turns and cancels it before installing", () => {
+    const calls: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const hostLock = HostLock.make(yield* fs.makeTempDirectoryScoped());
+        const releaseTurn = yield* hostLock.acquireRead;
+        const waiting = yield* Deferred.make<void>();
+        const { registry, updateStatesRef } = yield* makeRegistry(baseNativeCliProvider);
+        const runner = yield* makeTestRunner({
+          ...registry,
+          setProviderMaintenanceActionState: (input) =>
+            registry
+              .setProviderMaintenanceActionState(input)
+              .pipe(
+                Effect.tap(() =>
+                  input.state?.message === "Waiting for running turns to finish."
+                    ? Deferred.succeed(waiting, undefined)
+                    : Effect.void,
+                ),
+              ),
+        }).pipe(Effect.provideService(HostLock.ProviderMaintenanceHostLock, hostLock));
+        const update = yield* runner.updateProvider(NATIVE_CLI_DRIVER).pipe(Effect.forkScoped);
+        yield* Deferred.await(waiting);
+        yield* Fiber.interrupt(update);
+        yield* releaseTurn;
+        assert.deepStrictEqual(
+          (yield* Ref.get(updateStatesRef)).map((state) => [state.status, state.message]),
+          [
+            ["queued", "Waiting for another provider update to finish."],
+            ["queued", "Waiting for running turns to finish."],
+            ["failed", "Update canceled before installation started."],
+          ],
+        );
+        assert.deepStrictEqual(calls, []);
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("0.0.0"),
+          layerMockSpawner((command) => {
+            calls.push(command);
+            return {};
+          }),
+        ),
+      ),
+    );
+  });
+
   it.live("reclaims a dead reader whose PID has been reused", () =>
     Effect.scoped(
       Effect.gen(function* () {
