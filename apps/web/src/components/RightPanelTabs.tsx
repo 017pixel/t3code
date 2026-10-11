@@ -76,7 +76,6 @@ import {
   MenuTrigger,
 } from "~/components/ui/menu";
 import { useBrowserDefaults } from "~/browser/browserDefaults";
-import { ScrollArea } from "~/components/ui/scroll-area";
 import { PanelTabCloseButton } from "~/components/ui/panel-tab-close-button";
 import { faviconUrlForOrigin } from "~/lib/favicon";
 import { useTheme } from "~/hooks/useTheme";
@@ -219,7 +218,7 @@ const TAB_SCROLL_EDGE_TOLERANCE = 1;
 const TAB_DRAG_MODIFIERS = [restrictToHorizontalAxis, restrictToFirstScrollableAncestor];
 
 function tabScrollViewport(root: HTMLDivElement | null): HTMLDivElement | null {
-  return root?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null;
+  return root;
 }
 
 /**
@@ -1197,12 +1196,15 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
         )}
         data-right-panel-tabbar
       >
-        <ScrollArea
-          radius="none"
+        <div
           ref={tabListRef}
-          hideScrollbars
-          scrollFade
-          className="min-w-0 flex-1"
+          data-slot="scroll-area-viewport"
+          className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          style={{
+            maskImage: tabScrollState.hasOverflow
+              ? `linear-gradient(to right, ${tabScrollState.canScrollLeft ? "transparent, black calc(var(--spacing) * 6)" : "black"}, ${tabScrollState.canScrollRight ? "black calc(100% - var(--spacing) * 6), transparent" : "black"})`
+              : undefined,
+          }}
           data-right-panel-tab-list
         >
           <div className="flex h-full w-max min-w-full items-center gap-1">
@@ -1432,7 +1434,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
               </Menu>
             ) : null}
           </div>
-        </ScrollArea>
+        </div>
         {tabScrollState.hasOverflow ? (
           <div
             className="flex shrink-0 items-center gap-0.5 [-webkit-app-region:no-drag]"

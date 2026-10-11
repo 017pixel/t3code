@@ -23,11 +23,16 @@ const textDecoder = new TextDecoder();
  * Compile while the bytes download when the server labels the file as WASM;
  * otherwise (some static hosts and custom protocols) fall back to buffering.
  */
-async function compileWasm(url: string, label: string): Promise<WebAssembly.Module> {
+async function fetchWasm(url: string, label: string): Promise<Response> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Unable to load ${label} (${response.status})`);
   }
+  return response;
+}
+
+async function compileWasm(url: string, label: string): Promise<WebAssembly.Module> {
+  const response = await fetchWasm(url, label);
   if (
     typeof WebAssembly.compileStreaming === "function" &&
     response.headers.get("content-type")?.split(";")[0]?.trim() === "application/wasm"
@@ -62,12 +67,6 @@ export class GhosttyRuntime {
   }
 
   static async load(): Promise<GhosttyRuntime> {
-    // Both modules download and compile in parallel; the trampoline is only
-    // instantiated once the main module's memory and table exist.
-    const [module, trampolineModule] = await Promise.all([
-      compileWasm(ghosttyWasmUrl, "libghostty-vt"),
-      compileWasm(ghosttyWritePtyWasmUrl, "the libghostty-vt PTY trampoline"),
-    ]);
     let instance: WebAssembly.Instance | undefined;
     const imports = {
       env: {
@@ -80,7 +79,22 @@ export class GhosttyRuntime {
         },
       },
     };
-    instance = await WebAssembly.instantiate(module, imports);
+    const main = (async () => {
+      const response = await fetchWasm(ghosttyWasmUrl, "libghostty-vt");
+      if (
+        typeof WebAssembly.instantiateStreaming === "function" &&
+        response.headers.get("content-type")?.split(";")[0]?.trim() === "application/wasm"
+      ) {
+        return (await WebAssembly.instantiateStreaming(response, imports)).instance;
+      }
+      return (await WebAssembly.instantiate(await response.arrayBuffer(), imports)).instance;
+    })();
+    // Instantiate the main module while the trampoline downloads and compiles.
+    const [mainInstance, trampolineModule] = await Promise.all([
+      main,
+      compileWasm(ghosttyWritePtyWasmUrl, "the libghostty-vt PTY trampoline"),
+    ]);
+    instance = mainInstance;
     const runtime = new GhosttyRuntime(instance);
     await runtime.installWritePtyTrampoline(trampolineModule);
     return runtime;
