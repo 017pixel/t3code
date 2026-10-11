@@ -292,11 +292,16 @@ export function createVcsEnvironmentAtoms<R, E>(
           Effect.gen(function* () {
             const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
             const key = encodeKey([supervisor.target.environmentId, input]);
-            const cached = statuses.get(key);
+            // A file list feeds a commit: it starts from the server's answer,
+            // never from a replay that may predate files made since.
+            const cached = input.includeFiles === true ? undefined : statuses.get(key);
             let current = cached?.status ?? null;
             const changes = subscribeDynamic(WS_METHODS.subscribeVcsStatus, () =>
               Effect.sync(() => {
-                const knownVersion = statuses.get(key)?.version;
+                const knownVersion =
+                  input.includeFiles === true && current === null
+                    ? undefined
+                    : statuses.get(key)?.version;
                 return {
                   ...input,
                   compact: true,
