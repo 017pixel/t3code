@@ -1,3 +1,4 @@
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { AuthPreviewOperateScope, type ServerConfig } from "@t3tools/contracts";
 import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
@@ -32,6 +33,7 @@ import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { liveServerConfigValueAtom, primaryServerKeybindingsAtom } from "~/state/server";
+import { useComposerDraftStore } from "../composerDraftStore";
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -221,16 +223,36 @@ function ChatRouteGlobalShortcuts() {
 function LandingDraftDefaults() {
   const landing = usePendingLandingDraft();
   const handleNewThread = useNewThreadHandler();
+  // Load balancing can move the draft to another machine of its project
+  // before the defaults land; they come from, and go to, wherever it is now.
+  const draft = useComposerDraftStore((store) =>
+    landing === null ? null : store.getDraftSession(landing.draftId),
+  );
+  const projectRef = useMemo(
+    () =>
+      landing === null
+        ? null
+        : draft === null
+          ? landing.projectRef
+          : scopeProjectRef(draft.environmentId, draft.projectId),
+    [draft, landing],
+  );
+  // A machine the user picked stands, and the draft stops waiting on any.
+  const movedByUser =
+    draft !== null &&
+    draft.environmentSelection === "manual" &&
+    projectRef !== null &&
+    landing !== null &&
+    (projectRef.environmentId !== landing.projectRef.environmentId ||
+      projectRef.projectId !== landing.projectRef.projectId);
   // Waits for the server to answer this session; the live config then also
   // carries any change made since, for a landing that runs after boot.
   const sessionConfig = useAtomValue(
-    landing === null
+    projectRef === null
       ? NO_LIVE_CONFIG_ATOM
-      : environmentSession.initialConfigValueAtom(landing.projectRef.environmentId),
+      : environmentSession.initialConfigValueAtom(projectRef.environmentId),
   );
-  const currentConfig = useAtomValue(
-    liveServerConfigValueAtom(landing?.projectRef.environmentId ?? null),
-  );
+  const currentConfig = useAtomValue(liveServerConfigValueAtom(projectRef?.environmentId ?? null));
   const liveConfig = sessionConfig === null ? null : (currentConfig ?? sessionConfig);
   const startedDraftIdRef = useRef<string | null>(null);
   // The snapshot can name an environment this browser has since removed. Its
@@ -238,23 +260,24 @@ function LandingDraftDefaults() {
   // environment as unavailable instead of connecting forever.
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const landingEnvironmentGone =
-    landing !== null && catalog.isReady && !catalog.entries.has(landing.projectRef.environmentId);
+    projectRef !== null && catalog.isReady && !catalog.entries.has(projectRef.environmentId);
+  const dropLanding = landingEnvironmentGone || movedByUser;
   useEffect(() => {
-    if (landing !== null && landingEnvironmentGone) clearPendingLandingDraft(landing.draftId);
-  }, [landing, landingEnvironmentGone]);
+    if (landing !== null && dropLanding) clearPendingLandingDraft(landing.draftId);
+  }, [dropLanding, landing]);
   useEffect(() => {
-    if (landing === null || liveConfig === null) return;
+    if (landing === null || projectRef === null || liveConfig === null || dropLanding) return;
     if (startedDraftIdRef.current === landing.draftId) return;
     startedDraftIdRef.current = landing.draftId;
     // The screen may still show the snapshot's settings; the defaults use the server's.
-    void handleNewThread(landing.projectRef, {
+    void handleNewThread(projectRef, {
       replace: true,
       landing,
       serverSettings: liveConfig.settings,
     })
       .catch(() => undefined)
       .finally(() => clearPendingLandingDraft(landing.draftId));
-  }, [handleNewThread, landing, liveConfig]);
+  }, [dropLanding, handleNewThread, landing, liveConfig, projectRef]);
   return null;
 }
 

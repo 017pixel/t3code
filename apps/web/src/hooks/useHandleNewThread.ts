@@ -291,16 +291,22 @@ export function useNewThreadHandler() {
             const investedMeanwhile = composerDraftHasUserContent(
               getComposerDraft(emptyStoredDraftThread.draftId),
             );
+            const landingSession = isLandingDraft
+              ? getDraftSession(emptyStoredDraftThread.draftId)
+              : null;
+            // A landing draft moved to another machine meanwhile keeps that pick.
+            const movedMeanwhile =
+              landingSession !== null &&
+              (landingSession.environmentId !== projectRef.environmentId ||
+                landingSession.projectId !== projectRef.projectId);
             if (
               promotedMeanwhile ||
               remappedMeanwhile ||
+              movedMeanwhile ||
               (!isLandingDraft && (openedMeanwhile || investedMeanwhile))
             ) {
               return null;
             }
-            const landingSession = isLandingDraft
-              ? getDraftSession(emptyStoredDraftThread.draftId)
-              : null;
             // What the user changed on the landing draft while the defaults
             // loaded stands; everything else, the model included, gets them.
             const landingNow = landingSession === null ? null : landingDraftContext(landingSession);
