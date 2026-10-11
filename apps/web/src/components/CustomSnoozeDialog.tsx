@@ -126,7 +126,6 @@ function CustomSnoozeDialog() {
                         <Input
                           nativeInput
                           id={`${id}-date`}
-                          className="h-9 sm:h-8"
                           type="date"
                           required
                           min={localSnoozeDate(new Date())}
