@@ -18,7 +18,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 
 /** Enough rows to fill a tall window; the rest render right after the first paint. */
-const INITIAL_LICENSE_ROWS = 20;
+const INITIAL_LICENSE_ROWS = 40;
 
 type LicenseManifestState =
   | { readonly status: "loading" }
