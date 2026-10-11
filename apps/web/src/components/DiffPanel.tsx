@@ -28,7 +28,7 @@ import { useFileContextMenuHandler } from "../fileContextMenu";
 import { type DraftId } from "../composerDraftStore";
 import { openDiffFilePrimaryAction } from "../diffFileActions";
 import { useCheckpointDiff } from "~/lib/checkpointDiffState";
-import { cn } from "~/lib/utils";
+import { cn, randomUUID } from "~/lib/utils";
 import { selectThreadDiffPanelSelection, useDiffPanelStore } from "../diffPanelStore";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useTheme } from "../hooks/useTheme";
@@ -184,6 +184,8 @@ function DiffFileHeaderSuffix({
   );
 }
 
+// Local save revisions must not alias another client's revision on the server.
+const diffCacheClientId = randomUUID();
 // Preserve explicit refresh epochs across short panel remounts.
 const diffRefreshVersions = new Map<string, number>();
 
@@ -358,7 +360,12 @@ export default function DiffPanel({
   const savedFileRevision = useAtomValue(
     reviewWorkspaceRevision(activeThread?.environmentId, activeCwd ?? undefined),
   );
-  const reviewCacheKey = JSON.stringify([workspaceMutationId, savedFileRevision, version]);
+  const reviewCacheKey = JSON.stringify([
+    diffCacheClientId,
+    workspaceMutationId,
+    savedFileRevision,
+    version,
+  ]);
   const refreshBranchDiffPreview = useCallback(() => {
     const next = Math.max(Date.now(), (diffRefreshVersions.get(reviewScope) ?? 0) + 1);
     if (diffRefreshVersions.size >= 64 && !diffRefreshVersions.has(reviewScope))
