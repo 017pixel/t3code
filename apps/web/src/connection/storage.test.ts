@@ -212,6 +212,34 @@ describe("environment cache removal", () => {
         expect(loaded.projection.turnItems).toEqual([item]);
         expect(loaded.projection.turnItems[0]).toBe(loaded.projection.visibleTurnItems[0]?.item);
         expect(loaded.snapshotSequence).toBe(1);
+
+        // Older builds read a plain entry's deferred file lists as "no changes".
+        const deferred = {
+          ...v2Projection,
+          checkpoints: [
+            {
+              id: "checkpoint-deferred" as never,
+              threadId: v2Projection.thread.id,
+              scopeId: "scope" as never,
+              runId: null,
+              nodeId: "node" as never,
+              parentCheckpointId: null,
+              ordinalWithinScope: 1,
+              appRunOrdinal: 1,
+              ref: "refs/t3/deferred" as never,
+              status: "ready" as const,
+              files: [],
+              deferredFileCount: 2,
+              capturedAt: v2Now,
+            },
+          ],
+        };
+        yield* cache.saveThread(environmentId, { snapshotSequence: 2, projection: deferred });
+        expect([...values.values()]).toContainEqual(
+          expect.objectContaining({ format: "compact-thread-1", omitLocal: false }),
+        );
+        const reloaded = Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId));
+        expect(reloaded.projection.checkpoints[0]?.deferredFileCount).toBe(2);
       }).pipe(Effect.provide(ConnectionStorage.layer));
     }),
   );

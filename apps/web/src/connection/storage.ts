@@ -1066,7 +1066,14 @@ export const layer = Layer.effectContext(
           yield* waitForCacheIdle;
           const withoutLocal = omitLocalVisibleTurnItems(snapshot.projection);
           const withoutFiles = omitCheckpointItemFiles(withoutLocal ?? snapshot.projection);
-          const compact = withoutLocal !== null || withoutFiles !== null;
+          // Deferred checkpoints have empty file lists that older builds would
+          // read as "no changes", so those entries need the envelope too.
+          const compact =
+            withoutLocal !== null ||
+            withoutFiles !== null ||
+            snapshot.projection.checkpoints.some(
+              (checkpoint) => checkpoint.deferredFileCount !== undefined,
+            );
           const encoded = yield* encodeStoredThreadSnapshot({
             schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
             environmentId,
