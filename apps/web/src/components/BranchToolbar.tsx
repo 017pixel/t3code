@@ -23,6 +23,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
@@ -592,7 +593,19 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     };
     // Child labels and hosted controls may resize while the strip itself
     // stays fixed. Observe those changes instead of measuring every render.
-    const mutations = new MutationObserver(schedule);
+    // Label text decides whether the strip compacts, so a text change commits
+    // its measurement before the next paint, the way resizes do. Waiting a
+    // frame would paint the new text overflowing or clipped first.
+    const mutations = new MutationObserver((records) => {
+      const labelTextChanged = records.some((record) => {
+        if (record.type === "attributes") return false;
+        const node = record.target;
+        const parent = node instanceof Element ? node : node.parentElement;
+        return parent?.closest(COMPOSER_CONTEXT_LABEL_SELECTOR) != null;
+      });
+      if (labelTextChanged) flushSync(measure);
+      else schedule();
+    });
     mutations.observe(element, {
       subtree: true,
       childList: true,
