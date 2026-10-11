@@ -957,6 +957,19 @@ it.effect("delivers the original prompt when a restart cuts initial provider adm
   }),
 );
 
+it.effect("delivers an initial prompt also saved as pending steering exactly once", () =>
+  Effect.gen(function* () {
+    const messageId = MessageId.make("message:user");
+    const projection = {
+      ...cutMidTurn({ restartPendingMessageIds: [messageId] }),
+      attempts: [{ id: attemptId, runId, reason: "initial" }],
+      providerTurns: [],
+      messages: [{ id: messageId, text: "Do the accepted work.", attachments: [] }],
+    } as unknown as OrchestrationV2ThreadProjection;
+    assert.deepEqual(yield* continuationTexts(projection), ["Do the accepted work."]);
+  }),
+);
+
 it.effect(
   "delivers the replacement prompt when a steering restart never reached the provider",
   () =>
