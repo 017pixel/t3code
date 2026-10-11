@@ -509,6 +509,7 @@ finish();
     { platform: "linux", lease: "root-reused" },
     { platform: "win32", lease: "root-reused" },
     { platform: "linux", lease: "group" },
+    { platform: "linux", lease: "late" },
     { platform: "win32", lease: "job" },
     { platform: "win32", lease: "job-failed" },
   ] as const)(
@@ -556,8 +557,7 @@ finish();
           }
           const leases = NodePath.join(directory, "leases");
           NodeFS.mkdirSync(leases);
-          NodeFS.writeFileSync(
-            NodePath.join(leases, "install.json"),
+          const contents =
             lease === "legacy"
               ? "70"
               : JSON.stringify({
@@ -568,8 +568,9 @@ finish();
                     job || rootReused || lease === "group"
                       ? []
                       : [{ pid: 71, identity: childIdentity }],
-                }),
-          );
+                });
+          const installLease = NodePath.join(leases, "install.json");
+          if (lease !== "late") NodeFS.writeFileSync(installLease, contents);
           if (job)
             NodeFS.writeFileSync(
               NodePath.join(directory, "powershell.exe"),
@@ -579,7 +580,17 @@ finish();
           const result = yield* ProviderProcessLedger.make({
             stateDir: directory,
             ownerPid: 90,
-            controller,
+            controller:
+              lease === "late"
+                ? {
+                    ...controller,
+                    snapshot: () => {
+                      if (signals.includes("70:SIGSTOP"))
+                        NodeFS.writeFileSync(installLease, contents);
+                      return controller.snapshot();
+                    },
+                  }
+                : controller,
             installLeaseDirectory: leases,
           }).pipe(
             Effect.provideService(HostProcess.Platform, platform),
@@ -599,7 +610,13 @@ finish();
           expect(processes.has(70)).toBe(!orphan && !rootReused);
           expect(processes.has(71)).toBe(!reused);
           if (reused) expect(signals).toContain("71:SIGKILL");
-          else expect(signals.some((s) => /^(70|71):/.test(s))).toBe(false);
+          else if (lease === "late") {
+            for (const pid of [70, 71]) {
+              expect(signals).toContain(`${pid}:SIGSTOP`);
+              expect(signals).toContain(`${pid}:SIGCONT`);
+              expect(signals).not.toContain(`${pid}:SIGKILL`);
+            }
+          } else expect(signals.some((s) => /^(70|71):/.test(s))).toBe(false);
         }),
       ),
   );
