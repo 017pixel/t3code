@@ -1,16 +1,18 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDateInEffect:off - Launcher recovery uses native filesystem failures and wall clocks.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { vi } from "vite-plus/test";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
 vi.mock("node:fs/promises", { spy: true });
+vi.mock("node:fs", { spy: true });
 
 import {
   Launcher,
@@ -26,6 +28,32 @@ import {
   SERVICE_RESTART_PENDING_FILE,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
+
+let cache: string;
+beforeEach(() => {
+  cache = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-launcher-cache-"));
+  vi.stubEnv("XDG_CACHE_HOME", cache);
+  vi.clearAllMocks();
+});
+afterEach(() => {
+  try {
+    const realCache = NodePath.join(NodeOS.homedir(), ".cache", "t3", "provider-maintenance");
+    for (const operation of [
+      NodeFS.readdirSync,
+      NodeFS.readFileSync,
+      NodeFS.mkdirSync,
+      NodeFS.rmSync,
+    ]) {
+      assert.isFalse(
+        vi.mocked(operation).mock.calls.some(([path]) => String(path).startsWith(realCache)),
+        "launcher accessed the real maintenance cache",
+      );
+    }
+  } finally {
+    vi.unstubAllEnvs();
+    NodeFS.rmSync(cache, { recursive: true, force: true });
+  }
+});
 
 it("accepts only exact semantic versions", () => {
   for (const version of ["0.0.0", "1.2.3", "1.2.3-alpha.1", "1.2.3-0", "1.2.3+001"]) {
