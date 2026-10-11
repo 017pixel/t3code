@@ -4622,6 +4622,22 @@ describe("assistant meta in steered runs", () => {
       "assistant-meta:final",
     ]);
   });
+
+  it("leaves a created thread in place when no response follows the steer that made it", () => {
+    const timelineEntries = [
+      message("prompt", 0, "user", "turn_start"),
+      message("cut-off", 2, "assistant"),
+      message("steer", 5, "user", "steer"),
+      { ...createdThread, createdAt: time(8) },
+    ];
+
+    expect(settledRows(timelineEntries, true).map((row) => row.id)).toEqual([
+      "prompt",
+      "cut-off",
+      "steer",
+      "created",
+    ]);
+  });
 });
 
 describe("linked timeline resources", () => {

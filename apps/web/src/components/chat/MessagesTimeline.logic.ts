@@ -2054,7 +2054,14 @@ function attachCreatedThreadSummaries(
   const collapsedRuns = new Set<RunId>();
   const createdByRun = new Map<RunId, Array<Extract<MessagesTimelineRow, { kind: "event" }>>>();
   for (const [index, row] of rows.entries()) {
-    if (row.kind === "message" && row.showAssistantMeta && row.message.runId) {
+    // A response a steer cut off is not the run's answer, even when no reply
+    // follows the steer yet; created chats then stay where they happened.
+    if (
+      row.kind === "message" &&
+      row.showAssistantMeta &&
+      row.assistantMidRun !== true &&
+      row.message.runId
+    ) {
       terminalIndexes.set(row.message.runId, index);
     }
     if (row.kind === "turn-fold" && !row.expanded) collapsedRuns.add(row.runId);
