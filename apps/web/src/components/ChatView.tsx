@@ -1957,8 +1957,26 @@ export default function ChatView(props: ChatViewProps) {
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const composerFilesRef = useRef<ComposerFileAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
-  const localComposerRef = useRef<ChatComposerHandle | null>(null);
-  const composerRef = useComposerHandleContext() ?? localComposerRef;
+  // This view's own composer. The palette, the file browser and composer menus
+  // reach the shown view's composer through the shared ref, which only the
+  // shown view publishes (see keptViewWarming below).
+  const composerRef = useRef<ChatComposerHandle | null>(null);
+  const sharedComposerRef = useComposerHandleContext();
+  const publishesComposerRef = useRef(false);
+  const setComposerHandle = useCallback(
+    (handle: ChatComposerHandle | null) => {
+      const previous = composerRef.current;
+      composerRef.current = handle;
+      if (
+        sharedComposerRef !== null &&
+        publishesComposerRef.current &&
+        sharedComposerRef.current === previous
+      ) {
+        sharedComposerRef.current = handle;
+      }
+    },
+    [sharedComposerRef],
+  );
   const branchToolbarRef = useRef<BranchToolbarHandle>(null);
   const pasteAsTextShortcutUntilRef = useRef(0);
   const [restingComposerControlsHost, setRestingComposerControlsHost] =
@@ -3065,6 +3083,17 @@ export default function ChatView(props: ChatViewProps) {
 
   // A kept view warming up out of sight is not being viewed (see ThreadRouteView).
   const keptViewWarming = useContext(KeptViewWarmingContext);
+  // A warming view lays out with live effects, so it must not take the shared
+  // composer ref over. A view that hides clears it only while it still owns it.
+  useLayoutEffect(() => {
+    if (sharedComposerRef === null || keptViewWarming) return;
+    publishesComposerRef.current = true;
+    sharedComposerRef.current = composerRef.current;
+    return () => {
+      publishesComposerRef.current = false;
+      if (sharedComposerRef.current === composerRef.current) sharedComposerRef.current = null;
+    };
+  }, [keptViewWarming, sharedComposerRef]);
   // Hiding a kept view ends the visit, so showing it again counts as reopening
   // the thread, as it did when a single view switched threads.
   useEffect(
@@ -11866,7 +11895,7 @@ export default function ChatView(props: ChatViewProps) {
                                 true
                               }
                               onMultipleModelSelectionsChange={setMultipleModelSelections}
-                              composerRef={composerRef}
+                              composerRef={setComposerHandle}
                               composerDraftTarget={composerDraftTarget}
                               environmentId={environmentId}
                               attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}
