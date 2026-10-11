@@ -1730,11 +1730,25 @@ function PullRequestsRouteView() {
         if (!viewport) return;
         const bounds = viewport.getBoundingClientRect();
         const visibleY = Math.min(Math.max(y, bounds.top), bounds.bottom - 1);
+        // The row under the pointer: the lowest one starting at or above it,
+        // else the topmost. The list recycles rows, so DOM order is not the
+        // order on screen.
         let key: string | null = null;
+        let keyTop = -Infinity;
+        let topmost: { key: string | null; top: number } | null = null;
         for (const row of viewport.querySelectorAll<HTMLElement>("[data-pull-request-key]")) {
-          if (key !== null && row.getBoundingClientRect().top > visibleY) break;
-          key = row.dataset.pullRequestKey ?? null;
+          const rect = row.getBoundingClientRect();
+          // Recycled rows waiting off screen do not count.
+          if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
+          const top = rect.top;
+          const rowKey = row.dataset.pullRequestKey ?? null;
+          if (top <= visibleY && top > keyTop) {
+            key = rowKey;
+            keyTop = top;
+          }
+          if (topmost === null || top < topmost.top) topmost = { key: rowKey, top };
         }
+        key ??= topmost?.key ?? null;
         if (key !== null) sweepTo(key);
       },
       onEnd: () => {
