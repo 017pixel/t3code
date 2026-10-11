@@ -29,6 +29,7 @@ import {
   isTerminalProviderUpdatePhase,
   localEnvironmentUpdateNotificationKey,
   providerUpdateNotificationKey,
+  providerUpdatePromptActionKey,
   resolveEnvironmentUpdateRowStatus,
   shouldShowPrimaryProviderUpdateToast,
   type LocalEnvironmentProvidersInput,
@@ -92,6 +93,62 @@ function updateCandidate(input: Parameters<typeof provider>[0]): ProviderUpdateC
 }
 
 describe("provider update launch notification logic", () => {
+  it("refreshes the launch action when a background update starts and finishes", () => {
+    const candidate = updateCandidate({ driver: driver("codex") });
+    const initial = providerUpdatePromptActionKey([candidate]);
+    const running = {
+      ...candidate,
+      updateState: {
+        status: "running" as const,
+        origin: "background" as const,
+        startedAt: checkedAt,
+        finishedAt: null,
+        message: null,
+        output: null,
+      },
+    };
+    expect(providerUpdateNotificationKey([running])).toBe(
+      providerUpdateNotificationKey([candidate]),
+    );
+    expect(providerUpdatePromptActionKey([running])).not.toBe(initial);
+    expect(canOneClickUpdateProviderCandidate(running, [running])).toBe(false);
+    expect(
+      providerUpdatePromptActionKey([
+        { ...running, updateState: { ...running.updateState, status: "failed" } },
+      ]),
+    ).toBe(initial);
+  });
+
+  it.each(["queued", "running", "failed", "unchanged", "succeeded"] as const)(
+    "keeps background %s out of the sidebar, including beside a manual sibling",
+    (status) => {
+      const background = provider({
+        driver: driver("codex"),
+        instanceId: instanceId("personal"),
+        updateState: {
+          status,
+          origin: "background",
+          startedAt: checkedAt,
+          finishedAt: checkedAt,
+          message: "Automatic outcome",
+          output: null,
+        },
+      });
+      expect(getProviderUpdateSidebarPillView([background])).toBeNull();
+      const manual = provider({
+        driver: driver("codex"),
+        updateState: {
+          ...background.updateState!,
+          origin: "manual",
+          status: "failed",
+          message: "Manual failure",
+        },
+      });
+      expect(getProviderUpdateSidebarPillView([background, manual])?.description).toContain(
+        "Manual failure",
+      );
+    },
+  );
   it("detects enabled providers with a latest-version advisory", () => {
     expect(isProviderUpdateCandidate(provider({ driver: driver("codex") }))).toBe(true);
     expect(isProviderUpdateCandidate(provider({ driver: driver("codex"), enabled: false }))).toBe(

@@ -29,6 +29,7 @@ import {
   canMaintainEnvironment,
   canUpdateEnvironmentProvider,
   findEnvironmentUpdate,
+  providerUpdateSettingsNotice,
   supportsEnvironmentUpdate,
 } from "./environment-maintenance";
 
@@ -330,17 +331,16 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                               ? ` · Latest ${provider.versionAdvisory.latestVersion}`
                               : ""}
                           </Text>
-                          {provider.updateState && provider.updateState.status !== "idle" ? (
+                          {providerUpdateSettingsNotice(provider) ? (
                             <Text
                               selectable
                               className={
-                                provider.updateState.status === "failed"
+                                providerUpdateSettingsNotice(provider)?.failed
                                   ? "text-sm text-danger-foreground"
                                   : "text-sm text-foreground-muted"
                               }
                             >
-                              {provider.updateState.message ??
-                                `Update ${provider.updateState.status}`}
+                              {providerUpdateSettingsNotice(provider)?.message}
                             </Text>
                           ) : null}
                           {provider.compatibilityAdvisory?.message ? (

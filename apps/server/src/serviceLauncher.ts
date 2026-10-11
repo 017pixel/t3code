@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-// @effect-diagnostics globalTimers:off
+// @effect-diagnostics globalTimers:off globalDate:off
 // The launcher supervises the server child for the boot service and must keep
 // working across server versions, so it stays on Node built-ins with no Effect
 // runtime: it is the one part of the executable that cannot depend on the
@@ -33,6 +33,7 @@ import {
 const HANDOFF_DELAY_MS = 2_000;
 const PREPARED_TIMEOUT_MS = 120_000;
 const TERMINATE_GRACE_MS = 5_000;
+const HEALTH_PERIOD_MS = 5 * 60_000;
 
 type TerminalStatus = "committed" | "rolled-back" | "failed";
 type ChildRole = "active" | "trial";
@@ -226,6 +227,33 @@ async function runtimeExists(baseDir: string, version: string): Promise<boolean>
   }
 }
 
+/** Removes obsolete completed runtimes while preserving every executable needed for recovery. */
+export async function pruneServiceRuntimes(
+  baseDir: string,
+  keep: ReadonlySet<string> = new Set(),
+): Promise<void> {
+  const state = await readServiceState(NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE));
+  // Older launchers do not identify the runtime their service unit still names.
+  if (state.launcherVersion === undefined) return;
+  const protectedVersions = new Set([state.launcherVersion, state.activeVersion, ...keep]);
+  if (state.update?.status === "pending") {
+    protectedVersions.add(state.update.fromVersion);
+    protectedVersions.add(state.update.targetVersion);
+  }
+  if (state.rollback !== undefined) protectedVersions.add(state.rollback.update.fromVersion);
+  const versionsDir = NodePath.join(baseDir, "runtime", "versions");
+  for (const entry of await NodeFSP.readdir(versionsDir, { withFileTypes: true })) {
+    if (
+      !entry.isDirectory() ||
+      !isExactServiceVersion(entry.name) ||
+      protectedVersions.has(entry.name)
+    )
+      continue;
+    if (!(await runtimeExists(baseDir, entry.name))) continue;
+    await NodeFSP.rm(NodePath.join(versionsDir, entry.name), { recursive: true, force: true });
+  }
+}
+
 function terminalUpdate<S extends TerminalStatus>(input: {
   readonly pending: PendingServiceUpdate;
   readonly status: S;
@@ -379,6 +407,32 @@ export class Launcher {
     if (awaitedVersion?.trim() === this.#state.activeVersion) {
       await NodeFSP.rm(restartPending, { force: true }).catch(() => undefined);
     }
+    const executableDir = NodePath.dirname(await NodeFSP.realpath(process.execPath));
+    const versionsDir = NodePath.join(this.#baseDir, "runtime", "versions");
+    const launcherVersion =
+      NodePath.dirname(executableDir) === versionsDir
+        ? NodePath.basename(executableDir)
+        : (this.#state.launcherVersion ?? this.#state.activeVersion);
+    this.#state = { ...this.#state, launcherVersion };
+    await writeServiceState(this.#statePath, this.#state);
+    const rollback = this.#state.rollback;
+    if (rollback !== undefined) {
+      if (await databaseRestorePending(this.#baseDir, rollback.update)) {
+        await this.#returnToPrevious(rollback.update, "rolled-back", "rollback-interrupted");
+        return;
+      }
+      // Restarting the launcher must not turn an unproven release into a healthy one.
+      const healthyAfter = Date.now() + HEALTH_PERIOD_MS;
+      this.#state = { ...this.#state, rollback: { ...rollback, healthyAfter } };
+      await writeServiceState(this.#statePath, this.#state);
+      try {
+        await this.#startChild(this.#state.activeVersion, "active", this.#state.update);
+        this.#watchHealth(healthyAfter);
+      } catch {
+        await this.#returnToPrevious(rollback.update, "rolled-back", "candidate-start-failed");
+      }
+      return;
+    }
     const update = this.#state.update;
     if (update?.status !== "pending") {
       if (update !== undefined) {
@@ -489,7 +543,7 @@ export class Launcher {
       await reject("The requesting server is not the selected active version.");
       return;
     }
-    if (this.#state.update?.status === "pending") {
+    if (this.#state.update?.status === "pending" || this.#state.rollback !== undefined) {
       await reject("Another server update is already pending.");
       return;
     }
@@ -551,16 +605,41 @@ export class Launcher {
     }
     this.#clearTimer();
     const committed = terminalUpdate({ pending, status: "committed" });
+    const healthyAfter = Date.now() + HEALTH_PERIOD_MS;
     const next: ServiceState = {
       ...this.#state,
       activeVersion: pending.targetVersion,
       update: committed,
+      rollback: { update: pending, healthyAfter },
     };
     await writeServiceState(this.#statePath, next);
     this.#state = next;
     child.role = "active";
-    await discardDatabaseBackup(this.#baseDir, committed.id).catch(() => undefined);
+    this.#watchHealth(healthyAfter);
     await sendMessage(child.process, { type: "committed", updateId: committed.id });
+  }
+
+  #watchHealth(healthyAfter: number): void {
+    this.#timer = setTimeout(
+      () =>
+        this.#enqueue(async () => {
+          const rollback = this.#state.rollback;
+          if (
+            rollback === undefined ||
+            this.#stopping ||
+            this.#child === null ||
+            this.#child.process.exitCode !== null ||
+            this.#child.process.signalCode !== null
+          )
+            return;
+          const { rollback: _rollback, ...next } = this.#state;
+          await writeServiceState(this.#statePath, next);
+          this.#state = next;
+          await discardDatabaseBackup(this.#baseDir, rollback.update.id).catch(() => undefined);
+          await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
+        }),
+      Math.max(0, healthyAfter - Date.now()),
+    );
   }
 
   async #handlePreparedTimeout(child: ManagedChild): Promise<void> {
@@ -594,6 +673,14 @@ export class Launcher {
     }
 
     this.#clearTimer();
+    if (this.#state.rollback !== undefined) {
+      await this.#returnToPrevious(
+        this.#state.rollback.update,
+        "rolled-back",
+        `candidate-exited-after-commit:${String(code ?? signal ?? "unknown")}`,
+      );
+      return;
+    }
     const pending = this.#state.update;
     if (pending?.status === "pending") {
       await this.#startTrial(pending);
@@ -614,8 +701,9 @@ export class Launcher {
     }
     await restoreDatabaseBackup(this.#baseDir, pending);
     const outcome = terminalUpdate({ pending, status, reason });
+    const { rollback: _rollback, ...state } = this.#state;
     const next: ServiceState = {
-      ...this.#state,
+      ...state,
       activeVersion: pending.fromVersion,
       update: outcome,
     };
@@ -623,6 +711,7 @@ export class Launcher {
     this.#state = next;
     await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
     await this.#startChild(next.activeVersion, "active", outcome);
+    await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
   }
 }
 

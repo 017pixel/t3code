@@ -72,10 +72,48 @@ it.layer(layerTest)("GrokDriver", (it) => {
       });
       // `grok update` installs under GROK_HOME, so it must target this instance's home.
       expect(capabilities.update?.env?.GROK_HOME).toBe(grokHome);
+      expect(capabilities.update?.installationKey).toBeDefined();
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawner),
       Effect.scoped,
     ),
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "keeps custom Grok binaries manual and pins npm-owned installs",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "pf-09-grok-" });
+        const binaries = [
+          path.join(root, "pinned", "grok"),
+          path.join(root, "lib", "node_modules", "@xai-official", "grok", "bin", "grok"),
+        ];
+        for (const binaryPath of binaries) {
+          yield* fs.makeDirectory(path.dirname(binaryPath), { recursive: true });
+          yield* fs.writeFileString(binaryPath, "#!/bin/sh\n");
+          yield* fs.chmod(binaryPath, 0o755);
+          const instance = yield* GrokDriver.create({
+            instanceId: ProviderInstanceId.make("grok-owned"),
+            displayName: undefined,
+            enabled: false,
+            environment: [{ name: "GROK_HOME", value: root, sensitive: false }],
+            config: { ...GrokDriver.defaultConfig(), binaryPath },
+          });
+          const capabilities = yield* instance.snapshot.resolveMaintenance();
+          if (binaryPath === binaries[0])
+            expect(capabilities.update?.installationKey).toBeUndefined();
+          else {
+            expect(capabilities.update?.executable).toBe("npm");
+            expect(capabilities.update?.installationKey).toBeDefined();
+            expect(capabilities.update?.args).toContain(root);
+          }
+        }
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawner),
+        Effect.scoped,
+      ),
   );
 
   it.effect("stays manual-only when the configured executable does not exist", () =>

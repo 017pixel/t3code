@@ -1,21 +1,18 @@
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
-import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
-import * as Semaphore from "effect/Semaphore";
+import * as HostLock from "./ProviderMaintenanceHostLock.ts";
 
-/** One permit per process: background installs hold it, provider turn starts wait for it. */
-export class ProviderMaintenanceAdmission extends Context.Reference<{
-  readonly withPermit: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
-}>("t3/provider/providerMaintenanceCommandCoordinator/ProviderMaintenanceAdmission", {
-  defaultValue: () => ({ withPermit: Semaphore.makeUnsafe(1).withPermits(1) }),
-}) {}
+export { ProviderMaintenanceAdmission } from "@t3tools/provider-core/server/maintenance";
 
 export interface ProviderMaintenanceCommandCoordinatorShape<E> {
   readonly withCommandLock: <A, R>(input: {
     readonly targetKey: string;
     readonly lockKey: string;
     readonly onQueued?: Effect.Effect<void, E, R>;
+    /** Runs once if turns on this or another server must finish first. */
+    readonly onWaitingForTurns?: Effect.Effect<void, E, R>;
     readonly onInterrupted?: Effect.Effect<void, E, R>;
     readonly run: Effect.Effect<A, E, R>;
   }) => Effect.Effect<A, E, R>;
@@ -24,8 +21,10 @@ export interface ProviderMaintenanceCommandCoordinatorShape<E> {
 export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
   "makeProviderMaintenanceCommandCoordinator",
 )(function* <E>(input: { readonly makeAlreadyRunningError: (targetKey: string) => E }) {
+  const admission = yield* Maintenance.ProviderMaintenanceAdmission;
   const runningTargetsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
   const locks = yield* KeyedLock.make<string>();
+  const hostLock = yield* HostLock.ProviderMaintenanceHostLock;
 
   const acquireTarget = Effect.fn("acquireTarget")(function* (targetKey: string) {
     return yield* Ref.modify(runningTargetsRef, (runningTargets) => {
@@ -49,6 +48,7 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
     targetKey,
     lockKey,
     onQueued,
+    onWaitingForTurns,
     onInterrupted,
     run,
   }) =>
@@ -59,7 +59,11 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
       }
 
       return yield* (onQueued ?? Effect.void).pipe(
-        Effect.andThen(locks.withLock(lockKey, run)),
+        // Host leases drain before admission closes: a session holding a lease
+        // may still need admission to finish launching its CLI.
+        Effect.andThen(
+          locks.withLock(lockKey, hostLock.withWrite(admission.withPermit(run), onWaitingForTurns)),
+        ),
         Effect.onInterrupt(() => onInterrupted ?? Effect.void),
         Effect.ensuring(releaseTarget(targetKey)),
       );

@@ -22,6 +22,7 @@ import { readCustomModelEntries } from "@t3tools/shared/model";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { createProviderVersionAdvisory } from "./maintenanceResolver.ts";
 import { collectUint8StreamText } from "./collectStreamText.ts";
+import * as Maintenance from "./maintenance.ts";
 
 // Localized cmd.exe "not recognized" messages for a missing executable.
 const WINDOWS_COMMAND_NOT_FOUND_PATTERNS = [
@@ -130,7 +131,11 @@ export const spawnAndCollect = (binaryPath: string, command: ChildProcess.Comman
       });
     }
     return result;
-  }).pipe(Effect.scoped);
+  }).pipe(Effect.scoped, (effect) =>
+    Effect.flatMap(Maintenance.ProviderMaintenanceAdmission, (admission) =>
+      admission.withLaunchPermit(effect),
+    ),
+  );
 
 /**
  * Return the first semantic version found in CLI output, or null. Accepts a

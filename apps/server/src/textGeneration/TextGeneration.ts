@@ -6,10 +6,11 @@ import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textG
 import { TextGenerationError } from "@t3tools/contracts";
 
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import * as ProviderMaintenanceCoordinator from "../provider/providerMaintenanceCommandCoordinator.ts";
+import * as ProviderMaintenanceCoordinator from "@t3tools/provider-core/server/maintenance";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ThreadTitleLinks from "./ThreadTitleLinks.ts";
+import * as HostLock from "../provider/ProviderMaintenanceHostLock.ts";
 
 export type {
   BranchNameGenerationInput,
@@ -58,23 +59,24 @@ export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
-  // Waits out a background install so a provider CLI is never launched mid-replacement.
+  const hostLock = yield* HostLock.ProviderMaintenanceHostLock;
+  // The host lease is taken first: an install drains leases before it closes admission.
+  const launch = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    hostLock.withRead(admission.withLaunchPermit(effect));
   const instanceFor = (operation: TextGenerationOp, instanceId: ProviderInstanceId) =>
-    admission
-      .withPermit(Effect.void)
-      .pipe(Effect.andThen(resolveInstance(registry, operation, instanceId)));
+    resolveInstance(registry, operation, instanceId);
   return TextGeneration.of({
     generateCommitMessage: (input) =>
       instanceFor("generateCommitMessage", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),
+        Effect.flatMap((textGeneration) => launch(textGeneration.generateCommitMessage(input))),
       ),
     generatePrContent: (input) =>
       instanceFor("generatePrContent", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generatePrContent(input)),
+        Effect.flatMap((textGeneration) => launch(textGeneration.generatePrContent(input))),
       ),
     generateBranchName: (input) =>
       instanceFor("generateBranchName", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateBranchName(input)),
+        Effect.flatMap((textGeneration) => launch(textGeneration.generateBranchName(input))),
       ),
     generateThreadTitle: (input) =>
       instanceFor("generateThreadTitle", input.modelSelection.instanceId).pipe(
@@ -88,7 +90,7 @@ export const make = Effect.gen(function* () {
                   sourceControl,
                 ),
               ));
-            return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
+            return yield* launch(textGeneration.generateThreadTitle({ ...input, linkedContext }));
           }),
         ),
       ),

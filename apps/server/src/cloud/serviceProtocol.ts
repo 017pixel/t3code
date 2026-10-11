@@ -1,7 +1,7 @@
 import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 
-// Protocol 3 requires the standalone executable layout. Bump when runtimePaths
-// or the installed runtime tree changes incompatibly; launchers survive self-updates.
+// Protocol 3 requires the standalone executable layout. Post-commit health
+// observation is launcher-owned and does not change the runtime's IPC contract.
 export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
 export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
 export const SERVICE_STATE_FILE = "service-state.json";
@@ -29,6 +29,8 @@ export interface ServiceState {
   readonly protocol: typeof SERVICE_LAUNCHER_PROTOCOL;
   readonly activeVersion: string;
   readonly update?: ServiceUpdateRecord;
+  readonly launcherVersion?: string;
+  readonly rollback?: { readonly update: PendingServiceUpdate; readonly healthyAfter: number };
 }
 
 /** Context is copied from launcher-owned state when a child is spawned. */
@@ -150,7 +152,26 @@ export function compareExactServiceVersions(left: string, right: string): number
 export function decodeServiceState(value: unknown): ServiceState | undefined {
   if (!isRecord(value)) return undefined;
   const update = value.update === undefined ? undefined : decodeServiceUpdate(value.update);
+  const rollbackUpdate = isRecord(value.rollback)
+    ? decodeServiceUpdate(value.rollback.update)
+    : undefined;
+  const rollback =
+    isRecord(value.rollback) &&
+    rollbackUpdate?.status === "pending" &&
+    typeof value.rollback.healthyAfter === "number" &&
+    Number.isFinite(value.rollback.healthyAfter)
+      ? { update: rollbackUpdate, healthyAfter: value.rollback.healthyAfter }
+      : undefined;
   if (
+    (value.launcherVersion !== undefined &&
+      (typeof value.launcherVersion !== "string" ||
+        !isExactServiceVersion(value.launcherVersion))) ||
+    (value.rollback !== undefined &&
+      (rollback === undefined ||
+        update?.status !== "committed" ||
+        rollback.update.id !== update.id ||
+        rollback.update.targetVersion !== value.activeVersion ||
+        rollback.update.fromVersion !== update.fromVersion)) ||
     value.protocol !== SERVICE_LAUNCHER_PROTOCOL ||
     typeof value.activeVersion !== "string" ||
     !isExactServiceVersion(value.activeVersion) ||
@@ -168,6 +189,10 @@ export function decodeServiceState(value: unknown): ServiceState | undefined {
     protocol: SERVICE_LAUNCHER_PROTOCOL,
     activeVersion: value.activeVersion,
     ...(update === undefined ? {} : { update }),
+    ...(typeof value.launcherVersion === "string"
+      ? { launcherVersion: value.launcherVersion }
+      : {}),
+    ...(rollback === undefined ? {} : { rollback }),
   };
 }
 
@@ -183,7 +208,11 @@ export function parseServiceState(value: string): ServiceState | undefined {
 export function serviceStateHasPendingUpdate(value: string): boolean {
   try {
     const parsed: unknown = JSON.parse(value);
-    return isRecord(parsed) && isRecord(parsed.update) && parsed.update.status === "pending";
+    return (
+      isRecord(parsed) &&
+      isRecord(parsed.update) &&
+      (parsed.update.status === "pending" || parsed.rollback !== undefined)
+    );
   } catch {
     return false;
   }

@@ -43,6 +43,7 @@ import {
   resolveServerWelcomeState,
   resolveServerUpdateProgressResult,
   serverUpdateStateForProgressEvent,
+  serverUpdateStateForAnnouncedRestart,
   serverUpdateStateForServerVersion,
   validateServerUpdateReadyEvent,
   waitForNextEnvironmentReconnect,
@@ -87,6 +88,39 @@ function session(client: WsRpcProtocolClient): RpcSession {
     closed: Effect.never,
   };
 }
+
+it("treats an announced background restart as resuming and clears it on ready, including rollback", () => {
+  const active = {} as RpcSession;
+  const stale = {} as RpcSession;
+  const state = { currentSession: active, welcomeSession: active, welcome: null };
+  const payload = { fromVersion: "1.0.0", targetVersion: "1.1.0", updateId: "background-update" };
+  const announced = applyServerWelcomeEvent(state, active, { type: "updateRestart", payload });
+  expect(announced.restart).toEqual(payload);
+  const failed = {
+    status: "failed" as const,
+    stage: "installing" as const,
+    fromVersion: "1.0.0",
+    targetVersion: "1.0.1",
+    message: "old manual update failed",
+  };
+  expect(serverUpdateStateForAnnouncedRestart(failed, announced.restart)).toEqual({
+    status: "running",
+    stage: "resuming",
+    fromVersion: "1.0.0",
+    targetVersion: "1.1.0",
+  });
+  const manual = {
+    status: "running" as const,
+    stage: "installing" as const,
+    fromVersion: "1.0.0",
+    targetVersion: "1.1.0",
+  };
+  expect(serverUpdateStateForAnnouncedRestart(manual, announced.restart)).toBe(manual);
+  expect(applyServerWelcomeEvent(state, stale, { type: "updateRestart", payload })).toBe(state);
+  expect(
+    applyServerWelcomeEvent(announced, active, { type: "ready", payload: {} }).restart,
+  ).toBeUndefined();
+});
 
 describe("update restart reconnect nudges", () => {
   it.effect("retries a desktop commit that was lost before delivery", () =>
@@ -529,6 +563,70 @@ describe("server state projection", () => {
     expect(afterBufferedOldWelcome).toBe(afterSwitch);
     expect(resolveServerWelcomeState(afterBufferedOldWelcome)).toBeNull();
   });
+
+  it.effect(
+    "observes a background restart from the lifecycle stream and nudges reconnect until ready",
+    () =>
+      Effect.gen(function* () {
+        const events = yield* Queue.unbounded<{
+          readonly type: "updateRestart" | "ready";
+          readonly payload: unknown;
+        }>();
+        const subscribed = yield* Deferred.make<void>();
+        const client = {
+          [WS_METHODS.subscribeServerLifecycle]: () =>
+            Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+              Stream.drain,
+              Stream.concat(Stream.fromQueue(events)),
+            ),
+        } as unknown as WsRpcProtocolClient;
+        const currentSession = session(client);
+        const connectionState = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+        const retried = yield* Deferred.make<void>();
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: connectionState,
+          session: yield* SubscriptionRef.make(Option.some(currentSession)),
+          prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Deferred.succeed(retried, undefined).pipe(Effect.asVoid),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const state = yield* makeEnvironmentServerWelcomeState().pipe(
+              Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+            );
+            yield* Deferred.await(subscribed);
+            const announced = yield* SubscriptionRef.changes(state).pipe(
+              Stream.filter((value) => value.restart !== undefined),
+              Stream.runHead,
+              Effect.forkChild,
+            );
+            yield* Queue.offer(events, {
+              type: "updateRestart",
+              payload: { fromVersion: "1.0.0", targetVersion: "1.1.0", updateId: "background" },
+            });
+            expect(Option.getOrThrow(yield* Fiber.join(announced)).restart?.updateId).toBe(
+              "background",
+            );
+            yield* SubscriptionRef.set(connectionState, {
+              ...AVAILABLE_CONNECTION_STATE,
+              phase: "backoff" as const,
+            });
+            yield* TestClock.adjust("1 second");
+            yield* Deferred.await(retried);
+            const resumed = yield* SubscriptionRef.changes(state).pipe(
+              Stream.filter((value) => value.restart === undefined),
+              Stream.runHead,
+              Effect.forkChild,
+            );
+            yield* Queue.offer(events, { type: "ready", payload: {} });
+            expect(Option.getOrThrow(yield* Fiber.join(resumed)).restart).toBeUndefined();
+          }),
+        );
+      }),
+  );
 
   it.effect("checks the authoritative session before accepting a buffered welcome", () =>
     Effect.gen(function* () {

@@ -1,3 +1,5 @@
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
+import * as Deferred from "effect/Deferred";
 import * as NodeAssert from "node:assert/strict";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -281,6 +283,28 @@ it.layer(layerTest)("OpenCodeRuntime inventory", (it) => {
       NodeAssert.equal(result.stdout, "o".repeat(64));
       NodeAssert.equal(result.stderr, "e".repeat(64));
       NodeAssert.equal(result.code, 0);
+    }),
+  );
+  it.effect("OpenCode version and auth CLI probes wait for maintenance admission", () =>
+    Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
+      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const install = yield* admission
+        .withPermit(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      const probe = yield* runtime
+        .runOpenCodeCommand({ binaryPath: "/definitely-missing-opencode", args: ["--version"] })
+        .pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      NodeAssert.ok(probe.pollUnsafe() === undefined);
+      yield* Fiber.interrupt(probe);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(install);
     }),
   );
 });

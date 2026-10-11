@@ -144,6 +144,69 @@ it.layer(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("static HTTP responses", (it) => {
+  it.effect("serves the previous build's lazy assets after restart and prunes older builds", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-generations-" });
+      yield* fs.makeDirectory(path.join(staticDir, "assets"));
+      yield* fs.makeDirectory(path.join(staticDir, ".vite"));
+      const builds = ["settings-aaaaaaaa.js", "settings-bbbbbbbb.js", "settings-cccccccc.js"];
+      for (const [index, file] of builds.entries()) {
+        const asset = `assets/${file}`;
+        yield* fs.writeFileString(path.join(staticDir, asset), `export const build = ${index};`);
+        yield* fs.writeFileString(
+          path.join(staticDir, "index.html"),
+          `<html>build ${index}</html>`,
+        );
+        yield* fs.writeFileString(
+          path.join(staticDir, ".vite", "manifest.json"),
+          JSON.stringify({ settings: { file: asset } }),
+        );
+        const request = yield* makeStaticRequest(staticDir);
+        const current = yield* request(`/${asset}`);
+        expect(yield* current.text).toBe(`export const build = ${index};`);
+        if (index > 0) {
+          const previous = yield* request(`/assets/${builds[index - 1]}`);
+          expect(previous.status).toBe(200);
+          expect(previous.headers["content-type"]).toContain("javascript");
+          expect(previous.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+          expect(yield* previous.text).toBe(`export const build = ${index - 1};`);
+          const restarted = yield* makeStaticRequest(staticDir);
+          const stillPrevious = yield* restarted(`/assets/${builds[index - 1]}`);
+          expect(stillPrevious.status).toBe(200);
+          expect(yield* stillPrevious.text).toBe(`export const build = ${index - 1};`);
+        }
+        if (index === 2) {
+          const expired = yield* request(`/assets/${builds[0]}`);
+          expect(expired.status).toBe(404);
+          expect(yield* expired.text).toBe("Not Found");
+        }
+        yield* fs.remove(path.join(staticDir, asset));
+      }
+    }),
+  );
+
+  it.effect("returns 404 for missing assets while preserving SPA route fallback", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-missing-" });
+      yield* fs.writeFileString(path.join(staticDir, "index.html"), "<html>app</html>");
+      const request = yield* makeStaticRequest(staticDir);
+      for (const resource of ["/assets/settings-deadbeef.js", "/assets/styles-deadbeef.css"]) {
+        const response = yield* request(resource);
+        expect(response.status).toBe(404);
+        expect(response.headers["content-type"]).not.toContain("text/html");
+        expect(yield* response.text).toBe("Not Found");
+      }
+      for (const route of ["/settings/providers", "/projects/github.com%2Fvercel%2Fnext.js"]) {
+        const response = yield* request(route);
+        expect(response.status).toBe(200);
+        expect(yield* response.text).toBe("<html>app</html>");
+      }
+    }),
+  );
   it.effect("revalidates non-HTML files and returns changed contents", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

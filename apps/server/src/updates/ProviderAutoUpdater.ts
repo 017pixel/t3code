@@ -47,42 +47,59 @@ export const layer = Layer.effectDiscard(
     const runner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     const updateWindow = yield* UpdateWindow.UpdateWindow;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
-    // Keyed by instance and target version, so a newer release retries at once.
+    // Instances sharing an install share its retry budget; a new release retries at once.
     const attempts = new Map<string, number>();
 
     const pass = Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings;
       if (!settings.automaticUpdates || !settings.enableProviderUpdateChecks) return;
+      const installations = new Set<string>();
       for (const { instanceId } of yield* providers.getProviders) {
-        const install = Effect.gen(function* () {
+        const pick = Effect.gen(function* () {
           const settings = yield* serverSettings.getSettings;
           if (!settings.automaticUpdates || !settings.enableProviderUpdateChecks) return;
           const current = (yield* providers.getProviders).find(
             (candidate) => candidate.instanceId === instanceId,
           );
           if (!current || !isAutoUpdatable(current)) return;
+          const capabilities = yield* providers.getProviderMaintenanceCapabilitiesForInstance(
+            instanceId,
+            current.driver,
+          );
+          const installationKey = capabilities.update?.installationKey;
+          if (!installationKey || installations.has(installationKey)) return;
           const targetVersion = current.versionAdvisory?.latestVersion;
-          const attemptKey = `${instanceId}@${targetVersion}`;
-          const nowMs = yield* Clock.currentTimeMillis;
+          if (!targetVersion) return;
+          const attemptKey = `${installationKey}@${targetVersion}`;
+          const nowMs = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+          for (const [key, attemptedAt] of attempts) {
+            if (nowMs - attemptedAt >= Duration.toMillis(RETRY_AFTER)) attempts.delete(key);
+          }
           const attemptedAt = attempts.get(attemptKey);
           if (attemptedAt !== undefined && nowMs - attemptedAt < Duration.toMillis(RETRY_AFTER))
             return;
           attempts.set(attemptKey, nowMs);
+          installations.add(installationKey);
           yield* Effect.logInfo("Updating provider in the background", {
             instanceId,
             fromVersion: current.version,
             targetVersion,
           });
-          yield* runner
-            .updateProvider({ provider: current.driver, instanceId, quiet: true })
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("Background provider update failed", { instanceId, cause }),
-              ),
-            );
+          return { provider: current.driver, targetVersion };
         });
         // Rechecked per install: the previous one may have run for minutes.
-        if (Option.isNone(yield* updateWindow.runIfOpen(install))) return;
+        const picked = yield* updateWindow.runIfOpen(pick);
+        if (Option.isNone(picked)) return;
+        if (picked.value === undefined) continue;
+        // Installed after the window releases admission: the runner first drains host
+        // leases, and a session holding one may still need admission to launch its CLI.
+        yield* runner
+          .updateProvider({ ...picked.value, instanceId, quiet: true, origin: "background" })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Background provider update failed", { instanceId, cause }),
+            ),
+          );
       }
     }).pipe(
       Effect.catchCause((cause) =>

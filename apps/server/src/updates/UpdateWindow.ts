@@ -9,10 +9,10 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as ProviderMaintenanceCoordinator from "@t3tools/provider-core/server/maintenance";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as AntigravityInstallation from "../provider/AntigravityInstallation.ts";
 import * as CodexInstallation from "../provider/CodexInstallation.ts";
-import * as ProviderMaintenanceCoordinator from "../provider/providerMaintenanceCommandCoordinator.ts";
-import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -21,7 +21,6 @@ import * as TerminalManager from "../terminal/Manager.ts";
 const UPDATE_LOOKAHEAD = Duration.minutes(5);
 /**
  * How long every client must be untouched before an update may interrupt it.
- * Clients report activity about every 25s, so this must stay well above that.
  */
 const QUIET_PERIOD = Duration.minutes(15);
 /**
@@ -59,17 +58,26 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const providers = yield* ProviderRegistry.ProviderRegistry;
   const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
-  const terminals = yield* TerminalManager.TerminalManager;
+  const terminals = yield* Effect.serviceOption(TerminalManager.TerminalManager);
   const managedInstalls = [
-    yield* CodexInstallation.CodexInstallation,
-    yield* AntigravityInstallation.AntigravityInstallation,
+    Option.map(
+      yield* Effect.serviceOption(CodexInstallation.CodexInstallation),
+      (service) => service.state,
+    ),
+    Option.map(
+      yield* Effect.serviceOption(AntigravityInstallation.AntigravityInstallation),
+      (service) => service.state,
+    ),
   ];
 
   /** Returns what keeps the window closed; empty means open. */
   const blockers = Effect.fn("updates.UpdateWindow.blockers")(function* (restartsServer: boolean) {
     const now = yield* DateTime.now;
     const horizon = DateTime.addDuration(now, UPDATE_LOOKAHEAD);
-    const found: Array<string> = [];
+
+    if (Duration.isLessThan(yield* backgroundPolicy.sinceLastClientInteraction, QUIET_PERIOD)) {
+      return ["recent-interaction"];
+    }
 
     // A failed read keeps the window closed: guessing "idle" could cut off a turn.
     const activeThreadIds = yield* projections.getRecoveryThreadIds("active-work").pipe(
@@ -79,47 +87,46 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
       Effect.option,
     );
     if (Option.isNone(activeThreadIds)) return ["active-threads"];
-    if (activeThreadIds.value.length > 0) found.push("active-threads");
+    if (activeThreadIds.value.length > 0) return ["active-threads"];
     // Work a provider keeps running after its turn ends, such as background commands.
-    if (yield* sessions.hasPendingBackgroundWork) found.push("background-work");
+    if (yield* sessions.hasPendingBackgroundWork) return ["background-work"];
 
     // Includes installs someone started by hand.
     const providerUpdating = (yield* providers.getProviders).some(
       (provider) =>
         provider.updateState?.status === "queued" || provider.updateState?.status === "running",
     );
-    if (providerUpdating) found.push("provider-update");
-    if (restartsServer && (yield* terminals.hasBusyTerminals)) found.push("terminal-work");
+    if (providerUpdating) return ["provider-update"];
     // A first install downloads inside this server, so a restart would discard it.
     if (restartsServer) {
       for (const installation of managedInstalls) {
-        const { phase } = yield* installation.state;
+        if (Option.isNone(installation)) return ["provider-install"];
+        const { phase } = yield* installation.value;
         if (phase === "downloading" || phase === "extracting" || phase === "verifying") {
-          found.push("provider-install");
+          return ["provider-install"];
         }
       }
     }
 
-    if (Duration.isLessThan(yield* backgroundPolicy.sinceLastClientInteraction, QUIET_PERIOD)) {
-      found.push("recent-interaction");
-    }
-
     // Corrupt task rows are skipped, so one bad row cannot close the window for good.
-    const tasks = yield* ScheduledTaskService.listRunningOrDueTasks(horizon).pipe(
+    const tasks = yield* ScheduledTaskService.listRunningOrDueTasks(
+      horizon,
+      Duration.toMillis(FREQUENT_TASK_INTERVAL),
+    ).pipe(
       Effect.provideService(SqlClient.SqlClient, sql),
       Effect.tapError((cause) =>
         Effect.logWarning("Update window could not read scheduled tasks", { cause }),
       ),
       Effect.option,
     );
-    if (Option.isNone(tasks)) return [...found, "scheduled-task"];
+    if (Option.isNone(tasks)) return ["scheduled-task"];
     for (const task of tasks.value) {
       if (
         task.lastRunStatus === "running" ||
         task.schedule.type !== "interval" ||
         task.schedule.everyMs >= Duration.toMillis(FREQUENT_TASK_INTERVAL)
       ) {
-        found.push("scheduled-task");
+        return ["scheduled-task"];
       }
     }
 
@@ -129,7 +136,7 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
       ),
       Effect.option,
     );
-    if (Option.isNone(settings)) return [...found, "settings"];
+    if (Option.isNone(settings)) return ["settings"];
     const limited = yield* projections
       .getLimitRecoveryCandidates({
         now: horizon,
@@ -142,7 +149,7 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
         ),
         Effect.option,
       );
-    if (Option.isNone(limited)) return [...found, "usage-limit-resume"];
+    if (Option.isNone(limited)) return ["usage-limit-resume"];
     for (const thread of limited.value) {
       if (thread.usageLimitResetAt === null || thread.usageLimitResetAt === undefined) continue;
       const resetAt = DateTime.make(thread.usageLimitResetAt);
@@ -158,23 +165,35 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
         DateTime.isGreaterThan(resumesAt.value, now) &&
         !DateTime.isGreaterThan(resumesAt.value, horizon)
       ) {
-        found.push("usage-limit-resume");
+        return ["usage-limit-resume"];
       }
     }
 
-    return found;
+    return [];
   });
 
   const runIfOpen: UpdateWindow["Service"]["runIfOpen"] = (install, options) =>
     admission.withPermit(
       blockers(options?.restartsServer === true).pipe(
-        Effect.flatMap((found) =>
-          found.length === 0
-            ? Effect.asSome(install)
-            : Effect.logDebug("Background update waiting for the update window", {
-                blockers: [...new Set(found)],
-              }).pipe(Effect.as(Option.none())),
-        ),
+        Effect.flatMap((found) => {
+          if (found.length > 0)
+            return Effect.logDebug("Background update waiting for the update window", {
+              blockers: found,
+            }).pipe(Effect.as(Option.none()));
+          const stillQuiet = backgroundPolicy.sinceLastClientInteraction.pipe(
+            Effect.flatMap((quiet) =>
+              Duration.isLessThan(quiet, QUIET_PERIOD)
+                ? Effect.succeed(Option.none())
+                : Effect.asSome(install),
+            ),
+          );
+          if (options?.restartsServer !== true) return stillQuiet;
+          return Option.match(terminals, {
+            onNone: () => Effect.succeed(Option.none()),
+            onSome: (manager) =>
+              manager.withIdleTerminals(stillQuiet).pipe(Effect.map(Option.flatten)),
+          });
+        }),
       ),
     );
 

@@ -1,5 +1,25 @@
+// @effect-diagnostics nodeBuiltinImport:off - Separate processes exercise host-wide maintenance leases.
+import * as Maintenance from "@t3tools/provider-core/server/maintenance";
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Option from "effect/Option";
+import * as ThreadContracts from "@t3tools/contracts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as CodexInstallation from "./CodexInstallation.ts";
+import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import { describe, it, assert } from "@effect/vitest";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
+import * as HostLock from "./ProviderMaintenanceHostLock.ts";
+import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
+  DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -24,6 +44,10 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
 import * as ProviderRegistry from "./ProviderRegistry.ts";
+import * as ProviderAutoUpdater from "../updates/ProviderAutoUpdater.ts";
+import * as UpdateWindow from "../updates/UpdateWindow.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as ServerConfig from "../config.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
@@ -45,7 +69,15 @@ const encoder = new TextEncoder();
 // `{ command, args }` assertions below hold deterministically on any host
 // (including Windows). Windows-specific resolution is covered by the dedicated
 // win32 case at the end of this suite.
-const layerNonWindowsPlatform = Layer.succeed(HostProcess.Platform, "linux");
+const layerNonWindowsPlatform = Layer.merge(
+  Layer.succeed(HostProcess.Platform, "linux"),
+  Layer.succeed(HostLock.ProviderMaintenanceHostLock, {
+    directory: "",
+    acquireRead: Effect.succeed(Effect.void),
+    withRead: (effect) => effect,
+    withWrite: (effect) => effect,
+  }),
+);
 
 function lifecycleFor(provider: ProviderDriverKind): ProviderMaintenanceCapabilities {
   if (provider === NATIVE_CLI_DRIVER) {
@@ -247,6 +279,34 @@ const makeTestRunner = (
   );
 
 describe("providerMaintenanceRunner", () => {
+  it.effect.each([
+    { origin: "manual" as const, exitCode: 0 },
+    { origin: "manual" as const, exitCode: 1 },
+  ])("carries $origin origin through every update state ($exitCode)", ({ origin, exitCode }) =>
+    Effect.gen(function* () {
+      const { registry, updateStatesRef } = yield* makeRegistry(baseNativeCliProvider);
+      const runner = yield* makeTestRunner(registry);
+      const result = yield* runner.updateProvider({
+        provider: NATIVE_CLI_DRIVER,
+        origin,
+      });
+      assert.strictEqual(
+        result.providers[0]?.updateState?.status,
+        exitCode === 0 ? "succeeded" : "failed",
+      );
+      const states = yield* Ref.get(updateStatesRef);
+      assert.isAtLeast(states.length, 3);
+      assert.isTrue(states.every((state) => state.origin === origin));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("0.0.0"),
+          layerMockSpawner(() => ({ stdout: "installer output", code: exitCode })),
+        ),
+      ),
+    ),
+  );
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {
@@ -261,6 +321,7 @@ describe("providerMaintenanceRunner", () => {
         },
       ]);
       assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+      assert.strictEqual(result.providers[0]?.updateState?.origin, "manual");
       assert.deepStrictEqual(
         (yield* Ref.get(updateStatesRef)).map((state) => [state.status, state.message]),
         [
@@ -1084,3 +1145,918 @@ it.effect("refuses incompatible latest versions and unapproved or unpinnable tar
     ),
   );
 });
+
+it.effect.each([
+  { exitCode: 0, targetVersion: "2.0.0" },
+  { exitCode: 1, targetVersion: "2.0.0" },
+  { exitCode: 0, targetVersion: "2.0.0-beta.1" },
+])(
+  "background installs pin $targetVersion and refresh shared instances after exit $exitCode",
+  ({ exitCode, targetVersion }) => {
+    const calls: string[] = [];
+    const refreshed: ProviderInstanceId[] = [];
+    let installedVersion = "1.0.0";
+    const sibling = ProviderInstanceId.make("codex-work");
+    const unrelated = ProviderInstanceId.make("codex-other");
+    return Effect.gen(function* () {
+      const { registry, providersRef, updateStatesRef } = yield* makeRegistry([
+        baseProvider,
+        { ...baseProvider, instanceId: sibling },
+        { ...baseProvider, instanceId: unrelated },
+      ]);
+      const capabilities = makeProviderMaintenanceCapabilities({
+        provider: CODEX_DRIVER,
+        packageName: "@openai/codex",
+        updateExecutable: "npm",
+        updateArgs: ["install", "-g", "--prefix", "/owned", "@openai/codex@latest"],
+        updateLockKey: "npm-global:/owned",
+        installationKey: "codex:/owned",
+        env: { PATH: "/instance/node/bin", npm_config_registry: "https://private.invalid/" },
+      });
+      const runner = yield* makeTestRunner({
+        ...registry,
+        getProviderMaintenanceCapabilitiesForInstance: (id) =>
+          Effect.succeed(
+            id === unrelated
+              ? {
+                  ...capabilities,
+                  update: { ...capabilities.update!, installationKey: "codex:/other" },
+                }
+              : capabilities,
+          ),
+        refreshInstance: (id) =>
+          Effect.sync(() => refreshed.push(id)).pipe(
+            Effect.andThen(
+              Ref.updateAndGet(providersRef, (providers) =>
+                providers.map((entry) =>
+                  entry.instanceId === id ? { ...entry, version: installedVersion } : entry,
+                ),
+              ),
+            ),
+          ),
+      });
+      const result = yield* runner.updateProvider({
+        provider: CODEX_DRIVER,
+        ...(exitCode === 0 ? { targetVersion } : {}),
+        quiet: true,
+        origin: "background",
+      });
+      assert.deepStrictEqual(calls, [`install -g --prefix /owned @openai/codex@${targetVersion}`]);
+      assert.deepStrictEqual(refreshed, [CODEX_INSTANCE_ID, CODEX_INSTANCE_ID, sibling]);
+      assert.strictEqual(
+        result.providers[0]?.updateState?.status,
+        exitCode === 0 ? "succeeded" : "failed",
+      );
+      assert.strictEqual(result.providers[1]?.version, targetVersion);
+      assert.strictEqual(result.providers[2]?.version, "0.0.0");
+      // Background installs need proven ownership, so their origin is covered here.
+      assert.isTrue((yield* Ref.get(updateStatesRef)).every((s) => s.origin === "background"));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient(exitCode === 0 ? "9.0.0" : "2.0.0"),
+          layerMockSpawner((_command, args, options) => {
+            calls.push(args.join(" "));
+            assert.strictEqual(options.env?.npm_config_registry, "https://private.invalid/");
+            // The configured registry's latest is older than the checked public release.
+            installedVersion = args.includes(`@openai/codex@${targetVersion}`)
+              ? targetVersion
+              : "0.9.0";
+            return { stdout: "updated", code: exitCode };
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each(["2.0.0", "3.0.0", "v3.0.0", "unknown"])(
+  "background installs never downgrade a freshly probed %s",
+  (version) =>
+    Effect.gen(function* () {
+      const { registry, providersRef } = yield* makeRegistry({ ...baseProvider, version: "1.0.0" });
+      const capabilities = makeProviderMaintenanceCapabilities({
+        provider: CODEX_DRIVER,
+        packageName: "@openai/codex",
+        updateExecutable: "npm",
+        updateArgs: ["install", "-g", "@openai/codex@latest"],
+        updateLockKey: "npm-global:/owned",
+        installationKey: "codex:/owned",
+      });
+      const runner = yield* makeTestRunner({
+        ...registry,
+        getProviderMaintenanceCapabilitiesForInstance: () => Effect.succeed(capabilities),
+        refreshInstance: () =>
+          Ref.updateAndGet(providersRef, (providers) =>
+            providers.map((entry) => ({ ...entry, version })),
+          ),
+      });
+      const result = yield* runner.updateProvider({
+        provider: CODEX_DRIVER,
+        origin: "background",
+      });
+      assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("2.0.0"),
+          layerMockSpawner(() => {
+            throw new Error("must not install or downgrade");
+          }),
+        ),
+      ),
+    ),
+);
+
+it.effect.each([false, true])(
+  "background installs reject unproven or replaced ownership (%s)",
+  (changed) => {
+    const calls: string[] = [];
+    return Effect.gen(function* () {
+      const { registry } = yield* makeRegistry({ ...baseProvider, version: "1.0.0" });
+      const capabilities = makeProviderMaintenanceCapabilities({
+        provider: CODEX_DRIVER,
+        packageName: "@openai/codex",
+        updateExecutable: "/opt/pinned/codex",
+        updateArgs: ["update"],
+        updateLockKey: "codex-native",
+        ...(changed ? { installationKey: "old" } : {}),
+      });
+      const runner = yield* makeTestRunner({
+        ...registry,
+        getProviderMaintenanceCapabilitiesForInstance: (_id, _provider, options) =>
+          Effect.succeed(
+            changed && options?.fresh
+              ? {
+                  ...capabilities,
+                  update: { ...capabilities.update!, installationKey: "replacement" },
+                }
+              : capabilities,
+          ),
+      });
+      const result = yield* runner.updateProvider({
+        provider: CODEX_DRIVER,
+        origin: "background",
+      });
+      assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
+      assert.deepStrictEqual(calls, []);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("2.0.0"),
+          layerMockSpawner((command) => {
+            calls.push(command);
+            return {};
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("Windows updater lookup uses the same instance PATH as the spawned process", () => {
+  const captured: string[] = [];
+  return Effect.gen(function* () {
+    const { registry } = yield* makeRegistry();
+    const runner = yield* makeTestRunner({
+      ...registry,
+      getProviderMaintenanceCapabilitiesForInstance: () =>
+        Effect.succeed(
+          makeProviderMaintenanceCapabilities({
+            provider: CODEX_DRIVER,
+            packageName: "@openai/codex",
+            updateExecutable: "npm",
+            updateArgs: ["install", "-g", "@openai/codex@latest"],
+            updateLockKey: "npm-global:instance",
+            env: { PATH: "C:\\instance\\bin", PATHEXT: ".CMD" },
+          }),
+        ),
+    });
+    yield* runner.updateProvider(CODEX_DRIVER);
+    assert.strictEqual(captured.length, 1);
+    assert.include(captured[0]!, "instance");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(HostProcess.Platform, "win32"),
+        Layer.succeed(HostProcess.Environment, { PATH: "C:\\host\\bin" }),
+        Layer.succeed(
+          SpawnExecutableResolution,
+          (_command, _platform, env) => `${env.PATH}\\npm.cmd`,
+        ),
+        layerLatestVersionHttpClient("0.0.0"),
+        layerMockSpawner((command, _args, options) => {
+          captured.push(command);
+          assert.strictEqual(options.env?.PATH, "C:\\instance\\bin");
+          return {};
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect(
+  "background passes share retries per installation, pin targets and skip custom binaries",
+  () =>
+    Effect.gen(function* () {
+      const instances = ["a", "b", "separate", "pinned"].map((id) => ProviderInstanceId.make(id));
+      const { registry, providersRef } = yield* makeRegistry(
+        instances.map((id) => ({
+          ...baseProvider,
+          instanceId: id,
+          versionAdvisory: {
+            status: "behind_latest",
+            currentVersion: "1.0.0",
+            latestVersion: id === instances[1] ? "3.0.0" : "2.0.0",
+            updateCommand: "npm install",
+            canUpdate: true,
+            canInstallVersion: true,
+            checkedAt: null,
+            message: null,
+          },
+        })),
+      );
+      const calls: Array<{
+        instanceId: ProviderInstanceId | undefined;
+        targetVersion: string | undefined;
+      }> = [];
+      const finished = yield* Deferred.make<void>();
+      const secondPass = yield* Deferred.make<void>();
+      const thirdPass = yield* Deferred.make<void>();
+      const retried = yield* Deferred.make<void>();
+      let windowCalls = 0;
+      const capabilitiesFor = (id: ProviderInstanceId) =>
+        makeProviderMaintenanceCapabilities({
+          provider: CODEX_DRIVER,
+          packageName: "@openai/codex",
+          updateExecutable: "npm",
+          updateArgs: ["install", "-g", "@openai/codex@latest"],
+          updateLockKey: "npm-global:/owned",
+          ...(id === instances[3]
+            ? {}
+            : { installationKey: id === instances[2] ? "separate" : "shared" }),
+        });
+      yield* Layer.build(
+        ProviderAutoUpdater.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(ServerConfig.ServerConfig, {
+                devUrl: undefined,
+              } as ServerConfig.ServerConfig["Service"]),
+              Layer.succeed(ProviderRegistry.ProviderRegistry, {
+                ...registry,
+                getProviderMaintenanceCapabilitiesForInstance: (id) =>
+                  Effect.succeed(capabilitiesFor(id)),
+              }),
+              Layer.succeed(ProviderMaintenanceRunner.ProviderMaintenanceRunner, {
+                updateProvider: (target) =>
+                  Effect.gen(function* () {
+                    assert.notStrictEqual(typeof target, "string");
+                    if (typeof target === "string") throw new Error("instance target expected");
+                    calls.push({
+                      instanceId: target.instanceId,
+                      targetVersion: target.targetVersion,
+                    });
+                    assert.strictEqual(target.origin, "background");
+                    assert.strictEqual(target.quiet, true);
+                    return yield* new ServerProviderUpdateError({
+                      provider: CODEX_DRIVER,
+                      reason: "isolated installer failure",
+                    });
+                  }),
+              }),
+              Layer.succeed(UpdateWindow.UpdateWindow, {
+                runIfOpen: (install) =>
+                  install.pipe(
+                    Effect.tap(() => {
+                      windowCalls += 1;
+                      return windowCalls === 4
+                        ? Deferred.succeed(finished, undefined)
+                        : windowCalls === 8
+                          ? Deferred.succeed(secondPass, undefined)
+                          : windowCalls === 12
+                            ? Deferred.succeed(thirdPass, undefined)
+                            : windowCalls === 156
+                              ? Deferred.succeed(retried, undefined)
+                              : Effect.void;
+                    }),
+                    Effect.asSome,
+                  ),
+              }),
+              Layer.succeed(ServerSettings.ServerSettingsService, {
+                start: Effect.void,
+                ready: Effect.void,
+                getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+                updateSettings: () => Effect.die("unused"),
+                updateProviderInstance: () => Effect.die("unused"),
+                withSettingsSnapshot: (use) => use(DEFAULT_SERVER_SETTINGS),
+                streamChanges: Stream.empty,
+                subscribeChanges: Effect.succeed(Stream.empty),
+              }),
+            ),
+          ),
+        ),
+      );
+      yield* TestClock.adjust("2 minutes");
+      yield* Deferred.await(finished);
+      assert.deepStrictEqual(calls, [
+        { instanceId: instances[0], targetVersion: "2.0.0" },
+        { instanceId: instances[2], targetVersion: "2.0.0" },
+      ]);
+      yield* Ref.update(providersRef, (providers) =>
+        providers.map((entry) => ({
+          ...entry,
+          versionAdvisory: { ...entry.versionAdvisory!, latestVersion: "2.0.0" },
+        })),
+      );
+      yield* TestClock.adjust("10 minutes");
+      yield* Deferred.await(secondPass);
+      assert.strictEqual(calls.length, 2);
+      yield* Ref.update(providersRef, (providers) =>
+        providers.map((entry) => ({
+          ...entry,
+          versionAdvisory: { ...entry.versionAdvisory!, latestVersion: "3.0.0" },
+        })),
+      );
+      yield* TestClock.adjust("10 minutes");
+      yield* Deferred.await(thirdPass);
+      assert.deepStrictEqual(calls.slice(2), [
+        { instanceId: instances[0], targetVersion: "3.0.0" },
+        { instanceId: instances[2], targetVersion: "3.0.0" },
+      ]);
+      yield* TestClock.adjust("6 hours");
+      // At 6h after the first pass, the newer release has had only 5h40m; at 6h after its attempt it retries.
+      yield* Deferred.await(retried);
+      assert.strictEqual(calls.length, 6);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+);
+
+it.effect(
+  "background native updates recheck the owning channel instead of a stale advisory target",
+  () => {
+    const calls: string[] = [];
+    return Effect.gen(function* () {
+      const { registry } = yield* makeRegistry({ ...baseProvider, version: "1.0.0" });
+      const capabilities = makeProviderMaintenanceCapabilities({
+        provider: CODEX_DRIVER,
+        packageName: "@openai/codex",
+        updateExecutable: "brew",
+        updateArgs: ["upgrade", "codex"],
+        updateLockKey: "homebrew",
+        installationKey: "codex:/brew",
+        latestVersion: "3.0.0",
+      });
+      const runner = yield* makeTestRunner(
+        {
+          ...registry,
+          getProviderMaintenanceCapabilitiesForInstance: () => Effect.succeed(capabilities),
+        },
+        {
+          version: 1,
+          currentModels: {},
+          compatibility: [
+            {
+              driver: "codex",
+              t3CodeRange: ">=0.0.42",
+              recommendedVersion: "2.0.0",
+              ranges: [
+                { range: "=2.0.0", status: "supported" },
+                { range: "=3.0.0", status: "broken" },
+              ],
+            },
+          ],
+        },
+      );
+      const result = yield* runner.updateProvider({
+        provider: CODEX_DRIVER,
+        targetVersion: "2.0.0",
+        origin: "background",
+      });
+      assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
+      assert.deepStrictEqual(calls, []);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("2.0.0"),
+          layerMockSpawner((command) => {
+            calls.push(command);
+            return {};
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+describe("provider maintenance host leases", () => {
+  const coordinatedWrite = <A>(directory: string, run: Effect.Effect<A>) =>
+    Effect.gen(function* () {
+      const coordinator = yield* makeProviderMaintenanceCommandCoordinator({
+        makeAlreadyRunningError: () => new Error("already running"),
+      });
+      return yield* coordinator.withCommandLock({ targetKey: "provider", lockKey: "install", run });
+    }).pipe(Effect.provideService(HostLock.ProviderMaintenanceHostLock, HostLock.make(directory)));
+  const childLease = (directory: string, mode: "withRead" | "withWrite") =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        const child = NodeChildProcess.spawn(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            `
+          import * as Effect from "effect/Effect";
+          import { make } from ${JSON.stringify(new URL("./ProviderMaintenanceHostLock.ts", import.meta.url).href)};
+          await Effect.runPromise(make(process.argv[1])[process.argv[2]](Effect.promise(() =>
+            new Promise(resolve => { process.stdout.write("held\\n"); process.stdin.once("data", resolve); })
+          )));
+        `,
+            directory,
+            mode,
+          ],
+          { cwd: NodePath.resolve(import.meta.dirname, "../.."), stdio: "pipe" },
+        );
+        const held = new Promise<void>((resolve, reject) => {
+          child.stdout.once("data", () => resolve());
+          child.once("error", reject);
+          child.once("exit", (code) => code && reject(new Error(`holder exited ${code}`)));
+        });
+        const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+        return { child, held, exited };
+      }),
+      ({ child, exited }) =>
+        Effect.promise(async () => {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          await exited;
+        }),
+    );
+
+  const waitForGate = (directory: string) =>
+    Effect.callback<void>((resume) => {
+      const gate = NodePath.join(directory, "gate.lock");
+      const watcher = NodeFS.watch(directory, () => {
+        if (NodeFS.existsSync(gate)) resume(Effect.void);
+      });
+      watcher.once("error", (error) => resume(Effect.die(error)));
+      if (NodeFS.existsSync(gate)) resume(Effect.void);
+      return Effect.sync(() => watcher.close());
+    });
+
+  it.live("holds another server's install through a turn and admits nested CLI calls", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const holder = yield* childLease(directory, "withRead");
+        yield* Effect.promise(() => holder.held);
+        const local = HostLock.make(directory);
+        const release = yield* local.acquireRead;
+        const entered = yield* Deferred.make<void>();
+        const gate = Effect.raceFirst(
+          waitForGate(directory),
+          Deferred.await(entered).pipe(Effect.andThen(Effect.die("install bypassed active turn"))),
+        );
+        const install = yield* coordinatedWrite(
+          directory,
+          Deferred.succeed(entered, undefined),
+        ).pipe(Effect.forkScoped);
+        yield* gate;
+        assert.isFalse(yield* Deferred.isDone(entered));
+        yield* local.withRead(Effect.void);
+        yield* release;
+        assert.isFalse(yield* Deferred.isDone(entered));
+        holder.child.stdin.end("release");
+        yield* Effect.promise(() => holder.exited);
+        yield* Fiber.join(install);
+        assert.isTrue(yield* Deferred.isDone(entered));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("serializes installs across independent server processes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const holder = yield* childLease(directory, "withWrite");
+        yield* Effect.promise(() => holder.held);
+        const entered = yield* Deferred.make<void>();
+        const install = yield* coordinatedWrite(
+          directory,
+          Deferred.succeed(entered, undefined),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(entered));
+        holder.child.stdin.end("release");
+        yield* Effect.promise(() => holder.exited);
+        yield* Fiber.join(install);
+        assert.isTrue(yield* Deferred.isDone(entered));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("releases active and waiting host leases on interruption", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const local = HostLock.make(directory);
+        const entered = yield* Deferred.make<void>();
+        const turn = yield* local
+          .withRead(Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)))
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        const gate = waitForGate(directory);
+        const install = yield* local.withWrite(Effect.never).pipe(Effect.forkScoped);
+        yield* gate;
+        yield* Fiber.interrupt(install);
+        yield* Fiber.interrupt(turn);
+        assert.equal(NodeFS.readdirSync(NodePath.join(directory, "readers")).length, 0);
+        assert.equal(yield* local.withWrite(Effect.succeed("installed")), "installed");
+        const writer = yield* childLease(directory, "withWrite");
+        yield* Effect.promise(() => writer.held);
+        const queued = yield* local.withRead(Effect.never).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* Fiber.interrupt(queued);
+        writer.child.stdin.end("release");
+        yield* Effect.promise(() => writer.exited);
+        assert.equal(yield* local.withWrite(Effect.succeed("installed")), "installed");
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("drains host leases before an install closes CLI admission", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+        const release = yield* HostLock.make(directory).acquireRead;
+        const entered = yield* Deferred.make<void>();
+        const gate = waitForGate(directory);
+        const install = yield* coordinatedWrite(
+          directory,
+          Deferred.succeed(entered, undefined),
+        ).pipe(Effect.forkScoped);
+        yield* gate;
+        // A session holding a lease can still launch its CLI while the install waits.
+        assert.equal(yield* admission.withLaunchPermit(Effect.succeed("launched")), "launched");
+        assert.isFalse(yield* Deferred.isDone(entered));
+        yield* release;
+        yield* Fiber.join(install);
+        assert.isTrue(yield* Deferred.isDone(entered));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps anything but a server off the user-wide gate", () =>
+    Effect.gen(function* () {
+      const fallback = yield* HostLock.ProviderMaintenanceHostLock;
+      assert.isTrue(fallback.directory.startsWith(NodeOS.tmpdir()));
+      assert.notStrictEqual(fallback.directory, HostLock.userDirectory());
+      const served = yield* HostLock.ProviderMaintenanceHostLock.pipe(
+        Effect.provide(HostLock.layer),
+      );
+      assert.strictEqual(served.directory, HostLock.userDirectory());
+    }),
+  );
+
+  it.effect("shows a manual update waiting for turns and cancels it before installing", () => {
+    const calls: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const hostLock = HostLock.make(yield* fs.makeTempDirectoryScoped());
+        const releaseTurn = yield* hostLock.acquireRead;
+        const waiting = yield* Deferred.make<void>();
+        const { registry, updateStatesRef } = yield* makeRegistry(baseNativeCliProvider);
+        const runner = yield* makeTestRunner({
+          ...registry,
+          setProviderMaintenanceActionState: (input) =>
+            registry
+              .setProviderMaintenanceActionState(input)
+              .pipe(
+                Effect.tap(() =>
+                  input.state?.message === "Waiting for running turns to finish."
+                    ? Deferred.succeed(waiting, undefined)
+                    : Effect.void,
+                ),
+              ),
+        }).pipe(Effect.provideService(HostLock.ProviderMaintenanceHostLock, hostLock));
+        const update = yield* runner.updateProvider(NATIVE_CLI_DRIVER).pipe(Effect.forkScoped);
+        yield* Deferred.await(waiting);
+        yield* Fiber.interrupt(update);
+        yield* releaseTurn;
+        assert.deepStrictEqual(
+          (yield* Ref.get(updateStatesRef)).map((state) => [state.status, state.message]),
+          [
+            ["queued", "Waiting for another provider update to finish."],
+            ["queued", "Waiting for running turns to finish."],
+            ["failed", "Update canceled before installation started."],
+          ],
+        );
+        assert.deepStrictEqual(calls, []);
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("0.0.0"),
+          layerMockSpawner((command) => {
+            calls.push(command);
+            return {};
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.live("reclaims a dead reader whose PID has been reused", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) !== "linux") return;
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const readers = NodePath.join(directory, "readers");
+        NodeFS.mkdirSync(readers);
+        NodeFS.writeFileSync(
+          NodePath.join(readers, `${process.pid}-old-reader`),
+          "previous-process-start",
+        );
+        assert.equal(
+          yield* HostLock.make(directory).withWrite(Effect.succeed("installed")),
+          "installed",
+        );
+        assert.deepEqual(NodeFS.readdirSync(readers), []);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("reclaims a crashed server's turn and install leases", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        for (const mode of ["withRead", "withWrite"] as const) {
+          const holder = yield* childLease(directory, mode);
+          yield* Effect.promise(() => holder.held);
+          holder.child.kill("SIGKILL");
+          yield* Effect.promise(() => holder.exited);
+          if (mode === "withWrite") {
+            // Advance the dead heartbeat, without sleeping through its stale interval.
+            NodeFS.utimesSync(NodePath.join(directory, "gate.lock"), 0, 0);
+          }
+          assert.equal(
+            yield* HostLock.make(directory).withWrite(Effect.succeed("installed")),
+            "installed",
+          );
+        }
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+describe("update window short circuit", () => {
+  it.effect("does not query threads, providers or tasks during the quiet period", () =>
+    Effect.gen(function* () {
+      const context = yield* Layer.build(
+        UpdateWindow.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+              Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+              Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+                sinceLastClientInteraction: Effect.succeed(Duration.minutes(14)),
+              }),
+              SqlitePersistence.layerMemory,
+              Layer.mock(ServerSettings.ServerSettingsService)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            ),
+          ),
+        ),
+      );
+      const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
+      let ran = false;
+      assert.isTrue(
+        Option.isNone(
+          yield* window.runIfOpen(
+            Effect.sync(() => {
+              ran = true;
+            }),
+          ),
+        ),
+      );
+      assert.isFalse(ran);
+    }),
+  );
+
+  it.effect("stops at active work after exactly fifteen quiet minutes", () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const context = yield* Layer.build(
+        UpdateWindow.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                getRecoveryThreadIds: () =>
+                  Effect.sync(() => {
+                    reads++;
+                    return [ThreadContracts.ThreadId.make("busy")];
+                  }),
+              }),
+              Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+              Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+                sinceLastClientInteraction: Effect.succeed(Duration.minutes(15)),
+              }),
+              SqlitePersistence.layerMemory,
+              Layer.mock(ServerSettings.ServerSettingsService)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            ),
+          ),
+        ),
+      );
+      const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
+      assert.isTrue(Option.isNone(yield* window.runIfOpen(Effect.die("must not install"))));
+      assert.strictEqual(reads, 1);
+    }),
+  );
+
+  it.effect("stops at provider background work before reading update state or SQL", () =>
+    Effect.gen(function* () {
+      const context = yield* Layer.build(
+        UpdateWindow.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                getRecoveryThreadIds: () => Effect.succeed([]),
+              }),
+              Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+                hasPendingBackgroundWork: Effect.succeed(true),
+              }),
+              Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+                sinceLastClientInteraction: Effect.succeed(Duration.minutes(15)),
+              }),
+              SqlitePersistence.layerMemory,
+              Layer.mock(ServerSettings.ServerSettingsService)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            ),
+          ),
+        ),
+      );
+      const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
+      assert.isTrue(Option.isNone(yield* window.runIfOpen(Effect.die("must not install"))));
+    }),
+  );
+});
+
+it.effect("manual updates wait for admission and verify under the same permit", () =>
+  Effect.gen(function* () {
+    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const holder = yield* admission
+      .withPermit(
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      )
+      .pipe(Effect.forkScoped);
+    yield* Deferred.await(entered);
+    const { registry } = yield* makeRegistry(baseNativeCliProvider);
+    const updater = yield* makeTestRunner({
+      ...registry,
+      refreshInstance: () => admission.withPermit(registry.getProviders),
+    });
+    const update = yield* updater.updateProvider(NATIVE_CLI_DRIVER).pipe(Effect.forkScoped);
+    yield* Effect.yieldNow;
+    assert.isTrue(update.pollUnsafe() === undefined);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(holder);
+    const result = yield* Fiber.join(update);
+    assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        layerNonWindowsPlatform,
+        layerLatestVersionHttpClient("0.0.0"),
+        layerMockSpawner(() => ({ stdout: "updated" })),
+      ),
+    ),
+  ),
+);
+
+it.effect.each([
+  {
+    name: "open provider window",
+    restart: false,
+    busy: false,
+    installing: false,
+    interaction: false,
+    expected: true,
+  },
+  {
+    name: "open restart window",
+    restart: true,
+    busy: false,
+    installing: false,
+    interaction: false,
+    expected: true,
+  },
+  {
+    name: "busy terminal",
+    restart: true,
+    busy: true,
+    installing: false,
+    interaction: false,
+    expected: false,
+  },
+  {
+    name: "managed first install",
+    restart: true,
+    busy: false,
+    installing: true,
+    interaction: false,
+    expected: false,
+  },
+  {
+    name: "interaction arriving during blocker reads",
+    restart: false,
+    busy: false,
+    installing: false,
+    interaction: true,
+    expected: false,
+  },
+])("rechecks the update window for $name", (scenario) =>
+  Effect.gen(function* () {
+    let quietReads = 0;
+    let handoffs = 0;
+    const context = yield* Layer.build(
+      UpdateWindow.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([]),
+              getLimitRecoveryCandidates: () => Effect.succeed([]),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              hasPendingBackgroundWork: Effect.succeed(false),
+            }),
+            Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+              sinceLastClientInteraction: Effect.sync(() =>
+                Duration.minutes(++quietReads > 1 && scenario.interaction ? 0 : 15),
+              ),
+            }),
+            SqlitePersistence.layerMemory,
+            Layer.mock(ServerSettings.ServerSettingsService)({
+              getSettings: Effect.succeed(ThreadContracts.DEFAULT_SERVER_SETTINGS),
+            }),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+            Layer.mock(CodexInstallation.CodexInstallation)({
+              managedDirectory: "/managed/codex",
+              state: Effect.succeed({
+                driver: ProviderDriverKind.make("codex"),
+                phase: scenario.installing ? "verifying" : "idle",
+                operationId: null,
+                downloadedBytes: 0,
+                totalBytes: null,
+                version: null,
+                installedVersion: null,
+                canRemove: false,
+                message: null,
+              }),
+            }),
+            Layer.mock(AntigravityInstallation.AntigravityInstallation)({
+              managedDirectory: "/managed/antigravity",
+              state: Effect.succeed({
+                driver: ProviderDriverKind.make("antigravity"),
+                phase: "idle",
+                operationId: null,
+                downloadedBytes: 0,
+                totalBytes: null,
+                version: null,
+                installedVersion: null,
+                canRemove: false,
+                message: null,
+              }),
+            }),
+            Layer.mock(TerminalManager.TerminalManager)({
+              withIdleTerminals: (effect) =>
+                scenario.busy ? Effect.succeed(Option.none()) : Effect.asSome(effect),
+            }),
+          ),
+        ),
+      ),
+    );
+    const window = yield* Effect.service(UpdateWindow.UpdateWindow).pipe(Effect.provide(context));
+    const result = yield* window.runIfOpen(
+      Effect.sync(() => {
+        handoffs++;
+      }),
+      { restartsServer: scenario.restart },
+    );
+    assert.strictEqual(Option.isSome(result), scenario.expected);
+    assert.strictEqual(handoffs, scenario.expected ? 1 : 0);
+  }),
+);

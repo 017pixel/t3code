@@ -186,7 +186,7 @@ export const layer: Layer.Layer<
         (candidate) => candidate.id === providerThread.providerSessionId,
       );
       // Opening a session can launch the provider CLI; wait out a background install.
-      yield* admission.withPermit(Effect.void);
+      yield* admission.withLaunchPermit(Effect.void);
       const session = yield* sessions.open({
         threadId: input.threadId,
         providerSessionId: providerThread.providerSessionId,

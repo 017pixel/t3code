@@ -16,6 +16,7 @@ import {
   cliArchiveTarCommand,
   cliReleaseDownloadBaseUrl,
   parseChecksums,
+  validateCliReleaseDownloadUrl,
 } from "@t3tools/shared/cliRelease";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -125,6 +126,7 @@ interface PinnedRuntimeInstallInput {
   readonly arch: string;
   readonly httpClient: HttpClient.HttpClient;
   readonly releaseBaseUrl?: string | undefined;
+  readonly cleanup?: Effect.Effect<void>;
   readonly onProgress?: (progress: PinnedRuntimeProgress) => void;
 }
 
@@ -140,6 +142,7 @@ const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(
     Effect.flatMap(HttpClientResponse.filterStatusOk),
     Effect.flatMap(
       Effect.fn(function* (response) {
+        yield* Effect.try(() => validateCliReleaseDownloadUrl(response.url || url));
         if (onProgress === undefined) return new Uint8Array(yield* response.arrayBuffer);
         const length = Number(response.headers["content-length"]);
         const total = Number.isFinite(length) && length > 0 ? length : undefined;
@@ -193,7 +196,11 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
     });
   }
   const httpClient = input.httpClient;
-  const baseUrl = cliReleaseDownloadBaseUrl(input.version, input.releaseBaseUrl);
+  const baseUrl = yield* Effect.try({
+    try: () => cliReleaseDownloadBaseUrl(input.version, input.releaseBaseUrl),
+    catch: (cause) =>
+      new PinnedRuntimeInstallError({ step: "validating the release download origin", cause }),
+  });
   const fileName = cliArchiveFileName(input.version, platformKey);
 
   input.onProgress?.({ stage: "download", received: 0, total: undefined });
@@ -377,4 +384,6 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
 });
 
 export const ensurePinnedRuntimeInstalled = (input: PinnedRuntimeInstallInput) =>
-  pinnedRuntimeInstallLock.withPermit(installPinnedRuntime(input));
+  pinnedRuntimeInstallLock.withPermit(
+    installPinnedRuntime(input).pipe(Effect.tap(() => input.cleanup ?? Effect.void)),
+  );

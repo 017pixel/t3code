@@ -20,11 +20,15 @@ const testState = vi.hoisted(() => ({
   groups: [] as LocalEnvironmentUpdateGroup[],
   permittedEnvironmentIds: new Set<EnvironmentId>(),
   updateProvider: vi.fn(),
+  primaryProviders: [] as ServerProvider[],
+  addToast: vi.fn(),
+  updateToast: vi.fn(),
 }));
 
 const hooks = vi.hoisted(() => {
   let cursor = 0;
   let slots: unknown[] = [];
+  let effects: Array<() => void> = [];
 
   const nextIndex = () => cursor++;
 
@@ -35,6 +39,20 @@ const hooks = vi.hoisted(() => {
     reset() {
       cursor = 0;
       slots = [];
+      effects = [];
+    },
+    useEffect(effect: () => void, dependencies: readonly unknown[]) {
+      const index = nextIndex();
+      const previous = slots[index] as readonly unknown[] | undefined;
+      if (!previous || dependencies.some((value, i) => !Object.is(value, previous[i]))) {
+        slots[index] = dependencies;
+        effects.push(effect);
+      }
+    },
+    flushEffects() {
+      const pending = effects;
+      effects = [];
+      pending.forEach((effect) => effect());
     },
     useCallback<T>(callback: T): T {
       nextIndex();
@@ -79,6 +97,8 @@ vi.mock("react", async (importOriginal) => {
   return {
     ...actual,
     useCallback: hooks.useCallback,
+    useEffect: hooks.useEffect,
+    useLayoutEffect: hooks.useEffect,
     useMemo: hooks.useMemo,
     useRef: hooks.useRef,
     useState: hooks.useState,
@@ -91,6 +111,24 @@ vi.mock("react/compiler-runtime", () => ({
 
 vi.mock("~/state/server", () => ({
   serverEnvironment: { updateProvider: Symbol("updateProvider") },
+  primaryServerProvidersAtom: Symbol("providers"),
+}));
+
+vi.mock("@effect/atom-react", () => ({ useAtomValue: () => testState.primaryProviders }));
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+vi.mock("~/state/environments", () => ({
+  usePrimaryEnvironment: () => ({ environmentId: "env-wsl" }),
+}));
+vi.mock("~/providerUpdateDismissal", () => ({
+  useDismissedProviderUpdateNotificationKeys: () => ({
+    dismissedNotificationKeys: new Set(),
+    dismissNotificationKey: vi.fn(),
+  }),
+}));
+vi.mock("./ui/toast", () => ({
+  toastManager: { add: testState.addToast, update: testState.updateToast, close: vi.fn() },
+  hiddenToastActionProps: { hidden: true },
+  stackedThreadToast: (options: unknown) => options,
 }));
 
 vi.mock("~/state/session", () => ({
@@ -114,6 +152,7 @@ vi.mock("./ProviderUpdateLaunchNotification.environments", () => ({
 }));
 
 import { ProviderUpdateEnvironmentRows } from "./ProviderUpdateEnvironmentRows";
+import { ProviderUpdatePrimaryNotification } from "./ProviderUpdatePrimaryNotification";
 
 const environmentId = "env-wsl" as EnvironmentId;
 const pendingExpiryMs = 6 * 60_000;
@@ -183,6 +222,51 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+describe("ProviderUpdatePrimaryNotification", () => {
+  it("removes the stale launch Update action when an unsolicited update starts", () => {
+    hooks.reset();
+    testState.permittedEnvironmentIds.add(environmentId);
+    testState.updateProvider.mockReset();
+    testState.addToast.mockReset().mockReturnValue("launch-toast");
+    testState.updateToast.mockReset();
+    const initial = provider();
+    testState.primaryProviders = [initial];
+    const render = () => {
+      hooks.beginRender();
+      ProviderUpdatePrimaryNotification();
+      hooks.flushEffects();
+    };
+    render();
+    const staleAction = testState.addToast.mock.calls[0]![0].actionProps;
+    expect(staleAction.children).toBe("Update");
+    testState.primaryProviders = [
+      {
+        ...initial,
+        updateState: {
+          status: "running",
+          origin: "background",
+          startedAt: initial.checkedAt,
+          finishedAt: null,
+          message: "Updating",
+          output: null,
+        },
+      },
+    ];
+    render();
+    expect(testState.updateToast.mock.calls.at(-1)?.[1].actionProps.children).toBe("Settings");
+    staleAction.onClick();
+    expect(testState.updateProvider).not.toHaveBeenCalled();
+    testState.primaryProviders = [
+      {
+        ...testState.primaryProviders[0]!,
+        updateState: { ...testState.primaryProviders[0]!.updateState!, status: "failed" },
+      },
+    ];
+    render();
+    expect(testState.updateToast.mock.calls.at(-1)?.[1].actionProps.children).toBe("Update");
+  });
+});
 
 describe("ProviderUpdateEnvironmentRows", () => {
   beforeEach(() => {

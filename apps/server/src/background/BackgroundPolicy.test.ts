@@ -1,3 +1,5 @@
+import * as Duration from "effect/Duration";
+import * as TestClock from "effect/testing/TestClock";
 import { assert, describe, it } from "@effect/vitest";
 import {
   AuthSessionId,
@@ -384,3 +386,31 @@ describe("BackgroundPolicy", () => {
     ),
   );
 });
+
+it.effect("an idle foreground mobile lease leaves the fifteen minute quiet period intact", () =>
+  Effect.gen(function* () {
+    const policy = yield* BackgroundPolicy.BackgroundPolicy;
+    for (let report = 0; report < 36; report++) {
+      yield* policy.reportClientActivity(
+        AuthSessionId.make("mobile-session"),
+        RpcClientId.make(5),
+        makeReport({ clientKind: "mobile", appState: "active", recentlyInteracted: false }),
+      );
+      yield* TestClock.adjust("25 seconds");
+    }
+    assert.isTrue(
+      Duration.isGreaterThanOrEqualTo(
+        yield* policy.sinceLastClientInteraction,
+        Duration.minutes(15),
+      ),
+    );
+    yield* policy.reportClientActivity(
+      AuthSessionId.make("mobile-session"),
+      RpcClientId.make(5),
+      makeReport({ clientKind: "mobile", recentlyInteracted: true }),
+    );
+    assert.isTrue(
+      Duration.isLessThan(yield* policy.sinceLastClientInteraction, Duration.seconds(1)),
+    );
+  }).pipe(Effect.provide(layerFor(nominalHostPower))),
+);
