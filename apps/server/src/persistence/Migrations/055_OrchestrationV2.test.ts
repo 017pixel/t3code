@@ -243,15 +243,22 @@ layer("055_OrchestrationV2", (it) => {
           { name: "orchestration_v2_projection_thread_reads_stale_on_update" },
         ],
       );
-      // Builds that ran this migration as 62 run it again as 63, which leaves the projection alone.
+      // Restarting keeps the projection.
       yield* sql`INSERT INTO orchestration_v2_projection_thread_reads
-        (thread_id, compact_payload_json, payload_json) VALUES ('kept', '{}', '{}')`;
+        (thread_id, compact_payload_json, payload_json) VALUES ('early', '{}', '{}')`;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(
+        yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
+        [{ thread_id: "early" }],
+      );
+      // Builds that ran this migration as 62 run it again as 63, which rebuilds the rows they
+      // wrote from the thread rows.
       yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 62`;
       yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (62, 'ProjectionThreadReadPayload')`;
       assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadReadPayload"]]);
       assert.deepStrictEqual(
         yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
-        [{ thread_id: "kept" }],
+        [],
       );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

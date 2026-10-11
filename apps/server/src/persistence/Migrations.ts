@@ -76,7 +76,9 @@ import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ProjectionThreadSweepIndexes.ts";
-import Migration0063 from "./Migrations/063_ProjectionThreadReadPayload.ts";
+import Migration0063, {
+  migrateThreadReadProjection,
+} from "./Migrations/063_ProjectionThreadReadPayload.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -155,7 +157,7 @@ export const migrationEntries = [
   // Preview and stacked builds that already recorded a different 62 skip this one (runMigrations
   // warns). They only lose the sweep index: no query names it with INDEXED BY.
   [62, "ProjectionThreadSweepIndexes", Migration0062],
-  [63, "ProjectionThreadReadPayload", Migration0063],
+  [63, "ProjectionThreadReadPayload", migrateThreadReadProjection],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
