@@ -1071,6 +1071,10 @@ it.effect("oversized checkpoint indexes retain disk copies instead of buffer cac
             ),
         readFile: (file) =>
           file === index ? Effect.die("oversized index should stay on disk") : fs.readFile(file),
+        open: (file, options) =>
+          file === index
+            ? Effect.die("oversized index should stay on disk")
+            : fs.open(file, options),
       }),
     );
     yield* captureDriver.checkpoints.captureCheckpoint({ cwd, checkpointRef });
@@ -1229,8 +1233,10 @@ it.effect(
       const captureDriver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
-          readFile: (file) =>
-            fs.readFile(file).pipe(Effect.tap(() => (file === index ? interleave : Effect.void))),
+          open: (file, options) =>
+            fs
+              .open(file, options)
+              .pipe(Effect.tap(() => (file === index ? interleave : Effect.void))),
         }),
       );
       yield* captureDriver.checkpoints.captureCheckpoint({

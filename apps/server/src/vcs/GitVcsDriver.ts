@@ -1,4 +1,6 @@
 import * as NodeBuffer from "node:buffer";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - checkpoint indexes need an incremental digest; Crypto.digest buffers the whole file.
+import * as NodeCrypto from "node:crypto";
 
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -864,10 +866,29 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     | {
         cwd: string;
         headCommit: string;
-        source: Buffer;
+        sourceSize: number;
+        sourceDigest: string;
         normalized: Uint8Array;
       }
     | undefined;
+  // Identify the user's exact index bytes by SHA-256 through one small buffer.
+  // Whole-file reads left megabytes of external memory per capture and
+  // brought full GCs forward.
+  const digestIndexFile = (filePath: string) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const file = yield* fileSystem.open(filePath);
+        const hash = NodeCrypto.createHash("sha256");
+        const chunk = new Uint8Array(262_144);
+        let size = 0;
+        for (;;) {
+          const read = Number(yield* file.read(chunk));
+          if (read === 0) return { size, digest: hash.digest("base64") };
+          hash.update(chunk.subarray(0, read));
+          size += read;
+        }
+      }),
+    );
 
   const checkpoints: VcsDriver.VcsCheckpointOps = {
     captureCheckpoint: Effect.fn("GitVcsDriver.checkpoints.captureCheckpoint")(function* (input) {
@@ -944,28 +965,23 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             if (
               cacheable &&
               cachedIndex?.cwd === input.cwd &&
-              cachedIndex.headCommit === headCommit
+              cachedIndex.headCommit === headCommit &&
+              size === BigInt(cachedIndex.sourceSize)
             ) {
-              const bytes = yield* fileSystem.readFile(indexPath.stdout.trim());
-              const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-              if (cachedIndex.source.equals(source)) {
+              const source = yield* digestIndexFile(indexPath.stdout.trim());
+              if (
+                source.size === cachedIndex.sourceSize &&
+                source.digest === cachedIndex.sourceDigest
+              ) {
                 yield* fileSystem.writeFile(tempIndexPath, cachedIndex.normalized);
                 yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
                 return true;
               }
             }
-            // Cache the exact copied bytes, even if the user's index changes
-            // during copy. A cold capture keeps the original cheap disk copy.
+            // Key the cache by the exact copied bytes, even if the user's index
+            // changes during copy. A cold capture keeps the original cheap disk copy.
             yield* fileSystem.copyFile(indexPath.stdout.trim(), tempIndexPath);
-            const sourceBytes =
-              cacheable &&
-              (yield* fileSystem.stat(tempIndexPath)).size <= BigInt(checkpointIndexMaxBytes)
-                ? yield* fileSystem.readFile(tempIndexPath)
-                : undefined;
-            const source =
-              sourceBytes === undefined
-                ? undefined
-                : Buffer.from(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength);
+            const source = cacheable ? yield* digestIndexFile(tempIndexPath) : undefined;
             // Pin normalization to the cache key even if HEAD moves during capture.
             yield* execute({
               operation,
@@ -978,7 +994,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             let specialFlags = false;
             let recordStart = true;
             let skipped = false;
-            let skippedRecord: number[] = [];
+            let skippedRecord: Uint8Array[] = [];
             const skippedPaths: string[] = [];
             yield* vcsProcess.run({
               operation,
@@ -989,27 +1005,38 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               maxOutputBytes: 4_096,
               outputMode: "truncate",
               // Inspect every tag; retain only skipped file paths for checking sparse rules.
+              // Jump between NUL terminators: a per-byte loop over large indexes
+              // allocated tens of MiB per capture whenever V8 left it unoptimized.
               onStdoutChunk: (chunk) => {
-                for (const byte of chunk) {
-                  if (recordStart) skipped = byte === 83;
-                  if (skipped && sparseCheckout) {
-                    if (byte !== 0) skippedRecord.push(byte);
-                    else {
-                      if (skippedRecord.at(-1) !== 47) {
-                        const name = Buffer.from(skippedRecord).subarray(2);
-                        if (!NodeBuffer.isUtf8(name)) specialFlags = true;
-                        else skippedPaths.push(name.toString("utf8"));
-                      }
-                      skippedRecord = [];
+                let offset = 0;
+                while (offset < chunk.length) {
+                  if (recordStart) {
+                    const tag = chunk[offset] ?? 0;
+                    skipped = tag === 83;
+                    if ((tag >= 97 && tag <= 122) || (!sparseCheckout && skipped)) {
+                      specialFlags = true;
                     }
                   }
-                  if (
-                    recordStart &&
-                    ((byte >= 97 && byte <= 122) || (!sparseCheckout && byte === 83))
-                  ) {
-                    specialFlags = true;
+                  const end = chunk.indexOf(0, offset);
+                  const recordEnd = end === -1 ? chunk.length : end;
+                  if (skipped && sparseCheckout && recordEnd > offset) {
+                    skippedRecord.push(Buffer.from(chunk.subarray(offset, recordEnd)));
                   }
-                  recordStart = byte === 0;
+                  if (end === -1) {
+                    recordStart = false;
+                    return;
+                  }
+                  if (skipped && sparseCheckout) {
+                    const record = Buffer.concat(skippedRecord);
+                    if (record.at(-1) !== 47) {
+                      const name = record.subarray(2);
+                      if (!NodeBuffer.isUtf8(name)) specialFlags = true;
+                      else skippedPaths.push(name.toString("utf8"));
+                    }
+                    skippedRecord = [];
+                  }
+                  recordStart = true;
+                  offset = end + 1;
                 }
               },
             });
@@ -1032,7 +1059,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               !sparseCheckout &&
               headCommit !== null &&
               source !== undefined &&
-              source.length <= checkpointIndexMaxBytes
+              source.size <= checkpointIndexMaxBytes
             ) {
               const normalizedSize = (yield* fileSystem.stat(tempIndexPath)).size;
               checkpointIndex =
@@ -1040,7 +1067,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
                   ? {
                       cwd: input.cwd,
                       headCommit,
-                      source,
+                      sourceSize: source.size,
+                      sourceDigest: source.digest,
                       normalized: yield* fileSystem.readFile(tempIndexPath),
                     }
                   : undefined;
