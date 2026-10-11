@@ -558,7 +558,9 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 // One maintenance runner for RPCs and background updates, so both queue
 // behind the same per-installer lock.
 const layerProviderUpdates = ProviderAutoUpdater.layer.pipe(
-  Layer.provide(UpdateWindow.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
+  // The route window also sees guide work. Do not memoize this earlier,
+  // provider-only window as the server restart window.
+  Layer.provide(Layer.fresh(UpdateWindow.layer).pipe(Layer.provide(ProjectionStoreV2.layer))),
   Layer.provideMerge(ProviderMaintenanceRunner.layer.pipe(Layer.provide(InstallSupervisor.layer))),
 );
 

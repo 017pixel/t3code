@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
 import * as Semaphore from "effect/Semaphore";
+import * as Schema from "effect/Schema";
 import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 
 const HeldWrite = Context.Reference<{ readonly owner: object; active: boolean } | null>(
@@ -42,10 +43,45 @@ const processIdentity = (pid: number) => {
 
 export const installLeasePath = (directory: string) => NodePath.join(directory, "install.json");
 
-export const isProcessAlive = (pid: number) => {
+/** Start identity includes the Linux boot so leases cannot survive a reboot's PID reuse. */
+export const readProcessIdentity = (pid: number): string | null => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    const platform = NodeOS.platform();
+    if (platform === "linux") {
+      const start = processIdentity(pid);
+      return start
+        ? `${NodeFS.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()}:${start}`
+        : null;
+    }
+    if (platform !== "darwin" && platform !== "win32") return null;
+    const scan =
+      platform === "win32"
+        ? NodeChildProcess.spawnSync(
+            "powershell.exe",
+            [
+              "-NoProfile",
+              "-NonInteractive",
+              "-Command",
+              `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop).CreationDate.ToUniversalTime().ToString('o')`,
+            ],
+            { encoding: "utf8", timeout: 10_000, windowsHide: true },
+          )
+        : NodeChildProcess.spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+            encoding: "utf8",
+            timeout: 10_000,
+            env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+          });
+    return scan.error || scan.status !== 0 ? null : scan.stdout.trim() || null;
+  } catch {
+    return null;
+  }
+};
+
+export const isProcessAlive = (pid: number, identity?: string | null) => {
   try {
     process.kill(pid, 0);
-    return processIdentity(pid) !== "";
+    if (processIdentity(pid) === "") return false;
   } catch (error) {
     if (
       error instanceof Error &&
@@ -53,22 +89,40 @@ export const isProcessAlive = (pid: number) => {
       (error.code === "ESRCH" || error.code === "ENOENT")
     )
       return false;
-    throw error;
+    return true;
   }
+  if (identity == null) return true;
+  const current = readProcessIdentity(pid);
+  return current === null || current === identity;
 };
+
+const decodeInstallLease = Schema.decodeSync(
+  Schema.fromJsonString(
+    Schema.Union([
+      Schema.Number,
+      Schema.Struct({
+        pid: Schema.Number,
+        identity: Schema.optional(Schema.NullOr(Schema.String)),
+      }),
+    ]),
+  ),
+);
 
 /** A dead supervisor's installer still owns admission until its entire process group exits. */
 export const installIsAlive = (directory: string): boolean => {
   const file = installLeasePath(directory);
   let pid: number;
+  let identity: string | null | undefined;
   try {
-    pid = Number(NodeFS.readFileSync(file, "utf8"));
+    const lease = decodeInstallLease(NodeFS.readFileSync(file, "utf8"));
+    pid = typeof lease === "number" ? lease : lease.pid;
+    identity = typeof lease === "number" ? undefined : lease.identity;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
     throw error;
   }
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid provider install lease");
-  if (isProcessAlive(pid)) return true;
+  if (isProcessAlive(pid, identity)) return true;
   return installChildrenAreAlive(pid);
 };
 

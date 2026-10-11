@@ -33,6 +33,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
@@ -403,6 +404,40 @@ it.effect("retains automation and sender attribution while a message waits in th
     assert.equal(message?.text, "Run the audit");
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect("tracks workspace preparation for an empty thread with no active run", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+    const release = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      createWorktree: (input) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(entered, yield* Effect.fiber);
+          yield* Deferred.await(release);
+          return {
+            worktree: { path: "/repo-worktrees/empty", refName: input.newRefName, headSha: "abc" },
+          } as never;
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const result = yield* launches.launch(
+        launchInput({
+          command: "command:launch:empty-preparation",
+          thread: "thread:launch:empty-preparation",
+          workspace: { type: "worktree", baseRef: "main", branch: "empty" },
+        }),
+      );
+      const fiber = yield* Deferred.await(entered);
+      assert.equal((yield* threads.getThreadProjection(result.threadId)).runs.length, 0);
+      assert.equal(yield* launches.activePreparationCount, 1);
+      yield* Deferred.succeed(release, undefined);
+      assert.isTrue(Exit.isSuccess(yield* Fiber.await(fiber)));
+      assert.equal(yield* launches.activePreparationCount, 0);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
 
 it.effect("returns a visible preparing message while provisioning is still blocked", () =>
   Effect.gen(function* () {
@@ -2266,6 +2301,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
           ),
         checkWorktreeBase: launches.checkWorktreeBase,
         retryPreparation: launches.retryPreparation,
+        activePreparationCount: launches.activePreparationCount,
       }),
       Effect.flip,
     );

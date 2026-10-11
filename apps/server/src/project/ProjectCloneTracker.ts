@@ -19,6 +19,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
@@ -29,6 +30,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import * as ProviderMaintenanceCoordinator from "@t3tools/provider-core/server/maintenance";
 
 /**
  * Runs repository clones that back newly added projects and tracks their
@@ -69,6 +71,8 @@ export class ProjectCloneTracker extends Context.Service<
     readonly get: (projectId: ProjectId) => Effect.Effect<ProjectCloneSnapshot | null>;
     /** Emits every tracked clone first, then the full list after each change. */
     readonly stream: Stream.Stream<ReadonlyArray<ProjectCloneSnapshot>>;
+    /** Includes post-clone hooks after the progress snapshot has settled. */
+    readonly activeCloneCount: Effect.Effect<number>;
   }
 >()("t3/project/ProjectCloneTracker") {}
 
@@ -115,6 +119,7 @@ interface TrackedClone {
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const repositories = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+  const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
   const clones = yield* Ref.make(new Map<ProjectId, TrackedClone>());
   const changes = yield* PubSub.unbounded<ReadonlyArray<ProjectCloneSnapshot>>();
   const retentionFibers = new Map<ProjectId, Fiber.Fiber<unknown, never>>();
@@ -122,6 +127,7 @@ export const make = Effect.gen(function* () {
   // Clone fibers outlive the RPC that started them but not the server.
   const cloneScope = yield* Scope.make("parallel");
   yield* Effect.addFinalizer(() => Scope.close(cloneScope, Exit.void));
+  const cloneFibers = yield* FiberSet.make().pipe(Effect.provideService(Scope.Scope, cloneScope));
   // start/cancel/retry/discard mutate the same entry and the same directory;
   // one at a time keeps a double-clicked Retry from racing two clones into it.
   const actionLock = yield* Semaphore.make(1);
@@ -249,7 +255,10 @@ export const make = Effect.gen(function* () {
       const current = yield* Ref.get(clones);
       const tracked = current.get(projectId);
       if (!tracked) return;
-      const fiber = yield* runClone(projectId, tracked).pipe(Effect.forkIn(cloneScope));
+      const fiber = yield* runClone(projectId, tracked).pipe(
+        FiberSet.run(cloneFibers, { startImmediately: false }),
+        admission.withLaunchPermit,
+      );
       yield* Ref.update(clones, (map) => {
         const existing = map.get(projectId);
         if (!existing) return map;
@@ -430,6 +439,7 @@ export const make = Effect.gen(function* () {
     discard: (projectId) => locked(discard(projectId)),
     get,
     stream,
+    activeCloneCount: FiberSet.size(cloneFibers),
   });
 });
 
