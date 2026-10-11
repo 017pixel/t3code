@@ -1580,6 +1580,9 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       previousSnapshot.value !== value &&
       readValue?.() === previousSnapshot.value
     ) {
+      // The editor's text is the latest, so selection updates and focusAt
+      // must not wait for the older value to be applied.
+      latestValueRef.current = previousSnapshot.value;
       return;
     }
     const normalizedExpandedCursor = expandEditorCursor(value, normalizedCursor);
