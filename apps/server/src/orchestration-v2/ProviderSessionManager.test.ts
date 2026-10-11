@@ -4837,3 +4837,199 @@ it.effect("ProviderSessionManagerV2 holds the host lease through terminal backgr
     );
   }),
 );
+
+it.live.each(["start", "resume", "ensure", "snapshot"] as const)(
+  "a background session %s joins its lease ahead of a waiting maintenance writer",
+  (operation) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const pending = yield* Ref.make(true);
+      const fs = yield* FileSystem.FileSystem;
+      const hostLock = HostLock.make(yield* fs.makeTempDirectoryScoped());
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-host-maintenance-background");
+        const providerSessionId = idAllocator.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+          nativeThreadId: "native-host-maintenance",
+        });
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        const turnInput = {
+          appThread: (yield* projectionStore.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "turn",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        } satisfies ProviderAdapter.ProviderAdapterV2TurnInput;
+        const nextRunId = idAllocator.derive.run({ threadId, ordinal: 2 });
+        const continuation = runtime.startTurn({
+          ...turnInput,
+          runId: nextRunId,
+          runOrdinal: 2,
+          providerTurnOrdinal: 2,
+          attemptId: idAllocator.derive.runAttempt({ runId: nextRunId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId: nextRunId }),
+        });
+        yield* runtime.startTurn(turnInput);
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+        const terminal = {
+          type: "turn.terminal" as const,
+          driver: CODEX_DRIVER,
+          providerThreadId: providerThread.id,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: CODEX_DRIVER,
+            nativeTurnId: "native-host-turn",
+          }),
+          runOrdinal: 1,
+          status: "completed" as const,
+          failure: null,
+          threadDisposition: "reusable" as const,
+        };
+        const subscription = yield* runtime.subscribeEvents!;
+        const observed = yield* subscription.events.pipe(
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* Queue.offer(queue, terminal);
+        yield* Fiber.join(observed);
+        const unrelatedThreadId = ThreadId.make("thread-unrelated-maintenance");
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId: unrelatedThreadId, now }),
+          ],
+        });
+        const unrelatedSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: unrelatedThreadId,
+        });
+        const unrelatedRuntime = yield* manager.open({
+          threadId: unrelatedThreadId,
+          providerSessionId: unrelatedSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const unrelatedRunId = idAllocator.derive.run({ threadId: unrelatedThreadId, ordinal: 1 });
+        const waiting = yield* Deferred.make<void>();
+        const installed = yield* Deferred.make<void>();
+        const releaseWriter = yield* Deferred.make<void>();
+        const writer = yield* hostLock
+          .withWrite(
+            Deferred.succeed(installed, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseWriter)),
+            ),
+            Deferred.succeed(waiting, undefined),
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(waiting);
+        const unrelatedEntered = yield* Deferred.make<void>();
+        const unrelated = yield* Effect.forkChild(
+          unrelatedRuntime
+            .startTurn({
+              ...turnInput,
+              appThread: (yield* projectionStore.getThreadProjection(unrelatedThreadId)).thread,
+              threadId: unrelatedThreadId,
+              runId: unrelatedRunId,
+              attemptId: idAllocator.derive.runAttempt({
+                runId: unrelatedRunId,
+                attemptOrdinal: 1,
+              }),
+              rootNodeId: idAllocator.derive.rootNode({ runId: unrelatedRunId }),
+              providerThread: makeProviderThread({
+                idAllocator,
+                threadId: unrelatedThreadId,
+                providerSessionId: unrelatedSessionId,
+                now,
+                nativeThreadId: "native-unrelated-maintenance",
+              }),
+            })
+            .pipe(Effect.andThen(Deferred.succeed(unrelatedEntered, undefined))),
+          { startImmediately: true },
+        );
+        if (operation === "resume") {
+          yield* runtime.resumeThread({
+            threadId,
+            providerThread,
+            modelSelection: { ...modelSelection, model: "changed-model" },
+            runtimePolicy,
+          });
+          assert.equal((yield* Ref.get(state)).resumeCount, 1);
+        }
+        if (operation === "ensure") {
+          const error = yield* runtime
+            .ensureThread({
+              threadId,
+              modelSelection,
+              runtimePolicy,
+              existingProviderThread: providerThread,
+            })
+            .pipe(Effect.flip);
+          assert.equal(error._tag, "ProviderAdapterProtocolError");
+          assert.equal(
+            error.message,
+            `${CODEX_DRIVER} provider protocol error: ensureThread unused in test.`,
+          );
+        }
+        if (operation === "snapshot") {
+          const error = yield* runtime.readThreadSnapshot({ providerThread }).pipe(Effect.flip);
+          assert.equal(error._tag, "ProviderAdapterProtocolError");
+          assert.equal(
+            error.message,
+            `${CODEX_DRIVER} provider protocol error: readThreadSnapshot unused in test.`,
+          );
+        }
+        // A continuation constructed before the lease existed must use the current lease.
+        yield* continuation;
+        assert.isFalse(yield* Deferred.isDone(installed));
+        assert.isFalse(yield* Deferred.isDone(unrelatedEntered));
+        yield* manager.close(providerSessionId);
+        yield* Deferred.await(installed);
+        assert.isFalse(yield* Deferred.isDone(unrelatedEntered));
+        yield* Deferred.succeed(releaseWriter, undefined);
+        yield* Fiber.join(writer);
+        yield* Fiber.join(unrelated);
+        assert.isTrue(yield* Deferred.isDone(unrelatedEntered));
+        yield* manager.close(unrelatedSessionId);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            hostLock,
+            hasPendingBackgroundWork: Ref.get(pending),
+            idleTimeoutMs: 60_000,
+          }),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

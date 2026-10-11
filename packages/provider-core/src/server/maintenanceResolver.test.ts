@@ -262,7 +262,11 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           },
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn));
 
-        expect(capabilities.update?.installationKey).toBeDefined();
+        if (prefix.startsWith("Cellar/")) {
+          expect(capabilities.update?.installationKey).toBeUndefined();
+        } else {
+          expect(capabilities.update?.installationKey).toBeDefined();
+        }
         expect(capabilities).toMatchObject({
           provider: driver("packageTool"),
           packageName: "@example/package-tool",
@@ -280,6 +284,46 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
             lockKey: `npm-global:${normalizeCommandPath(tempDir)}`,
           },
         });
+      }).pipe(Effect.scoped),
+    { skip: windowsHost || !symlinksSupported },
+  );
+
+  it.effect(
+    "excludes explicitly pinned npm keg binaries from automatic updates",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* makeTempDir("t3-pinned-npm-capabilities");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+        );
+        const prefix = NodePath.join(root, "Cellar/node/24");
+        const alias = linkIntoPackage(prefix, "package-tool", [
+          "lib",
+          "node_modules",
+          "@example",
+          "package-tool",
+        ]);
+        const real = NodeFS.realpathSync(alias);
+        for (const binaryPath of ["package-tool", real]) {
+          const capabilities = yield* resolvePackageManagedProviderMaintenance(
+            {
+              provider: driver("packageTool"),
+              npmPackageName: "@example/package-tool",
+              nativeUpdate: null,
+            },
+            {
+              binaryPath,
+              resolvedCommandPath: alias,
+              realCommandPath: real,
+              env: { PATH: "" },
+              platform: "linux",
+            },
+          ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn));
+          expect(capabilities.update?.executable).toBe("npm");
+          expect(capabilities.update?.installationKey).toBe(
+            binaryPath === real ? undefined : `@example/package-tool:${prefix}`,
+          );
+        }
       }).pipe(Effect.scoped),
     { skip: windowsHost || !symlinksSupported },
   );
