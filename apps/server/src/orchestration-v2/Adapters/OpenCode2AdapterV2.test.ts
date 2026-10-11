@@ -1009,7 +1009,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         if (execution === "joined") {
           const childTurns = collected.flatMap((event) =>
             event.type === "provider_turn.updated" &&
-            event.providerTurn.nativeTurnRef?.nativeId.startsWith(CHILD)
+            event.providerTurn.nativeTurnRef?.nativeId?.startsWith(CHILD)
               ? [event.providerTurn.ordinal]
               : [],
           );
