@@ -38,6 +38,7 @@ const Receipt = Schema.Struct({
   args: Schema.Array(Schema.String),
   env: Schema.optional(Schema.Record(Schema.String, Schema.UndefinedOr(Schema.String))),
   parentPid: Schema.Number,
+  parentIdentity: Schema.optional(Schema.NullOr(Schema.String)),
   directory: Schema.String,
   pid: Schema.optional(Schema.Number),
   progress: Schema.optional(Schema.String),
@@ -103,6 +104,7 @@ export const layer = Layer.effect(
         ...input,
         id: NodeCrypto.randomUUID(),
         parentPid: process.pid,
+        parentIdentity: HostLock.readProcessIdentity(process.pid),
         directory: host.directory,
       };
       yield* Effect.try(() => {
@@ -211,7 +213,14 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
     const stderr = NodeFS.openSync(`${file}.stderr`, "a", 0o600);
     const child = NodeChildProcess.spawn(
       invocation.command,
-      [...selfInvocationArgs(invocation, ["__provider-install", file, String(process.pid)])],
+      [
+        ...selfInvocationArgs(invocation, [
+          "__provider-install",
+          file,
+          String(process.pid),
+          HostLock.readProcessIdentity(process.pid) ?? "",
+        ]),
+      ],
       {
         detached: true,
         stdio: ["ignore", stdout, stderr],
@@ -231,10 +240,15 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
   let receipt = readReceipt(file);
   const relayPid = Number(args[1]);
   // The live relay is the only link into the desktop/server's Windows tree.
-  while (HostLock.isProcessAlive(relayPid)) await new Promise((resolve) => setTimeout(resolve, 25));
+  while (HostLock.isProcessAlive(relayPid, args[2] || undefined))
+    await new Promise((resolve) => setTimeout(resolve, 25));
   const lease = HostLock.installLeasePath(receipt.directory);
   const candidate = `${lease}.${process.pid}`;
-  NodeFS.writeFileSync(candidate, String(process.pid), { flag: "wx", mode: 0o600 });
+  NodeFS.writeFileSync(
+    candidate,
+    JSON.stringify({ pid: process.pid, identity: HostLock.readProcessIdentity(process.pid) }),
+    { flag: "wx", mode: 0o600 },
+  );
   try {
     // A delayed relay must never overwrite an already running install's owner.
     NodeFS.linkSync(candidate, lease);
@@ -290,7 +304,10 @@ export async function runInstallSubcommand(command: string, args: ReadonlyArray<
     writeReceipt(file, receipt);
     const deadline = Date.now() + 30_000;
     while (!NodeFS.existsSync(`${file}.start`)) {
-      if (!HostLock.isProcessAlive(receipt.parentPid) || Date.now() >= deadline) {
+      if (
+        !HostLock.isProcessAlive(receipt.parentPid, receipt.parentIdentity) ||
+        Date.now() >= deadline
+      ) {
         throw new Error("Server exited before authorizing provider installation.");
       }
       await new Promise((resolve) => setTimeout(resolve, 50));

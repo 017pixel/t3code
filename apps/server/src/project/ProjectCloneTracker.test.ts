@@ -8,6 +8,7 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -162,20 +163,28 @@ describe("ProjectCloneTracker", () => {
 
   it.effect("a cancel that lands after git finished keeps the checkout", () => {
     const gate = Deferred.makeUnsafe<void>();
+    const entered = Deferred.makeUnsafe<Fiber.Fiber<unknown, unknown>>();
     const harness = makeHarness();
     // The clone itself completes instantly; the post-clone hook is what hangs.
     const hooks: ProjectCloneTracker.ProjectCloneHooks = {
       ...harness.hooks,
-      onCloned: () => Deferred.await(gate),
+      onCloned: () =>
+        Effect.fiber.pipe(
+          Effect.flatMap((fiber) => Deferred.succeed(entered, fiber)),
+          Effect.andThen(Deferred.await(gate)),
+        ),
     };
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       yield* tracker.start(startInput, hooks);
-      yield* Effect.yieldNow;
+      const fiber = yield* Deferred.await(entered);
       expect((yield* tracker.get(projectId))?.phase).toBe("done");
+      expect(yield* tracker.activeCloneCount).toBe(1);
       expect(yield* tracker.cancel(projectId)).toBe(false);
       expect(harness.discarded).toEqual([]);
       yield* Deferred.succeed(gate, undefined);
+      expect(Exit.isSuccess(yield* Fiber.await(fiber))).toBe(true);
+      expect(yield* tracker.activeCloneCount).toBe(0);
     }).pipe(Effect.provide(harness.layer));
   });
 

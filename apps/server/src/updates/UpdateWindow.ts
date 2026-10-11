@@ -10,13 +10,17 @@ import type { ProviderInstanceId } from "@t3tools/contracts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProviderMaintenanceCoordinator from "@t3tools/provider-core/server/maintenance";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
 import * as AntigravityInstallation from "../provider/AntigravityInstallation.ts";
 import * as CodexInstallation from "../provider/CodexInstallation.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 
 /** Work due this soon keeps the window closed, so it does not start late. */
 const UPDATE_LOOKAHEAD = Duration.minutes(5);
@@ -64,6 +68,38 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
   const providers = yield* ProviderRegistry.ProviderRegistry;
   const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
   const terminals = yield* Effect.serviceOption(TerminalManager.TerminalManager);
+  // The server updater sees the route and runtime services; provider updates
+  // need only CLI admission, so those layers need not supply these services.
+  const restartWork = [
+    [
+      "review-guides",
+      Option.map(
+        yield* Effect.serviceOption(PullRequestReviewGuideService.PullRequestReviewGuideService),
+        (service) => service.activeGenerationCount,
+      ),
+    ],
+    [
+      "project-clones",
+      Option.map(
+        yield* Effect.serviceOption(ProjectCloneTracker.ProjectCloneTracker),
+        (service) => service.activeCloneCount,
+      ),
+    ],
+    [
+      "workspace-preparation",
+      Option.map(
+        yield* Effect.serviceOption(ThreadLaunchService.ThreadLaunchService),
+        (service) => service.activePreparationCount,
+      ),
+    ],
+    [
+      "git-refreshes",
+      Option.map(
+        yield* Effect.serviceOption(VcsStatusBroadcaster.VcsStatusBroadcaster),
+        (service) => service.activeRefreshCount,
+      ),
+    ],
+  ] as const;
   const managedInstalls = [
     Option.map(
       yield* Effect.serviceOption(CodexInstallation.CodexInstallation),
@@ -108,6 +144,15 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
     if (providerUpdating) return ["provider-update"];
     // A first install downloads inside this server, so a restart would discard it.
     if (restartsServer) {
+      const activeWork: string[] = [];
+      for (const [name, work] of restartWork) {
+        if (Option.isNone(work)) activeWork.push(`${name}:unknown`);
+        else {
+          const count = yield* work.value;
+          if (count > 0) activeWork.push(`${name}:${count}`);
+        }
+      }
+      if (activeWork.length > 0) return activeWork;
       for (const installation of managedInstalls) {
         if (Option.isNone(installation)) return ["provider-install"];
         const { phase } = yield* installation.value;
