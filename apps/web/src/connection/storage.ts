@@ -330,7 +330,9 @@ function readShellRowsOnConnection(database: IDBDatabase, environmentId: Environ
       request.addEventListener("success", () => {
         const raw: unknown = request.result;
         if (!isShellRows(raw)) {
-          resume(Effect.succeed(raw));
+          // Another object belongs to a format this build does not know, such
+          // as a newer build's manifest. Reading none keeps it from discarding it.
+          resume(Effect.succeed(typeof raw === "string" ? raw : undefined));
           return;
         }
         try {
