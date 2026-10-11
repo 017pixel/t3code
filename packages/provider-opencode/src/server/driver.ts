@@ -16,7 +16,9 @@ import { ProviderDriverKind } from "@t3tools/contracts";
 import { OpenCodeSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -385,12 +387,14 @@ export const OpenCodeDriver: ProviderDriver<
                 OpenCode2Server.OpenCode2Server
               >
             >();
-          const generation = yield* Effect.cached(
+          // A failed load is not kept, so the next request retries it.
+          const generation = yield* Effect.cachedWithTTL(
             Effect.promise(() => import("./v2/textGeneration.ts")).pipe(
               Effect.flatMap((module) => module.make()),
               Effect.provideService(OpenCode2Server.OpenCode2Server, openCode2Server),
               Effect.provideContext(context),
             ),
+            (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
           );
           const deferred: ProviderTextGeneration = {
             generateCommitMessage: (input) =>

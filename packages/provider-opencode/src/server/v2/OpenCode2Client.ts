@@ -1,7 +1,9 @@
 import type { OpenCodeClient } from "@opencode/client/effect";
 import type { OpenCodeEvent } from "@opencode/protocol/groups/event";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -66,11 +68,13 @@ export const make = Effect.gen(function* () {
   const context = yield* Effect.context<
     Effect.Services<typeof import("./OpenCode2ClientLive.ts").make> | Scope.Scope
   >();
-  const live = yield* Effect.cached(
+  // A failed load is not kept, so the next connect retries it.
+  const live = yield* Effect.cachedWithTTL(
     Effect.promise(() => import("./OpenCode2ClientLive.ts")).pipe(
       Effect.flatMap((module) => module.make),
       Effect.provideContext(context),
     ),
+    (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
   );
   return OpenCode2Client.of({
     connect: (input) => live.pipe(Effect.flatMap((value) => value.connect(input))),

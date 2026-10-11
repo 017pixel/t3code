@@ -78,7 +78,9 @@ import {
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -5040,7 +5042,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ),
       );
 
-    const threadFind = yield* Effect.cached(
+    // A failed load is not kept, so the next search retries it.
+    const threadFind = yield* Effect.cachedWithTTL(
       Effect.promise(() => import("./ThreadFind.ts")).pipe(
         Effect.flatMap(({ makeThreadFind }) =>
           makeThreadFind((threadId) =>
@@ -5049,6 +5052,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ),
         Effect.provideService(SqlClient.SqlClient, sql),
       ),
+      (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
     );
     const searchThread: ProjectionStoreV2Shape["searchThread"] = (input) =>
       threadFind.pipe(Effect.flatMap((find) => find.searchThread(input)));
