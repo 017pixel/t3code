@@ -21,6 +21,7 @@ import {
   shortcutLabelForCommand,
 } from "../keybindings";
 import { isEditableFocused } from "../lib/editableFocus";
+import { PortalContainerContext, useOwnPortalContainer } from "../lib/portalContainer";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { isModelPickerOpen } from "../modelPickerVisibility";
@@ -258,6 +259,8 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const panelAnimationsSuppressed = usePanelNavigationSuppression(pathname);
   const routePanelAnimationsActive = panelAnimationsActive && !panelAnimationsSuppressed;
   const isOnSettings = pathname === "/settings" || pathname.startsWith("/settings/");
+  // The thread sidebar's popups hide with it on settings, where it is hidden in <Activity>.
+  const threadSidebarPortalContainer = useOwnPortalContainer(isOnSettings, null);
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
   const [sidebarWidth, setSidebarWidth] = useState(readInitialThreadSidebarWidth);
   // Subscribed rather than read once: the clamp must track live window size,
@@ -362,13 +365,15 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           ) : null}
           {/* Hidden rather than unmounted on settings, so going back only reveals it. */}
           <Activity mode={isOnSettings ? "hidden" : "visible"}>
-            {legacySidebarEnabled ? (
-              <Suspense fallback={<SidebarChromeShell />}>
-                <LegacyThreadSidebar />
-              </Suspense>
-            ) : (
-              <ThreadSidebar />
-            )}
+            <PortalContainerContext value={threadSidebarPortalContainer}>
+              {legacySidebarEnabled ? (
+                <Suspense fallback={<SidebarChromeShell />}>
+                  <LegacyThreadSidebar />
+                </Suspense>
+              ) : (
+                <ThreadSidebar />
+              )}
+            </PortalContainerContext>
           </Activity>
           <SidebarRail onDoubleClick={resetSidebarWidth} />
         </Sidebar>
