@@ -2198,12 +2198,14 @@ const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSel
       });
     }
 
-    // --version exercises the eagerly loaded module graph, which is where a
-    // missing dependency shows up, without starting a server or touching disk
-    // state. It does not cover lazily imported externals: node-pty is checked
-    // by the WSL preflight probe at runtime, while ffi-rs, @ff-labs/fff-node
-    // and the bun adapters are covered by the shared runtime-external closure
-    // and emitted-bundle checks.
+    // __load-bundle evaluates every chunk the entry reaches, lazily loaded
+    // services and provider adapters included, and loads the Cursor SDK. That
+    // is where a missing dependency shows up, without starting a server or
+    // touching disk state. (--version returns before the server graph loads.)
+    // It does not cover other externals required only when called: node-pty is
+    // checked by the WSL preflight probe at runtime, while ffi-rs and the bun
+    // adapters are covered by the shared runtime-external closure and
+    // emitted-bundle checks.
     yield* runCommand(
       ChildProcess.make(
         process.execPath,
@@ -2211,7 +2213,7 @@ const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSel
         // CommonJS resolution still falls back to $HOME/.node_modules,
         // $HOME/.node_libraries and the install prefix, so a globally installed
         // copy of a missing dependency would quietly satisfy this check.
-        ["--no-global-search-paths", entryPoint, "--version"],
+        ["--no-global-search-paths", entryPoint, "__load-bundle"],
         {
           cwd: probeApp,
           stdout: "pipe",
@@ -2223,11 +2225,11 @@ const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSel
         },
       ),
       {
-        label: "server sidecar self-containment check (node bin.mjs --version)",
+        label: "server sidecar self-containment check (node bin.mjs __load-bundle)",
         verbose: input.verbose,
       },
     ).pipe(
-      // Printing a version should be immediate. A regression that blocks (on
+      // Loading the bundle should take seconds. A regression that blocks (on
       // stdin, a port, a lock) would otherwise hang release CI until the job
       // times out with nothing useful in the log.
       Effect.timeout(BUNDLE_SELF_CHECK_TIMEOUT),
@@ -2236,7 +2238,7 @@ const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSel
           Effect.fail(
             new BundleNotSelfContainedError({
               exitCode: -1,
-              output: `The packaged bundle did not print its version within ${Duration.toSeconds(BUNDLE_SELF_CHECK_TIMEOUT)}s; it is hanging rather than failing to resolve.`,
+              output: `The packaged bundle did not finish loading within ${Duration.toSeconds(BUNDLE_SELF_CHECK_TIMEOUT)}s; it is hanging rather than failing to resolve.`,
             }),
           ),
         BuildCommandFailedError: (error) =>
