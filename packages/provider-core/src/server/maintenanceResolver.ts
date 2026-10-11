@@ -421,7 +421,11 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       .replaceAll("\\", "/")
       .replace(/(\/packages\/standalone)\/.*$/i, "$1")
       .replace(/(\/\.local\/share\/claude)\/.*$/i, "$1");
-    const codexHome = nativeUpdate.env?.CODEX_HOME;
+    // Compared after resolving links, like the command path: a symlinked home is still owned.
+    const configuredHome = nativeUpdate.env?.CODEX_HOME;
+    const codexHome = configuredHome
+      ? yield* fileSystem.realPath(configuredHome).pipe(Effect.orElseSucceed(() => configuredHome))
+      : undefined;
     const ownsHome =
       definition.provider !== "codex" ||
       !codexHome ||

@@ -1203,6 +1203,13 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         expect(
           (yield* resolve(NodePath.join(root, "other"))).update?.installationKey,
         ).toBeUndefined();
+        // The default home is often reached through a link, such as macOS's /var -> /private/var.
+        const linkedHome = `${root}-linked`;
+        NodeFS.symlinkSync(root, linkedHome);
+        yield* Effect.addFinalizer(() => Effect.sync(() => NodeFS.rmSync(linkedHome)));
+        expect((yield* resolve(linkedHome)).update?.installationKey).toBe(
+          owned.update?.installationKey,
+        );
       }).pipe(Effect.scoped),
     { skip: windowsHost },
   );
