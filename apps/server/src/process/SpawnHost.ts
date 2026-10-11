@@ -361,6 +361,10 @@ class SpawnHostClient {
       } else if (child.state === "sent") {
         // It may have started; spawning again could run it twice.
         child.markFailed(new Error("The spawn host exited before reporting the spawn."));
+      } else if (!child.referenced) {
+        // Its exit status left with the host. A scope release leaves an
+        // unreferenced child, such as a detached editor, running; so does this.
+        child.markExited(null, null);
       } else if (child.pid !== undefined) {
         // Its exit status left with the host. Stop the group it leads, as a scope release would.
         killGroupOrProcess(child.pid, "SIGKILL");
