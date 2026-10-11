@@ -129,6 +129,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleWithoutShell(getLocalEnvironmentBearerToken);
 
   yield* ipc.handleWithoutShell(getClientSettings);
+  // Saves at once, then waits for the login shell itself before the shortcut.
   yield* ipc.handleWithoutShell(setClientSettings);
   yield* ipc.handleSecretStorage(getConnectionCatalog);
   yield* ipc.handle(getSnapShotState);

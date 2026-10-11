@@ -16,7 +16,7 @@ import {
   type RefObject,
 } from "react";
 
-import { PortalContainerContext } from "~/lib/portalContainer";
+import { PortalContainerContext, useOwnPortalContainer } from "~/lib/portalContainer";
 
 /**
  * A thread view that `ThreadRouteView` keeps rendered while hidden. React
@@ -288,23 +288,7 @@ export function KeptViewFrame({
   onWarm: (viewKey: string) => void;
   children: ReactNode;
 }) {
-  const lifetime = useContext(KeptViewLifetimeContext);
-  const [portalContainer] = useState(() => {
-    const container = document.createElement("div");
-    container.hidden = true;
-    return container;
-  });
-  useLayoutEffect(() => {
-    if (!portalContainer.isConnected) {
-      document.body.append(portalContainer);
-      lifetime?.hold(() => portalContainer.remove());
-    }
-    portalContainer.toggleAttribute("hidden", warming);
-    // Hiding the view runs this cleanup too; its popups stay mounted but out of sight.
-    return () => {
-      portalContainer.toggleAttribute("hidden", true);
-    };
-  }, [lifetime, portalContainer, warming]);
+  const portalContainer = useOwnPortalContainer(warming, useContext(KeptViewLifetimeContext));
   const warmed = useEffectEvent(() => onWarm(viewKey));
   useLayoutEffect(() => {
     if (!warming) return;

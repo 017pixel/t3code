@@ -79,6 +79,7 @@ import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   primaryServerConfigAtom,
   primaryServerConfigEventAtom,
+  primaryServerSessionConfigAtom,
   primaryServerWelcomeAtom,
 } from "../state/server";
 import { readProject, setActiveEnvironmentId, useActiveEnvironmentId } from "../state/entities";
@@ -578,6 +579,7 @@ function EventRouter({
   const primaryEnvironment = usePrimaryEnvironment();
   const serverConfig = useAtomValue(primaryServerConfigAtom);
   const serverConfigEvent = useAtomValue(primaryServerConfigEventAtom);
+  const serverSessionConfig = useAtomValue(primaryServerSessionConfigAtom);
   const serverWelcome = useAtomValue(primaryServerWelcomeAtom);
   const readPathname = useEffectEvent(() => pathname);
   const handledBootstrapThreadIdRef = useRef<string | null>(null);
@@ -676,10 +678,11 @@ function EventRouter({
     handleWelcome(serverWelcome);
   }, [serverWelcome]);
 
-  // Before handling the event: the first config can come without one.
+  // Before handling the event: the first config can come without one. The
+  // server's, since the boot snapshot can predate a fix made while closed.
   useEffect(() => {
-    if (serverConfig) keybindingsToastController.seed(serverConfig.issues);
-  }, [keybindingsToastController, serverConfig]);
+    if (serverSessionConfig) keybindingsToastController.seed(serverSessionConfig.issues);
+  }, [keybindingsToastController, serverSessionConfig]);
 
   useEffect(() => {
     if (serverConfigEvent === null || handledConfigEventRef.current === serverConfigEvent) {

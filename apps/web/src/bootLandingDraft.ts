@@ -95,7 +95,12 @@ export async function resolveLandingDraft(): Promise<DraftId | null> {
   }
   const draft = useComposerDraftStore.getState().getDraftSession(draftId);
   if (draft === null) return null;
-  setPendingLandingDraft({ draftId, projectRef, openedWith: landingDraftContext(draft) });
+  setPendingLandingDraft({
+    draftId,
+    // A reused draft can sit on another machine of the project than its most recent one.
+    projectRef: scopeProjectRef(draft.environmentId, draft.projectId),
+    openedWith: landingDraftContext(draft),
+  });
   // The defaults read t3.json once the session is ready; asking now lets the
   // query go out with the session instead of after the first render, and the
   // query cache answers the later read.

@@ -475,6 +475,18 @@ export const primaryEnvironmentMissingAtom = Atom.make(false).pipe(
   Atom.withLabel("web-primary-environment-missing"),
 );
 
+const NO_DESKTOP_LOCAL_BACKENDS: ReadonlySet<string> = new Set();
+
+/**
+ * Desktop-local backends the desktop lists, by backend id, that discovery may
+ * still register: their bootstrap was not rejected. A WSL backend that is
+ * still booting stays here until it answers or the desktop stops listing it.
+ */
+export const discoverableDesktopLocalBackendsAtom = Atom.make(NO_DESKTOP_LOCAL_BACKENDS).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("web-discoverable-desktop-local-backends"),
+);
+
 export function secondaryBearerExpiresAtEpochMs(
   issuedAtEpochMs: number,
   expiresInSeconds: number,
@@ -777,6 +789,16 @@ const layerPlatformConnectionSource = Layer.effect(
           }
         }
         yield* Ref.set(rejectedRef, nextRejected);
+        const discoverable = topologyRead.bootstraps
+          .map((bootstrap) => bootstrap.id)
+          .filter((id) => !nextRejected.has(id));
+        const previousDiscoverable = appAtomRegistry.get(discoverableDesktopLocalBackendsAtom);
+        if (
+          discoverable.length !== previousDiscoverable.size ||
+          discoverable.some((id) => !previousDiscoverable.has(id))
+        ) {
+          appAtomRegistry.set(discoverableDesktopLocalBackendsAtom, new Set(discoverable));
+        }
       }
 
       yield* Ref.set(cacheRef, next);

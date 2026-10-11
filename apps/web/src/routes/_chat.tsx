@@ -10,7 +10,7 @@ import { registerChatSurface } from "../components/chatSurfaceSlot";
 import { KeptChatSurface } from "../components/ThreadRouteView";
 import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
-import { useProjects } from "../state/entities";
+import { useProjects, waitForProject } from "../state/entities";
 import { isPreviewAvailableFor } from "../browser/previewRuntime";
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { environmentSession, useEnvironmentScope } from "../state/session";
@@ -18,7 +18,11 @@ import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread, useNewThreadHandler } from "../hooks/useHandleNewThread";
-import { clearPendingLandingDraft, usePendingLandingDraft } from "../bootLanding";
+import {
+  clearPendingLandingDraft,
+  readPendingLandingDraft,
+  usePendingLandingDraft,
+} from "../bootLanding";
 import { environmentCatalog } from "../connection/catalog";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -254,7 +258,8 @@ function LandingDraftDefaults() {
   );
   const currentConfig = useAtomValue(liveServerConfigValueAtom(projectRef?.environmentId ?? null));
   const liveConfig = sessionConfig === null ? null : (currentConfig ?? sessionConfig);
-  const startedDraftIdRef = useRef<string | null>(null);
+  // One run per place the draft sits: load balancing can move it during one.
+  const startedRef = useRef<string | null>(null);
   // The snapshot can name an environment this browser has since removed. Its
   // config never arrives, so the draft stops waiting for it and reports the
   // environment as unavailable instead of connecting forever.
@@ -267,16 +272,36 @@ function LandingDraftDefaults() {
   }, [dropLanding, landing]);
   useEffect(() => {
     if (landing === null || projectRef === null || liveConfig === null || dropLanding) return;
-    if (startedDraftIdRef.current === landing.draftId) return;
-    startedDraftIdRef.current = landing.draftId;
-    // The screen may still show the snapshot's settings; the defaults use the server's.
-    void handleNewThread(projectRef, {
-      replace: true,
-      landing,
-      serverSettings: liveConfig.settings,
-    })
+    const startedKey = `${landing.draftId} ${projectRef.environmentId} ${projectRef.projectId}`;
+    if (startedRef.current === startedKey) return;
+    startedRef.current = startedKey;
+    // A machine the draft moved to can answer before its projects arrive, and
+    // the defaults need the project. The screen may still show the snapshot's
+    // settings; the defaults use the server's.
+    void waitForProject(projectRef)
       .catch(() => undefined)
-      .finally(() => clearPendingLandingDraft(landing.draftId));
+      .then(() =>
+        readPendingLandingDraft() === landing
+          ? handleNewThread(projectRef, {
+              replace: true,
+              landing,
+              serverSettings: liveConfig.settings,
+            })
+          : null,
+      )
+      .catch(() => undefined)
+      .finally(() => {
+        // Moved meanwhile: the run for where it went clears the landing.
+        const draftNow = useComposerDraftStore.getState().getDraftSession(landing.draftId);
+        if (
+          draftNow !== null &&
+          (draftNow.environmentId !== projectRef.environmentId ||
+            draftNow.projectId !== projectRef.projectId)
+        ) {
+          return;
+        }
+        clearPendingLandingDraft(landing.draftId);
+      });
   }, [dropLanding, handleNewThread, landing, liveConfig, projectRef]);
   return null;
 }
