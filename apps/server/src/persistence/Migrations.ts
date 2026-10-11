@@ -74,10 +74,11 @@ import Migration0057 from "./Migrations/057_ScheduledTaskWebhooks.ts";
 import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
 import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
-import Migration0061 from "./Migrations/061_ProjectionThreadSweepIndexes.ts";
-import Migration0062, {
+import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
+import Migration0062 from "./Migrations/062_ProjectionThreadSweepIndexes.ts";
+import Migration0063, {
   ensureThreadReadProjection,
-} from "./Migrations/062_ProjectionThreadReadPayload.ts";
+} from "./Migrations/063_ProjectionThreadReadPayload.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -152,10 +153,11 @@ export const migrationEntries = [
   [58, "WebhookRelayDeliveries", Migration0058],
   [59, "McpAppModelContext", Migration0059],
   [60, "ThreadSnapshotWindowIndexes", Migration0060],
-  // Published previews ran PeerLinks as 61, so their databases skip this one (runMigrations
+  [61, "PullRequestReviewGuides", Migration0061],
+  // Preview and stacked builds that already recorded a different 62 skip this one (runMigrations
   // warns). They only lose the sweep index: no query names it with INDEXED BY.
-  [61, "ProjectionThreadSweepIndexes", Migration0061],
-  [62, "ProjectionThreadReadPayload", Migration0062],
+  [62, "ProjectionThreadSweepIndexes", Migration0062],
+  [63, "ProjectionThreadReadPayload", Migration0063],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -242,7 +244,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ).pipe(Effect.annotateLogs({ skipped }));
   }
   // ProjectionStore reads this table, so it must exist even when its migration was skipped.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 62) {
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 63) {
     yield* ensureThreadReadProjection;
   }
   return executedMigrations;
