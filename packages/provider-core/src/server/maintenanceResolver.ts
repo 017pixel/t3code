@@ -581,7 +581,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
         `${packageName}@latest`,
       ],
       updateLockKey: `npm-global:${normalizeCommandPath(npmPrefix)}`,
-      installationKey: `${packageName}:${identity(npmPrefix)}`,
+      installationKey: keyFor(npmPrefix),
     });
   }
 

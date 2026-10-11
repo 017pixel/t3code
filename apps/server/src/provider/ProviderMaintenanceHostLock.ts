@@ -172,13 +172,16 @@ export const make = (directory: string) => {
           if (result._tag === "Success") {
             // An installer may have registered after our first check, before its
             // server died and this gate's heartbeat expired.
-            if (yield* Effect.sync(() => installIsAlive(directory))) {
+            const alive = yield* Effect.sync(() => {
+              const alive = installIsAlive(directory);
+              // Reclaim under the gate so no scan can erase a newer install lease.
+              if (!alive) NodeFS.rmSync(installLeasePath(directory), { force: true });
+              return alive;
+            }).pipe(Effect.onError(() => Effect.promise(() => result.success())));
+            if (alive) {
               yield* Effect.promise(() => result.success());
               continue;
             }
-            // Reclaim only under the gate, so a concurrent stale-owner scan
-            // cannot erase a newer supervisor's lease.
-            yield* Effect.sync(() => NodeFS.rmSync(installLeasePath(directory), { force: true }));
             return {
               release: result.success,
               handoff: async () => {
@@ -288,10 +291,7 @@ export const make = (directory: string) => {
     const inherited = inheritedRelease === undefined ? undefined : readTokens.get(inheritedRelease);
     const read = Effect.acquireUseRelease(
       acquireRead,
-      (release) =>
-        effect.pipe(
-          Effect.provideService(HeldRead, inherited?.active ? inherited : readTokens.get(release)!),
-        ),
+      (release) => effect.pipe(Effect.provideService(HeldRead, readTokens.get(release)!)),
       (release) => release,
     );
     return inherited === undefined ? read : read.pipe(Effect.provideService(HeldRead, inherited));
