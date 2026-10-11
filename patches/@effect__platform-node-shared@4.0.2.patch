@@ -38,19 +38,33 @@ index 6cfa36e..ddef269 100644
   * Result of flattening a pipeline of commands.
   *
 diff --git a/dist/NodeChildProcessSpawner.js b/dist/NodeChildProcessSpawner.js
-index b3e4dea..1b82509 100644
+index b3e4dea..0930404 100644
 --- a/dist/NodeChildProcessSpawner.js
 +++ b/dist/NodeChildProcessSpawner.js
-@@ -47,7 +47,7 @@ const isProcessAlive = (childProcess, exitSignal) => {
- const taskkill = (childProcess, onExit = () => {}) => NodeChildProcess.execFile("taskkill", ["/pid", String(childProcess.pid), "/T", "/F"], {
-   windowsHide: true
- }, onExit);
+@@ -44,10 +44,18 @@ const isProcessAlive = (childProcess, exitSignal) => {
+     return false;
+   }
+ };
+-const taskkill = (childProcess, onExit = () => {}) => NodeChildProcess.execFile("taskkill", ["/pid", String(childProcess.pid), "/T", "/F"], {
+-  windowsHide: true
+-}, onExit);
 -const make = /*#__PURE__*/Effect.gen(function* () {
++const taskkill = (childProcess, onExit = () => {}) => {
++  // Once Node observes the leader's exit, taskkill /T cannot reclaim orphaned
++  // descendants through its PID, which may be reused. Skip stale-PID cleanup.
++  if (childProcess.exitCode !== null || childProcess.signalCode !== null) {
++    onExit(null);
++    return;
++  }
++  NodeChildProcess.execFile("taskkill", ["/pid", String(childProcess.pid), "/T", "/F"], {
++    windowsHide: true
++  }, onExit);
++};
 +const makeWithSpawn = spawnProcess => Effect.gen(function* () {
    const fs = yield* FileSystem.FileSystem;
    const path = yield* Path.Path;
    const resolveWorkingDirectory = Effect.fnUntraced(function* (options) {
-@@ -170,6 +170,10 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+@@ -170,6 +178,10 @@ const make = /*#__PURE__*/Effect.gen(function* () {
              // Create a sink to write to for input file descriptors
              let sink = Sink.drain;
              if (nodeStream && "write" in nodeStream) {
@@ -61,7 +75,7 @@ index b3e4dea..1b82509 100644
                sink = NodeSink.fromWritable({
                  evaluate: () => nodeStream,
                  onError: error => toPlatformError(`fromWritable(fd${fd})`, toError(error), command)
-@@ -261,7 +265,7 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+@@ -261,7 +273,7 @@ const make = /*#__PURE__*/Effect.gen(function* () {
    };
    const spawn = (command, spawnOptions) => Effect.callback(resume => {
      const deferred = Deferred.makeUnsafe();
@@ -70,7 +84,7 @@ index b3e4dea..1b82509 100644
      handle.on("error", error => {
        resume(Effect.fail(toPlatformError("spawn", error, command)));
      });
-@@ -553,7 +557,12 @@ const make = /*#__PURE__*/Effect.gen(function* () {
+@@ -553,7 +565,12 @@ const make = /*#__PURE__*/Effect.gen(function* () {
   * @category layers
   * @since 4.0.0
   */
@@ -84,3 +98,40 @@ index b3e4dea..1b82509 100644
  /**
   * Flattens a `Command` into an array of `StandardCommand`s along with pipe
   * options for each connection.
+diff --git a/src/NodeChildProcessSpawner.ts b/src/NodeChildProcessSpawner.ts
+index f15aa85..1d36d30 100644
+--- a/src/NodeChildProcessSpawner.ts
++++ b/src/NodeChildProcessSpawner.ts
+@@ -19,7 +19,9 @@
+  * `forceKillAfter`, the wait is limited to one second and never escalates.
+  * With it, cleanup may take the configured duration plus a final one-second
+  * wait after `SIGKILL`. Zombie descendants can consume either full bound. On
+- * Windows, `taskkill` terminates the tree and only the leader's exit is awaited.
++ * Windows, `taskkill` terminates the tree while the leader is running and only
++ * the leader's exit is awaited. Descendants that outlive the leader are not
++ * reclaimed by PID-based cleanup.
+  *
+  * POSIX cleanup targets a numeric process-group ID. If the group disappears
+  * and its ID is reused before cleanup, an unrelated group may be signalled.
+@@ -99,13 +101,20 @@ const isProcessAlive = (childProcess: NodeChildProcess.ChildProcess, exitSignal:
+ const taskkill = (
+   childProcess: NodeChildProcess.ChildProcess,
+   onExit: (error: NodeChildProcess.ExecException | null) => void = () => {}
+-) =>
++) => {
++  // Once Node observes the leader's exit, taskkill /T cannot reclaim orphaned
++  // descendants through its PID, which may be reused. Skip stale-PID cleanup.
++  if (childProcess.exitCode !== null || childProcess.signalCode !== null) {
++    onExit(null)
++    return
++  }
+   NodeChildProcess.execFile(
+     "taskkill",
+     ["/pid", String(childProcess.pid!), "/T", "/F"],
+     { windowsHide: true },
+     onExit
+   )
++}
+ 
+ const make = Effect.gen(function*() {
+   const fs = yield* FileSystem.FileSystem
