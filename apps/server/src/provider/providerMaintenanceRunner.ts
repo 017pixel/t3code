@@ -71,6 +71,8 @@ export interface ProviderMaintenanceRunnerShape {
           readonly quiet?: boolean | undefined;
           /** Background installs require proven ownership and pin the checked release. */
           readonly origin?: ServerProviderUpdateState["origin"];
+          /** Rechecks background eligibility after queued turns and installs have drained. */
+          readonly beforeInstall?: Effect.Effect<boolean>;
         },
   ) => Effect.Effect<ServerProviderUpdatedPayload, ServerProviderUpdateError>;
 }
@@ -594,6 +596,21 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               instanceId,
               fresh.update.installationKey,
             );
+            if (
+              background &&
+              typeof target !== "string" &&
+              target.beforeInstall &&
+              !(yield* target.beforeInstall)
+            ) {
+              return yield* finish(
+                makeUpdateState({
+                  status: "unchanged",
+                  startedAt: null,
+                  finishedAt: yield* nowIso,
+                  message: "Background update postponed until the update window opens.",
+                }),
+              );
+            }
             yield* setRunningMessage(`Running ${describeCommand(command)}`);
             const result = yield* runMaintenanceCommand(
               command,
@@ -698,25 +715,30 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
             message: "Waiting for running turns to finish.",
           }),
         ).pipe(Effect.asVoid),
-        onInterrupted: Effect.gen(function* () {
-          const current = (yield* providerRegistry.getProviders).find(
-            (candidate) => candidate.instanceId === instanceId,
-          );
-          // A state left queued or running would block background updates until restart.
-          const status = current?.updateState?.status;
-          if (status !== "queued" && status !== "running") return;
-          yield* setUpdateState(
-            makeUpdateState({
-              status: "failed",
-              startedAt: current?.updateState?.startedAt ?? null,
-              finishedAt: yield* nowIso,
-              message:
-                status === "queued"
-                  ? "Update canceled before installation started."
-                  : "Update canceled.",
-            }),
-          );
-        }),
+        onFailure: (cause) =>
+          Effect.gen(function* () {
+            const current = (yield* providerRegistry.getProviders).find(
+              (candidate) => candidate.instanceId === instanceId,
+            );
+            // A state left queued or running would block background updates until restart.
+            const status = current?.updateState?.status;
+            if (status !== "queued" && status !== "running") return;
+            const failure = Cause.squash(cause);
+            yield* setUpdateState(
+              makeUpdateState({
+                status: "failed",
+                startedAt: current?.updateState?.startedAt ?? null,
+                finishedAt: yield* nowIso,
+                message: !Cause.hasInterrupts(cause)
+                  ? failure instanceof Error
+                    ? failure.message
+                    : "Could not acquire the provider installation lock."
+                  : status === "queued"
+                    ? "Update canceled before installation started."
+                    : "Update canceled.",
+              }),
+            );
+          }),
         run: runProviderUpdate(),
       })
       .pipe(

@@ -1,6 +1,8 @@
 import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Effect from "effect/Effect";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
 import * as Ref from "effect/Ref";
 import * as HostLock from "./ProviderMaintenanceHostLock.ts";
 
@@ -13,7 +15,7 @@ export interface ProviderMaintenanceCommandCoordinatorShape<E> {
     readonly onQueued?: Effect.Effect<void, E, R>;
     /** Runs once if turns on this or another server must finish first. */
     readonly onWaitingForTurns?: Effect.Effect<void, E, R>;
-    readonly onInterrupted?: Effect.Effect<void, E, R>;
+    readonly onFailure?: (cause: Cause.Cause<E>) => Effect.Effect<void, E, R>;
     readonly run: Effect.Effect<A, E, R>;
   }) => Effect.Effect<A, E, R>;
 }
@@ -49,7 +51,7 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
     lockKey,
     onQueued,
     onWaitingForTurns,
-    onInterrupted,
+    onFailure,
     run,
   }) =>
     Effect.gen(function* () {
@@ -64,7 +66,9 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
         Effect.andThen(
           locks.withLock(lockKey, hostLock.withWrite(admission.withPermit(run), onWaitingForTurns)),
         ),
-        Effect.onInterrupt(() => onInterrupted ?? Effect.void),
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit) ? (onFailure?.(exit.cause) ?? Effect.void) : Effect.void,
+        ),
         Effect.ensuring(releaseTarget(targetKey)),
       );
     });

@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
+import type { ProviderInstanceId } from "@t3tools/contracts";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -41,6 +42,7 @@ export class UpdateWindow extends Context.Service<
      */
     readonly runIfOpen: <A, E, R>(
       install: Effect.Effect<A, E, R>,
+      updatingInstanceId?: ProviderInstanceId,
     ) => Effect.Effect<Option.Option<A>, E, R>;
   }
 >()("t3/updates/UpdateWindow") {}
@@ -55,7 +57,9 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
   const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
 
   /** Returns what keeps the window closed; empty means open. */
-  const blockers = Effect.fn("updates.UpdateWindow.blockers")(function* () {
+  const blockers = Effect.fn("updates.UpdateWindow.blockers")(function* (
+    updatingInstanceId?: ProviderInstanceId,
+  ) {
     const now = yield* DateTime.now;
     const horizon = DateTime.addDuration(now, UPDATE_LOOKAHEAD);
 
@@ -78,7 +82,8 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
     // Includes installs someone started by hand.
     const providerUpdating = (yield* providers.getProviders).some(
       (provider) =>
-        provider.updateState?.status === "queued" || provider.updateState?.status === "running",
+        provider.instanceId !== updatingInstanceId &&
+        (provider.updateState?.status === "queued" || provider.updateState?.status === "running"),
     );
     if (providerUpdating) return ["provider-update"];
 
@@ -146,9 +151,9 @@ const make = Effect.fn("updates.UpdateWindow.make")(function* () {
     return [];
   });
 
-  const runIfOpen: UpdateWindow["Service"]["runIfOpen"] = (install) =>
+  const runIfOpen: UpdateWindow["Service"]["runIfOpen"] = (install, updatingInstanceId) =>
     admission.withPermit(
-      blockers().pipe(
+      blockers(updatingInstanceId).pipe(
         Effect.flatMap((found) =>
           found.length > 0
             ? Effect.logDebug("Background update waiting for the update window", {
