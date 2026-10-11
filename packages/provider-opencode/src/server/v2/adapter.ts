@@ -2852,14 +2852,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                     child.subagent!.turns,
                     history.filter((entry) => entry.type === "idle").length,
                   );
-                  yield* startChildTurn(child);
-                  child.active!.before =
-                    history.find(
-                      (entry) =>
-                        entry.type === "user" ||
-                        entry.type === "synthetic" ||
-                        entry.type === "idle",
-                    )?.id ?? null;
+                  if (child.active === undefined) {
+                    yield* startChildTurn(child);
+                    child.active!.before =
+                      history.find(
+                        (entry) =>
+                          entry.type === "user" ||
+                          entry.type === "synthetic" ||
+                          entry.type === "idle",
+                      )?.id ?? null;
+                  }
                   yield* backfill(childId!, child, activeSessions);
                 }
                 const [permissions, forms] = yield* Effect.all([

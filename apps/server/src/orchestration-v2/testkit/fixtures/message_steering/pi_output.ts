@@ -55,6 +55,13 @@ export function assertPiMessageSteeringOutput(
     MESSAGE_STEERING_INITIAL_PROMPT,
     MESSAGE_STEERING_STEER_PROMPT,
   ]);
+  assert.lengthOf(
+    projection.turnItems.filter(
+      (item) => item.type === "user_message" && item.text === MESSAGE_STEERING_STEER_PROMPT,
+    ),
+    1,
+    "steering must appear once in the saved conversation",
+  );
   assertUserMessageInputIntents(projection, ["turn_start", "steer"]);
   assertAssistantTextIncludes(projection, "steering fixture observed");
   assert.lengthOf(projection.providerTurns, 1, "active steering must not start a provider turn");

@@ -1020,6 +1020,34 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             { id: "msg_child_prompt", type: "user", time: { created: 1 }, text: "Choose a color" },
           ],
         };
+        // A second call joins the same execution after another user message
+        // landed. Its history still includes work before that message.
+        const joinedHistory = {
+          ...childHistory,
+          data: [
+            { id: "msg_child_steer", type: "user", time: { created: 3 }, text: "Keep going" },
+            {
+              ...childHistory.data[0],
+              content: [
+                { type: "text", text: "Pre gap" },
+                {
+                  type: "tool",
+                  id: "call_child_gap",
+                  name: "shell",
+                  executed: true,
+                  state: {
+                    status: "completed",
+                    input: { command: "echo CHILD_GAP" },
+                    content: [{ type: "text", text: "CHILD_GAP" }],
+                    metadata: {},
+                  },
+                  time: { created: 2, ran: 2, completed: 2 },
+                },
+              ],
+            },
+            ...childHistory.data.slice(1),
+          ],
+        };
         const { runtime, thread } = yield* resumed(
           [
             out("session.active"),
@@ -1044,9 +1072,9 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             ...(execution === "joined"
               ? [
                   out("message.list", { sessionID: CHILD, order: "desc", limit: "50" }),
-                  reply("message.list", childHistory),
+                  reply("message.list", joinedHistory),
                   out("message.list", { sessionID: CHILD, order: "desc", limit: "50" }),
-                  reply("message.list", childHistory),
+                  reply("message.list", joinedHistory),
                   out("permission.list", { sessionID: CHILD }),
                   replyData("permission.list", []),
                   out("session.form.list", { sessionID: CHILD }),
@@ -1069,7 +1097,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
               sessionID: CHILD,
               assistantMessageID: "msg_child",
               ordinal: 0,
-              text: "Prefix",
+              text: execution === "joined" ? "Pre gapfix" : "Prefix",
             }),
             event("session.execution.succeeded", { sessionID: CHILD }),
             ...(execution === "joined"
@@ -1145,7 +1173,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             (event) =>
               event.type === "message.updated" &&
               event.message.threadId !== threadId &&
-              event.message.text === "Prefix",
+              event.message.text === (execution === "joined" ? "Pre gapfix" : "Prefix"),
           ),
         );
         assert.isFalse(
@@ -1154,6 +1182,22 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           ),
         );
         if (execution === "joined") {
+          assert.isTrue(
+            collected.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "command_execution" &&
+                event.turnItem.status === "completed" &&
+                event.turnItem.output === "CHILD_GAP",
+            ),
+            "joining a running child must backfill tools before its latest user message",
+          );
+          assert.isTrue(
+            collected.some(
+              (event) => event.type === "message.updated" && event.message.text === "Pre gap",
+            ),
+            "joining a running child must backfill text before its latest user message",
+          );
           const childTurns = collected.flatMap((event) =>
             event.type === "provider_turn.updated" &&
             event.providerTurn.nativeTurnRef?.nativeId?.startsWith(CHILD)

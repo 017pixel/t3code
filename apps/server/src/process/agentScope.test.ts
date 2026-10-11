@@ -313,6 +313,37 @@ finish();
       }),
     ),
   );
+  it.effect("resumes a provider tree it froze when cleanup cannot finish", () =>
+    scenario(({ directory, processes, signals, controller }) =>
+      Effect.gen(function* () {
+        yield* record(directory, controller);
+        processes.delete(10);
+        // Each stopped process forks again, so the tree never reaches a fixed point.
+        let nextPid = 1000;
+        const forking: ProviderProcessLedger.ProcessController = {
+          ...controller,
+          signal: (pid, signal) => {
+            controller.signal(pid, signal);
+            if (signal !== "SIGSTOP") return;
+            const child = nextPid++;
+            processes.set(child, {
+              pid: child,
+              ppid: pid,
+              pgid: 20,
+              startTime: `fork-${child}`,
+              zombie: false,
+            });
+          },
+        };
+        yield* Effect.exit(restart(directory, forking));
+        const stopped = signals.filter((s) => s.endsWith(":SIGSTOP")).map((s) => s.split(":")[0]);
+        const resumed = signals.filter((s) => s.endsWith(":SIGCONT")).map((s) => s.split(":")[0]);
+        expect(stopped.length).toBeGreaterThan(0);
+        expect(resumed.toSorted()).toEqual(stopped.toSorted());
+        expect(signals.some((s) => s.endsWith(":SIGKILL"))).toBe(false);
+      }),
+    ),
+  );
   it.effect("leaves every child of a live owning server alone", () =>
     scenario(({ directory, processes, signals, controller }) =>
       Effect.gen(function* () {
@@ -611,6 +642,56 @@ finish();
           expect(signals).toEqual([]);
           live.release();
         }),
+      ),
+  );
+
+  it.effect.each(["", "{", "{}"])(
+    "discards an invalid server registration %j before recovering orphaned providers",
+    (contents) =>
+      scenario(({ directory, processes, signals, controller }) =>
+        Effect.gen(function* () {
+          yield* record(directory, controller);
+          const leases = NodePath.join(directory, "leases");
+          processes.set(70, {
+            pid: 70,
+            ppid: 20,
+            pgid: 70,
+            startTime: "live-server",
+            zombie: false,
+          });
+          processes.set(71, {
+            pid: 71,
+            ppid: 70,
+            pgid: 71,
+            startTime: "live-provider",
+            zombie: false,
+          });
+          yield* ProviderProcessLedger.make({
+            stateDir: NodePath.join(directory, "second"),
+            ownerPid: 70,
+            controller,
+            installLeaseDirectory: leases,
+          });
+          const servers = NodePath.join(leases, "servers");
+          const liveRegistration = NodePath.join(servers, NodeFS.readdirSync(servers)[0]!);
+          const invalid = NodePath.join(servers, "invalid.json");
+          NodeFS.writeFileSync(invalid, contents);
+          processes.delete(10);
+          yield* ProviderProcessLedger.make({
+            stateDir: directory,
+            ownerPid: 90,
+            controller,
+            installLeaseDirectory: leases,
+          });
+          expect(NodeFS.existsSync(invalid)).toBe(false);
+          expect(NodeFS.existsSync(liveRegistration)).toBe(true);
+          expect(processes.has(20)).toBe(false);
+          expect(processes.has(30)).toBe(false);
+          expect(signals).toContain("20:SIGKILL");
+          expect(processes.has(70)).toBe(true);
+          expect(processes.has(71)).toBe(true);
+          expect(signals.some((s) => /^(70|71|90):/.test(s))).toBe(false);
+        }).pipe(Effect.scoped),
       ),
   );
 

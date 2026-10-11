@@ -302,9 +302,11 @@ export async function make(input: {
       const file = NodePath.join(servers, name);
       try {
         return [{ file, entry: decodeEntry(NodeFS.readFileSync(file, "utf8")) }];
-      } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
-        throw cause;
+      } catch {
+        // A partial registration names no server to protect and must not
+        // block recovery in every environment sharing the install directory.
+        NodeFS.rmSync(file, { force: true });
+        return [];
       }
     });
     if (records.every(({ entry }) => entry.instanceId === instanceId)) return;
