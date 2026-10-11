@@ -987,7 +987,10 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       const fromFlat = pmToFlat(map, from);
       const toFlat = pmToFlat(map, to);
       const nextValue = map.value;
-      const nextCursor = flatToCollapsed(map, fromFlat);
+      // The doc cursor counts typed `@name` text by its characters. The prompt counts it as one
+      // token, as the controlled effect below does, so report the clamped cursor.
+      const docCursor = flatToCollapsed(map, fromFlat);
+      const nextCursor = clampEditorCursor(nextValue, docCursor);
       const nextExpandedCursor = Math.max(
         0,
         Math.min(map.value.length, flatToMarkdown(map, fromFlat)),
@@ -1038,11 +1041,11 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
         map.runs.some((run) => {
           if (run.kind !== "token") return false;
           const start = run.collapsedStart + run.openLen;
-          return nextCursor === start || nextCursor === start + run.docLen;
+          return docCursor === start || docCursor === start + run.docLen;
         });
       onChangeRef.current(nextValue, nextCursor, nextExpandedCursor, suppressTrigger, contextIds);
     },
-    [literalText],
+    [clampEditorCursor, literalText],
   );
 
   const editorAttributes = useMemo(
@@ -1532,7 +1535,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     const fromFlat = pmToFlat(map, from);
     const next: typeof snapshot = {
       value: map.value,
-      cursor: flatToCollapsed(map, fromFlat),
+      cursor: clampEditorCursor(map.value, flatToCollapsed(map, fromFlat)),
       expandedCursor: Math.max(0, Math.min(map.value.length, flatToMarkdown(map, fromFlat))),
       contextIds: literalText ? [] : map.contextIds,
     };
@@ -1543,7 +1546,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     };
     snapshotRef.current = next;
     return next;
-  }, [editor, literalText]);
+  }, [clampEditorCursor, editor, literalText]);
 
   // Controlled value/cursor from the store (history recall, chip insertion…).
   useLayoutEffect(() => {
