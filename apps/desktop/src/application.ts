@@ -5,7 +5,7 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
-import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - Version output must flush before Electron exits, without acquiring the runtime.
@@ -237,9 +237,13 @@ const layerDesktopClerk = DesktopClerk.layer.pipe(
   Layer.provideMerge(ElectronApp.layer),
 );
 
+// Main-process requests reach the local backend, SSH-forwarded loopback ports,
+// tailnet hosts and an opt-in OTLP collector. fetch would send them to
+// HTTP(S)_PROXY under NODE_USE_ENV_PROXY; node:http agents never use a proxy,
+// like the undici Agent before them, and keep undici out of the main bundle.
 const layerDesktopApplicationRuntime = layerDesktopApplication.pipe(
   Layer.provideMerge(NodeServices.layer),
-  Layer.provideMerge(FetchHttpClient.layer),
+  Layer.provideMerge(NodeHttpClient.layerNodeHttp),
   Layer.provideMerge(NetService.layer),
   Layer.provideMerge(layerElectron),
 );
