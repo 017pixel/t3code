@@ -728,3 +728,30 @@ it.effect("snapshot refresh waits outside its mutex so updater verification cann
     assert.strictEqual(checks, 3);
   }).pipe(Effect.provide(layerAlwaysRunTest)),
 );
+
+it.effect("live snapshot watchers release CLI admission after their finite probe", () =>
+  Effect.gen(function* () {
+    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
+    const watching = yield* Deferred.make<void>();
+    const update = yield* Deferred.make<void>();
+    yield* makeManagedServerProvider<TestSettings>({
+      resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+      getSettings: Effect.succeed({ enabled: true }),
+      streamSettings: Stream.empty,
+      haveSettingsChanged: () => false,
+      initialSnapshot: () => Effect.succeed(initialSnapshot),
+      checkProvider: Effect.succeed(refreshedSnapshot),
+      enrichSnapshot: () =>
+        admission
+          .withLaunchPermit(Effect.void)
+          .pipe(
+            Effect.andThen(Deferred.succeed(watching, undefined)),
+            Effect.andThen(Effect.never),
+          ),
+      refreshOnInterval: false,
+    });
+    yield* Deferred.await(watching);
+    yield* admission.withPermit(Deferred.succeed(update, undefined)).pipe(Effect.forkScoped);
+    yield* Deferred.await(update);
+  }).pipe(Effect.provide(layerAlwaysRunTest)),
+);

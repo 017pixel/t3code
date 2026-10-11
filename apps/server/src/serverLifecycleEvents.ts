@@ -14,6 +14,19 @@ export const eventsForClient = (
 ) =>
   events.pipe(
     Stream.filter((event) => event.type !== "updateRestart" || input.updateRestarts === true),
+    Stream.mapEffect((event) => {
+      if (event.type !== "updateRestart" || event.payload.expiresAt === undefined) {
+        return Effect.succeed(event);
+      }
+      const expiresAt = event.payload.expiresAt;
+      return Clock.currentTimeMillis.pipe(
+        Effect.map((now) => ({
+          ...event,
+          payload: { ...event.payload, expiresInMs: Math.max(0, expiresAt - now) },
+        })),
+      );
+    }),
+    Stream.filter((event) => event.type !== "updateRestart" || event.payload.expiresInMs !== 0),
   );
 
 type LifecycleEventInput =

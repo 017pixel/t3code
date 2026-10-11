@@ -86,14 +86,19 @@ and npm are proven by the real path (symlinks followed): a versioned keg or cask
 Native installer layouts and the global directories of pnpm, Bun, Yarn, and Vite+ may match on
 either the resolved path or its real target, since those installers place real files or their own
 symlinks there. Volta is proven by its `volta-shim` link plus the package's image directory. When
-nothing is proven, the provider's own updater (`claude update`, `codex update`, `opencode upgrade`,
-`pi update --self`, `grok update`) runs instead, because each one detects its installer itself;
+nothing is proven, a manual update can use the provider's own updater (`claude update`,
+`codex update`, `opencode upgrade`, `pi update --self`, `grok update`), which detects its installer itself;
 the runner's version check catches an updater that exits 0 without updating. Mise installs stay
 manual-only because their version is pinned in mise's config. npm updates pin `--prefix` because the
 `npm` on `PATH` can belong to a different Node than the one that owns the provider. Homebrew
 compares against `brew info` since casks trail npm by hours; native installs share npm's version
 train, so the registry stays authoritative for them.
 See the [resolver](../../apps/server/src/provider/providerMaintenance.ts).
+
+Background updates require a proven installation identity. Manual and background
+installs drain host-wide provider leases before closing admission to CLI launches:
+a session holding a lease may still need admission to finish launching. This order
+also protects another environment on the same machine from a binary being replaced.
 
 Ownership is cached per instance and re-read immediately before an update runs. The
 [runner](../../apps/server/src/provider/providerMaintenanceRunner.ts) refuses when the lock key

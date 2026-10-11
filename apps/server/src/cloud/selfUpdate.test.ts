@@ -3,6 +3,7 @@ import { expect, it } from "@effect/vitest";
 import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -14,7 +15,7 @@ import * as ServerLifecycleEvents from "../serverLifecycleEvents.ts";
 import * as ServerAutoUpdater from "../updates/ServerAutoUpdater.ts";
 import * as UpdateWindow from "../updates/UpdateWindow.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -175,73 +176,105 @@ it.layer(NodeServices.layer)("server self update", (it) => {
     }),
   );
 
-  it.effect("rechecks a staged release after a closed window and refuses a withdrawn target", () =>
+  it.effect("expires the handoff latch by elapsed time despite wall clock corrections", () =>
     Effect.gen(function* () {
-      let latest = "1.1.0";
-      let open = false;
-      const staged: string[] = [];
-      const installed: string[] = [];
-      const config = yield* ServerConfig.ServerConfig.pipe(
-        Effect.provide(
-          ServerConfig.layerTest(process.cwd(), { prefix: "t3-background-update-test-" }),
-        ),
+      const { selfUpdate } = yield* makeHarness();
+      const clock = yield* Clock.Clock;
+      let wallTime = 0n;
+      const update = selfUpdate.update({ targetVersion: "1.1.0" }).pipe(
+        Effect.provideService(Clock.Clock, {
+          ...clock,
+          currentTimeNanos: Effect.sync(() => wallTime),
+          currentTimeNanosUnsafe: () => wallTime,
+        }),
       );
-      const { run: pass } = yield* ServerAutoUpdater.makeUpdatePass().pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            ServerConfig.layer({ ...config, devUrl: undefined }),
-            ServerSettings.layerTest({ automaticUpdates: true }),
+      yield* update;
+      wallTime = 600_000_000_000n;
+      expect((yield* update.pipe(Effect.flip)).reason).toBe(
+        "A server update is already in progress.",
+      );
+      wallTime = -600_000_000_000n;
+      yield* TestClock.adjust("5 minutes");
+      expect((yield* update).updateId).toBe("launcher-id");
+    }),
+  );
+
+  it.effect.each(["withdrawn", "disabled"] as const)(
+    "rechecks a staged release at handoff: %s",
+    (scenario) =>
+      Effect.gen(function* () {
+        let latest = "1.1.0";
+        let open = false;
+        let enabled = true;
+        const staged: string[] = [];
+        const installed: string[] = [];
+        const config = yield* ServerConfig.ServerConfig.pipe(
+          Effect.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-background-update-test-" }),
           ),
-        ),
-        Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, {
-          managed: true,
-          lastOutcome: undefined,
-          requestUpdate: () => Effect.succeed("id"),
-          prepareTrial: Effect.undefined,
-        }),
-        Effect.provideService(ServerSelfUpdate.ServerSelfUpdate, {
-          capability: "boot-service",
-          commitDesktopUpdate: () => Effect.never,
-          stage: (target) =>
-            Effect.sync(() => {
-              staged.push(target);
-              return { orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION };
-            }),
-          update: ({ targetVersion }) =>
-            Effect.sync(() => {
-              installed.push(targetVersion);
-              return { targetVersion, method: "boot-service" as const };
-            }),
-        }),
-        Effect.provideService(UpdateWindow.UpdateWindow, {
-          runIfOpen: (effect) =>
-            open ? Effect.map(effect, Option.some) : Effect.succeed(Option.none()),
-        }),
-        Effect.provideService(
-          HttpClient.HttpClient,
-          HttpClient.make((request) =>
-            Effect.sync(() =>
-              HttpClientResponse.fromWeb(
-                request,
-                new Response(JSON.stringify([{ tag_name: `v${latest}` }])),
-              ),
+        );
+        const { run: pass } = yield* ServerAutoUpdater.makeUpdatePass().pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ServerConfig.layer({ ...config, devUrl: undefined }),
+              Layer.mock(ServerSettings.ServerSettingsService)({
+                getSettings: Effect.sync(() => ({
+                  ...DEFAULT_SERVER_SETTINGS,
+                  automaticUpdates: enabled,
+                })),
+              }),
             ),
           ),
-        ),
-      );
-      yield* pass;
-      expect(staged).toEqual(["1.1.0"]);
-      latest = "1.2.0";
-      yield* TestClock.adjust("1 hour");
-      yield* pass;
-      expect(staged).toEqual(["1.1.0", "1.2.0"]);
-      latest = "1.0.0";
-      open = true;
-      const handoff = yield* pass.pipe(Effect.forkChild);
-      yield* TestClock.adjust("5 minutes");
-      yield* Fiber.join(handoff);
-      expect(installed).toEqual([]);
-    }),
+          Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, {
+            managed: true,
+            lastOutcome: undefined,
+            requestUpdate: () => Effect.succeed("id"),
+            prepareTrial: Effect.undefined,
+          }),
+          Effect.provideService(ServerSelfUpdate.ServerSelfUpdate, {
+            capability: "boot-service",
+            commitDesktopUpdate: () => Effect.never,
+            stage: (target) =>
+              Effect.sync(() => {
+                staged.push(target);
+                return { orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION };
+              }),
+            update: ({ targetVersion }) =>
+              Effect.sync(() => {
+                installed.push(targetVersion);
+                return { targetVersion, method: "boot-service" as const };
+              }),
+          }),
+          Effect.provideService(UpdateWindow.UpdateWindow, {
+            runIfOpen: (effect) =>
+              open ? Effect.map(effect, Option.some) : Effect.succeed(Option.none()),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.sync(() => {
+                if (open && scenario === "disabled") enabled = false;
+                return HttpClientResponse.fromWeb(
+                  request,
+                  new Response(JSON.stringify([{ tag_name: `v${latest}` }])),
+                );
+              }),
+            ),
+          ),
+        );
+        yield* pass;
+        expect(staged).toEqual(["1.1.0"]);
+        latest = "1.2.0";
+        yield* TestClock.adjust("1 hour");
+        yield* pass;
+        expect(staged).toEqual(["1.1.0", "1.2.0"]);
+        if (scenario === "withdrawn") latest = "1.0.0";
+        open = true;
+        const handoff = yield* pass.pipe(Effect.forkChild);
+        yield* TestClock.adjust("5 minutes");
+        yield* Fiber.join(handoff);
+        expect(installed).toEqual([]);
+      }),
   );
 
   it.effect("marks running threads at the boot-service handoff", () =>
