@@ -1,5 +1,25 @@
 import { useEffect, useState } from "react";
 
+/** Placeholder heights of the two row variants, which the first mount budget also counts. */
+export const SIDEBAR_ROW_HEIGHT_REM = { card: 5.125, slim: 2.25 } as const;
+const ROW_OBSERVER_MARGIN_PX = 240;
+
+let initialRowBudgetRem: number | null = null;
+
+/**
+ * How far down the list the first paint reaches, in rem: the window height
+ * plus the observer margin. Rows that start inside it mount with the list, so
+ * a tall window never paints them blank for a frame while the observer runs.
+ */
+export function sidebarInitialRowBudgetRem(): number {
+  if (initialRowBudgetRem === null) {
+    if (typeof window === "undefined") return 0;
+    const rootPx = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    initialRowBudgetRem = (window.innerHeight + ROW_OBSERVER_MARGIN_PX) / rootPx;
+  }
+  return initialRowBudgetRem;
+}
+
 const observers = new Map<
   Element | null,
   {
@@ -26,7 +46,7 @@ export function useSidebarRowViewport(node: HTMLElement | null, initiallyVisible
         (entries) => {
           for (const entry of entries) listeners.get(entry.target)?.(entry.isIntersecting);
         },
-        { root, rootMargin: "240px 0px" },
+        { root, rootMargin: `${ROW_OBSERVER_MARGIN_PX}px 0px` },
       );
       group = { observer, listeners };
       observers.set(root, group);

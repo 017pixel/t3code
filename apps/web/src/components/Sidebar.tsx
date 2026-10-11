@@ -239,7 +239,11 @@ import {
 } from "./Sidebar.drag";
 import { SidebarDragLifecycle, SidebarPointerSensor } from "./Sidebar.pointer";
 import { createSidebarListMotion } from "./Sidebar.motion";
-import { useSidebarRowViewport } from "./Sidebar.viewport";
+import {
+  SIDEBAR_ROW_HEIGHT_REM,
+  sidebarInitialRowBudgetRem,
+  useSidebarRowViewport,
+} from "./Sidebar.viewport";
 import { observeResize } from "../lib/observeResize";
 import {
   ThreadPullRequestBadgeControl,
@@ -718,7 +722,7 @@ function SortableThreadRow(props: {
         data-sidebar-row-displaced={bag.transform?.x || bag.transform?.y ? "" : undefined}
         className="list-none"
         style={{
-          height: props.variant === "card" ? "5.125rem" : "2.25rem",
+          height: `${SIDEBAR_ROW_HEIGHT_REM[props.variant]}rem`,
           transform: CSS.Translate.toString(bag.transform),
           transition: bag.transition,
           visibility: bag.transform?.scaleY === 0 ? "hidden" : undefined,
@@ -5537,6 +5541,8 @@ export default function Sidebar() {
                         );
                       };
                       let rowIndex = 0;
+                      let rowTopRem = 0;
+                      const initialRowBudgetRem = sidebarInitialRowBudgetRem();
                       const renderThreadRow = (
                         thread: EnvironmentThreadShell,
                         section: SidebarSection,
@@ -5544,18 +5550,20 @@ export default function Sidebar() {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
                         );
+                        const variant =
+                          section === "settled" || section === "snoozed" ? "slim" : "card";
+                        const initiallyVisible = rowIndex++ < 16 || rowTopRem < initialRowBudgetRem;
+                        rowTopRem += SIDEBAR_ROW_HEIGHT_REM[variant];
                         return (
                           <SortableThreadRow
                             key={threadKey}
                             id={threadKey}
                             title={thread.title}
-                            variant={
-                              section === "settled" || section === "snoozed" ? "slim" : "card"
-                            }
+                            variant={variant}
                             keepMounted={
                               routeThreadKey === threadKey || renamingThreadKey === threadKey
                             }
-                            initiallyVisible={rowIndex++ < 16}
+                            initiallyVisible={initiallyVisible}
                             contextDrag={isContextDrag}
                             environmentId={thread.environmentId}
                             disabled={
