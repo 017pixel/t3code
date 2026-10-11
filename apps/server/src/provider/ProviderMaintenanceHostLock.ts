@@ -60,7 +60,11 @@ export const installIsAlive = (directory: string): boolean => {
   }
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid provider install lease");
   if (isProcessAlive(pid)) return true;
-  // Snapshot only after an owner dies. A failed scan keeps the lease closed.
+  return installChildrenAreAlive(pid);
+};
+
+/** The installer can leave children writing after its root exits. Failed scans keep admission closed. */
+export const installChildrenAreAlive = (pid: number): boolean => {
   const windows = NodeOS.platform() === "win32";
   const scan = windows
     ? NodeChildProcess.spawnSync(
@@ -73,7 +77,7 @@ export const installIsAlive = (directory: string): boolean => {
         ],
         { encoding: "utf8", timeout: 10_000, windowsHide: true },
       )
-    : NodeChildProcess.spawnSync("ps", ["-ax", "-o", "pgid=", "-o", "stat="], {
+    : NodeChildProcess.spawnSync("ps", ["-ax", "-o", "pid=", "-o", "pgid=", "-o", "stat="], {
         encoding: "utf8",
         timeout: 10_000,
       });
@@ -92,6 +96,7 @@ export const installIsAlive = (directory: string): boolean => {
         if (
           parent !== undefined &&
           child !== undefined &&
+          child !== scan.pid &&
           descendants.has(parent) &&
           !descendants.has(child)
         ) {
@@ -103,8 +108,14 @@ export const installIsAlive = (directory: string): boolean => {
     if (descendants.size > 1) return true;
   } else if (
     scan.stdout.split(/\r?\n/).some((line) => {
-      const [group, state] = line.trim().split(/\s+/);
-      return Number(group) === pid && state !== undefined && !state.startsWith("Z");
+      const [child, group, state] = line.trim().split(/\s+/);
+      return (
+        Number(child) !== pid &&
+        Number(child) !== scan.pid &&
+        Number(group) === pid &&
+        state !== undefined &&
+        !state.startsWith("Z")
+      );
     })
   )
     return true;
