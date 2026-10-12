@@ -823,6 +823,135 @@ describe("KiroAdapterV2", () => {
   );
 });
 
+describe("KiroAdapterV2 agents", () => {
+  // A user agent from `~/.kiro/agents` whose config sets `"model": "claude-sonnet-4.5"`.
+  const agentModeOption = (currentValue: string) => ({
+    ...modeOption,
+    currentValue,
+    options: [...modeOption.options, option("reviewer", "reviewer")],
+  });
+  const agent = (value: string) => [{ id: "mode", value }];
+
+  it.effect("selects the thread's agent before its model, which the agent would replace", () =>
+    runKiroScript({
+      scenario: "agent-then-model",
+      model: "claude-opus-5.5",
+      options: agent("reviewer"),
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer(
+          "session/new",
+          sessionSetup([agentModeOption("vibe"), kiroModelOption("auto"), autopilotOption("on")]),
+        ),
+        // Shapes from kiro-cli 2.27.0, probed live: switching to an agent runs
+        // the agent's own model.
+        setConfig("mode", "reviewer"),
+        configResult([
+          agentModeOption("reviewer"),
+          kiroModelOption("claude-sonnet-4.5"),
+          autopilotOption("on"),
+        ]),
+        setConfig("model", "claude-opus-5.5"),
+        configResult([
+          agentModeOption("reviewer"),
+          kiroModelOption("claude-opus-5.5"),
+          autopilotOption("on"),
+        ]),
+        setConfig("autopilot", "off"),
+        configResult([
+          agentModeOption("reviewer"),
+          kiroModelOption("claude-opus-5.5"),
+          autopilotOption("off"),
+        ]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        // Turn 2 picks Spec; its model is the thread's again.
+        setConfig("mode", "spec"),
+        configResult([
+          agentModeOption("spec"),
+          kiroModelOption("claude-opus-5.5"),
+          autopilotOption("off"),
+        ]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ events, startTurnOn }) =>
+        Effect.gen(function* () {
+          yield* startTurnOn(1, "claude-opus-5.5", agent("reviewer"));
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          yield* startTurnOn(2, "claude-opus-5.5", agent("spec"));
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("puts Kiro default back after an agent switch moved the session off it", () =>
+    runKiroScript({
+      scenario: "agent-then-default-model",
+      options: agent("reviewer"),
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        // A new session has not advertised `model` yet.
+        answer("session/new", sessionSetup([agentModeOption("vibe"), autopilotOption("on")])),
+        setConfig("mode", "reviewer"),
+        configResult([
+          agentModeOption("reviewer"),
+          kiroModelOption("claude-sonnet-4.5"),
+          autopilotOption("on"),
+        ]),
+        setConfig("model", "auto"),
+        configResult([agentModeOption("reviewer"), kiroModelOption("auto"), autopilotOption("on")]),
+        setConfig("autopilot", "off"),
+        configResult([
+          agentModeOption("reviewer"),
+          kiroModelOption("auto"),
+          autopilotOption("off"),
+        ]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ events, startTurn }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("keeps the session's agent when the thread's agent no longer exists", () =>
+    runKiroScript({
+      scenario: "agent-removed",
+      options: agent("deleted-agent"),
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        // No `mode` write: the replay agent fails on any frame not scripted here.
+        answer(
+          "session/new",
+          sessionSetup([agentModeOption("vibe"), kiroModelOption("auto"), autopilotOption("on")]),
+        ),
+        setConfig("autopilot", "off"),
+        configResult([agentModeOption("vibe"), kiroModelOption("auto"), autopilotOption("off")]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ events, startTurn }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+});
+
 describe("KiroAdapterV2 early Stop", () => {
   // Kiro CLI 2.27.1 dropped a `session/cancel` sent 0-0.5 s after
   // `session/prompt` and ran the turn to completion (reported by TinBane), so

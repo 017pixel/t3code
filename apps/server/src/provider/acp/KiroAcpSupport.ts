@@ -44,6 +44,13 @@ export const KIRO_MODEL_CONFIG_ID = "model";
 export const KIRO_EFFORT_CONFIG_ID = "effortLevel";
 
 /**
+ * Kiro's agent session option. Kiro V3 offers its agents (the bundled ones,
+ * `~/.kiro/agents`, and the workspace's `.kiro/agents`) as the choices of its
+ * `mode` select, and the thread's choice is stored under the same id.
+ */
+export const KIRO_AGENT_CONFIG_ID = "mode";
+
+/**
  * Kiro offers two permission postures, Supervised and Autopilot, which T3's
  * Supervised and Full access select. Any other mode runs Supervised.
  */

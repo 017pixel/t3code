@@ -39,6 +39,7 @@ import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProv
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import {
+  KIRO_AGENT_CONFIG_ID,
   KIRO_AUTOPILOT_CONFIG_ID,
   KIRO_EFFORT_CONFIG_ID,
   KIRO_MODEL_CONFIG_ID,
@@ -113,6 +114,7 @@ const applyKiroModel = (
   runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   modelSelection: ModelSelection,
   defaultModel: Effect.Effect<string>,
+  agentSwitched: boolean,
 ) =>
   Effect.gen(function* () {
     const modelOption = findKiroModelOption(yield* runtime.getConfigOptions);
@@ -120,8 +122,8 @@ const applyKiroModel = (
     const selected = modelSelection.model.trim();
     const isDefault = selected.length === 0 || selected === KIRO_DEFAULT_MODEL;
     // Before Kiro advertises `model` the session is new, so it already runs
-    // Kiro's default.
-    if (isDefault && modelOption?.type !== "select") {
+    // Kiro's default, unless an agent switch just moved it to the agent's model.
+    if (isDefault && modelOption?.type !== "select" && !agentSwitched) {
       return current;
     }
     const requested = isDefault ? yield* defaultModel : selected;
@@ -197,10 +199,41 @@ const applyKiroEffort = (
     );
   });
 
+/**
+ * Selects the thread's Kiro agent (the snapshot's `mode` select) and reports
+ * whether a switch went out. Kiro runs an agent's own `model` setting when it
+ * switches to it (kiro-cli 2.27.0), so the agent is written before the model
+ * and the thread's model choice still applies. A thread with no agent choice
+ * keeps the session's agent. An agent the session does not list (deleted
+ * since the provider snapshot) is skipped: Kiro would accept the write and
+ * stay on its current agent.
+ */
+const applyKiroAgent = (
+  runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+  modelSelection: ModelSelection,
+) =>
+  Effect.gen(function* () {
+    const requested = getModelSelectionStringOptionValue(modelSelection, KIRO_AGENT_CONFIG_ID);
+    if (requested === undefined) return false;
+    const agentOption = (yield* runtime.getConfigOptions).find(
+      (option) => option.id === KIRO_AGENT_CONFIG_ID,
+    );
+    if (agentOption?.type !== "select" || agentOption.currentValue === requested) return false;
+    if (!selectValues(agentOption).includes(requested)) {
+      yield* Effect.logWarning("Kiro does not list the thread's agent", { agent: requested });
+      return false;
+    }
+    yield* runtime.setConfigOption(KIRO_AGENT_CONFIG_ID, requested);
+    return true;
+  });
+
 const applyKiroModelSelection =
   (defaultModel: Effect.Effect<string>): NonNullable<AcpAdapterV2Flavor["applyModelSelection"]> =>
   ({ runtime, modelSelection }) =>
-    applyKiroModel(runtime, modelSelection, defaultModel).pipe(
+    applyKiroAgent(runtime, modelSelection).pipe(
+      Effect.flatMap((agentSwitched) =>
+        applyKiroModel(runtime, modelSelection, defaultModel, agentSwitched),
+      ),
       Effect.tap((appliedModel) => applyKiroEffort(runtime, modelSelection, appliedModel)),
     );
 
@@ -290,7 +323,9 @@ function makeKiroAcpAdapterFlavor(options: KiroAdapterV2Options): AcpAdapterV2Fl
     applyModelSelection: applyKiroModelSelection(
       options.defaultModel ?? Effect.succeed(KIRO_FALLBACK_DEFAULT_MODEL),
     ),
-    ownedModelOptionIds: ["reasoningEffort"],
+    // The generic option loop runs after the model write, and an agent write
+    // there would put the agent's own model back.
+    ownedModelOptionIds: ["reasoningEffort", KIRO_AGENT_CONFIG_ID],
     // Kiro's own review step: with Autopilot off (Supervised) Kiro asks the
     // user to accept a turn's changes before it ends; on (Full access) it does
     // not. Its per-tool prompts come either way and T3's runtime policy

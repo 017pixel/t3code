@@ -25,6 +25,16 @@ Models with adjustable reasoning effort, such as recent Claude Opus and Sonnet m
 show a **Reasoning** setting with only the levels Kiro offers for that model. **Kiro default** and
 models without effort control run at Kiro's own setting.
 
+## Agents
+
+The **Agent** setting next to the model picks the
+[Kiro agent](https://kiro.dev/docs/custom-agents/) a thread runs as: Kiro's built-in agents such as
+Spec and Plan, and your own agents in `~/.kiro/agents`. Agents in a project's `.kiro/agents` are
+not listed yet. Refresh the Kiro provider after adding or removing an agent.
+
+The thread's model still applies when an agent sets its own `model`. An agent that was removed
+leaves the thread on Kiro's current agent.
+
 ## Permission Modes
 
 Kiro asks before tool calls such as writes and commands, and T3 Code answers by the permission mode:

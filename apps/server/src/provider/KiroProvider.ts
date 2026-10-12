@@ -2,11 +2,14 @@ import {
   type KiroSettings,
   type ModelCapabilities,
   ProviderDriverKind,
+  type ProviderOptionDescriptor,
   type ServerProviderAuth,
   type ServerProviderModel,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import type * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -14,7 +17,11 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { ChildProcess, type ChildProcessSpawner } from "effect/process";
 
-import { KIRO_SUPPORTED_RUNTIME_MODES } from "./acp/KiroAcpSupport.ts";
+import {
+  KIRO_AGENT_CONFIG_ID,
+  KIRO_SUPPORTED_RUNTIME_MODES,
+  makeKiroAcpRuntime,
+} from "./acp/KiroAcpSupport.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
@@ -47,16 +54,31 @@ const KIRO_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
 ];
 const KIRO_API_KEY_ENV = "KIRO_API_KEY";
 
+/**
+ * The agent picker is not a model trait, but the composer reads options per
+ * model, so every model, custom ones included, carries it.
+ */
 const kiroModels = (
   settings: KiroSettings,
   listed: ReadonlyArray<ServerProviderModel> = KIRO_BUILT_IN_MODELS,
-) => providerModelsFromSettings(listed, settings.customModels, EMPTY_CAPABILITIES);
+  agents?: ProviderOptionDescriptor,
+) =>
+  providerModelsFromSettings(listed, settings.customModels, EMPTY_CAPABILITIES).map((model) => {
+    const descriptors = model.capabilities?.optionDescriptors ?? [];
+    return agents === undefined || descriptors.some((descriptor) => descriptor.id === agents.id)
+      ? model
+      : {
+          ...model,
+          capabilities: createModelCapabilities({ optionDescriptors: [...descriptors, agents] }),
+        };
+  });
 
 const snapshot = (
   settings: KiroSettings,
   checkedAt: string,
   probe: ProviderProbeResult,
   listed?: ReadonlyArray<ServerProviderModel>,
+  agents?: ProviderOptionDescriptor,
 ) =>
   buildServerProvider({
     // Gives the snapshot its version advisory; Kiro runs no enrichment pass.
@@ -64,7 +86,7 @@ const snapshot = (
     presentation: KIRO_PRESENTATION,
     enabled: settings.enabled,
     checkedAt,
-    models: kiroModels(settings, listed),
+    models: kiroModels(settings, listed, agents),
     probe,
   });
 
@@ -252,10 +274,94 @@ export function kiroDefaultModelId(models: ReadonlyArray<ServerProviderModel>): 
   );
 }
 
+const KiroConfigTemplate = Schema.Struct({
+  configOptions: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      type: Schema.String,
+      currentValue: Schema.optional(Schema.Unknown),
+      options: Schema.optional(
+        Schema.Array(
+          Schema.Struct({
+            value: Schema.String,
+            name: Schema.String,
+            description: Schema.optional(Schema.NullOr(Schema.String)),
+          }),
+        ),
+      ),
+    }),
+  ),
+});
+const decodeKiroConfigTemplate = Schema.decodeUnknownOption(KiroConfigTemplate);
+
+/**
+ * The thread's agent picker, from Kiro's `_kiro/config/template` result: the
+ * `mode` select a new session would get, without opening one. Kiro 2.27
+ * offers its bundled agents (Default, Spec, Plan, ...) and the user's
+ * `~/.kiro/agents`, in its own order, and marks the one a new session starts
+ * on (Default, `vibe`; `kiro-cli agent set-default` changes only
+ * `kiro-cli chat`). The template does not read a workspace, so a project's
+ * `.kiro/agents` are not offered here.
+ */
+export function kiroAgentDescriptor(template: unknown): ProviderOptionDescriptor | undefined {
+  const decoded = Option.getOrUndefined(decodeKiroConfigTemplate(template));
+  const mode = decoded?.configOptions.find(
+    (option) => option.id === KIRO_AGENT_CONFIG_ID && option.type === "select",
+  );
+  const defaultAgent = typeof mode?.currentValue === "string" ? mode.currentValue : undefined;
+  const choices = (mode?.options ?? []).flatMap((choice) => {
+    const id = choice.value.trim();
+    const label = choice.name.trim() || id;
+    const description = choice.description?.trim();
+    return id.length === 0
+      ? []
+      : [
+          {
+            id,
+            label,
+            ...(description ? { description } : {}),
+            ...(id === defaultAgent ? { isDefault: true } : {}),
+          },
+        ];
+  });
+  // One agent is nothing to choose between.
+  if (choices.length < 2) return undefined;
+  return {
+    id: KIRO_AGENT_CONFIG_ID,
+    label: "Agent",
+    type: "select",
+    options: choices,
+    ...(defaultAgent !== undefined && choices.some((choice) => choice.isDefault)
+      ? { currentValue: defaultAgent }
+      : {}),
+  };
+}
+
+/**
+ * Asks Kiro for its agents with `initialize` and `_kiro/config/template` and
+ * nothing more: no `session/new`, so no MCP server starts and no session is
+ * stored. The process runs in the server's working directory.
+ */
+const probeKiroAgents = (settings: KiroSettings, environment: NodeJS.ProcessEnv) =>
+  Effect.gen(function* () {
+    const runtime = yield* makeKiroAcpRuntime({
+      settings,
+      environment,
+      cwd: yield* HostProcess.WorkingDirectory,
+      clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
+    });
+    yield* runtime.initialize();
+    return kiroAgentDescriptor(yield* runtime.request("_kiro/config/template", {}));
+  }).pipe(Effect.scoped);
+
 export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(function* (
   settings: KiroSettings,
   environment: NodeJS.ProcessEnv,
-): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
+): Effect.fn.Return<
+  ServerProviderDraft,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
+> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   if (!settings.enabled) {
     return snapshot(settings, checkedAt, {
@@ -313,22 +419,27 @@ export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(func
       message: "Kiro CLI is installed but not signed in. Run `kiro-cli login`.",
     });
   }
-  // Signed out, `--list-models` starts a browser login instead, so it runs
-  // only once `whoami` has confirmed the account.
-  const listed =
+  // Signed out, `--list-models` starts a browser login instead, and the agent
+  // probe fails to start, so both run only once `whoami` has confirmed the
+  // account. Without an agent list the composer shows no agent picker.
+  const [listed, agents] =
     auth.status === "authenticated"
-      ? kiroModelsFromList(
-          yield* runKiroCli(
-            settings,
-            ["chat", "--list-models", "--format", "json"],
-            environment,
-          ).pipe(
-            Effect.timeoutOption(AUTH_PROBE_TIMEOUT_MS),
-            Effect.map(Option.getOrUndefined),
-            Effect.orElseSucceed(() => undefined),
-          ),
+      ? yield* Effect.all(
+          [
+            runKiroCli(settings, ["chat", "--list-models", "--format", "json"], environment).pipe(
+              Effect.timeoutOption(AUTH_PROBE_TIMEOUT_MS),
+              Effect.map((output) => kiroModelsFromList(Option.getOrUndefined(output))),
+              Effect.orElseSucceed(() => undefined),
+            ),
+            probeKiroAgents(settings, environment).pipe(
+              Effect.timeoutOption(AUTH_PROBE_TIMEOUT_MS),
+              Effect.map(Option.getOrUndefined),
+              Effect.orElseSucceed(() => undefined),
+            ),
+          ],
+          { concurrency: "unbounded" },
         )
-      : undefined;
+      : [undefined, undefined];
   return snapshot(
     settings,
     checkedAt,
@@ -342,5 +453,6 @@ export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(func
         : { message: "Could not confirm the Kiro sign-in. Run `kiro-cli whoami` to check." }),
     },
     listed,
+    agents,
   );
 });
