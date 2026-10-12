@@ -16,10 +16,12 @@ function contrast(a: string, b: string) {
 }
 
 describe("native theme colors", () => {
-  for (const theme of MOBILE_THEME_OPTIONS.filter((item) => item.id !== "material-you")) {
+  for (const theme of MOBILE_THEME_OPTIONS) {
+    if (theme.id === "material-you") continue;
+    const themeId = theme.id;
     for (const appearance of ["light", "dark"] as const) {
       it(`${theme.label} ${appearance} keeps native labels legible on every container`, () => {
-        const colors = createNativeThemeColors(getMobileThemeVariables(theme.id, appearance));
+        const colors = createNativeThemeColors(getMobileThemeVariables(themeId, appearance));
         for (const surface of [
           colors.surface,
           colors.surfaceContainer,
