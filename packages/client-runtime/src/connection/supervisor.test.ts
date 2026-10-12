@@ -157,6 +157,7 @@ const makeHarness = Effect.fn("TestConnectionHarness.make")(function* (options?:
   ) => Effect.Effect<PreparedConnection, ConnectionAttemptError>;
   readonly ready?: (attempt: number) => Effect.Effect<void, ConnectionAttemptError>;
   readonly probe?: (attempt: number) => Effect.Effect<void, ConnectionAttemptError>;
+  readonly receivedFrames?: Effect.Effect<number>;
   readonly initialConfig?: (attempt: number) => Effect.Effect<ServerConfig, ConnectionAttemptError>;
   readonly checkRoute?: (route: ConnectionRoute) => Effect.Effect<ConnectionDriver.RouteCheck>;
 }) {
@@ -213,6 +214,7 @@ const makeHarness = Effect.fn("TestConnectionHarness.make")(function* (options?:
         subscribeServerConfig: (input) => TEST_RPC_CLIENT.subscribeServerConfig(input),
         ready: options?.ready?.(attempt) ?? Effect.void,
         probe: options?.probe?.(attempt) ?? Effect.void,
+        receivedFrames: options?.receivedFrames ?? Effect.succeed(0),
         closed: Deferred.await(closed),
       } satisfies RpcSession.RpcSession),
       () => Ref.update(releaseCount, (count) => count + 1),
@@ -1370,6 +1372,62 @@ describe("EnvironmentSupervisor", () => {
       );
 
       expect(yield* Ref.get(harness.sessionCount)).toBe(2);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("keeps waiting on a quick probe while data still arrives, up to the full timeout", () =>
+    Effect.gen(function* () {
+      const frames = yield* Ref.make(0);
+      const harness = yield* makeHarness({
+        probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
+        receivedFrames: Ref.get(frames),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      yield* harness.wake("application-active-probe");
+      yield* TestClock.adjust("5 seconds");
+      yield* Ref.set(frames, 1);
+      yield* TestClock.adjust("6 seconds");
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+
+      // Frames keep arriving, but the probe still gets no more than 15 seconds.
+      yield* Ref.set(frames, 2);
+      yield* TestClock.adjust("3999 millis");
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+      yield* Ref.set(frames, 3);
+      yield* TestClock.adjust("1 milli");
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 2,
+      );
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("times out a quick probe once data stops arriving", () =>
+    Effect.gen(function* () {
+      const frames = yield* Ref.make(0);
+      const harness = yield* makeHarness({
+        probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
+        receivedFrames: Ref.get(frames),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      yield* harness.wake("application-active-probe");
+      yield* TestClock.adjust("1 second");
+      yield* Ref.set(frames, 1);
+      yield* TestClock.adjust("5 seconds");
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+      yield* TestClock.adjust("6 seconds");
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 2,
+      );
     }).pipe(Effect.provide(TestClock.layer())),
   );
 

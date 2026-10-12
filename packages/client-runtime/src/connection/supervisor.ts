@@ -646,7 +646,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       yield* Ref.set(probeUnanswered, true);
       const probe = yield* Effect.forkChild(lease.session.probe);
       // Monotonic nanoseconds, so a wall-clock correction cannot move the deadline.
-      let deadline = (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(probeTimeout);
+      const probeStartedAt = yield* Clock.monotonicTimeNanos;
+      const latestDeadline = probeStartedAt + Duration.toNanosUnsafe(CONNECTION_PROBE_TIMEOUT);
+      let deadline = probeStartedAt + Duration.toNanosUnsafe(probeTimeout);
+      let receivedFrames = yield* lease.session.receivedFrames;
       for (;;) {
         const remaining = deadline - (yield* Clock.monotonicTimeNanos);
         const probeEvent = yield* Effect.raceAllFirst([
@@ -659,6 +662,17 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           ),
         ]);
         if (probeEvent._tag === "TimedOut") {
+          // Data still arriving means a slow link, not a dead one: the answer
+          // may be queued behind it. Wait another window, up to the full
+          // probe timeout.
+          const received = yield* lease.session.receivedFrames;
+          const now = yield* Clock.monotonicTimeNanos;
+          if (received > receivedFrames && now < latestDeadline) {
+            receivedFrames = received;
+            const extended = now + Duration.toNanosUnsafe(probeTimeout);
+            deadline = extended < latestDeadline ? extended : latestDeadline;
+            continue;
+          }
           yield* Fiber.interrupt(probe);
           return yield* new ConnectionTransientError({
             reason: "timeout",
