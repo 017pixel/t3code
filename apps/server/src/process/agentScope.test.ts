@@ -683,19 +683,28 @@ finish();
     ({ platform, handoff }) =>
       scenario(({ directory, processes, signals, controller }) =>
         Effect.gen(function* () {
-          processes.set(60, { pid: 60, ppid: 20, pgid: 60, startTime: "launcher", zombie: false });
+          for (const [pid, p] of processes)
+            processes.set(pid, { ...p, startTime: String(pid * 10) });
+          processes.set(60, { pid: 60, ppid: 20, pgid: 60, startTime: "600", zombie: false });
           processes.set(70, {
             pid: 70,
             ppid: 60,
             pgid: 60,
-            startTime: "second-server",
+            startTime: "700",
             zombie: false,
           });
           processes.set(71, {
             pid: 71,
             ppid: 70,
             pgid: 71,
-            startTime: "second-provider",
+            startTime: "800",
+            zombie: false,
+          });
+          processes.set(72, {
+            pid: 72,
+            ppid: 60,
+            pgid: 60,
+            startTime: "800",
             zombie: false,
           });
           if (platform === "win32")
@@ -735,6 +744,8 @@ finish();
             );
             expect(NodeFS.readdirSync(NodePath.join(leases, "servers"))).toHaveLength(1);
           }
+          // A stale parent id must not make an older orphan belong to a reused server or launcher.
+          processes.set(30, { ...processes.get(30)!, ppid: handoff ? 60 : 70 });
           processes.delete(10);
           yield* ProviderProcessLedger.make({
             stateDir: directory,
@@ -743,9 +754,12 @@ finish();
             installLeaseDirectory: leases,
           });
           expect(processes.has(20)).toBe(false);
-          for (const pid of handoff ? [60, 90] : [60, 70, 71, 90])
+          expect(processes.has(30)).toBe(false);
+          expect(signals).toContain("30:SIGKILL");
+          expect(signals).not.toContain("30:SIGCONT");
+          for (const pid of handoff ? [60, 72, 90] : [60, 70, 71, 72, 90])
             expect(processes.has(pid)).toBe(true);
-          expect(signals.some((s) => /^(60|70|71|90):/.test(s))).toBe(false);
+          expect(signals.some((s) => /^(60|70|71|72|90):/.test(s))).toBe(false);
         }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, platform)),
       ),
   );

@@ -505,11 +505,19 @@ export async function make(input: {
       }
     }
     const protectedPids = new Set(owners.map((p) => p.pid));
+    const parents = new Map(table.map((p) => [p.pid, p]));
     let changed = true;
     while (changed) {
       changed = false;
       for (const p of table) {
-        if (!protectedPids.has(p.pid) && protectedPids.has(p.ppid)) {
+        const parent = protectedPids.has(p.ppid) ? parents.get(p.ppid) : undefined;
+        const parentBirth = parent ? creationTime(parent) : undefined;
+        const childBirth = creationTime(p);
+        if (
+          !protectedPids.has(p.pid) &&
+          parent &&
+          (parentBirth === undefined || childBirth === undefined || childBirth >= parentBirth)
+        ) {
           protectedPids.add(p.pid);
           changed = true;
         }
