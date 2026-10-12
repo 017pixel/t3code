@@ -490,6 +490,12 @@ export async function make(input: {
           throw cause;
         }
         if (server.hostname !== hostname || same(server.owner, entry.owner)) continue;
+        if (
+          [server.owner, ...server.processes].some(
+            (p) => !table.some((observed) => observed.pid === p.pid) && controller.exists(p.pid),
+          )
+        )
+          throw new Error("Could not verify a live server during provider cleanup");
         const live = table.find((p) => same(p, server.owner) && !p.zombie);
         const managed = table.filter(
           (p) => !p.zombie && server.processes.some((owned) => same(p, owned)),
@@ -497,11 +503,7 @@ export async function make(input: {
         if (live || managed.length > 0) {
           if (live) owners.push(live);
           owners.push(...managed);
-        } else if (
-          !table.some((p) => p.pid === server.owner.pid) &&
-          controller.exists(server.owner.pid)
-        )
-          throw new Error("Could not verify a live server during provider cleanup");
+        }
       }
     }
     const protectedPids = new Set(owners.map((p) => p.pid));

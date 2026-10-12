@@ -369,26 +369,43 @@ finish();
       }),
     ),
   );
-  it.effect(
-    "resumes frozen providers when the final server protection query cannot verify a live pid",
-    () =>
+  it.effect.each(["owner", "managed-owner", "launcher", "handoff"] as const)(
+    "resumes frozen providers when the final server protection query cannot verify a live %s",
+    (missing) =>
       scenario(({ directory, processes, signals, controller }) =>
         Effect.gen(function* () {
           yield* record(directory, controller);
           const leases = NodePath.join(directory, "leases");
+          const managed = missing !== "owner";
+          if (managed)
+            processes.set(60, {
+              pid: 60,
+              ppid: 1,
+              pgid: 60,
+              startTime: "launcher",
+              zombie: false,
+            });
           processes.set(70, {
             pid: 70,
-            ppid: 1,
+            ppid: managed ? 60 : 1,
             pgid: 70,
             startTime: "live-server",
             zombie: false,
           });
-          yield* ProviderProcessLedger.make({
+          const second = ProviderProcessLedger.make({
             stateDir: NodePath.join(directory, "second"),
             ownerPid: 70,
             controller,
             installLeaseDirectory: leases,
           });
+          yield* managed
+            ? second.pipe(
+                Effect.provideService(HostProcess.Environment, {
+                  [SERVICE_LAUNCHER_CONTEXT_ENV]: "managed",
+                }),
+              )
+            : second;
+          if (missing === "handoff") processes.delete(70);
           processes.delete(10);
           let frozenQueries = 0;
           const result = yield* ProviderProcessLedger.make({
@@ -401,7 +418,8 @@ finish();
               snapshot: () => {
                 if (signals.filter((signal) => signal.endsWith(":SIGSTOP")).length === 2)
                   frozenQueries++;
-                return [...processes.values()].filter((p) => frozenQueries < 2 || p.pid !== 70);
+                const hidden = missing === "owner" || missing === "managed-owner" ? 70 : 60;
+                return [...processes.values()].filter((p) => frozenQueries < 2 || p.pid !== hidden);
               },
             },
           }).pipe(Effect.exit);
@@ -747,6 +765,20 @@ finish();
           // A stale parent id must not make an older orphan belong to a reused server or launcher.
           processes.set(30, { ...processes.get(30)!, ppid: handoff ? 60 : 70 });
           processes.delete(10);
+          if (handoff) {
+            const result = yield* ProviderProcessLedger.make({
+              stateDir: directory,
+              ownerPid: 90,
+              installLeaseDirectory: leases,
+              controller: {
+                ...controller,
+                snapshot: () => [...processes.values()].filter((p) => p.pid !== 60),
+              },
+            }).pipe(Effect.exit);
+            expect(result._tag).toBe("Failure");
+            expect(signals).toEqual([]);
+            expect(processes.has(72)).toBe(true);
+          }
           yield* ProviderProcessLedger.make({
             stateDir: directory,
             ownerPid: 90,
