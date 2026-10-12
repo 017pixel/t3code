@@ -446,6 +446,9 @@ const makeEventStore = Effect.gen(function* () {
       (event) =>
         Effect.gen(function* () {
           const encoded = yield* encodeV2EventJson(event);
+          // Encoding validates but does not apply decoding defaults. Publish
+          // the same normalized representation that durable replay returns.
+          const normalized = yield* decodeV2EventJson(encoded);
           const rows = yield* sql<{ readonly sequence: number }>`
             INSERT INTO orchestration_events (
               event_id,
@@ -486,13 +489,11 @@ const makeEventStore = Effect.gen(function* () {
             )
             RETURNING sequence
           `;
-          // Encoding above already validated this internal event. Only the
-          // database-generated header needs decoding before publication.
           const header = yield* decodeV2StoredHeader({
             sequence: rows[0]?.sequence,
             commandId: input.commandId ?? null,
           });
-          return { ...header, event };
+          return { ...header, event: normalized };
         }),
       { concurrency: 1 },
     ).pipe(
