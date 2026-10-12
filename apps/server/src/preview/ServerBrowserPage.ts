@@ -175,6 +175,31 @@ export const captureViewport = async (
   return data;
 };
 
+const SNAPSHOT_CAPTURE_TIMEOUT_MS = 5_000;
+
+/**
+ * A capture waits for the page's next frame. A desktop tab whose thread is not
+ * open draws none, so without a limit the snapshot holds the tab and every
+ * later action waits behind it.
+ */
+const captureWithinLimit = (capture: Promise<string>) => {
+  void capture.catch(constVoid);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new ServerBrowserOperationError(
+            "PreviewAutomationExecutionError",
+            "The page did not draw a frame, so no screenshot was taken. In the desktop app, a tab only draws while the user has its thread open. Use preview_evaluate to read the page, or ask the user to open the thread.",
+          ),
+        ),
+      SNAPSHOT_CAPTURE_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([capture, limit]).finally(() => clearTimeout(timer));
+};
+
 export const snapshot = async (input: {
   readonly page: Page;
   readonly cdp: CDPSession;
@@ -196,7 +221,7 @@ export const snapshot = async (input: {
       >
     >,
     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
-    captureViewport(input.page, input.cdp, { format: "png", scale }),
+    captureWithinLimit(captureViewport(input.page, input.cdp, { format: "png", scale })),
   ]);
   if (state.generation !== generation) {
     throw new ServerBrowserOperationError(
