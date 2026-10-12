@@ -1,6 +1,6 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { AuthPreviewOperateScope, type ServerConfig } from "@t3tools/contracts";
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
+import { Outlet, createFileRoute, redirect, useParams } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
@@ -8,6 +8,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { registerChatSurface } from "../components/chatSurfaceSlot";
 import { KeptChatSurface } from "../components/ThreadRouteView";
+import { ThreadLinkPrompt } from "../components/promptLinks/ThreadLinkPrompt";
+import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects, waitForProject } from "../state/entities";
@@ -311,6 +313,10 @@ const NO_LIVE_CONFIG_ATOM = Atom.make<ServerConfig | null>(null).pipe(
 );
 
 function ChatRouteLayout() {
+  const threadTarget = useParams({
+    strict: false,
+    select: (params) => resolveThreadRouteTarget(params),
+  });
   // The thread routes render nothing here: the root layout hosts their view
   // (see KeptChatSurface) so it outlives the route swaps around it.
   useLayoutEffect(() => registerChatSurface(<KeptChatSurface />), []);
@@ -318,6 +324,9 @@ function ChatRouteLayout() {
     <>
       <ChatRouteGlobalShortcuts />
       <LandingDraftDefaults />
+      {threadTarget?.kind === "server" ? (
+        <ThreadLinkPrompt threadRef={threadTarget.threadRef} />
+      ) : null}
       <Outlet />
     </>
   );
