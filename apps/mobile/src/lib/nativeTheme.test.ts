@@ -15,24 +15,31 @@ function contrast(a: string, b: string) {
   return (values[0]! + 0.05) / (values[1]! + 0.05);
 }
 
+const cases = MOBILE_THEME_OPTIONS.flatMap((theme) => {
+  if (theme.id === "material-you") return [];
+  const themeId = theme.id;
+  return (["light", "dark"] as const).map((appearance) => ({
+    label: theme.label,
+    themeId,
+    appearance,
+  }));
+});
+
 describe("native theme colors", () => {
-  for (const theme of MOBILE_THEME_OPTIONS) {
-    if (theme.id === "material-you") continue;
-    const themeId = theme.id;
-    for (const appearance of ["light", "dark"] as const) {
-      it(`${theme.label} ${appearance} keeps native labels legible on every container`, () => {
-        const colors = createNativeThemeColors(getMobileThemeVariables(themeId, appearance));
-        for (const surface of [
-          colors.surface,
-          colors.surfaceContainer,
-          colors.surfaceContainerHigh,
-          colors.surfaceContainerHighest,
-        ]) {
-          expect(contrast(colors.onSurface, surface)).toBeGreaterThanOrEqual(4.5);
-        }
-        expect(contrast(colors.onPrimary, colors.primary)).toBeGreaterThanOrEqual(4.5);
-        for (const color of Object.values(colors)) expect(color).toMatch(/^#[0-9a-f]{6}$/i);
-      });
-    }
-  }
+  it.each(cases)(
+    "$label $appearance keeps native labels legible on every container",
+    ({ themeId, appearance }) => {
+      const colors = createNativeThemeColors(getMobileThemeVariables(themeId, appearance));
+      for (const surface of [
+        colors.surface,
+        colors.surfaceContainer,
+        colors.surfaceContainerHigh,
+        colors.surfaceContainerHighest,
+      ]) {
+        expect(contrast(colors.onSurface, surface)).toBeGreaterThanOrEqual(4.5);
+      }
+      expect(contrast(colors.onPrimary, colors.primary)).toBeGreaterThanOrEqual(4.5);
+      for (const color of Object.values(colors)) expect(color).toMatch(/^#[0-9a-f]{6}$/i);
+    },
+  );
 });
