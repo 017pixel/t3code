@@ -150,8 +150,13 @@ const SNAPSHOT_SCRIPT = `(() => {
   };
 })()`;
 
-// Scaled captures repaint live screencasts, so callers pause them. Clips use document offsets.
-export const captureViewport = async (
+const CAPTURE_TIMEOUT_MS = 5_000;
+const NO_FRAME_MESSAGE =
+  "The page did not draw a frame, so no screenshot was taken. In the desktop app, a tab only draws while the user has its thread open. Use preview_evaluate to read the page, or ask the user to open the thread.";
+/** Captures Chromium has not answered yet; a page only draws one at a time. */
+const pendingCaptures = new WeakSet<Page>();
+
+const captureFrame = async (
   page: Page,
   cdp: CDPSession,
   options: { readonly format: "png" | "jpeg"; readonly quality?: number; readonly scale: number },
@@ -175,27 +180,27 @@ export const captureViewport = async (
   return data;
 };
 
-const SNAPSHOT_CAPTURE_TIMEOUT_MS = 5_000;
-
 /**
+ * Scaled captures repaint live screencasts, so callers pause them. Clips use document offsets.
  * A capture waits for the page's next frame. A desktop tab whose thread is not
- * open draws none, so without a limit the snapshot holds the tab and every
- * later action waits behind it.
+ * open draws none, so the capture gives up after a limit instead of holding
+ * the tab. A new capture is refused until Chromium answers the old one, which
+ * still owns the page's capture viewport.
  */
-const captureWithinLimit = (capture: Promise<string>) => {
+export const captureViewport = (
+  page: Page,
+  cdp: CDPSession,
+  options: { readonly format: "png" | "jpeg"; readonly quality?: number; readonly scale: number },
+): Promise<string> => {
+  const noFrame = () =>
+    new ServerBrowserOperationError("PreviewAutomationExecutionError", NO_FRAME_MESSAGE);
+  if (pendingCaptures.has(page)) return Promise.reject(noFrame());
+  pendingCaptures.add(page);
+  const capture = captureFrame(page, cdp, options).finally(() => pendingCaptures.delete(page));
   void capture.catch(constVoid);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const limit = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          new ServerBrowserOperationError(
-            "PreviewAutomationExecutionError",
-            "The page did not draw a frame, so no screenshot was taken. In the desktop app, a tab only draws while the user has its thread open. Use preview_evaluate to read the page, or ask the user to open the thread.",
-          ),
-        ),
-      SNAPSHOT_CAPTURE_TIMEOUT_MS,
-    );
+    timer = setTimeout(() => reject(noFrame()), CAPTURE_TIMEOUT_MS);
   });
   return Promise.race([capture, limit]).finally(() => clearTimeout(timer));
 };
@@ -221,7 +226,7 @@ export const snapshot = async (input: {
       >
     >,
     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
-    captureWithinLimit(captureViewport(input.page, input.cdp, { format: "png", scale })),
+    captureViewport(input.page, input.cdp, { format: "png", scale }),
   ]);
   if (state.generation !== generation) {
     throw new ServerBrowserOperationError(
