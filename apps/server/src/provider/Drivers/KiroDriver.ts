@@ -1,5 +1,6 @@
 import { KiroSettings, ProviderDriverKind, TextGenerationError } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -53,12 +54,14 @@ const unsupportedTextGeneration: ProviderTextGeneration = (() => {
     generatePrContent: () => unsupported("generatePrContent"),
     generateBranchName: () => unsupported("generateBranchName"),
     generateThreadTitle: () => unsupported("generateThreadTitle"),
+    generateReviewGuide: () => unsupported("generateReviewGuide"),
   };
 })();
 
 export type KiroDriverEnv =
   | KiroAdapterV2DriverEnv
   | ChildProcessSpawner.ChildProcessSpawner
+  | Crypto.Crypto
   | ProviderHost.ProviderHost;
 
 export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
@@ -72,6 +75,7 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const crypto = yield* Crypto.Crypto;
       const processEnv = yield* mergeProviderInstanceEnvironment(
         environment,
         yield* HostProcess.Environment,
@@ -99,6 +103,7 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
         checkProvider: checkKiroProviderStatus(effectiveConfig, processEnv).pipe(
           Effect.map(stampIdentity),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(Crypto.Crypto, crypto),
         ),
       }).pipe(
         Effect.mapError(
