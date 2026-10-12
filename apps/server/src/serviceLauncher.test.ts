@@ -298,16 +298,16 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
           root,
           yield* Effect.promise(() => readServiceState(statePath)),
         );
-        const running = yield* Effect.acquireRelease(
-          Effect.sync(() => launcher.run()),
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            void launcher.run().catch(started.reject);
+          }),
           () => Effect.promise(() => launcher.stop("SIGTERM")),
         );
-        // A failed launcher would otherwise leave the child promise pending forever.
-        yield* Effect.promise(() => Promise.race([started.promise, running]));
+        yield* Effect.promise(() => started.promise);
         assert.isTrue(yield* fs.exists(path.join(root, "started")));
         assert.equal(yield* fs.exists(path.join(records, "0.json")), lease === "corrupt");
         yield* Effect.promise(() => launcher.stop("SIGTERM"));
-        yield* Effect.promise(() => running);
       }),
   );
 
