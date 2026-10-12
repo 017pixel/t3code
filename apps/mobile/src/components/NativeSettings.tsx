@@ -72,6 +72,7 @@ export function NativeSettingsToggle(props: NativeSettingsToggleProps) {
 }
 export function NativeSettingsSlider(props: NativeSettingsSliderProps) {
   const draft = useRef(props.value);
+  const editing = useRef(false);
   const { colors } = useControlTheme();
   return (
     <VStack spacing={8} modifiers={[disabled(props.disabled)]}>
@@ -90,9 +91,12 @@ export function NativeSettingsSlider(props: NativeSettingsSliderProps) {
         value={props.value}
         onValueChange={(value) => {
           draft.current = value;
+          // VoiceOver adjustments can change the value without a touch-editing session.
+          if (!editing.current && !props.disabled) props.onValueChange(value);
         }}
-        onEditingChanged={(editing) => {
-          if (!editing && !props.disabled) props.onValueChange(draft.current);
+        onEditingChanged={(isEditing) => {
+          editing.current = isEditing;
+          if (!isEditing && !props.disabled) props.onValueChange(draft.current);
         }}
       />
     </VStack>
