@@ -700,7 +700,9 @@ const make = Effect.gen(function* () {
     else void tab.page.close().catch(constVoid);
     if (tab.isolatedContext) void tab.page.context().close().catch(constVoid);
     void tab.recording?.encoder.close().catch(constVoid);
-    void NodeFSP.rm(downloadDir(tab), { recursive: true, force: true }).catch(constVoid);
+    // A handed-off tab keeps its downloads; the folder is keyed by tab, not page.
+    if (!handOff)
+      void NodeFSP.rm(downloadDir(tab), { recursive: true, force: true }).catch(constVoid);
     reportLiveTabs();
     if (closeSession) {
       runFork(manager.close({ threadId: tab.threadId, tabId: tab.tabId }).pipe(Effect.ignore));
@@ -2425,7 +2427,13 @@ const make = Effect.gen(function* () {
         const snapshot = sessions.find(
           (session) => session.tabId === key.tabId && session.runtime === "server",
         );
-        if (snapshot) yield* Effect.promise(() => ensureTab(snapshot).catch(constVoid));
+        const tab = snapshot
+          ? yield* Effect.promise(() => ensureTab(snapshot).catch(() => null))
+          : null;
+        if (!existing) return;
+        if (tab) tab.downloads.unshift(...existing.downloads);
+        else
+          void NodeFSP.rm(downloadDir(existing), { recursive: true, force: true }).catch(constVoid);
       }).pipe(Effect.ignore),
     ),
     Effect.forkScoped,

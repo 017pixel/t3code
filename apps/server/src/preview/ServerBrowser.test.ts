@@ -1574,6 +1574,28 @@ it.live("an agent tab that went headless moves onto the desktop page that mounts
     Effect.gen(function* () {
       const { broker, tabId } = yield* ready;
       const headless = contexts[0]!.page;
+      // The agent downloaded a file on the headless page; Chromium writes it, here the test does.
+      const saved = Promise.withResolvers<string>();
+      const written = Promise.withResolvers<void>();
+      headless.emit("download", {
+        failure: async () => null,
+        saveAs: (path: string) => {
+          saved.resolve(path);
+          return written.promise;
+        },
+        suggestedFilename: () => "report.csv",
+        url: () => "blob:http://localhost:5173/1",
+      });
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.writeFileString(yield* Effect.promise(() => saved.promise), "a,b");
+      written.resolve();
+      const status = () =>
+        broker.invoke<PreviewAutomationStatus>({ scope, tabId, operation: "status", input: {} });
+      let before = yield* status();
+      while (!before.downloads?.length) {
+        yield* Effect.yieldNow;
+        before = yield* status();
+      }
       while (desktopDetaches.listenerCount("attach") === 0) yield* Effect.yieldNow;
       // The user opens the thread after the attach wait ran out, so the desktop mounts its page now.
       desktopTabs.add(tabId);
@@ -1591,6 +1613,10 @@ it.live("an agent tab that went headless moves onto the desktop page that mounts
       expect(desktopPage.goto.mock.calls.map(([url]) => url)).toContain(
         "http://localhost:5173/next",
       );
+      // The session stayed open, so the agent's download is still there.
+      const after = yield* status();
+      expect(after.downloads).toEqual(before.downloads);
+      expect(yield* fs.exists(after.downloads?.[0]?.path ?? "")).toBe(true);
     }),
   ).pipe(Effect.provide(layer)),
 );
