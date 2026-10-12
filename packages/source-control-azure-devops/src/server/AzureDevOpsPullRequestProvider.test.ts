@@ -130,6 +130,7 @@ describe("getChangeRequest", () => {
         Effect.provide(
           Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({
             getPullRequest: () => Effect.succeed(PULL_REQUEST),
+            listBuildChecks: () => Effect.succeed([]),
             listIterations: () =>
               Effect.succeed([ITERATION, { ...ITERATION, id: 4, headCommit: "new-head" }]),
             listIterationChanges: () =>
