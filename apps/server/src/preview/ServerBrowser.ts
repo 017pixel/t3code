@@ -2237,7 +2237,12 @@ const make = Effect.gen(function* () {
           if (next._tag === "frame") runFork(next.ack);
           // State a stalled viewer cannot miss replaces its backlog. It runs
           // synchronously so an older replacement can never land after a newer one.
-          else if (next._tag === "gone" || next._tag === "control" || next._tag === "fileChooser") {
+          else if (
+            next._tag === "gone" ||
+            next._tag === "reconnect" ||
+            next._tag === "control" ||
+            next._tag === "fileChooser"
+          ) {
             const dropped = Effect.runSyncExit(Queue.clear(output));
             if (dropped._tag === "Failure") return;
             Queue.offerUnsafe(output, next);

@@ -1572,7 +1572,7 @@ it.live("a desktop page that comes back reconnects without waiting for a viewer"
 it.live("an agent tab that went headless moves onto the desktop page that mounts late", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { broker, tabId } = yield* ready;
+      const { browser, broker, tabId } = yield* ready;
       const headless = contexts[0]!.page;
       // The agent downloaded a file on the headless page; Chromium writes it, here the test does.
       const saved = Promise.withResolvers<string>();
@@ -1596,12 +1596,17 @@ it.live("an agent tab that went headless moves onto the desktop page that mounts
         yield* Effect.yieldNow;
         before = yield* status();
       }
+      // A remote viewer streams the headless page and has stopped reading.
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+      stallViewer(viewer, { _tag: "viewport", width: 1, height: 1 });
       while (desktopDetaches.listenerCount("attach") === 0) yield* Effect.yieldNow;
       // The user opens the thread after the attach wait ran out, so the desktop mounts its page now.
       desktopTabs.add(tabId);
       desktopDetaches.emit("attach", { threadId: scope.thread.threadId, tabId });
       while (desktopConnections.length === 0) yield* Effect.yieldNow;
       expect(headless.isClosed()).toBe(true);
+      // Even with a full queue, the viewer learns to reconnect to the new page.
+      expect(yield* Queue.take(viewer.output)).toEqual({ _tag: "reconnect" });
       yield* broker.invoke({
         scope,
         tabId,
