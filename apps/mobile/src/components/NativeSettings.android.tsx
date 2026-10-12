@@ -20,7 +20,7 @@ import {
   toggleable,
   verticalScroll,
 } from "@expo/ui/jetpack-compose/modifiers";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { NativeThemeHost } from "./NativeThemeHost";
 import { useControlTheme } from "./useControlTheme";
 import type {
@@ -106,6 +106,9 @@ export function NativeSettingsToggle(props: NativeSettingsToggleProps) {
 }
 export function NativeSettingsSlider(props: NativeSettingsSliderProps) {
   const draft = useRef(props.value);
+  useEffect(() => {
+    draft.current = props.value;
+  }, [props.value]);
   const { colors, fontSize } = useControlTheme();
   return (
     <Column modifiers={[fillMaxWidth(), padding(16, 12, 16, 8)]}>

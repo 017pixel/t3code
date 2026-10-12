@@ -20,7 +20,7 @@ import {
   scrollContentBackground,
   tag,
 } from "@expo/ui/swift-ui/modifiers";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { NativeThemeHost } from "./NativeThemeHost";
 import { useControlTheme } from "./useControlTheme";
 import type {
@@ -73,6 +73,9 @@ export function NativeSettingsToggle(props: NativeSettingsToggleProps) {
 export function NativeSettingsSlider(props: NativeSettingsSliderProps) {
   const draft = useRef(props.value);
   const editing = useRef(false);
+  useEffect(() => {
+    if (!editing.current) draft.current = props.value;
+  }, [props.value]);
   const { colors } = useControlTheme();
   return (
     <VStack spacing={8} modifiers={[disabled(props.disabled)]}>
