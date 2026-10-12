@@ -1568,3 +1568,29 @@ it.live("a desktop page that comes back reconnects without waiting for a viewer"
     }),
   ).pipe(Effect.provide(layer)),
 );
+
+it.live("an agent tab that went headless moves onto the desktop page that mounts late", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const headless = contexts[0]!.page;
+      while (desktopDetaches.listenerCount("attach") === 0) yield* Effect.yieldNow;
+      // The user opens the thread after the attach wait ran out, so the desktop mounts its page now.
+      desktopTabs.add(tabId);
+      desktopDetaches.emit("attach", { threadId: scope.thread.threadId, tabId });
+      while (desktopConnections.length === 0) yield* Effect.yieldNow;
+      expect(headless.isClosed()).toBe(true);
+      yield* broker.invoke({
+        scope,
+        tabId,
+        operation: "navigate",
+        input: { url: "http://localhost:5173/next" },
+      });
+      // The agent now drives the page the user sees.
+      const desktopPage = desktopConnections[0]!.context.page;
+      expect(desktopPage.goto.mock.calls.map(([url]) => url)).toContain(
+        "http://localhost:5173/next",
+      );
+    }),
+  ).pipe(Effect.provide(layer)),
+);
