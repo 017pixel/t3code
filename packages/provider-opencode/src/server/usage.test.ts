@@ -52,20 +52,38 @@ describe("readOpenCodeUsage", () => {
       yield* insert(303, "msg-0", data);
 
       let largestRawResult = 0;
-      const originalAll = NodeSqlite.StatementSync.prototype.all;
+      const originalEmit = NodeWorkerThreads.Worker.prototype.emit;
       yield* Effect.acquireRelease(
         Effect.sync(() =>
-          vi.spyOn(NodeSqlite.StatementSync.prototype, "all").mockImplementation(function (
-            this: NodeSqlite.StatementSync,
-            ...params
+          vi.spyOn(NodeWorkerThreads.Worker.prototype, "emit").mockImplementation(function (
+            this: NodeWorkerThreads.Worker,
+            event: string | symbol,
+            ...args: ReadonlyArray<unknown>
           ) {
-            const rows = originalAll.apply(this, params);
-            const rawSize = rows.reduce(
-              (size, row) => size + (typeof row.data === "string" ? row.data.length : 0),
-              0,
-            );
-            largestRawResult = Math.max(largestRawResult, rawSize);
-            return rows;
+            const response = args[0];
+            if (
+              event === "message" &&
+              typeof response === "object" &&
+              response !== null &&
+              "ok" in response &&
+              response.ok === true &&
+              "value" in response &&
+              Array.isArray(response.value)
+            ) {
+              const rawSize = response.value.reduce(
+                (size: number, row: unknown) =>
+                  size +
+                  (typeof row === "object" &&
+                  row !== null &&
+                  "data" in row &&
+                  typeof row.data === "string"
+                    ? row.data.length
+                    : 0),
+                0,
+              );
+              largestRawResult = Math.max(largestRawResult, rawSize);
+            }
+            return originalEmit.call(this, event, ...args);
           }),
         ),
         (spy) => Effect.sync(() => spy.mockRestore()),
@@ -273,4 +291,4 @@ describe("readOpenCodeUsage", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
-import * as NodeSqlite from "node:sqlite";
+import * as NodeWorkerThreads from "node:worker_threads";

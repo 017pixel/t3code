@@ -4,16 +4,15 @@
  *
  * @module SqliteClient
  */
-import * as NodeSqlite from "node:sqlite";
+import * as NodeWorkerThreads from "node:worker_threads";
 
-import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Predicate from "effect/Predicate";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -22,8 +21,15 @@ import * as Stream from "effect/Stream";
 import * as Reactivity from "effect/reactivity/Reactivity";
 import * as Client from "effect/sql/SqlClient";
 import type { Connection } from "effect/sql/SqlConnection";
-import { SqlError, classifySqliteError } from "effect/sql/SqlError";
+import { ConnectionError, SqlError, classifySqliteError } from "effect/sql/SqlError";
 import * as Statement from "effect/sql/Statement";
+
+import {
+  sqliteWorkerMain,
+  type SqliteWorkerCommand,
+  type SqliteWorkerOptions,
+  type SqliteWorkerResponse,
+} from "./nodeSqliteWorker.ts";
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
 
@@ -99,6 +105,133 @@ const classifyError = (cause: unknown, message: string, operation: string) => {
   return classifySqliteError(cause, { message, operation });
 };
 
+interface SqliteWorkerConnection {
+  readonly request: <A>(command: SqliteWorkerCommand) => Effect.Effect<A, SqlError>;
+}
+
+class SequentialSqliteWorker extends Context.Service<
+  SequentialSqliteWorker,
+  {
+    readonly reserve: Effect.Effect<SqliteWorkerConnection, SqlError, Scope.Scope>;
+  }
+>()("@t3tools/shared/nodeSqliteClient/SequentialSqliteWorker") {}
+
+const makeWorker = Effect.fnUntraced(function* (): Effect.fn.Return<
+  SqliteWorkerConnection,
+  SqlError,
+  Scope.Scope
+> {
+  const scope = yield* Effect.scope;
+  const worker = yield* Effect.try({
+    try: () =>
+      new NodeWorkerThreads.Worker(
+        `(${sqliteWorkerMain.toString()})(require("node:sqlite"), require("node:worker_threads"))`,
+        {
+          eval: true,
+        },
+      ),
+    catch: (cause) =>
+      new SqlError({ reason: classifyError(cause, "Failed to open database", "open") }),
+  });
+  const pending = new Map<number, (result: Effect.Effect<unknown, SqlError>) => void>();
+  let nextId = 0;
+  let failure: SqlError | undefined;
+  const fail = (cause: unknown) => {
+    failure = new SqlError({
+      reason: new ConnectionError({
+        message: "SQLite worker stopped",
+        operation: "execute",
+        cause,
+      }),
+    });
+    for (const resume of pending.values()) resume(Effect.fail(failure));
+    pending.clear();
+  };
+  worker.on("error", fail);
+  worker.on("exit", (code) => fail(new Error(`SQLite worker exited with code ${code}`)));
+  worker.on("message", (response: SqliteWorkerResponse) => {
+    const resume = pending.get(response.id);
+    if (!resume) return;
+    pending.delete(response.id);
+    if (response.ok) {
+      resume(Effect.succeed(response.value));
+    } else {
+      const cause = Object.assign(new Error(response.cause.message), response.cause);
+      resume(
+        Effect.fail(
+          new SqlError({
+            reason: classifyError(
+              cause,
+              {
+                open: "Failed to open database",
+                close: "Failed to close database",
+                prepare: "Failed to prepare statement",
+                execute: "Failed to execute statement",
+              }[response.operation],
+              response.operation,
+            ),
+          }),
+        ),
+      );
+    }
+  });
+
+  // A cancelled caller must wait for its in-flight operation before rollback
+  // or releasing the connection; terminating it could interrupt a durable commit.
+  const request = <A>(command: SqliteWorkerCommand) =>
+    Effect.callback<A, SqlError>((resume) => {
+      if (failure) {
+        // A dead worker has already closed its native database. Cleanup must
+        // preserve the typed operation failure instead of adding a defect.
+        resume(
+          command.operation === "close" ? Effect.succeed(undefined as A) : Effect.fail(failure),
+        );
+        return;
+      }
+      const id = ++nextId;
+      pending.set(id, (result) => resume(result as Effect.Effect<A, SqlError>));
+      try {
+        worker.postMessage({ ...command, id }, []);
+      } catch (cause) {
+        pending.delete(id);
+        resume(
+          Effect.fail(
+            new SqlError({
+              reason: classifyError(cause, "Failed to send database operation", command.operation),
+            }),
+          ),
+        );
+      }
+    }).pipe(Effect.uninterruptible);
+
+  yield* Scope.addFinalizer(
+    scope,
+    Effect.promise(() => worker.terminate()),
+  );
+  return { request };
+});
+
+// Sequential scanners lease the worker until each client's scope closes. The
+// first uncached database starts it; cached scans never start a worker.
+export const layerSequentialWorker = Layer.effect(
+  SequentialSqliteWorker,
+  Effect.gen(function* () {
+    const scope = yield* Effect.scope;
+    const semaphore = yield* Semaphore.make(1);
+    const getWorker = yield* Effect.cached(Scope.provide(makeWorker(), scope));
+    return SequentialSqliteWorker.of({
+      reserve: Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const lease = yield* Effect.scope;
+          yield* restore(semaphore.take(1));
+          yield* Scope.addFinalizer(lease, semaphore.release(1));
+          return yield* getWorker;
+        }),
+      ),
+    });
+  }),
+);
+
 const make = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
 ): Effect.fn.Return<Client.SqlClient, SqlError, Scope.Scope | Reactivity.Reactivity> {
@@ -111,146 +244,59 @@ const make = Effect.fn("makeWithDatabase")(function* (
 
   const makeConnection = Effect.gen(function* () {
     const scope = yield* Effect.scope;
-    const db = yield* Effect.try({
-      try: () =>
-        new NodeSqlite.DatabaseSync(options.filename, {
-          readOnly: options.readonly ?? false,
-          allowExtension: options.allowExtension ?? false,
-        }),
-      catch: (cause) =>
-        new SqlError({
-          reason: classifyError(cause, "Failed to open database", "open"),
-        }),
-    });
-    yield* Scope.addFinalizer(
-      scope,
-      Effect.try({
-        try: () => db.close(),
-        catch: (cause) =>
-          new SqlError({
-            reason: classifyError(cause, "Failed to close database", "close"),
-          }),
-      }).pipe(Effect.orDie),
-    );
-
-    const statementReaderCache = new WeakMap<NodeSqlite.StatementSync, boolean>();
-    const hasRows = (statement: NodeSqlite.StatementSync): boolean => {
-      const cached = statementReaderCache.get(statement);
-      if (cached !== undefined) {
-        return cached;
-      }
-      const value = statement.columns().length > 0;
-      statementReaderCache.set(statement, value);
-      return value;
-    };
-
-    const prepare = (sql: string) =>
-      Effect.try({
-        try: () => db.prepare(sql),
-        catch: (cause) =>
-          new SqlError({
-            reason: classifyError(cause, "Failed to prepare statement", "prepare"),
-          }),
-      });
-
-    const prepareCache = yield* Cache.makeWith(prepare, {
-      capacity: options.prepareCacheSize ?? 200,
-      // A transient prepare failure must not outlive the lock or missing schema.
-      timeToLive: (exit) =>
-        Exit.isSuccess(exit) ? (options.prepareCacheTTL ?? Duration.minutes(10)) : Duration.zero,
+    const sharedWorker = yield* Effect.serviceOption(SequentialSqliteWorker);
+    const { request } = yield* Option.isSome(sharedWorker)
+      ? sharedWorker.value.reserve
+      : makeWorker();
+    yield* Scope.addFinalizer(scope, request<void>({ operation: "close" }).pipe(Effect.orDie));
+    yield* request<void>({
+      operation: "open",
+      options: {
+        filename: options.filename,
+        readonly: options.readonly ?? false,
+        allowExtension: options.allowExtension ?? false,
+        prepareCacheSize: options.prepareCacheSize ?? 200,
+        prepareCacheTTL: Duration.toMillis(options.prepareCacheTTL ?? Duration.minutes(10)),
+      } satisfies SqliteWorkerOptions,
     });
 
-    const runStatement = (
-      statement: NodeSqlite.StatementSync,
+    const run = <A>(
+      sql: string,
       params: ReadonlyArray<unknown>,
-      raw: boolean,
+      mode: "rows" | "values" | "raw",
+      unprepared = false,
     ) =>
-      Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
-        try {
-          statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
-          if (hasRows(statement)) {
-            return Effect.succeed(statement.all(...(params as any)));
-          }
-          const result = statement.run(...(params as any));
-          return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
-        } catch (cause) {
-          return Effect.fail(
-            new SqlError({
-              reason: classifyError(cause, "Failed to execute statement", "execute"),
-            }),
-          );
-        }
-      });
-
-    const run = (sql: string, params: ReadonlyArray<unknown>, raw = false) =>
-      Effect.flatMap(Cache.get(prepareCache, sql), (s) => runStatement(s, params, raw));
-
-    const runStatementValues = (
-      statement: NodeSqlite.StatementSync,
-      params: ReadonlyArray<unknown>,
-    ) =>
-      Effect.acquireUseRelease(
-        Effect.succeed(statement),
-        (statement) =>
-          Effect.try({
-            try: () => {
-              if (hasRows(statement)) {
-                statement.setReturnArrays(true);
-                // Safe to cast to array after we've setReturnArrays(true)
-                return statement.all(...(params as any)) as unknown as ReadonlyArray<
-                  ReadonlyArray<unknown>
-                >;
-              }
-              statement.run(...(params as any));
-              return [];
-            },
-            catch: (cause) =>
-              new SqlError({
-                reason: classifyError(cause, "Failed to execute statement", "execute"),
-              }),
-          }),
-        (statement) =>
-          Effect.try({
-            try: () => {
-              if (hasRows(statement)) {
-                statement.setReturnArrays(false);
-              }
-            },
-            catch: (cause) =>
-              new SqlError({
-                reason: classifyError(
-                  cause,
-                  "Failed to reset statement result mode",
-                  "resetResultMode",
-                ),
-              }),
-          }).pipe(Effect.orDie),
+      Effect.withFiber<A, SqlError>((fiber) =>
+        request<A>({
+          operation: "execute",
+          sql,
+          params,
+          mode,
+          unprepared,
+          safeIntegers: Boolean(Context.get(fiber.context, Client.SafeIntegers)),
+        }),
       );
-
-    const runValues = (sql: string, params: ReadonlyArray<unknown>) =>
-      Effect.flatMap(Cache.get(prepareCache, sql), (statement) =>
-        runStatementValues(statement, params),
-      );
+    const rows = (sql: string, params: ReadonlyArray<unknown>, unprepared = false) =>
+      run<ReadonlyArray<Record<string, unknown>>>(sql, params, "rows", unprepared);
+    const values = (sql: string, params: ReadonlyArray<unknown>, unprepared = false) =>
+      run<ReadonlyArray<ReadonlyArray<unknown>>>(sql, params, "values", unprepared);
 
     return identity<Connection>({
       execute(sql, params, rowTransform) {
-        return rowTransform ? Effect.map(run(sql, params), rowTransform) : run(sql, params);
+        const effect = rows(sql, params);
+        return rowTransform ? Effect.map(effect, rowTransform) : effect;
       },
       executeRaw(sql, params) {
-        return run(sql, params, true);
+        return run<unknown>(sql, params, "raw");
       },
       executeValues(sql, params) {
-        return runValues(sql, params);
+        return values(sql, params);
       },
       executeValuesUnprepared(sql, params) {
-        return Effect.flatMap(prepare(sql), (statement) =>
-          runStatementValues(statement, params ?? []),
-        );
+        return values(sql, params ?? [], true);
       },
       executeUnprepared(sql, params, rowTransform) {
-        const effect = prepare(sql).pipe(
-          Effect.flatMap((statement) => runStatement(statement, params ?? [], false)),
-        );
+        const effect = rows(sql, params ?? [], true);
         return rowTransform ? Effect.map(effect, rowTransform) : effect;
       },
       executeStream(_sql, _params) {
@@ -262,7 +308,6 @@ const make = Effect.fn("makeWithDatabase")(function* (
   const semaphore = yield* Semaphore.make(1);
   const connection = yield* makeConnection;
 
-  const acquirer = semaphore.withPermits(1)(Effect.succeed(connection));
   const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
     const fiber = Fiber.getCurrent()!;
     const scope = Context.getUnsafe(fiber.context, Scope.Scope);
@@ -273,7 +318,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
   });
 
   return yield* Client.make({
-    acquirer,
+    acquirer: transactionAcquirer,
     compiler,
     transactionAcquirer,
     // A deferred BEGIN only takes the write lock at the first write. If another

@@ -460,4 +460,4 @@ export const readAntigravityUsage = Effect.fn("readAntigravityUsage")(function* 
     }
   }
   return { files, errors };
-});
+}, Effect.provide(NodeSqliteClient.layerSequentialWorker));

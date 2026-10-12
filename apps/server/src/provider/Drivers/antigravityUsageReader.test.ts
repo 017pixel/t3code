@@ -1,5 +1,6 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off - Effect's File.Info has no ctime or sub-millisecond mtime, which the cache tests compare.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeWorkerThreads from "node:worker_threads";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
@@ -10,6 +11,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
+import { vi } from "vite-plus/test";
 
 import { makeAntigravityUsageCache, readAntigravityUsage } from "./antigravityUsageReader.ts";
 
@@ -72,6 +74,52 @@ const records = (result: Effect.Success<ReturnType<typeof readAntigravityUsage>>
   result.files.flatMap((file) => file.records);
 
 describe("readAntigravityUsage", () => {
+  it.effect("starts one worker for a multi-database scan and none for a cached scan", () =>
+    Effect.gen(function* () {
+      const dir = yield* tempDir;
+      const path = yield* Path.Path;
+      for (let index = 0; index < 5; index++) {
+        yield* seedDatabase(path.join(dir, `${index}.db`), (db) =>
+          Effect.gen(function* () {
+            yield* createTables(db);
+            yield* db.run("INSERT INTO gen_metadata VALUES (?, ?)", [
+              11,
+              new Uint8Array(
+                protoBytes(
+                  1,
+                  protoBytes(4, [...protoNumber(2, 10), ...protoText(11, `request-${index}`)]),
+                ),
+              ),
+            ]);
+          }),
+        );
+      }
+      const workers = new Set<number>();
+      const originalEmit = NodeWorkerThreads.Worker.prototype.emit;
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi.spyOn(NodeWorkerThreads.Worker.prototype, "emit").mockImplementation(function (
+            this: NodeWorkerThreads.Worker,
+            event: string | symbol,
+            ...args: ReadonlyArray<unknown>
+          ) {
+            if (event === "online") workers.add(this.threadId);
+            return originalEmit.call(this, event, ...args);
+          }),
+        ),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+      const cache = makeAntigravityUsageCache();
+      const first = yield* readAntigravityUsage(dir, 0, cache);
+      assert.deepEqual(first.errors, []);
+      assert.equal(records(first).length, 5);
+      assert.equal(workers.size, 1);
+      workers.clear();
+      assert.deepEqual(yield* readAntigravityUsage(dir, 0, cache), first);
+      assert.equal(workers.size, 0);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "deduplicates Antigravity generation and step usage while preserving retry model and token buckets",
     () =>
