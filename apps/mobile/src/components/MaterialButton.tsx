@@ -1,4 +1,5 @@
 import { Pressable } from "react-native";
+import { AppActivityIndicator } from "./AppActivityIndicator";
 import { AppText } from "./AppText";
 import { cn } from "../lib/cn";
 
@@ -6,6 +7,7 @@ export interface MaterialButtonProps {
   readonly label: string;
   readonly onPress: () => void;
   readonly disabled?: boolean;
+  readonly accessibilityHint?: string;
   readonly loading?: boolean;
   readonly tone?: "primary" | "secondary" | "danger" | "text" | "contrast";
   readonly fullWidth?: boolean;
@@ -25,18 +27,21 @@ export function MaterialButton(props: MaterialButtonProps) {
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityState={{ disabled }}
+      accessibilityLabel={props.label}
+      accessibilityHint={props.accessibilityHint}
+      accessibilityState={{ disabled, busy: Boolean(props.loading) }}
       disabled={disabled}
       onPress={props.onPress}
       className={cn(
-        "min-h-12 justify-center rounded-full px-6 active:opacity-70",
+        "min-h-12 flex-row items-center justify-center gap-2 rounded-full px-6 active:opacity-70",
         props.fullWidth ? "w-full" : "self-start",
         disabled ? "bg-subtle-strong" : containerClassName,
       )}
     >
+      {props.loading ? <AppActivityIndicator colorClassName="accent-foreground-muted" /> : null}
       <AppText
         className={cn(
-          "text-center font-t3-medium",
+          "min-w-0 shrink text-center font-t3-medium",
           disabled ? "text-foreground-muted" : labelClassName,
         )}
       >
