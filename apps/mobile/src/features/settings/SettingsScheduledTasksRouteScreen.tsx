@@ -39,6 +39,7 @@ import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { Alert, AppState, Platform, Pressable, TextInput as RNTextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { MaterialButton } from "../../components/MaterialButton";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import {
@@ -1012,21 +1013,14 @@ function TaskForm({
           Time uses the environment's time zone, which may differ from your phone's.
         </Text>
       ) : null}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityState={{
-          disabled: saving || dictationPending || taskMissing || environmentUnavailable,
-        }}
-        disabled={
-          !canOperate || saving || dictationPending || taskMissing || environmentUnavailable
-        }
+      <MaterialButton
+        tone="primary"
+        fullWidth
+        loading={saving}
+        disabled={!canOperate || dictationPending || taskMissing || environmentUnavailable}
         onPress={() => void save()}
-        className="min-h-12 items-center justify-center rounded-[14px] bg-primary px-4 disabled:opacity-50"
-      >
-        <Text className="text-base font-t3-medium text-primary-foreground">
-          {saving ? "Saving…" : draft.task ? "Save changes" : "Create task"}
-        </Text>
-      </Pressable>
+        label={saving ? "Saving…" : draft.task ? "Save changes" : "Create task"}
+      />
     </View>
   );
 }

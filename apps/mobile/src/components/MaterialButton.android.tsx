@@ -24,26 +24,31 @@ export function MaterialButton(props: MaterialButtonProps) {
   const Component =
     tone === "text" ? TextButton : tone === "secondary" ? FilledTonalButton : Button;
   const containerColor =
-    tone === "primary"
-      ? colors["--color-primary"]
-      : tone === "danger"
-        ? colors["--color-danger"]
-        : tone === "text"
-          ? "#00000000"
-          : colors["--color-secondary"];
+    tone === "contrast"
+      ? colors["--color-foreground"]
+      : tone === "primary"
+        ? colors["--color-primary"]
+        : tone === "danger"
+          ? colors["--color-danger"]
+          : tone === "text"
+            ? "#00000000"
+            : colors["--color-secondary"];
   const contentColor =
-    tone === "primary"
-      ? colors["--color-primary-foreground"]
-      : tone === "danger"
-        ? colors["--color-danger-foreground"]
-        : tone === "text"
-          ? colors["--color-primary-text"]
-          : colors["--color-secondary-foreground"];
+    tone === "contrast"
+      ? colors["--color-screen"]
+      : tone === "primary"
+        ? colors["--color-primary-foreground"]
+        : tone === "danger"
+          ? colors["--color-danger-foreground"]
+          : tone === "text"
+            ? colors["--color-primary-text"]
+            : colors["--color-secondary-foreground"];
   return (
     <View
       accessible
       accessibilityRole="button"
       accessibilityLabel={props.label}
+      accessibilityHint={props.accessibilityHint}
       accessibilityState={{
         disabled: Boolean(props.disabled || props.loading),
         busy: Boolean(props.loading),
