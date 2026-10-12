@@ -683,14 +683,16 @@ const make = Effect.gen(function* () {
   /** Whether the preview session for a tab still exists. */
   const sessionOpen = (tab: ServerTab) => !closedSessions.has(tabKey(tab.threadId, tab.tabId));
 
-  const dropTab = (tab: ServerTab, closeSession: boolean) => {
+  /** `handOff` keeps the session for a new page, so viewers reconnect to it. */
+  const dropTab = (tab: ServerTab, closeSession: boolean, handOff = false) => {
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     tabs.delete(key);
     tab.closing = true;
     clearAbortedNavigation(tab);
     // A desktop page outlives the connection unless its session closed with it.
-    const end = tab.desktop && !closeSession && sessionOpen(tab) ? "reconnect" : "gone";
+    const end =
+      (tab.desktop || handOff) && !closeSession && sessionOpen(tab) ? "reconnect" : "gone";
     for (const viewer of tab.viewers) viewer.push({ _tag: end });
     void tab.control.close().catch(constVoid);
     // The desktop owns its page; letting go only ends this connection.
@@ -2408,10 +2410,17 @@ const make = Effect.gen(function* () {
   // The page came back, for example after its DevTools closed. Reconnect now
   // rather than on the next viewer or agent, or the tab's URL and title stop
   // reaching every client in the meantime.
+  // A tab that went headless before the desktop mounted it (its thread was in
+  // the background) moves onto the desktop's page. Otherwise the user and the
+  // agent see two different pages under one tab.
   yield* desktopChannel.attached.pipe(
     Stream.runForEach((key) =>
       Effect.gen(function* () {
-        if (tabs.has(tabKey(key.threadId, key.tabId))) return;
+        const pending = pendingTabs.get(tabKey(key.threadId, key.tabId));
+        if (pending) yield* Effect.promise(() => pending.catch(constVoid));
+        const existing = tabs.get(tabKey(key.threadId, key.tabId));
+        if (existing?.desktop) return;
+        if (existing) dropTab(existing, false, true);
         const { sessions } = yield* manager.list({ threadId: ThreadId.make(key.threadId) });
         const snapshot = sessions.find(
           (session) => session.tabId === key.tabId && session.runtime === "server",
