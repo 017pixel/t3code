@@ -50,8 +50,10 @@ const establishmentTimeout = Duration.fromInputUnsafe(CONNECTION_ESTABLISHMENT_T
 const synchronizationTimeout = Duration.fromInputUnsafe("75 seconds");
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 // Mobile resumes, explicit retries, and offline events want a fast answer:
-// the user is waiting, or the network may be gone.
-const QUICK_CONNECTION_PROBE_TIMEOUT = "3 seconds";
+// the user is waiting, or the network may be gone. It still has to cover a
+// lost packet and its retransmit on a 500ms round trip, or a slow link reads
+// as a dead socket and every resume tears down a working session.
+const QUICK_CONNECTION_PROBE_TIMEOUT = "6 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
 // While connected over a fallback route, how often to look for a better one.
 // Network changes and returning to the app also trigger a check.
