@@ -52,7 +52,9 @@ const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 // Mobile resumes, explicit retries, and offline events want a fast answer:
 // the user is waiting, or the network may be gone. It still has to cover a
 // lost packet and its retransmit on a 500ms round trip, or a slow link reads
-// as a dead socket and every resume tears down a working session.
+// as a dead socket and every resume tears down a working session. It must
+// stay longer than PING_INTERVAL plus a round trip, so a working link always
+// delivers a frame that extends it.
 const QUICK_CONNECTION_PROBE_TIMEOUT = "6 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
 // While connected over a fallback route, how often to look for a better one.
@@ -648,8 +650,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       // Monotonic nanoseconds, so a wall-clock correction cannot move the deadline.
       const probeStartedAt = yield* Clock.monotonicTimeNanos;
       const latestDeadline = probeStartedAt + Duration.toNanosUnsafe(CONNECTION_PROBE_TIMEOUT);
-      let deadline = probeStartedAt + Duration.toNanosUnsafe(probeTimeout);
-      let receivedFrames = yield* lease.session.receivedFrames;
+      let window = probeTimeout;
+      let deadline = probeStartedAt + Duration.toNanosUnsafe(window);
+      let receivedReads = yield* lease.session.receivedReads;
       for (;;) {
         const remaining = deadline - (yield* Clock.monotonicTimeNanos);
         const probeEvent = yield* Effect.raceAllFirst([
@@ -665,11 +668,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           // Data still arriving means a slow link, not a dead one: the answer
           // may be queued behind it. Wait another window, up to the full
           // probe timeout.
-          const received = yield* lease.session.receivedFrames;
+          const received = yield* lease.session.receivedReads;
           const now = yield* Clock.monotonicTimeNanos;
-          if (received > receivedFrames && now < latestDeadline) {
-            receivedFrames = received;
-            const extended = now + Duration.toNanosUnsafe(probeTimeout);
+          if (received > receivedReads && now < latestDeadline) {
+            receivedReads = received;
+            const extended = now + Duration.toNanosUnsafe(window);
             deadline = extended < latestDeadline ? extended : latestDeadline;
             continue;
           }
@@ -697,7 +700,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         if (signalTimeout !== undefined) {
           const signalDeadline =
             (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(signalTimeout);
-          if (signalDeadline < deadline) deadline = signalDeadline;
+          if (signalDeadline < deadline) {
+            deadline = signalDeadline;
+            window = signalTimeout;
+          }
         }
       }
     }

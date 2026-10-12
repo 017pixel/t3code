@@ -24,7 +24,12 @@ import * as RpcClientError from "effect/rpc/RpcClientError";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as Socket from "effect/socket/Socket";
 
-import { makeWsRpcProtocolClient, PING_TIMEOUT, type WsRpcProtocolClient } from "./protocol.ts";
+import {
+  makeWsRpcProtocolClient,
+  PING_INTERVAL,
+  PING_TIMEOUT,
+  type WsRpcProtocolClient,
+} from "./protocol.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 import type {
   ConnectionAttemptError,
@@ -52,8 +57,8 @@ export interface RpcSession {
   ) => ServerConfigSubscription;
   readonly ready: Effect.Effect<void, ConnectionAttemptError>;
   readonly probe: Effect.Effect<void, ConnectionAttemptError>;
-  /** How many socket reads have delivered data, pongs included. A rising count proves the link is alive. */
-  readonly receivedFrames: Effect.Effect<number>;
+  /** How many socket reads have delivered data, pongs included. A rising count means the link still carries traffic. */
+  readonly receivedReads: Effect.Effect<number>;
   readonly closed: Effect.Effect<never, ConnectionAttemptError>;
 }
 
@@ -196,18 +201,18 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
         Effect.asVoid,
       ),
     });
-    let receivedFrames = 0;
+    let receivedReads = 0;
     const layerSocket = Layer.effect(
       Socket.Socket,
       Effect.gen(function* () {
         const socket = yield* Socket.Socket;
         return Socket.make({
           reader: Effect.map(socket.reader, (reader) => ({
+            ...reader,
             pull: Effect.map(reader.pull, (frames) => {
-              receivedFrames += 1;
+              receivedReads += 1;
               return frames;
             }),
-            upgrade: (options) => reader.upgrade(options),
           })),
           writer: socket.writer,
         });
@@ -223,6 +228,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     const layerProtocol = Layer.effect(
       RpcClient.Protocol,
       RpcClient.makeProtocolSocket({
+        pingInterval: PING_INTERVAL,
         pingTimeout: PING_TIMEOUT,
         retryTransientErrors: false,
         retryPolicy: Schedule.recurs(0),
@@ -415,7 +421,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
         Effect.raceFirst(Deferred.await(disconnected)),
       ),
       probe,
-      receivedFrames: Effect.sync(() => receivedFrames),
+      receivedReads: Effect.sync(() => receivedReads),
       closed: Effect.raceFirst(
         Deferred.await(disconnected),
         Deferred.await(configSubscriptionClosed),

@@ -6,8 +6,8 @@ import {
 } from "./app-state-wakeups";
 
 describe("mobileApplicationActiveWakeup", () => {
-  it("skips the check when the app never left the foreground", () => {
-    expect(mobileApplicationActiveWakeup(null, 20_000)).toBeNull();
+  it("skips the probe when the app never left the foreground", () => {
+    expect(mobileApplicationActiveWakeup(null, 20_000)).toBe("application-refocused");
   });
 
   it("uses a fast probe after a short background visit", () => {

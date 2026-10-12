@@ -157,7 +157,7 @@ const makeHarness = Effect.fn("TestConnectionHarness.make")(function* (options?:
   ) => Effect.Effect<PreparedConnection, ConnectionAttemptError>;
   readonly ready?: (attempt: number) => Effect.Effect<void, ConnectionAttemptError>;
   readonly probe?: (attempt: number) => Effect.Effect<void, ConnectionAttemptError>;
-  readonly receivedFrames?: Effect.Effect<number>;
+  readonly receivedReads?: Effect.Effect<number>;
   readonly initialConfig?: (attempt: number) => Effect.Effect<ServerConfig, ConnectionAttemptError>;
   readonly checkRoute?: (route: ConnectionRoute) => Effect.Effect<ConnectionDriver.RouteCheck>;
 }) {
@@ -214,7 +214,7 @@ const makeHarness = Effect.fn("TestConnectionHarness.make")(function* (options?:
         subscribeServerConfig: (input) => TEST_RPC_CLIENT.subscribeServerConfig(input),
         ready: options?.ready?.(attempt) ?? Effect.void,
         probe: options?.probe?.(attempt) ?? Effect.void,
-        receivedFrames: options?.receivedFrames ?? Effect.succeed(0),
+        receivedReads: options?.receivedReads ?? Effect.succeed(0),
         closed: Deferred.await(closed),
       } satisfies RpcSession.RpcSession),
       () => Ref.update(releaseCount, (count) => count + 1),
@@ -650,6 +650,42 @@ describe("EnvironmentSupervisor", () => {
 
       expect(yield* Ref.get(harness.prepareCount)).toBe(2);
     }),
+  );
+
+  it.effect("a mobile refocus restarts the retry ladder but never probes a live session", () =>
+    Effect.gen(function* () {
+      const probeCount = yield* Ref.make(0);
+      const harness = yield* makeHarness({
+        prepare: (attempt) =>
+          attempt <= 2 ? Effect.fail(transient()) : Effect.succeed(PREPARED_CONNECTION),
+        probe: () => Ref.update(probeCount, (count) => count + 1),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "backoff" && state.attempt === 1,
+      );
+      yield* TestClock.adjust("3 seconds");
+      yield* eventuallyState(
+        supervisor.state,
+        (state) => state.phase === "backoff" && state.attempt === 2,
+      );
+      yield* harness.wake("application-refocused");
+      yield* eventuallyState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.attempt === 1,
+      );
+
+      yield* harness.wake("application-refocused");
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      expect(yield* Ref.get(probeCount)).toBe(0);
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+    }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("explicit retry starts a fresh backoff sequence", () =>
@@ -1352,6 +1388,35 @@ describe("EnvironmentSupervisor", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("extends a retry-shortened probe by the retry's window when data arrives", () =>
+    Effect.gen(function* () {
+      const frames = yield* Ref.make(0);
+      const harness = yield* makeHarness({
+        probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
+        receivedReads: Ref.get(frames),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      yield* harness.wake("application-active");
+      yield* TestClock.adjust("1 second");
+      yield* supervisor.retryNow;
+      yield* TestClock.adjust("1 second");
+      yield* Ref.set(frames, 1);
+      // The retry's deadline lands at 7 seconds and the data extends it by the
+      // retry's 6 seconds to 13, not by the original 15.
+      yield* TestClock.adjust("10999 millis");
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+      yield* TestClock.adjust("1 milli");
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 2,
+      );
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("quickly times out a stalled mobile foreground liveness probe", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
@@ -1380,7 +1445,7 @@ describe("EnvironmentSupervisor", () => {
       const frames = yield* Ref.make(0);
       const harness = yield* makeHarness({
         probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
-        receivedFrames: Ref.get(frames),
+        receivedReads: Ref.get(frames),
       });
       const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
         initiallyDesired: true,
@@ -1411,7 +1476,7 @@ describe("EnvironmentSupervisor", () => {
       const frames = yield* Ref.make(0);
       const harness = yield* makeHarness({
         probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
-        receivedFrames: Ref.get(frames),
+        receivedReads: Ref.get(frames),
       });
       const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
         initiallyDesired: true,

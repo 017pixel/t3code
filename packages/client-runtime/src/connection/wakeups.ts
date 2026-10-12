@@ -6,6 +6,10 @@ export type ConnectionWakeup =
   | "application-active"
   | "application-active-probe"
   | "application-active-reconnect"
+  // The app came back from a brief inactive state, such as Control Center or
+  // Face ID, without being suspended. Its socket is fine, but a pending retry
+  // should still run now.
+  | "application-refocused"
   | "credentials-changed"
   // The device moved to a different network (another Wi-Fi, Wi-Fi to
   // cellular) while staying online. Saved routes may have changed reach.
@@ -15,7 +19,8 @@ function isApplicationActiveWakeup(reason: ConnectionWakeup): boolean {
   return (
     reason === "application-active" ||
     reason === "application-active-probe" ||
-    reason === "application-active-reconnect"
+    reason === "application-active-reconnect" ||
+    reason === "application-refocused"
   );
 }
 

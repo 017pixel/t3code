@@ -1099,19 +1099,34 @@ describe("RpcSessionFactory", () => {
 
       yield* TestClock.adjust("15 seconds");
       expect(closedFiber.pollUnsafe()).toBeUndefined();
-      expect(socket.sent.map((message) => decodeJson(message)).filter(isPing)).toEqual([
-        { _tag: "Ping" },
-        { _tag: "Ping" },
-        { _tag: "Ping" },
-      ]);
+      expect(socket.sent.map((message) => decodeJson(message)).filter(isPing)).toHaveLength(5);
 
-      yield* TestClock.adjust("5 seconds");
+      yield* TestClock.adjust("3 seconds");
       const error = yield* Fiber.join(closedFiber);
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error).toMatchObject({
         reason: "transport",
         detail: "Test environment stopped responding.",
       });
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("counts every socket read, pongs included", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory();
+      const session = yield* factory.connect(PREPARED);
+      const readyFiber = yield* Effect.forkChild(session.ready);
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      yield* completeInitialConfig(socket);
+      yield* Fiber.join(readyFiber);
+
+      const before = yield* session.receivedReads;
+      expect(before).toBeGreaterThan(0);
+      yield* TestClock.adjust("3 seconds");
+      socket.serverMessage(encodeJson({ _tag: "Pong" }));
+      yield* Effect.yieldNow;
+      expect(yield* session.receivedReads).toBe(before + 1);
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
