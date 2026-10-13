@@ -249,8 +249,14 @@ const make = Effect.gen(function* () {
     );
 
   const readThreads = Effect.fn("StorageCleanup.readThreads")(function* () {
-    const active = yield* projections.getShellSnapshot();
-    const archived = yield* projections.getShellSnapshot({ location: "archive" });
+    const active = yield* projections.getShellSnapshot({
+      location: "active",
+      compactPullRequests: true,
+    });
+    const archived = yield* projections.getShellSnapshot({
+      location: "archive",
+      compactPullRequests: true,
+    });
     const projects = yield* projectStore.listShells();
     return { projects, threads: [...active.threads, ...archived.threads] };
   });
