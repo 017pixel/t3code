@@ -1071,6 +1071,25 @@ export { sortPinnedThreadsByOrderKey as sortPinnedThreadsForSidebar } from "@t3t
 
 const EMPTY_CONTENT_MATCH_KEYS: ReadonlySet<string> = new Set<string>();
 
+type ThreadPullRequestSearchInput = Parameters<typeof threadPullRequestSearchTerms>[0];
+const pullRequestSearchIndex = new WeakMap<
+  ThreadPullRequestSearchInput,
+  { terms: string[]; haystack: string }
+>();
+
+function indexedPullRequestSearch(thread: ThreadPullRequestSearchInput) {
+  let indexed = pullRequestSearchIndex.get(thread);
+  if (indexed === undefined) {
+    const terms = threadPullRequestSearchTerms(thread);
+    indexed = {
+      terms: terms.map((term) => term.toLowerCase()),
+      haystack: normalizeSearchText(terms.join(" ")),
+    };
+    pullRequestSearchIndex.set(thread, indexed);
+  }
+  return indexed;
+}
+
 /**
  * Search the already-ordered sidebar thread collection by title or linked PR,
  * plus any thread whose messages the server matched (`contentMatchKeys`, keyed
@@ -1093,9 +1112,9 @@ export function searchSidebarThreads<
   const titleMatches: T[] = [];
   const contentMatches: T[] = [];
   for (const thread of threads) {
-    const matchesTitle = [thread.title, ...threadPullRequestSearchTerms(thread)].some((term) =>
-      term.toLowerCase().includes(normalizedQuery),
-    );
+    const matchesTitle =
+      thread.title.toLowerCase().includes(normalizedQuery) ||
+      indexedPullRequestSearch(thread).terms.some((term) => term.includes(normalizedQuery));
     if (matchesTitle) {
       titleMatches.push(thread);
     } else if (
@@ -1121,7 +1140,7 @@ export function pullRequestMatchesSearchQuery(
 ): boolean {
   const normalizedQuery = normalizeSearchText(query);
   if (normalizedQuery.length === 0) return false;
-  const haystack = normalizeSearchText(threadPullRequestSearchTerms(pullRequest).join(" "));
+  const haystack = indexedPullRequestSearch(pullRequest).haystack;
   return normalizedQuery.split(" ").every((token) => haystack.includes(token));
 }
 

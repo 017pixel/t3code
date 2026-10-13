@@ -18,6 +18,22 @@ import {
 } from "./KeybindingsSettings.logic";
 
 describe("KeybindingsSettings.logic", () => {
+  it("filters cached rows and uses edited shortcuts after the config changes", () => {
+    const binding = DEFAULT_RESOLVED_KEYBINDINGS.find((row) => row.command === "chat.new")!;
+    const initial = [binding];
+    const rows = buildKeybindingRows(initial, "");
+    expect(buildKeybindingRows(initial, "new")).toEqual(rows);
+    expect(buildKeybindingRows(initial, "missing shortcut")).toEqual([]);
+    const updated = [
+      {
+        ...binding,
+        shortcut: { ...binding.shortcut, key: "f12", modKey: false },
+      },
+    ];
+    expect(buildKeybindingRows(updated, "f12").map((row) => row.key)).toEqual(["f12"]);
+    expect(buildKeybindingRows(initial, "f12")).toEqual([]);
+  });
+
   it("lists composer, provider, and pull request commands with editable defaults", () => {
     const rows = buildKeybindingRows(DEFAULT_RESOLVED_KEYBINDINGS, "");
     for (const command of [

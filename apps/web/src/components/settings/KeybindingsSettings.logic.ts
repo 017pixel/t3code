@@ -248,11 +248,14 @@ export function groupKeybindingRows(
   });
 }
 
-export function buildKeybindingRows(
-  keybindings: ResolvedKeybindingsConfig,
-  query: string,
-): ReadonlyArray<KeybindingRow> {
-  const normalizedQuery = query.trim().toLowerCase();
+const keybindingRowsByConfig = new WeakMap<
+  ResolvedKeybindingsConfig,
+  ReadonlyArray<KeybindingRow>
+>();
+
+function keybindingRows(keybindings: ResolvedKeybindingsConfig): ReadonlyArray<KeybindingRow> {
+  const cached = keybindingRowsByConfig.get(keybindings);
+  if (cached) return cached;
   const rows = keybindings.map((binding, index) => {
     const defaultBinding = defaultBindingForBinding(binding);
     const key = shortcutToKeybindingInput(binding.shortcut);
@@ -287,11 +290,19 @@ export function buildKeybindingRows(
     return left.key.localeCompare(right.key);
   });
 
-  if (normalizedQuery.length === 0) {
-    return rowsWithConflicts;
-  }
+  keybindingRowsByConfig.set(keybindings, rowsWithConflicts);
+  return rowsWithConflicts;
+}
 
-  return rowsWithConflicts.filter((row) => {
+export function buildKeybindingRows(
+  keybindings: ResolvedKeybindingsConfig,
+  query: string,
+): ReadonlyArray<KeybindingRow> {
+  const rows = keybindingRows(keybindings);
+  const normalizedQuery = query.trim().toLowerCase();
+  if (normalizedQuery.length === 0) return rows;
+
+  return rows.filter((row) => {
     return (
       row.command.toLowerCase().includes(normalizedQuery) ||
       commandLabel(row.command).toLowerCase().includes(normalizedQuery) ||

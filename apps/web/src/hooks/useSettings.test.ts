@@ -4,6 +4,8 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
+import { act, createElement } from "react";
+import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const persistenceMocks = vi.hoisted(() => ({
@@ -25,6 +27,7 @@ import {
   persistClientSettingsUpdate,
   prepareModelPreferencesPatch,
   resolveEnvironmentIdentificationMode,
+  useClientSettings,
 } from "./useSettings";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
@@ -36,6 +39,61 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("client settings subscriptions", () => {
+  it("updates the selected setting without repainting an unrelated consumer", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const renderWordWrap = vi.fn();
+    function WordWrap() {
+      const wordWrap = useClientSettings((settings) => settings.wordWrap);
+      renderWordWrap(wordWrap);
+      return createElement("span", null, String(wordWrap));
+    }
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(createElement(WordWrap));
+      });
+      const initialRenders = renderWordWrap.mock.calls.length;
+      await act(() => persistClientSettingsPatch({ snapShotFlash: false }));
+      expect(renderWordWrap).toHaveBeenCalledTimes(initialRenders);
+      expect(renderer!.root.findByType("span").children).toEqual([
+        String(DEFAULT_CLIENT_SETTINGS.wordWrap),
+      ]);
+      await act(() => persistClientSettingsPatch({ wordWrap: !DEFAULT_CLIENT_SETTINGS.wordWrap }));
+      expect(renderer!.root.findByType("span").children).toEqual([
+        String(!DEFAULT_CLIENT_SETTINGS.wordWrap),
+      ]);
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("caches object selections and follows a changed selector", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    function Setting({ field }: { field: "wordWrap" | "snapShotFlash" }) {
+      const selection = useClientSettings((settings) => ({ value: settings[field] }));
+      return createElement("span", null, String(selection.value));
+    }
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(createElement(Setting, { field: "wordWrap" }));
+      });
+      await act(() => persistClientSettingsPatch({ snapShotFlash: false }));
+      await act(() => renderer!.update(createElement(Setting, { field: "snapShotFlash" })));
+      expect(renderer!.root.findByType("span").children).toEqual(["false"]);
+      await act(() => persistClientSettingsPatch({ snapShotFlash: true }));
+      expect(renderer!.root.findByType("span").children).toEqual(["true"]);
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("client settings hydration", () => {

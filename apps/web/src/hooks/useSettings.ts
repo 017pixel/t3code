@@ -10,6 +10,7 @@
  * cannot silently read the wrong server's settings.
  */
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore, use } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -374,8 +375,12 @@ function useMergedSettings<T>(
 export function useClientSettings<T = ClientSettings>(
   selector?: (settings: ClientSettings) => T,
 ): T {
-  const settings = useClientSettingsValue();
-  return useMemo(() => (selector ? selector(settings) : (settings as T)), [selector, settings]);
+  const select = useShallow(selector ?? ((settings: ClientSettings) => settings as T));
+  const getSnapshot = useCallback(() => select(getClientSettingsSnapshot()), [select]);
+  const getServerSnapshot = useCallback(() => select(DEFAULT_CLIENT_SETTINGS), [select]);
+  // The subscription compares the selected value, so unrelated settings
+  // writes don't render every consumer before its selector can run.
+  return useSyncExternalStore(subscribeClientSettings, getSnapshot, getServerSnapshot);
 }
 
 export function resolveEnvironmentIdentificationMode(input: {
@@ -395,7 +400,7 @@ export function resolveEnvironmentIdentificationMode(input: {
 
 export function useEnvironmentIdentificationMode(): EnvironmentIdentificationMode {
   const settingsHydrated = useClientSettingsHydrated();
-  const mode = useClientSettingsValue().environmentIdentificationMode;
+  const mode = useClientSettings((settings) => settings.environmentIdentificationMode);
   const { resolvedTheme, theme, themeHalves } = useTheme();
   const previewSidebarArtwork = useSyncExternalStore(
     subscribeToThemePreview,
@@ -423,7 +428,7 @@ export function useEnvironmentIdentificationMode(): EnvironmentIdentificationMod
  */
 export function useLegacySidebarEnabled(): boolean {
   const settingsHydrated = useClientSettingsHydrated();
-  const legacySidebarEnabled = useClientSettingsValue().legacySidebarEnabled;
+  const legacySidebarEnabled = useClientSettings((settings) => settings.legacySidebarEnabled);
   return settingsHydrated && legacySidebarEnabled;
 }
 
