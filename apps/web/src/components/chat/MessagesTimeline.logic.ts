@@ -1310,7 +1310,7 @@ function withoutSubagentDelegationRows(entries: ReadonlyArray<TimelineEntry>) {
     childrenByRun.set(item.runId, children);
   }
   return entries.filter((entry) => {
-    if (entry.kind !== "work" || workEntryDisplayIndicatesToolFailure(entry.entry)) return true;
+    if (entry.kind !== "work") return true;
     const item = entry.entry.projectedItem?.item ?? entry.entry.structuredPayload;
     if (
       item?.type !== "dynamic_tool" ||
@@ -1319,6 +1319,7 @@ function withoutSubagentDelegationRows(entries: ReadonlyArray<TimelineEntry>) {
       resolveT3McpToolDefinition(item.toolName)?.summaryAction !== "delegate"
     )
       return true;
+    if (workEntryDisplayIndicatesToolFailure(entry.entry)) return true;
     const output = compactDynamicToolOutput(item.output);
     if (output?.isError) return true;
     if (output?.taskId !== undefined) {

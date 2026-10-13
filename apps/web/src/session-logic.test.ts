@@ -1553,6 +1553,43 @@ describe("incremental v2 timeline entries", () => {
     expect(restoredMessage.message.attachments?.[0]).not.toHaveProperty("previewUrl");
   });
 
+  it.each([false, true])(
+    "retains renumbered history when older attachment URLs change: %s",
+    (newUrls) => {
+      const fixture = makeStreamingTimelineFixture("Partial");
+      const input = { visibleTurnItems: fixture.visibleTurnItems, optimisticMessages: [] };
+      const previous = deriveTimelineEntriesFromVisibleTurnItemsWithState(input);
+      const first = fixture.visibleTurnItems[0]!;
+      const older = {
+        ...first,
+        position: 0,
+        sourceItemId: TurnItemId.make("older-prompt"),
+        item: {
+          ...first.item,
+          id: TurnItemId.make("older-prompt"),
+          messageId: MessageId.make("older-prompt"),
+        },
+      };
+      const nextInput = {
+        ...input,
+        ...(newUrls
+          ? { attachmentUrlById: new Map([["older-image", "https://server.test/older-image"]]) }
+          : {}),
+        visibleTurnItems: [
+          older,
+          ...input.visibleTurnItems.map((row) => ({ ...row, position: row.position + 1 })),
+        ],
+      };
+      const next = deriveTimelineEntriesFromVisibleTurnItemsWithState(nextInput, previous);
+      expect(next.entries).toEqual(deriveTimelineEntriesFromVisibleTurnItems(nextInput));
+      for (const entry of previous.entries) {
+        if (entry.kind !== "message") continue;
+        const retained = next.entries.find((candidate) => candidate.id === entry.id);
+        expect(retained?.kind === "message" && retained.message).toBe(entry.message);
+      }
+    },
+  );
+
   it("appends committed items in canonical order even when their timestamps go backwards", () => {
     const fixture = makeStreamingTimelineFixture("Partial");
     const input = { visibleTurnItems: fixture.visibleTurnItems, optimisticMessages: [] };
