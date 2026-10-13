@@ -113,9 +113,8 @@ function parsePlainParagraph(source: string): Root | undefined {
   };
 }
 
-/** Reparse only the open tail. A following top-level block closes the previous
- * block; closed fences also close at a blank line. Definitions are document-wide
- * and still require the full parse.
+/** Reparse only the tail after a closed top-level fence and blank line.
+ * Definitions are document-wide and still require the full parse.
  */
 function createIncrementalMarkdownParser(parse: Parser): Parser {
   let cached: ParsedPrefix | undefined;
@@ -140,22 +139,6 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
     } else {
       root = parsePlainParagraph(source) ?? parse(source, file);
       if (hasDefinitions(root)) return root;
-    }
-
-    const tail = root.children.at(-1);
-    const tailStart = tail?.position?.start;
-    if (
-      root.children.length > 1 &&
-      tailStart?.offset !== undefined &&
-      tailStart.column === 1 &&
-      tailStart.offset > (prefix?.offset ?? 0)
-    ) {
-      cached = {
-        source: source.slice(0, tailStart.offset),
-        offset: tailStart.offset,
-        line: tailStart.line,
-        children: structuredClone(root.children.slice(0, -1)),
-      };
     }
 
     for (let index = root.children.length - 1; index >= 0; index--) {

@@ -79,17 +79,6 @@ describe("incremental Markdown parsing", () => {
     }
   });
 
-  it("parses only the open paragraph after completed prose and a table", () => {
-    const incremental = createIncrementalMarkdownPlugin();
-    const source = "finished *prose*\n\na | b\n--|--\na | b\n\nopen *tail*";
-    const parsedSources: string[] = [];
-    expect(render(source, incremental, parsedSources)).toEqual(render(source));
-    parsedSources.length = 0;
-    const next = source + " grows";
-    expect(render(next, incremental, parsedSources)).toEqual(render(next));
-    expect(parsedSources).toContain("open *tail* grows");
-    expect(parsedSources).not.toContain(next);
-  });
   it("reuses a parsed document across mounts without retaining mutated transforms", () => {
     const source = "> [!NOTE]\n> cached alert\n\n- a\n\n[link]: /target";
     const expected = render(source);
