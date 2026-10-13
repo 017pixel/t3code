@@ -5,24 +5,30 @@ import { AsyncResult, Atom } from "effect/reactivity";
 
 /**
  * Whether `t3@<version>` is published on npm. A 404 is false; network and
- * registry errors stay unknown. Both re-check every few minutes, so a release
- * that lands later shows up without a reload.
+ * registry errors fail, and callers treat that as unknown.
+ *
+ * Trace propagation stays off: its `b3` and `traceparent` headers turn this
+ * into a CORS preflight, which the registry rejects, so browsers could never
+ * complete the check.
  */
+export const checkNpmReleasePublished = (version: string) =>
+  Effect.gen(function* () {
+    const response = yield* HttpClient.get(
+      `https://registry.npmjs.org/t3/${encodeURIComponent(version)}`,
+    );
+    if (response.status === 404) return false;
+    const body = yield* HttpClientResponse.filterStatusOk(response).pipe(
+      Effect.flatMap((ok) => ok.json),
+    );
+    return typeof body === "object" && body !== null && "version" in body
+      ? body.version === version
+      : false;
+  }).pipe(Effect.provideService(HttpClient.TracerPropagationEnabled, false));
+
+/** Re-checks every few minutes, so a release that lands later shows up
+    without a reload. */
 const npmReleasePublishedAtom = Atom.family((version: string) =>
-  Atom.make(
-    Effect.gen(function* () {
-      const response = yield* HttpClient.get(
-        `https://registry.npmjs.org/t3/${encodeURIComponent(version)}`,
-      );
-      if (response.status === 404) return false;
-      const body = yield* HttpClientResponse.filterStatusOk(response).pipe(
-        Effect.flatMap((ok) => ok.json),
-      );
-      return typeof body === "object" && body !== null && "version" in body
-        ? body.version === version
-        : false;
-    }).pipe(Effect.provide(FetchHttpClient.layer)),
-  ).pipe(
+  Atom.make(checkNpmReleasePublished(version).pipe(Effect.provide(FetchHttpClient.layer))).pipe(
     Atom.withRefresh("5 minutes"),
     Atom.keepAlive,
     Atom.withLabel(`npm-release-published:${version}`),
