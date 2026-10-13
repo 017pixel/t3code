@@ -1,19 +1,31 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
+import {
+  ORCHESTRATION_PROTOCOL_VERSION,
+  ServerSelfUpdateError,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as ProviderInstallLock from "../provider/ProviderInstallLock.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as ServerAutoUpdater from "../updates/ServerAutoUpdater.ts";
+import * as UpdateWindow from "../updates/UpdateWindow.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
@@ -23,6 +35,8 @@ interface HarnessOptions {
   readonly managed?: boolean;
   readonly preflight?: "ready" | "blocked";
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
+  readonly orchestrationProtocol?: number;
+  readonly lastOutcome?: ServiceLauncherClient.ServiceLauncherClient["Service"]["lastOutcome"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
 }
 
@@ -33,6 +47,12 @@ const archiveBytes = new TextEncoder().encode("not really a tarball");
 const releaseHttpClient = (order: string[]) =>
   HttpClient.make((request) =>
     Effect.gen(function* () {
+      if (request.url.startsWith("https://api.github.com/")) {
+        return HttpClientResponse.fromWeb(
+          request,
+          new Response(JSON.stringify([{ tag_name: "v1.1.0" }])),
+        );
+      }
       if (request.url.endsWith("/SHA256SUMS")) {
         const digest = yield* Effect.promise(() => crypto.subtle.digest("SHA-256", archiveBytes));
         const hex = Array.from(new Uint8Array(digest), (byte) =>
@@ -47,6 +67,8 @@ const releaseHttpClient = (order: string[]) =>
       return HttpClientResponse.fromWeb(request, new Response(archiveBytes));
     }),
   );
+
+const noStaging = { capability: null, stage: () => Effect.die("unused") } as const;
 
 const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   options: HarnessOptions = {},
@@ -82,6 +104,8 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
                 status: "ready",
                 version: "1.1.0",
                 launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
+                orchestrationProtocol:
+                  options.orchestrationProtocol ?? ORCHESTRATION_PROTOCOL_VERSION,
               };
         return {
           stdout: JSON.stringify(result),
@@ -105,10 +129,13 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           return "launcher-id";
         })),
     prepareTrial: Effect.undefined,
+    lastOutcome: options.lastOutcome,
   });
   const config = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
+  const httpClient = releaseHttpClient(order);
+  const serverConfig = { ...config, mode: options.mode ?? "web" };
   const selfUpdate = yield* ServerSelfUpdate.make().pipe(
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
     Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, launcher),
@@ -119,12 +146,12 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
         run: () => Effect.die("unexpected desktop app update run"),
       },
     ),
-    Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order)),
+    Effect.provideService(HttpClient.HttpClient, httpClient),
     Effect.provideService(HostProcess.Platform, "linux"),
     Effect.provideService(HostProcess.Architecture, "x64"),
-    Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
+    Effect.provide(ServerConfig.layer(serverConfig)),
   );
-  return { selfUpdate, order };
+  return { selfUpdate, order, launcher, httpClient, serverConfig };
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
@@ -134,6 +161,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          ...noStaging,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("downloading").pipe(
               Effect.andThen(reportProgress("installing")),
@@ -168,6 +196,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          ...noStaging,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("installing").pipe(
               Effect.as({
@@ -216,6 +245,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          ...noStaging,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("installing").pipe(Effect.andThen(Effect.fail(updateError))),
           commitDesktopUpdate: () => Effect.never,
@@ -238,6 +268,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          ...noStaging,
           update: (
             _input,
             reportProgress = () => Effect.void,
@@ -271,6 +302,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          ...noStaging,
           update: () =>
             Effect.succeed({
               targetVersion: "1.2.0",
@@ -307,6 +339,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          ...noStaging,
           update: () =>
             Effect.succeed({
               targetVersion: "1.2.0",
@@ -420,6 +453,145 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       );
       yield* Deferred.succeed(accepted, "launcher-id");
       expect((yield* Fiber.join(first)).updateId).toBe("launcher-id");
+    }),
+  );
+
+  it.effect("stages without handing off and returns the staged client protocol", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness();
+      expect(yield* selfUpdate.stage("1.1.0")).toEqual({
+        orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION,
+      });
+      expect(order).toEqual(["download", "extract", "preflight"]);
+      // Staging releases the in-flight guard, so a later update still runs.
+      expect((yield* selfUpdate.update({ targetVersion: "1.1.0" })).updateId).toBe("launcher-id");
+    }),
+  );
+
+  it.effect("refuses to stage while an update is in flight", () =>
+    Effect.gen(function* () {
+      const requested = yield* Deferred.make<void>();
+      const accepted = yield* Deferred.make<string>();
+      const { selfUpdate } = yield* makeHarness({
+        requestUpdate: () =>
+          Deferred.succeed(requested, undefined).pipe(Effect.andThen(Deferred.await(accepted))),
+      });
+      const first = yield* Effect.forkChild(selfUpdate.update({ targetVersion: "1.1.0" }), {
+        startImmediately: true,
+      });
+      yield* Deferred.await(requested);
+      expect((yield* selfUpdate.stage("1.1.1").pipe(Effect.flip)).reason).toBe(
+        "A server update is already in progress.",
+      );
+      yield* Deferred.succeed(accepted, "launcher-id");
+      yield* Fiber.join(first);
+    }),
+  );
+});
+
+const backgroundUpdates = (
+  harness: Effect.Success<ReturnType<typeof makeHarness>>,
+  options: { readonly open: { value: boolean }; readonly automaticUpdates?: boolean },
+) => {
+  const held: string[] = [];
+  const windows: Array<{ readonly restartsServer?: boolean } | undefined> = [];
+  const pass = ServerAutoUpdater.makeUpdatePass().pipe(
+    Effect.flatMap(({ pass }) => Effect.succeed(pass)),
+    Effect.provideService(ServerSelfUpdate.ServerSelfUpdate, harness.selfUpdate),
+    Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, harness.launcher),
+    Effect.provideService(HttpClient.HttpClient, harness.httpClient),
+    Effect.provide(ServerConfig.layer(harness.serverConfig)),
+    Effect.provide(
+      Layer.mergeAll(
+        ServerSettings.layerTest({ automaticUpdates: options.automaticUpdates ?? true }),
+        Layer.mock(UpdateWindow.UpdateWindow)({
+          runIfOpen: (effect, windowOptions) =>
+            Effect.suspend(() => {
+              windows.push(windowOptions);
+              return options.open.value ? Effect.asSome(effect) : Effect.succeedNone;
+            }),
+        }),
+        Layer.mock(ProviderInstallLock.ProviderInstallLock)({
+          tryRun: (key, run) =>
+            Effect.acquireUseRelease(
+              Effect.sync(() => void held.push(key)),
+              () => run(() => Effect.void).pipe(Effect.map(Option.some)),
+              () => Effect.sync(() => void held.pop()),
+            ),
+        }),
+      ),
+    ),
+  );
+  return { pass, held, windows };
+};
+
+it.layer(NodeServices.layer)("background server updates", (it) => {
+  it.effect("stages once, waits for the update window, then hands off under the restart lock", () =>
+    Effect.gen(function* () {
+      const accepted = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        requestUpdate: () => Deferred.succeed(accepted, undefined).pipe(Effect.as("launcher-id")),
+      });
+      const open = { value: false };
+      const updates = backgroundUpdates(harness, { open });
+      const pass = yield* updates.pass;
+
+      yield* pass;
+      yield* pass;
+      expect(harness.order).toEqual(["download", "extract", "preflight"]);
+      expect(updates.windows).toEqual([{ restartsServer: true }, { restartsServer: true }]);
+
+      open.value = true;
+      const handoff = yield* Effect.forkChild(pass, { startImmediately: true });
+      yield* Deferred.await(accepted);
+      // Turn starts wait on this lock until the launcher stops the server.
+      expect(updates.held).toEqual(["server-restart"]);
+      expect(harness.order.filter((step) => step === "download")).toHaveLength(1);
+      while (handoff.pollUnsafe() === undefined) {
+        yield* TestClock.adjust(Duration.minutes(1));
+      }
+      yield* Fiber.join(handoff);
+      expect(updates.held).toEqual([]);
+    }),
+  );
+
+  it.effect("skips a target the launcher rolled back or failed", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        lastOutcome: {
+          id: "update-1",
+          fromVersion: "0.0.45",
+          targetVersion: "1.1.0",
+          status: "rolled-back",
+        },
+      });
+      const pass = yield* backgroundUpdates(harness, { open: { value: true } }).pass;
+      yield* pass;
+      expect(harness.order).toEqual([]);
+    }),
+  );
+
+  it.effect("skips a target whose client protocol differs, without staging it again", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION + 1,
+      });
+      const pass = yield* backgroundUpdates(harness, { open: { value: true } }).pass;
+      yield* pass;
+      expect(harness.order).toEqual(["download", "extract", "preflight"]);
+      yield* TestClock.adjust(Duration.hours(2));
+      yield* pass;
+      expect(harness.order).toEqual(["download", "extract", "preflight"]);
+    }),
+  );
+
+  it.effect("does nothing when automatic updates are off or the server is not a service", () =>
+    Effect.gen(function* () {
+      const off = yield* makeHarness();
+      yield* yield* backgroundUpdates(off, { open: { value: true }, automaticUpdates: false }).pass;
+      const unmanaged = yield* makeHarness({ managed: false });
+      yield* yield* backgroundUpdates(unmanaged, { open: { value: true } }).pass;
+      expect([...off.order, ...unmanaged.order]).toEqual([]);
     }),
   );
 });
