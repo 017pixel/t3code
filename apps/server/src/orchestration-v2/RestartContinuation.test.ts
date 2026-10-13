@@ -771,6 +771,29 @@ it.effect("shows a continuation as a T3 Code notice whose detail is the prompt",
   }),
 );
 
+it.effect("carries steering the provider never received into the continuation", () =>
+  Effect.gen(function* () {
+    const steerId = MessageId.make("message:steer");
+    const attachment = {
+      type: "file" as const,
+      id: "attachment:steer",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 12,
+    };
+    const [resumed] = yield* continuationDispatches({
+      ...cutMidTurn({ restartPendingMessageIds: [steerId] }),
+      messages: [
+        { id: steerId, text: "Also update the docs.", attachments: [attachment] },
+        { id: MessageId.make("message:unrelated"), text: "Not carried.", attachments: [] },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection);
+    assert.equal(resumed?.text, "Continue where you left off.\n\nAlso update the docs.");
+    assert.deepEqual(resumed?.attachments, [attachment]);
+    assert.isUndefined(resumed?.notification);
+  }),
+);
+
 it.effect(
   "carries the note forward when its continuation was cut before reaching the provider",
   () =>

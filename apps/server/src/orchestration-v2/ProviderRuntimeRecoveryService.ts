@@ -156,7 +156,18 @@ const cancelledItem = (
 ): OrchestrationV2ThreadProjection["turnItems"][number] =>
   item.type === "secret_request" && item.secretStatus === "pending"
     ? { ...item, status: "cancelled", secretStatus: "cancelled", completedAt: now, updatedAt: now }
-    : { ...item, status: "cancelled", completedAt: now, updatedAt: now };
+    : {
+        ...item,
+        status: "cancelled",
+        completedAt: now,
+        updatedAt: now,
+        // A cut stream never gets its closing event.
+        ...(item.type === "reasoning" ||
+        item.type === "assistant_message" ||
+        item.type === "proposed_plan"
+          ? { streaming: false }
+          : {}),
+      };
 
 /**
  * A provider thread's latest started run: the last turn that provider saw.
@@ -317,6 +328,16 @@ export const make = Effect.gen(function* () {
         });
       }
       for (const run of runs) {
+        // Steering still queued in the outbox died with the process; the
+        // continuation prompt carries it.
+        const undeliveredSteering = [
+          ...new Set([
+            ...(run.restartPendingMessageIds ?? []),
+            ...(projection.pendingSteering ?? [])
+              .filter((steer) => steer.runId === run.id)
+              .map((steer) => steer.messageId),
+          ]),
+        ];
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -324,7 +345,15 @@ export const make = Effect.gen(function* () {
           runId: run.id,
           providerInstanceId: run.providerInstanceId,
           occurredAt: now,
-          payload: { ...run, status: "cancelled", queuePosition: null, completedAt: now },
+          payload: {
+            ...run,
+            status: "cancelled",
+            queuePosition: null,
+            completedAt: now,
+            ...(undeliveredSteering.length === 0
+              ? {}
+              : { restartPendingMessageIds: undeliveredSteering }),
+          },
         });
         for (const attempt of projection.attempts.filter(
           (candidate) =>
