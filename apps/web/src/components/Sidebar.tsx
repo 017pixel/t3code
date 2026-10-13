@@ -1041,7 +1041,15 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   onDraftContextMenu: (draftId: DraftId, position: { x: number; y: number }) => void;
 }) {
   const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
-  const draftsByThreadKey = useComposerDraftStore((store) => store.draftsByThreadKey);
+  const draftsByThreadKey = useComposerDraftStore(
+    useShallow((store) =>
+      Object.fromEntries(
+        Object.keys(store.draftThreadsByThreadKey)
+          .filter((key) => key !== props.routeDraftId)
+          .map((key) => [key, store.draftsByThreadKey[key]] as const),
+      ),
+    ),
+  );
   // The open draft's row is FROZEN at the moment the draft became the route:
   // it stays visible (like a thread row) but never repaints while the user
   // types. A draft that was never navigated away from has no snapshot to
