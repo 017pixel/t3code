@@ -13,6 +13,8 @@ import * as Schema from "effect/Schema";
 
 /** A lock file this old is stale even if a process with its pid is alive (pid reuse). */
 const MAX_LOCK_AGE = Duration.hours(1);
+/** A reclaim sentinel this old was left by a process that died mid-reclaim. */
+const MAX_SENTINEL_AGE = Duration.seconds(10);
 const IDLE_POLL_INTERVAL = Duration.seconds(1);
 
 export class ProviderInstallLockError extends Schema.TaggedError<ProviderInstallLockError>()(
@@ -96,20 +98,50 @@ const make = Effect.gen(function* () {
   const writePid = (file: string, pid: number, flag: "w" | "wx") =>
     fileSystem.writeFileString(file, String(pid), { flag });
 
-  /** Creates the lock file exclusively; false when it exists and is held. A stale one is reclaimed once. */
-  const acquire = Effect.fn("ProviderInstallLock.acquire")(function* (file: string) {
-    yield* fileSystem.makeDirectory(directory, { recursive: true });
-    const create = writePid(file, process.pid, "wx").pipe(
+  /** Creates `file` exclusively; false when it already exists. */
+  const createExclusively = (file: string) =>
+    writePid(file, process.pid, "wx").pipe(
       Effect.as(true),
       Effect.catchTags({
         PlatformError: (error) =>
           error.reason._tag === "AlreadyExists" ? Effect.succeed(false) : Effect.fail(error),
       }),
     );
-    if (yield* create) return true;
+
+  /** Takes the short-lived sentinel that serializes reclaimers; one left by a crashed process is removed. */
+  const claimSentinel = Effect.fn("ProviderInstallLock.claimSentinel")(function* (
+    sentinel: string,
+  ) {
+    if (yield* createExclusively(sentinel)) return true;
+    const info = yield* fileSystem.stat(sentinel).pipe(ignoreNotFound(undefined));
+    if (info !== undefined) {
+      const modifiedAt = Option.match(info.mtime, {
+        onNone: () => 0,
+        onSome: (date) => date.getTime(),
+      });
+      if ((yield* Clock.currentTimeMillis) - modifiedAt < Duration.toMillis(MAX_SENTINEL_AGE)) {
+        return false;
+      }
+      yield* fileSystem.remove(sentinel, { force: true });
+    }
+    return yield* createExclusively(sentinel);
+  });
+
+  /**
+   * Creates the lock file exclusively; false when it exists and is held. A stale one is
+   * reclaimed under a sentinel, so a second reclaimer cannot delete the first one's fresh lock.
+   */
+  const acquire = Effect.fn("ProviderInstallLock.acquire")(function* (file: string) {
+    yield* fileSystem.makeDirectory(directory, { recursive: true });
+    if (yield* createExclusively(file)) return true;
     if (yield* isHeld(file).pipe(ignoreNotFound(false))) return false;
-    yield* fileSystem.remove(file, { force: true });
-    return yield* create;
+    const sentinel = `${file}.reclaim`;
+    if (!(yield* claimSentinel(sentinel))) return false;
+    return yield* Effect.gen(function* () {
+      if (yield* isHeld(file).pipe(ignoreNotFound(false))) return false;
+      yield* fileSystem.remove(file, { force: true });
+      return yield* createExclusively(file);
+    }).pipe(Effect.ensuring(fileSystem.remove(sentinel, { force: true }).pipe(Effect.ignore)));
   });
 
   const tryRun: ProviderInstallLock["Service"]["tryRun"] = (lockKey, run) => {
