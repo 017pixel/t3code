@@ -1024,6 +1024,17 @@ describe("pullRequestMatchesSearchQuery", () => {
     expect(pullRequestMatchesSearchQuery(updated, "#123")).toBe(false);
     expect(pullRequestMatchesSearchQuery(updated, "#456")).toBe(true);
   });
+
+  it("normalizes multi-token queries after switching queries and clearing search", () => {
+    const pullRequest = {
+      branchPullRequest: { ...branchPullRequest, repository: "pingdotgg/café" },
+    };
+    expect(pullRequestMatchesSearchQuery(pullRequest, "cafe #123")).toBe(true);
+    expect(pullRequestMatchesSearchQuery(pullRequest, "#456")).toBe(false);
+    expect(pullRequestMatchesSearchQuery(pullRequest, "")).toBe(false);
+    expect(pullRequestMatchesSearchQuery(pullRequest, "  CAFÉ  #123  ")).toBe(true);
+    expect(pullRequestMatchesSearchQuery(pullRequest, "cafe #123")).toBe(true);
+  });
 });
 
 describe("searchSidebarThreads", () => {
