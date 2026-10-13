@@ -1074,10 +1074,8 @@ const EMPTY_CONTENT_MATCH_KEYS: ReadonlySet<string> = new Set<string>();
 type ThreadPullRequestSearchInput = Parameters<typeof threadPullRequestSearchTerms>[0];
 const pullRequestSearchIndex = new WeakMap<
   ThreadPullRequestSearchInput,
-  { terms: string[]; haystack?: string }
+  { terms: string[]; haystack: string }
 >();
-let pullRequestQuery = "";
-let pullRequestQueryTokens: string[] = [];
 
 function indexedPullRequestSearch(thread: ThreadPullRequestSearchInput) {
   let indexed = pullRequestSearchIndex.get(thread);
@@ -1085,6 +1083,7 @@ function indexedPullRequestSearch(thread: ThreadPullRequestSearchInput) {
     const terms = threadPullRequestSearchTerms(thread);
     indexed = {
       terms: terms.map((term) => term.toLowerCase()),
+      haystack: normalizeSearchText(terms.join(" ")),
     };
     pullRequestSearchIndex.set(thread, indexed);
   }
@@ -1139,15 +1138,10 @@ export function pullRequestMatchesSearchQuery(
   pullRequest: Parameters<typeof threadPullRequestSearchTerms>[0],
   query: string,
 ): boolean {
-  if (query !== pullRequestQuery) {
-    pullRequestQuery = query;
-    const normalizedQuery = normalizeSearchText(query);
-    pullRequestQueryTokens = normalizedQuery.length > 0 ? normalizedQuery.split(" ") : [];
-  }
-  if (pullRequestQueryTokens.length === 0) return false;
-  const indexed = indexedPullRequestSearch(pullRequest);
-  const haystack = (indexed.haystack ??= normalizeSearchText(indexed.terms.join(" ")));
-  return pullRequestQueryTokens.every((token) => haystack.includes(token));
+  const normalizedQuery = normalizeSearchText(query);
+  if (normalizedQuery.length === 0) return false;
+  const haystack = indexedPullRequestSearch(pullRequest).haystack;
+  return normalizedQuery.split(" ").every((token) => haystack.includes(token));
 }
 
 export function filterSidebarProjectScopeItems<TItem extends { readonly value: string }>(input: {
