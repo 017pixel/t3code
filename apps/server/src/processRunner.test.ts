@@ -488,6 +488,17 @@ describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", (
     }).pipe(Effect.provide(layer)),
   );
 
+  it.live("survives unread stdin resets and still reports active write failures", () =>
+    Effect.gen(function* () {
+      const child = { command: "sh", args: ["-c", "sleep .02; exit 0"] };
+      const result = yield* run({ ...child, stdin: "x".repeat(1024) });
+      expect(result.code).toBe(0);
+
+      const error = yield* run({ ...child, stdin: "x".repeat(2_000_000) }).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(ProcessRunner.ProcessStdinError);
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.live("reports a missing executable as a spawn error", () =>
     Effect.gen(function* () {
       const error = yield* run({ command: "t3-spawn-host-missing-command", args: [] }).pipe(
