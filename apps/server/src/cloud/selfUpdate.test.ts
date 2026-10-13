@@ -38,19 +38,21 @@ interface HarnessOptions {
   readonly orchestrationProtocol?: number;
   readonly lastOutcome?: ServiceLauncherClient.ServiceLauncherClient["Service"]["lastOutcome"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
+  /** The newest published release; change it to publish another. */
+  readonly release?: { version: string };
 }
 
 // The staged runtime is a release archive: the fake client serves SHA256SUMS
 // and the tarball, and the fake runner stands in for tar before it answers
 // the staged preflight.
 const archiveBytes = new TextEncoder().encode("not really a tarball");
-const releaseHttpClient = (order: string[]) =>
+const releaseHttpClient = (order: string[], release: { readonly version: string }) =>
   HttpClient.make((request) =>
     Effect.gen(function* () {
       if (request.url.startsWith("https://api.github.com/")) {
         return HttpClientResponse.fromWeb(
           request,
-          new Response(JSON.stringify([{ tag_name: "v1.1.0" }])),
+          new Response(JSON.stringify([{ tag_name: `v${release.version}` }])),
         );
       }
       if (request.url.endsWith("/SHA256SUMS")) {
@@ -60,7 +62,7 @@ const releaseHttpClient = (order: string[]) =>
         ).join("");
         return HttpClientResponse.fromWeb(
           request,
-          new Response(`${hex}  t3-1.1.0-linux-x64.tar.gz\n`),
+          new Response(`${hex}  t3-${release.version}-linux-x64.tar.gz\n`),
         );
       }
       order.push("download");
@@ -76,6 +78,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-self-update-test-" });
+  const release = options.release ?? { version: "1.1.0" };
   const order: string[] = [];
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
@@ -99,10 +102,10 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
         order.push("preflight");
         const result =
           options.preflight === "blocked"
-            ? { status: "blocked", version: "1.1.0", reason: "local update required" }
+            ? { status: "blocked", version: release.version, reason: "local update required" }
             : {
                 status: "ready",
-                version: "1.1.0",
+                version: release.version,
                 launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
                 orchestrationProtocol:
                   options.orchestrationProtocol ?? ORCHESTRATION_PROTOCOL_VERSION,
@@ -134,7 +137,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const config = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
-  const httpClient = releaseHttpClient(order);
+  const httpClient = releaseHttpClient(order, release);
   const serverConfig = { ...config, mode: options.mode ?? "web" };
   const selfUpdate = yield* ServerSelfUpdate.make().pipe(
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
@@ -151,7 +154,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
     Effect.provideService(HostProcess.Architecture, "x64"),
     Effect.provide(ServerConfig.layer(serverConfig)),
   );
-  return { selfUpdate, order, launcher, httpClient, serverConfig };
+  return { selfUpdate, order, launcher, httpClient, serverConfig, release };
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
@@ -553,6 +556,42 @@ it.layer(NodeServices.layer)("background server updates", (it) => {
       yield* Fiber.join(handoff);
       expect(updates.held).toEqual([]);
     }),
+  );
+
+  it.effect(
+    "hands off a newer release that supersedes the staged one before the window opens",
+    () =>
+      Effect.gen(function* () {
+        const requested: string[] = [];
+        const accepted = yield* Deferred.make<void>();
+        const harness = yield* makeHarness({
+          requestUpdate: ({ targetVersion }) =>
+            Effect.sync(() => void requested.push(targetVersion)).pipe(
+              Effect.andThen(Deferred.succeed(accepted, undefined)),
+              Effect.as("launcher-id"),
+            ),
+        });
+        const open = { value: false };
+        const pass = yield* backgroundUpdates(harness, { open }).pass;
+
+        yield* pass;
+        harness.release.version = "1.2.0";
+        yield* TestClock.adjust(Duration.hours(1));
+        yield* pass;
+        // The same newest release again is not downloaded twice.
+        yield* TestClock.adjust(Duration.hours(1));
+        yield* pass;
+        expect(harness.order.filter((step) => step === "download")).toHaveLength(2);
+
+        open.value = true;
+        const handoff = yield* Effect.forkChild(pass, { startImmediately: true });
+        yield* Deferred.await(accepted);
+        expect(requested).toEqual(["1.2.0"]);
+        while (handoff.pollUnsafe() === undefined) {
+          yield* TestClock.adjust(Duration.minutes(1));
+        }
+        yield* Fiber.join(handoff);
+      }),
   );
 
   it.effect("skips a target the launcher rolled back or failed", () =>

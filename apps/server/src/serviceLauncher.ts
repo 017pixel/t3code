@@ -603,7 +603,10 @@ export class Launcher {
     try {
       // The unit's ExecStart names a specific runtime/versions/<v>/t3.
       const executableDir = NodePath.dirname(await NodeFSP.realpath(process.execPath));
-      const versionsDir = NodePath.join(this.#baseDir, "runtime", "versions");
+      // Both sides resolved: a symlinked home would otherwise hide the launcher's own runtime.
+      const versionsDir = await NodeFSP.realpath(
+        NodePath.join(this.#baseDir, "runtime", "versions"),
+      );
       const launcherVersion =
         NodePath.dirname(executableDir) === versionsDir
           ? NodePath.basename(executableDir)
