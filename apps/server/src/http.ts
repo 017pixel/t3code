@@ -254,11 +254,9 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
   return yield* HttpServerResponse.file(asset.path, { status, offset, bytesToRead, headers });
 });
 
-// Dynamic snapshots need fast compression; hashed assets already have precompressed copies.
-export const layerHttpCompression = HttpRouter.middleware(
-  HttpMiddleware.compression({ levels: { br: 4 } }),
-  { global: true },
-);
+export const layerHttpCompression = HttpRouter.middleware(HttpMiddleware.compression(), {
+  global: true,
+});
 
 export const layerBrowserApiCors = Layer.unwrap(
   Effect.gen(function* () {
