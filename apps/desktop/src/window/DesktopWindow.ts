@@ -424,9 +424,6 @@ export const make = Effect.gen(function* () {
       ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
       webPreferences: {
         preload: environment.preloadPath,
-        // Hashed production assets can cache on their first use; development
-        // keeps Chromium's normal heat check for changing scripts.
-        v8CacheOptions: environment.isDevelopment ? "code" : "bypassHeatCheck",
         // The window boots hidden (show: false until ready-to-show), and
         // Chromium throttles hidden renderers: timers coalesce and rAF stops,
         // which stalls first paint. Boot unthrottled; the first-reveal trigger
