@@ -1,4 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import {
   ProviderSetupError,
   type ProviderAuthMethod,
@@ -39,7 +38,6 @@ export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (o
     spawn: AcpSessionRuntime.AcpSpawnInput,
   ) => Effect.Effect<Runtime, ProviderSetupError, Scope.Scope>;
 }) {
-  const admission = yield* Maintenance.ProviderMaintenanceAdmission;
   const catalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
@@ -364,10 +362,9 @@ export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (o
     // ACP doesn't advertise its credential scope. Conservatively treat all
     // instances of the same agent on this environment as sharing credentials.
     credentialBinding: { owner: "provider", key: `acp:${agentKey}` },
-    methods: admission.withLaunchPermit(methods),
+    methods,
     ...(options.settings.authMethodId ? { defaultMethodId: options.settings.authMethodId } : {}),
-    authenticate: (methodId, context) =>
-      admission.withLaunchPermit(authenticate(methodId, context)),
-    logout: admission.withLaunchPermit(signOut),
+    authenticate,
+    logout: signOut,
   });
 });

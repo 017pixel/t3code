@@ -1745,8 +1745,6 @@ const WsSubscribeTerminalMetadataRpc = Rpc.make(WS_METHODS.subscribeTerminalMeta
 
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
   payload: Schema.Struct({
-    /** Older clients show background updates as manual update notifications. */
-    providerUpdateOrigins: Schema.optionalKey(Schema.Boolean),
     /**
      * Whether this client understands `environmentThemesUpdated` events.
      * Already-shipped clients decode the stream against the old event union

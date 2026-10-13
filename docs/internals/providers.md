@@ -86,8 +86,8 @@ and npm are proven by the real path (symlinks followed): a versioned keg or cask
 Native installer layouts and the global directories of pnpm, Bun, Yarn, and Vite+ may match on
 either the resolved path or its real target, since those installers place real files or their own
 symlinks there. Volta is proven by its `volta-shim` link plus the package's image directory. When
-nothing is proven, a manual update can use the provider's own updater (`claude update`,
-`codex update`, `opencode upgrade`, `pi update --self`, `grok update`), which detects its installer itself;
+nothing is proven, the provider's own updater (`claude update`, `codex update`, `opencode upgrade`,
+`pi update --self`, `grok update`) runs instead, because each one detects its installer itself;
 the runner's version check catches an updater that exits 0 without updating. Mise installs stay
 manual-only because their version is pinned in mise's config. npm updates pin `--prefix` because the
 `npm` on `PATH` can belong to a different Node than the one that owns the provider. Homebrew
@@ -95,21 +95,16 @@ compares against `brew info` since casks trail npm by hours; native installs sha
 train, so the registry stays authoritative for them.
 See the [resolver](../../apps/server/src/provider/providerMaintenance.ts).
 
-Background updates require a proven installation identity. Manual and background
-installs drain host-wide provider leases before closing admission to CLI launches:
-a session holding a lease may still need admission to finish launching. This order
-also protects another environment on the same machine from a binary being replaced.
-
-Installers run under a detached
-[supervisor](../../apps/server/src/provider/ProviderInstallSupervisor.ts) that owns the
-host install lease and writes a result receipt, so quitting or crashing the server never
-stops a half-written install. The next server reports the receipt's outcome. Admission
-stays closed until the installer exits, even if the supervisor itself dies.
-
 Ownership is cached per instance and re-read immediately before an update runs. The
 [runner](../../apps/server/src/provider/providerMaintenanceRunner.ts) refuses when the lock key
 changed since the advisory, and reports success only when the refreshed provider is still installed
 with a readable, current version.
+
+Background updates (`automaticUpdates`) use the same runner but install the checked release as
+`package@version`; only native self-updaters and Homebrew run unpinned. A lock file per `lockKey`
+in the user cache directory is shared by every T3 server on the host, and the installer runs
+detached with its output in a log file, so quitting the server never cuts an install in half. A turn
+start waits for any held lock before it reads its context, so a CLI is never replaced under a launch.
 
 ## Protocol traps
 

@@ -19,8 +19,6 @@ import { AppState } from "react-native";
 import * as MobileStorage from "../persistence/mobile-storage";
 import {
   observeMobileBackgroundActivitySubscription,
-  mobileRecentlyInteracted,
-  recordMobileInteraction,
   onRetainedMobileBackgroundScopesChange,
   retainedMobileBackgroundScopes,
 } from "./background-activity-scopes";
@@ -73,7 +71,7 @@ export const layerReporter = Layer.effectDiscard(
                 clientKind: "mobile",
                 visible: active,
                 focused: active,
-                recentlyInteracted: active && mobileRecentlyInteracted(),
+                recentlyInteracted: active,
                 appState: normalizeAppState(appState),
                 scopes: [
                   ...BASELINE_SCOPES,
@@ -92,7 +90,6 @@ export const layerReporter = Layer.effectDiscard(
       Effect.sync(() => {
         const removeScopeListener = onRetainedMobileBackgroundScopesChange(requestReport);
         const subscription = AppState.addEventListener("change", (nextState) => {
-          if (nextState === "active" && appState !== "active") recordMobileInteraction();
           appState = nextState;
           requestReport();
         });

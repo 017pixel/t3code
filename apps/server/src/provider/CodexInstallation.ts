@@ -1,4 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no incremental digest.
 import { ProviderDriverKind, type ProviderInstallState } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -303,33 +302,31 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
         }),
     );
   });
-  const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-  const runCommand = Effect.fn("CodexInstallation.runCommand")(
-    function* (command: string, args: ReadonlyArray<string>) {
-      const resolved = yield* resolveSpawnCommand(command, args).pipe(
-        Effect.provideService(HostProcess.Platform, platform),
+  const runCommand = Effect.fn("CodexInstallation.runCommand")(function* (
+    command: string,
+    args: ReadonlyArray<string>,
+  ) {
+    const resolved = yield* resolveSpawnCommand(command, args).pipe(
+      Effect.provideService(HostProcess.Platform, platform),
+    );
+    const child = yield* spawner.spawn(
+      ChildProcess.make(resolved.command, resolved.args, { shell: resolved.shell }),
+    );
+    const [output, , exitCode] = yield* Effect.all(
+      [
+        child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+        child.stderr.pipe(Stream.runDrain),
+        child.exitCode,
+      ],
+      { concurrency: "unbounded" },
+    );
+    if (exitCode !== 0)
+      return yield* installationError(
+        "verify",
+        "Could not unpack or start the downloaded Codex package.",
       );
-      const child = yield* spawner.spawn(
-        ChildProcess.make(resolved.command, resolved.args, { shell: resolved.shell }),
-      );
-      const [output, , exitCode] = yield* Effect.all(
-        [
-          child.stdout.pipe(Stream.decodeText(), Stream.mkString),
-          child.stderr.pipe(Stream.runDrain),
-          child.exitCode,
-        ],
-        { concurrency: "unbounded" },
-      );
-      if (exitCode !== 0)
-        return yield* installationError(
-          "verify",
-          "Could not unpack or start the downloaded Codex package.",
-        );
-      return output;
-    },
-    Effect.scoped,
-    admission.withLaunchPermit,
-  );
+    return output;
+  }, Effect.scoped);
   const localCache = new Map<string, { fingerprint: string; executable: CodexExecutable | null }>();
   const resolveLocal = Effect.fn("CodexInstallation.resolveLocal")(
     function* () {
@@ -338,6 +335,7 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
       );
+      if (executablePath === null) return null;
       // Keep launcher symlinks intact: version-manager shims dispatch by their invoked name.
       const realExecutablePath = yield* fs.realPath(executablePath);
       // A PATH entry pointing into T3's download remains a managed installation.
@@ -643,7 +641,7 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
     );
   });
 
-  const remove: CodexInstallationService["remove"] = Effect.fn("CodexInstallation.remove")(
+  const remove = Effect.fn("CodexInstallation.remove")(
     function* (protectedBinaryPaths: ReadonlyArray<string> = []) {
       yield* gate.withPermit(
         Effect.gen(function* () {
@@ -726,28 +724,12 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
 
   return CodexInstallation.of({
     managedDirectory,
-    resolve: (...args) => admission.withLaunchPermit(resolve(...args)),
-    acquire: (...args) => admission.withLaunchPermit(acquire(...args)),
-    start: SubscriptionRef.get(state).pipe(
-      Effect.flatMap((current) =>
-        isRunning(current) ? Effect.succeed(current) : admission.withPermit(start),
-      ),
-    ),
+    resolve,
+    acquire,
+    start,
     cancel,
     state: SubscriptionRef.get(state),
     changes: SubscriptionRef.changes(state),
-    remove: (protectedBinaryPaths) =>
-      SubscriptionRef.get(state).pipe(
-        Effect.flatMap((current) =>
-          isRunning(current)
-            ? Effect.fail(
-                installationError(
-                  "remove",
-                  "Stop provider installation before removing its managed runtime.",
-                ),
-              )
-            : admission.withPermit(remove(protectedBinaryPaths)),
-        ),
-      ),
+    remove,
   });
 });

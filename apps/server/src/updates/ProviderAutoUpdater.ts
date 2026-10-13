@@ -1,10 +1,13 @@
-import type { ServerProvider } from "@t3tools/contracts";
+import type { ProviderInstanceId } from "@t3tools/contracts";
+import { enrichProviderSnapshotWithVersionAdvisory } from "@t3tools/provider-core/server/maintenanceResolver";
+import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
+import { HttpClient } from "effect/http";
 
 import * as ServerConfig from "../config.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -13,27 +16,10 @@ import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as UpdateWindow from "./UpdateWindow.ts";
 
-/** A failed install is retried for the same version only after this long. */
+/** An instance is tried once per release, then again only after this long. */
 const RETRY_AFTER = Duration.hours(6);
 const FIRST_PASS_DELAY = Duration.minutes(2);
 const PASS_INTERVAL = Duration.minutes(10);
-
-function isAutoUpdatable(provider: ServerProvider): boolean {
-  const advisory = provider.versionAdvisory;
-  const updateStatus = provider.updateState?.status;
-  return (
-    provider.enabled &&
-    provider.installed &&
-    advisory?.status === "behind_latest" &&
-    advisory.canUpdate &&
-    advisory.latestVersion !== null &&
-    // The runner refuses these, which would leave a failure nobody asked for.
-    provider.compatibilityAdvisory?.latestVersionStatus !== "broken" &&
-    provider.compatibilityAdvisory?.latestVersionStatus !== "unsupported" &&
-    updateStatus !== "queued" &&
-    updateStatus !== "running"
-  );
-}
 
 /**
  * Installs provider CLI updates in the background when `automaticUpdates` is
@@ -47,73 +33,80 @@ export const layer = Layer.effectDiscard(
     const runner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     const updateWindow = yield* UpdateWindow.UpdateWindow;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
-    // Instances sharing an install share its retry budget; a new release retries at once.
+    const httpClient = yield* HttpClient.HttpClient;
+    const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+    // `instanceId@version` to when it was last tried, on the monotonic clock.
     const attempts = new Map<string, number>();
 
-    const pass = Effect.gen(function* () {
-      const settings = yield* serverSettings.getSettings;
-      if (!settings.automaticUpdates || !settings.enableProviderUpdateChecks) return;
-      const installations = new Set<string>();
-      for (const { instanceId } of yield* providers.getProviders) {
-        const pick = Effect.gen(function* () {
-          const settings = yield* serverSettings.getSettings;
-          if (!settings.automaticUpdates || !settings.enableProviderUpdateChecks) return;
-          const current = (yield* providers.getProviders).find(
-            (candidate) => candidate.instanceId === instanceId,
-          );
-          if (!current || !isAutoUpdatable(current)) return;
-          const capabilities = yield* providers.getProviderMaintenanceCapabilitiesForInstance(
-            instanceId,
-            current.driver,
-          );
-          const installationKey = capabilities.update?.installationKey;
-          if (!installationKey || installations.has(installationKey)) return;
-          const targetVersion = current.versionAdvisory?.latestVersion;
-          if (!targetVersion) return;
-          const attemptKey = `${installationKey}@${targetVersion}`;
-          const nowMs = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
-          for (const [key, attemptedAt] of attempts) {
-            if (nowMs - attemptedAt >= Duration.toMillis(RETRY_AFTER)) attempts.delete(key);
-          }
-          const attemptedAt = attempts.get(attemptKey);
-          if (attemptedAt !== undefined && nowMs - attemptedAt < Duration.toMillis(RETRY_AFTER))
-            return;
-          attempts.set(attemptKey, nowMs);
-          installations.add(installationKey);
-          yield* Effect.logInfo("Updating provider in the background", {
-            instanceId,
-            fromVersion: current.version,
-            targetVersion,
-          });
-          return { provider: current.driver, targetVersion, attemptKey };
+    const enabled = serverSettings.getSettings.pipe(
+      Effect.map((settings) => settings.automaticUpdates && settings.enableProviderUpdateChecks),
+      Effect.orElseSucceed(() => false),
+    );
+
+    /** Chooses what to install for one instance and spends its retry budget, or returns undefined. */
+    const pick = (instanceId: ProviderInstanceId) =>
+      Effect.gen(function* () {
+        if (!(yield* enabled)) return undefined;
+        const current = (yield* providers.getProviders).find(
+          (candidate) => candidate.instanceId === instanceId,
+        );
+        const updateStatus = current?.updateState?.status;
+        if (
+          !current?.enabled ||
+          !current.installed ||
+          updateStatus === "queued" ||
+          updateStatus === "running"
+        ) {
+          return undefined;
+        }
+        // A headless service has no client refreshing advisories, so look up the newest release here.
+        const capabilities = yield* providers.getProviderMaintenanceCapabilitiesForInstance(
+          instanceId,
+          current.driver,
+        );
+        const advisory = (yield* enrichProviderSnapshotWithVersionAdvisory(current, capabilities, {
+          enableProviderUpdateChecks: true,
+        }).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
+        )).versionAdvisory;
+        const targetVersion = advisory?.latestVersion;
+        if (advisory?.status !== "behind_latest" || !advisory.canUpdate || !targetVersion) {
+          return undefined;
+        }
+        const nowMs = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+        for (const [key, attemptedAt] of attempts) {
+          if (nowMs - attemptedAt >= Duration.toMillis(RETRY_AFTER)) attempts.delete(key);
+        }
+        const attemptKey = `${instanceId}@${targetVersion}`;
+        if (attempts.has(attemptKey)) return undefined;
+        attempts.set(attemptKey, nowMs);
+        yield* Effect.logInfo("Updating provider in the background", {
+          instanceId,
+          fromVersion: current.version,
+          targetVersion,
         });
+        return { provider: current.driver, targetVersion, attemptKey };
+      });
+
+    const pass = Effect.gen(function* () {
+      if (!(yield* enabled)) return;
+      for (const { instanceId } of yield* providers.getProviders) {
         // Rechecked per install: the previous one may have run for minutes.
-        const picked = yield* updateWindow.runIfOpen(pick);
+        const picked = yield* updateWindow.runIfOpen(pick(instanceId));
         if (Option.isNone(picked)) return;
         if (picked.value === undefined) continue;
-        // Installed after the window releases admission: the runner first drains host
-        // leases, and a session holding one may still need admission to launch its CLI.
-        const { attemptKey, ...target } = picked.value;
+        const { provider, targetVersion, attemptKey } = picked.value;
+        // Runs under the install lock, which would close the window on itself.
         const beforeInstall = Effect.gen(function* () {
-          const allowed = yield* Effect.gen(function* () {
-            const settings = yield* serverSettings.getSettings;
-            return (
-              settings.automaticUpdates &&
-              settings.enableProviderUpdateChecks &&
-              Option.isSome(yield* updateWindow.runIfOpen(Effect.void, instanceId))
-            );
-          }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+          const allowed =
+            (yield* enabled) && (yield* updateWindow.isOpen({ ignoreInstallLocks: true }));
+          // Postponed, not failed: the next open window gets a fresh try.
           if (!allowed) attempts.delete(attemptKey);
           return allowed;
-        });
+        }).pipe(Effect.catchCause(() => Effect.succeed(false)));
         yield* runner
-          .updateProvider({
-            ...target,
-            instanceId,
-            quiet: true,
-            origin: "background",
-            beforeInstall,
-          })
+          .updateProvider({ provider, instanceId, targetVersion, background: true, beforeInstall })
           .pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("Background provider update failed", { instanceId, cause }),

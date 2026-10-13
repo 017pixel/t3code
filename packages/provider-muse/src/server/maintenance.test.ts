@@ -212,7 +212,6 @@ it.layer(NodeServices.layer)("Muse maintenance", (it) => {
           executable: binaryPath,
           args: ["--version"],
           lockKey: `muse:${binaryPath}`,
-          installationKey: `muse:${binaryPath}`,
           env: {
             MUSE_CHANNEL: "muse-canary",
             MUSE_NO_AUTO_UPDATE: "0",

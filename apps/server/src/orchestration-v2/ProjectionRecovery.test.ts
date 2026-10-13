@@ -212,6 +212,8 @@ it.effect("selects unfinished recovery work without reading settled thread histo
     );
     assert.deepEqual(yield* projections.getRecoveryThreadIds("delegated-completions"), [delivery]);
     assert.deepEqual(yield* projections.getRecoveryThreadIds("subagent-results"), []);
+    // Only runs count: queued runs and idle background items do not block an update.
+    assert.deepEqual(yield* projections.getRecoveryThreadIds("active-work"), [blocked]);
     const recoveryState = yield* projections.getRuntimeRecoveryProjection(queued);
     assert.deepEqual(
       recoveryState.runs.map((run) => run.id),
@@ -502,7 +504,7 @@ it.effect("includes shared sessions and provider-owned background rosters in rec
       preparedState.providerSessions.map((session) => session.id),
       [preparedSessionId],
     );
-    assert.equal(restartContinuationRun(preparedState)?.id, preparedRunId);
+    assert.equal(restartContinuationRun(preparedState, yield* DateTime.now)?.id, preparedRunId);
     assert.deepEqual(yield* projections.getUnreadableThreadIds(), []);
     const sql = yield* SqlClient.SqlClient;
     yield* sql`

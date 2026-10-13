@@ -1,4 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import {
   AcpRegistryListProvidersResult,
   AcpRegistryOperationError,
@@ -451,10 +450,6 @@ export const probeAcpRegistryConfiguration = Effect.fn("AcpRegistryProbe.probeCo
       skills: result.commands.skills,
     };
   },
-  (effect) =>
-    Effect.flatMap(Maintenance.ProviderMaintenanceAdmission, (admission) =>
-      admission.withLaunchPermit(effect),
-    ),
 );
 
 const MANAGEMENT_TIMEOUT = Duration.seconds(60);
@@ -525,10 +520,6 @@ const makeAcpRegistryManagementRuntime = Effect.fn("AcpRegistryProbe.makeManagem
     );
     return runtime;
   },
-  (effect) =>
-    Effect.flatMap(Maintenance.ProviderMaintenanceAdmission, (admission) =>
-      admission.withScopedLaunchPermit(effect),
-    ),
 );
 
 function managementFailure(

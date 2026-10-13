@@ -476,7 +476,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "automatic-updates",
     title: "Update automatically",
     to: "/settings/general",
-    searchTerms: ["background auto install provider cli upgrade idle restart"],
+    searchTerms: ["background auto install provider cli upgrade idle"],
     scope: "environment-defaults",
   },
   {

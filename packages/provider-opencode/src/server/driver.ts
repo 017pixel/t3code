@@ -260,9 +260,8 @@ export const OpenCodeDriver: ProviderDriver<
       );
       // A fresh read (an update about to run, or a manual refresh) re-probes, so
       // a binary replaced by the other major version gets its own package.
-      // A configured server is someone else's install; updating the local binary would not touch it.
       const resolveMaintenance = (options?: { readonly fresh?: boolean }) =>
-        !effectiveConfig.enabled || effectiveConfig.serverUrl.trim().length > 0
+        !effectiveConfig.enabled
           ? Effect.succeed(noUpdate)
           : options?.fresh === true
             ? runtimeProbe.refresh.pipe(
@@ -459,7 +458,7 @@ export const OpenCodeDriver: ProviderDriver<
           streamSettings: snapshotSettings.streamSettings,
           haveSettingsChanged: haveProviderSnapshotSettingsChanged,
           checkProviderOnSettingsChange: () => false,
-          refreshOnInterval: "enrich",
+          refreshOnInterval: false,
           initialSnapshot: (settings) =>
             makePendingOpenCodeProvider(settings.provider).pipe(Effect.map(stampIdentity)),
           checkProvider,
