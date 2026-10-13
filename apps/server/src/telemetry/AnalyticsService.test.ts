@@ -5,11 +5,13 @@ import * as Clock from "effect/Clock";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientError from "effect/http/HttpClientError";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -17,6 +19,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerActivation from "../serverActivation.ts";
 import { getTelemetryIdentifier } from "./Identify.ts";
 import * as AnalyticsService from "./AnalyticsService.ts";
 
@@ -58,6 +61,7 @@ const SentBatch = Schema.fromJsonString(
     batch: Schema.Array(Schema.Struct({ uuid: Schema.String })),
   }),
 );
+const decodeSentBatch = Schema.decodeEffect(SentBatch);
 
 /**
  * HTTP client that reads each batch, then fails as if the connection dropped
@@ -70,9 +74,9 @@ const layerAcceptThenFailClient = (batches: Array<ReadonlyArray<{ readonly uuid:
     HttpClient.make((request) =>
       Effect.gen(function* () {
         if (request.body._tag === "Uint8Array") {
-          const body = yield* Schema.decodeEffect(SentBatch)(
-            new TextDecoder().decode(request.body.body),
-          ).pipe(Effect.orDie);
+          const body = yield* decodeSentBatch(new TextDecoder().decode(request.body.body)).pipe(
+            Effect.orDie,
+          );
           batches.push(body.batch);
         }
         return yield* new HttpClientError.HttpClientError({
@@ -130,6 +134,83 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
       const uuids = batches.map((batch) => batch.map((event) => event.uuid).join(","));
       assert.equal(new Set(uuids).size, 1, "every retry carries the same uuids");
       assert.equal(new Set(batches[0]?.map((event) => event.uuid)).size, 20);
+    }),
+  );
+
+  it.effect("a failed public flush wakes the parked worker to retry without another event", () =>
+    Effect.gen(function* () {
+      const batches: Array<ReadonlyArray<{ readonly uuid: string }>> = [];
+      const firstSend = yield* Deferred.make<void>();
+      const failFirstSend = yield* Deferred.make<void>();
+      const startWorker = yield* Deferred.make<void>();
+      const layerRuntime = AnalyticsService.layer.pipe(
+        Layer.provideMerge(
+          ServerConfig.ServerConfig.layerTest(process.cwd(), {
+            prefix: "t3-telemetry-concurrent-",
+          }),
+        ),
+        Layer.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromUnknown({
+              T3CODE_TELEMETRY_ENABLED: true,
+              T3CODE_POSTHOG_KEY: "phc_test_key",
+              T3CODE_POSTHOG_HOST: "http://localhost",
+            }),
+          ),
+        ),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(HostProcess.Platform, "linux"),
+            Layer.succeed(HostProcess.Architecture, "x64"),
+            Layer.succeed(ServerActivation.ServerBackgroundStart, {
+              awaitFirstClient: Effect.void,
+              awaitTurn: Deferred.await(startWorker),
+              markClientServed: Effect.void,
+            }),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) =>
+                Effect.gen(function* () {
+                  if (request.body._tag === "Uint8Array") {
+                    const body = yield* decodeSentBatch(
+                      new TextDecoder().decode(request.body.body),
+                    ).pipe(Effect.orDie);
+                    batches.push(body.batch);
+                  }
+                  if (batches.length === 1) {
+                    yield* Deferred.succeed(firstSend, undefined);
+                    yield* Deferred.await(failFirstSend);
+                    return yield* new HttpClientError.HttpClientError({
+                      reason: new HttpClientError.TransportError({
+                        request,
+                        cause: "connection reset",
+                      }),
+                    });
+                  }
+                  return HttpClientResponse.fromWeb(request, new Response());
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const analytics = yield* AnalyticsService.AnalyticsService;
+        yield* analytics.record("test.concurrent.flush");
+        const flushing = yield* analytics.flush.pipe(Effect.forkScoped);
+        yield* Deferred.await(firstSend);
+        yield* Deferred.succeed(startWorker, undefined);
+        // Drain runnable fibers so the worker sees the empty buffer and parks.
+        yield* TestClock.adjust("0 millis");
+        yield* Deferred.succeed(failFirstSend, undefined);
+        yield* Fiber.join(flushing);
+        yield* TestClock.adjust("999 millis");
+        assert.equal(batches.length, 1);
+        yield* TestClock.adjust("1001 millis");
+        assert.equal(batches.length, 2);
+        assert.deepEqual(batches[1], batches[0]);
+      }).pipe(Effect.provide(layerRuntime));
     }),
   );
 

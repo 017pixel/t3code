@@ -237,6 +237,7 @@ export const make = Effect.gen(function* () {
       const retryAt = (yield* Clock.currentTimeMillis) + retryDelayMs(failures, yield* Random.next);
       if (batchAttempts < MAX_BATCH_ATTEMPTS) {
         yield* Ref.set(deliveryRef, { failedBatch: batch, batchAttempts, failures, retryAt });
+        yield* Queue.offer(flushRequests, undefined);
         yield* Effect.logDebug("Failed to send telemetry batch; will retry", {
           attempt: batchAttempts,
           cause: sent.failure,
