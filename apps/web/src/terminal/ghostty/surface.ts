@@ -74,6 +74,11 @@ function ensureTerminalSymbolsFont(): Promise<void> {
   return symbolsFontLoad;
 }
 
+/** Warm the first renderer without mounting a surface or starting a shell. */
+export function preloadTerminalAssets() {
+  return Promise.all([ensureTerminalSymbolsFont(), loadGhosttyRuntime()]);
+}
+
 function quoteTerminalFontFamilies(list: string): string {
   return list
     .split(",")
