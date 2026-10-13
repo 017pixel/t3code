@@ -1,6 +1,5 @@
-import { createClerkBridge } from "@clerk/electron";
+import { createClerkBridge, type TokenStorage } from "@clerk/electron";
 import * as NodeURL from "node:url";
-import { storage } from "@clerk/electron/storage";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -84,8 +83,22 @@ export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHos
 );
 
 function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
+  // The bridge must register before ready, but token storage is asynchronous.
+  // Keep electron-store and its validation dependencies off the window path.
+  let tokenStorage: Promise<TokenStorage> | undefined;
+  const getStorage = () =>
+    (tokenStorage ??= import("@clerk/electron/storage")
+      .then(({ storage }) => storage({ path: stateDir }))
+      .catch((error: unknown) => {
+        tokenStorage = undefined;
+        throw error;
+      }));
   return createClerkBridge({
-    storage: storage({ path: stateDir }),
+    storage: {
+      getItem: async (key) => (await getStorage()).getItem(key),
+      setItem: async (key, value) => (await getStorage()).setItem(key, value),
+      removeItem: async (key) => (await getStorage()).removeItem(key),
+    },
     passkeys: true,
     renderer: {
       scheme: ElectronProtocol.getDesktopScheme(isDevelopment),

@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off - Hosted handoff test uses a real localhost listener without an OpenAI account.
 import * as NodeHttp from "node:http";
+import type { CreateClerkBridgeOptions } from "@clerk/electron";
 import * as NodePath from "@effect/platform-node/NodePath";
 import { codexAuthHandoffUrl, readCodexAuthDelivery } from "@t3tools/shared/codexAuthHandoff";
 import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
@@ -89,6 +90,7 @@ describe("DesktopClerk", () => {
   beforeEach(() => {
     createClerkBridgeMock.mockReset();
     storageMock.mockReset();
+    for (const method of Object.values(storageAdapter)) method.mockReset();
   });
 
   it.effect("acquires and releases the SDK bridge with the layer", () => {
@@ -103,15 +105,29 @@ describe("DesktopClerk", () => {
     return Effect.gen(function* () {
       yield* Effect.scoped(Layer.build(layerDesktopClerk(true, events)));
 
-      assert.deepEqual(createClerkBridgeMock.mock.calls, [
-        [
-          {
-            storage: storageAdapter,
-            passkeys: true,
-            renderer: { scheme: "t3code-dev", host: "app" },
-          },
-        ],
-      ]);
+      assert.equal(createClerkBridgeMock.mock.calls.length, 1);
+      const { storage, ...options } = createClerkBridgeMock.mock
+        .calls[0]![0] as CreateClerkBridgeOptions;
+      assert.deepEqual(options, {
+        passkeys: true,
+        renderer: { scheme: "t3code-dev", host: "app" },
+      });
+      assert.equal(storageMock.mock.calls.length, 0);
+      storageAdapter.getItem.mockResolvedValue("encrypted-token");
+      assert.deepEqual(
+        yield* Effect.promise(() =>
+          Promise.all([
+            storage!.getItem("session"),
+            storage!.setItem("session", "token"),
+            storage!.removeItem("old-session"),
+          ]),
+        ),
+        ["encrypted-token", undefined, undefined],
+      );
+      assert.deepEqual(storageMock.mock.calls, [[{ path: "/tmp/t3-state" }]]);
+      assert.deepEqual(storageAdapter.getItem.mock.calls, [["session"]]);
+      assert.deepEqual(storageAdapter.setItem.mock.calls, [["session", "token"]]);
+      assert.deepEqual(storageAdapter.removeItem.mock.calls, [["old-session"]]);
       assert.equal(cleanup.mock.calls.length, 1);
       // The bridge acquires Electron's single-instance lock at creation, and
       // the lock both lives in and creates the userData directory — so the
@@ -119,6 +135,27 @@ describe("DesktopClerk", () => {
       assert.deepEqual(events, ["setPath:userData:/tmp/app-data/t3code-dev", "createClerkBridge"]);
       storageMock.mockClear();
       createClerkBridgeMock.mockClear();
+    });
+  });
+
+  it.effect("retries token storage initialization after a failure", () => {
+    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+    const failure = new Error("token store unavailable");
+    storageMock.mockImplementationOnce(() => {
+      throw failure;
+    });
+    storageMock.mockReturnValue(storageAdapter);
+    storageAdapter.getItem.mockResolvedValue("token");
+
+    return Effect.gen(function* () {
+      yield* Effect.scoped(Layer.build(layerDesktopClerk()));
+      const { storage } = createClerkBridgeMock.mock.calls[0]![0] as CreateClerkBridgeOptions;
+      assert.deepEqual(
+        yield* Effect.promise(() => Promise.allSettled([storage!.getItem("session")])),
+        [{ status: "rejected", reason: failure }],
+      );
+      assert.equal(yield* Effect.promise(async () => storage!.getItem("session")), "token");
+      assert.equal(storageMock.mock.calls.length, 2);
     });
   });
 
