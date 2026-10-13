@@ -280,6 +280,31 @@ describe("ChatMarkdown favicon privacy", () => {
 });
 
 describe("ChatMarkdown streaming", () => {
+  it("updates table rows and late references while preserving table controls", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const table = "| name | link |\n| --- | --- |\n| first | [later] |";
+    try {
+      for (const text of [table, table + "\n| second | value |", table + "\n\n[later]: /target"]) {
+        await act(async () =>
+          root.render(<ChatMarkdown cwd="/tmp/project" text={text} isStreaming />),
+        );
+        expect(container.querySelector("table")?.textContent).toContain("first");
+        expect(container.querySelector('[aria-label="Copy table"]')).not.toBeNull();
+        if (text.includes("second")) {
+          expect(container.querySelector("table")?.textContent).toContain("second");
+        }
+        if (text.includes("/target")) {
+          expect(container.querySelector('table a[href="/target"]')).not.toBeNull();
+        }
+      }
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("runs only a complete single-line shell block after a click", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const onRunShellCommand = vi.fn();

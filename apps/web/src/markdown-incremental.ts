@@ -78,9 +78,44 @@ function shiftPositions(node: Root | RootContent, offset: number, lines: number)
   }
 }
 
-/** Keep the full document pipeline while avoiding parsing a completed code-heavy
- * prefix on every token. A closed top-level fence followed by a blank line is a
- * parsing boundary. Definitions are document-wide, so they require a full parse.
+/** Ordinary single-line prose has no tokenization work. Keep its exact source
+ * positions so the rest of the normal Markdown pipeline still owns rendering.
+ */
+function parsePlainParagraph(source: string): Root | undefined {
+  if (
+    !/^[\p{L}\p{N} ,.!?;:'"%()/-]*$/u.test(source) ||
+    /^ {4}|^ {0,3}(?:-|\d+[.)](?: |$))|www\.|https?:/i.test(source)
+  )
+    return;
+  const start = source.length - source.trimStart().length;
+  const end = source.trimEnd().length;
+  const point = (offset: number) => ({ line: 1, column: offset + 1, offset });
+  const position = { start: point(start), end: point(source.length) };
+  return {
+    type: "root",
+    children:
+      end > start
+        ? [
+            {
+              type: "paragraph",
+              children: [
+                {
+                  type: "text",
+                  value: source.slice(start, end),
+                  position: { start: point(start), end: point(end) },
+                },
+              ],
+              position,
+            },
+          ]
+        : [],
+    position: { start: point(0), end: point(source.length) },
+  };
+}
+
+/** Reparse only the open tail. A following top-level block closes the previous
+ * block; closed fences also close at a blank line. Definitions are document-wide
+ * and still require the full parse.
  */
 function createIncrementalMarkdownParser(parse: Parser): Parser {
   let cached: ParsedPrefix | undefined;
@@ -91,9 +126,11 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
     if (source.includes("\r") || source.includes("\uFEFF")) return parse(source, file);
 
     const prefix = cached && source.startsWith(cached.source) ? cached : undefined;
+    if (!prefix) cached = undefined;
     let root: Root;
     if (prefix) {
-      root = parse(source.slice(prefix.offset), file);
+      const tail = source.slice(prefix.offset);
+      root = parsePlainParagraph(tail) ?? parse(tail, file);
       if (hasDefinitions(root)) return parse(source, file);
       shiftPositions(root, prefix.offset, prefix.line - 1);
       if (root.position) root.position.start = { line: 1, column: 1, offset: 0 };
@@ -101,8 +138,24 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
       // each render receives its own copy, including source positions.
       root.children.unshift(...structuredClone(prefix.children));
     } else {
-      root = parse(source, file);
+      root = parsePlainParagraph(source) ?? parse(source, file);
       if (hasDefinitions(root)) return root;
+    }
+
+    const tail = root.children.at(-1);
+    const tailStart = tail?.position?.start;
+    if (
+      root.children.length > 1 &&
+      tailStart?.offset !== undefined &&
+      tailStart.column === 1 &&
+      tailStart.offset > (prefix?.offset ?? 0)
+    ) {
+      cached = {
+        source: source.slice(0, tailStart.offset),
+        offset: tailStart.offset,
+        line: tailStart.line,
+        children: structuredClone(root.children.slice(0, -1)),
+      };
     }
 
     for (let index = root.children.length - 1; index >= 0; index--) {
@@ -120,6 +173,7 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
       const separator = /^\n[ \t]*\n/.exec(source.slice(end))?.[0];
       if (!closing.test(lastLine) || !separator) continue;
       const offset = end + separator.length;
+      if (offset <= (cached?.offset ?? 0)) break;
       cached = {
         source: source.slice(0, offset),
         offset,

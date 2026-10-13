@@ -23,6 +23,7 @@ import {
   markdownMayContainRawHtml,
 } from "@t3tools/shared/markdownPipeline";
 import { useAtomValue } from "@effect/atom-react";
+import * as Equal from "effect/Equal";
 import {
   COMPOSER_CONTEXT_CLIPBOARD_MIME,
   encodeComposerContextClipboardHtml,
@@ -3385,9 +3386,17 @@ const CHAT_MARKDOWN_COMPONENTS = {
     }
     return <ChatMarkdownImageFallback alt={altText} copyMarkdown={copyMarkdown} kind={kind} />;
   },
-  table: function MarkdownTableRenderer({ node: _node, ...props }) {
-    return <MarkdownTable {...props} />;
-  },
+  // Compare the transformed tree so finished cells skip reconciliation while
+  // late reference definitions and appended rows still update the table.
+  table: memo(
+    function MarkdownTableRenderer({
+      node: _node,
+      ...props
+    }: ComponentProps<"table"> & ReactMarkdownExtraProps) {
+      return <MarkdownTable {...props} />;
+    },
+    (previous, next) => Equal.equals(previous.node, next.node),
+  ),
   details: function MarkdownDetailsRenderer({ node: _node, children, open: detailsOpen }) {
     return <MarkdownDetails open={detailsOpen}>{children}</MarkdownDetails>;
   },
@@ -3473,10 +3482,7 @@ function ChatMarkdown({
     localMediaPreview,
     setLocalMediaPreview,
   } = useChatMarkdownState({ text, ...props });
-  const incrementalParsing =
-    props.isStreaming === true &&
-    extraRemarkPlugins.length === 0 &&
-    /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
+  const incrementalParsing = props.isStreaming === true && extraRemarkPlugins.length === 0;
   const cachedParsing = props.isStreaming !== true && extraRemarkPlugins.length === 0;
   const remarkPlugins = useMemo(
     () => [

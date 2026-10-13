@@ -52,6 +52,44 @@ function render(source: string, incremental?: Plugin<[], Root>, parsedSources?: 
 const prefix = "# Before\n\n```ts\nconst values = [1, 2];\n```\n\n";
 
 describe("incremental Markdown parsing", () => {
+  it.each([
+    "ordinary prose with 123, punctuation, and Unicode café 東京",
+    "   leading and trailing spaces   ",
+    "",
+    "   ",
+    "1. list",
+    "1) list",
+    "- list",
+    "----",
+    "    indented code",
+    "www.example.com",
+    "https://example.com",
+    "user@example.com",
+    "a &amp; b",
+    "a\n\nb\n\nc",
+    "# heading\n\nparagraph\n\nmore",
+    "- first\n\n- second\n\nparagraph\n\n- next",
+    "a | b\n--|--\na | b\n\nparagraph\n\nmore",
+    "[ref]\n\nparagraph\n\n[ref]: /later",
+  ])("keeps rendered output and positions for unfenced streaming %j", (source) => {
+    const incremental = createIncrementalMarkdownPlugin();
+    for (let end = 0; end <= source.length; end++) {
+      const text = source.slice(0, end);
+      expect(render(text, incremental), `prefix ${end}`).toEqual(render(text));
+    }
+  });
+
+  it("parses only the open paragraph after completed prose and a table", () => {
+    const incremental = createIncrementalMarkdownPlugin();
+    const source = "finished *prose*\n\na | b\n--|--\na | b\n\nopen *tail*";
+    const parsedSources: string[] = [];
+    expect(render(source, incremental, parsedSources)).toEqual(render(source));
+    parsedSources.length = 0;
+    const next = source + " grows";
+    expect(render(next, incremental, parsedSources)).toEqual(render(next));
+    expect(parsedSources).toContain("open *tail* grows");
+    expect(parsedSources).not.toContain(next);
+  });
   it("reuses a parsed document across mounts without retaining mutated transforms", () => {
     const source = "> [!NOTE]\n> cached alert\n\n- a\n\n[link]: /target";
     const expected = render(source);
