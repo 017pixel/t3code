@@ -1032,15 +1032,15 @@ describe("resolveThreadSwitchTimeline", () => {
 
   const held = { threadKey: "env-1:thread-a", entries: ["a1", "a2"] };
 
-  it("keeps the previous thread's entries while the next thread is loading", () => {
+  it("leaves the destination empty while its first snapshot is loading", () => {
+    rememberReadyThreadTimeline(held);
     expect(
       resolveThreadSwitchTimeline({
         loading: true,
         activeThreadKey: "env-1:thread-b",
         nextEntries: [],
-        lastReady: held,
       }),
-    ).toEqual({ entries: ["a1", "a2"], displayThreadKey: "env-1:thread-a" });
+    ).toEqual({ entries: [], displayThreadKey: "env-1:thread-b" });
   });
 
   it("shows the new thread once its detail is ready", () => {
@@ -1049,7 +1049,6 @@ describe("resolveThreadSwitchTimeline", () => {
         loading: false,
         activeThreadKey: "env-1:thread-b",
         nextEntries: ["b1"],
-        lastReady: held,
       }),
     ).toEqual({ entries: ["b1"], displayThreadKey: "env-1:thread-b" });
   });
@@ -1060,7 +1059,6 @@ describe("resolveThreadSwitchTimeline", () => {
         loading: true,
         activeThreadKey: "env-1:thread-a",
         nextEntries: [],
-        lastReady: null,
       }),
     ).toEqual({ entries: [], displayThreadKey: "env-1:thread-a" });
   });
@@ -1078,7 +1076,7 @@ describe("resolveThreadSwitchTimeline", () => {
     });
   });
 
-  it("survives a ChatView remount by remembering the last ready timeline", () => {
+  it("does not paint the last ready timeline on a different thread after remount", () => {
     rememberReadyThreadTimeline(held);
     expect(peekHeldThreadTimeline<string[]>()).toEqual(held);
     expect(
@@ -1087,7 +1085,7 @@ describe("resolveThreadSwitchTimeline", () => {
         activeThreadKey: "env-1:thread-b",
         nextEntries: [],
       }),
-    ).toEqual({ entries: ["a1", "a2"], displayThreadKey: "env-1:thread-a" });
+    ).toEqual({ entries: [], displayThreadKey: "env-1:thread-b" });
   });
 
   it("paints a remembered destination instead of the last-viewed thread", () => {
@@ -1126,13 +1124,13 @@ describe("resolveThreadSwitchTimeline", () => {
   });
 
   it("does not hold another environment's timeline across a jump", () => {
+    rememberReadyThreadTimeline(held);
     expect(threadKeysShareEnvironment("env-1:thread-a", "env-2:thread-b")).toBe(false);
     expect(
       resolveThreadSwitchTimeline({
         loading: true,
         activeThreadKey: "env-2:thread-b",
         nextEntries: [],
-        lastReady: held,
       }),
     ).toEqual({ entries: [], displayThreadKey: "env-2:thread-b" });
   });
