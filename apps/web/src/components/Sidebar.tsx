@@ -88,6 +88,7 @@ import {
 import {
   memo,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -3082,8 +3083,9 @@ export default function Sidebar() {
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
+  const deferredThreadSearchQuery = useDeferredValue(threadSearchQuery);
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
-  const isSearchingThreads = threadSearchQuery.trim().length > 0;
+  const isSearchingThreads = deferredThreadSearchQuery.trim().length > 0;
   const searchableThreads = useMemo(
     () => [
       ...pinnedThreads,
@@ -3106,10 +3108,10 @@ export default function Sidebar() {
     () =>
       searchSidebarThreads(
         searchableThreads,
-        threadSearchQuery,
+        deferredThreadSearchQuery,
         new Set(threadSearchMatchByKey.keys()),
       ),
-    [searchableThreads, threadSearchQuery, threadSearchMatchByKey],
+    [searchableThreads, deferredThreadSearchQuery, threadSearchMatchByKey],
   );
   const threadSearchResultOrderKey = threadSearchResults
     .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
@@ -3406,36 +3408,47 @@ export default function Sidebar() {
       // IME composition (Japanese/Chinese input) uses the same keys; committing
       // a candidate must not move the highlight or navigate away mid-compose.
       if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-      if (event.key === "Escape" && isSearchingThreads) {
+      if (event.key === "Escape" && threadSearchQuery.trim().length > 0) {
         event.preventDefault();
         event.stopPropagation();
         clearThreadSearch();
         return;
       }
-      if (threadSearchResults.length === 0) return;
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Enter") return;
+      // Navigation uses the current input even if the result render is still pending.
+      const results =
+        threadSearchQuery === deferredThreadSearchQuery
+          ? threadSearchResults
+          : searchSidebarThreads(
+              searchableThreads,
+              threadSearchQuery,
+              new Set(threadSearchMatchByKey.keys()),
+            );
+      if (results.length === 0) return;
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setActiveSearchResultIndex((index) => (index + 1) % threadSearchResults.length);
+        setActiveSearchResultIndex((index) => (index + 1) % results.length);
         return;
       }
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setActiveSearchResultIndex(
-          (index) => (index - 1 + threadSearchResults.length) % threadSearchResults.length,
-        );
+        setActiveSearchResultIndex((index) => (index - 1 + results.length) % results.length);
         return;
       }
       if (event.key === "Enter") {
         event.preventDefault();
-        const result = threadSearchResults[activeSearchResultIndex];
+        const result = results[activeSearchResultIndex];
         if (result) selectThreadSearchResult(result);
       }
     },
     [
       activeSearchResultIndex,
       clearThreadSearch,
-      isSearchingThreads,
+      deferredThreadSearchQuery,
+      searchableThreads,
       selectThreadSearchResult,
+      threadSearchMatchByKey,
+      threadSearchQuery,
       threadSearchResults,
     ],
   );
@@ -5420,7 +5433,7 @@ export default function Sidebar() {
                                 }),
                               ) ?? null
                             }
-                            searchQuery={threadSearchQuery}
+                            searchQuery={deferredThreadSearchQuery}
                             onHighlight={setActiveSearchResultIndex}
                             onSelect={selectThreadSearchResult}
                             onFileDropThreads={handleThreadFileDrop}
