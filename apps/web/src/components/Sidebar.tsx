@@ -3116,10 +3116,16 @@ export default function Sidebar() {
   const threadSearchResultOrderKey = threadSearchResults
     .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
     .join("\0");
+  const threadSearchResultsQueryRef = useRef(deferredThreadSearchQuery);
 
   useEffect(() => {
-    setActiveSearchResultIndex(0);
-  }, [threadSearchResultOrderKey]);
+    const queryChanged = threadSearchResultsQueryRef.current !== deferredThreadSearchQuery;
+    threadSearchResultsQueryRef.current = deferredThreadSearchQuery;
+    // Input changes already reset the index; keep navigation made while results catch up.
+    setActiveSearchResultIndex((index) =>
+      queryChanged ? Math.min(index, Math.max(0, threadSearchResults.length - 1)) : 0,
+    );
+  }, [deferredThreadSearchQuery, threadSearchResultOrderKey, threadSearchResults.length]);
 
   useEffect(() => {
     if (!isSearchingThreads) return;
