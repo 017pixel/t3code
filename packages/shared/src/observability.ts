@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import type * as Exit from "effect/Exit";
 import * as ExitRuntime from "effect/Exit";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -370,6 +371,7 @@ function spanToTraceRecord(span: SerializableSpan): EffectTraceRecord {
 }
 
 export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: TraceSinkOptions) {
+  const flushRequests = yield* Queue.sliding<void>(1);
   const sink = new RotatingFileSink({
     filePath: options.filePath,
     maxBytes: options.maxBytes,
@@ -487,7 +489,14 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
 
   yield* Effect.addFinalizer(() => flush.pipe(Effect.ignore));
   yield* Effect.forkScoped(
-    Effect.sleep(`${options.batchWindowMs} millis`).pipe(Effect.andThen(flush), Effect.forever),
+    Effect.gen(function* () {
+      while (true) {
+        yield* Queue.take(flushRequests);
+        if (buffer.length === 0 && pendingFlushStats.count === 0 && droppedCount === 0) continue;
+        yield* Effect.sleep(`${options.batchWindowMs} millis`);
+        yield* flush;
+      }
+    }),
   );
 
   return {
@@ -498,6 +507,7 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
         if (buffer.length >= FLUSH_BUFFER_THRESHOLD) {
           flushUnsafe();
         }
+        Queue.offerUnsafe(flushRequests, undefined);
       } catch {
         return;
       }

@@ -1,7 +1,9 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -12,6 +14,7 @@ import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import { getTelemetryIdentifier } from "./Identify.ts";
@@ -133,6 +136,7 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
   it.effect("flush drains all buffered events across multiple batches", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<RecordedBatchRequest> = [];
+      const resumed = yield* Deferred.make<void>();
       const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
         prefix: "t3-telemetry-base-",
       });
@@ -159,6 +163,9 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
           );
 
           capturedRequests.push({ path: request.url, body: payload });
+          if (payload?.batch?.some((event) => event.event === "test.after.idle")) {
+            yield* Deferred.succeed(resumed, undefined);
+          }
 
           return HttpServerResponse.jsonUnsafe({});
         }),
@@ -185,13 +192,23 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         }
 
         yield* analytics.flush;
+
+        const clock = yield* Clock.Clock;
+        const sleeps = vi.spyOn(clock, "sleep");
+        yield* Effect.addFinalizer(() => Effect.sync(() => sleeps.mockRestore()));
+        yield* TestClock.adjust("1 hour");
+        assert.isAtMost(sleeps.mock.calls.length, 1);
+        yield* analytics.record("test.after.idle", { index: 45 });
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(resumed);
+        assert.equal(capturedRequests.at(-1)?.body?.batch?.[0]?.event, "test.after.idle");
       }).pipe(Effect.provide(layerRuntime));
 
       const batchRequests = capturedRequests.filter(
         (request): request is RecordedBatchRequest & { readonly body: RecordedBatchBody } =>
           Array.isArray(request.body?.batch),
       );
-      assert.equal(batchRequests.length, 3);
+      assert.equal(batchRequests.length, 4);
       assert.equal(
         batchRequests.every(
           (request) => request.path.endsWith("/batch/") || request.path.endsWith("/batch"),
@@ -269,6 +286,11 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         const analytics = yield* AnalyticsService.AnalyticsService;
         yield* analytics.record("test.disabled", { index: 1 });
         yield* analytics.flush;
+        const clock = yield* Clock.Clock;
+        const sleeps = vi.spyOn(clock, "sleep");
+        yield* Effect.addFinalizer(() => Effect.sync(() => sleeps.mockRestore()));
+        yield* TestClock.adjust("1 hour");
+        assert.equal(sleeps.mock.calls.length, 0);
       }).pipe(Effect.provide(layerRuntime));
 
       assert.deepEqual(capturedPaths, []);

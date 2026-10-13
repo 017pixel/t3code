@@ -2,6 +2,7 @@ import { assert, describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Arr from "effect/Array";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -343,6 +344,43 @@ describe("observability", () => {
   });
 
   nodeServicesIt("node services", (it) => {
+    it.effect("parks empty trace buffers and flushes new records after a long idle", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-trace-idle-" });
+        const tracePath = path.join(tempDir, "shared.trace.ndjson");
+        const clock = yield* Clock.Clock;
+        const sleeps = vi.spyOn(clock, "sleep");
+        yield* Effect.addFinalizer(() => Effect.sync(() => sleeps.mockRestore()));
+        const sink = yield* makeTraceSink({
+          filePath: tracePath,
+          maxBytes: 1024 * 1024,
+          maxFiles: 2,
+          batchWindowMs: 1_000,
+        });
+
+        yield* TestClock.adjust("1 hour");
+        expect(sleeps).not.toHaveBeenCalled();
+        sink.push(makeRecord("first"));
+        yield* TestClock.adjust("1 second");
+        assert.deepStrictEqual(
+          (yield* readTraceRecords(tracePath)).map((line) => line.name),
+          ["first"],
+        );
+        expect(sleeps).toHaveBeenCalledTimes(1);
+        yield* TestClock.adjust("1 hour");
+        expect(sleeps).toHaveBeenCalledTimes(1);
+        sink.push(makeRecord("second"));
+        yield* TestClock.adjust("1 second");
+        assert.deepStrictEqual(
+          (yield* readTraceRecords(tracePath)).map((line) => line.name),
+          ["first", "second"],
+        );
+        expect(sleeps).toHaveBeenCalledTimes(2);
+      }).pipe(Effect.scoped),
+    );
+
     it.effect("flushes buffered trace records on close", () =>
       Effect.scoped(
         Effect.gen(function* () {
