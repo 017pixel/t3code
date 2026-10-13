@@ -951,6 +951,7 @@ export function isStreamingTurnItemTextUpdate(
 export function isStreamingProjectionTextUpdate(
   previous: OrchestrationV2ThreadProjection,
   next: OrchestrationV2ThreadProjection,
+  isTextUpdate = isStreamingTurnItemTextUpdate,
 ): boolean {
   if (previous === next) return true;
   const {
@@ -996,10 +997,35 @@ export function isStreamingProjectionTextUpdate(
     const old = beforeRows[index]!;
     const row = afterRows[index]!;
     if (old === row) continue;
-    if (!isStreamingTurnItemTextUpdate(old, row)) return false;
+    if (!isTextUpdate(old, row)) return false;
     changedItems.add(row.item);
   }
   return afterItems.every((item, index) => item === beforeItems[index] || changedItems.has(item));
+}
+
+/** Omitted command output retains the inspector's "live" cache key. Timestamp
+ * updates can skip rows; lifecycle and failure changes still rebuild them.
+ */
+export function isStreamingRowContentUpdate(
+  previous: OrchestrationV2ProjectedTurnItem,
+  next: OrchestrationV2ProjectedTurnItem,
+): boolean {
+  if (isStreamingTurnItemTextUpdate(previous, next)) return true;
+  const { item: oldItem, ...oldSource } = previous;
+  const { item, ...source } = next;
+  if (
+    oldItem.type !== "command_execution" ||
+    item.type !== "command_execution" ||
+    oldItem.status !== "running" ||
+    item.status !== "running" ||
+    oldItem.outputOmitted !== true ||
+    item.outputOmitted !== true ||
+    !shallow(oldSource, source)
+  )
+    return false;
+  const { updatedAt: _oldTime, ...oldMetadata } = oldItem;
+  const { updatedAt: _time, ...metadata } = item;
+  return Equal.equals(oldMetadata, metadata);
 }
 
 function reuseTimelineEntries(

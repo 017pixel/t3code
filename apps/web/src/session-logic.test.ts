@@ -32,6 +32,7 @@ import {
   findLatestProposedPlan,
   isLatestRunSettled,
   isStreamingProjectionTextUpdate,
+  isStreamingRowContentUpdate,
   selectHandoffImageResources,
   selectMessageImageResources,
   createMessageAttachmentPreviewProjector,
@@ -1417,6 +1418,27 @@ describe("work-log failure policy (#7999/#7893)", () => {
 });
 
 describe("incremental v2 timeline entries", () => {
+  it("keeps compact running command revisions out of the shell and exposes metadata changes", () => {
+    const fixture = makeStreamingTimelineFixture("Partial");
+    const original = fixture.visibleTurnItems.find((row) => row.item.type === "command_execution")!;
+    if (original.item.type !== "command_execution") throw Error("Expected command fixture");
+    const before = {
+      ...original,
+      item: { ...original.item, status: "running" as const, outputOmitted: true },
+    };
+    const next = {
+      ...before,
+      item: { ...before.item, updatedAt: DateTime.makeUnsafe(fixture.time(8)) },
+    };
+    expect(isStreamingRowContentUpdate(before, next)).toBe(true);
+    for (const changed of [
+      { ...next, item: { ...next.item, status: "completed" as const } },
+      { ...next, item: { ...next.item, outputIndicatesFailure: true } },
+      { ...next, item: { ...next.item, output: "inline output" } },
+      { ...next, sourceThreadId: ThreadId.make("other") },
+    ])
+      expect(isStreamingRowContentUpdate(before, changed)).toBe(false);
+  });
   it("keeps token text in its row and exposes completion, metadata, and control changes", () => {
     const fixture = makeStreamingTimelineFixture("Partial");
     const rows = fixture.visibleTurnItems;
