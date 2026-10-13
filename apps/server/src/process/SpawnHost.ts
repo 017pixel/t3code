@@ -125,8 +125,12 @@ class HostedChildProcess
 
   attachStdio(fd: number, socket: NodeNet.Socket): void {
     this.stdio[fd] = socket;
-    if (fd === 0) this.stdin = socket;
-    else if (fd === 1) this.stdout = socket;
+    if (fd === 0) {
+      // Transferred stdin is readable, unlike Node's own, and can reset after
+      // the sink finishes. Its active listener still reports ProcessStdinError.
+      socket.on("error", () => {});
+      this.stdin = socket;
+    } else if (fd === 1) this.stdout = socket;
     else if (fd === 2) this.stderr = socket;
   }
 
