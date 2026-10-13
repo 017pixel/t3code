@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import {
   eraseHeldText,
   holdTextForUrlRouteTarget,
-  isPendingSidebarTextKey,
+  isUrlTargetSidebarTextKey,
   setUrlRouteTargetKey,
   takeHeldText,
 } from "./components/keptView";
@@ -49,7 +49,7 @@ describe("sidebar typing during a kept thread navigation", () => {
     row.focus();
     const key = new KeyboardEvent("keydown", { key: "A", shiftKey: true });
     row.dispatchEvent(key);
-    expect(isPendingSidebarTextKey(key, previous)).toBe(true);
+    expect(isUrlTargetSidebarTextKey(key)).toBe(true);
     expect(holdTextForUrlRouteTarget(previous, key.key)).toBe(true);
     expect(takeHeldText(previous)).toBeNull();
     holdTextForUrlRouteTarget(previous, "b");
@@ -61,17 +61,17 @@ describe("sidebar typing during a kept thread navigation", () => {
     expect(eraseHeldText(previous)).toBe(false);
   });
 
-  it("rejects another row, a nested control, and typing without pending navigation", () => {
+  it("rejects another row and nested controls, and buffers nothing after reveal", () => {
     const key = new KeyboardEvent("keydown", { key: "a" });
     row.dispatchEvent(key);
-    expect(isPendingSidebarTextKey(key, previous)).toBe(false);
+    expect(isUrlTargetSidebarTextKey(key)).toBe(false);
     setUrlRouteTargetKey(previous);
-    expect(isPendingSidebarTextKey(key, destination)).toBe(false);
+    expect(isUrlTargetSidebarTextKey(key)).toBe(false);
     setUrlRouteTargetKey(destination);
-    expect(isPendingSidebarTextKey(key, destination)).toBe(false);
+    expect(isUrlTargetSidebarTextKey(key)).toBe(true);
     expect(holdTextForUrlRouteTarget(destination, "a")).toBe(false);
     row.querySelector("button")!.dispatchEvent(key);
-    expect(isPendingSidebarTextKey(key, previous)).toBe(false);
+    expect(isUrlTargetSidebarTextKey(key)).toBe(false);
     expect(takeHeldText(destination)).toBeNull();
   });
 
@@ -88,7 +88,7 @@ describe("sidebar typing during a kept thread navigation", () => {
     setUrlRouteTargetKey(destination);
     const key = new KeyboardEvent("keydown", init);
     row.dispatchEvent(key);
-    expect(isPendingSidebarTextKey(key, previous)).toBe(false);
+    expect(isUrlTargetSidebarTextKey(key)).toBe(false);
     expect(takeHeldText(destination)).toBeNull();
   });
 });
