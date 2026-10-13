@@ -111,8 +111,9 @@ export function selectCliRuntimeExternalDependencies(
  * way while every list-based test passed, which is why this reads the artifact
  * instead.
  *
- * `regionCount` is reported so the caller can tell "nothing was inlined" apart
- * from "the marker format changed and this scan no longer sees anything".
+ * Compact builds strip region comments, so callers can supply the emitted
+ * sourcemap's source paths instead. `regionCount` counts the inspected modules
+ * so a missing map or changed marker format cannot produce a vacuous pass.
  *
  * `inlinedPackages` is every package seen in a region, which lets the caller
  * check the opposite direction too. Verifying only that externals are absent
@@ -121,7 +122,10 @@ export function selectCliRuntimeExternalDependencies(
  * backends would then fail with ERR_MODULE_NOT_FOUND because those packages
  * are not in the selected sidecar closure either.
  */
-export function findInlinedExternalPackages(source: string): {
+export function findInlinedExternalPackages(
+  source: string,
+  sourcePaths?: ReadonlyArray<string>,
+): {
   readonly regionCount: number;
   readonly inlined: ReadonlyArray<string>;
   readonly inlinedPackages: ReadonlyArray<string>;
@@ -133,9 +137,10 @@ export function findInlinedExternalPackages(source: string): {
   let regionCount = 0;
   const inlined = new Set<string>();
   const inlinedPackages = new Set<string>();
-  for (const region of source.matchAll(regionPattern)) {
+  const paths =
+    sourcePaths ?? Array.from(source.matchAll(regionPattern), (region) => region[1] ?? "");
+  for (const regionPath of paths) {
     regionCount += 1;
-    const regionPath = region[1] ?? "";
     for (const candidate of regionPath.matchAll(packagePattern)) {
       const name = candidate[1];
       if (name === undefined || name === ".pnpm") continue;

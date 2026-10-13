@@ -3667,7 +3667,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     const inlinedPackages = new Set<string>();
     for (const chunkName of chunkNames) {
       const source = yield* fs.readFileString(path.join(distDirs.serverDist, chunkName));
-      const scan = findInlinedExternalPackages(source);
+      const sourceMapPath = path.join(distDirs.serverDist, `${chunkName}.map`);
+      const sourcePaths = (yield* fs.exists(sourceMapPath))
+        ? (yield* Schema.decodeEffect(
+            Schema.fromJsonString(Schema.Struct({ sources: Schema.Array(Schema.String) })),
+          )(yield* fs.readFileString(sourceMapPath))).sources
+        : undefined;
+      const scan = findInlinedExternalPackages(source, sourcePaths);
       totalRegions += scan.regionCount;
       for (const name of scan.inlined) inlined.add(name);
       for (const name of scan.inlinedPackages) inlinedPackages.add(name);
@@ -3677,7 +3683,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         packages: [...inlined].sort(),
       });
     }
-    // No regions at all means the scan went blind (marker format changed), not
+    // No modules at all means the scan went blind (map or markers missing), not
     // that the bundle is clean.
     if (totalRegions === 0) {
       return yield* new InlinedExternalPackageError({

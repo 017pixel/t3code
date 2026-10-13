@@ -21,7 +21,6 @@ allowBuilds:
   # Ships N-API prebuilds; its install script only rebuilds from source.
   objc-js: false
   "react-native-enriched-markdown@file:apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.10.tgz": true
-  react-native-enriched-markdown@file:apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.9.tgz: set this to true or false
   sharp: true
   tsc-rs: true
   utf-8-validate: false
@@ -276,6 +275,8 @@ overrides:
   "@types/ws@^8": "catalog:"
   "undici@^8": "catalog:"
   "ws@^8": "catalog:"
+  # The updater otherwise bundles a second semver 7 beside the desktop services.
+  "semver@^7": 7.8.5
   vite: "catalog:"
   vite-plus: "catalog:"
   yaml: "catalog:"

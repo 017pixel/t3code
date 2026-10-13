@@ -242,14 +242,12 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
   ]) {
     yield* fs.remove(path.join(input.stageDir, entry), { recursive: true, force: true });
   }
-  // A hoisted install still leaves nested `node_modules/.bin` shim directories
-  // inside packages that declare bins (msgpackr-extract's). They are symlinks
-  // nothing runs, and the npm registry refuses a tarball that contains any
-  // symlink, so strip every `.bin` directory below node_modules.
-  yield* removeNestedBinDirectories(fs, path, path.join(input.stageDir, "node_modules"));
+  // The runtime needs neither bin shims (symlinks npm rejects), source maps,
+  // nor TypeScript declarations. Keep executable JS and native fallback assets.
+  yield* pruneRuntimeInstall(fs, path, path.join(input.stageDir, "node_modules"));
 });
 
-const removeNestedBinDirectories = (
+const pruneRuntimeInstall = (
   fs: FileSystem.FileSystem,
   path: Path.Path,
   root: string,
@@ -258,13 +256,13 @@ const removeNestedBinDirectories = (
     const entries = yield* fs.readDirectory(root).pipe(Effect.orElseSucceed(() => []));
     for (const entry of entries) {
       const child = path.join(root, entry);
-      if (entry === ".bin") {
+      if (entry === ".bin" || /(?:\.map|\.d\.[cm]?ts)$/.test(entry)) {
         yield* fs.remove(child, { recursive: true, force: true });
         continue;
       }
       const info = yield* fs.stat(child).pipe(Effect.option);
       if (Option.isSome(info) && info.value.type === "Directory") {
-        yield* removeNestedBinDirectories(fs, path, child);
+        yield* pruneRuntimeInstall(fs, path, child);
       }
     }
   });

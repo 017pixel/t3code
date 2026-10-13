@@ -86,6 +86,8 @@ export default mergeConfig(
       entry: packExecutable ? ["src/bin.ts"] : ["src/bin.ts", "src/claude-history-worker.ts"],
       outDir: packExecutable ? "dist-exe" : "dist",
       sourcemap: !packExecutable,
+      // Compact code without renaming functions or rewriting runtime expressions.
+      minify: { compress: false, mangle: false },
       clean: true,
       ...(packExecutable
         ? {
