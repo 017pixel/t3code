@@ -13,7 +13,7 @@ import {
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
 import { ExternalLinkIcon, GitBranchIcon, RotateCcwIcon } from "lucide-react";
-import { memo, Suspense, use, useLayoutEffect, useMemo, useRef } from "react";
+import { memo, Suspense, use, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useTheme } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
@@ -31,7 +31,7 @@ import { ShellCommandBlock } from "./ShellCommandBlock";
 
 /** Keep the text node when logs grow; edits and resets replace its contents. */
 function ToolOutputText({ text }: { text: string }) {
-  const initial = useRef(text);
+  const [initial] = useState(text);
   const previous = useRef(text);
   const element = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -47,7 +47,7 @@ function ToolOutputText({ text }: { text: string }) {
   }, [text]);
   return (
     <div ref={element} className="max-h-80 overflow-auto text-muted-foreground">
-      {initial.current}
+      {initial}
     </div>
   );
 }

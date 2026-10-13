@@ -23,7 +23,6 @@ import {
   markdownMayContainRawHtml,
 } from "@t3tools/shared/markdownPipeline";
 import { useAtomValue } from "@effect/atom-react";
-import * as Equal from "effect/Equal";
 import {
   COMPOSER_CONTEXT_CLIPBOARD_MIME,
   encodeComposerContextClipboardHtml,
@@ -3386,17 +3385,9 @@ const CHAT_MARKDOWN_COMPONENTS = {
     }
     return <ChatMarkdownImageFallback alt={altText} copyMarkdown={copyMarkdown} kind={kind} />;
   },
-  // Compare the transformed tree so finished cells skip reconciliation while
-  // late reference definitions and appended rows still update the table.
-  table: memo(
-    function MarkdownTableRenderer({
-      node: _node,
-      ...props
-    }: ComponentProps<"table"> & ReactMarkdownExtraProps) {
-      return <MarkdownTable {...props} />;
-    },
-    (previous, next) => Equal.equals(previous.node, next.node),
-  ),
+  table: function MarkdownTableRenderer({ node: _node, ...props }) {
+    return <MarkdownTable {...props} />;
+  },
   details: function MarkdownDetailsRenderer({ node: _node, children, open: detailsOpen }) {
     return <MarkdownDetails open={detailsOpen}>{children}</MarkdownDetails>;
   },
