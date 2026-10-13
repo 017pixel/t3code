@@ -169,7 +169,7 @@ import { flushSync } from "react-dom";
 import {
   eraseHeldText,
   holdTextForUrlRouteTarget,
-  isPendingSidebarTextKey,
+  isUrlTargetSidebarTextKey,
   isUrlRouteTargetElsewhere,
   KeptViewWarmingContext,
   takeHeldText,
@@ -8248,7 +8248,7 @@ export default function ChatView(props: ChatViewProps) {
       const sidebarTextKey =
         !shortcutContext.terminalFocus &&
         !shortcutContext.modelPickerOpen &&
-        isPendingSidebarTextKey(event, viewRouteTargetKey) &&
+        isUrlTargetSidebarTextKey(event) &&
         !queryShownElement(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR);
 
       // A kept thread the user just switched to is revealed in a transition;
@@ -8285,7 +8285,7 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
-      if (typesToComposer) {
+      if (typesToComposer || sidebarTextKey) {
         if (composerRef.current?.insertTextAtEnd(event.key)) {
           event.preventDefault();
           event.stopPropagation();

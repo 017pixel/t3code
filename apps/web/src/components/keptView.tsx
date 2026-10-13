@@ -331,13 +331,12 @@ export function setUrlRouteTargetKey(key: string | null): void {
   urlRouteTargetKey = key;
 }
 
-/** Printable typing on the destination sidebar row before a kept view is revealed. */
-export function isPendingSidebarTextKey(event: KeyboardEvent, viewTargetKey: string): boolean {
+/** Printable typing on the sidebar row for the URL's thread. */
+export function isUrlTargetSidebarTextKey(event: KeyboardEvent): boolean {
   if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey)
     return false;
   // Space and Enter activate the row; only its other text keys join the URL-target buffer.
-  if (event.key.length !== 1 || event.key === " " || !isUrlRouteTargetElsewhere(viewTargetKey))
-    return false;
+  if (event.key.length !== 1 || event.key === " ") return false;
   const target = event.target;
   if (
     !(target instanceof Element) ||
