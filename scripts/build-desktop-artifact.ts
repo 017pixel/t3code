@@ -110,6 +110,9 @@ const RepoRoot = Effect.service(Path.Path).pipe(
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeWorkspaceConfig = Schema.decodeEffect(fromYaml(WorkspaceConfig));
 const encodeStageWorkspaceConfig = Schema.encodeEffect(fromYaml(StageWorkspaceConfig));
+const decodeBundleSourceMap = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Struct({ sources: Schema.Array(Schema.String) })),
+);
 
 const readWorkspaceConfig = Effect.fn("readWorkspaceConfig")(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -3669,9 +3672,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       const source = yield* fs.readFileString(path.join(distDirs.serverDist, chunkName));
       const sourceMapPath = path.join(distDirs.serverDist, `${chunkName}.map`);
       const sourcePaths = (yield* fs.exists(sourceMapPath))
-        ? (yield* Schema.decodeEffect(
-            Schema.fromJsonString(Schema.Struct({ sources: Schema.Array(Schema.String) })),
-          )(yield* fs.readFileString(sourceMapPath))).sources
+        ? (yield* decodeBundleSourceMap(yield* fs.readFileString(sourceMapPath))).sources
         : undefined;
       const scan = findInlinedExternalPackages(source, sourcePaths);
       totalRegions += scan.regionCount;
