@@ -1275,6 +1275,29 @@ describe("ProviderInstallLock", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("two servers reclaiming the same stale lock leave exactly one owner", () =>
+    Effect.gen(function* () {
+      const { directory, first, second } = yield* withHome;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const deadPid = NodeChildProcess.spawnSync(process.execPath, ["-e", ""]).pid;
+      yield* fileSystem.makeDirectory(directory, { recursive: true });
+      yield* fileSystem.writeFileString(lockFile(directory, "k"), String(deadPid));
+      const runs = yield* Ref.make(0);
+      // Hold the lock long enough for the other reclaimer to finish its attempt.
+      // @effect-diagnostics-next-line globalTimers:off
+      const hold = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      const attempt = (lock: typeof first) =>
+        lock.tryRun("k", () => Ref.update(runs, (count) => count + 1).pipe(Effect.andThen(hold)));
+
+      const results = yield* Effect.all([attempt(first), attempt(second)], {
+        concurrency: "unbounded",
+      });
+
+      assert.strictEqual(results.filter(Option.isSome).length, 1);
+      assert.strictEqual(yield* Ref.get(runs), 1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("untilIdle waits for a held lock, then resumes", () =>
     Effect.gen(function* () {
       const { directory, first } = yield* withHome;
