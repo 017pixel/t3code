@@ -331,6 +331,23 @@ export function setUrlRouteTargetKey(key: string | null): void {
   urlRouteTargetKey = key;
 }
 
+/** Printable typing on the destination sidebar row before a kept view is revealed. */
+export function isPendingSidebarTextKey(event: KeyboardEvent, viewTargetKey: string): boolean {
+  if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey)
+    return false;
+  // Space and Enter activate the row; only its other text keys join the URL-target buffer.
+  if (event.key.length !== 1 || event.key === " " || !isUrlRouteTargetElsewhere(viewTargetKey))
+    return false;
+  const target = event.target;
+  if (
+    !(target instanceof Element) ||
+    !target.matches('[data-testid="sidebar-row-slim"], [data-testid="sidebar-row-card"]')
+  )
+    return false;
+  const threadKey = target.closest("[data-thread-item]")?.getAttribute("data-thread-item");
+  return threadKey !== undefined && urlRouteTargetKey === `server:${threadKey}`;
+}
+
 /**
  * Revealing a kept thread follows the click in a transition, so for a moment
  * the view the user left is still shown and gets their keys. Text it would
@@ -352,10 +369,11 @@ export function holdTextForUrlRouteTarget(viewTargetKey: string, text: string): 
 }
 
 /** Backspace on the way to a kept thread takes back the last character held for it. */
-export function eraseHeldText(viewTargetKey: string): void {
-  if (heldText === null || !isUrlRouteTargetElsewhere(viewTargetKey)) return;
-  if (heldText.targetKey !== urlRouteTargetKey) return;
+export function eraseHeldText(viewTargetKey: string): boolean {
+  if (heldText === null || !isUrlRouteTargetElsewhere(viewTargetKey)) return false;
+  if (heldText.targetKey !== urlRouteTargetKey) return false;
   heldText = { ...heldText, text: heldText.text.slice(0, -1) };
+  return true;
 }
 
 /** Text typed for this view while the view the user left was still shown. */

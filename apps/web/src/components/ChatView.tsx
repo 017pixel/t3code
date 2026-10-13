@@ -169,6 +169,7 @@ import { flushSync } from "react-dom";
 import {
   eraseHeldText,
   holdTextForUrlRouteTarget,
+  isPendingSidebarTextKey,
   isUrlRouteTargetElsewhere,
   KeptViewWarmingContext,
   takeHeldText,
@@ -8257,23 +8258,41 @@ export default function ChatView(props: ChatViewProps) {
         !shortcutContext.terminalFocus &&
         !shortcutContext.modelPickerOpen &&
         shouldTypeToFocusComposer(event);
+      const sidebarTextKey =
+        !shortcutContext.terminalFocus &&
+        !shortcutContext.modelPickerOpen &&
+        isPendingSidebarTextKey(event, viewRouteTargetKey) &&
+        !queryShownElement(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR);
 
       // A kept thread the user just switched to is revealed in a transition;
       // text typed meanwhile, into this view's composer or to focus it, goes
       // to the thread the URL names.
       if (
         isUrlRouteTargetElsewhere(viewRouteTargetKey) &&
-        (typesToComposer || isComposerTextKey(event)) &&
+        (typesToComposer || isComposerTextKey(event) || sidebarTextKey) &&
         holdTextForUrlRouteTarget(viewRouteTargetKey, event.key)
       ) {
         event.preventDefault();
         event.stopPropagation();
+        // Leave the row's activation keys alone; subsequent typing uses type-to-focus.
+        if (sidebarTextKey && event.target instanceof HTMLElement) event.target.blur();
         return;
       }
       // The other keys would send, edit or recall in this thread's draft.
       // Backspace takes back held text instead, and the rest do nothing.
-      if (isUrlRouteTargetElsewhere(viewRouteTargetKey) && isComposerEditKey(event)) {
-        if (event.key === "Backspace") eraseHeldText(viewRouteTargetKey);
+      const erasedHeldText =
+        event.key === "Backspace" &&
+        !event.isComposing &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        shouldRedirectInputToComposer(event) &&
+        eraseHeldText(viewRouteTargetKey);
+      if (
+        isUrlRouteTargetElsewhere(viewRouteTargetKey) &&
+        (isComposerEditKey(event) || erasedHeldText)
+      ) {
+        if (event.key === "Backspace" && !erasedHeldText) eraseHeldText(viewRouteTargetKey);
         event.preventDefault();
         event.stopPropagation();
         return;

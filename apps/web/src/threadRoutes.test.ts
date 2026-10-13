@@ -1,4 +1,12 @@
-import { describe, expect, it } from "vite-plus/test";
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import {
+  eraseHeldText,
+  holdTextForUrlRouteTarget,
+  isPendingSidebarTextKey,
+  setUrlRouteTargetKey,
+  takeHeldText,
+} from "./components/keptView";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId } from "@t3tools/contracts";
 import { DraftId } from "./composerDraftStore";
@@ -18,6 +26,72 @@ import {
   threadRouteTargetKey,
   type KeptThreadView,
 } from "./threadRoutes";
+
+describe("sidebar typing during a kept thread navigation", () => {
+  const previous = "server:env-1:previous";
+  const destination = "server:env-1:destination";
+  const item = document.createElement("li");
+  item.setAttribute("data-thread-item", "env-1:destination");
+  item.innerHTML =
+    '<div data-testid="sidebar-row-slim" role="button" tabindex="0"><button>Menu</button></div>';
+  const row = item.querySelector<HTMLElement>("[role=button]")!;
+
+  beforeEach(() => document.body.append(item));
+
+  afterEach(() => {
+    takeHeldText(destination);
+    setUrlRouteTargetKey(null);
+    item.remove();
+  });
+
+  it("holds destination row typing without giving any text to the previous draft", () => {
+    setUrlRouteTargetKey(destination);
+    row.focus();
+    const key = new KeyboardEvent("keydown", { key: "A", shiftKey: true });
+    row.dispatchEvent(key);
+    expect(isPendingSidebarTextKey(key, previous)).toBe(true);
+    expect(holdTextForUrlRouteTarget(previous, key.key)).toBe(true);
+    expect(takeHeldText(previous)).toBeNull();
+    holdTextForUrlRouteTarget(previous, "b");
+    expect(eraseHeldText(previous)).toBe(true);
+    holdTextForUrlRouteTarget(previous, "c");
+    setUrlRouteTargetKey(destination);
+    expect(takeHeldText(destination)).toBe("Ac");
+    expect(takeHeldText(destination)).toBeNull();
+    expect(eraseHeldText(previous)).toBe(false);
+  });
+
+  it("rejects another row, a nested control, and typing without pending navigation", () => {
+    const key = new KeyboardEvent("keydown", { key: "a" });
+    row.dispatchEvent(key);
+    expect(isPendingSidebarTextKey(key, previous)).toBe(false);
+    setUrlRouteTargetKey(previous);
+    expect(isPendingSidebarTextKey(key, destination)).toBe(false);
+    setUrlRouteTargetKey(destination);
+    expect(isPendingSidebarTextKey(key, destination)).toBe(false);
+    expect(holdTextForUrlRouteTarget(destination, "a")).toBe(false);
+    row.querySelector("button")!.dispatchEvent(key);
+    expect(isPendingSidebarTextKey(key, previous)).toBe(false);
+    expect(takeHeldText(destination)).toBeNull();
+  });
+
+  it.each([
+    { key: " " },
+    { key: "Enter" },
+    { key: "Tab" },
+    { key: "ArrowDown" },
+    { key: "a", ctrlKey: true },
+    { key: "a", metaKey: true },
+    { key: "a", altKey: true },
+    { key: "a", isComposing: true },
+  ])("leaves activation, navigation, modifiers and composition alone: %j", (init) => {
+    setUrlRouteTargetKey(destination);
+    const key = new KeyboardEvent("keydown", init);
+    row.dispatchEvent(key);
+    expect(isPendingSidebarTextKey(key, previous)).toBe(false);
+    expect(takeHeldText(destination)).toBeNull();
+  });
+});
 
 describe("threadRoutes", () => {
   it("does not treat cached thread lists as authoritative for deep links", () => {
