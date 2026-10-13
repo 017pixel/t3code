@@ -42,6 +42,36 @@ import {
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
+// Ordinary v2/v3 indexes encode assume-unchanged and skip-worktree in each
+// entry. Unsupported formats keep the ls-files check, including sparse v4.
+function checkpointIndexHasFlags(bytes: Uint8Array, objectIdBytes: number): boolean | undefined {
+  const index = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (index.length < 12 + objectIdBytes || index.toString("ascii", 0, 4) !== "DIRC") return;
+  const version = index.readUInt32BE(4);
+  if (version !== 2 && version !== 3) return;
+  const entries = index.readUInt32BE(8);
+  const limit = index.length - objectIdBytes;
+  let offset = 12;
+  for (let entry = 0; entry < entries; entry++) {
+    const start = offset;
+    const flagsOffset = start + 40 + objectIdBytes;
+    if (flagsOffset + 2 > limit) return;
+    const flags = index.readUInt16BE(flagsOffset);
+    if ((flags & 0x8000) !== 0) return true;
+    offset = flagsOffset + 2;
+    if ((flags & 0x4000) !== 0) {
+      if (version !== 3 || offset + 2 > limit) return;
+      if ((index.readUInt16BE(offset) & 0x4000) !== 0) return true;
+      offset += 2;
+    }
+    const end = index.indexOf(0, offset);
+    if (end === -1 || end >= limit) return;
+    offset = start + Math.ceil((end + 1 - start) / 8) * 8;
+    if (offset > limit) return;
+  }
+  return false;
+}
+
 export interface ExecuteGitInput {
   readonly operation: string;
   readonly cwd: string;
@@ -991,12 +1021,21 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             });
             // read-tree can rewrite the index, so restore its racy timestamp afterward.
             yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
-            let specialFlags = false;
+            const normalized =
+              cacheable &&
+              (yield* fileSystem.stat(tempIndexPath)).size <= BigInt(checkpointIndexMaxBytes)
+                ? yield* fileSystem.readFile(tempIndexPath)
+                : undefined;
+            const indexFlags =
+              normalized === undefined
+                ? undefined
+                : checkpointIndexHasFlags(normalized, headCommit.length / 2);
+            let specialFlags = indexFlags ?? false;
             let recordStart = true;
             let skipped = false;
             let skippedRecord: Uint8Array[] = [];
             const skippedPaths: string[] = [];
-            yield* vcsProcess.run({
+            const inspectFlags = vcsProcess.run({
               operation,
               command: "git",
               cwd: input.cwd,
@@ -1040,6 +1079,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
                 }
               },
             });
+            if (indexFlags === undefined) yield* inspectFlags;
             if (skippedPaths.length > 0 && !specialFlags) {
               const selected = yield* execute({
                 operation,
@@ -1061,15 +1101,14 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               source !== undefined &&
               source.size <= checkpointIndexMaxBytes
             ) {
-              const normalizedSize = (yield* fileSystem.stat(tempIndexPath)).size;
               checkpointIndex =
-                normalizedSize <= BigInt(checkpointIndexMaxBytes)
+                normalized !== undefined
                   ? {
                       cwd: input.cwd,
                       headCommit,
                       sourceSize: source.size,
                       sourceDigest: source.digest,
-                      normalized: yield* fileSystem.readFile(tempIndexPath),
+                      normalized,
                     }
                   : undefined;
             } else {
