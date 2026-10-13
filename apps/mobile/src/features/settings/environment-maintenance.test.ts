@@ -6,7 +6,6 @@ import {
   canMaintainEnvironment,
   canUpdateEnvironmentProvider,
   findEnvironmentUpdate,
-  providerUpdateSettingsNotice,
   supportsEnvironmentUpdate,
 } from "./environment-maintenance";
 
@@ -34,30 +33,6 @@ const provider = Schema.decodeUnknownSync(ServerProvider)({
 afterEach(() => vi.unstubAllGlobals());
 
 describe("environment maintenance access", () => {
-  it.each(["queued", "running", "succeeded", "failed", "unchanged"] as const)(
-    "keeps a background %s quiet and leaves settings diagnostics neutral",
-    (status) => {
-      const updateState = {
-        status,
-        origin: "background" as const,
-        startedAt: null,
-        finishedAt: null,
-        message: "Update outcome",
-        output: null,
-      };
-      expect(providerUpdateSettingsNotice({ ...provider, updateState })).toEqual(
-        status === "failed" || status === "unchanged"
-          ? { message: "Update outcome", failed: false }
-          : null,
-      );
-      expect(
-        providerUpdateSettingsNotice({
-          ...provider,
-          updateState: { ...updateState, origin: "manual" },
-        }),
-      ).toEqual({ message: "Update outcome", failed: status === "failed" });
-    },
-  );
   it("requires a connected authenticated session with operate permission", () => {
     const session = {
       authenticated: true,

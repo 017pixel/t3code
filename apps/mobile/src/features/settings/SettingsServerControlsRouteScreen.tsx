@@ -1,9 +1,7 @@
 import { useNavigation } from "@react-navigation/native";
 import { SettingsRow } from "./components/SettingsRow";
 import { AuthSettingsWriteScope } from "@t3tools/contracts";
-import { readEnvironmentScope } from "../../state/session";
-import { useAtomValue } from "@effect/atom-react";
-import { Atom } from "effect/reactivity";
+import { readEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { AppText as Text } from "../../components/AppText";
 import {
@@ -15,7 +13,7 @@ import {
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   type ProjectScopedServerSettingKey,
 } from "@t3tools/contracts";
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -145,35 +143,20 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const navigation = useNavigation();
   const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
   const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
+  const writableEnvironments = useEnvironmentsWithScope(selectedTargets, AuthSettingsWriteScope);
   const projectSelected = selectedProjectKey !== null;
-  const targets = useMemo(
-    () =>
-      resolveMobileSettingsTargets(
-        selectedTargets,
-        projectSelected ? (selectedProject?.members.map((member) => member.project) ?? []) : null,
-      ),
-    [selectedTargets, selectedProject, projectSelected],
-  );
-  const canWriteSettings = useAtomValue(
-    useMemo(
-      () =>
-        Atom.make(
-          (get) =>
-            targets.length > 0 &&
-            targets.every((target) =>
-              get(
-                serverEnvironment.updateSettings.permissionAtom(target.environment.environmentId),
-              ),
-            ),
-        ),
-      [targets],
-    ),
+  const targets = resolveMobileSettingsTargets(
+    selectedTargets,
+    projectSelected ? (selectedProject?.members.map((member) => member.project) ?? []) : null,
   );
   const [pendingWrites, setPendingWrites] = useState(0);
   const writeInFlight = useRef(false);
   const [pendingTargets, setPendingTargets] = useState<
     readonly ScopedMobileSettingsTarget[] | null
   >(null);
+  const canWriteSettings =
+    targets.length > 0 &&
+    targets.every((target) => writableEnvironments.has(target.environment.environmentId));
   const displayTargets = pendingWrites > 0 && pendingTargets !== null ? pendingTargets : targets;
   const hasConnectedSelection = targets.length > 0;
   const reference = displayTargets[0] ?? null;
@@ -490,7 +473,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                           projectSelected
                             ? "Environment-wide setting. Select All projects to change it."
                             : supportsAutomaticUpdates
-                              ? "Install one-click provider CLI updates and background service updates on the selected environments while nothing is running."
+                              ? "Install provider CLI updates, and update background-service installs, on the selected environments while nothing is running."
                               : "Update older servers to control automatic updates."
                         }
                         value={uniform("automaticUpdates")}

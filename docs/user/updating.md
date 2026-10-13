@@ -5,21 +5,41 @@ When a server is behind your web or desktop app, an update notice appears in the
 conversation and **Settings → Connections**. Update the machine named in that
 notice.
 
+## Update everything at once
+
+The update button at the bottom of the sidebar updates every connected machine
+in one step. It updates outdated providers, then servers that are behind, then
+the desktop app you are using, which restarts last. Servers move to the
+version your desktop app is installing, or to your web app's version. A
+background service stays on its current release channel. A remote desktop app
+installs the latest release from its own channel. Hover the button to see what
+it will update.
+
+Server updates appear only after that version is published to npm. Remote
+desktop apps do not wait for npm. Servers that need
+a manual update are not included. Use the notice or **Settings → Connections**
+for those.
+
+The confirmation counts the running threads that the restarts will interrupt,
+and how many can resume afterwards. See **Continue threads after restarts**
+below.
+
 ## Before you update
 
 Server updates restart the connection and can interrupt active agents and
 terminal commands. Saved threads, settings, and project files remain.
 
-**Settings → General → Continue threads after restarts** is off by default.
-Enable it to resume supported active threads after an update, crash, or machine
+**Settings → General → Continue threads after restarts** is on by default.
+It resumes supported active threads after an update, crash, or machine
 restart. Changes are saved to connected environments that support this setting;
 update older servers first. If a supported environment was offline or has a
 different value, use **Apply to all** in Settings after it connects.
 T3 Code must start again on that machine;
 the setting does not enable automatic startup. Terminal commands may still be
 interrupted, and threads without saved provider resume state need a new message.
-If you previously enabled continuation for updates, enable this setting once
-to allow recovery without a connected client.
+A thread is not resumed while it waits for your approval, answer, or secret, or
+while it is archived, snoozed, or settled. After three automatic resumes in a row,
+the thread waits for your next message.
 
 Updates from the previous orchestration system preserve conversation transcripts but cannot carry
 every kind of runtime history forward. Read [Threads from older T3 Code versions](./thread-migration.md)
@@ -72,35 +92,27 @@ update can roll back to the previous version. If the update still fails:
 2. Check that you updated the server's machine, not only the device you are using.
 3. For a command-line server, stop it and relaunch the exact version shown in the notice.
 
-## Automatic updates
-
-**Settings → General → Update automatically** is on by default. Each environment
-waits until no thread is running or waiting for you, no background work is pending,
-no client has been used for 15 minutes, and no scheduled task or usage-limit resume
-is due within 5 minutes. Tasks that repeat more often than every 15 minutes only
-hold updates back while they run. Then it installs:
-
-- provider CLI updates that have a one-click update and a recognized installation,
-  when **Provider update checks** is also on;
-- the newest T3 Code release on its channel, when it runs as a background service
-  (`t3 service install`). It downloads first and restarts only inside that window.
-  If a newer release is published while one waits, the newer one replaces it.
-
-Automatic server restarts also wait for integrated terminal commands to finish.
-
-Servers started from a terminal or with `npx` are never replaced automatically.
-A failed provider update is retried after 6 hours, when a newer version is
-published, or after the server restarts. A T3 Code release that fails to download
-is retried at the next hourly check. One that rolls back is skipped until a newer
-version is published. An update that needs newer clients waits for you to install
-it. While `settings.json` cannot be read, automatic updates stay off.
-
 ## Update providers
 
-ACP Registry agents, including Antigravity, and local ACP commands do not offer
-one-click updates and are not updated by this setting.
-If T3 Code cannot identify a CLI's installation, its update button can still run
-the CLI's own updater manually, but automatic updates leave it alone.
+**Settings → General → Update automatically** is on by default. With
+**Provider update checks** also on, each environment installs provider CLI
+updates in the background once no client has been used for 15 minutes and no
+thread is running or waiting for you. Only CLIs that support one-click updates
+are updated, each to the release T3 Code checked. A failed update is retried
+after 6 hours or when a newer version is published. While `settings.json`
+cannot be read, automatic updates stay off, and a server started for
+development never updates provider CLIs.
+
+The same setting updates a [background service](./background-service.md) to
+the newest release on its channel. T3 Code downloads the release right away
+and restarts the service once the same conditions hold, and also no project
+clone or workspace setup is running and no terminal is running a command. A
+stable service never installs a prerelease, a release that changes the client
+protocol waits for a manual update, and a release the service rolled back is
+not tried again. A server that crashes is restarted
+with a growing delay instead of exiting. To stay on an exact version, turn
+**Update automatically** off. Servers started by the desktop app, `npx`, or a
+terminal are not updated this way.
 
 **Settings → Providers** shows provider updates for the selected environment.
 **Update all** updates every outdated provider on every connected environment
@@ -117,7 +129,7 @@ the machine instead.
 
 The same page lets you refresh provider status and update supported providers.
 These controls require a connected environment and permission to operate it.
-Automatic updates, provider update checks, and restart continuation preferences are in
+Provider update checks and restart continuation preferences are in
 **Settings → Maintenance**. If provider update checks are disabled, enable them
 there before refreshing to find newer versions.
 

@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-// @effect-diagnostics globalTimers:off globalDate:off
+// @effect-diagnostics globalTimers:off
 // The launcher supervises the server child for the boot service and must keep
 // working across server versions, so it stays on Node built-ins with no Effect
 // runtime: it is the one part of the executable that cannot depend on the
@@ -9,8 +9,6 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeOS from "node:os";
-import * as NodeSqlite from "node:sqlite";
 
 import type {
   PendingServiceUpdate,
@@ -32,38 +30,13 @@ import {
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
 
-import * as OwnedProcesses from "./process/ownedProcesses.ts";
-
 const HANDOFF_DELAY_MS = 2_000;
 const PREPARED_TIMEOUT_MS = 120_000;
 const TERMINATE_GRACE_MS = 5_000;
-const CRASH_WINDOW_MS = 5 * 60_000;
-const CRASH_LIMIT = 3;
-
-// A read-only transaction includes WAL state. Compare both the migration ledger
-// and actual schema: missing/corrupt history or untracked DDL must fail closed.
-function databaseSchema(dbPath: string): string | null {
-  let db: NodeSqlite.DatabaseSync | undefined;
-  try {
-    db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
-    db.exec("BEGIN");
-    const ledger = db
-      .prepare("SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id")
-      .all();
-    if (ledger.length === 0) return null;
-    const schema = db
-      .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
-      .all();
-    const version = db.prepare("PRAGMA user_version").get();
-    return NodeCrypto.createHash("sha256")
-      .update(JSON.stringify({ ledger, schema, version }))
-      .digest("hex");
-  } catch {
-    return null;
-  } finally {
-    db?.close();
-  }
-}
+const CRASH_RESTART_BASE_MS = 1_000;
+const CRASH_RESTART_MAX_MS = 30_000;
+/** A child that ran this long before exiting was not crash-looping. */
+const STABLE_RUN_MS = 60_000;
 
 type TerminalStatus = "committed" | "rolled-back" | "failed";
 type ChildRole = "active" | "trial";
@@ -72,6 +45,7 @@ interface ManagedChild {
   readonly version: string;
   role: ChildRole;
   readonly process: NodeChildProcess.ChildProcess;
+  readonly startedAt: number;
 }
 
 // Mirrors pinnedRuntimePaths: a runtime is an unpacked release archive whose
@@ -257,30 +231,29 @@ async function runtimeExists(baseDir: string, version: string): Promise<boolean>
   }
 }
 
-/** Removes obsolete completed runtimes while preserving every executable needed for recovery. */
+/**
+ * Removes completed runtimes nothing can return to, so unattended updates do
+ * not fill the disk. The launcher's own version stays because the service unit
+ * names that executable; the active version, the version an update came from,
+ * and a pending target stay because recovery may start them.
+ */
 export async function pruneServiceRuntimes(
   baseDir: string,
-  keep: ReadonlySet<string> = new Set(),
+  state: ServiceState,
+  launcherVersion: string | undefined,
 ): Promise<void> {
-  const state = await readServiceState(NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE));
-  // Older launchers do not identify the runtime their service unit still names.
-  if (state.launcherVersion === undefined) return;
-  const protectedVersions = new Set([state.launcherVersion, state.activeVersion, ...keep]);
-  if (state.update?.status === "pending") {
-    protectedVersions.add(state.update.fromVersion);
-    protectedVersions.add(state.update.targetVersion);
+  const keep = new Set([state.activeVersion]);
+  if (launcherVersion !== undefined) keep.add(launcherVersion);
+  if (state.update !== undefined) {
+    keep.add(state.update.fromVersion);
+    if (state.update.status === "pending") keep.add(state.update.targetVersion);
   }
-  if (state.rollback !== undefined) protectedVersions.add(state.rollback.update.fromVersion);
-  if (state.crashRecovery !== undefined)
-    protectedVersions.add(state.crashRecovery.update.fromVersion);
   const versionsDir = NodePath.join(baseDir, "runtime", "versions");
   for (const entry of await NodeFSP.readdir(versionsDir, { withFileTypes: true })) {
-    if (
-      !entry.isDirectory() ||
-      !isExactServiceVersion(entry.name) ||
-      protectedVersions.has(entry.name)
-    )
+    if (!entry.isDirectory() || !isExactServiceVersion(entry.name) || keep.has(entry.name)) {
       continue;
+    }
+    // An incomplete directory is a staging in progress, not an old runtime.
     if (!(await runtimeExists(baseDir, entry.name))) continue;
     await NodeFSP.rm(NodePath.join(versionsDir, entry.name), { recursive: true, force: true });
   }
@@ -347,7 +320,7 @@ export class Launcher {
   #stopRequested = false;
   #stopping = false;
   #done = false;
-  #committedAtMonotonic: number | undefined;
+  #crashDelayMs = CRASH_RESTART_BASE_MS;
   readonly #completion = Promise.withResolvers<void>();
 
   constructor(baseDir: string, state: ServiceState) {
@@ -412,7 +385,6 @@ export class Launcher {
       // before this queued stop tears it down. That replacement owns the
       // pre-activation tunnel cleanup path and observes the marker above.
       this.#stopping = true;
-      this.#clearTimer();
       const child = this.#child?.process;
       this.#child = null;
       if (child !== undefined) await terminateChild(child, signal);
@@ -440,26 +412,6 @@ export class Launcher {
     const awaitedVersion = await NodeFSP.readFile(restartPending, "utf8").catch(() => undefined);
     if (awaitedVersion?.trim() === this.#state.activeVersion) {
       await NodeFSP.rm(restartPending, { force: true }).catch(() => undefined);
-    }
-    const executableDir = NodePath.dirname(await NodeFSP.realpath(process.execPath));
-    const versionsDir = NodePath.join(this.#baseDir, "runtime", "versions");
-    const launcherVersion =
-      NodePath.dirname(executableDir) === versionsDir
-        ? NodePath.basename(executableDir)
-        : (this.#state.launcherVersion ?? this.#state.activeVersion);
-    this.#state = { ...this.#state, launcherVersion };
-    await writeServiceState(this.#statePath, this.#state);
-    const rollback = this.#state.rollback;
-    if (rollback !== undefined) {
-      if (await databaseRestorePending(this.#baseDir, rollback.update)) {
-        await this.#returnToPrevious(rollback.update, "rolled-back", "rollback-interrupted");
-        return;
-      }
-      // Older launchers retained a backup after activation. It may predate
-      // accepted work, so only an already-started restore can use it safely.
-      const { rollback: _rollback, ...next } = this.#state;
-      await writeServiceState(this.#statePath, next);
-      this.#state = next;
     }
     const update = this.#state.update;
     if (update?.status !== "pending") {
@@ -495,28 +447,8 @@ export class Launcher {
     }
   }
 
-  async #reapProviders(): Promise<void> {
-    await OwnedProcesses.make({
-      stateDir: NodePath.join(this.#baseDir, "userdata"),
-      // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
-      platform: process.platform,
-      environment: process.env,
-      hostname: NodeOS.hostname(),
-      installLeaseDirectory: NodePath.join(
-        process.env.XDG_CACHE_HOME || NodePath.join(NodeOS.homedir(), ".cache"),
-        "t3",
-        "provider-maintenance",
-      ),
-    }).catch(() => {
-      // Never let cleanup stop the launcher. A newer child repeats it and a
-      // failing child stays in crash-loop recovery, which keeps the service up.
-    });
-  }
-
   async #startChild(version: string, role: ChildRole, update?: ServiceUpdateRecord): Promise<void> {
     if (this.#stopping) return;
-    // The previous runtime may predate reaping, including after a launcher restart.
-    await this.#reapProviders();
     if (!(await runtimeExists(this.#baseDir, version))) {
       throw new Error(`Selected t3@${version} runtime is missing or incomplete.`);
     }
@@ -550,6 +482,7 @@ export class Launcher {
       version,
       role,
       process: child,
+      startedAt: performance.now(),
     };
     this.#child = managed;
     child.on("message", (value) => {
@@ -591,7 +524,7 @@ export class Launcher {
       await reject("The requesting server is not the selected active version.");
       return;
     }
-    if (this.#state.update?.status === "pending" || this.#state.rollback !== undefined) {
+    if (this.#state.update?.status === "pending") {
       await reject("Another server update is already pending.");
       return;
     }
@@ -619,9 +552,7 @@ export class Launcher {
       dbPath: message.dbPath,
       status: "pending",
     };
-    const { crashRecovery: _recovery, ...state } = this.#state;
-    const next: ServiceState = { ...state, update: pending };
-    this.#committedAtMonotonic = undefined;
+    const next: ServiceState = { ...this.#state, update: pending };
     await writeServiceState(this.#statePath, next);
     this.#state = next;
     await sendMessage(child.process, { type: "update-accepted", updateId: pending.id });
@@ -659,24 +590,28 @@ export class Launcher {
       ...this.#state,
       activeVersion: pending.targetVersion,
       update: committed,
-      crashRecovery: {
-        update: pending,
-        schema: databaseSchema(
-          databaseBackupFile(databaseBackupDir(this.#baseDir, pending.id), ""),
-        ),
-        committedAt: Date.now(),
-        crashes: 0,
-      },
     };
     await writeServiceState(this.#statePath, next);
     this.#state = next;
     child.role = "active";
-    this.#committedAtMonotonic = performance.now();
-    // Committed opens the runtime's provider and client gates. Never restore
-    // this snapshot afterward: it would erase receipts for accepted work.
+    await discardDatabaseBackup(this.#baseDir, committed.id).catch(() => undefined);
     await sendMessage(child.process, { type: "committed", updateId: committed.id });
-    await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
-    await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
+    await this.#pruneRuntimes();
+  }
+
+  async #pruneRuntimes(): Promise<void> {
+    try {
+      // The unit's ExecStart names a specific runtime/versions/<v>/t3.
+      const executableDir = NodePath.dirname(await NodeFSP.realpath(process.execPath));
+      const versionsDir = NodePath.join(this.#baseDir, "runtime", "versions");
+      const launcherVersion =
+        NodePath.dirname(executableDir) === versionsDir
+          ? NodePath.basename(executableDir)
+          : undefined;
+      await pruneServiceRuntimes(this.#baseDir, this.#state, launcherVersion);
+    } catch {
+      // Pruning only saves disk; it must never stop the service.
+    }
   }
 
   async #handlePreparedTimeout(child: ManagedChild): Promise<void> {
@@ -715,74 +650,19 @@ export class Launcher {
       await this.#startTrial(pending);
       return;
     }
-    if (this.#state.crashRecovery !== undefined) {
-      await this.#handleCommittedCrash();
-      return;
+    // Restart in-process so systemd's start limit cannot strand an unattended
+    // service behind a crashing release.
+    if (performance.now() - child.startedAt >= STABLE_RUN_MS) {
+      this.#crashDelayMs = CRASH_RESTART_BASE_MS;
     }
-    throw new Error(`Active child exited unexpectedly (${String(code ?? signal ?? "unknown")}).`);
-  }
-
-  async #handleCommittedCrash(): Promise<void> {
-    const recovery = this.#state.crashRecovery;
-    if (recovery === undefined) return;
-    const age =
-      this.#committedAtMonotonic === undefined
-        ? Date.now() - recovery.committedAt
-        : performance.now() - this.#committedAtMonotonic;
-    // A launcher restart uses durable time. A backward clock jump is not
-    // evidence of a bounded crash loop, so it cannot authorize a downgrade.
-    if (this.#state.update?.status !== "failed" && (age < 0 || age > CRASH_WINDOW_MS)) {
-      const { crashRecovery: _recovery, ...next } = this.#state;
-      await writeServiceState(this.#statePath, next);
-      this.#state = next;
-      await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
-      throw new Error("Active child exited outside the update crash window.");
-    }
-    const crashes = Math.min(recovery.crashes + 1, 6);
-    let next: ServiceState = { ...this.#state, crashRecovery: { ...recovery, crashes } };
-    if (crashes >= CRASH_LIMIT && this.#state.update?.status !== "failed") {
-      const current = databaseSchema(recovery.update.dbPath);
-      if (
-        recovery.schema !== null &&
-        current === recovery.schema &&
-        (await runtimeExists(this.#baseDir, recovery.update.fromVersion))
-      ) {
-        const { crashRecovery: _recovery, ...state } = next;
-        next = {
-          ...state,
-          activeVersion: recovery.update.fromVersion,
-          update: terminalUpdate({
-            pending: recovery.update,
-            status: "rolled-back",
-            reason: "candidate-crash-loop: previous runtime resumed with current database",
-          }),
-        };
-      } else {
-        next = {
-          ...next,
-          update: terminalUpdate({
-            pending: recovery.update,
-            status: "failed",
-            reason:
-              "candidate-crash-loop: database schema changed or compatibility could not be verified; keeping candidate runtime",
-          }),
-        };
-      }
-    }
-    await writeServiceState(this.#statePath, next);
-    this.#state = next;
-    if (this.#stopRequested) return;
-    // Keep the launcher alive so systemd's start limit does not strand the
-    // service. The timer stays cancellable by explicit shutdown.
-    this.#timer = setTimeout(
-      () => {
-        this.#timer = undefined;
-        this.#enqueue(() =>
-          this.#startChild(this.#state.activeVersion, "active", this.#state.update),
-        );
-      },
-      Math.min(1_000 * 2 ** (crashes - 1), 30_000),
-    );
+    const delay = this.#crashDelayMs;
+    this.#crashDelayMs = Math.min(delay * 2, CRASH_RESTART_MAX_MS);
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      this.#enqueue(() =>
+        this.#startChild(this.#state.activeVersion, "active", this.#state.update),
+      );
+    }, delay);
   }
 
   async #returnToPrevious(
@@ -795,12 +675,10 @@ export class Launcher {
       this.#child = null;
       await terminateChild(child.process);
     }
-    await this.#reapProviders();
     await restoreDatabaseBackup(this.#baseDir, pending);
     const outcome = terminalUpdate({ pending, status, reason });
-    const { rollback: _rollback, ...state } = this.#state;
     const next: ServiceState = {
-      ...state,
+      ...this.#state,
       activeVersion: pending.fromVersion,
       update: outcome,
     };
@@ -808,7 +686,7 @@ export class Launcher {
     this.#state = next;
     await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
     await this.#startChild(next.activeVersion, "active", outcome);
-    await pruneServiceRuntimes(this.#baseDir).catch(() => undefined);
+    await this.#pruneRuntimes();
   }
 }
 

@@ -16,7 +16,6 @@ import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ProviderHost from "./ProviderHost.ts";
-import * as Maintenance from "./maintenance.ts";
 import { applyUsageLimitsUpdate, resolveUsageLimitsAfterProbe } from "./usageLimits.ts";
 import type { ManagedServerProvider } from "./snapshot.ts";
 
@@ -52,7 +51,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     readonly publishSnapshot: (snapshot: ServerProvider) => Effect.Effect<void>;
   }) => Effect.Effect<void>;
   readonly refreshInterval?: Duration.Input;
-  readonly refreshOnInterval?: boolean | "enrich";
+  readonly refreshOnInterval?: boolean;
   readonly checkProviderOnSettingsChange?: (previous: Settings, next: Settings) => boolean;
 }): Effect.fn.Return<
   ManagedServerProvider,
@@ -60,7 +59,6 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   Scope.Scope | ProviderHost.ProviderHost
 > {
   const host = yield* ProviderHost.ProviderHost;
-  const admission = yield* Maintenance.ProviderMaintenanceAdmission;
   const refreshSemaphore = yield* Semaphore.make(1);
   const changesPubSub = yield* Effect.acquireRelease(
     PubSub.unbounded<ServerProvider>(),
@@ -195,9 +193,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     return nextSnapshot;
   });
   const applySnapshot = (nextSettings: Settings, options?: { readonly forceRefresh?: boolean }) =>
-    admission.withLaunchPermit(
-      refreshSemaphore.withPermits(1)(applySnapshotBase(nextSettings, options)),
-    );
+    refreshSemaphore.withPermits(1)(applySnapshotBase(nextSettings, options));
 
   /**
    * Runtime usage updates arrive between probes. They patch only
@@ -230,16 +226,6 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     return yield* applySnapshot(nextSettings, { forceRefresh: true });
   });
 
-  const refreshEnrichment = refreshSemaphore.withPermits(1)(
-    Effect.gen(function* () {
-      const settings = yield* input.getSettings;
-      const state = yield* Ref.get(snapshotStateRef);
-      const generation = state.enrichmentGeneration + 1;
-      yield* Ref.set(snapshotStateRef, { ...state, enrichmentGeneration: generation });
-      yield* restartSnapshotEnrichment(settings, state.snapshot, generation);
-    }),
-  );
-
   const hasProviderStatusDemand = Effect.gen(function* () {
     const state = yield* Ref.get(snapshotStateRef);
     const instanceId = state.snapshot.instanceId;
@@ -250,7 +236,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     return genericDemand || instanceDemand;
   });
 
-  const configuredRefreshInterval =
+  const getRefreshInterval =
     input.refreshInterval !== undefined
       ? Effect.succeed(input.refreshInterval)
       : host.settings.get.pipe(
@@ -260,15 +246,6 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
           ),
           Effect.orElseSucceed(() => DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL),
         );
-
-  const getRefreshInterval = configuredRefreshInterval.pipe(
-    Effect.map((interval) =>
-      input.refreshOnInterval === "enrich" &&
-      Duration.toMillis(Duration.fromInputUnsafe(interval)) <= 0
-        ? Duration.hours(1)
-        : interval,
-    ),
-  );
 
   const refreshIntervalChanges = yield* Queue.sliding<void>(1);
   if (input.refreshInterval === undefined) {
@@ -307,18 +284,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
             Duration.toMillis(Duration.fromInputUnsafe(refreshInterval)) > 0
               ? hasProviderStatusDemand.pipe(
                   Effect.flatMap((shouldRefresh) =>
-                    input.refreshOnInterval === "enrich"
-                      ? host.settings.get.pipe(
-                          Effect.flatMap((settings) =>
-                            shouldRefresh ||
-                            (settings.automaticUpdates && settings.enableProviderUpdateChecks)
-                              ? refreshEnrichment
-                              : Effect.void,
-                          ),
-                        )
-                      : shouldRefresh
-                        ? refreshSnapshot().pipe(Effect.asVoid)
-                        : Effect.void,
+                    shouldRefresh ? refreshSnapshot().pipe(Effect.asVoid) : Effect.void,
                   ),
                 )
               : Effect.void,

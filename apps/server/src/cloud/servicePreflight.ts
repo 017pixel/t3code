@@ -8,8 +8,7 @@ export type ServicePreflightResult =
       readonly status: "ready";
       readonly version: string;
       readonly launcherProtocol: typeof SERVICE_LAUNCHER_PROTOCOL;
-      /** Absent from runtimes that predate it. A background update skips a
-          target whose clients would need a newer protocol. */
+      /** Absent from runtimes that predate it. A target whose protocol differs would lock out current clients. */
       readonly orchestrationProtocol?: number;
     }
   | {

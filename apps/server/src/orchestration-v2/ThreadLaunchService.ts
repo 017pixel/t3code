@@ -1,6 +1,7 @@
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as RestartWork from "../updates/RestartWork.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
@@ -23,7 +24,6 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -48,7 +48,6 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
-import * as ProviderMaintenanceCoordinator from "@t3tools/provider-core/server/maintenance";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
@@ -189,8 +188,6 @@ export class ThreadLaunchService extends Context.Service<
       | Orchestrator.OrchestratorV2Error
       | ThreadManagement.ThreadManagementProviderInstanceDisabledError
     >;
-    /** Workspace preparation and branch naming can outlive a thread's run. */
-    readonly activePreparationCount: Effect.Effect<number>;
   }
 >()("t3/orchestration-v2/ThreadLaunchService") {}
 
@@ -209,6 +206,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+  const restartWork = yield* RestartWork.RestartWork;
   const terminals = yield* TerminalManager.TerminalManager;
   const git = yield* GitWorkflow.GitWorkflowService;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -219,13 +217,9 @@ const make = Effect.gen(function* () {
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
-  const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
   const preparationScope = yield* Scope.make("sequential");
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
-  const preparations = yield* FiberSet.make().pipe(
-    Effect.provideService(Scope.Scope, preparationScope),
-  );
 
   const mapError =
     (input: PreparationInput, operation: ThreadLaunchError["operation"], threadId?: ThreadId) =>
@@ -539,7 +533,7 @@ const make = Effect.gen(function* () {
               cause,
             }),
           ),
-          FiberSet.run(preparations, { startImmediately: false }),
+          Effect.forkIn(preparationScope),
         );
       }
 
@@ -742,20 +736,23 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
     runId: RunId | null,
   ) {
-    yield* prepareInBackground(input, threadId, runId).pipe(
-      Effect.onError((cause) =>
-        failPreparedRun(
-          input,
-          threadId,
-          runId,
-          Cause.hasInterruptsOnly(cause) ? "Worktree setup cancelled." : Cause.squash(cause),
+    // A restart would lose the setup script, so it counts as restart work from the moment it forks.
+    yield* restartWork
+      .track(
+        prepareInBackground(input, threadId, runId).pipe(
+          Effect.onError((cause) =>
+            failPreparedRun(
+              input,
+              threadId,
+              runId,
+              Cause.hasInterruptsOnly(cause) ? "Worktree setup cancelled." : Cause.squash(cause),
+            ),
+          ),
+          Effect.ignoreCause,
+          Effect.ensuring(releasePreparation(input.commandId)),
         ),
-      ),
-      Effect.ignoreCause,
-      Effect.ensuring(releasePreparation(input.commandId)),
-      FiberSet.run(preparations, { startImmediately: false }),
-      admission.withLaunchPermit,
-    );
+      )
+      .pipe(Effect.forkIn(preparationScope, { startImmediately: true }));
   });
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
@@ -1059,12 +1056,7 @@ const make = Effect.gen(function* () {
     );
   };
 
-  return ThreadLaunchService.of({
-    launch,
-    checkWorktreeBase,
-    retryPreparation,
-    activePreparationCount: FiberSet.size(preparations),
-  });
+  return ThreadLaunchService.of({ launch, checkWorktreeBase, retryPreparation });
 });
 
 export const layer = Layer.effect(ThreadLaunchService, make);

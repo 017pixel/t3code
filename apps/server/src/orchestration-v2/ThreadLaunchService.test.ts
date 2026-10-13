@@ -32,7 +32,6 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -56,6 +55,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as RestartWork from "../updates/RestartWork.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
@@ -153,6 +153,7 @@ function makeHarness(options: HarnessOptions = {}) {
   const layerExternalServices = Layer.mergeAll(
     WorktreeSetupTracker.layer,
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
+    RestartWork.layer,
     Layer.mock(TerminalManager.TerminalManager)({ close: () => Effect.void }),
     Layer.succeed(ProjectService.ProjectService, {
       create: () => Effect.die("unused"),
@@ -402,40 +403,6 @@ it.effect("retains automation and sender attribution while a message waits in th
   }).pipe(Effect.provide(harness.layer));
 });
 
-it.effect("tracks workspace preparation for an empty thread with no active run", () =>
-  Effect.gen(function* () {
-    const entered = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
-    const release = yield* Deferred.make<void>();
-    const harness = makeHarness({
-      createWorktree: (input) =>
-        Effect.gen(function* () {
-          yield* Deferred.succeed(entered, yield* Effect.fiber);
-          yield* Deferred.await(release);
-          return {
-            worktree: { path: "/repo-worktrees/empty", refName: input.newRefName, headSha: "abc" },
-          } as never;
-        }),
-    });
-    yield* Effect.gen(function* () {
-      const launches = yield* ThreadLaunch.ThreadLaunchService;
-      const threads = yield* ThreadManagement.ThreadManagementService;
-      const result = yield* launches.launch(
-        launchInput({
-          command: "command:launch:empty-preparation",
-          thread: "thread:launch:empty-preparation",
-          workspace: { type: "worktree", baseRef: "main", branch: "empty" },
-        }),
-      );
-      const fiber = yield* Deferred.await(entered);
-      assert.equal((yield* threads.getThreadProjection(result.threadId)).runs.length, 0);
-      assert.equal(yield* launches.activePreparationCount, 1);
-      yield* Deferred.succeed(release, undefined);
-      assert.isTrue(Exit.isSuccess(yield* Fiber.await(fiber)));
-      assert.equal(yield* launches.activePreparationCount, 0);
-    }).pipe(Effect.provide(harness.layer));
-  }),
-);
-
 it.effect("returns a visible preparing message while provisioning is still blocked", () =>
   Effect.gen(function* () {
     const worktreeEntered = yield* Deferred.make<void>();
@@ -579,17 +546,21 @@ it.effect("enqueues provider work only after setup has been initiated", () =>
         message: "Start after setup",
         workspace: { type: "worktree", baseRef: "main" },
       });
+      const restartWork = yield* RestartWork.RestartWork;
       const launched = yield* launches.launch(input);
       yield* Deferred.await(setupEntered);
       assert.isEmpty(
         yield* outbox.listByCommandId(CommandId.make("command:launch:release:release")),
       );
+      // A restart now would cut the setup script off.
+      assert.equal(yield* restartWork.count, 1);
       yield* Deferred.succeed(allowSetup, undefined);
       yield* waitUntil(() =>
         outbox
           .listByCommandId(CommandId.make("command:launch:release:release"))
           .pipe(Effect.map((effects) => effects.length === 1)),
       );
+      yield* restartWork.count.pipe(Effect.repeat({ until: (count) => count === 0 }));
       const projection = yield* threads.getThreadProjection(launched.threadId);
       assert.equal(projection.runs[0]?.status, "starting");
       assert.equal(projection.checkpointScopes[0]?.cwd, "/repo-worktrees/feature");
@@ -2298,7 +2269,6 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
           ),
         checkWorktreeBase: launches.checkWorktreeBase,
         retryPreparation: launches.retryPreparation,
-        activePreparationCount: launches.activePreparationCount,
       }),
       Effect.flip,
     );

@@ -43,7 +43,6 @@ import {
   resolveServerWelcomeState,
   resolveServerUpdateProgressResult,
   serverUpdateStateForProgressEvent,
-  serverUpdateStateForAnnouncedRestart,
   serverUpdateStateForServerVersion,
   validateServerUpdateReadyEvent,
   waitForNextEnvironmentReconnect,
@@ -88,117 +87,6 @@ function session(client: WsRpcProtocolClient): RpcSession {
     closed: Effect.never,
   };
 }
-
-it("treats an announced background restart as resuming and clears it on ready, including rollback", () => {
-  const active = {} as RpcSession;
-  const stale = {} as RpcSession;
-  const state = { currentSession: active, welcomeSession: active, welcome: null };
-  const payload = { fromVersion: "1.0.0", targetVersion: "1.1.0", updateId: "background-update" };
-  const announced = applyServerWelcomeEvent(state, active, { type: "updateRestart", payload });
-  expect(announced.restart).toEqual(payload);
-  const failed = {
-    status: "failed" as const,
-    stage: "installing" as const,
-    fromVersion: "1.0.0",
-    targetVersion: "1.0.1",
-    message: "old manual update failed",
-  };
-  expect(serverUpdateStateForAnnouncedRestart(failed, announced.restart)).toEqual({
-    status: "running",
-    stage: "resuming",
-    fromVersion: "1.0.0",
-    targetVersion: "1.1.0",
-  });
-  const manual = {
-    status: "running" as const,
-    stage: "installing" as const,
-    fromVersion: "1.0.0",
-    targetVersion: "1.1.0",
-  };
-  expect(serverUpdateStateForAnnouncedRestart(manual, announced.restart)).toBe(manual);
-  expect(applyServerWelcomeEvent(state, stale, { type: "updateRestart", payload })).toBe(state);
-  expect(
-    applyServerWelcomeEvent(announced, active, { type: "ready", payload: {} }).restart,
-  ).toBeUndefined();
-});
-
-it.each(["rolled-back", "failed"] as const)(
-  "keeps a background %s outcome visible after reconnect until the next successful update",
-  (status) => {
-    const active = {} as RpcSession;
-    const stale = {} as RpcSession;
-    const outcome = {
-      id: "background",
-      fromVersion: "1.0.0",
-      targetVersion: "1.1.0",
-      status,
-      reason: "candidate-crash-loop",
-    };
-    const state = { currentSession: active, welcomeSession: active, welcome: null };
-    const ready = applyServerWelcomeEvent(state, active, {
-      type: "ready",
-      payload: { updateOutcome: outcome },
-    });
-    const version = status === "failed" ? "1.1.0" : "1.0.0";
-    expect(
-      serverUpdateStateForServerVersion(
-        serverUpdateStateForAnnouncedRestart(
-          { status: "idle" },
-          undefined,
-          ready.updateOutcome,
-          version,
-        ),
-        version,
-      ),
-    ).toEqual({
-      status: "failed",
-      stage: "resuming",
-      fromVersion: version,
-      targetVersion: "1.1.0",
-      message: "candidate-crash-loop",
-    });
-    expect(
-      serverUpdateStateForAnnouncedRestart({ status: "idle" }, undefined, outcome, version),
-    ).toBe(serverUpdateStateForAnnouncedRestart({ status: "idle" }, undefined, outcome, version));
-    expect(
-      applyServerWelcomeEvent(state, stale, {
-        type: "ready",
-        payload: { updateOutcome: outcome },
-      }),
-    ).toBe(state);
-    const running = {
-      status: "running",
-      stage: "installing",
-      fromVersion: version,
-      targetVersion: "1.2.0",
-    } as const;
-    expect(serverUpdateStateForAnnouncedRestart(running, undefined, outcome, version)).toBe(
-      running,
-    );
-    const manualFailure = {
-      status: "failed",
-      stage: "installing",
-      fromVersion: version,
-      targetVersion: outcome.targetVersion,
-      message: "manual retry failed",
-    } as const;
-    expect(serverUpdateStateForAnnouncedRestart(manualFailure, undefined, outcome, version)).toBe(
-      manualFailure,
-    );
-    const success = applyServerWelcomeEvent(ready, active, {
-      type: "ready",
-      payload: { updateOutcome: { ...outcome, status: "committed", targetVersion: "1.2.0" } },
-    });
-    expect(
-      serverUpdateStateForAnnouncedRestart(
-        { status: "idle" },
-        undefined,
-        success.updateOutcome,
-        "1.2.0",
-      ),
-    ).toEqual({ status: "idle" });
-  },
-);
 
 describe("update restart reconnect nudges", () => {
   it.effect("retries a desktop commit that was lost before delivery", () =>
@@ -641,81 +529,6 @@ describe("server state projection", () => {
     expect(afterBufferedOldWelcome).toBe(afterSwitch);
     expect(resolveServerWelcomeState(afterBufferedOldWelcome)).toBeNull();
   });
-
-  it.effect.each(["ready", "expiry", "expiry with server clock ahead"] as const)(
-    "observes a background restart and clears it on %s",
-    (completion) =>
-      Effect.gen(function* () {
-        const events = yield* Queue.unbounded<{
-          readonly type: "updateRestart" | "ready";
-          readonly payload: unknown;
-        }>();
-        const subscribed = yield* Deferred.make<void>();
-        const client = {
-          [WS_METHODS.subscribeServerLifecycle]: () =>
-            Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
-              Stream.drain,
-              Stream.concat(Stream.fromQueue(events)),
-            ),
-        } as unknown as WsRpcProtocolClient;
-        const currentSession = session(client);
-        const connectionState = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
-        const retried = yield* Deferred.make<void>();
-        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
-          target: TARGET,
-          state: connectionState,
-          session: yield* SubscriptionRef.make(Option.some(currentSession)),
-          prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
-          connect: Effect.void,
-          disconnect: Effect.void,
-          retryNow: Deferred.succeed(retried, undefined).pipe(Effect.asVoid),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const state = yield* makeEnvironmentServerWelcomeState().pipe(
-              Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
-            );
-            yield* Deferred.await(subscribed);
-            const announced = yield* SubscriptionRef.changes(state).pipe(
-              Stream.filter((value) => value.restart !== undefined),
-              Stream.runHead,
-              Effect.forkChild,
-            );
-            yield* Queue.offer(events, {
-              type: "updateRestart",
-              payload: {
-                fromVersion: "1.0.0",
-                targetVersion: "1.1.0",
-                updateId: "background",
-                expiresAt: completion === "expiry with server clock ahead" ? 3_602_000 : 2_000,
-                expiresInMs: 2_000,
-              },
-            });
-            expect(Option.getOrThrow(yield* Fiber.join(announced)).restart?.updateId).toBe(
-              "background",
-            );
-            yield* SubscriptionRef.set(connectionState, {
-              ...AVAILABLE_CONNECTION_STATE,
-              phase: "backoff" as const,
-            });
-            yield* TestClock.adjust("1 second");
-            yield* Deferred.await(retried);
-            const resumed = yield* SubscriptionRef.changes(state).pipe(
-              Stream.filter((value) => value.restart === undefined),
-              Stream.runHead,
-              Effect.forkChild,
-            );
-            if (completion === "ready") yield* Queue.offer(events, { type: "ready", payload: {} });
-            else {
-              yield* TestClock.adjust("1 second");
-              expect((yield* SubscriptionRef.get(state)).restart).toBeUndefined();
-              return;
-            }
-            expect(Option.getOrThrow(yield* Fiber.join(resumed)).restart).toBeUndefined();
-          }),
-        );
-      }),
-  );
 
   it.effect("checks the authoritative session before accepting a buffered welcome", () =>
     Effect.gen(function* () {

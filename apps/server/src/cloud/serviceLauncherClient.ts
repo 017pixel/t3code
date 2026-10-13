@@ -108,8 +108,7 @@ export class ServiceLauncherClient extends Context.Service<
       ServerSelfUpdateOutcome | undefined,
       ServiceLauncherClientError
     >;
-    /** The launcher's last finished update, kept until the next one, so a
-        rolled-back target is not retried on every boot. */
+    /** The launcher's last finished update, so a rolled-back target is not retried on every boot. */
     readonly lastOutcome: ServerSelfUpdateOutcome | undefined;
   }
 >()("t3/cloud/serviceLauncherClient") {}

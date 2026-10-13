@@ -1745,8 +1745,6 @@ const WsSubscribeTerminalMetadataRpc = Rpc.make(WS_METHODS.subscribeTerminalMeta
 
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
   payload: Schema.Struct({
-    /** Older clients show background updates as manual update notifications. */
-    providerUpdateOrigins: Schema.optionalKey(Schema.Boolean),
     /**
      * Whether this client understands `environmentThemesUpdated` events.
      * Already-shipped clients decode the stream against the old event union
@@ -1770,7 +1768,7 @@ export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerCon
 });
 
 const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecycle, {
-  payload: Schema.Struct({ updateRestarts: Schema.optionalKey(Schema.Boolean) }),
+  payload: Schema.Struct({}),
   success: ServerLifecycleStreamEvent,
   error: EnvironmentAuthorizationError,
   stream: true,

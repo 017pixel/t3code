@@ -184,14 +184,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
       } satisfies CodexSettings;
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
         resolveProviderMaintenanceCapabilitiesEffect(
-          makeCodexMaintenanceResolver(
-            homeLayout.effectiveHomePath
-              ? homeLayout.sharedHomePath
-              : expandHomePath(
-                  processEnv.CODEX_HOME?.trim() || homeLayout.sharedHomePath,
-                  yield* HostProcess.HomeDirectory,
-                ),
-          ),
+          makeCodexMaintenanceResolver(homeLayout.sharedHomePath),
           {
             binaryPath: effectiveConfig.binaryPath,
             env: processEnv,

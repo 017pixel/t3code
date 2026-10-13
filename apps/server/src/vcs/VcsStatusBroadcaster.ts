@@ -27,7 +27,6 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
-import * as ProviderMaintenanceCoordinator from "@t3tools/provider-core/server/maintenance";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -206,8 +205,6 @@ export class VcsStatusBroadcaster extends Context.Service<
       input: VcsStatusSubscriptionInput,
       options?: StreamStatusOptions,
     ) => Stream.Stream<VcsStatusStreamEvent, GitManagerServiceError>;
-    /** Remote refreshes include background fetches and automatic pulls. */
-    readonly activeRefreshCount: Effect.Effect<number>;
   }
 >()("t3/vcs/VcsStatusBroadcaster") {}
 
@@ -225,7 +222,6 @@ const normalizeCwd = (cwd: string) =>
 export const make = Effect.gen(function* () {
   const autoPullPolicy = yield* VcsAutoPullPolicy;
   const workflow = yield* GitWorkflowService.GitWorkflowService;
-  const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
   const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
   const fs = yield* FileSystem.FileSystem;
   const changesPubSub = yield* Effect.acquireRelease(
@@ -240,15 +236,8 @@ export const make = Effect.gen(function* () {
   // periodic poll that started before `gh pr create` can finish after the
   // turn-end refresh and overwrite the fresh PR with its stale `pr: null`.
   const remoteWriteLocks = yield* KeyedLock.make<string>();
-  const activeRefreshes = yield* Ref.make(0);
   const withRemoteWriteLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
-    Effect.uninterruptibleMask((restore) =>
-      Effect.acquireUseRelease(
-        restore(admission.withLaunchPermit(Ref.update(activeRefreshes, (count) => count + 1))),
-        () => restore(remoteWriteLocks.withLock(cwd, effect)),
-        () => Ref.update(activeRefreshes, (count) => count - 1),
-      ),
-    );
+    remoteWriteLocks.withLock(cwd, effect);
   const pollersRef = yield* SynchronizedRef.make(new Map<string, ActiveRemotePoller>());
 
   const getCachedStatus = Effect.fn("VcsStatusBroadcaster.getCachedStatus")(function* (
@@ -754,7 +743,6 @@ export const make = Effect.gen(function* () {
     refreshStatus,
     refreshPullRequestStatus,
     streamStatus,
-    activeRefreshCount: Ref.get(activeRefreshes),
   });
 });
 

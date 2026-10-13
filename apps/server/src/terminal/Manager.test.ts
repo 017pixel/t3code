@@ -1099,6 +1099,43 @@ it.layer(
     }),
   );
 
+  it.effect("reports busy only while a terminal runs a foreground command", () =>
+    Effect.gen(function* () {
+      let inspect: {
+        readonly hasRunningSubprocess: boolean;
+        readonly childCommand: string | null;
+        readonly processIds: ReadonlyArray<number>;
+      } = { hasRunningSubprocess: false, childCommand: null, processIds: [] };
+      const { manager, getEvents } = yield* createManager(5, {
+        subprocessInspector: () => Effect.succeed(inspect),
+        subprocessPollIntervalMs: 20,
+      });
+      expect(yield* manager.hasBusyTerminals).toBe(false);
+
+      yield* manager.open(openInput());
+      expect(yield* manager.hasBusyTerminals).toBe(false);
+
+      inspect = { hasRunningSubprocess: true, childCommand: "vim", processIds: [100] };
+      yield* waitFor(
+        Effect.map(getEvents, (events) =>
+          events.some((event) => event.type === "activity" && event.hasRunningSubprocess),
+        ),
+        "1200 millis",
+      );
+      expect(yield* manager.hasBusyTerminals).toBe(true);
+
+      inspect = { hasRunningSubprocess: false, childCommand: null, processIds: [] };
+      yield* waitFor(
+        Effect.map(getEvents, (events) => {
+          const last = events.filter((event) => event.type === "activity").at(-1);
+          return last?.type === "activity" && !last.hasRunningSubprocess;
+        }),
+        "1200 millis",
+      );
+      expect(yield* manager.hasBusyTerminals).toBe(false);
+    }),
+  );
+
   it.effect("does not invoke subprocess polling until a terminal session is running", () =>
     Effect.gen(function* () {
       let checks = 0;
@@ -1282,8 +1319,8 @@ it.layer(
       const { manager, ptyAdapter } = yield* createManager(5, {
         processTable: Effect.succeed([
           { pid: 9000, ppid: 1, name: "zsh" },
-          // A known async prompt worker with no children.
-          { pid: 100, ppid: 9000, name: "gitstatusd" },
+          // An async prompt worker: a copy of the shell with no children.
+          { pid: 100, ppid: 9000, name: "zsh" },
           { pid: 9001, ppid: 1, name: "zsh" },
           { pid: 200, ppid: 9001, name: "node" },
           { pid: 9002, ppid: 1, name: "zsh" },
@@ -1298,8 +1335,6 @@ it.layer(
       yield* manager.open(openInput({ terminalId: "subshell" }));
       yield* manager.open(openInput({ threadId: "thread-2" }));
 
-      for (const process of ptyAdapter.processes) process.emitData("\u001b]133;A\u0007");
-      yield* Effect.yieldNow;
       yield* manager.closeIdle({ threadId: "thread-1" });
 
       expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([
@@ -1414,11 +1449,7 @@ it.layer(
           fs
             .writeFileString(filePath, contents, options)
             .pipe(
-              Effect.tap(() =>
-                filePath.endsWith(".log") && contents.length > 0
-                  ? Queue.offer(writes, contents)
-                  : Effect.void,
-              ),
+              Effect.tap(() => (contents.length > 0 ? Queue.offer(writes, contents) : Effect.void)),
             ),
       });
       const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 0 }).pipe(
@@ -1944,7 +1975,7 @@ it.layer(
       expect(ptyAdapter.spawnInputs[0]).toEqual(
         expect.objectContaining({
           shell: "pwsh.exe",
-          args: expect.arrayContaining(["-NoLogo", "-NoExit", "-Command"]),
+          args: ["-NoLogo"],
         }),
       );
     }),
@@ -2038,16 +2069,8 @@ it.layer(
         "pwsh.exe",
         "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
       ]);
-      expect(ptyAdapter.spawnInputs[1]?.args?.slice(0, 3)).toEqual([
-        "-NoLogo",
-        "-NoExit",
-        "-Command",
-      ]);
-      expect(ptyAdapter.spawnInputs[2]?.args?.slice(0, 3)).toEqual([
-        "-NoLogo",
-        "-NoExit",
-        "-Command",
-      ]);
+      expect(ptyAdapter.spawnInputs[1]?.args).toEqual(["-NoLogo"]);
+      expect(ptyAdapter.spawnInputs[2]?.args).toEqual(["-NoLogo"]);
     }),
   );
 
@@ -2972,235 +2995,5 @@ it.layer(
       assert.equal(process.killSignals[0], "SIGTERM");
       expect(process.killSignals).toContain("SIGKILL");
     }).pipe(Effect.provide(TestClock.layer())),
-  );
-  it.effect("keeps a childless exec at the terminal root pid", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter } = yield* createManager(5, {
-        processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "vim" }]),
-      });
-      yield* manager.open(openInput());
-      yield* manager.closeIdle({ threadId: "thread-1" });
-      expect(ptyAdapter.processes[0]!.killed).toBe(false);
-    }),
-  );
-
-  it.effect("checks fresh terminal work instead of a stale idle poll", () =>
-    Effect.gen(function* () {
-      let busy = false;
-      let checks = 0;
-      const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
-        shellResolver: () => "/bin/bash",
-        subprocessPollIntervalMs: 60_000,
-        subprocessInspector: () =>
-          Effect.sync(() => {
-            checks++;
-            return {
-              hasRunningSubprocess: busy,
-              childCommand: busy ? "sleep" : null,
-              processIds: [],
-            };
-          }),
-      });
-      yield* manager.open(openInput());
-      ptyAdapter.processes[0]!.emitData("\u001b]133;A\u0007");
-      yield* waitFor(Effect.map(getEvents, (events) => events.some((e) => e.type === "output")));
-      expect(yield* manager.hasBusyTerminals).toBe(false);
-      const before = checks;
-      busy = true;
-      expect(yield* manager.hasBusyTerminals).toBe(true);
-      expect(checks).toBeGreaterThan(before);
-    }),
-  );
-
-  it.effect("rejects a busy terminal without scanning the process table", () =>
-    Effect.gen(function* () {
-      let scans = 0;
-      const { manager } = yield* createManager(5, {
-        shellResolver: () => "/bin/bash",
-        subprocessPollIntervalMs: 60_000,
-        processTable: Effect.sync(() => {
-          scans++;
-          return [{ pid: 9000, ppid: 1, name: "bash" }];
-        }),
-      });
-      yield* manager.open(openInput());
-      const before = scans;
-      expect(yield* manager.hasBusyTerminals).toBe(true);
-      expect(Option.isNone(yield* manager.withIdleTerminals(Effect.die("must not restart")))).toBe(
-        true,
-      );
-      expect(scans).toBe(before);
-    }),
-  );
-
-  it.effect("tracks PowerShell in-process work until its next prompt", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
-        shellResolver: () => "pwsh.exe",
-        processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "pwsh.exe" }]),
-      }).pipe(Effect.provide(layerWithHostPlatform("win32")));
-      yield* manager.open(openInput());
-      const process = ptyAdapter.processes[0]!;
-      process.emitData("\u001b]133;");
-      process.emitData("A\u0007");
-      yield* waitFor(
-        Effect.map(getEvents, (events) => events.filter((e) => e.type === "output").length === 2),
-      );
-      expect(yield* manager.hasBusyTerminals).toBe(false);
-      yield* manager.write({
-        threadId: "thread-1",
-        terminalId: DEFAULT_TERMINAL_ID,
-        data: "\u001b[1;1R",
-      });
-      expect(yield* manager.hasBusyTerminals).toBe(false);
-      yield* manager.write({
-        threadId: "thread-1",
-        terminalId: DEFAULT_TERMINAL_ID,
-        data: "Start-Sleep 60\r",
-      });
-      expect(yield* manager.hasBusyTerminals).toBe(true);
-      process.emitData("\u001b]133;A\u0007");
-      yield* waitFor(
-        Effect.map(getEvents, (events) => events.filter((e) => e.type === "output").length === 3),
-      );
-      expect(yield* manager.hasBusyTerminals).toBe(false);
-    }),
-  );
-
-  it.effect("ignores a childless gitstatusd prompt helper", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter } = yield* createManager(5, {
-        processTable: Effect.succeed([
-          { pid: 9000, ppid: 1, name: "zsh" },
-          { pid: 100, ppid: 9000, name: "gitstatusd-linux-x86_64" },
-        ]),
-      });
-      yield* manager.open(openInput());
-      ptyAdapter.processes[0]!.emitData("\u001b]133;A\u0007");
-      yield* Effect.yieldNow;
-      yield* manager.closeIdle({ threadId: "thread-1" });
-      expect(ptyAdapter.processes[0]!.killed).toBe(true);
-    }),
-  );
-
-  it.effect("does not replay a previous prompt marker after new input", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
-        shellResolver: () => "/bin/bash",
-        subprocessInspector: () =>
-          Effect.succeed({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
-      });
-      yield* manager.open(openInput());
-      const process = ptyAdapter.processes[0]!;
-      process.emitData("\u001b]133;A\u0007");
-      yield* waitFor(Effect.map(getEvents, (events) => events.some((e) => e.type === "output")));
-      yield* manager.write({
-        threadId: "thread-1",
-        terminalId: DEFAULT_TERMINAL_ID,
-        data: "while :; do :; done\r",
-      });
-      process.emitData("command echo");
-      yield* waitFor(
-        Effect.map(getEvents, (events) => events.filter((e) => e.type === "output").length === 2),
-      );
-      expect(yield* manager.hasBusyTerminals).toBe(true);
-    }),
-  );
-
-  it.effect.each(["sh", "dash", "fish", "ksh", "cmd"])(
-    "tracks input and prompts in %s terminals",
-    (shell) =>
-      Effect.gen(function* () {
-        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
-          shellResolver: () => shell,
-          processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: shell }]),
-        });
-        yield* manager.open(openInput());
-        const process = ptyAdapter.processes[0]!;
-        process.emitData("\u001b]133;A\u0007");
-        yield* waitFor(Effect.map(getEvents, (events) => events.some((e) => e.type === "output")));
-        expect(yield* manager.hasBusyTerminals).toBe(false);
-        yield* manager.write({
-          threadId: "thread-1",
-          terminalId: DEFAULT_TERMINAL_ID,
-          data: "read\r",
-        });
-        expect(yield* manager.hasBusyTerminals).toBe(true);
-        process.emitData("\u001b]133;A\u0007");
-        yield* waitFor(
-          Effect.map(getEvents, (events) => events.filter((e) => e.type === "output").length === 2),
-        );
-        expect(yield* manager.hasBusyTerminals).toBe(false);
-      }),
-  );
-
-  it.effect("keeps the restart window closed when the process table omits a live PTY", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
-        shellResolver: () => "/bin/bash",
-        processTable: Effect.succeed([]),
-      });
-      yield* manager.open(openInput());
-      ptyAdapter.processes[0]!.emitData("\u001b]133;A\u0007");
-      yield* waitFor(Effect.map(getEvents, (events) => events.some((e) => e.type === "output")));
-      expect(yield* manager.hasBusyTerminals).toBe(true);
-      expect(Option.isNone(yield* manager.withIdleTerminals(Effect.die("must not restart")))).toBe(
-        true,
-      );
-    }),
-  );
-
-  it.effect("blocks restart for childless background shell jobs at an idle prompt", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
-        shellResolver: () => "/bin/bash",
-        processTable: Effect.succeed([
-          { pid: 9000, ppid: 1, name: "bash" },
-          { pid: 9001, ppid: 9000, name: "bash" },
-        ]),
-      });
-      yield* manager.open(openInput());
-      ptyAdapter.processes[0]!.emitData("\u001b]133;A\u0007");
-      yield* waitFor(Effect.map(getEvents, (events) => events.some((e) => e.type === "output")));
-      expect(yield* manager.hasBusyTerminals).toBe(true);
-      yield* manager.closeIdle({ threadId: "thread-1" });
-      expect(ptyAdapter.processes[0]!.killed).toBe(false);
-    }),
-  );
-
-  it.effect("holds new terminal launches and input through the restart handoff", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
-        shellResolver: () => "/bin/bash",
-        subprocessInspector: () =>
-          Effect.succeed({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
-      });
-      yield* manager.open(openInput());
-      ptyAdapter.processes[0]!.emitData("\u001b]133;A\u0007");
-      yield* waitFor(Effect.map(getEvents, (events) => events.some((e) => e.type === "output")));
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const handoff = yield* manager
-        .withIdleTerminals(
-          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
-        )
-        .pipe(Effect.forkScoped);
-      yield* Deferred.await(entered);
-      const write = yield* manager
-        .write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "make\r" })
-        .pipe(Effect.forkScoped);
-      const open = yield* manager.open(openInput({ terminalId: "new" })).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
-      expect(write.pollUnsafe() === undefined).toBe(true);
-      expect(open.pollUnsafe() === undefined).toBe(true);
-      expect(ptyAdapter.processes).toHaveLength(1);
-      expect(ptyAdapter.processes[0]!.writes).toEqual([]);
-      yield* Deferred.succeed(release, undefined);
-      expect(Option.isSome(yield* Fiber.join(handoff))).toBe(true);
-      yield* Fiber.join(write);
-      yield* Fiber.join(open);
-      expect(ptyAdapter.processes).toHaveLength(2);
-      expect(ptyAdapter.processes[0]!.writes).toEqual(["make\r"]);
-    }),
   );
 });

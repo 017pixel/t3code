@@ -185,7 +185,11 @@ import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
-import { attachmentRelativePath, createDeterministicAttachmentId } from "./attachmentStore.ts";
+import {
+  attachmentRelativePath,
+  chatAttachmentStableKey,
+  createDeterministicAttachmentId,
+} from "./attachmentStore.ts";
 import { parseBase64DataUrl } from "./imageMime.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
@@ -264,37 +268,6 @@ const resolveDiscoveryForConfig = <A, E, R>(
 export const resolveAvailableEditorsForConfig = <A, E, R>(
   discovery: Effect.Effect<ReadonlyArray<A>, E, R>,
 ) => resolveDiscoveryForConfig(discovery, () => []);
-
-/** Keep background install diagnostics out of clients that cannot distinguish their origin. */
-export const withProviderUpdateOrigins = <E, R>(
-  events: Stream.Stream<ServerConfigStreamEvent, E, R>,
-  input: { readonly providerUpdateOrigins?: boolean },
-) => {
-  if (input.providerUpdateOrigins === true) return events;
-  const providersForClient = (providers: ClientServerConfig["providers"]) =>
-    providers.map((provider) => {
-      if (provider.updateState?.origin !== "background") return provider;
-      const { updateState: _updateState, ...legacyProvider } = provider;
-      return legacyProvider;
-    });
-  return events.pipe(
-    Stream.map((event): ServerConfigStreamEvent => {
-      if (event.type === "snapshot") {
-        return {
-          ...event,
-          config: { ...event.config, providers: providersForClient(event.config.providers) },
-        };
-      }
-      if (event.type === "providerStatuses") {
-        return {
-          ...event,
-          payload: { providers: providersForClient(event.payload.providers) },
-        };
-      }
-      return event;
-    }),
-  );
-};
 
 const resolveFileManagerRevealKindForConfig = <E, R>(
   discovery: Effect.Effect<FileManagerRevealKind | undefined, E, R>,
@@ -429,7 +402,10 @@ const persistChatAttachments = Effect.fn("ws.assets.persistChatAttachments")(fun
           message: `Attachment ${attachment.name} size does not match its payload.`,
         });
       }
-      const rawId = createDeterministicAttachmentId(input.threadId, `${input.messageId}:${index}`);
+      const rawId = createDeterministicAttachmentId(
+        input.threadId,
+        chatAttachmentStableKey(input.messageId, index, bytes),
+      );
       if (rawId === null) {
         return yield* new PersistChatAttachmentsError({
           message: "Could not allocate an attachment identifier.",
@@ -829,6 +805,10 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
           afterSequence,
           throughSequence,
           limit: THREAD_RESUME_MAX_REPLAY_EVENTS + 1,
+          // A row a newer build wrote (e.g. after a downgrade) must not fail
+          // every resubscribe. The live tail resumes from `highWater`, so a
+          // dropped row never hides later events.
+          skipUnknownEventTypes: true,
         })
         .pipe(
           Stream.map((stored) => ({
@@ -1183,6 +1163,10 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         applicationEvents.readApplicationEvents({
           afterSequence: input.afterSequence,
           throughSequence: highWater,
+          // A row a newer build wrote (e.g. after a downgrade) must not fail
+          // every shell resubscribe. The live tail below resumes from
+          // highWater, so a dropped row never hides later events.
+          skipUnknownEventTypes: true,
         }),
       );
       return composeShellStreamWithEnrichment({
@@ -3097,10 +3081,10 @@ const layerWsRpc = (
               return Stream.concat(
                 rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
                 withLateEditorConfig(config, liveUpdates, externalLauncher),
-              ).pipe((events) => withProviderUpdateOrigins(events, input));
+              );
             }),
           ),
-        [WS_METHODS.subscribeServerLifecycle]: (input) =>
+        [WS_METHODS.subscribeServerLifecycle]: (_input) =>
           Stream.unwrap(
             Effect.gen(function* () {
               const liveBuffer = yield* Queue.unbounded<ServerLifecycleStreamEvent>();
@@ -3117,10 +3101,7 @@ const layerWsRpc = (
               const liveEvents = Stream.fromQueue(liveBuffer).pipe(
                 Stream.filter((event) => event.sequence > snapshot.sequence),
               );
-              return ServerLifecycleEvents.eventsForClient(
-                Stream.concat(rpcInitialItems(snapshotEvents), liveEvents),
-                input,
-              );
+              return Stream.concat(rpcInitialItems(snapshotEvents), liveEvents);
             }),
           ),
         [WS_METHODS.subscribeAuthAccess]: (_input) =>

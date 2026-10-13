@@ -193,11 +193,6 @@ export const layer = Layer.effectDiscard(
     };
     // Captured, so a control that stops propagation (say, an editor's keydown) still counts.
     const interactionListenerOptions = { capture: true, passive: true } as const;
-    // Coming back to the window means someone is about to use it.
-    const onForeground = () => {
-      if (document.visibilityState === "visible") recordInteraction();
-      requestReport();
-    };
 
     const report = Effect.gen(function* () {
       const observedAtMs = yield* Clock.currentTimeMillis;
@@ -221,8 +216,8 @@ export const layer = Layer.effectDiscard(
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         retainedScopeListeners.add(requestReport);
-        document.addEventListener("visibilitychange", onForeground);
-        window.addEventListener("focus", onForeground);
+        document.addEventListener("visibilitychange", requestReport);
+        window.addEventListener("focus", requestReport);
         window.addEventListener("blur", requestReport);
         window.addEventListener("online", requestReport);
         window.addEventListener("pointermove", recordInteraction, interactionListenerOptions);
@@ -233,8 +228,8 @@ export const layer = Layer.effectDiscard(
       () =>
         Effect.sync(() => {
           retainedScopeListeners.delete(requestReport);
-          document.removeEventListener("visibilitychange", onForeground);
-          window.removeEventListener("focus", onForeground);
+          document.removeEventListener("visibilitychange", requestReport);
+          window.removeEventListener("focus", requestReport);
           window.removeEventListener("blur", requestReport);
           window.removeEventListener("online", requestReport);
           window.removeEventListener("pointermove", recordInteraction, interactionListenerOptions);
