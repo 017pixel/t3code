@@ -1,7 +1,7 @@
 import { expect, it } from "@effect/vitest";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 
 import { runServicePreflight } from "./servicePreflight.ts";
+import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 it.each([1, 2])("blocks legacy launcher protocol %i", (launcherProtocol) => {
   expect(
@@ -18,17 +18,16 @@ it.each([1, 2])("blocks legacy launcher protocol %i", (launcherProtocol) => {
   });
 });
 
-it("accepts the deployed protocol 3 launcher without requiring a service reinstall", () => {
+it("accepts the current launcher protocol", () => {
   expect(
     runServicePreflight({
       databasePath: "/missing/state.sqlite",
-      launcherProtocol: 3,
+      launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
       version: "1.2.3",
     }),
   ).toEqual({
     status: "ready",
     version: "1.2.3",
-    launcherProtocol: 3,
-    orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION,
+    launcherProtocol: SERVICE_LAUNCHER_PROTOCOL,
   });
 });

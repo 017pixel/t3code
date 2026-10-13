@@ -1,5 +1,3 @@
-import * as Fiber from "effect/Fiber";
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ModelManifest from "./ModelManifest.ts";
 import { expect, it } from "@effect/vitest";
@@ -360,52 +358,3 @@ it("publishes complete packages for all supported platforms", () => {
       );
   expect(CodexInstallation.resolveCodexReleaseAsset("linux", "riscv64")).toBeNull();
 });
-
-it.effect("Codex first installs wait for admission before changing state or downloading", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness();
-    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-    const entered = yield* Deferred.make<void>();
-    const release = yield* Deferred.make<void>();
-    const holder = yield* admission
-      .withPermit(
-        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
-      )
-      .pipe(Effect.forkScoped);
-    yield* Deferred.await(entered);
-    const install = yield* h.installation.start.pipe(Effect.forkScoped);
-    yield* Effect.yieldNow;
-    expect(install.pollUnsafe() === undefined).toBe(true);
-    expect(h.downloads()).toBe(0);
-    expect((yield* h.installation.state).phase).toBe("idle");
-    yield* Deferred.succeed(release, undefined);
-    yield* Fiber.join(holder);
-    yield* Fiber.join(install);
-    expect((yield* terminalState(h.installation)).phase).toBe("succeeded");
-    expect(h.downloads()).toBe(1);
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-);
-
-it.effect("other providers keep launching while a Codex first install downloads", () =>
-  Effect.gen(function* () {
-    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-    const downloading = yield* Deferred.make<void>();
-    const finish = yield* Deferred.make<void>();
-    const h = yield* makeHarness({
-      body: Stream.fromEffect(
-        Deferred.succeed(downloading, undefined).pipe(
-          Effect.andThen(Deferred.await(finish)),
-          Effect.as(new Uint8Array(archive)),
-        ),
-      ),
-    });
-    yield* h.installation.start;
-    yield* Deferred.await(downloading);
-    expect(yield* admission.withLaunchPermit(Effect.succeed("launched"))).toBe("launched");
-    // Codex itself only resolves a completed, activated release.
-    expect(Exit.isFailure(yield* h.installation.resolve().pipe(Effect.exit))).toBe(true);
-    yield* Deferred.succeed(finish, undefined);
-    expect((yield* terminalState(h.installation)).phase).toBe("succeeded");
-    expect((yield* h.installation.resolve()).source).toBe("managed");
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-);

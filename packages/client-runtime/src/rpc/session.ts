@@ -154,7 +154,6 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
 ) {
   const webSocketConstructor = yield* Socket.WebSocketConstructor;
   const serverConfigInput: ServerConfigSubscriptionInput = {
-    providerUpdateOrigins: true,
     ...(options.environmentThemes === true ? { environmentThemes: true } : {}),
     ...(options.usageLimitSources === true ? { usageLimitSources: true } : {}),
     ...(options.usageLimitsCommand === true ? { usageLimitsCommand: true } : {}),
@@ -362,18 +361,16 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
           }),
       ),
     );
-    const subscribeServerConfig = (input: ServerConfigSubscriptionInput) => {
-      const payload = { ...input, providerUpdateOrigins: true };
-      return Stream.unwrap(
+    const subscribeServerConfig = (input: ServerConfigSubscriptionInput) =>
+      Stream.unwrap(
         validatedInitialConfig.pipe(
           Effect.as(
-            Equal.equals(payload, serverConfigInput)
+            Equal.equals(input, serverConfigInput)
               ? serverConfigEvents
-              : protocolClient[WS_METHODS.subscribeServerConfig](payload),
+              : protocolClient[WS_METHODS.subscribeServerConfig](input),
           ),
         ),
       );
-    };
     const probe = initialConfig.pipe(
       Effect.flatMap((config) =>
         (config.environment.capabilities.connectionProbe === true

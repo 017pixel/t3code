@@ -73,7 +73,10 @@ const layerUnusedLifecycleRuntime = Layer.mergeAll(
     ElectronTheme.ElectronTheme,
     ElectronTheme.ElectronTheme.of({} as ElectronTheme.ElectronTheme["Service"]),
   ),
-  Layer.mock(ElectronUpdater.ElectronUpdater, {}),
+  Layer.succeed(
+    ElectronUpdater.ElectronUpdater,
+    ElectronUpdater.ElectronUpdater.of({} as ElectronUpdater.ElectronUpdater["Service"]),
+  ),
   Layer.succeed(
     ElectronDialog.ElectronDialog,
     ElectronDialog.ElectronDialog.of({} as ElectronDialog.ElectronDialog["Service"]),

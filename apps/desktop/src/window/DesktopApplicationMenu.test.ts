@@ -58,7 +58,6 @@ const layerElectronDialog = Layer.succeed(ElectronDialog.ElectronDialog, {
 
 const layerDesktopUpdates = Layer.succeed(DesktopUpdates.DesktopUpdates, {
   getState: Effect.die("unexpected getState"),
-  installOnQuit: Effect.succeed(false),
   isActionActive: Effect.succeed(false),
   isInstallActive: Effect.succeed(false),
   subscribe: Effect.die("unexpected subscribe"),

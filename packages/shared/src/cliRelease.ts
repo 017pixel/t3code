@@ -61,28 +61,7 @@ export function cliReleaseDownloadBaseUrl(
   version: string,
   baseUrl: string | undefined = CLI_RELEASE_DEFAULT_BASE_URL,
 ): string {
-  const origin = validateCliReleaseDownloadUrl(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL);
-  return `${origin.href.replace(/\/+$/, "")}/v${version}`;
-}
-
-/**
- * Checks both configured mirrors and the final URL after HTTP redirects. Local
- * `file:` mirrors (SSH remote installs) never cross the network.
- */
-export function validateCliReleaseDownloadUrl(url: string): URL {
-  const origin = new URL(url);
-  const loopback =
-    origin.hostname === "localhost" ||
-    origin.hostname === "[::1]" ||
-    /^127\.\d+\.\d+\.\d+$/.test(origin.hostname);
-  if (
-    origin.protocol !== "https:" &&
-    origin.protocol !== "file:" &&
-    !(origin.protocol === "http:" && loopback)
-  ) {
-    throw new Error("T3 release downloads require HTTPS (HTTP is allowed only on loopback).");
-  }
-  return origin;
+  return `${(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL).replace(/\/+$/, "")}/v${version}`;
 }
 
 /**
@@ -109,7 +88,7 @@ export const CLI_RELEASE_CHANNELS: ReadonlyArray<CliReleaseChannel> = [
 
 /** The release train a version was published on, derived from its prerelease tag. */
 export function cliReleaseChannelOf(version: string): CliReleaseChannel {
-  const channel = /^[^-+]+-(nightly|preview)\.\d{8}\.\d+(?:\+[0-9A-Za-z.-]+)?$/.exec(version)?.[1];
+  const channel = /^[^-+]+-(nightly|preview)\.\d{8}\.\d+$/.exec(version)?.[1];
   return channel === "nightly" || channel === "preview" ? channel : "stable";
 }
 
@@ -132,18 +111,13 @@ export function newestCliReleaseVersion(
   releases: ReadonlyArray<{
     readonly tag_name: string;
     readonly draft?: boolean | undefined;
-    readonly prerelease?: boolean | undefined;
   }>,
   channel: CliReleaseChannel,
 ): string | undefined {
   for (const release of releases) {
     if (release.draft) continue;
-    const version = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/.exec(
-      release.tag_name,
-    )?.[1];
+    const version = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(release.tag_name)?.[1];
     if (version === undefined) continue;
-    if (channel === "stable" && (release.prerelease || version.split("+", 1)[0]?.includes("-")))
-      continue;
     if (cliReleaseChannelOf(version) === channel) return version;
   }
   return undefined;

@@ -7,6 +7,7 @@ import {
   type DesktopUpdateCheckResult,
   type DesktopUpdateState,
 } from "@t3tools/contracts";
+import { errorTag } from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -184,8 +185,6 @@ export class DesktopUpdates extends Context.Service<
     readonly check: (reason: string) => Effect.Effect<DesktopUpdateCheckResult>;
     readonly download: Effect.Effect<DesktopUpdateActionResult>;
     readonly install: Effect.Effect<DesktopUpdateActionResult>;
-    /** Called after backend shutdown on a real quit, never a settings relaunch. */
-    readonly installOnQuit: Effect.Effect<boolean>;
     readonly installPrepared: (
       expectedVersion: string,
     ) => Effect.Effect<DesktopPreparedUpdateInstallResult>;
@@ -197,6 +196,63 @@ const {
   logWarning: logUpdaterWarning,
   logError: logUpdaterError,
 } = DesktopObservability.makeComponentLogger("desktop-updater");
+
+function redactMessage(message: string): string {
+  // Updater HTTP errors append response bodies and headers after the first line.
+  return (message.split(/[\r\n]/, 1)[0] ?? "")
+    .replace(/\b(?:https?|file):\/\/[^\s"'<>]+/gi, "[redacted URL]")
+    .replace(/\b(?:Bearer|Basic)\s+[^\s,;]+/gi, "[redacted credential]")
+    .replace(
+      /\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*[:=].*$/gi,
+      "[redacted header]",
+    )
+    .replace(
+      /\b[\w-]*(?:token|password|secret|credential|api[_-]?key)[\w-]*\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "[redacted credential]",
+    )
+    .slice(0, 512);
+}
+
+function summarizeCause(cause: unknown, depth: number): string {
+  if (depth >= 3) return "[truncated cause]";
+  if (Cause.isCause(cause)) {
+    return cause.reasons
+      .slice(0, 3)
+      .map((reason) =>
+        reason._tag === "Fail"
+          ? summarizeCause(reason.error, depth + 1)
+          : reason._tag === "Die"
+            ? summarizeCause(reason.defect, depth + 1)
+            : "Interrupted",
+      )
+      .join("; ");
+  }
+  if (typeof cause === "string") return redactMessage(cause);
+  if (typeof cause !== "object" || cause === null) return errorTag(cause);
+
+  const error = cause as {
+    readonly message?: unknown;
+    readonly code?: unknown;
+    readonly cause?: unknown;
+  };
+  const code =
+    typeof error.code === "string" && /^[A-Z][A-Z0-9_]{0,127}$/.test(error.code)
+      ? ` [${error.code}]`
+      : "";
+  const message = typeof error.message === "string" ? `: ${redactMessage(error.message)}` : "";
+  const nested =
+    error.cause === undefined ? "" : `; caused by ${summarizeCause(error.cause, depth + 1)}`;
+  return `${errorTag(cause)}${code}${message}${nested}`;
+}
+
+/** Log a bounded cause summary without stacks, response payloads, or request credentials. */
+export function describeUpdateErrorCause(cause: unknown): string {
+  try {
+    return summarizeCause(cause, 0).slice(0, 1024);
+  } catch {
+    return "UnknownError";
+  }
+}
 
 function parseAppUpdateYml(raw: string): Effect.Effect<Option.Option<AppUpdateYmlConfig>> {
   const entries: Record<string, string> = {};
@@ -291,6 +347,8 @@ export const make = Effect.gen(function* () {
   const finishedUpdateActions = yield* PubSub.unbounded<UpdateAction>();
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
+  // Versions whose download failed. Pollers skip them: they run every few
+  // minutes, so a persistent failure would otherwise redownload forever.
   const failedDownloads = new Set<string>();
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
@@ -336,18 +394,17 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  // Use the same package identity as electron-updater. An inherited APPIMAGE
-  // variable must not enable updates for an RPM or pacman installation.
-  const linuxPackageType =
+  // The .deb carries electron-builder's resources/package-type marker.
+  // electron-updater reads the same file and installs updates with dpkg.
+  const isDebPackage =
     environment.platform === "linux" && environment.isPackaged
       ? yield* fileSystem
           .readFileString(environment.path.join(environment.resourcesPath, "package-type"))
           .pipe(
-            Effect.map((packageType) => packageType.trim()),
-            Effect.orElseSucceed(() => null),
+            Effect.map((packageType) => packageType.trim() === "deb"),
+            Effect.orElseSucceed(() => false),
           )
-      : null;
-  const isDebPackage = linuxPackageType === "deb";
+      : false;
 
   const hasUpdateFeedConfig = Ref.get(appUpdateYmlConfigRef).pipe(
     Effect.map((appUpdateYmlConfig) => Option.isSome(appUpdateYmlConfig) || config.mockUpdates),
@@ -360,10 +417,7 @@ export const make = Effect.gen(function* () {
         isDevelopment: environment.isDevelopment,
         isPackaged: environment.isPackaged,
         platform: environment.platform,
-        appImage:
-          linuxPackageType === "rpm" || linuxPackageType === "pacman"
-            ? undefined
-            : Option.getOrUndefined(config.appImagePath),
+        appImage: Option.getOrUndefined(config.appImagePath),
         isDebPackage,
         disabledByEnv: config.disableAutoUpdate,
         hasUpdateFeedConfig: hasFeedConfig,
@@ -449,6 +503,7 @@ export const make = Effect.gen(function* () {
             );
             yield* logUpdaterError(error.message, {
               errorTag: error._tag,
+              cause: describeUpdateErrorCause(error.cause),
               channel: error.channel,
             });
             return true;
@@ -485,6 +540,9 @@ export const make = Effect.gen(function* () {
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
       );
       yield* logUpdaterInfo("downloading update");
+      // electron-updater reads this flag when the download completes. A .deb
+      // install asks for a password, so it waits for an explicit Install.
+      yield* electronUpdater.setAutoInstallOnAppQuit(!isDebPackage);
       yield* electronUpdater.downloadUpdate;
       return { accepted: true, completed: true };
     }).pipe(
@@ -497,6 +555,7 @@ export const make = Effect.gen(function* () {
             );
             yield* logUpdaterError(error.message, {
               errorTag: error._tag,
+              cause: describeUpdateErrorCause(error.cause),
               channel: error.channel,
             });
             return { accepted: true, completed: false };
@@ -504,9 +563,14 @@ export const make = Effect.gen(function* () {
         ),
       }),
       Effect.onInterrupt(() =>
-        updateState((current) => (current.status === "downloading" ? state : current)).pipe(
-          Effect.asVoid,
-        ),
+        electronUpdater
+          .setAutoInstallOnAppQuit(false)
+          .pipe(
+            Effect.andThen(
+              updateState((current) => (current.status === "downloading" ? state : current)),
+            ),
+            Effect.asVoid,
+          ),
       ),
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
@@ -520,6 +584,7 @@ export const make = Effect.gen(function* () {
           );
           yield* logUpdaterError(error.message, {
             errorTag: error._tag,
+            cause: describeUpdateErrorCause(error.cause),
             action: error.action,
           });
           return { accepted: true, completed: false };
@@ -529,10 +594,9 @@ export const make = Effect.gen(function* () {
     );
   }).pipe(Effect.withSpan("desktop.updates.downloadAvailableUpdate"));
 
-  // Updates the background pollers find download on their own; a check someone
-  // started keeps its Download button. A failed download waits for a newer release.
-  // A downloaded update installs on quit, so the pollers leave it alone: a new
-  // download would discard its installer, and the next launch finds newer releases.
+  // Updates the pollers find download on their own; a manual check keeps its
+  // Download button. A downloaded update installs on quit, so pollers leave it
+  // alone: a newer download would discard its installer.
   const checkAndDownloadInBackground = Effect.fn("desktop.updates.checkAndDownloadInBackground")(
     function* (reason: "startup" | "poll") {
       if ((yield* Ref.get(updateStateRef)).downloadedVersion !== null) return;
@@ -682,6 +746,7 @@ export const make = Effect.gen(function* () {
                 yield* recoverFailedInstall(error.message);
                 yield* logUpdaterError(error.message, {
                   errorTag: error._tag,
+                  cause: describeUpdateErrorCause(error.cause),
                   channel: error.channel,
                   isSilent: error.isSilent,
                   isForceRunAfter: error.isForceRunAfter,
@@ -700,6 +765,7 @@ export const make = Effect.gen(function* () {
               yield* recoverFailedInstall(error.message);
               yield* logUpdaterError(error.message, {
                 errorTag: error._tag,
+                cause: describeUpdateErrorCause(error.cause),
                 action: error.action,
               });
               return { accepted: true, completed: false, failed: true };
@@ -739,6 +805,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdatePollerError({ poller: "startup", cause });
         return logUpdaterError(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           poller: error.poller,
         });
       }),
@@ -754,6 +821,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdatePollerError({ poller: "poll", cause });
         return logUpdaterError(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           poller: error.poller,
         });
       }),
@@ -809,6 +877,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "update-available", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -838,6 +907,7 @@ export const make = Effect.gen(function* () {
       yield* recoverFailedInstall(error.message);
       yield* logUpdaterError(error.message, {
         errorTag: error._tag,
+        cause: describeUpdateErrorCause(error.cause),
         operation: error.operation,
       });
       return;
@@ -858,6 +928,7 @@ export const make = Effect.gen(function* () {
 
     yield* logUpdaterError(error.message, {
       errorTag: error._tag,
+      cause: describeUpdateErrorCause(error.cause),
       operation: error.operation,
     });
   });
@@ -888,6 +959,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "download-progress", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -897,30 +969,10 @@ export const make = Effect.gen(function* () {
   const handleUpdateDownloaded = Effect.fn("desktop.updates.handleUpdateDownloaded")(function* (
     raw: unknown,
   ) {
-    // Keep this prelude synchronous: MacUpdater checks the flag immediately
-    // after emitting this event, before it hands the download to Squirrel.
-    yield* electronUpdater.setAutoInstallOnAppQuit(false);
     yield* decodeUpdateInfo(raw).pipe(
       Effect.flatMap(
         Effect.fn("desktop.updates.applyUpdateDownloaded")(function* (info) {
           const state = yield* Ref.get(updateStateRef);
-          const action = yield* activeUpdateAction;
-          if (
-            resolveDefaultDesktopUpdateChannel(info.version) !== state.channel ||
-            (Option.isSome(action) && action.value === "channel")
-          ) {
-            yield* logUpdaterInfo("ignoring download outside the selected update channel", {
-              version: info.version,
-              channel: state.channel,
-            });
-            return;
-          }
-          // Squirrel applies a staged update on every process exit, including a
-          // settings relaunch. Defer staging until the lifecycle requests a real quit.
-          // Installing a .deb asks for a password, which must not appear on quit.
-          if (environment.platform !== "darwin" && !isDebPackage) {
-            yield* electronUpdater.setAutoInstallOnAppQuit(true);
-          }
           yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, info.version));
           yield* logUpdaterInfo("update downloaded", { version: info.version });
         }),
@@ -932,6 +984,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "update-downloaded", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -1041,6 +1094,7 @@ export const make = Effect.gen(function* () {
             ),
           );
 
+        // The reset below drops any download of the old channel.
         yield* electronUpdater.setAutoInstallOnAppQuit(false);
         const enabled = yield* shouldEnableAutoUpdates;
         yield* setState(createBaseUpdateState(nextChannel, enabled, environment));
@@ -1080,18 +1134,6 @@ export const make = Effect.gen(function* () {
         state: yield* Ref.get(updateStateRef),
       };
     }).pipe(Effect.withSpan("desktop.updates.download")),
-    installOnQuit: Effect.gen(function* () {
-      const state = yield* Ref.get(updateStateRef);
-      if (environment.platform !== "darwin" || state.downloadedVersion === null) return false;
-      yield* electronUpdater.quitAndInstall({ isSilent: true, isForceRunAfter: false });
-      return true;
-    }).pipe(
-      Effect.catchCause((cause) =>
-        logUpdaterError("Could not install the downloaded update on quit.", { cause }).pipe(
-          Effect.as(false),
-        ),
-      ),
-    ),
     install: installWithExpectedVersion().pipe(
       Effect.map(({ accepted, completed, state }) => ({ accepted, completed, state })),
     ),

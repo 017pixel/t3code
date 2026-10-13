@@ -3,19 +3,12 @@ import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Duration from "effect/Duration";
-import * as Fiber from "effect/Fiber";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
-import * as Scope from "effect/Scope";
 import {
   ProjectId,
-  DEFAULT_SERVER_SETTINGS,
-  ProviderDriverKind,
   type PullRequestActivity,
   type PullRequestDetail,
   type PullRequestStack,
@@ -24,16 +17,6 @@ import {
 import type { ReviewGuideGenerationInput } from "@t3tools/provider-core/server/textGeneration";
 
 import * as ServerConfig from "../config.ts";
-import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
-import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
-import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
-import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
-import * as CodexInstallation from "../provider/CodexInstallation.ts";
-import * as AntigravityInstallation from "../provider/AntigravityInstallation.ts";
-import * as TerminalManager from "../terminal/Manager.ts";
-import * as UpdateWindow from "../updates/UpdateWindow.ts";
-import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as PullRequestReviewGuides from "../persistence/PullRequestReviewGuides.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -66,18 +49,6 @@ const reference: PullRequestRef = {
   repository: "acme/app",
   number: 7,
 };
-
-const idleInstallationState = (driver: string) => ({
-  driver: ProviderDriverKind.make(driver),
-  phase: "idle" as const,
-  operationId: null,
-  downloadedBytes: 0,
-  totalBytes: null,
-  version: null,
-  installedVersion: null,
-  canRemove: false,
-  message: null,
-});
 
 const git = (cwd: string, args: ReadonlyArray<string>) =>
   Effect.gen(function* () {
@@ -196,7 +167,6 @@ const makeLayer = (input: {
   readonly currentHead?: Ref.Ref<string>;
   /** The project's own repository; defaults to the one the test reference names. */
   readonly identity?: typeof ACME_APP;
-  readonly number?: number;
 }) =>
   PullRequestReviewGuideService.layer.pipe(
     Layer.provide(
@@ -220,9 +190,7 @@ const makeLayer = (input: {
           (input.currentHead === undefined
             ? Effect.succeed(input.headSha)
             : Ref.get(input.currentHead)
-          ).pipe(
-            Effect.map((head) => ({ ...detail(input.workspace, head), number: input.number ?? 7 })),
-          ),
+          ).pipe(Effect.map((head) => detail(input.workspace, head))),
         activity: () => Effect.succeed(activity),
         invalidate: () => Effect.void,
         stack: () => Effect.succeed(stack(input)),
@@ -262,228 +230,6 @@ const layerBase = Layer.mergeAll(
 
 // Runs drive real git, which the test clock does not advance, so waits use real time.
 it.layer(layerBase, { excludeTestServices: true })("PullRequestReviewGuideService", (it) => {
-  it.effect.each([
-    "pre-model fetch",
-    "post-model cleanup",
-    "cleanup during scope shutdown",
-  ] as const)(
-    "blocks restart admission during a superseded generation's %s after the newer guide settles",
-    (stage) =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const repositories = yield* makeRepositories;
-          const reviewReference = {
-            ...reference,
-            number: stage === "pre-model fetch" ? 70 : stage === "post-model cleanup" ? 71 : 72,
-          };
-          const stored = yield* Deferred.make<void>();
-          const held = yield* Deferred.make<void>();
-          const release = yield* Deferred.make<void>();
-          const oldFiber = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
-          const newFiber = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
-          const currentHead = yield* Ref.make(repositories.headSha);
-          const driver = yield* GitVcsDriver.GitVcsDriver;
-          const serviceScope = yield* Scope.make();
-          yield* Effect.addFinalizer(() => Scope.close(serviceScope, Exit.void));
-          let oldCheckout: string | undefined;
-          const gate = Deferred.succeed(held, undefined).pipe(
-            Effect.andThen(Deferred.await(release)),
-          );
-          const context = yield* Layer.build(
-            makeLayer({
-              ...repositories,
-              number: reviewReference.number,
-              stored,
-              currentHead,
-              generate: () => Effect.succeed({ stops: [] }),
-            }).pipe(
-              Layer.provide(
-                Layer.succeed(GitVcsDriver.GitVcsDriver, {
-                  ...driver,
-                  execute: (input) =>
-                    Effect.gen(function* () {
-                      if (input.operation === "PullRequestReviewGuideService.fetch") {
-                        if (input.args.some((arg) => arg.endsWith("/0/base"))) {
-                          yield* Deferred.succeed(oldFiber, yield* Effect.fiber);
-                          if (stage === "pre-model fetch") yield* gate;
-                        }
-                        if (input.args.some((arg) => arg.endsWith("/1/base"))) {
-                          yield* Deferred.succeed(newFiber, yield* Effect.fiber);
-                        }
-                      }
-                      if (
-                        input.operation === "PullRequestReviewGuideService.addWorktree" &&
-                        oldCheckout === undefined &&
-                        stage !== "pre-model fetch"
-                      ) {
-                        oldCheckout = input.args.at(-2);
-                      }
-                      return yield* driver.execute(input);
-                    }),
-                  removeWorktree: (input) =>
-                    (stage !== "pre-model fetch" && input.path === oldCheckout
-                      ? gate
-                      : Effect.void
-                    ).pipe(Effect.andThen(driver.removeWorktree(input))),
-                }),
-              ),
-            ),
-          ).pipe(Effect.provideService(Scope.Scope, serviceScope));
-          const service = Context.get(
-            context,
-            PullRequestReviewGuideService.PullRequestReviewGuideService,
-          );
-          const memoMap = yield* Layer.makeMemoMap;
-          const scope = yield* Effect.scope;
-          // Production constructs the provider window before routes provide guides.
-          yield* Layer.buildWithMemoMap(
-            Layer.fresh(UpdateWindow.layer).pipe(
-              Layer.provide(
-                Layer.mergeAll(
-                  Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
-                  Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
-                  Layer.mock(BackgroundPolicy.BackgroundPolicy)({
-                    sinceLastClientInteraction: Effect.succeed(Duration.minutes(14)),
-                  }),
-                  Layer.mock(ServerSettings.ServerSettingsService)({}),
-                  Layer.mock(ProviderRegistry.ProviderRegistry)({}),
-                ),
-              ),
-            ),
-            memoMap,
-            scope,
-          );
-          const windowContext = yield* Layer.buildWithMemoMap(
-            UpdateWindow.layer.pipe(
-              Layer.provide(
-                Layer.mergeAll(
-                  Layer.succeed(
-                    PullRequestReviewGuideService.PullRequestReviewGuideService,
-                    service,
-                  ),
-                  Layer.mock(ProjectionStore.ProjectionStoreV2)({
-                    getRecoveryThreadIds: () => Effect.succeed([]),
-                    getLimitRecoveryCandidates: () => Effect.succeed([]),
-                  }),
-                  Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-                    hasPendingBackgroundWork: Effect.succeed(false),
-                  }),
-                  Layer.mock(BackgroundPolicy.BackgroundPolicy)({
-                    sinceLastClientInteraction: Effect.succeed(Duration.minutes(15)),
-                  }),
-                  Layer.mock(ProviderRegistry.ProviderRegistry)({
-                    getProviders: Effect.succeed([]),
-                  }),
-                  Layer.mock(ServerSettings.ServerSettingsService)({
-                    getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-                  }),
-                  Layer.mock(CodexInstallation.CodexInstallation)({
-                    managedDirectory: "/managed/codex",
-                    state: Effect.succeed(idleInstallationState("codex")),
-                  }),
-                  Layer.mock(AntigravityInstallation.AntigravityInstallation)({
-                    managedDirectory: "/managed/antigravity",
-                    state: Effect.succeed(idleInstallationState("antigravity")),
-                  }),
-                  Layer.mock(TerminalManager.TerminalManager)({
-                    withIdleTerminals: (effect) => Effect.asSome(effect),
-                  }),
-                  Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({
-                    activeCloneCount: Effect.succeed(0),
-                  }),
-                  Layer.mock(ThreadLaunchService.ThreadLaunchService)({
-                    activePreparationCount: Effect.succeed(0),
-                  }),
-                  Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
-                    activeRefreshCount: Effect.succeed(0),
-                  }),
-                ),
-              ),
-            ),
-            memoMap,
-            scope,
-          );
-          const window = Context.get(windowContext, UpdateWindow.UpdateWindow);
-          yield* Effect.gen(function* () {
-            // Once a restart owns admission, even a not-yet-started guide waits.
-            const handoffEntered = yield* Deferred.make<void>();
-            const handoffRelease = yield* Deferred.make<void>();
-            const handoff = yield* window
-              .runIfOpen(
-                Deferred.succeed(handoffEntered, undefined).pipe(
-                  Effect.andThen(Deferred.await(handoffRelease)),
-                ),
-                { restartsServer: true },
-              )
-              .pipe(Effect.forkScoped);
-            yield* Deferred.await(handoffEntered);
-            const waitingGuide = yield* service
-              .generate(reviewReference)
-              .pipe(Effect.forkScoped({ startImmediately: true }));
-            assert.isUndefined(waitingGuide.pollUnsafe());
-            assert.strictEqual(yield* service.activeGenerationCount, 0);
-            yield* Deferred.succeed(handoffRelease, undefined);
-            yield* Fiber.join(handoff);
-            yield* Fiber.join(waitingGuide);
-            yield* Deferred.await(held);
-            assert.strictEqual(yield* service.activeGenerationCount, 1);
-            // Same-head presses join the run rather than inflating the count.
-            assert.isFalse((yield* service.generate(reviewReference)).started);
-            assert.strictEqual(yield* service.activeGenerationCount, 1);
-            yield* Ref.set(currentHead, repositories.upperSha);
-            yield* service.generate(reviewReference);
-            yield* Deferred.await(stored);
-            assert.isTrue(Exit.isSuccess(yield* Fiber.await(yield* Deferred.await(newFiber))));
-            const latest = yield* service.get(reviewReference);
-            assert.isNull(latest.run);
-            assert.strictEqual(latest.guide?.headSha, repositories.upperSha);
-            const closing =
-              stage === "cleanup during scope shutdown"
-                ? yield* Scope.close(serviceScope, Exit.void).pipe(
-                    Effect.forkScoped({ startImmediately: true }),
-                  )
-                : null;
-            if (closing !== null) assert.isUndefined(closing.pollUnsafe());
-            assert.strictEqual(yield* service.activeGenerationCount, 1);
-            assert.isTrue(
-              Option.isNone(
-                yield* window.runIfOpen(Effect.die("must not restart"), { restartsServer: true }),
-              ),
-            );
-            // Fetch/setup and cleanup do not launch a CLI outside TextGeneration's permit.
-            assert.isTrue(Option.isSome(yield* window.runIfOpen(Effect.void)));
-            yield* Deferred.succeed(release, undefined);
-            const old = yield* Deferred.await(oldFiber);
-            const oldExit = yield* Fiber.await(old);
-            if (closing === null) assert.isTrue(Exit.isSuccess(oldExit));
-            if (closing !== null) yield* Fiber.join(closing);
-            assert.strictEqual(yield* service.activeGenerationCount, 0);
-            assert.isTrue(
-              Option.isSome(yield* window.runIfOpen(Effect.void, { restartsServer: true })),
-            );
-            assert.strictEqual(
-              (yield* service.get(reviewReference)).guide?.headSha,
-              repositories.upperSha,
-            );
-            assert.strictEqual(
-              yield* git(repositories.workspace, [
-                "for-each-ref",
-                "--format=%(refname)",
-                "refs/t3/review-guide",
-              ]),
-              "",
-            );
-            assert.deepEqual(
-              (yield* git(repositories.workspace, ["worktree", "list", "--porcelain"])).match(
-                /^worktree .+$/gmu,
-              ),
-              [`worktree ${repositories.workspace}`],
-            );
-          }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
-        }),
-      ),
-  );
-
   it.effect("briefs the change against its own base in a checkout it then removes", () =>
     Effect.scoped(
       Effect.gen(function* () {

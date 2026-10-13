@@ -152,49 +152,6 @@ function layerBackgroundPolicy(shouldRunScopeWork: (scope: BackgroundScope) => b
 }
 
 describe("VcsStatusBroadcaster", () => {
-  it.effect(
-    "tracks background fetches through interrupted cleanup without counting idle pollers",
-    () => {
-      const entered = Deferred.makeUnsafe<void>();
-      const cleanup = Deferred.makeUnsafe<void>();
-      const releaseCleanup = Deferred.makeUnsafe<void>();
-      const state = {
-        currentLocalStatus: baseLocalStatus,
-        currentRemoteStatus: baseRemoteStatus,
-        localStatusCalls: 0,
-        remoteStatusCalls: 0,
-        localInvalidationCalls: 0,
-        remoteInvalidationCalls: 0,
-        beforeRemoteStatus: Deferred.succeed(entered, undefined).pipe(
-          Effect.andThen(Effect.never),
-          Effect.ensuring(
-            Deferred.succeed(cleanup, undefined).pipe(
-              Effect.andThen(Deferred.await(releaseCleanup)),
-            ),
-          ),
-        ),
-      };
-      return Effect.gen(function* () {
-        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
-        assert.equal(yield* broadcaster.activeRefreshCount, 0);
-        const reader = yield* broadcaster
-          .streamStatus({ cwd: "/repo" })
-          .pipe(Stream.runDrain, Effect.forkScoped);
-        yield* Deferred.await(entered);
-        assert.equal(yield* broadcaster.activeRefreshCount, 1);
-        const stopping = yield* Fiber.interrupt(reader).pipe(Effect.forkScoped);
-        yield* Deferred.await(cleanup);
-        assert.equal(yield* broadcaster.activeRefreshCount, 1);
-        yield* Deferred.succeed(releaseCleanup, undefined);
-        yield* Fiber.join(stopping);
-        assert.equal(yield* broadcaster.activeRefreshCount, 0);
-      }).pipe(
-        Effect.ensuring(Deferred.succeed(releaseCleanup, undefined)),
-        Effect.provide(layerTestFor(state)),
-      );
-    },
-  );
-
   it.effect.skipIf(!symlinksSupported)(
     "automatically pulls an enabled clean default branch when status detects it is behind",
     () => {

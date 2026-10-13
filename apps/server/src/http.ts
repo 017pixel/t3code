@@ -5,7 +5,6 @@ import {
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
-import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
 import * as Data from "effect/Data";
@@ -49,11 +48,14 @@ import {
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
-import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
+import {
+  browserApiCorsAllowedHeaders,
+  browserApiCorsAllowedMethods,
+  DESKTOP_RENDERER_ORIGINS,
+} from "./httpCors.ts";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
-const DESKTOP_RENDERER_ORIGINS = ["t3code://app", "t3code-dev://app"];
 const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
 // HTML previews are agent output, not the app. The sandbox gives the document an
 // opaque origin: scripts run, but same-origin cookies, storage, and API calls are
@@ -518,19 +520,6 @@ const decodeBuildManifest = Schema.decodeUnknownEffect(
   ),
 );
 
-const isHashedBuildAsset = (asset: string) => /^assets\/[^/]+-[\w-]{8}\.[^/]+$/.test(asset);
-const BuildAssetCache = Schema.fromJsonString(
-  Schema.Struct({
-    current: Schema.Array(Schema.String),
-    previous: Schema.Array(Schema.String),
-  }),
-);
-const decodeBuildAssetCache = Schema.decodeUnknownEffect(BuildAssetCache);
-const encodeBuildAssetCache = Schema.encodeEffect(BuildAssetCache);
-const emptyBuildAssetCache = Schema.decodeUnknownSync(BuildAssetCache)(
-  '{"current":[],"previous":[]}',
-);
-
 const loadImmutableBuildAssets = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const staticDir =
@@ -538,61 +527,19 @@ const loadImmutableBuildAssets = Effect.gen(function* () {
   if (!staticDir) return new Set<string>();
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const current = yield* fileSystem
-    .readFileString(path.join(staticDir, ".vite", "manifest.json"))
-    .pipe(
-      Effect.flatMap(decodeBuildManifest),
-      Effect.map(
-        (manifest) =>
-          new Set(
-            Object.values(manifest).flatMap((entry) => [
-              entry.file,
-              ...(entry.css ?? []),
-              ...(entry.assets ?? []),
-            ]),
-          ),
-      ),
-      Effect.orElseSucceed(() => new Set<string>()),
-    );
-  if (config.devUrl || current.size === 0) return current;
-
-  // Open tabs still import the previous build's lazy chunks after a service restart.
-  // Keep two generations on disk; never accumulate every installed build.
-  return yield* Effect.gen(function* () {
-    const cacheDir = path.join(config.providerStatusCacheDir, "web-assets");
-    const manifestPath = path.join(cacheDir, "current.json");
-    const saved = yield* fileSystem.readFileString(manifestPath).pipe(
-      Effect.flatMap(decodeBuildAssetCache),
-      Effect.orElseSucceed(() => emptyBuildAssetCache),
-    );
-    const currentAssets = [...current].filter(isHashedBuildAsset);
-    const savedCurrent = new Set(saved.current);
-    const sameBuild =
-      currentAssets.length === savedCurrent.size &&
-      currentAssets.every((asset) => savedCurrent.has(asset));
-    const previous = sameBuild ? saved.previous : saved.current;
-    const retained = new Set([...currentAssets, ...previous].filter(isHashedBuildAsset));
-    const filesDir = path.join(cacheDir, "assets");
-    yield* fileSystem.makeDirectory(filesDir, { recursive: true });
-    for (const asset of currentAssets) {
-      const cached = path.join(cacheDir, asset);
-      if (savedCurrent.has(asset) && (yield* fileSystem.exists(cached))) continue;
-      yield* fileSystem.copyFile(path.join(staticDir, asset), cached);
-    }
-    for (const file of yield* fileSystem.readDirectory(filesDir)) {
-      if (!retained.has(`assets/${file}`)) yield* fileSystem.remove(path.join(filesDir, file));
-    }
-    yield* writeFileStringAtomically({
-      filePath: manifestPath,
-      contents: yield* encodeBuildAssetCache({ current: currentAssets, previous }),
-    });
-    return new Set([...current, ...retained]);
-  }).pipe(
-    Effect.catchCause((cause) =>
-      Effect.logWarning("Could not retain previous web build assets", { cause }).pipe(
-        Effect.as(current),
-      ),
+  return yield* fileSystem.readFileString(path.join(staticDir, ".vite", "manifest.json")).pipe(
+    Effect.flatMap(decodeBuildManifest),
+    Effect.map(
+      (manifest) =>
+        new Set(
+          Object.values(manifest).flatMap((entry) => [
+            entry.file,
+            ...(entry.css ?? []),
+            ...(entry.assets ?? []),
+          ]),
+        ),
     ),
+    Effect.orElseSucceed(() => new Set<string>()),
   );
 });
 
@@ -680,23 +627,7 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
     }
 
     let opened = yield* openStaticFile(filePath);
-    if (
-      !opened &&
-      isHashedBuildAsset(staticRelativePath) &&
-      immutableBuildAssets.has(staticRelativePath)
-    ) {
-      opened = yield* openStaticFile(
-        path.join(config.providerStatusCacheDir, "web-assets", staticRelativePath),
-      );
-    }
     if (!opened) {
-      // A missing build chunk must fail its import, not load index.html as a script.
-      // Other dotted paths stay SPA routes: project keys can end in `next.js`.
-      if (/^assets[/\\]/.test(staticRelativePath))
-        return HttpServerResponse.text("Not Found", {
-          status: 404,
-          headers: { "Cache-Control": "no-cache" },
-        });
       filePath = path.resolve(staticRoot, "index.html");
       opened = yield* openStaticFile(filePath);
       if (!opened) {
@@ -710,7 +641,9 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
     // A hash-like name is not enough: custom static files can use the same naming pattern.
     const relativePath = path.relative(staticRoot, filePath).replaceAll("\\", "/");
     const immutable =
-      !isHtml && isHashedBuildAsset(relativePath) && immutableBuildAssets.has(relativePath);
+      !isHtml &&
+      /^assets\/.+-[\w-]{8}\.[^/]+$/.test(relativePath) &&
+      immutableBuildAssets.has(relativePath);
     const headers: Record<string, string> = {
       "Cache-Control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
     };

@@ -78,7 +78,6 @@ export const museMaintenance: ProviderMaintenanceCapabilitiesResolver = {
             "--version",
           ].join(" "),
           updateLockKey: `muse:${context.realCommandPath}`,
-          installationKey: `muse:${context.realCommandPath}`,
           platform: context.platform,
           env: { ...context.env, ...updateEnv },
         }),

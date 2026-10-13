@@ -1,6 +1,3 @@
-import * as Deferred from "effect/Deferred";
-import * as Fiber from "effect/Fiber";
-import * as Maintenance from "./maintenance.ts";
 import { describe, expect, it } from "@effect/vitest";
 import type { ModelCapabilities } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -76,6 +73,25 @@ describe("providerModelsFromSettings", () => {
       },
       { slug: "named", name: "Named", isCustom: true, capabilities },
     ]);
+  });
+
+  it("renames a built-in model when a named entry uses its slug", () => {
+    const capabilities = createModelCapabilities({ optionDescriptors: [] });
+    const models = providerModelsFromSettings(
+      [
+        {
+          slug: "gpt-5.5",
+          name: "GPT-5.5",
+          shortName: "5.5",
+          isCustom: false,
+          capabilities,
+        },
+      ],
+      [{ slug: "gpt-5.5", name: "Team GPT" }],
+      capabilities,
+    );
+
+    expect(models).toEqual([{ slug: "gpt-5.5", name: "Team GPT", isCustom: false, capabilities }]);
   });
 
   it("preserves a custom slug that collides with a provider alias", () => {
@@ -183,150 +199,3 @@ describe("ProviderCommandNotFoundError", () => {
     });
   });
 });
-
-describe("provider maintenance admission", () => {
-  it.effect("keeps CLI probes behind an install and permits its verification", () =>
-    Effect.gen(function* () {
-      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      let launches = 0;
-      const spawner = ChildProcessSpawner.make(() =>
-        Effect.sync(() => {
-          launches++;
-          return ChildProcessSpawner.makeHandle({
-            pid: ChildProcessSpawner.ProcessId(1),
-            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-            isRunning: Effect.succeed(false),
-            kill: () => Effect.void,
-            unref: Effect.succeed(Effect.void),
-            stdin: Sink.drain,
-            stdout: Stream.empty,
-            stderr: Stream.empty,
-            all: Stream.empty,
-            getInputFd: () => Sink.drain,
-            getOutputFd: () => Stream.empty,
-          });
-        }),
-      );
-      const probe = spawnAndCollect("codex", ChildProcess.make("codex", ["--version"])).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      );
-      const install = yield* admission
-        .withPermit(
-          Effect.gen(function* () {
-            yield* Deferred.succeed(entered, undefined);
-            yield* Deferred.await(release);
-            yield* probe;
-          }),
-        )
-        .pipe(Effect.forkScoped);
-      yield* Deferred.await(entered);
-      const waiting = yield* probe.pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
-      expect(launches).toBe(0);
-      expect(waiting.pollUnsafe() === undefined).toBe(true);
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(install);
-      yield* Fiber.join(waiting);
-      expect(launches).toBe(2);
-    }),
-  );
-
-  it.effect("revokes inherited verification admission when the holder exits", () =>
-    Effect.gen(function* () {
-      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-      const proceed = yield* Deferred.make<void>();
-      const child = yield* admission.withPermit(
-        Deferred.await(proceed).pipe(
-          Effect.andThen(admission.withPermit(Effect.succeed("child"))),
-          Effect.forkScoped,
-        ),
-      );
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const install = yield* admission
-        .withPermit(
-          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
-        )
-        .pipe(Effect.forkScoped);
-      yield* Deferred.await(entered);
-      yield* Deferred.succeed(proceed, undefined);
-      yield* Effect.yieldNow;
-      expect(child.pollUnsafe() === undefined).toBe(true);
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(install);
-      expect(yield* Fiber.join(child)).toBe("child");
-    }),
-  );
-
-  it.effect("releases scoped CLI admission on interruption", () =>
-    Effect.gen(function* () {
-      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-      const entered = yield* Deferred.make<void>();
-      const probe = yield* Effect.scoped(
-        admission
-          .withScopedLaunchPermit(Effect.void)
-          .pipe(Effect.andThen(Deferred.succeed(entered, undefined)), Effect.andThen(Effect.never)),
-      ).pipe(Effect.forkScoped);
-      yield* Deferred.await(entered);
-      const install = yield* admission
-        .withPermit(Effect.succeed("installed"))
-        .pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
-      expect(install.pollUnsafe() === undefined).toBe(true);
-      yield* Fiber.interrupt(probe);
-      expect(yield* Fiber.join(install)).toBe("installed");
-    }),
-  );
-});
-
-it.effect("keeps an install excluded until borrowed scoped probe admission closes", () =>
-  Effect.gen(function* () {
-    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-    const entered = yield* Deferred.make<void>();
-    const release = yield* Deferred.make<void>();
-    const child = yield* admission.withPermit(
-      Effect.gen(function* () {
-        const child = yield* Effect.scoped(
-          admission.withScopedLaunchPermit(
-            Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
-          ),
-        ).pipe(Effect.forkScoped);
-        yield* Deferred.await(entered);
-        return child;
-      }),
-    );
-    const install = yield* admission
-      .withPermit(Effect.succeed("installed"))
-      .pipe(Effect.forkScoped);
-    yield* Effect.yieldNow;
-    expect(install.pollUnsafe() === undefined).toBe(true);
-    yield* Deferred.succeed(release, undefined);
-    yield* Fiber.join(child);
-    expect(yield* Fiber.join(install)).toBe("installed");
-  }),
-);
-
-it.effect("cancels an admission waiter while an install still holds the permit", () =>
-  Effect.gen(function* () {
-    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-    const entered = yield* Deferred.make<void>();
-    const release = yield* Deferred.make<void>();
-    const install = yield* admission
-      .withPermit(
-        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
-      )
-      .pipe(Effect.forkScoped);
-    yield* Deferred.await(entered);
-    const probe = yield* admission
-      .withPermit(Effect.die("canceled CLI must not launch"))
-      .pipe(Effect.forkScoped);
-    yield* Effect.yieldNow;
-    yield* Fiber.interrupt(probe);
-    expect(probe.pollUnsafe() !== undefined).toBe(true);
-    yield* Deferred.succeed(release, undefined);
-    yield* Fiber.join(install);
-    expect(yield* admission.withPermit(Effect.succeed("next"))).toBe("next");
-  }),
-);

@@ -1,12 +1,9 @@
 import { EnvironmentId, WS_METHODS } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { vi } from "vite-plus/test";
 
 import {
   onRetainedMobileBackgroundScopesChange,
-  recordMobileInteraction,
-  mobileRecentlyInteracted,
   observeMobileBackgroundActivitySubscription,
   retainedMobileBackgroundScopes,
 } from "./background-activity-scopes";
@@ -88,40 +85,4 @@ describe("mobile background activity", () => {
       removeListener();
     }),
   );
-});
-
-it("expires real mobile interaction independently of foreground heartbeats", () => {
-  recordMobileInteraction();
-  const now = performance.now();
-  expect(mobileRecentlyInteracted(now)).toBe(true);
-  for (let elapsed = 25_000; elapsed <= 15 * 60_000; elapsed += 25_000) {
-    expect(mobileRecentlyInteracted(now + elapsed)).toBe(elapsed < 30_000);
-  }
-  recordMobileInteraction();
-  expect(mobileRecentlyInteracted()).toBe(true);
-});
-
-it("reports renewed interaction once and lets heartbeats cover continuous use", () => {
-  const start = performance.now() + 40_000;
-  const clock = vi.spyOn(performance, "now");
-  let reports = 0;
-  const unsubscribe = onRetainedMobileBackgroundScopesChange(() => {
-    reports++;
-  });
-  try {
-    for (let elapsed = 0; elapsed < 120_000; elapsed += 100) {
-      clock.mockReturnValue(start + elapsed);
-      recordMobileInteraction();
-    }
-    expect(reports).toBe(1);
-    expect(mobileRecentlyInteracted(start + 120_000)).toBe(true);
-    expect(mobileRecentlyInteracted(start + 150_000)).toBe(false);
-    clock.mockReturnValue(start + 150_000);
-    recordMobileInteraction();
-    expect(reports).toBe(2);
-    expect(mobileRecentlyInteracted(start + 150_000)).toBe(true);
-  } finally {
-    unsubscribe();
-    clock.mockRestore();
-  }
 });

@@ -1,8 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
-import * as Deferred from "effect/Deferred";
-import * as Fiber from "effect/Fiber";
-import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -13,7 +10,6 @@ import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
-import { stopAllPoolInstances } from "../app/DesktopApp.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
@@ -113,43 +109,6 @@ function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.De
 }
 
 describe("DesktopBackendPool", () => {
-  it.effect("stops Windows and WSL backends concurrently within the quit budget", () =>
-    Effect.gen(function* () {
-      const startedWindows = yield* Deferred.make<void>();
-      const startedWsl = yield* Deferred.make<void>();
-      const stopped: string[] = [];
-      const instances = [
-        [DesktopBackendPool.PRIMARY_INSTANCE_ID, startedWindows],
-        [DesktopBackendPool.BackendInstanceId("wsl:ubuntu"), startedWsl],
-      ] as const;
-      const layer = DesktopBackendPool.layerTest(
-        instances.map(([id, started]) => ({
-          ...makeStubInstance(id, id),
-          stop: (options) =>
-            Effect.sync(() => {
-              assert.equal(Duration.toMillis(options?.timeout ?? Duration.zero), 5_000);
-            }).pipe(
-              Effect.andThen(Deferred.succeed(started, undefined)),
-              Effect.andThen(Effect.sleep(Duration.seconds(4))),
-              Effect.andThen(
-                Effect.sync(() => {
-                  stopped.push(id);
-                }),
-              ),
-            ),
-        })),
-      );
-      yield* Effect.gen(function* () {
-        const stop = yield* stopAllPoolInstances().pipe(Effect.forkChild);
-        yield* Deferred.await(startedWindows);
-        yield* Deferred.await(startedWsl);
-        yield* TestClock.adjust(Duration.seconds(4));
-        yield* Fiber.join(stop);
-        assert.equal(stopped.length, 2);
-      }).pipe(Effect.provide(layer));
-    }).pipe(Effect.provide(TestClock.layer())),
-  );
-
   it.effect("layerTest exposes registered instances by id", () =>
     Effect.gen(function* () {
       const pool = yield* DesktopBackendPool.DesktopBackendPool;

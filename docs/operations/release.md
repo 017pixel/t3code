@@ -291,6 +291,18 @@ and `VERCEL_ORG_ID` secrets. It also respects the optional `VERCEL_TEAM_SLUG`
 variable. The Vercel project's root directory must be `apps/marketing`.
 Git deployments remain disabled in `apps/marketing/vercel.ts`.
 
+## Android APK mirror
+
+`.github/workflows/mobile-android-apk.yml` checks Google Play hourly and publishes the newest
+build on the `v2` closed testing track to the rolling `android-nightly` prerelease, for nightly
+users who can't join the Play testing group. Those v2-preview builds are the only Android builds that can
+connect to a nightly server. The APK is the universal APK Play generates and signs from the
+uploaded bundle, so no signing key lives in GitHub. The job skips itself until
+`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` holds a Play service account key with the "Release to
+production, exclude devices, and use Play App Signing" permission, which downloading generated
+APKs requires. The job reads tracks without opening a Play edit, so it can share the service
+account EAS Submit uses.
+
 ## Hosted web app release deployment
 
 The hosted app is intentionally not deployed by Vercel's Git integration. The
@@ -366,7 +378,7 @@ One-time Vercel dashboard setup:
 
 ## Server self-update release invariant
 
-A client that updates a connected server asks for its own exact version, not an npm dist-tag. Every released
+Connected servers update to the client's exact version, not to an npm dist-tag. Every released
 desktop or hosted client version must therefore have a matching `t3@<version>` package available on
 npm before users can receive that client.
 
@@ -399,8 +411,8 @@ available.
 - `apps/desktop/src/main.ts` only wires the updater layers into the desktop runtime.
 - Update UX:
   - Background checks run on startup delay + interval.
-  - Updates found by background checks download automatically and install when the app quits (except `.deb`, where dpkg asks for a password).
-  - The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install right away.
+  - Updates found by the startup and interval checks download automatically and install when the app quits. `.deb` installs are never armed for quit, because dpkg asks for a password.
+  - A manual check only reports; the update button downloads, then restarts to install right away.
 - Provider: GitHub Releases (`provider: github`) configured at build time.
 - Repository slug source:
   - `T3CODE_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.

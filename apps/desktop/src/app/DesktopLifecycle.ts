@@ -13,7 +13,6 @@ import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
-import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
@@ -40,11 +39,10 @@ export type DesktopLifecycleRuntimeServices =
 
 type DesktopLifecycleRegistrationServices =
   | DesktopLifecycleRuntimeServices
-  | ElectronWindow.ElectronWindow
-  | DesktopUpdates.DesktopUpdates;
+  | ElectronWindow.ElectronWindow;
 
 /**
- * @effect-expect-leaking DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronTheme | ElectronUpdater | ElectronWindow | DesktopUpdates
+ * @effect-expect-leaking DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronTheme | ElectronUpdater | ElectronWindow
  */
 export class DesktopLifecycle extends Context.Service<
   DesktopLifecycle,
@@ -136,12 +134,10 @@ function handleBeforeQuit(
       );
     }).pipe(Effect.withSpan("desktop.lifecycle.beforeQuit")),
   ).finally(() => {
+    markQuitAllowed();
     void runEffect(
       Effect.gen(function* () {
         const electronApp = yield* ElectronApp.ElectronApp;
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        yield* updates.installOnQuit;
-        markQuitAllowed();
         yield* electronApp.quit;
       }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
     );
@@ -150,7 +146,6 @@ function handleBeforeQuit(
 
 function quitFromSignal(
   signal: "SIGINT" | "SIGTERM",
-  markQuitAllowed: () => void,
   runEffect: <A, E>(
     effect: Effect.Effect<A, E, DesktopLifecycleRegistrationServices>,
   ) => Promise<A>,
@@ -164,9 +159,6 @@ function quitFromSignal(
       if (wasQuitting) return;
       yield* logLifecycleInfo("process signal received", { signal });
       yield* requestDesktopShutdownAndWait();
-      const updates = yield* DesktopUpdates.DesktopUpdates;
-      yield* updates.installOnQuit;
-      markQuitAllowed();
       yield* electronApp.quit;
     }).pipe(Effect.withSpan("desktop.lifecycle.processSignal")),
   );
@@ -190,7 +182,6 @@ export const make = DesktopLifecycle.of({
       }
       // app.exit still emits "quit", where electron-updater would install a
       // downloaded update under the relaunched app on Windows and Linux.
-      // macOS staging is deferred until a real quit by DesktopUpdates.
       yield* electronUpdater.setAutoInstallOnAppQuit(false);
       yield* electronApp.relaunch({
         execPath: process.execPath,
@@ -215,7 +206,6 @@ export const make = DesktopLifecycle.of({
     const context = yield* Effect.context<DesktopLifecycleRegistrationServices>();
     const runEffect = Effect.runPromiseWith(context);
     let quitAllowed = false;
-    let quitRequested = false;
     let updaterQuitAllowed = false;
     yield* electronTheme.onUpdated(() => {
       void runEffect(
@@ -242,11 +232,6 @@ export const make = DesktopLifecycle.of({
       );
     });
     yield* electronApp.on("before-quit", (event: Electron.Event) => {
-      if (quitRequested && !quitAllowed && !updaterQuitAllowed) {
-        event.preventDefault();
-        return;
-      }
-      quitRequested = true;
       handleBeforeQuit(
         event,
         runEffect,
@@ -279,26 +264,10 @@ export const make = DesktopLifecycle.of({
 
     if (environment.platform !== "win32") {
       yield* addScopedListener(process, "SIGINT", () => {
-        if (quitRequested) return;
-        quitRequested = true;
-        quitFromSignal(
-          "SIGINT",
-          () => {
-            quitAllowed = true;
-          },
-          runEffect,
-        );
+        quitFromSignal("SIGINT", runEffect);
       });
       yield* addScopedListener(process, "SIGTERM", () => {
-        if (quitRequested) return;
-        quitRequested = true;
-        quitFromSignal(
-          "SIGTERM",
-          () => {
-            quitAllowed = true;
-          },
-          runEffect,
-        );
+        quitFromSignal("SIGTERM", runEffect);
       });
     }
   }).pipe(Effect.withSpan("desktop.lifecycle.register")),

@@ -8,18 +8,18 @@ import type * as Electron from "electron";
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
-import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as DesktopState from "./DesktopState.ts";
-import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 
 function layerElectronApp(
   appListeners: Map<string, (...args: readonly unknown[]) => void>,
   quit: Effect.Effect<void> = Effect.void,
+  relaunch: Effect.Effect<void> = Effect.void,
 ) {
   const registerListener = (eventName: string, listener: (...args: readonly unknown[]) => void) =>
     Effect.acquireRelease(
@@ -39,7 +39,7 @@ function layerElectronApp(
     whenReady: Effect.void,
     quit,
     exit: () => Effect.void,
-    relaunch: () => Effect.void,
+    relaunch: () => relaunch,
     setPath: () => Effect.void,
     setName: () => Effect.void,
     setAboutPanelOptions: () => Effect.void,
@@ -105,145 +105,6 @@ function layerDesktopWindow(
 
 describe("DesktopLifecycle", () => {
   it.effect.each(["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>)(
-    "disarms quit installation before a settings relaunch on %s",
-    (platform) =>
-      Effect.gen(function* () {
-        const exited = yield* Deferred.make<void>();
-        const events: string[] = [];
-        const layer = DesktopLifecycle.layer.pipe(
-          Layer.provideMerge(layerElectronApp(new Map())),
-          Layer.provideMerge(layerElectronTheme),
-          Layer.provideMerge(
-            layerDesktopWindow({
-              flushMainWindowBounds: Effect.sync(() => {
-                events.push("flush");
-              }),
-            }),
-          ),
-          Layer.provideMerge(
-            Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
-              platform,
-              isDevelopment: false,
-            } as DesktopEnvironment.DesktopEnvironment["Service"]),
-          ),
-          Layer.provideMerge(
-            Layer.mock(ElectronUpdater.ElectronUpdater)({
-              setAutoInstallOnAppQuit: (value) =>
-                Effect.sync(() => {
-                  events.push(`autoInstall:${value}`);
-                }),
-            }),
-          ),
-          Layer.provideMerge(DesktopShutdown.layer),
-          Layer.provideMerge(DesktopState.layer),
-        );
-        yield* Effect.gen(function* () {
-          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
-          const app = yield* ElectronApp.ElectronApp;
-          const shutdown = yield* DesktopShutdown.DesktopShutdown;
-          yield* lifecycle.relaunch("settings").pipe(
-            Effect.provideService(ElectronApp.ElectronApp, {
-              ...app,
-              relaunch: () =>
-                Effect.sync(() => {
-                  events.push("relaunch");
-                }),
-              exit: (code) =>
-                Effect.sync(() => {
-                  events.push(`exit:${code}`);
-                }).pipe(Effect.andThen(Deferred.succeed(exited, undefined)), Effect.asVoid),
-            }),
-          );
-          yield* shutdown.awaitRequest;
-          assert.deepEqual(events, ["flush"]);
-          yield* shutdown.markComplete;
-          yield* Deferred.await(exited);
-          assert.deepEqual(events, ["flush", "autoInstall:false", "relaunch", "exit:0"]);
-        }).pipe(Effect.provide(layer));
-      }),
-  );
-
-  it.effect.each(["quit", "SIGTERM"] as const)(
-    "blocks repeated quit events during %s staging",
-    (trigger) =>
-      Effect.gen(function* () {
-        const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
-        const stagingStarted = yield* Deferred.make<void>();
-        const finishStaging = yield* Deferred.make<void>();
-        const quitFinished = yield* Deferred.make<void>();
-        let installs = 0;
-        const attemptQuit = () => {
-          let prevented = false;
-          appListeners.get("before-quit")?.({
-            preventDefault: () => {
-              prevented = true;
-            },
-          });
-          return prevented;
-        };
-        const layer = DesktopLifecycle.layer.pipe(
-          Layer.provideMerge(
-            layerElectronApp(
-              appListeners,
-              Effect.sync(() => {
-                assert.isFalse(attemptQuit());
-              }).pipe(Effect.andThen(Deferred.succeed(quitFinished, undefined)), Effect.asVoid),
-            ),
-          ),
-          Layer.provideMerge(layerElectronTheme),
-          Layer.provideMerge(layerElectronWindow()),
-          Layer.provideMerge(layerDesktopWindow()),
-          Layer.provideMerge(
-            Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
-              platform: "darwin",
-              isDevelopment: false,
-            } as DesktopEnvironment.DesktopEnvironment["Service"]),
-          ),
-          Layer.provideMerge(
-            Layer.succeed(DesktopShutdown.DesktopShutdown, {
-              request: Effect.void,
-              awaitRequest: Effect.void,
-              markComplete: Effect.void,
-              awaitComplete: Effect.void,
-              isComplete: Effect.succeed(true),
-            }),
-          ),
-          Layer.provideMerge(
-            Layer.succeed(DesktopUpdates.DesktopUpdates, {
-              installOnQuit: Effect.sync(() => {
-                installs++;
-              }).pipe(
-                Effect.andThen(Deferred.succeed(stagingStarted, undefined)),
-                Effect.andThen(Deferred.await(finishStaging)),
-                // MacUpdater calls app.quit synchronously from its native event.
-                Effect.tap(() => Effect.sync(() => assert.isTrue(attemptQuit()))),
-                Effect.as(true),
-              ),
-            } as DesktopUpdates.DesktopUpdates["Service"]),
-          ),
-          Layer.provideMerge(DesktopState.layer),
-        );
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
-            const previousSignals = process.listeners("SIGTERM");
-            yield* lifecycle.register;
-            if (trigger === "quit") assert.isTrue(attemptQuit());
-            else
-              process
-                .listeners("SIGTERM")
-                .find((listener) => !previousSignals.includes(listener))?.("SIGTERM");
-            yield* Deferred.await(stagingStarted);
-            assert.isTrue(attemptQuit());
-            yield* Deferred.succeed(finishStaging, undefined);
-            yield* Deferred.await(quitFinished);
-            assert.equal(installs, 1);
-          }),
-        ).pipe(Effect.provide(layer));
-      }),
-  );
-
-  it.effect.each(["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>)(
     "lets the updater's quit event proceed on %s",
     (platform) => {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
@@ -256,11 +117,6 @@ describe("DesktopLifecycle", () => {
       const layer = DesktopLifecycle.layer.pipe(
         Layer.provideMerge(layerElectronApp(appListeners)),
         Layer.provideMerge(layerElectronTheme),
-        Layer.provideMerge(
-          Layer.succeed(DesktopUpdates.DesktopUpdates, {
-            installOnQuit: Effect.succeed(false),
-          } as DesktopUpdates.DesktopUpdates["Service"]),
-        ),
         Layer.provideMerge(
           layerElectronWindow(
             Effect.sync(() => {
@@ -303,78 +159,113 @@ describe("DesktopLifecycle", () => {
     },
   );
 
-  it.effect.each([false, true])(
-    "destroys windows before waiting for backend shutdown (install: %s)",
-    (installOnQuit) =>
-      Effect.gen(function* () {
-        const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
-        const shutdownRequested = yield* Deferred.make<void>();
-        const allowShutdown = yield* Deferred.make<void>();
-        const quitRequested = yield* Deferred.make<void>();
-        const events: string[] = [];
+  it.effect("destroys windows before waiting for backend shutdown", () =>
+    Effect.gen(function* () {
+      const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      const shutdownRequested = yield* Deferred.make<void>();
+      const allowShutdown = yield* Deferred.make<void>();
+      const quitRequested = yield* Deferred.make<void>();
+      const events: string[] = [];
 
-        const quit = Effect.sync(() => {
-          events.push("quit");
-        }).pipe(Effect.andThen(Deferred.succeed(quitRequested, undefined)), Effect.asVoid);
-        const destroyAll = Effect.sync(() => {
-          events.push("destroy");
-        });
-        const flushMainWindowBounds = Effect.sync(() => {
-          events.push("flush");
-        });
+      const quit = Effect.sync(() => {
+        events.push("quit");
+      }).pipe(Effect.andThen(Deferred.succeed(quitRequested, undefined)), Effect.asVoid);
+      const destroyAll = Effect.sync(() => {
+        events.push("destroy");
+      });
+      const flushMainWindowBounds = Effect.sync(() => {
+        events.push("flush");
+      });
 
-        const layerDesktopShutdown = Layer.succeed(DesktopShutdown.DesktopShutdown, {
-          request: Effect.sync(() => {
-            events.push("request");
-          }).pipe(Effect.andThen(Deferred.succeed(shutdownRequested, undefined)), Effect.asVoid),
-          awaitRequest: Deferred.await(shutdownRequested),
-          markComplete: Deferred.succeed(allowShutdown, undefined).pipe(Effect.asVoid),
-          awaitComplete: Deferred.await(allowShutdown),
-          isComplete: Deferred.isDone(allowShutdown),
-        });
+      const layerDesktopShutdown = Layer.succeed(DesktopShutdown.DesktopShutdown, {
+        request: Effect.sync(() => {
+          events.push("request");
+        }).pipe(Effect.andThen(Deferred.succeed(shutdownRequested, undefined)), Effect.asVoid),
+        awaitRequest: Deferred.await(shutdownRequested),
+        markComplete: Deferred.succeed(allowShutdown, undefined).pipe(Effect.asVoid),
+        awaitComplete: Deferred.await(allowShutdown),
+        isComplete: Deferred.isDone(allowShutdown),
+      });
 
-        const layerEnvironment = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
-          platform: "darwin",
-          isDevelopment: false,
-        } as DesktopEnvironment.DesktopEnvironment["Service"]);
+      const layerEnvironment = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+        platform: "darwin",
+        isDevelopment: false,
+      } as DesktopEnvironment.DesktopEnvironment["Service"]);
 
-        const layer = DesktopLifecycle.layer.pipe(
-          Layer.provideMerge(layerElectronApp(appListeners, quit)),
-          Layer.provideMerge(layerElectronTheme),
-          Layer.provideMerge(
-            Layer.succeed(DesktopUpdates.DesktopUpdates, {
-              installOnQuit: Effect.sync(() => {
-                events.push("installOnQuit");
-                return installOnQuit;
-              }),
-            } as DesktopUpdates.DesktopUpdates["Service"]),
-          ),
-          Layer.provideMerge(layerElectronWindow(destroyAll)),
-          Layer.provideMerge(layerDesktopWindow({ flushMainWindowBounds })),
-          Layer.provideMerge(layerEnvironment),
-          Layer.provideMerge(layerDesktopShutdown),
-          Layer.provideMerge(DesktopState.layer),
-        );
+      const layer = DesktopLifecycle.layer.pipe(
+        Layer.provideMerge(layerElectronApp(appListeners, quit)),
+        Layer.provideMerge(layerElectronTheme),
+        Layer.provideMerge(layerElectronWindow(destroyAll)),
+        Layer.provideMerge(layerDesktopWindow({ flushMainWindowBounds })),
+        Layer.provideMerge(layerEnvironment),
+        Layer.provideMerge(layerDesktopShutdown),
+        Layer.provideMerge(DesktopState.layer),
+      );
 
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
-            yield* lifecycle.register;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+          yield* lifecycle.register;
 
-            const event = { preventDefault: () => undefined } as Electron.Event;
-            appListeners.get("before-quit")?.(event);
+          const event = { preventDefault: () => undefined } as Electron.Event;
+          appListeners.get("before-quit")?.(event);
 
-            appListeners.get("before-quit")?.(event);
-            yield* Deferred.await(shutdownRequested);
-            const eventsBeforeCleanup = [...events];
-            yield* Deferred.succeed(allowShutdown, undefined);
-            yield* Deferred.await(quitRequested);
+          yield* Deferred.await(shutdownRequested);
+          const eventsBeforeCleanup = [...events];
+          yield* Deferred.succeed(allowShutdown, undefined);
+          yield* Deferred.await(quitRequested);
 
-            assert.deepEqual(eventsBeforeCleanup, ["flush", "destroy", "request"]);
-            assert.deepEqual(events, ["flush", "destroy", "request", "installOnQuit", "quit"]);
+          assert.deepEqual(eventsBeforeCleanup, ["flush", "destroy", "request"]);
+          assert.deepEqual(events, ["flush", "destroy", "request", "quit"]);
+        }),
+      ).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("disarms install-on-quit before a settings relaunch", () =>
+    Effect.gen(function* () {
+      const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      const relaunched = yield* Deferred.make<void>();
+      const events: string[] = [];
+      const layerElectronUpdater = Layer.succeed(ElectronUpdater.ElectronUpdater, {
+        setAutoInstallOnAppQuit: (value: boolean) =>
+          Effect.sync(() => {
+            events.push(`autoInstallOnAppQuit=${value}`);
           }),
-        ).pipe(Effect.provide(layer));
-      }),
+      } as unknown as ElectronUpdater.ElectronUpdater["Service"]);
+      const layerEnvironment = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+        platform: "win32",
+        isDevelopment: false,
+      } as DesktopEnvironment.DesktopEnvironment["Service"]);
+      const layerShutdown = Layer.succeed(DesktopShutdown.DesktopShutdown, {
+        request: Effect.void,
+        awaitRequest: Effect.void,
+        markComplete: Effect.void,
+        awaitComplete: Effect.void,
+        isComplete: Effect.succeed(true),
+      });
+      const relaunch = Effect.sync(() => {
+        events.push("relaunch");
+      }).pipe(Effect.andThen(Deferred.succeed(relaunched, undefined)), Effect.asVoid);
+      const layer = DesktopLifecycle.layer.pipe(
+        Layer.provideMerge(layerElectronApp(appListeners, Effect.void, relaunch)),
+        Layer.provideMerge(layerElectronTheme),
+        Layer.provideMerge(layerElectronWindow()),
+        Layer.provideMerge(layerDesktopWindow()),
+        Layer.provideMerge(layerEnvironment),
+        Layer.provideMerge(layerShutdown),
+        Layer.provideMerge(layerElectronUpdater),
+        Layer.provideMerge(DesktopState.layer),
+      );
+
+      yield* Effect.gen(function* () {
+        const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+        yield* lifecycle.relaunch("serverExposureMode=network-accessible");
+        yield* Deferred.await(relaunched);
+
+        assert.deepEqual(events, ["autoInstallOnAppQuit=false", "relaunch"]);
+      }).pipe(Effect.provide(layer));
+    }),
   );
 
   it.effect("ignores app activation while quitting", () =>
@@ -391,11 +282,6 @@ describe("DesktopLifecycle", () => {
       const layer = DesktopLifecycle.layer.pipe(
         Layer.provideMerge(layerElectronApp(appListeners)),
         Layer.provideMerge(layerElectronTheme),
-        Layer.provideMerge(
-          Layer.succeed(DesktopUpdates.DesktopUpdates, {
-            installOnQuit: Effect.succeed(false),
-          } as DesktopUpdates.DesktopUpdates["Service"]),
-        ),
         Layer.provideMerge(layerElectronWindow()),
         Layer.provideMerge(layerDesktopWindow({ activate })),
         Layer.provideMerge(layerEnvironment),

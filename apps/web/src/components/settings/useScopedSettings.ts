@@ -1,11 +1,12 @@
-import { useAtomValue } from "@effect/atom-react";
+import { AuthSettingsWriteScope } from "@t3tools/contracts";
+import { useEnvironmentsWithScope } from "../../state/session";
 import {
   requiredScopesForServerSettingsPatch,
   EnvironmentAuthorizationError,
 } from "@t3tools/contracts";
 import { readEnvironmentScope } from "../../state/session";
 import * as Cause from "effect/Cause";
-import { AsyncResult, Atom } from "effect/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import {
   DEFAULT_SERVER_SETTINGS,
   type ProjectScopedServerSettingKey,
@@ -153,17 +154,9 @@ export function useClearProjectOverrides() {
 
 export function useScopedSettingsWriteAllowed() {
   const { connectedEnvironments } = useSettingsScope();
-  return useAtomValue(
-    useMemo(
-      () =>
-        Atom.make(
-          (get) =>
-            connectedEnvironments.length > 0 &&
-            connectedEnvironments.every((target) =>
-              get(serverEnvironment.updateSettings.permissionAtom(target.environmentId)),
-            ),
-        ),
-      [connectedEnvironments],
-    ),
+  const writable = useEnvironmentsWithScope(connectedEnvironments, AuthSettingsWriteScope);
+  return (
+    connectedEnvironments.length > 0 &&
+    connectedEnvironments.every((target) => writable.has(target.environmentId))
   );
 }
