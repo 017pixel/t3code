@@ -66,6 +66,24 @@ export const compactShellPullRequestStacks = (thread: OrchestrationV2ThreadShell
     }),
   };
 };
+
+/** HTTP clients opt in; whole-list equality preserves link dates, watches and stack vintages. */
+export const deduplicateShellPullRequests = (
+  threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+) => {
+  const lists = new Map<string, number>();
+  return threads.map((thread, index) => {
+    if (!thread.pullRequests?.length) return thread;
+    const key = JSON.stringify(thread.pullRequests);
+    const reference = lists.get(key);
+    if (reference === undefined) {
+      lists.set(key, index);
+      return thread;
+    }
+    const { pullRequests: _links, ...row } = thread;
+    return { ...row, pullRequestReference: reference };
+  });
+};
 const encode = Schema.encodeEffect(ReadPayload);
 const decode = Schema.decodeUnknownEffect(ReadPayload);
 

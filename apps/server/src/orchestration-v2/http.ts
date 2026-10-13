@@ -31,7 +31,10 @@ import * as ProjectStore from "./ProjectStore.ts";
 import { buildActiveShellSnapshot, loadShellSnapshotParts } from "./ShellStream.ts";
 import { boundedSnapshotResponseFields } from "./ThreadStream.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
-import { compactShellPullRequestStacks } from "./ThreadReadPayload.ts";
+import {
+  compactShellPullRequestStacks,
+  deduplicateShellPullRequests,
+} from "./ThreadReadPayload.ts";
 
 function isThreadNotFound(error: unknown): boolean {
   return (
@@ -78,6 +81,7 @@ export const layer = HttpApiBuilder.group(
 
     const loadShellSnapshot = Effect.fn("http.orchestration.loadShellSnapshot")(function* (
       compactPullRequests: boolean,
+      deduplicatePullRequests: boolean,
     ) {
       const base = buildActiveShellSnapshot(
         yield* loadShellSnapshotParts({
@@ -91,12 +95,13 @@ export const layer = HttpApiBuilder.group(
         }),
       );
       const projects = yield* enrichProjectShells(base.projects);
+      const threads = compactPullRequests
+        ? base.threads.map(compactShellPullRequestStacks)
+        : base.threads;
       return {
         ...base,
         projects,
-        threads: compactPullRequests
-          ? base.threads.map(compactShellPullRequestStacks)
-          : base.threads,
+        threads: deduplicatePullRequests ? deduplicateShellPullRequests(threads) : threads,
       };
     });
 
@@ -169,7 +174,10 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* loadShellSnapshot(args.query.compactPullRequests === "true").pipe(
+          return yield* loadShellSnapshot(
+            args.query.compactPullRequests === "true",
+            args.query.deduplicatePullRequests === "true",
+          ).pipe(
             traceLocalHandlerWork,
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_snapshot_failed", cause),

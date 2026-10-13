@@ -45,6 +45,7 @@ import { resolveAutoSettlementAt } from "./ThreadSettlementService.ts";
 import {
   compactThreadPullRequests,
   compactShellPullRequestStacks,
+  deduplicateShellPullRequests,
   decodeThreadReadPayload,
   encodeThreadReadPayload,
 } from "./ThreadReadPayload.ts";
@@ -5972,6 +5973,24 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.isNull(wire.pullRequests?.[1]?.stack);
       assert.equal(wire.pullRequests?.[2]?.stack?.base, "older-base");
       assert.isUndefined(wire.pullRequests?.[2]?.stackReference);
+      const differentVintage = {
+        ...wire,
+        pullRequests: wire.pullRequests!.map((link) => ({
+          ...link,
+          linkedAt: DateTime.formatIso(DateTime.add(at, { seconds: 1 })),
+        })),
+      };
+      const rows = [wire, { ...wire }, differentVintage, { ...wire, pullRequests: [] }];
+      const deduplicated = deduplicateShellPullRequests(rows);
+      const restored = deduplicated.map(({ pullRequestReference, ...row }) => ({
+        ...row,
+        ...(pullRequestReference === undefined
+          ? {}
+          : { pullRequests: deduplicated[pullRequestReference]!.pullRequests }),
+      }));
+      assert.deepEqual(restored, rows);
+      assert.isUndefined(deduplicated[1]?.pullRequests);
+      assert.deepEqual(deduplicated[2]?.pullRequests, differentVintage.pullRequests);
       const terminalAt = DateTime.formatIso(DateTime.add(at, { seconds: 1 }));
       for (const state of ["merged", "closed"] as const) {
         yield* syncPullRequests(`terminal-${state}`, [

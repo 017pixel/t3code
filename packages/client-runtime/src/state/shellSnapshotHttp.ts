@@ -47,7 +47,10 @@ export const fetchEnvironmentShellSnapshot = Effect.fn(
     ...input,
     group: "orchestration",
     method: "GET",
-    url: (urls) => urls.shellSnapshot({ query: { compactPullRequests: "true" } }),
+    url: (urls) =>
+      urls.shellSnapshot({
+        query: { compactPullRequests: "true", deduplicatePullRequests: "true" },
+      }),
     timeoutMs: input.timeoutMs ?? DEFAULT_SHELL_SNAPSHOT_TIMEOUT_MS,
     // The body is decoded here so each thread's pull request links can decode after its
     // rows. Every declared error is an `EnvironmentHttpCommonError`, so decoding one keeps
@@ -56,7 +59,7 @@ export const fetchEnvironmentShellSnapshot = Effect.fn(
       client
         .shellSnapshot({
           headers: withOrchestrationProtocolHeader(headers),
-          query: { compactPullRequests: "true" },
+          query: { compactPullRequests: "true", deduplicatePullRequests: "true" },
           responseMode: "response-only",
         })
         .pipe(Effect.flatMap(decodeShellSnapshotResponse)),

@@ -1976,6 +1976,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   /** Pull request the user linked to this thread (#8160). */
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.optional(Schema.Array(OrchestrationV2ShellPullRequestLink)),
+  /** Opted-in HTTP snapshots reuse an earlier thread row's identical link list. */
+  pullRequestReference: Schema.optionalKey(NonNegativeInt),
   /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   lineage: OrchestrationV2AppThreadLineage,
