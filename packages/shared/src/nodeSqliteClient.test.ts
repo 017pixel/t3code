@@ -1,7 +1,9 @@
 import * as NodeSqlite from "node:sqlite";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -76,6 +78,26 @@ layer("NodeSqliteClient", (it) => {
       assert.equal(missing.reason._tag, "ConstraintError");
     }),
   );
+
+  it.effect("enforces query_only inside withReadTransaction on in-memory databases", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE readonly_probe(id INTEGER PRIMARY KEY, value TEXT NOT NULL)`;
+      yield* sql`INSERT INTO readonly_probe(id, value) VALUES (1, 'initial')`;
+
+      const error = yield* SqliteClient.withReadTransaction(
+        sql,
+        sql`UPDATE readonly_probe SET value = 'mutated' WHERE id = 1`,
+      ).pipe(Effect.flip);
+      assert.equal(error._tag, "SqlError");
+
+      // After the read transaction closes, normal writes on the in-memory connection succeed.
+      yield* sql`UPDATE readonly_probe SET value = 'updated' WHERE id = 1`;
+      assert.deepEqual(yield* sql`SELECT value FROM readonly_probe WHERE id = 1`.values, [
+        ["updated"],
+      ]);
+    }),
+  );
 });
 
 const makeTempDatabase = Effect.gen(function* () {
@@ -141,6 +163,116 @@ it.effect("reports a transaction blocked by another writer as a lock timeout", (
       assert.deepEqual(yield* read, [[0]]);
     }).pipe(Effect.provide(SqliteClient.layer({ filename })));
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "allows withReadTransaction and standalone SELECT queries while another writer holds BEGIN IMMEDIATE",
+  () =>
+    Effect.gen(function* () {
+      const { filename, other } = yield* makeTempDatabase;
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`PRAGMA busy_timeout = 0`;
+
+        yield* Effect.sync(() => {
+          other.exec("BEGIN IMMEDIATE");
+          other.exec("UPDATE counters SET value = 99 WHERE id = 1");
+        });
+
+        // Standalone SELECT and withReadTransaction read the committed WAL snapshot
+        // on a read-only connection without contending on the write lock.
+        assert.deepEqual(yield* sql`SELECT value FROM counters WHERE id = 1`.values, [[0]]);
+        const snapshotValue = yield* SqliteClient.withReadTransaction(
+          sql,
+          Effect.gen(function* () {
+            const first = yield* sql`SELECT value FROM counters WHERE id = 1`.values;
+            const second = yield* sql`SELECT value FROM counters WHERE id = 1`.values;
+            assert.deepEqual(first, second);
+            return first;
+          }),
+        );
+        assert.deepEqual(snapshotValue, [[0]]);
+
+        yield* Effect.sync(() => other.exec("COMMIT"));
+        assert.deepEqual(
+          yield* SqliteClient.withReadTransaction(
+            sql,
+            sql`SELECT value FROM counters WHERE id = 1`.values,
+          ),
+          [[99]],
+        );
+      }).pipe(Effect.provide(SqliteClient.layer({ filename })));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "runs concurrent read snapshots and queries without waiting on an in-flight write transaction",
+  () =>
+    Effect.gen(function* () {
+      const { filename } = yield* makeTempDatabase;
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const writerEntered = yield* Deferred.make<void>();
+        const releaseWriter = yield* Deferred.make<void>();
+        const readerOneEntered = yield* Deferred.make<void>();
+        const readerTwoEntered = yield* Deferred.make<void>();
+
+        const writerFiber = yield* Effect.forkChild(
+          sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`UPDATE counters SET value = 42 WHERE id = 1`;
+              // Nested withReadTransaction inside an active write transaction reuses
+              // the writer connection and sees uncommitted writes.
+              const uncommitted = yield* SqliteClient.withReadTransaction(
+                sql,
+                sql`SELECT value FROM counters WHERE id = 1`.values,
+              );
+              assert.deepEqual(uncommitted, [[42]]);
+
+              yield* Deferred.succeed(writerEntered, undefined);
+              yield* Deferred.await(releaseWriter);
+            }),
+          ),
+        );
+
+        yield* Deferred.await(writerEntered);
+
+        // Two concurrent read transactions can both enter and hold their WAL snapshots
+        // simultaneously while the writer fiber is still holding the writer semaphore.
+        const readerOne = yield* Effect.forkChild(
+          SqliteClient.withReadTransaction(
+            sql,
+            Effect.gen(function* () {
+              const before = yield* sql`SELECT value FROM counters WHERE id = 1`.values;
+              yield* Deferred.succeed(readerOneEntered, undefined);
+              yield* Deferred.await(readerTwoEntered);
+              const after = yield* sql`SELECT value FROM counters WHERE id = 1`.values;
+              return { before, after };
+            }),
+          ),
+        );
+        const readerTwo = yield* Effect.forkChild(
+          SqliteClient.withReadTransaction(
+            sql,
+            Effect.gen(function* () {
+              yield* Deferred.await(readerOneEntered);
+              const rows = yield* sql`SELECT value FROM counters WHERE id = 1`.values;
+              yield* Deferred.succeed(readerTwoEntered, undefined);
+              return rows;
+            }),
+          ),
+        );
+
+        assert.deepEqual(yield* Fiber.join(readerOne), { before: [[0]], after: [[0]] });
+        assert.deepEqual(yield* Fiber.join(readerTwo), [[0]]);
+        assert.deepEqual(yield* sql`SELECT value FROM counters WHERE id = 1`.values, [[0]]);
+
+        yield* Deferred.succeed(releaseWriter, undefined);
+        yield* Fiber.join(writerFiber);
+
+        assert.deepEqual(yield* sql`SELECT value FROM counters WHERE id = 1`.values, [[42]]);
+      }).pipe(Effect.provide(SqliteClient.layer({ filename, readConcurrency: 2 })));
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect("returns a typed failure when the database cannot be opened", () =>

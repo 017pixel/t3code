@@ -12,6 +12,7 @@ import {
   OrchestrationProjectShell as ProjectShellSchema,
   OrchestrationV2ThreadShell as ThreadShellSchema,
 } from "@t3tools/contracts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -35,9 +36,8 @@ export function buildActiveShellSnapshot(input: {
 
 /**
  * Loads the thread shell, projects and sequence for the shell snapshots.
- * One transaction covers the reads so they agree; the threads are decoded
- * after it commits, because the server shares one SQLite connection and
- * decoding a large shell takes longer than reading it.
+ * One read transaction covers the reads so they agree; the threads are decoded
+ * after it commits so the connection is returned to the pool immediately.
  */
 export const loadShellSnapshotParts = <E1, E2, E3, E4>(input: {
   readonly sql: SqlClient.SqlClient;
@@ -46,7 +46,8 @@ export const loadShellSnapshotParts = <E1, E2, E3, E4>(input: {
   readonly latestSequence: Effect.Effect<number, E4>;
 }) =>
   Effect.gen(function* () {
-    const read = yield* input.sql.withTransaction(
+    const read = yield* NodeSqliteClient.withReadTransaction(
+      input.sql,
       Effect.all({
         decodeThreads: input.readThreads,
         projects: input.listProjects,

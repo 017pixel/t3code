@@ -6,6 +6,8 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -52,6 +54,37 @@ it.effect("waits out a concurrent writer instead of failing with SQLITE_BUSY", (
     yield* sql`INSERT INTO busy_probe(id) VALUES (${1})`;
     const rows = yield* sql<{ readonly id: number }>`SELECT id FROM busy_probe`;
     assert.deepEqual([...rows], [{ id: 1 }]);
+  }).pipe(
+    Effect.provide(SqlitePersistence.layerFromPath(dbPath).pipe(Layer.provide(NodeServices.layer))),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
+it.effect("serves read transactions without blocking on an external write lock", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sqlite-read-tx-"));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE read_probe(id INTEGER PRIMARY KEY, name TEXT NOT NULL)`;
+    yield* sql`INSERT INTO read_probe(id, name) VALUES (${1}, ${"ready"})`;
+
+    // Hold a write lock for 2 seconds in a child process; read snapshots and
+    // standalone SELECT queries should finish immediately on the reader pool.
+    yield* spawnWriteLockHolder(dbPath, 2000);
+    const startedAt = yield* Clock.currentTimeMillis;
+    const snapshot = yield* NodeSqliteClient.withReadTransaction(
+      sql,
+      Effect.all([
+        sql<{ readonly id: number; readonly name: string }>`SELECT id, name FROM read_probe`,
+        sql<{ readonly count: number }>`SELECT COUNT(*) AS count FROM read_probe`,
+      ]),
+    );
+    const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
+
+    assert.deepEqual([...snapshot[0]], [{ id: 1, name: "ready" }]);
+    assert.deepEqual([...snapshot[1]], [{ count: 1 }]);
+    assert.isBelow(elapsedMs, 1000);
   }).pipe(
     Effect.provide(SqlitePersistence.layerFromPath(dbPath).pipe(Layer.provide(NodeServices.layer))),
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),

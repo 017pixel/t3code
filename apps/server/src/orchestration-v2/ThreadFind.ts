@@ -7,6 +7,7 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { searchableMessageSegments, searchablePlanSegments } from "@t3tools/shared/threadFindText";
 import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
 import * as Cache from "effect/Cache";
@@ -344,7 +345,7 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
       }
       return { payloads, cwd, sequence, cacheKey, sourceThreadIds };
     },
-    sql.withTransaction,
+    NodeSqliteClient.withReadTransaction(sql),
     (effect, input) =>
       effect.pipe(
         Effect.mapError((cause) =>
