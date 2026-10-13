@@ -500,9 +500,9 @@ const backgroundUpdates = (
     Effect.provideService(ServerSelfUpdate.ServerSelfUpdate, harness.selfUpdate),
     Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, harness.launcher),
     Effect.provideService(HttpClient.HttpClient, harness.httpClient),
-    Effect.provide(ServerConfig.layer(harness.serverConfig)),
     Effect.provide(
       Layer.mergeAll(
+        ServerConfig.layer(harness.serverConfig),
         ServerSettings.layerTest({ automaticUpdates: options.automaticUpdates ?? true }),
         Layer.mock(UpdateWindow.UpdateWindow)({
           runIfOpen: (effect, windowOptions) =>
