@@ -152,7 +152,7 @@ const SNAPSHOT_SCRIPT = `(() => {
 
 const CAPTURE_TIMEOUT_MS = 5_000;
 const NO_FRAME_MESSAGE =
-  "The page did not draw a frame, so no screenshot was taken. In the desktop app, a tab only draws while the user has its thread open. Use preview_evaluate to read the page, or ask the user to open the thread.";
+  "The page did not draw a frame within 5 seconds, so no screenshot was taken. Use preview_evaluate to read the page, or open the tab in the Browser panel and retry.";
 /** Captures Chromium has not answered yet; a page only draws one at a time. */
 const pendingCaptures = new WeakSet<Page>();
 
