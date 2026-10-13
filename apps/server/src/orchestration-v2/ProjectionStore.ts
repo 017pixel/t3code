@@ -421,10 +421,11 @@ export interface ProjectionStoreV2Shape {
   /**
    * Active (not deleted, not archived) threads with at least one pull request
    * link, in shell snapshot order, or only `threadId` when given. Skips run,
-   * message and item reads.
+   * message and item reads. A watch sweep only decodes threads with a saved watch.
    */
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
+    options?: { readonly watchedOnly?: boolean },
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
   readonly getTurnStartContext: (
     threadId: ThreadId,
@@ -5833,6 +5834,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const getThreadsWithPullRequests: ProjectionStoreV2Shape["getThreadsWithPullRequests"] = (
       threadId,
+      options,
     ) =>
       Effect.gen(function* () {
         const rows = yield* sql<ThreadReadRow>`
@@ -5846,6 +5848,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND t.archived_at IS NULL
             -- Read from the sweep index (migration 061) rather than each payload.
             AND json_array_length(t.payload_json, '$.pullRequests') > 0
+            ${
+              options?.watchedOnly
+                ? sql`AND EXISTS (
+                    SELECT 1 FROM json_each(
+                      CASE WHEN summary.thread_id IS NULL THEN t.payload_json ELSE summary.compact_payload_json END,
+                      CASE WHEN summary.thread_id IS NULL THEN '$.pullRequests' ELSE '$.thread.pullRequests' END
+                    ) AS link
+                    WHERE json_type(link.value, '$.watch') IS NOT NULL
+                  )`
+                : sql``
+            }
           ORDER BY t.updated_at ASC, t.thread_id ASC
         `;
         return yield* Effect.forEach(rows, (row) =>
@@ -6083,16 +6096,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         });
         const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
           yield* pendingBackgroundDataByThreadId({ providerThreadRows, pendingTurnItemRows });
-        const states = yield* Effect.forEach(threadRows, (row) =>
-          shellThreadStateFromRow({
+        const states = yield* Effect.forEach(threadRows, (row, index) => {
+          const decode = shellThreadStateFromRow({
             row,
             compactPullRequests,
             runOrdinalsByThreadId,
             itemCountsByThreadId,
             providerThreadsByThreadId,
             pendingTurnItemsByThreadId,
-          }),
-        );
+          });
+          // Schema decoding can finish eagerly without spending the runtime's
+          // operation budget. Let config discovery and other requests progress
+          // between small batches, after the read transaction has committed.
+          return index > 0 && index % 16 === 0
+            ? Effect.yieldNow.pipe(Effect.andThen(decode))
+            : decode;
+        });
         const statesByThreadId = new Map(states.map((state) => [state.thread.id, state]));
 
         const shells = states
@@ -6373,7 +6392,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 left.id.localeCompare(right.id),
             );
         }),
-      getThreadsWithPullRequests: (threadId) =>
+      getThreadsWithPullRequests: (threadId, options) =>
         Ref.get(replayState).pipe(
           Effect.map((state) =>
             [...state.projections.values()]
@@ -6383,7 +6402,9 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   (threadId === undefined || thread.id === threadId) &&
                   thread.deletedAt === null &&
                   thread.archivedAt === null &&
-                  (thread.pullRequests ?? []).length > 0,
+                  (thread.pullRequests ?? []).length > 0 &&
+                  (!options?.watchedOnly ||
+                    thread.pullRequests?.some((link) => link.watch !== undefined)),
               )
               .toSorted(
                 (left, right) =>
