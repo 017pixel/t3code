@@ -69,6 +69,7 @@ function ensureTerminalSymbolsFont(): Promise<void> {
       document.fonts.add(await face.load());
     } catch {
       // Locally installed fallback faces still apply.
+      symbolsFontLoad = null;
     }
   })();
   return symbolsFontLoad;
