@@ -68,8 +68,11 @@ export const makeUpdatePass = () =>
         compareExactServiceVersions(targetVersion, currentVersion) <= 0 ||
         skipped.has(targetVersion)
       ) {
+        // A staged release the feed no longer offers must not be installed later.
+        staged = undefined;
         return;
       }
+      if (targetVersion === staged) return;
       yield* Effect.logInfo("Staging a background server update", { targetVersion });
       const { orchestrationProtocol } = yield* selfUpdate.stage(targetVersion);
       if (orchestrationProtocol !== ORCHESTRATION_PROTOCOL_VERSION) {
@@ -104,7 +107,8 @@ export const makeUpdatePass = () =>
 
     const pass = Effect.gen(function* () {
       if (!(yield* enabled)) return;
-      if (staged === undefined && (yield* Clock.currentTimeMillis) >= nextReleaseCheckAt) {
+      // Keeps checking while staged: the window may stay closed past a newer or withdrawn release.
+      if ((yield* Clock.currentTimeMillis) >= nextReleaseCheckAt) {
         yield* stageNewest;
       }
       const targetVersion = staged;
