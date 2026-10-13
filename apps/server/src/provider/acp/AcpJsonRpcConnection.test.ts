@@ -1258,44 +1258,6 @@ describe("AcpSessionRuntime", () => {
     );
   });
 
-  it.effect.each(["loadSession", "resumeSession", "forkSession"] as const)(
-    "preserves extra workspace roots and fresh MCP credentials on %s",
-    (method) =>
-      Effect.gen(function* () {
-        const requests: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
-        const runtime = yield* AcpSessionRuntime.make({
-          ...mockRuntimeOptions,
-          spawn: { ...mockRuntimeOptions.spawn, env: { T3_ACP_SESSION_LIFECYCLE: "1" } },
-          additionalDirectories: ["/tmp/acp-extra-root"],
-          mcpServers: [
-            { name: "t3-code", command: "node", args: [], env: [{ name: "TOKEN", value: "old" }] },
-          ],
-          requestLogger: (event) =>
-            Effect.sync(() => {
-              requests.push(event);
-            }),
-        });
-        const started = yield* runtime.start();
-        const freshMcpServers = [
-          { name: "t3-code", command: "node", args: [], env: [{ name: "TOKEN", value: "fresh" }] },
-        ];
-        yield* runtime[method](started.sessionId, { mcpServers: freshMcpServers });
-        const operation =
-          method === "loadSession"
-            ? "session/load"
-            : method === "resumeSession"
-              ? "session/resume"
-              : "session/fork";
-        expect(
-          requests.find((event) => event.method === operation && event.status === "started")
-            ?.payload,
-        ).toMatchObject({
-          additionalDirectories: ["/tmp/acp-extra-root"],
-          mcpServers: freshMcpServers,
-        });
-      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
   it.effect("supports negotiated ACP session list, fork, resume, and close methods", () => {
     const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
     return Effect.gen(function* () {

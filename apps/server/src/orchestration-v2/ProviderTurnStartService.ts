@@ -25,7 +25,6 @@ import * as Schema from "effect/Schema";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
-import * as ProviderMaintenanceCoordinator from "../provider/providerMaintenanceCommandCoordinator.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
@@ -39,7 +38,6 @@ import {
 } from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import { hasRestorableOpenCodeRequest } from "./RestartContinuation.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -50,7 +48,6 @@ import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
   restartCancelledBackgroundWorkNote,
-  restartPendingMessageIds,
 } from "./RestartBackgroundNote.ts";
 
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
@@ -114,7 +111,6 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
-    const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -225,10 +221,6 @@ export const layer: Layer.Layer<
       readonly willRetry?: boolean;
     }) {
       const { runId } = input;
-      // The run is durably starting before this effect is dispatched. Wait for
-      // an admitted install, then reread: active-work blocks later installs,
-      // without holding the permit through provider commands such as /compact.
-      yield* admission.withLaunchPermit(Effect.void);
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
       const run = projection.runs.find((candidate) => candidate.id === runId);
       if (run === undefined) {
@@ -1232,29 +1224,6 @@ export const layer: Layer.Layer<
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
-      // Undelivered steering must be prompted. A surviving native turn that is
-      // followed or settled from its source would drop it.
-      const restartSourceRun = projection.runs.find(
-        (source) =>
-          source.id === run.restartContinuationOfRunId &&
-          restartPendingMessageIds(source, projection.runs, projection.providerTurns).length === 0,
-      );
-      const restartSourceTurn = projection.providerTurns.findLast(
-        (turn) => turn.runAttemptId === restartSourceRun?.activeAttemptId,
-      );
-      const restartSourceRecords =
-        restartSourceRun === undefined
-          ? undefined
-          : yield* projectionStore.getThreadRecords(
-              input.threadId,
-              ["messages", "runtimeRequests"],
-              {
-                messageIds: [restartSourceRun.userMessageId],
-              },
-            );
-      const restartSourceMessage = restartSourceRecords?.messages.find(
-        (message) => message.id === restartSourceRun?.userMessageId,
-      );
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         appThread: projection.thread,
@@ -1287,34 +1256,6 @@ export const layer: Layer.Layer<
           (legacyInputRunIds.size > 0 &&
             sameNativeThread &&
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
-        ...(restartSourceMessage === undefined
-          ? {}
-          : {
-              restartContinuationSource: {
-                attemptId: restartSourceRun?.activeAttemptId ?? null,
-                nativeTurnRef: restartSourceTurn?.nativeTurnRef ?? null,
-                awaitingUser:
-                  restartSourceRun !== undefined &&
-                  restartSourceRecords !== undefined &&
-                  hasRestorableOpenCodeRequest(
-                    {
-                      providerTurns: projection.providerTurns,
-                      runtimeRequests: restartSourceRecords.runtimeRequests,
-                    },
-                    restartSourceRun,
-                  ),
-                ...(restartSourceRun === undefined
-                  ? {}
-                  : { startedAt: restartSourceRun.startedAt }),
-                message: {
-                  messageId: restartSourceMessage.id,
-                  text: restartSourceMessage.text,
-                  attachments: restartSourceMessage.attachments,
-                  createdBy: restartSourceMessage.createdBy,
-                  creationSource: restartSourceMessage.creationSource,
-                },
-              },
-            }),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,

@@ -1,6 +1,7 @@
 import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 
-// Protocol 3 requires the standalone executable layout.
+// Protocol 3 requires the standalone executable layout. Bump when runtimePaths
+// or the installed runtime tree changes incompatibly; launchers survive self-updates.
 export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
 export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
 export const SERVICE_STATE_FILE = "service-state.json";
@@ -8,8 +9,6 @@ export const SERVICE_STATE_FILE = "service-state.json";
     the child can tell "the service is going away" from "the launcher is about
     to start my replacement" while a pending update is recorded. */
 export const SERVICE_STOP_MARKER_FILE = ".service-stopping";
-/** Written before a requested service restart stops the launcher. */
-export const SERVICE_RESTART_MARKER_FILE = ".service-restarting";
 /** Written by `t3 update` when the unit was repointed at a new version but the
     running service was deliberately left on the old one. The launcher removes
     it when it starts (whoever restarted the service), so while it exists the
@@ -30,16 +29,6 @@ export interface ServiceState {
   readonly protocol: typeof SERVICE_LAUNCHER_PROTOCOL;
   readonly activeVersion: string;
   readonly update?: ServiceUpdateRecord;
-  readonly launcherVersion?: string;
-  /** Runtime-only recovery; its schema predates the trial, never accepted work. */
-  readonly crashRecovery?: {
-    readonly update: PendingServiceUpdate;
-    readonly schema: string | null;
-    readonly committedAt: number;
-    readonly crashes: number;
-  };
-  /** Legacy launchers retained post-commit backups; read them for recovery only. */
-  readonly rollback?: { readonly update: PendingServiceUpdate; readonly healthyAfter: number };
 }
 
 /** Context is copied from launcher-owned state when a child is spawned. */
@@ -161,52 +150,7 @@ export function compareExactServiceVersions(left: string, right: string): number
 export function decodeServiceState(value: unknown): ServiceState | undefined {
   if (!isRecord(value)) return undefined;
   const update = value.update === undefined ? undefined : decodeServiceUpdate(value.update);
-  const rollbackUpdate = isRecord(value.rollback)
-    ? decodeServiceUpdate(value.rollback.update)
-    : undefined;
-  const rollback =
-    isRecord(value.rollback) &&
-    rollbackUpdate?.status === "pending" &&
-    typeof value.rollback.healthyAfter === "number" &&
-    Number.isFinite(value.rollback.healthyAfter)
-      ? { update: rollbackUpdate, healthyAfter: value.rollback.healthyAfter }
-      : undefined;
-  const recoveryUpdate = isRecord(value.crashRecovery)
-    ? decodeServiceUpdate(value.crashRecovery.update)
-    : undefined;
-  const crashRecovery =
-    isRecord(value.crashRecovery) &&
-    recoveryUpdate?.status === "pending" &&
-    (value.crashRecovery.schema === null || typeof value.crashRecovery.schema === "string") &&
-    typeof value.crashRecovery.committedAt === "number" &&
-    Number.isFinite(value.crashRecovery.committedAt) &&
-    typeof value.crashRecovery.crashes === "number" &&
-    Number.isSafeInteger(value.crashRecovery.crashes) &&
-    value.crashRecovery.crashes >= 0
-      ? {
-          update: recoveryUpdate,
-          schema: value.crashRecovery.schema,
-          committedAt: value.crashRecovery.committedAt,
-          crashes: value.crashRecovery.crashes,
-        }
-      : undefined;
   if (
-    (value.crashRecovery !== undefined &&
-      (crashRecovery === undefined ||
-        (update?.status !== "committed" && update?.status !== "failed") ||
-        crashRecovery.update.id !== update.id ||
-        crashRecovery.update.targetVersion !== value.activeVersion ||
-        crashRecovery.update.targetVersion !== update.targetVersion ||
-        crashRecovery.update.fromVersion !== update.fromVersion)) ||
-    (value.launcherVersion !== undefined &&
-      (typeof value.launcherVersion !== "string" ||
-        !isExactServiceVersion(value.launcherVersion))) ||
-    (value.rollback !== undefined &&
-      (rollback === undefined ||
-        update?.status !== "committed" ||
-        rollback.update.id !== update.id ||
-        rollback.update.targetVersion !== value.activeVersion ||
-        rollback.update.fromVersion !== update.fromVersion)) ||
     value.protocol !== SERVICE_LAUNCHER_PROTOCOL ||
     typeof value.activeVersion !== "string" ||
     !isExactServiceVersion(value.activeVersion) ||
@@ -215,10 +159,8 @@ export function decodeServiceState(value: unknown): ServiceState | undefined {
       compareExactServiceVersions(update.targetVersion, update.fromVersion) <= 0) ||
     (update?.status === "pending" && update.fromVersion !== value.activeVersion) ||
     (update?.status === "committed" && update.targetVersion !== value.activeVersion) ||
-    (update?.status === "rolled-back" && update.fromVersion !== value.activeVersion) ||
-    (update?.status === "failed" &&
-      update.fromVersion !== value.activeVersion &&
-      (crashRecovery === undefined || update.targetVersion !== value.activeVersion))
+    ((update?.status === "rolled-back" || update?.status === "failed") &&
+      update.fromVersion !== value.activeVersion)
   ) {
     return undefined;
   }
@@ -226,11 +168,6 @@ export function decodeServiceState(value: unknown): ServiceState | undefined {
     protocol: SERVICE_LAUNCHER_PROTOCOL,
     activeVersion: value.activeVersion,
     ...(update === undefined ? {} : { update }),
-    ...(typeof value.launcherVersion === "string"
-      ? { launcherVersion: value.launcherVersion }
-      : {}),
-    ...(rollback === undefined ? {} : { rollback }),
-    ...(crashRecovery === undefined ? {} : { crashRecovery }),
   };
 }
 
@@ -246,11 +183,7 @@ export function parseServiceState(value: string): ServiceState | undefined {
 export function serviceStateHasPendingUpdate(value: string): boolean {
   try {
     const parsed: unknown = JSON.parse(value);
-    return (
-      isRecord(parsed) &&
-      isRecord(parsed.update) &&
-      (parsed.update.status === "pending" || parsed.rollback !== undefined)
-    );
+    return isRecord(parsed) && isRecord(parsed.update) && parsed.update.status === "pending";
   } catch {
     return false;
   }
@@ -288,9 +221,7 @@ export function decodeServiceLauncherContext(value: string): ServiceLauncherCont
   const update = parsed.update === undefined ? undefined : decodeServiceUpdate(parsed.update);
   if (parsed.update !== undefined && update === undefined) return undefined;
   const selectedVersion =
-    update?.status === "pending" ||
-    update?.status === "committed" ||
-    (update?.status === "failed" && parsed.childVersion === update.targetVersion)
+    update?.status === "pending" || update?.status === "committed"
       ? update.targetVersion
       : update === undefined
         ? parsed.childVersion

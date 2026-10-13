@@ -66,7 +66,6 @@ describe("cliRelease", () => {
     expect(cliReleaseChannelOf("1.2.3")).toBe("stable");
     expect(cliReleaseChannelOf("1.2.3-nightly.20260911.4")).toBe("nightly");
     expect(cliReleaseChannelOf("1.2.3-preview.20260911.4")).toBe("preview");
-    expect(cliReleaseChannelOf("1.2.3-nightly.20260911.4+build.1")).toBe("nightly");
     // A prerelease that is not one of our trains is not silently a nightly.
     expect(cliReleaseChannelOf("1.2.3-rc.1")).toBe("stable");
   });
@@ -84,36 +83,6 @@ describe("cliRelease", () => {
     expect(newestCliReleaseVersion(releases, "nightly")).toBe("1.2.4-nightly.20260912.7");
     expect(newestCliReleaseVersion(releases, "stable")).toBe("1.2.3");
     expect(newestCliReleaseVersion([{ tag_name: "v1.2.3" }], "preview")).toBeUndefined();
-  });
-
-  it("excludes prereleases from stable and accepts nightly build metadata", () => {
-    const releases = [
-      { tag_name: "v2.0.0-rc.1" },
-      { tag_name: "v1.9.0", prerelease: true },
-      { tag_name: "v1.8.0-nightly.20260911.4+build.1", prerelease: true },
-      { tag_name: "v1.7.0+build.1" },
-    ];
-    expect(newestCliReleaseVersion(releases, "stable")).toBe("1.7.0+build.1");
-    expect(newestCliReleaseVersion(releases, "nightly")).toBe("1.8.0-nightly.20260911.4+build.1");
-  });
-
-  it("requires authenticated download origins except for loopback development", () => {
-    for (const origin of [
-      "http://mirror.example",
-      "http://localhost.evil.test",
-      "ftp://127.0.0.1",
-    ]) {
-      expect(() => cliReleaseDownloadBaseUrl("1.0.0", origin)).toThrow();
-    }
-    for (const origin of [
-      "https://mirror.example",
-      "http://localhost:4321",
-      "http://127.0.0.2:4321",
-      "http://[::1]:4321",
-      "file:///tmp/t3-mirror",
-    ]) {
-      expect(cliReleaseDownloadBaseUrl("1.0.0", origin)).toBe(`${origin}/v1.0.0`);
-    }
   });
 
   it("pages through the release index at the largest page GitHub allows", () => {

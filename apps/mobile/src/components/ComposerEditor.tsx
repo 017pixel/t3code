@@ -1,4 +1,3 @@
-import { recordMobileInteraction } from "../connection/background-activity-scopes";
 import { ComposerContextId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
@@ -69,7 +68,6 @@ export function ComposerEditor({
       text,
       draftKey ? getComposerDraftSnapshot(draftKey) : draft,
     );
-    recordMobileInteraction();
     props.onChangeText(text);
     if (draftKey) {
       setComposerDraftContext(draftKey, restored.context);
@@ -240,7 +238,8 @@ export function ComposerEditor({
               threadId: String(thread.threadId),
             });
           }}
-          environmentId={environmentId}
+          environmentId={environmentId ?? draft.project?.environmentId}
+          projectId={draft.project?.projectId}
           records={draft.context?.records}
           attachments={draft.attachments}
           onClose={() => setSelected(null)}

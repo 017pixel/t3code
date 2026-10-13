@@ -97,8 +97,6 @@ one on.
 
 On desktop and web, pick **Deliveries** from a task's menu to see recent
 requests and the prompt each one produced.
-Once the environment accepts a request, it keeps the pending delivery through
-server restarts. Pausing or deleting the task skips deliveries still waiting to run.
 
 If the environment is offline, the sender gets an error and nothing runs;
 redeliver from the sender, such as GitHub's **Recent Deliveries**, once it is

@@ -1,4 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no incremental digest or free-space query.
 import * as EffectNodeStream from "@effect/platform-node/NodeStream";
 import { ProviderDriverKind, type ProviderInstallState } from "@t3tools/contracts";
@@ -147,7 +146,6 @@ function isRunning(state: ProviderInstallState) {
 export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.make")(function* (
   options: AntigravityInstallationOptions,
 ) {
-  const admission = yield* Maintenance.ProviderMaintenanceAdmission;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
@@ -755,9 +753,7 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
     );
   });
 
-  const remove: AntigravityInstallationService["remove"] = Effect.fn(
-    "AntigravityInstallation.remove",
-  )(
+  const remove = Effect.fn("AntigravityInstallation.remove")(
     function* (protectedBinaryPaths: ReadonlyArray<string> = []) {
       yield* gate.withPermit(
         Effect.gen(function* () {
@@ -841,26 +837,10 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
     managedDirectory,
     resolve,
     acquire,
-    start: SubscriptionRef.get(state).pipe(
-      Effect.flatMap((current) =>
-        isRunning(current) ? Effect.succeed(current) : admission.withPermit(start),
-      ),
-    ),
+    start,
     cancel,
     state: SubscriptionRef.get(state),
     changes: SubscriptionRef.changes(state),
-    remove: (protectedBinaryPaths) =>
-      SubscriptionRef.get(state).pipe(
-        Effect.flatMap((current) =>
-          isRunning(current)
-            ? Effect.fail(
-                installationError(
-                  "remove",
-                  "Stop provider installation before removing its managed runtime.",
-                ),
-              )
-            : admission.withPermit(remove(protectedBinaryPaths)),
-        ),
-      ),
+    remove,
   });
 });

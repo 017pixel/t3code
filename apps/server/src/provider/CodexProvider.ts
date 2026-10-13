@@ -1,5 +1,3 @@
-import { AgentScope } from "@t3tools/shared/AgentScope";
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -34,7 +32,6 @@ import {
   codexModelFamily,
   createModelCapabilities,
   formatCodexModelName,
-  readCustomModelEntries,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
@@ -42,6 +39,7 @@ import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
+  providerModelsFromSettings,
   type ServerProviderDraft,
 } from "@t3tools/provider-core/server/snapshotProbe";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -279,26 +277,8 @@ function appendCustomCodexModels(
   models: ReadonlyArray<ServerProviderModel>,
   customModels: ReadonlyArray<CustomModelSetting>,
 ): ReadonlyArray<ServerProviderModel> {
-  if (customModels.length === 0) {
-    return models;
-  }
-
-  const seen = new Set(models.map((model) => model.slug));
   const fallbackCapabilities = models.find((model) => model.capabilities)?.capabilities ?? null;
-  const customEntries: ServerProviderModel[] = [];
-  for (const entry of readCustomModelEntries(customModels)) {
-    if (seen.has(entry.slug)) {
-      continue;
-    }
-    seen.add(entry.slug);
-    customEntries.push({
-      slug: entry.slug,
-      name: entry.name,
-      isCustom: true,
-      capabilities: entry.capabilities ?? fallbackCapabilities,
-    });
-  }
-  return customEntries.length === 0 ? models : [...models, ...customEntries];
+  return providerModelsFromSettings(models, customModels, fallbackCapabilities);
 }
 
 function parseCodexSkillsListResponse(
@@ -444,66 +424,57 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
  * the caller's scope closes. Shared by the status probe, the skills probe,
  * and account-level requests such as reset-credit redemption.
  */
-export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(
-  function* (input: {
-    readonly binaryPath: string;
-    readonly homePath?: string | undefined;
-    readonly launchArgs?: string | undefined;
-    readonly cwd: string;
-    readonly environment?: NodeJS.ProcessEnv | undefined;
-  }) {
-    // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
-    // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
-    // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
-    // Expand here for parity with `CodexTextGeneration`.
-    const resolvedHomePath = input.homePath
-      ? expandHomePath(input.homePath, yield* HostProcess.HomeDirectory)
-      : undefined;
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const environment = {
-      ...codexAppServerEnvironment(input.environment),
-      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-    };
-    const spawnCommand = yield* resolveSpawnCommand(
-      input.binaryPath,
-      codexAppServerArgs(input.launchArgs),
-      { env: environment, extendEnv: true },
+export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(function* (input: {
+  readonly binaryPath: string;
+  readonly homePath?: string | undefined;
+  readonly launchArgs?: string | undefined;
+  readonly cwd: string;
+  readonly environment?: NodeJS.ProcessEnv | undefined;
+}) {
+  // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
+  // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
+  // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
+  // Expand here for parity with `CodexTextGeneration`.
+  const resolvedHomePath = input.homePath
+    ? expandHomePath(input.homePath, yield* HostProcess.HomeDirectory)
+    : undefined;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const environment = {
+    ...codexAppServerEnvironment(input.environment),
+    ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+  };
+  const spawnCommand = yield* resolveSpawnCommand(
+    input.binaryPath,
+    codexAppServerArgs(input.launchArgs),
+    { env: environment, extendEnv: true },
+  );
+  const child = yield* spawner
+    .spawn(
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        cwd: input.cwd,
+        env: environment,
+        extendEnv: true,
+        forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
+        shell: spawnCommand.shell,
+      }),
+    )
+    .pipe(
+      Effect.mapError(
+        (cause) =>
+          new CodexErrors.CodexAppServerSpawnError({
+            command: `${input.binaryPath} app-server`,
+            cause,
+          }),
+      ),
     );
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-          cwd: input.cwd,
-          env: environment,
-          extendEnv: true,
-          forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
-          shell: spawnCommand.shell,
-        }),
-      )
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new CodexErrors.CodexAppServerSpawnError({
-              command: `${input.binaryPath} app-server`,
-              cause,
-            }),
-        ),
-      );
-    const processScope = yield* AgentScope;
-    yield* processScope.trackProcess?.(Number(child.pid)) ?? Effect.void;
-
-    const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
-    const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-      Effect.provide(clientContext),
-    );
-    const initialize = yield* client.request("initialize", buildCodexInitializeParams());
-    yield* client.notify("initialized", undefined);
-    return { client, initialize };
-  },
-  (effect) =>
-    Effect.flatMap(Maintenance.ProviderMaintenanceAdmission, (admission) =>
-      admission.withScopedLaunchPermit(effect),
-    ),
-);
+  const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+  const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+    Effect.provide(clientContext),
+  );
+  const initialize = yield* client.request("initialize", buildCodexInitializeParams());
+  yield* client.notify("initialized", undefined);
+  return { client, initialize };
+});
 
 const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(function* (input: {
   readonly binaryPath: string;

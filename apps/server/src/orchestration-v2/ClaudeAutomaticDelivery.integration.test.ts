@@ -144,7 +144,6 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
           crypto: yield* Crypto.Crypto,
           idAllocator: yield* IdAllocator.IdAllocatorV2,
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed(sessionId),
             open: () =>
               Effect.succeed({

@@ -1,4 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import {
   type AcpRegistryAcceptUrlAuthInput,
   type AcpRegistryUrlAuthAction,
@@ -100,7 +99,6 @@ export class AcpRegistryRuntimeCoordinator extends Context.Service<
 >()("@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator") {}
 
 const make = Effect.gen(function* () {
-  const admission = yield* Maintenance.ProviderMaintenanceAdmission;
   const foregroundStarts = yield* PubSub.unbounded<string>();
   const activeForegroundCounts = yield* Ref.make(new Map<string, number>());
   const availableCommandsUpdates = yield* PubSub.unbounded<AvailableCommandsUpdate>();
@@ -344,9 +342,8 @@ const make = Effect.gen(function* () {
 
   return AcpRegistryRuntimeCoordinator.of({
     withForegroundStartup,
-    runBackgroundProbe: (agentId, effect) =>
-      runBackgroundProbe(agentId, admission.withLaunchPermit(effect)),
-    withSessionMutation: (effect) => admission.withLaunchPermit(withSessionMutation(effect)),
+    runBackgroundProbe,
+    withSessionMutation,
     clearAvailableCommands,
     publishAvailableCommands,
     getAvailableCommands,

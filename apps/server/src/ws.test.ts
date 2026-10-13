@@ -1,7 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
   ORCHESTRATION_PROTOCOL_VERSION,
-  ServerProvider,
   type ServerConfig,
   type ServerConfigStreamEvent,
 } from "@t3tools/contracts";
@@ -15,7 +14,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
-import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
@@ -26,7 +24,6 @@ import {
   resolveAvailableEditorsForConfig,
   shouldUseBoundedThreadSnapshot,
   withLateEditorConfig,
-  withProviderUpdateOrigins,
 } from "./ws.ts";
 
 it("accepts only the current orchestration protocol before websocket RPC setup", () => {
@@ -69,67 +66,6 @@ it.effect("does not block server config when editor discovery never resolves", (
 // Only the fields the late-editor fold reads or rewrites.
 const snapshotConfig = (fields: Partial<ServerConfig>) =>
   ({ availableEditors: [], settings: {}, ...fields }) as unknown as ServerConfig;
-
-const decodeServerProvider = Schema.decodeSync(ServerProvider);
-
-it.effect.each(["running", "succeeded", "failed"] as const)(
-  "keeps background %s quiet for legacy config subscribers while retaining manual updates",
-  (status) =>
-    Effect.gen(function* () {
-      const providers = (["background", "manual"] as const).map((origin) =>
-        decodeServerProvider({
-          instanceId: origin,
-          driver: "codex",
-          enabled: true,
-          installed: true,
-          version: "1.2.0",
-          status: "ready",
-          auth: { status: "authenticated" },
-          checkedAt: "2026-10-11T00:00:00.000Z",
-          models: [],
-          updateState: {
-            status,
-            origin,
-            startedAt: null,
-            finishedAt: null,
-            message: null,
-            output: null,
-          },
-        }),
-      );
-      const snapshot: ServerConfigStreamEvent = {
-        version: 1,
-        type: "snapshot",
-        config: snapshotConfig({ providers }),
-      };
-      const live: ServerConfigStreamEvent = {
-        version: 1,
-        type: "providerStatuses",
-        payload: { providers },
-      };
-      for (const flag of [undefined, false, true]) {
-        const events = yield* withProviderUpdateOrigins(
-          Stream.make(snapshot, live),
-          flag === undefined ? {} : { providerUpdateOrigins: flag },
-        ).pipe(Stream.runCollect);
-        assert.equal(events.length, 2);
-        for (const event of events) {
-          const visible =
-            event.type === "snapshot"
-              ? event.config.providers
-              : event.type === "providerStatuses"
-                ? event.payload.providers
-                : [];
-          assert.equal(visible[0]?.version, "1.2.0");
-          assert.deepEqual(
-            visible[0]?.updateState,
-            flag === true ? providers[0]?.updateState : undefined,
-          );
-          assert.deepEqual(visible[1], providers[1]);
-        }
-      }
-    }),
-);
 
 const settingsUpdated = (settings: object): ServerConfigStreamEvent => ({
   version: 1,

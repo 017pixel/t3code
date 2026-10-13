@@ -23,7 +23,6 @@ import {
 import {
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_RESTART_PENDING_FILE,
-  SERVICE_RESTART_MARKER_FILE,
   SERVICE_STATE_FILE,
   compareExactServiceVersions,
   parseServiceState,
@@ -829,18 +828,8 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     // written, from the same read the downgrade check uses; the stop that
     // normally serialises against the launcher is skipped on purpose.
     const start = options?.start !== false;
-    // A restarting install replaces the running server, like `restart`, so
-    // its external provider turns are kept rather than aborted.
-    const restartMarkerPath = path.join(input.baseDir, "runtime", SERVICE_RESTART_MARKER_FILE);
-    const removeRestartMarker =
-      installed && start
-        ? fs.remove(restartMarkerPath, { force: true }).pipe(Effect.ignore)
-        : Effect.void;
     if (installed && start) {
-      yield* writeDurably(restartMarkerPath, "").pipe(
-        Effect.mapError((cause) => new BootServiceInstallError({ cause })),
-      );
-      yield* runSteps(manager.stop).pipe(Effect.onError(() => removeRestartMarker));
+      yield* runSteps(manager.stop);
     }
 
     yield* Effect.gen(function* () {
@@ -912,7 +901,6 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       Effect.tapError(() =>
         installed && start ? runSteps(manager.restart).pipe(Effect.ignore) : Effect.void,
       ),
-      Effect.ensuring(removeRestartMarker),
     );
     return plan;
   });
@@ -928,16 +916,12 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     ) {
       return false;
     }
-    const restartMarkerPath = path.join(input.baseDir, "runtime", SERVICE_RESTART_MARKER_FILE);
-    yield* writeDurably(restartMarkerPath, "");
-    yield* Effect.gen(function* () {
-      yield* runSteps(manager.stop);
-      yield* runSteps(manager.activate).pipe(
-        // Same recovery as a failed repair: a service that was running should
-        // not be left stopped because daemon-reload or enable failed.
-        Effect.tapError(() => runSteps(manager.restart).pipe(Effect.ignore)),
-      );
-    }).pipe(Effect.ensuring(fs.remove(restartMarkerPath, { force: true }).pipe(Effect.ignore)));
+    yield* runSteps(manager.stop);
+    yield* runSteps(manager.activate).pipe(
+      // Same recovery as a failed repair: a service that was running should
+      // not be left stopped because daemon-reload or enable failed.
+      Effect.tapError(() => runSteps(manager.restart).pipe(Effect.ignore)),
+    );
     yield* fs.remove(restartPendingPath, { force: true });
     return true;
   }).pipe(

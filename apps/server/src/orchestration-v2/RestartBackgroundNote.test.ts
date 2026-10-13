@@ -44,27 +44,6 @@ const turnFor = (source: OrchestrationV2Run) => ({
   status: "completed" as const,
 });
 
-it("prompts a continuation whose steering restart never started a provider turn", () => {
-  const source = run(1, codexThread, { status: "cancelled" });
-  const continuation = run(2, codexThread, { restartContinuationOfRunId: source.id });
-  const attempt = {
-    id: source.activeAttemptId!,
-    runId: source.id,
-    reason: "steering_restart" as const,
-  };
-  assert.isTrue(isRestartNoteContinuation(continuation, [source, continuation], [], [attempt]));
-  assert.isFalse(
-    isRestartNoteContinuation(continuation, [source, continuation], [turnFor(source)], [attempt]),
-  );
-  const chained = run(3, codexThread, { restartContinuationOfRunId: continuation.id });
-  assert.isTrue(isRestartNoteContinuation(chained, [source, continuation, chained], [], [attempt]));
-  const handoff = {
-    ...source,
-    userMessageId: MessageId.make("message:mcp:session:worktree-continuation:request"),
-  };
-  assert.isTrue(isRestartNoteContinuation(continuation, [handoff, continuation], [], []));
-});
-
 it("keeps the note for the provider thread that lost the work across a provider switch", () => {
   const root = run(1, claudeThread, { restartCancelledBackgroundWork: lost });
   const onCodex = run(2, codexThread);
@@ -255,22 +234,4 @@ it("counts a prompted mid-turn or chained continuation as delivering the note", 
     }),
     [],
   );
-});
-
-it("carries pending native steering through repeated crashes until its prompt completes", () => {
-  const messageId = MessageId.make("message:pending-native-steer");
-  const source = run(1, codexThread, {
-    status: "cancelled",
-    restartPendingMessageIds: [messageId],
-  });
-  const continuation = run(2, codexThread, {
-    status: "cancelled",
-    restartContinuationOfRunId: source.id,
-  });
-  const again = run(3, codexThread, { restartContinuationOfRunId: continuation.id });
-  const runs = [source, continuation, again];
-  assert.isTrue(isRestartNoteContinuation(again, runs, [], []));
-  assert.isFalse(isRestartNoteContinuation(again, runs, [turnFor(continuation)], []));
-  // A pre-existing completed turn cannot have delivered a still-pending steer.
-  assert.isTrue(isRestartNoteContinuation(continuation, runs, [turnFor(source)], []));
 });

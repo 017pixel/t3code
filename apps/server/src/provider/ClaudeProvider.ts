@@ -1,4 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import {
   type ClaudeSettings,
   type ModelCapabilities,
@@ -447,10 +446,6 @@ const probeClaudeCapabilities = (
         if (!abort.signal.aborted) abort.abort();
       }),
     ),
-    (effect) =>
-      Effect.flatMap(Maintenance.ProviderMaintenanceAdmission, (admission) =>
-        admission.withLaunchPermit(effect),
-      ),
     Effect.result,
     Effect.map((result) => (Result.isSuccess(result) ? result.success : undefined)),
   );

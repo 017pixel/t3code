@@ -1,4 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -286,6 +285,13 @@ export function wrapCommandForLinuxCgroup(
         '[ "$actual" = "$expected" ] || exit 126',
         "unset ELECTRON_RUN_AS_NODE T3_ACP_CGROUP_WRAPPER",
         "trap 'exit 125' 0",
+        // The trap alone does not cover a failed `exec`: bash — which is
+        // /bin/sh on Arch derivatives — exits 127 without running the EXIT
+        // trap, so a missing agent binary reported "killed by the wrapper"
+        // instead of "never launched". The caller always hands us an absolute
+        // target, so test it as an executable file rather than asking the
+        // shell to resolve it.
+        '[ -f "$1" ] && [ -x "$1" ] || exit 125',
         'exec "$@"',
       ].join("\n"),
       "t3-acp-cgroup-wrapper",
@@ -1602,10 +1608,6 @@ export const make = (
         }),
       )
       .pipe(
-        (effect) =>
-          Effect.flatMap(Maintenance.ProviderMaintenanceAdmission, (admission) =>
-            admission.withLaunchPermit(effect),
-          ),
         Effect.provideService(Scope.Scope, runtimeScope),
         Effect.mapError(
           (cause) =>
@@ -1615,9 +1617,6 @@ export const make = (
             }),
         ),
       );
-
-    const agentScope = yield* AgentScope;
-    yield* agentScope.trackProcess?.(Number(child.pid)) ?? Effect.void;
 
     const posixOwnershipLedger = new Map<string, AcpOwnedPosixProcess>();
     const posixOwnershipFrontier = new Map<number, AcpOwnedPosixProcess>();
@@ -2329,7 +2328,6 @@ export const make = (
           } else {
             return yield* new EffectAcpErrors.AcpRequestError({
               code: -32601,
-              method: "session/load",
               errorMessage: "ACP agent does not advertise session/load or session/resume support",
             });
           }
@@ -2548,9 +2546,6 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
-              ...(options.additionalDirectories?.length
-                ? { additionalDirectories: options.additionalDirectories }
-                : {}),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.LoadSessionRequest;
             return runLoadSessionWithReplayIdle(requestPayload, started.initializeResult);
@@ -2563,9 +2558,6 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
-              ...(options.additionalDirectories?.length
-                ? { additionalDirectories: options.additionalDirectories }
-                : {}),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.ResumeSessionRequest;
             return runLoggedRequest(
@@ -2582,9 +2574,6 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
-              ...(options.additionalDirectories?.length
-                ? { additionalDirectories: options.additionalDirectories }
-                : {}),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.ForkSessionRequest;
             return runLoggedRequest(

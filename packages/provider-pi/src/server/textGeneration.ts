@@ -1,4 +1,3 @@
-import { AgentScope } from "@t3tools/shared/AgentScope";
 /**
  * PiTextGeneration — commit messages, PR content, branch names, and thread
  * titles generated through an ephemeral `pi --mode rpc --no-session` process.
@@ -27,7 +26,6 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
   environment: NodeJS.ProcessEnv = process.env,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const agentScope = yield* AgentScope;
 
   const runPiJson: TextGenerationOperations.Runner = (request) => {
     const { operation, cwd, prompt, modelSelection } = request;
@@ -58,10 +56,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
         args: launch.args,
         cwd,
         env: launch.env,
-      }).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Effect.provideService(AgentScope, agentScope),
-      );
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
       if (modelSelection.model !== "default") {
         // `customModels` accepts arbitrary strings, so an unusable slug is

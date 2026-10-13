@@ -1,4 +1,3 @@
-import { AgentScope } from "@t3tools/shared/AgentScope";
 /**
  * PiRpc — stdio JSONL transport for the Pi coding agent's RPC mode.
  *
@@ -241,9 +240,6 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
       }),
     )
     .pipe(Effect.mapError((cause) => new PiRpcError({ operation: "spawn", cause })));
-
-  const processScope = yield* AgentScope;
-  yield* processScope.trackProcess?.(Number(child.pid)) ?? Effect.void;
 
   let childExited = false;
   let diagnosingStdoutClose = false;

@@ -561,7 +561,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         env: launch.env,
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Effect.provideService(AgentScope, agentScope),
         Effect.mapError(
           (cause) =>
             new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -589,18 +588,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         ProviderAdapter.ProviderAdapterV2Error | Cause.Done
       >();
       const pendingPrompts = new Map<string, PendingPiPrompt>();
-      const pendingSteers = new Map<
-        string,
-        Array<Deferred.Deferred<void, ProviderAdapter.ProviderAdapterProtocolError>>
-      >();
-      const failPendingSteers = Effect.fnUntraced(function* () {
-        for (const pending of pendingSteers.values()) {
-          for (const delivery of pending) {
-            yield* Deferred.fail(delivery, protocolError("Pi stopped before persisting steering"));
-          }
-        }
-        pendingSteers.clear();
-      });
       const sessionApprovals = new Set<string>();
       // Answering a dialog and terminalizing a turn both publish lifecycle
       // events. Pi can settle immediately after `extension_ui_response`, so
@@ -627,7 +614,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         Effect.gen(function* () {
           closed = true;
           pendingWake = null;
-          yield* failPendingSteers();
           if (rollbackBarrier !== null)
             yield* Deferred.fail(
               rollbackBarrier,
@@ -1621,7 +1607,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const turn = state.activeTurn;
         if (turn === null) return;
         state.activeTurn = null;
-        yield* failPendingSteers();
         const interrupted = turn.interrupted || turn.nativeAborted;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
@@ -1890,27 +1875,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           case "message_end": {
             if (turn === null) return;
             const message = event["message"];
-            if (recordString(message, "role") === "user") {
-              const text = contentText(recordField(message, "content"));
-              const deliveries = pendingSteers.get(text);
-              const pending = deliveries?.[0];
-              if (deliveries !== undefined && pending !== undefined) {
-                // Pi emits message_end before appending the entry. The RPC
-                // reply is a barrier after that append, unlike prompt's queue ack.
-                deliveries.shift();
-                if (deliveries.length === 0) pendingSteers.delete(text);
-                yield* Deferred.complete(
-                  pending,
-                  request({ type: "get_state" }).pipe(
-                    Effect.asVoid,
-                    Effect.mapError((cause) =>
-                      protocolError("Pi could not confirm persisted steering", cause),
-                    ),
-                  ),
-                );
-              }
-              return;
-            }
             if (recordString(message, "role") !== "assistant") return;
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
@@ -2448,19 +2412,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const baselineEntries = yield* request({ type: "get_entries" }).pipe(
           Effect.orElseSucceed(() => undefined),
         );
-        const entries = recordField(baselineEntries, "entries");
-        if (
-          resumeId != null &&
-          (existing?.nativeConversationHeadRef != null || existing?.firstRunOrdinal != null) &&
-          Array.isArray(entries) &&
-          !entries.some((entry) => {
-            const type = recordField(entry, "type");
-            return type === "message" || type === "compaction" || type === "custom_message";
-          })
-        ) {
-          threadState = null;
-          return yield* protocolError("Pi lost the persisted conversation for this session");
-        }
         lastKnownLeaf = recordString(baselineEntries, "leafId") ?? null;
         // A successful full baseline makes the cursor trustworthy again. Only
         // a failed one leaves it stale, so a recovered session does not keep
@@ -2823,10 +2774,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                     steerInput.message.attachments,
                   )
                 : null;
-            const persisted =
-              payload !== null && !payload.message.trimStart().startsWith("/")
-                ? yield* Deferred.make<void, ProviderAdapter.ProviderAdapterProtocolError>()
-                : null;
             // Prompt with streamingBehavior steer is atomic on Pi's side: it
             // queues during an active run and starts a new run if settlement
             // won the race. A direct `steer` sent after Pi became idle would
@@ -2847,11 +2794,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                     kind: "steer",
                   });
                 } else if (payload !== null) {
-                  if (persisted !== null) {
-                    const deliveries = pendingSteers.get(payload.message) ?? [];
-                    deliveries.push(persisted);
-                    pendingSteers.set(payload.message, deliveries);
-                  }
                   yield* connection.send({
                     type: "prompt",
                     message: payload.message,
@@ -2866,9 +2808,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 turn.settleProbeGeneration += 1;
               }),
             );
-            // Queued steering lives only in Pi's memory. Keep the outbox
-            // delivery unfinished until the native conversation contains it.
-            if (persisted !== null) yield* Deferred.await(persisted);
           }).pipe(
             Effect.mapError(
               (cause) =>
@@ -3264,10 +3203,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 }
                 return file;
               }),
-            ).pipe(
-              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-              Effect.provideService(AgentScope, agentScope),
-            );
+            ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
             const now = yield* DateTime.now;
             return yield* registerThread(
               {

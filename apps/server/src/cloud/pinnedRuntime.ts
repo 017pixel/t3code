@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
-import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
   CLI_RELEASE_CHECKSUMS_FILE,
@@ -16,7 +16,6 @@ import {
   cliArchiveTarCommand,
   cliReleaseDownloadBaseUrl,
   parseChecksums,
-  validateCliReleaseDownloadUrl,
 } from "@t3tools/shared/cliRelease";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -126,7 +125,6 @@ interface PinnedRuntimeInstallInput {
   readonly arch: string;
   readonly httpClient: HttpClient.HttpClient;
   readonly releaseBaseUrl?: string | undefined;
-  readonly cleanup?: Effect.Effect<void>;
   readonly onProgress?: (progress: PinnedRuntimeProgress) => void;
 }
 
@@ -138,33 +136,8 @@ const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(
 ) {
   // The install lock is held for the whole transaction, so a stalled download
   // must fail rather than block every other caller.
-  const requiresHttps = new URL(url).protocol === "https:";
-  const validateDownload = (targetUrl: string) => {
-    const target = validateCliReleaseDownloadUrl(targetUrl);
-    if (requiresHttps && target.protocol !== "https:") {
-      throw new Error("HTTPS release downloads cannot redirect to HTTP.");
-    }
-  };
-  return yield* Effect.gen(function* () {
-    let nextUrl = url;
-    for (let redirects = 0; ; redirects++) {
-      yield* Effect.try(() => validateDownload(nextUrl));
-      const response = yield* HttpClient.withScope(httpClient)
-        .execute(HttpClientRequest.get(nextUrl))
-        .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }));
-      yield* Effect.try(() => validateDownload(response.url || nextUrl));
-      if (![301, 302, 303, 307, 308].includes(response.status) || !response.headers.location) {
-        return yield* HttpClientResponse.filterStatusOk(response);
-      }
-      if (redirects >= 10)
-        return yield* new PinnedRuntimeInstallError({
-          step: "following too many release redirects",
-        });
-      nextUrl = yield* Effect.try(
-        () => new URL(response.headers.location!, response.url || nextUrl).href,
-      );
-    }
-  }).pipe(
+  return yield* httpClient.execute(HttpClientRequest.get(url)).pipe(
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
     Effect.flatMap(
       Effect.fn(function* (response) {
         if (onProgress === undefined) return new Uint8Array(yield* response.arrayBuffer);
@@ -194,7 +167,6 @@ const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(
         return bytes;
       }),
     ),
-    Effect.scoped,
     Effect.mapError((cause) => new PinnedRuntimeInstallError({ step, cause })),
     Effect.timeoutOrElse({
       duration: PINNED_RUNTIME_INSTALL_TIMEOUT,
@@ -221,11 +193,7 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
     });
   }
   const httpClient = input.httpClient;
-  const baseUrl = yield* Effect.try({
-    try: () => cliReleaseDownloadBaseUrl(input.version, input.releaseBaseUrl),
-    catch: (cause) =>
-      new PinnedRuntimeInstallError({ step: "validating the release download origin", cause }),
-  });
+  const baseUrl = cliReleaseDownloadBaseUrl(input.version, input.releaseBaseUrl);
   const fileName = cliArchiveFileName(input.version, platformKey);
 
   input.onProgress?.({ stage: "download", received: 0, total: undefined });
@@ -409,6 +377,4 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
 });
 
 export const ensurePinnedRuntimeInstalled = (input: PinnedRuntimeInstallInput) =>
-  pinnedRuntimeInstallLock.withPermit(
-    installPinnedRuntime(input).pipe(Effect.tap(() => input.cleanup ?? Effect.void)),
-  );
+  pinnedRuntimeInstallLock.withPermit(installPinnedRuntime(input));

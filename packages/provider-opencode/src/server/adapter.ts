@@ -53,7 +53,6 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as Hex from "effect/encoding/Hex";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
@@ -89,19 +88,6 @@ export const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 export const OPENCODE_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(OPENCODE_PROVIDER);
 export const OPENCODE_SDK_PROTOCOL = "opencode-sdk.sse" as const;
 const DEFAULT_OPENCODE_SETTINGS = Schema.decodeSync(OpenCodeSettings)({});
-
-// Recovery can recreate admission even if its provider event never committed.
-const durableOpenCodeMessageId = Effect.fnUntraced(function* (
-  attemptId: string,
-  startedAt: DateTime.Utc,
-) {
-  const digest = yield* Effect.promise(() =>
-    globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(attemptId)),
-  );
-  return `msg_${BigInt.asUintN(48, BigInt(DateTime.toEpochMillis(startedAt)) * 0x1000n + 1n)
-    .toString(16)
-    .padStart(12, "0")}${Hex.encode(new Uint8Array(digest)).slice(0, 28)}`;
-});
 
 const makeOpenCodeMessageId = Effect.fnUntraced(function* (
   clock: Ref.Ref<{ readonly epochMillis: number; readonly counter: number }>,
@@ -248,9 +234,6 @@ interface OpenCodeTurnTokenUsageAccumulator {
   reasoningTokens: number;
   hasSubagents: boolean;
   complete: boolean;
-  // While a restart follows a surviving run, its prompt is not known yet, so
-  // no assistant message can be ruled out.
-  followingRestart: boolean;
 }
 
 function makeOpenCodeTurnTokenUsageAccumulator(): OpenCodeTurnTokenUsageAccumulator {
@@ -259,7 +242,6 @@ function makeOpenCodeTurnTokenUsageAccumulator(): OpenCodeTurnTokenUsageAccumula
     promptMessageIds: new Set(),
     assistantOwnershipByMessageId: new Map(),
     unresolvedStepsByMessageId: new Map(),
-    followingRestart: false,
     inputTokens: 0,
     cachedInputTokens: 0,
     cacheCreationTokens: 0,
@@ -304,7 +286,7 @@ interface ActiveOpenCodeTurn {
   readonly partIdsByMessage: Map<string, Set<string>>;
   readonly toolNamesByCallId: Map<string, string>;
   mcpServerNames?: ReadonlyArray<string>;
-  providerTurn: OrchestrationV2ProviderTurn;
+  readonly providerTurn: OrchestrationV2ProviderTurn;
   nextItemOrdinal: number;
   nativeUserMessageId: string | null;
   admissionMessageId: string | null;
@@ -1034,11 +1016,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
         // task child keeps running after its parent turn settles, so idle
         // release must not close the server under it.
         const busySessionIds = new Set<string>();
-        const observedStatuses = new Map<
-          string,
-          { type: "busy" | "retry" | "idle"; revision: number }
-        >();
-        let statusRevision = 0;
         // Requests settled before their session relation resolved: a late
         // routing attempt must never resurrect them. Bounded because entries
         // only matter for the seconds a routing retry can still be running.
@@ -1050,7 +1027,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
         };
         const abortController = new AbortController();
         let closing = false;
-        let preserveExternalTurns = false;
         let hasConnected = false;
 
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
@@ -2443,9 +2419,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   ? "unknown"
                   : usage.promptMessageIds.has(message.parentID)
                     ? "owned"
-                    : usage.followingRestart
-                      ? "unknown"
-                      : "other";
+                    : "other";
             usage.assistantOwnershipByMessageId.set(message.id, ownership);
             if (ownership !== "unknown") {
               if (ownership === "owned") {
@@ -2647,15 +2621,9 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             case "session.deleted":
               relatedSessionOwners.delete(event.properties.info.id);
               busySessionIds.delete(event.properties.info.id);
-              observedStatuses.delete(event.properties.info.id);
               return;
             case "session.status": {
               const sessionId = event.properties.sessionID;
-              if (threads.has(sessionId) || relatedSessionOwners.has(sessionId))
-                observedStatuses.set(sessionId, {
-                  type: event.properties.status.type,
-                  revision: ++statusRevision,
-                });
               switch (event.properties.status.type) {
                 case "busy":
                 case "retry":
@@ -2689,11 +2657,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             case "session.idle": {
               busySessionIds.delete(event.properties.sessionID);
               const state = threads.get(event.properties.sessionID);
-              if (state !== undefined || relatedSessionOwners.has(event.properties.sessionID))
-                observedStatuses.set(event.properties.sessionID, {
-                  type: "idle",
-                  revision: ++statusRevision,
-                });
               if (state?.activeTurn !== null && state?.activeTurn !== undefined) {
                 if (state.activeTurn.admissionPending) {
                   advanceOpenCodePromptAdmission(state.activeTurn, "idle");
@@ -2822,25 +2785,23 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           yield* Scope.addFinalizer(
             scope,
             Effect.suspend(() =>
-              preserveExternalTurns
-                ? Effect.void
-                : Effect.forEach(
-                    Array.from(threads.values()).filter((state) => state.parentSubagent === null),
-                    (state) =>
-                      sdkCall("session.abort", { sessionID: state.nativeSessionId }, (signal) =>
-                        client.session.abort({ sessionID: state.nativeSessionId }, { signal }),
-                      ).pipe(
+              Effect.forEach(
+                Array.from(threads.values()).filter((state) => state.parentSubagent === null),
+                (state) =>
+                  sdkCall("session.abort", { sessionID: state.nativeSessionId }, (signal) =>
+                    client.session.abort({ sessionID: state.nativeSessionId }, { signal }),
+                  ).pipe(
+                    Effect.timeout("1 second"),
+                    Effect.ignore({ log: true }),
+                    Effect.andThen(
+                      abortDescendants(state.nativeSessionId).pipe(
                         Effect.timeout("1 second"),
                         Effect.ignore({ log: true }),
-                        Effect.andThen(
-                          abortDescendants(state.nativeSessionId).pipe(
-                            Effect.timeout("1 second"),
-                            Effect.ignore({ log: true }),
-                          ),
-                        ),
                       ),
-                    { concurrency: 8, discard: true },
+                    ),
                   ),
+                { concurrency: 8, discard: true },
+              ),
             ),
           );
         }
@@ -3067,10 +3028,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           providerSession: sessionEntity,
           events: Stream.fromEffectRepeat(Queue.take(events)),
           hasPendingBackgroundWork: Effect.sync(() => busySessionIds.size > 0),
-          prepareForServerShutdown: (restarting) =>
-            Effect.sync(() => {
-              preserveExternalTurns = restarting;
-            }),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               // Only a row that already carries a native session can be
@@ -3187,36 +3144,25 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               const isCompaction =
                 turnInput.message.text.trim() === "/compact" &&
                 turnInput.message.attachments.length === 0;
-              // A cancellation note must not prompt an external server whose
-              // task sessions survived. Delivery keeps the source even when
-              // it removes the continuation flag to force other providers to prompt.
-              const reconcileRestart =
-                turnInput.restartContinuationOfRunId !== undefined ||
-                (connection.external && turnInput.restartContinuationSource !== undefined);
-              let parts = isCompaction ? [] : resolvePromptParts(turnInput);
+              const parts = isCompaction ? [] : resolvePromptParts(turnInput);
               const startedAt = yield* DateTime.now;
               const syntheticNativeTurnId = `${sessionId}:attempt:${turnInput.attemptId}`;
               const providerTurnId = idAllocator.derive.providerTurn({
                 driver: OPENCODE_PROVIDER,
                 nativeTurnId: syntheticNativeTurnId,
               });
-              let admissionMessageId =
-                turnInput.runStartedAt == null
-                  ? yield* makeOpenCodeMessageId(messageIdClock)
-                  : yield* durableOpenCodeMessageId(turnInput.attemptId, turnInput.runStartedAt);
               const providerTurn: OrchestrationV2ProviderTurn = {
                 id: providerTurnId,
                 providerThreadId: turnInput.providerThread.id,
                 nodeId: turnInput.rootNodeId,
                 runAttemptId: turnInput.attemptId,
-                nativeTurnRef:
-                  turnInput.restartContinuationSource?.nativeTurnRef ??
-                  providerRef(admissionMessageId, "weak"),
+                nativeTurnRef: providerRef(syntheticNativeTurnId, "weak"),
                 ordinal: turnInput.providerTurnOrdinal,
                 status: "running",
                 startedAt,
                 completedAt: null,
               };
+              const admissionMessageId = yield* makeOpenCodeMessageId(messageIdClock);
               // No Effect may be yielded between this check and installing the
               // turn. If the event stream ended while IDs were being prepared,
               // registering afterward would leave a running turn that the EOF
@@ -3280,293 +3226,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 lastRunOrdinal: turnInput.runOrdinal,
               });
               yield* updateProviderSession("running", null);
-              if (reconcileRestart) {
-                turn.usage.followingRestart = true;
-                const snapshotRevision = statusRevision;
-                const statuses = unwrapData(
-                  "session.status",
-                  yield* sdkCall("session.status", { sessionID: sessionId }, () =>
-                    client.session.status(),
-                  ).pipe(
-                    Effect.tapError((cause) =>
-                      finalizeTurn(state, turn, "failed", {
-                        failure: makeProviderFailure({ cause, class: "provider_error" }),
-                      }),
-                    ),
-                  ),
-                );
-                const revertedMessageIds = new Set<string>();
-                const readHistory = (nativeSessionId = sessionId) =>
-                  Effect.gen(function* () {
-                    const nativeSession = unwrapData(
-                      "session.get",
-                      yield* sdkCall("session.get", { sessionID: nativeSessionId }, () =>
-                        client.session.get({ sessionID: nativeSessionId }),
-                      ),
-                    );
-                    const history = unwrapData(
-                      "session.messages",
-                      yield* sdkCall("session.messages", { sessionID: nativeSessionId }, () =>
-                        client.session.messages({ sessionID: nativeSessionId }),
-                      ),
-                    );
-                    const boundary = history.findIndex(
-                      (entry) => entry.info.id === nativeSession.revert?.messageID,
-                    );
-                    if (nativeSessionId === sessionId && boundary >= 0)
-                      for (const entry of history.slice(boundary))
-                        revertedMessageIds.add(entry.info.id);
-                    return boundary < 0 ? history : history.slice(0, boundary);
-                  }).pipe(
-                    Effect.tapError((cause) =>
-                      finalizeTurn(state, turn, "failed", {
-                        failure: makeProviderFailure({ cause, class: "provider_error" }),
-                      }),
-                    ),
-                  );
-                const statusFor = (nativeSessionId: string) => {
-                  const observed = observedStatuses.get(nativeSessionId);
-                  return observed !== undefined && observed.revision > snapshotRevision
-                    ? observed.type
-                    : (statuses[nativeSessionId]?.type ?? "idle");
-                };
-                const idleHistory = yield* readHistory();
-                const isPrompt = (entry: (typeof idleHistory)[number]) =>
-                  entry.info.role === "user" &&
-                  !(
-                    entry.parts.length > 0 &&
-                    entry.parts.every(
-                      (part) =>
-                        (part.type === "compaction" && part.auto) ||
-                        (part.type === "text" && part.synthetic === true),
-                    )
-                  );
-                // Live events may have finished the surviving run meanwhile.
-                if (turn.finalized || state.activeTurn !== turn) return;
-                // An idle session whose newest prompt T3 never settled, answered by
-                // a clean final reply, finished the cut run while T3 was down.
-                const lastPrompt = idleHistory.findLast(isPrompt);
-                const lastInfo = idleHistory?.at(-1)?.info;
-                const source = turnInput.restartContinuationSource;
-                const recordedMessageId = source?.nativeTurnRef?.nativeId;
-                const savedMessageId =
-                  recordedMessageId?.startsWith("msg_") === true
-                    ? recordedMessageId
-                    : source?.attemptId != null && source.startedAt != null
-                      ? yield* durableOpenCodeMessageId(source.attemptId, source.startedAt)
-                      : recordedMessageId;
-                if (turn.finalized || state.activeTurn !== turn) return;
-                const idle = statusFor(sessionId) === "idle";
-                const originalParts =
-                  source === undefined
-                    ? []
-                    : resolvePromptParts({ ...turnInput, message: source.message });
-                const matchingPrompt = idleHistory?.findLast((entry) => {
-                  if (entry.info.role !== "user") return false;
-                  if (savedMessageId?.startsWith("msg_") === true) {
-                    if (entry.info.id === savedMessageId) return true;
-                    if (recordedMessageId?.startsWith("msg_") === true) return false;
-                  }
-                  if (source?.startedAt == null) return false;
-                  const sourceEpoch = DateTime.toEpochMillis(source.startedAt);
-                  // Our admission IDs encode T3's clock; a remote server's
-                  // message timestamp may be behind it.
-                  const afterStart = /^msg_[0-9a-f]{12}[A-Za-z0-9]{28}$/.test(entry.info.id)
-                    ? BigInt.asIntN(
-                        36,
-                        BigInt(`0x${entry.info.id.slice(4, 16)}`) / 0x1000n - BigInt(sourceEpoch),
-                      ) >= 0n
-                    : entry.info.time.created >= sourceEpoch;
-                  if (!afterStart) return false;
-                  return (
-                    originalParts.length > 0 &&
-                    originalParts.every((expected) =>
-                      entry.parts.some((actual) =>
-                        expected.type === "text"
-                          ? actual.type === "text" &&
-                            actual.text.trim().endsWith(expected.text.trim())
-                          : actual.type === "file" && actual.url === expected.url,
-                      ),
-                    )
-                  );
-                });
-                const sourceMessageId = matchingPrompt?.info.id ?? savedMessageId;
-                const finishedWhileDown =
-                  lastPrompt !== undefined &&
-                  (sourceMessageId === undefined
-                    ? source === undefined &&
-                      turnInput.providerThread.nativeConversationHeadRef !== null &&
-                      lastPrompt.info.id !==
-                        turnInput.providerThread.nativeConversationHeadRef.nativeId
-                    : lastPrompt.info.id === sourceMessageId) &&
-                  lastInfo?.role === "assistant" &&
-                  lastInfo.parentID ===
-                    idleHistory.findLast((entry) => entry.info.role === "user")?.info.id &&
-                  lastInfo.summary !== true &&
-                  lastInfo.time.completed !== undefined &&
-                  lastInfo.error === undefined &&
-                  lastInfo.finish === "stop";
-                if (idle && !finishedWhileDown) {
-                  turn.usage.followingRestart = false;
-                  // Rebinding a durable question is not permission to start
-                  // another generation if the native callback disappeared.
-                  if (source?.awaitingUser === true) {
-                    yield* finalizeTurn(state, turn, "interrupted");
-                    return;
-                  }
-                  if (
-                    source !== undefined &&
-                    !idleHistory?.some((entry) => entry.info.id === sourceMessageId)
-                  ) {
-                    parts = resolvePromptParts({ ...turnInput, message: source.message });
-                    // A delayed original request and this retry must share
-                    // OpenCode's admission ID. Reverted records need a new ID.
-                    if (
-                      savedMessageId?.startsWith("msg_") === true &&
-                      !revertedMessageIds.has(savedMessageId)
-                    ) {
-                      turn.usage.promptMessageIds.delete(admissionMessageId);
-                      admissionMessageId = savedMessageId;
-                      turn.admissionMessageId = admissionMessageId;
-                      turn.usage.promptMessageIds.add(admissionMessageId);
-                    }
-                  }
-                } else {
-                  // A server that outlived T3 still owns this turn; follow it
-                  // instead of adding another prompt to its running execution.
-                  turn.admissionMessageId = null;
-                  advanceOpenCodePromptAdmission(turn, "busy");
-                  const admissionAction = advanceOpenCodePromptAdmission(turn, "accepted");
-                  yield* Deferred.succeed(admissionSettled, undefined);
-                  turn.admissionAbortController = null;
-                  const history = idleHistory;
-                  // Keep the original admission identity if T3 is restarted
-                  // again while following this same surviving execution.
-                  const followedPrompt = history.findLast(isPrompt);
-                  if (followedPrompt !== undefined) {
-                    turn.nativeUserMessageId = followedPrompt.info.id;
-                    yield* emitProviderTurn(state, turn, "running", null);
-                  }
-                  const replayHistory = Effect.fnUntraced(function* (
-                    replayState: OpenCodeThreadState,
-                    entries: typeof history,
-                  ) {
-                    const userIndex = entries.findLastIndex(isPrompt);
-                    for (const entry of userIndex < 0 ? [] : entries.slice(userIndex)) {
-                      if (replayState.activeTurn?.finalized) break;
-                      yield* handleMessageUpdated({
-                        id: entry.info.id,
-                        type: "message.updated",
-                        properties: { sessionID: replayState.nativeSessionId, info: entry.info },
-                      });
-                      for (const part of entry.parts) {
-                        // Live events since this turn became active already
-                        // hold a newer copy; the snapshot would roll it back.
-                        if (
-                          part.type === "tool"
-                            ? replayState.activeTurn?.toolNamesByCallId.has(part.callID)
-                            : replayState.activeTurn?.parts.has(part.id)
-                        )
-                          continue;
-                        yield* handlePartUpdated({
-                          id: part.id,
-                          type: "message.part.updated",
-                          properties: {
-                            sessionID: replayState.nativeSessionId,
-                            part,
-                            time: DateTime.toEpochMillis(startedAt),
-                          },
-                        });
-                      }
-                    }
-                  });
-                  yield* replayHistory(state, history);
-                  const replayed = new Set([sessionId]);
-                  // Task parts reconnect their child sessions. Replay those
-                  // too, including nested tasks created while T3 was down.
-                  for (const child of threads.values()) {
-                    if (child.parentSubagent === null || replayed.has(child.nativeSessionId))
-                      continue;
-                    if (!replayed.has(child.parentSubagent.parentState.nativeSessionId)) continue;
-                    replayed.add(child.nativeSessionId);
-                    const childHistory = yield* readHistory(child.nativeSessionId);
-                    yield* replayHistory(child, childHistory);
-                    const status = statusFor(child.nativeSessionId);
-                    if (status !== "idle") {
-                      busySessionIds.add(child.nativeSessionId);
-                    } else if (child.activeTurn !== null) {
-                      const lastMessage = childHistory.at(-1)?.info;
-                      if (lastMessage?.role === "assistant" && lastMessage.error !== undefined) {
-                        yield* handleEvent({
-                          id: lastMessage.id,
-                          type: "session.error",
-                          properties: {
-                            sessionID: child.nativeSessionId,
-                            error: lastMessage.error,
-                          },
-                        });
-                      } else {
-                        yield* finalizeTurn(child, child.activeTurn, "completed");
-                      }
-                    }
-                  }
-                  if (
-                    statusFor(sessionId) !== "idle" &&
-                    state.activeTurn === turn &&
-                    !turn.finalized
-                  )
-                    busySessionIds.add(sessionId);
-                  turn.usage.followingRestart = false;
-                  if (idle) {
-                    if (!turn.finalized) yield* finalizeTurn(state, turn, "completed");
-                  } else if (admissionAction === "reconcile-idle") {
-                    yield* reconcilePromptAdmission(state, turn);
-                  }
-                  if (!turn.finalized) {
-                    const permissions = unwrapData(
-                      "permission.list",
-                      yield* sdkCall("permission.list", {}, (signal) =>
-                        client.permission.list(undefined, { signal }),
-                      ).pipe(
-                        Effect.tapError((cause) =>
-                          finalizeTurn(state, turn, "failed", {
-                            failure: makeProviderFailure({ cause, class: "provider_error" }),
-                          }),
-                        ),
-                      ),
-                    );
-                    const questions = unwrapData(
-                      "question.list",
-                      yield* sdkCall("question.list", {}, (signal) =>
-                        client.question.list(undefined, { signal }),
-                      ).pipe(
-                        Effect.tapError((cause) =>
-                          finalizeTurn(state, turn, "failed", {
-                            failure: makeProviderFailure({ cause, class: "provider_error" }),
-                          }),
-                        ),
-                      ),
-                    );
-                    for (const request of permissions) {
-                      const owner = yield* resolveSessionOwner(request.sessionID);
-                      if (owner !== undefined && topLevelRequestOwner(owner)?.state === state)
-                        yield* routeRuntimeRequest(request.id, request.sessionID, {
-                          type: "permission",
-                          value: request,
-                        });
-                    }
-                    for (const request of questions) {
-                      const owner = yield* resolveSessionOwner(request.sessionID);
-                      if (owner !== undefined && topLevelRequestOwner(owner)?.state === state)
-                        yield* routeRuntimeRequest(request.id, request.sessionID, {
-                          type: "question",
-                          value: request,
-                        });
-                    }
-                  }
-                  return;
-                }
-              }
               if (isCompaction) {
                 yield* sdkCall(
                   "session.summarize",
@@ -3610,13 +3269,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 turnInput.modelSelection,
                 "variant",
               );
-              if (reconcileRestart) {
-                turn.providerTurn = {
-                  ...turn.providerTurn,
-                  nativeTurnRef: providerRef(admissionMessageId, "weak"),
-                };
-                yield* emitProviderTurn(state, turn, "running", null);
-              }
               yield* submitPrompt(
                 state,
                 turn,

@@ -1,4 +1,3 @@
-import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -166,7 +165,6 @@ export const makeAcpClientTerminals = Effect.fn("makeAcpClientTerminals")(functi
   options: AcpClientTerminalsOptions,
 ): Effect.fn.Return<AcpClientTerminals, never, ChildProcessSpawner.ChildProcessSpawner> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const agentScope = yield* AgentScope;
   const creationPermit = yield* Semaphore.make(1);
   const terminals = new Map<string, ManagedAcpTerminal>();
   let nextTerminalNumber = 1;
@@ -255,7 +253,6 @@ export const makeAcpClientTerminals = Effect.fn("makeAcpClientTerminals")(functi
               )
               .pipe(
                 Effect.provideService(Scope.Scope, terminalScope),
-                Effect.tap((child) => agentScope.trackProcess?.(Number(child.pid)) ?? Effect.void),
                 Effect.mapError((cause) =>
                   terminalRequestError(
                     `Could not start terminal command '${request.command}'.`,

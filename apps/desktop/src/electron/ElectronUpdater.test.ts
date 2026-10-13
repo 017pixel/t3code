@@ -1,9 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Duration from "effect/Duration";
-import * as Fiber from "effect/Fiber";
-import * as TestClock from "effect/testing/TestClock";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 import { beforeEach, vi } from "vite-plus/test";
 
 const { autoUpdaterMock } = vi.hoisted(() => ({
@@ -12,7 +8,6 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
     allowPrerelease: false,
     autoDownload: true,
     autoInstallOnAppQuit: true,
-    autoRunAppAfterInstall: true,
     channel: "latest",
     disableDifferentialDownload: false,
     fullChangelog: false,
@@ -25,12 +20,6 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("electron", async () => {
-  const { EventEmitter } = await import("node:events");
-  return { autoUpdater: Object.assign(new EventEmitter(), { checkForUpdates: vi.fn() }) };
-});
-import * as Electron from "electron";
-
 vi.mock("electron-updater", () => ({
   autoUpdater: autoUpdaterMock,
 }));
@@ -39,7 +28,6 @@ import * as ElectronUpdater from "./ElectronUpdater.ts";
 
 describe("ElectronUpdater", () => {
   beforeEach(() => {
-    vi.mocked(Electron.autoUpdater.checkForUpdates).mockReset();
     autoUpdaterMock.allowDowngrade = false;
     autoUpdaterMock.allowPrerelease = false;
     autoUpdaterMock.autoDownload = true;
@@ -52,71 +40,10 @@ describe("ElectronUpdater", () => {
     autoUpdaterMock.downloadUpdate.mockClear();
     autoUpdaterMock.downloadUpdate.mockImplementation(() => Promise.resolve([]));
     autoUpdaterMock.on.mockClear();
-    autoUpdaterMock.quitAndInstall.mockReset();
+    autoUpdaterMock.quitAndInstall.mockClear();
     autoUpdaterMock.removeListener.mockClear();
     autoUpdaterMock.setFeedURL.mockClear();
   });
-
-  it.effect.each(["downloaded", "error", "timeout", "throw"])(
-    "finishes a macOS real quit after native %s",
-    (outcome) =>
-      Effect.gen(function* () {
-        vi.mocked(Electron.autoUpdater.checkForUpdates).mockImplementationOnce(() => {
-          if (outcome === "downloaded") Electron.autoUpdater.emit("update-downloaded");
-          if (outcome === "error") Electron.autoUpdater.emit("error", new Error("staging failed"));
-          if (outcome === "throw") throw new Error("native check failed");
-        });
-        const updater = yield* ElectronUpdater.ElectronUpdater;
-        const quit = yield* updater
-          .quitAndInstall({ isSilent: true, isForceRunAfter: false })
-          .pipe(Effect.exit, Effect.forkChild);
-        yield* Effect.yieldNow;
-        if (outcome === "timeout") yield* TestClock.adjust(Duration.seconds(5));
-        const result = yield* Fiber.join(quit);
-        assert.equal(result._tag, outcome === "downloaded" ? "Success" : "Failure");
-        assert.isFalse(autoUpdaterMock.autoRunAppAfterInstall);
-        assert.equal(autoUpdaterMock.quitAndInstall.mock.calls.length, 0);
-        assert.equal(Electron.autoUpdater.listenerCount("error"), 0);
-        assert.equal(Electron.autoUpdater.listenerCount("update-downloaded"), 0);
-      }).pipe(
-        Effect.provide(ElectronUpdater.layer),
-        Effect.provideService(HostProcess.Platform, "darwin"),
-        Effect.provide(TestClock.layer()),
-      ),
-  );
-
-  it.effect("does not leave MacUpdater's delayed quit handler after staging times out", () =>
-    Effect.gen(function* () {
-      let lateQuits = 0;
-      const lateQuit = () => {
-        lateQuits++;
-      };
-      // MacUpdater 6.8.9 registers this persistent callback in quitAndInstall.
-      autoUpdaterMock.quitAndInstall.mockImplementationOnce(() => {
-        Electron.autoUpdater.on("update-downloaded", lateQuit);
-      });
-      yield* Effect.gen(function* () {
-        const updater = yield* ElectronUpdater.ElectronUpdater;
-        const staging = yield* updater
-          .quitAndInstall({ isSilent: true, isForceRunAfter: false })
-          .pipe(Effect.exit, Effect.forkChild);
-        yield* TestClock.adjust(Duration.seconds(5));
-        assert.equal((yield* Fiber.join(staging))._tag, "Failure");
-        Electron.autoUpdater.emit("update-downloaded");
-        assert.equal(lateQuits, 0);
-      }).pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            Electron.autoUpdater.removeListener("update-downloaded", lateQuit);
-          }),
-        ),
-      );
-    }).pipe(
-      Effect.provide(ElectronUpdater.layer),
-      Effect.provideService(HostProcess.Platform, "darwin"),
-      Effect.provide(TestClock.layer()),
-    ),
-  );
 
   it.effect("scopes updater event listeners", () =>
     Effect.gen(function* () {
@@ -207,7 +134,6 @@ describe("ElectronUpdater", () => {
       );
       assert.notInclude(error.message, cause.message);
       assert.deepEqual(autoUpdaterMock.quitAndInstall.mock.calls, [[true, false]]);
-      assert.isFalse(autoUpdaterMock.autoRunAppAfterInstall);
     }).pipe(Effect.provide(ElectronUpdater.layer)),
   );
 });

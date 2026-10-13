@@ -45,7 +45,6 @@ const ReleaseIndex = Schema.Array(
   Schema.Struct({
     tag_name: Schema.String,
     draft: Schema.optional(Schema.Boolean),
-    prerelease: Schema.optional(Schema.Boolean),
   }),
 );
 const decodeReleaseIndex = Schema.decodeUnknownEffect(Schema.fromJsonString(ReleaseIndex));
@@ -56,7 +55,7 @@ const RELEASE_INDEX_TIMEOUT = Duration.seconds(30);
 const RELEASE_INDEX_MAX_PAGES = 10;
 
 /** Asks GitHub for the newest published version on a channel, page by page. */
-export const resolveNewestVersion = Effect.fn("cli.update.resolve_newest")(function* (
+const resolveNewestVersion = Effect.fn("cli.update.resolve_newest")(function* (
   channel: CliReleaseChannel,
 ) {
   const httpClient = yield* HttpClient.HttpClient;

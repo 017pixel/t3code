@@ -5,17 +5,14 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId } from "@t3tools/contracts";
 import type { OpenCodeSettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
-import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/http/HttpClient";
-import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
@@ -228,63 +225,6 @@ const layerUpdate = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 it.layer(layerUpdate)("OpenCodeDriver updates", (it) => {
-  it.effect.each([Duration.minutes(1), Duration.zero])(
-    "refreshes OpenCode release advisories without foreground demand at health interval %s",
-    (interval) =>
-      Effect.gen(function* () {
-        yield* (yield* ProviderLatestVersions.ProviderLatestVersions).invalidate("@opencode/cli");
-        versionOutput.current = "opencode v2.0.18\n";
-        serverStarts.length = 0;
-        const root = NodeFS.realpathSync(
-          NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "pf-09-opencode-")),
-        );
-        yield* Effect.addFinalizer(() =>
-          Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
-        );
-        const binaryPath = npmGlobalInstall(root, ["@opencode", "cli"], "opencode.exe");
-        let latest = "2.0.18";
-        const http = HttpClient.make((request) =>
-          Effect.succeed(
-            HttpClientResponse.fromWeb(
-              request,
-              request.url.startsWith("https://registry.npmjs.org/")
-                ? Response.json({ version: latest })
-                : new Response("", { status: 404 }),
-            ),
-          ),
-        );
-        const instance = yield* create({ binaryPath }, http).pipe(
-          Effect.provide(
-            TestProviderHost.layer({
-              runBackgroundWork: false,
-              settings: { ...DEFAULT_SERVER_SETTINGS, providerHealthRefreshInterval: interval },
-            }).pipe(Layer.provide(NodeServices.layer)),
-          ),
-        );
-        const boot = yield* instance.snapshot.streamChanges.pipe(
-          Stream.filter((snapshot) => snapshot.versionAdvisory?.latestVersion === latest),
-          Stream.take(1),
-          Stream.runCollect,
-          Effect.forkScoped,
-        );
-        yield* Fiber.join(boot);
-        const startsAtBoot = serverStarts.length;
-        const probesAtBoot = versionProbes.length;
-        latest = "2.0.19";
-        const updated = yield* instance.snapshot.streamChanges.pipe(
-          Stream.filter((snapshot) => snapshot.versionAdvisory?.latestVersion === latest),
-          Stream.take(1),
-          Stream.runCollect,
-          Effect.forkScoped,
-        );
-        yield* TestClock.adjust("1 hour");
-        const snapshots = yield* Fiber.join(updated);
-        assert.strictEqual(snapshots[0]?.versionAdvisory?.status, "behind_latest");
-        assert.strictEqual(serverStarts.length, startsAtBoot);
-        assert.strictEqual(versionProbes.length, probesAtBoot);
-      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
-  );
-
   it.effect("never runs the binary for a disabled instance's update check", () =>
     Effect.gen(function* () {
       versionProbes.length = 0;

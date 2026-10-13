@@ -4,15 +4,12 @@ import type {
   OrchestrationV2RestartCancelledBackgroundWork,
   OrchestrationV2Run,
   OrchestrationV2RunAttempt,
-  OrchestrationV2Subagent,
-  MessageId,
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 
 type Work = OrchestrationV2RestartCancelledBackgroundWork;
 type Attempt = Pick<OrchestrationV2RunAttempt, "id" | "runId">;
-type PromptAttempt = Attempt & Partial<Pick<OrchestrationV2RunAttempt, "reason">>;
 
 const MAX_LABEL_LENGTH = 160;
 
@@ -52,15 +49,6 @@ export function cancelledTurnItemWork(item: OrchestrationV2TurnItem): Work | und
     default:
       return undefined;
   }
-}
-
-/** A native subagent can be recorded before its turn item arrives. */
-export function cancelledSubagentWork(subagent: OrchestrationV2Subagent): Work {
-  return {
-    kind: "subagent",
-    label: compactLabel(subagent.title) ?? compactLabel(subagent.prompt) ?? "subagent",
-    id: subagent.id,
-  };
 }
 
 function restartWorkKind(task: OrchestrationV2PendingBackgroundTask): Work["kind"] {
@@ -111,73 +99,7 @@ export function restartCancelledBackgroundWorkNote(work: ReadonlyArray<Work>): s
 type ProviderTurnState = Pick<
   OrchestrationV2ProviderTurn,
   "runAttemptId" | "providerThreadId" | "status"
-> &
-  Partial<Pick<OrchestrationV2ProviderTurn, "ordinal">>;
-
-type OrderedRun = Pick<
-  OrchestrationV2Run,
-  | "id"
-  | "ordinal"
-  | "completedAt"
-  | "providerThreadId"
-  | "activeAttemptId"
-  | "restartContinuationOfRunId"
 >;
-
-/** Native turn ordinals and continuation links retain order across wall clock changes. */
-export function restartRunRanAfter(
-  run: OrderedRun,
-  other: OrderedRun,
-  providerTurns: ReadonlyArray<ProviderTurnState>,
-  runs: ReadonlyArray<OrchestrationV2Run>,
-  attempts: ReadonlyArray<Attempt> = [],
-): boolean {
-  const lineage = (source: OrderedRun) => {
-    const chain = [source];
-    const visited = new Set([source.id]);
-    for (let current = source; current.restartContinuationOfRunId !== undefined;) {
-      const previous = runs.find(
-        (candidate) => candidate.id === current.restartContinuationOfRunId,
-      );
-      if (previous === undefined || visited.has(previous.id)) break;
-      chain.push(previous);
-      visited.add(previous.id);
-      current = previous;
-    }
-    return chain;
-  };
-  const runChain = lineage(run);
-  const otherChain = lineage(other);
-  if (runChain.some((ancestor) => ancestor.id === other.id)) return run.id !== other.id;
-  if (otherChain.some((ancestor) => ancestor.id === run.id)) return false;
-  if (run.providerThreadId !== null && run.providerThreadId === other.providerThreadId) {
-    const turnOrdinal = (chain: ReadonlyArray<OrderedRun>) => {
-      for (const source of chain) {
-        const attemptIds = new Set(
-          attempts.filter((attempt) => attempt.runId === source.id).map((attempt) => attempt.id),
-        );
-        if (source.activeAttemptId != null) attemptIds.add(source.activeAttemptId);
-        if (attemptIds.size === 0) continue;
-        const ordinal = providerTurns.reduce(
-          (latest, turn) =>
-            turn.providerThreadId === run.providerThreadId &&
-            turn.runAttemptId !== null &&
-            attemptIds.has(turn.runAttemptId)
-              ? Math.max(latest, turn.ordinal ?? 0)
-              : latest,
-          0,
-        );
-        if (ordinal > 0) return ordinal;
-      }
-      return 0;
-    };
-    const runOrdinal = turnOrdinal(runChain);
-    const otherOrdinal = turnOrdinal(otherChain);
-    if (runOrdinal > 0 && otherOrdinal > 0 && runOrdinal !== otherOrdinal)
-      return runOrdinal > otherOrdinal;
-  }
-  return runRanAfter(run, other);
-}
 
 /**
  * A run whose turn had settled before the restart cancelled its background
@@ -237,67 +159,16 @@ export function restartContinuationNote(
   return { work, settled: isRestartNoteSource(current, providerTurns) };
 }
 
-export const isWorktreeContinuationRun = (run: Pick<OrchestrationV2Run, "userMessageId">) =>
-  /^message:mcp:[^:]+:worktree-continuation:/.test(run.userMessageId);
-
-/** An initial, handoff, or replacement prompt that never reached the provider. */
-export function restartPromptSource(
-  source: OrchestrationV2Run,
-  runs: ReadonlyArray<OrchestrationV2Run>,
-  providerTurns: ReadonlyArray<Pick<ProviderTurnState, "runAttemptId">>,
-  attempts: ReadonlyArray<PromptAttempt>,
-): OrchestrationV2Run | undefined {
-  const visited = new Set<string>();
-  let current: OrchestrationV2Run | undefined = source;
-  while (current !== undefined && !visited.has(current.id)) {
-    visited.add(current.id);
-    if (providerTurns.some((turn) => turn.runAttemptId === current?.activeAttemptId)) return;
-    if (
-      isWorktreeContinuationRun(current) ||
-      attempts.some(
-        (attempt) =>
-          attempt.id === current?.activeAttemptId &&
-          (attempt.reason === "initial" || attempt.reason === "steering_restart"),
-      )
-    )
-      return current;
-    current = runs.find((run) => run.id === current?.restartContinuationOfRunId);
-  }
-}
-
-/** Unsettled steering follows a continuation until a completed turn proves delivery. */
-export function restartPendingMessageIds(
-  source: OrchestrationV2Run,
-  runs: ReadonlyArray<OrchestrationV2Run>,
-  providerTurns: ReadonlyArray<Pick<ProviderTurnState, "runAttemptId" | "status">>,
-): ReadonlyArray<MessageId> {
-  const visited = new Set<string>();
-  const messages: Array<MessageId> = [];
-  let current: OrchestrationV2Run | undefined = source;
-  while (current !== undefined && !visited.has(current.id)) {
-    visited.add(current.id);
-    messages.unshift(...(current.restartPendingMessageIds ?? []));
-    if (
-      providerTurns.some(
-        (turn) => turn.runAttemptId === current?.activeAttemptId && turn.status === "completed",
-      )
-    )
-      break;
-    current = runs.find((run) => run.id === current?.restartContinuationOfRunId);
-  }
-  return [...new Set(messages)];
-}
-
 /**
- * A restart continuation prompted with the note or an undelivered steering restart.
+ * A restart continuation prompted with the note rather than a native resume.
  * A turn cut mid-way that lost background work is prompted too, so the note
- * is delivered with it; continuations with no new input resume natively.
+ * is delivered with it; only a continuation without a note resumes natively.
  */
 export function isRestartNoteContinuation(
   run: Pick<OrchestrationV2Run, "restartContinuationOfRunId">,
   runs: ReadonlyArray<OrchestrationV2Run>,
   providerTurns: ReadonlyArray<Pick<ProviderTurnState, "runAttemptId" | "status">>,
-  attempts: ReadonlyArray<PromptAttempt>,
+  attempts: ReadonlyArray<Attempt>,
 ): boolean {
   const source =
     run.restartContinuationOfRunId === undefined
@@ -305,9 +176,7 @@ export function isRestartNoteContinuation(
       : runs.find((candidate) => candidate.id === run.restartContinuationOfRunId);
   return (
     source !== undefined &&
-    (restartPendingMessageIds(source, runs, providerTurns).length > 0 ||
-      restartContinuationNote(source, runs, providerTurns, attempts).work.length > 0 ||
-      restartPromptSource(source, runs, providerTurns, attempts) !== undefined)
+    restartContinuationNote(source, runs, providerTurns, attempts).work.length > 0
   );
 }
 
@@ -378,11 +247,9 @@ export function pendingRestartCancelledBackgroundWork(input: {
   return sameThread
     .filter(
       (source) =>
+        runRanAfter(input.run, source) &&
         (source.restartCancelledBackgroundWork?.length ?? 0) > 0 &&
-        restartRunRanAfter(input.run, source, input.providerTurns, input.runs, input.attempts) &&
-        !prompted.some((later) =>
-          restartRunRanAfter(later, source, input.providerTurns, input.runs, input.attempts),
-        ),
+        !prompted.some((later) => runRanAfter(later, source)),
     )
     .reduce<ReadonlyArray<Work>>(
       (work, source) =>

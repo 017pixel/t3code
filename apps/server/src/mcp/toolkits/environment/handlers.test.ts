@@ -52,36 +52,31 @@ const layerEnvironment = Layer.mock(Environment.ServerEnvironment)({
 it.effect("updates preferences for a thread caller through the /mcp registration", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
-    const expected = { newWorktreesStartFromOrigin: true, continueThreadsAfterServerUpdate: false };
-    for (const name of ["t3_environment_preferences_update", "t3_environment_read"] as const) {
-      const result = yield* server
-        .callTool({
-          name,
-          arguments: name === "t3_environment_preferences_update" ? expected : {},
-        })
-        .pipe(
-          Effect.provideService(McpInvocationContext.McpInvocationContext, caller),
-          Effect.provideService(
-            McpSchema.McpServerClient,
-            McpSchema.McpServerClient.of({
-              clientId: 1,
+    const result = yield* server
+      .callTool({
+        name: "t3_environment_preferences_update",
+        arguments: { newWorktreesStartFromOrigin: true },
+      })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, caller),
+        Effect.provideService(
+          McpSchema.McpServerClient,
+          McpSchema.McpServerClient.of({
+            clientId: 1,
+            protocolVersion: "2025-06-18",
+            clientCapabilities: {},
+            clientInfo: { name: "preferences", version: "1" },
+            initializePayload: {
               protocolVersion: "2025-06-18",
-              clientCapabilities: {},
+              capabilities: {},
               clientInfo: { name: "preferences", version: "1" },
-              initializePayload: {
-                protocolVersion: "2025-06-18",
-                capabilities: {},
-                clientInfo: { name: "preferences", version: "1" },
-              },
-              getClient: Effect.die("unused"),
-            }),
-          ),
-        );
-      expect(result.isError).toBe(false);
-      expect(result.structuredContent).toMatchObject(
-        name === "t3_environment_read" ? { preferences: expected } : expected,
+            },
+            getClient: Effect.die("unused"),
+          }),
+        ),
       );
-    }
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toMatchObject({ newWorktreesStartFromOrigin: true });
   }).pipe(
     Effect.provide(
       McpHttpServer.layerEnvironmentToolkit.pipe(

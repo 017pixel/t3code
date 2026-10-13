@@ -1,5 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off -- workflow fixtures use files; the fake Claude CLI uses Node streams and exercises process death
-import * as NodeChildProcess from "node:child_process";
+// @effect-diagnostics nodeBuiltinImport:off -- workflow fixtures use files and the fake Claude CLI uses Node streams
 import * as NodeEvents from "node:events";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -61,6 +60,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Scheduler from "effect/Scheduler";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -1019,7 +1019,6 @@ describe("ClaudeAdapterV2 Auto-accept edits", () => {
           crypto: yield* Crypto.Crypto,
           idAllocator,
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed("native-thread-claude-accept-edits"),
             open: (input) =>
               Effect.sync(() => {
@@ -1179,7 +1178,6 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
       }),
     ),
     Effect.provideService(ClaudeAdapterV2.ClaudeAgentSdkQueryRunner, {
-      hasSession: () => Effect.succeed(true),
       allocateSessionId: Effect.succeed("native-thread-claude-binary-path"),
       open: (input) =>
         Effect.sync(() => {
@@ -1301,7 +1299,6 @@ describe("ClaudeAdapterV2 resume compaction", () => {
           crypto: yield* Crypto.Crypto,
           idAllocator,
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed("native-thread-claude-resume"),
             open: (input) =>
               Effect.sync(() => {
@@ -1527,7 +1524,6 @@ describe("ClaudeAdapterV2 attachments", () => {
           crypto: yield* Crypto.Crypto,
           idAllocator,
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed("native-thread-claude-attachments"),
             open: () =>
               Effect.succeed({
@@ -1674,7 +1670,6 @@ describe("ClaudeAdapterV2 attachments", () => {
           crypto: yield* Crypto.Crypto,
           idAllocator,
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed("native-thread-claude-unsupported-attachment"),
             open: () =>
               Effect.sync(() => {
@@ -1770,7 +1765,6 @@ describe("ClaudeAdapterV2 native fork", () => {
           crypto: yield* Crypto.Crypto,
           idAllocator,
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed("source-native-session"),
             open: (input) =>
               Effect.sync(() => {
@@ -2044,198 +2038,6 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
 });
 
 describe("ClaudeAdapterV2 native session identity", () => {
-  it.live.each(["native", "javascript", "shell wrapper", "agent scope"] as const)(
-    "ends the %s CLI when its hosting process crashes",
-    (launchKind) =>
-      Effect.gen(function* () {
-        const platform = yield* HostProcess.Platform;
-        if (platform !== "linux") return;
-        const executablePath = yield* HostProcess.ExecutablePath;
-        const directory = NodeFS.mkdtempSync(
-          NodePath.join(NodeOS.tmpdir(), "t3-claude-parent-death-"),
-        );
-        const readyPath = NodePath.join(directory, "ready");
-        const stoppedPath = NodePath.join(directory, "stopped");
-        const waitForFile = (file: string) =>
-          Effect.callback<void>((resume) => {
-            const check = () => {
-              if (NodeFS.existsSync(file)) resume(Effect.void);
-            };
-            const watcher = NodeFS.watch(directory, check);
-            check();
-            return Effect.sync(() => watcher.close());
-          }).pipe(
-            Effect.timeoutOrElse({
-              duration: "5 seconds",
-              orElse: () => Effect.die(new Error(`No process milestone at ${file}`)),
-            }),
-          );
-        const cliSource = [
-          "const fs = require('node:fs');",
-          "const publish = (file, text) => { fs.writeFileSync(file + '.tmp', text); fs.renameSync(file + '.tmp', file); };",
-          `process.on('SIGTERM', () => { publish(${JSON.stringify(stoppedPath)}, 'stopped'); process.exit(0); });`,
-          `publish(${JSON.stringify(readyPath)}, String(process.pid));`,
-          "setInterval(() => {}, 1000);",
-        ].join("\n");
-        const scriptPath = NodePath.join(directory, "cli.js");
-        NodeFS.writeFileSync(scriptPath, cliSource);
-        const shellPath = NodePath.join(directory, "cli.sh");
-        const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-        NodeFS.writeFileSync(
-          shellPath,
-          `#!/bin/sh\nexec ${shellQuote(executablePath)} ${shellQuote(scriptPath)} "$@"\n`,
-          { mode: 0o755 },
-        );
-        const binaryPath =
-          launchKind === "javascript"
-            ? scriptPath
-            : launchKind === "shell wrapper"
-              ? shellPath
-              : executablePath;
-        const executableArgs =
-          launchKind === "native" || launchKind === "agent scope" ? ["-e", cliSource, "--"] : [];
-        const parentSource = [
-          `import * as Effect from ${JSON.stringify(import.meta.resolve("effect/Effect"))};`,
-          `import * as NodeServices from ${JSON.stringify(import.meta.resolve("@effect/platform-node/NodeServices"))};`,
-          `import * as Adapter from ${JSON.stringify(import.meta.resolve("./ClaudeAdapterV2.ts"))};`,
-          `import * as Loggers from ${JSON.stringify(import.meta.resolve("@t3tools/provider-core/server/ProviderEventLoggers"))};`,
-          `import { AgentScope, agentScopeCommand } from ${JSON.stringify(import.meta.resolve("@t3tools/shared/AgentScope"))};`,
-          "await Effect.runPromise(Effect.scoped(Effect.gen(function* () {",
-          "const runner = yield* Adapter.ClaudeAgentSdkQueryRunner;",
-          "yield* runner.open({ threadId: 'parent-death', providerSessionId: 'parent-death', options: {",
-          `pathToClaudeCodeExecutable: ${JSON.stringify(binaryPath)}, executableArgs: ${JSON.stringify(executableArgs)},`,
-          "sessionId: '12345678-1234-4123-8123-123456789012', model: 'sonnet', tools: [], permissionMode: 'default', env: process.env }});",
-          "yield* Effect.never;",
-          "}).pipe(Effect.provide(Adapter.layerQueryRunner), Effect.provide(NodeServices.layer),",
-          ...(launchKind === "agent scope"
-            ? [
-                "Effect.provideService(AgentScope, { wrap: (input) => Effect.succeed(agentScopeCommand(input)), oomKilled: () => Effect.succeed(false), clear: () => Effect.void }),",
-              ]
-            : []),
-          "Effect.provideService(Loggers.ProviderEventLoggers, Loggers.NoOpProviderEventLoggers))));",
-        ].join("\n");
-        const ready = yield* waitForFile(readyPath).pipe(Effect.forkScoped);
-        const parent = NodeChildProcess.spawn(
-          executablePath,
-          ["--input-type=module", "-e", parentSource],
-          {
-            stdio: ["ignore", "ignore", "inherit"],
-          },
-        );
-        let cliPid: number | undefined;
-        try {
-          yield* Fiber.join(ready);
-          cliPid = Number(NodeFS.readFileSync(readyPath, "utf8"));
-          const stopped = yield* waitForFile(stoppedPath).pipe(Effect.forkScoped);
-          parent.kill("SIGKILL");
-          yield* Fiber.join(stopped);
-          assert.equal(NodeFS.readFileSync(stoppedPath, "utf8"), "stopped");
-        } finally {
-          parent.kill("SIGKILL");
-          if (cliPid !== undefined) {
-            try {
-              process.kill(cliPid, "SIGKILL");
-            } catch {}
-          }
-          NodeFS.rmSync(directory, { recursive: true, force: true });
-        }
-      }),
-    15000,
-  );
-
-  it.effect("rejects missing or unusable transcripts before accepting a resume", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const configDir = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "t3-claude-v2-missing-transcript-",
-        });
-        const runner = yield* ClaudeAdapterV2.ClaudeAgentSdkQueryRunner;
-        const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
-          instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
-          settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: configDir },
-          environment: {},
-          attachmentsDir: configDir,
-          fileSystem,
-          path,
-          crypto: yield* Crypto.Crypto,
-          idAllocator: yield* IdAllocator.IdAllocatorV2,
-          queryRunner: runner,
-        });
-        const threadId = ThreadId.make("thread-claude-missing-transcript");
-        const runtime = yield* adapter.openSession({
-          threadId,
-          providerSessionId: ProviderSessionId.make("session-claude-missing-transcript"),
-          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-        });
-        const providerThread = yield* runtime.ensureThread({
-          threadId,
-          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-        });
-        const resumeInput = {
-          providerThread,
-          threadId,
-          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-        };
-        const missing = yield* runtime.resumeThread(resumeInput).pipe(Effect.result);
-        assert.equal(missing._tag, "Failure");
-        if (missing._tag === "Failure")
-          assert.equal(missing.failure._tag, "ProviderAdapterResumeThreadError");
-        const directory = path.join(configDir, "projects", "-workspace");
-        yield* fileSystem.makeDirectory(directory, { recursive: true });
-        const transcriptPath = path.join(
-          directory,
-          `${providerThread.nativeThreadRef!.nativeId}.jsonl`,
-        );
-        for (const transcript of [
-          "",
-          "{broken\n",
-          '{"type":"summary","summary":"summary only"}\n',
-          '{"type":"user","uuid":"sidechain","isSidechain":true,"message":{"role":"user","content":"subagent only"}}\n',
-        ]) {
-          yield* fileSystem.writeFileString(transcriptPath, transcript);
-          const unusable = yield* runtime.resumeThread(resumeInput).pipe(Effect.result);
-          assert.equal(unusable._tag, "Failure", transcript);
-          if (unusable._tag === "Failure")
-            assert.equal(unusable.failure._tag, "ProviderAdapterResumeThreadError");
-        }
-        yield* fileSystem.writeFileString(
-          transcriptPath,
-          '{broken\n{"type":"user","uuid":"saved-prompt","message":{"role":"user","content":"previous prompt"}}\n{incomplete',
-        );
-        const resumed = yield* runtime.resumeThread(resumeInput);
-        assert.deepEqual(resumed.nativeThreadRef, providerThread.nativeThreadRef);
-        assert.equal(resumed.providerSessionId, runtime.providerSession.id);
-        assert.isFalse(
-          yield* runner.hasSession({
-            sessionId: providerThread.nativeThreadRef!.nativeId!,
-            configDir: path.join(configDir, "other-home"),
-          }),
-        );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            ClaudeAdapterV2.layerQueryRunner,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-          ).pipe(
-            Layer.provideMerge(NodeServices.layer),
-            Layer.provide(
-              Layer.succeed(
-                ProviderEventLoggers.ProviderEventLoggers,
-                ProviderEventLoggers.NoOpProviderEventLoggers,
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-
   const openTurnWithOrdinal = (providerTurnOrdinal: number, nativeThreadHasTurns?: boolean) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -2255,7 +2057,6 @@ describe("ClaudeAdapterV2 native session identity", () => {
           crypto: yield* Crypto.Crypto,
           idAllocator,
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed("native-session-identity"),
             open: (input) =>
               Effect.sync(() => {
@@ -2517,7 +2318,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   const makeWakeHarnessWithOptions = (options?: {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
     readonly interrupt?: Effect.Effect<void>;
-    readonly stopTask?: (taskId: string) => Effect.Effect<void>;
+    readonly stopTask?: (
+      taskId: string,
+    ) => Effect.Effect<void, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
     readonly environment?: NodeJS.ProcessEnv;
     readonly subagentLaunchToolUseId?: string;
     readonly nativeSessionId?: string;
@@ -2580,7 +2383,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }).pipe(Effect.andThen(Queue.offer(continuationReceipts, request))),
         },
         queryRunner: {
-          hasSession: () => Effect.succeed(true),
           allocateSessionId: Effect.succeed(options?.nativeSessionId ?? WAKE_NATIVE_SESSION),
           open: (input) =>
             Effect.gen(function* () {
@@ -2707,82 +2509,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
-
-  it.effect.each(["assistant", "compaction"] as const)(
-    "drops a rollback cursor consumed by %s before a resumed turn is cut",
-    (progress) =>
-      Effect.gen(function* () {
-        const harness = yield* makeWakeHarnessWithOptions({ freshQueueOnReopen: true });
-        const providerThread = {
-          ...harness.providerThread,
-          nativeConversationHeadRef: {
-            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
-            nativeId: "rollback-cursor",
-            strength: "weak" as const,
-          },
-        };
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make("rollback-restart-first"),
-            text: "Continue after rollback.",
-            attachments: [],
-          }),
-        );
-        assert.equal(harness.getOpenedOptions()?.resumeSessionAt, "rollback-cursor");
-        yield* harness.offerAndWait(
-          progress === "assistant"
-            ? makeAssistantTextFrame({ uuid: "post-rollback-progress", text: "New progress." })
-            : claudeSdkFrame({
-                type: "system",
-                subtype: "compact_boundary",
-                compact_metadata: { trigger: "auto", pre_tokens: 1500, post_tokens: 400 },
-                uuid: "post-rollback-compaction",
-                session_id: WAKE_NATIVE_SESSION,
-              }),
-        );
-        // A later roster frame must not bring the consumed cursor back.
-        yield* harness.offerAndWait(
-          claudeSdkFrame({
-            type: "system",
-            subtype: "background_tasks_changed",
-            tasks: [],
-            uuid: "post-rollback-roster",
-            session_id: WAKE_NATIVE_SESSION,
-          }),
-        );
-        yield* Queue.shutdown(harness.sdkMessages);
-        yield* Queue.take(harness.terminalReceipts);
-        const updates = harness.events.filter((event) => event.type === "provider_thread.updated");
-        assert.lengthOf(updates, 3);
-        for (const update of updates)
-          assert.isNull(update.providerThread.nativeConversationHeadRef);
-        const saved = updates.at(-1);
-        assert.equal(saved?.type, "provider_thread.updated");
-        if (saved?.type !== "provider_thread.updated") return;
-        assert.isNull(saved.providerThread.nativeConversationHeadRef);
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: saved.providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make("rollback-restart-second"),
-            text: "Continue where you left off.",
-            attachments: [],
-            providerTurnOrdinal: 2,
-          }),
-        );
-        assert.equal(harness.getOpenedOptions()?.resume, WAKE_NATIVE_SESSION);
-        assert.isUndefined(harness.getOpenedOptions()?.resumeSessionAt);
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
-        ),
-      ),
-  );
 
   it.effect.each([
     { isError: false, title: "Check weather" },
@@ -3083,6 +2809,75 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  it.effect.each([
+    { model: "claude-opus-5-5", expected: "assistant_message" },
+    { model: "claude-fable-5-1", expected: "assistant_message" },
+    { model: "claude-opus-5", expected: "reasoning" },
+    { model: "claude-sonnet-4-6", expected: "reasoning" },
+  ] as const)(
+    "shows $model thinking right before a tool call as $expected",
+    ({ model, expected }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("thinking-before-tool-attempt"),
+            text: "Check the memory file",
+            attachments: [],
+          }),
+        );
+        const snapshot = (uuid: string, content: ReadonlyArray<unknown>) =>
+          claudeSdkFrame({
+            type: "assistant",
+            uuid,
+            session_id: WAKE_NATIVE_SESSION,
+            parent_tool_use_id: null,
+            message: { id: "reply-message", model, content },
+          });
+        const frames = [
+          snapshot("reasoning-snapshot", [
+            { type: "thinking", thinking: "Planning the check", signature: "sig" },
+          ]),
+          snapshot("reply-snapshot", [
+            {
+              type: "thinking",
+              thinking: "Found it: the memory file is the cause.",
+              signature: "sig",
+            },
+          ]),
+          snapshot("tool-snapshot", [
+            { type: "tool_use", id: "tool-1", name: "Bash", input: { command: "ls" } },
+          ]),
+          makeResultFrame({ uuid: "thinking-before-tool-result", result: "" }),
+        ];
+        for (const frame of frames) yield* Queue.offer(harness.sdkMessages, frame);
+        yield* Queue.take(harness.terminalReceipts);
+        const latest = new Map(
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" &&
+            (event.turnItem.type === "reasoning" || event.turnItem.type === "assistant_message")
+              ? [[event.turnItem.id, event.turnItem] as const]
+              : [],
+          ),
+        );
+        assert.deepEqual(
+          [...latest.values()].map((item) => [item.type, item.text]),
+          [
+            ["reasoning", "Planning the check"],
+            [expected, "Found it: the memory file is the cause."],
+          ],
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
   it.effect.each(["cancelled", "denied", "permission_denied", undefined])(
     "preserves native tool non-execution metadata %s without inferring a denial from text",
     (kind) =>
@@ -3358,7 +3153,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   it.effect("names an expired Claude login instead of the terminal API error", () =>
     Effect.gen(function* () {
       const configDir = "/synthetic/Claude config";
-      const cwd = "/synthetic/project";
+      // The adapter resolves the cwd on the host, which adds a drive letter on Windows.
+      const cwd = NodePath.resolve("/synthetic/project");
       const harness = yield* makeWakeHarnessWithOptions({
         environment: { CLAUDE_CONFIG_DIR: configDir },
       });
@@ -3395,7 +3191,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       if (terminal.status !== "failed") return;
       assert.include(terminal.failure.message, "run `claude auth login`");
       assert.include(terminal.failure.message, configDir);
-      assert.include(terminal.failure.message, cwd);
+      // The message quotes its paths, which escapes Windows separators.
+      assert.include(terminal.failure.message, JSON.stringify(cwd));
       assert.notInclude(terminal.failure.message, "repeated API errors");
     }).pipe(
       Effect.provide(
@@ -5065,7 +4862,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               }),
           },
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
             open: () =>
               Effect.gen(function* () {
@@ -5318,7 +5114,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               offer: () => Effect.void,
             },
             queryRunner: {
-              hasSession: () => Effect.succeed(true),
               allocateSessionId: Effect.sync(() => {
                 const next =
                   nativeIds[allocateIndex] ?? `native-thread-roster-extra-${allocateIndex}`;
@@ -9000,17 +8795,373 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   it.effect.each([false, true])(
-    "stops one native subagent while its sibling keeps running, owner settled %s",
-    (ownerSettled) =>
+    "drops an idle start superseded by live completion, later resume %s",
+    (resume) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const startTurn = (ordinal: number, continuation = false) =>
+            harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: DateTime.makeUnsafe(0),
+                attemptId: RunAttemptId.make(`attempt-stale-start-${ordinal}`),
+                providerTurnOrdinal: ordinal,
+                text: "Continue work.",
+                attachments: [],
+                ...(continuation
+                  ? {
+                      messageCreatedBy: "agent" as const,
+                      messageCreationSource: "provider" as const,
+                    }
+                  : {}),
+              }),
+            );
+          const started = (taskId: string, suffix: string) =>
+            makeSubagentTaskStartedFrame({
+              taskId,
+              toolUseId: `toolu-${taskId}`,
+              uuid: `00000000-0000-4000-8000-${suffix}`,
+            });
+          const finished = (taskId: string, suffix: string) =>
+            makeSubagentNotificationFrame({
+              taskId,
+              toolUseId: `toolu-${taskId}`,
+              summary: "Finished audit.",
+              uuid: `00000000-0000-4000-8000-${suffix}`,
+            });
+          yield* startTurn(1);
+          yield* harness.offerAndWait(started("stale-agent", "000000004001"));
+          yield* harness.offerAndWait(started("wake-agent", "000000004002"));
+          yield* harness.offerAndWait(
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000004003",
+              result: "Agents launched.",
+            }),
+          );
+          yield* Queue.take(harness.terminalReceipts);
+          // The background task resumes in the idle gap, before a user turn.
+          yield* harness.offerAndWait(started("stale-agent", "000000004004"));
+          yield* startTurn(2);
+          yield* harness.offerAndWait(finished("stale-agent", "000000004005"));
+          yield* harness.offerAndWait(
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000004006",
+              result: "User turn finished.",
+            }),
+          );
+          yield* Queue.take(harness.terminalReceipts);
+          if (resume) yield* harness.offerAndWait(started("stale-agent", "000000004007"));
+          yield* harness.offerAndWait(finished("wake-agent", "000000004008"));
+          yield* Queue.take(harness.continuationReceipts);
+          yield* startTurn(3, true);
+          yield* harness.offerAndWait(
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000004009",
+              result: "Wake finished.",
+            }),
+          );
+          yield* Queue.take(harness.terminalReceipts);
+          const latest = harness.events.findLast(
+            (event) =>
+              event.type === "subagent.updated" &&
+              event.subagent.nativeTaskRef?.nativeId === "stale-agent",
+          );
+          assert.equal(latest?.type, "subagent.updated");
+          if (latest?.type !== "subagent.updated") return;
+          assert.equal(latest.subagent.status, resume ? "running" : "completed");
+          assert.equal(latest.subagent.result, resume ? null : "Finished audit.");
+          assert.equal(latest.subagent.completedAt === null, resume);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  const makeStopFixture = (options?: Parameters<typeof makeWakeHarnessWithOptions>[0]) =>
+    Effect.gen(function* () {
+      const requests = yield* Queue.unbounded<void>();
+      const harness = yield* makeWakeHarnessWithOptions({
+        ...options,
+        stopTask: (id) =>
+          Queue.offer(requests, undefined).pipe(
+            Effect.andThen(options?.stopTask?.(id) ?? Effect.void),
+          ),
+      });
+      let sequence = 4500;
+      const uuid = () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`;
+      const startTurn = (continuation = false) =>
+        harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: DateTime.makeUnsafe(0),
+            attemptId: RunAttemptId.make(`attempt-stop-${continuation ? 2 : 1}`),
+            providerTurnOrdinal: continuation ? 2 : 1,
+            text: "Run an audit.",
+            attachments: [],
+            ...(continuation
+              ? { messageCreatedBy: "agent" as const, messageCreationSource: "provider" as const }
+              : {}),
+          }),
+        );
+      const start = (toolUseId = "toolu-stop-agent") =>
+        harness.offerAndWait(
+          makeSubagentTaskStartedFrame({
+            taskId: "stop-agent",
+            toolUseId,
+            uuid: uuid(),
+          }),
+        );
+      const notify = (
+        status: "completed" | "failed" | "stopped",
+        summary = "Native outcome.",
+        toolUseId = "toolu-stop-agent",
+      ) =>
+        harness.offerAndWait(
+          claudeSdkFrame({
+            ...makeSubagentNotificationFrame({
+              taskId: "stop-agent",
+              toolUseId,
+              summary,
+              uuid: uuid(),
+            }),
+            status,
+          }),
+        );
+      const stop = (requestedAt?: DateTime.Utc) =>
+        harness.runtime.stopSubagent!({
+          providerThread: harness.providerThread,
+          nativeTaskId: "stop-agent",
+          ...(requestedAt === undefined ? {} : { requestedAt }),
+        });
+      const finishParent = () =>
+        harness
+          .offerAndWait(makeResultFrame({ uuid: uuid(), result: "Launched." }))
+          .pipe(Effect.andThen(Queue.take(harness.terminalReceipts)));
+      yield* startTurn();
+      yield* start();
+      yield* Queue.take(harness.subagentReceipts);
+      return {
+        ...harness,
+        start,
+        notify,
+        stop,
+        finishParent,
+        replay: () => startTurn(true),
+        uuid,
+        requests,
+      };
+    });
+
+  it.effect.each([
+    [false, "no notification"],
+    [true, "no notification"],
+    [false, "stop fails"],
+    [false, "stop hangs"],
+  ] as const)("never infers an outcome from Stop, owner settled %s and %s", ([idle, failure]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const requested = yield* Deferred.make<void>();
+        const fixture = yield* makeStopFixture({
+          stopTask: () =>
+            Deferred.succeed(requested, undefined).pipe(
+              Effect.andThen(
+                failure === "stop fails"
+                  ? new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                      method: "stopTask",
+                      cause: "Task is no longer live",
+                    })
+                  : failure === "stop hangs"
+                    ? Effect.never
+                    : Effect.void,
+              ),
+            ),
+        });
+        if (idle) yield* fixture.finishParent();
+        const stopping = yield* fixture.stop().pipe(Effect.exit, Effect.forkScoped);
+        yield* Deferred.await(requested);
+        yield* TestClock.adjust("2 seconds");
+        const result = yield* Fiber.join(stopping);
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal(
+          fixture.events.findLast((event) => event.type === "subagent.updated")?.subagent.status,
+          "running",
+        );
+        assert.isTrue(yield* fixture.hasPendingBackgroundWork);
+        yield* fixture.notify("completed");
+        assert.equal((yield* Queue.take(fixture.subagentReceipts)).subagent.status, "completed");
+        assert.isFalse(yield* fixture.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each([1, 2, 3, 4, 5, 6, 7, 8])(
+    "accepts completion during Stop at scheduler step %s",
+    (pauseAt) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* makeStopFixture();
+          const resumptions = yield* Queue.unbounded<() => void>();
+          const scheduler = yield* Scheduler.Scheduler;
+          const dispatcher = scheduler.makeDispatcher();
+          let checks = 0;
+          // Pause Stop before its SDK request and deliver the outcome while it is suspended.
+          const stopping = yield* fixture.stop().pipe(
+            Effect.provideService(Scheduler.Scheduler, {
+              executionMode: scheduler.executionMode,
+              shouldYield: () => ++checks === pauseAt,
+              makeDispatcher: () => ({
+                scheduleTask: (task, priority) => {
+                  if (checks === pauseAt) Queue.offerUnsafe(resumptions, task);
+                  else dispatcher.scheduleTask(task, priority);
+                },
+                flush: () => dispatcher.flush(),
+              }),
+            }),
+            Effect.exit,
+            Effect.forkScoped,
+          );
+          const resume = yield* Queue.take(resumptions);
+          yield* fixture.notify("completed");
+          const completed = yield* Queue.take(fixture.subagentReceipts);
+          yield* Effect.sync(resume);
+          yield* TestClock.adjust("2 seconds");
+          assert.deepEqual(
+            yield* Fiber.join(stopping),
+            Exit.succeed({
+              status: "completed" as const,
+              completedAt: completed.subagent.completedAt!,
+              result: "Native outcome.",
+            }),
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("retains native confirmation after the synchronous Agent tool result", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeStopFixture({
+          stopTask: () => Effect.die("Task already completed"),
+        });
+        yield* fixture.notify("completed");
+        const completed = yield* Queue.take(fixture.subagentReceipts);
+        yield* fixture.offerAndWait(
+          claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content: [
+                { type: "tool_result", tool_use_id: "toolu-stop-agent", content: "Tool result." },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: fixture.uuid(),
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        assert.equal((yield* Queue.take(fixture.subagentReceipts)).subagent.result, "Tool result.");
+        assert.deepEqual(yield* fixture.stop(), {
+          status: "completed",
+          completedAt: completed.subagent.completedAt!,
+          result: "Native outcome.",
+        });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each(["completed", "failed", "stopped"] as const)(
+    "applies idle %s once, preserves a genuine resume, and only confirms native outcomes",
+    (status) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          let stops = 0;
+          const fixture = yield* makeStopFixture({
+            stopTask: () => Effect.sync(() => void stops++),
+          });
+          yield* fixture.finishParent();
+          yield* TestClock.adjust("1 second");
+          yield* fixture.notify(status);
+          const completed = yield* Queue.take(fixture.subagentReceipts);
+          const expected = status === "stopped" ? "cancelled" : status;
+          assert.equal(completed.subagent.status, expected);
+          assert.lengthOf(fixture.offeredMessages, 1);
+          assert.isFalse(yield* fixture.hasPendingBackgroundWork);
+          assert.deepEqual(yield* fixture.stop(), {
+            status: expected,
+            completedAt: completed.subagent.completedAt!,
+            result: "Native outcome.",
+          });
+          assert.equal(stops, 0);
+          yield* TestClock.adjust("1 second");
+          yield* fixture.start("toolu-resume");
+          assert.isUndefined(yield* fixture.stop(completed.subagent.completedAt!));
+          assert.equal(stops, 0);
+          const stopping = yield* fixture.stop().pipe(Effect.exit, Effect.forkScoped);
+          yield* Queue.take(fixture.requests);
+          const beforeReplay = fixture.events.length;
+          yield* fixture.replay();
+          const reopened = yield* Queue.take(fixture.subagentReceipts);
+          assert.equal(reopened.subagent.status, "running");
+          assert.isNull(reopened.subagent.completedAt);
+          assert.isFalse(
+            fixture.events
+              .slice(beforeReplay)
+              .some(
+                (event) => event.type === "subagent.updated" && event.subagent.status !== "running",
+              ),
+          );
+          yield* TestClock.adjust("2 seconds");
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(stopping)));
+          assert.equal(stops, 1);
+          yield* fixture.notify("completed", "Resumed outcome.", "toolu-resume");
+          const resumed = yield* Queue.take(fixture.subagentReceipts);
+          assert.equal(resumed.subagent.result, "Resumed outcome.");
+          assert.isAbove(
+            DateTime.toEpochMillis(resumed.subagent.completedAt!),
+            DateTime.toEpochMillis(completed.subagent.completedAt!),
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect.each([
+    [false, "stopped"],
+    [true, "stopped"],
+    [false, "completed"],
+  ] as const)(
+    "stops one native subagent while its sibling keeps running, owner settled %s, outcome %s",
+    ([ownerSettled, outcome]) =>
       Effect.scoped(
         Effect.gen(function* () {
           const stopped: string[] = [];
+          const stopRequested = yield* Deferred.make<void>();
           let closes = 0;
           const harness = yield* makeWakeHarnessWithOptions({
             stopTask: (taskId) =>
               Effect.sync(() => {
                 stopped.push(taskId);
-              }),
+              }).pipe(Effect.andThen(Deferred.succeed(stopRequested, undefined))),
             interrupt: Effect.die("A child stop must not interrupt its owner"),
             close: () =>
               Effect.sync(() => {
@@ -9047,7 +9198,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }
           const stop = harness.runtime.stopSubagent;
           assert.isDefined(stop);
-          yield* stop!({ providerThread: harness.providerThread, nativeTaskId: "agent-stop" });
+          const stopping = yield* stop!({
+            providerThread: harness.providerThread,
+            nativeTaskId: "agent-stop",
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(stopRequested);
           assert.deepEqual(stopped, ["agent-stop"]);
           yield* harness.offerAndWait(
             claudeSdkFrame({
@@ -9057,7 +9212,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 summary: "Stopped by user",
                 uuid: "00000000-0000-4000-8000-000000000804",
               }),
-              status: "stopped",
+              status: outcome,
             }),
           );
           if (ownerSettled) {
@@ -9075,13 +9230,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               }),
             );
           }
+          yield* Fiber.join(stopping);
           const stoppedEvent = yield* Queue.take(harness.subagentReceipts);
-          assert.equal(stoppedEvent.subagent.status, "cancelled");
+          assert.equal(
+            stoppedEvent.subagent.status,
+            outcome === "stopped" ? "cancelled" : "completed",
+          );
           const tasks = harness.events.filter((event) => event.type === "subagent.updated");
           assert.equal(
             tasks.findLast((event) => event.subagent.nativeTaskRef?.nativeId === "agent-stop")
               ?.subagent.status,
-            "cancelled",
+            outcome === "stopped" ? "cancelled" : "completed",
           );
           assert.equal(
             tasks.findLast((event) => event.subagent.nativeTaskRef?.nativeId === "agent-keep")
@@ -10055,7 +10214,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               }),
           },
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
             open: () =>
               Effect.gen(function* () {
@@ -10246,7 +10404,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 }),
             },
             queryRunner: {
-              hasSession: () => Effect.succeed(true),
               allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
               open: () =>
                 Effect.gen(function* () {
@@ -10489,7 +10646,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 }),
             },
             queryRunner: {
-              hasSession: () => Effect.succeed(true),
               allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
               open: () =>
                 Effect.gen(function* () {
@@ -10615,7 +10771,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             () => events.filter((event) => event.type === "turn.terminal").length === 2,
             "user turn terminal after replace",
           );
-          assert.isTrue(yield* hasPendingBackgroundWork);
+          // The actual completion was applied while idle, before wake replay.
+          assert.isFalse(yield* hasPendingBackgroundWork);
+          assert.equal(subagentEvents().at(-1)?.subagent.status, "completed");
           assert.lengthOf(continuationRequests, 1);
 
           yield* Queue.offer(
@@ -10689,7 +10847,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           idAllocator,
           continuationRequests: { offer: () => Effect.void },
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
             open: () =>
               Effect.gen(function* () {
@@ -10864,7 +11021,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               offer: () => Effect.void,
             },
             queryRunner: {
-              hasSession: () => Effect.succeed(true),
               allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
               open: () => {
                 openCount += 1;
@@ -11004,7 +11160,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 }),
             },
             queryRunner: {
-              hasSession: () => Effect.succeed(true),
               allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
               open: () => {
                 openCount += 1;
@@ -11202,7 +11357,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             offer: () => Effect.void,
           },
           queryRunner: {
-            hasSession: () => Effect.succeed(true),
             allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
             open: () =>
               Effect.fail(
@@ -12915,17 +13069,24 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   it.effect.each([
-    ["api_error", false],
-    ["aborted_streaming", false],
-    ["api_error", true],
+    ["api_error", false, false],
+    ["aborted_streaming", false, false],
+    ["api_error", true, false],
+    ["api_error", false, true],
+    ["aborted_streaming", false, true],
   ] as const)(
-    "stops the run's live workflow after root result %s, continuation=%s",
-    ([terminalReason, continuation]) =>
+    "stops the run's live workflow after root result %s, continuation=%s, pending Stop=%s",
+    ([terminalReason, continuation, pendingStop]) =>
       Effect.scoped(
         Effect.gen(function* () {
           const stoppedTasks: Array<string> = [];
+          const stopRequested = yield* Deferred.make<void>();
           const harness = yield* makeWorkflowHarnessWithOptions({
-            stopTask: (taskId) => Effect.sync(() => void stoppedTasks.push(taskId)),
+            stopTask: (taskId) =>
+              Effect.sync(() => void stoppedTasks.push(taskId)).pipe(
+                Effect.andThen(Deferred.succeed(stopRequested, undefined)),
+                Effect.asVoid,
+              ),
           });
           const now = yield* DateTime.now;
           const turnInput = {
@@ -12938,6 +13099,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           };
           yield* harness.runtime.startTurn(makeClaudeTestTurnInput(turnInput));
           yield* launchWorkflow({ harness, snapshotUuid: "00000000-0000-4000-8000-000000001050" });
+          const stopping = pendingStop
+            ? yield* harness.runtime.stopSubagent!({
+                providerThread: harness.providerThread,
+                nativeTaskId: WORKFLOW_TASK_ID,
+              }).pipe(Effect.exit, Effect.forkScoped)
+            : undefined;
+          if (pendingStop) yield* Deferred.await(stopRequested);
           if (continuation) {
             yield* harness.offerAndWait(
               makeResultFrame({
@@ -12979,7 +13147,22 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           // workflow was re-attributed to) stops following it, so it is stopped
           // instead of left running out of sight.
           const settled = terminalReason === "api_error" ? "failed" : "cancelled";
-          assert.deepEqual(stoppedTasks, [WORKFLOW_TASK_ID]);
+          assert.deepEqual(
+            stoppedTasks,
+            pendingStop ? [WORKFLOW_TASK_ID, WORKFLOW_TASK_ID] : [WORKFLOW_TASK_ID],
+          );
+          if (stopping !== undefined) {
+            // Parent failure assigns a local outcome without a task_notification.
+            yield* TestClock.adjust("2 seconds");
+            assert.isTrue(Exit.isFailure(yield* Fiber.join(stopping)));
+            // Local parent cleanup still cannot provide a confirmed outcome on retry.
+            const retry = yield* harness.runtime.stopSubagent!({
+              providerThread: harness.providerThread,
+              nativeTaskId: WORKFLOW_TASK_ID,
+            }).pipe(Effect.exit, Effect.forkScoped);
+            yield* TestClock.adjust("2 seconds");
+            assert.isTrue(Exit.isFailure(yield* Fiber.join(retry)));
+          }
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
           assert.equal(workflowCoordinatorEvents(harness.events).at(-1)?.subagent.status, settled);
           for (const index of [1, 2]) {
@@ -13458,8 +13641,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           NodePath.join(harness.transcriptDir, "agent-a1.jsonl"),
           '{"type":"assistant","message":{"role":"assistant","id":"msg_a1","content":[{"type":"text","text":"A1 continued"}]}}\n',
         );
-        yield* Queue.offer(
-          harness.sdkMessages,
+        yield* harness.offerAndWait(
           workflowSnapshot({ uuid: "00000000-0000-4000-8000-000000001015", state: "done" }),
         );
         yield* awaitUntil(
@@ -13482,8 +13664,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           NodePath.join(harness.transcriptDir, "agent-a2.jsonl"),
           '{"type":"assistant","message":{"role":"assistant","id":"msg_a2","content":[{"type":"text","text":"A2 from the transcript"}]}}\n',
         );
-        yield* Queue.offer(
-          harness.sdkMessages,
+        yield* harness.offerAndWait(
           workflowSnapshot({ uuid: "00000000-0000-4000-8000-000000001016", state: "done" }),
         );
         yield* awaitUntil(

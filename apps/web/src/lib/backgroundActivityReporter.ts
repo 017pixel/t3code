@@ -191,13 +191,7 @@ export const layer = Layer.effectDiscard(
         requestReport();
       }
     };
-    // Captured, so a control that stops propagation (say, an editor's keydown) still counts.
-    const interactionListenerOptions = { capture: true, passive: true } as const;
-    // Coming back to the window means someone is about to use it.
-    const onForeground = () => {
-      if (document.visibilityState === "visible") recordInteraction();
-      requestReport();
-    };
+    const passiveListenerOptions = { passive: true } as const;
 
     const report = Effect.gen(function* () {
       const observedAtMs = yield* Clock.currentTimeMillis;
@@ -221,26 +215,26 @@ export const layer = Layer.effectDiscard(
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         retainedScopeListeners.add(requestReport);
-        document.addEventListener("visibilitychange", onForeground);
-        window.addEventListener("focus", onForeground);
+        document.addEventListener("visibilitychange", requestReport);
+        window.addEventListener("focus", requestReport);
         window.addEventListener("blur", requestReport);
         window.addEventListener("online", requestReport);
-        window.addEventListener("pointermove", recordInteraction, interactionListenerOptions);
-        window.addEventListener("keydown", recordInteraction, interactionListenerOptions);
-        window.addEventListener("wheel", recordInteraction, interactionListenerOptions);
-        window.addEventListener("touchstart", recordInteraction, interactionListenerOptions);
+        window.addEventListener("pointermove", recordInteraction);
+        window.addEventListener("keydown", recordInteraction);
+        window.addEventListener("wheel", recordInteraction, passiveListenerOptions);
+        window.addEventListener("touchstart", recordInteraction, passiveListenerOptions);
       }),
       () =>
         Effect.sync(() => {
           retainedScopeListeners.delete(requestReport);
-          document.removeEventListener("visibilitychange", onForeground);
-          window.removeEventListener("focus", onForeground);
+          document.removeEventListener("visibilitychange", requestReport);
+          window.removeEventListener("focus", requestReport);
           window.removeEventListener("blur", requestReport);
           window.removeEventListener("online", requestReport);
-          window.removeEventListener("pointermove", recordInteraction, interactionListenerOptions);
-          window.removeEventListener("keydown", recordInteraction, interactionListenerOptions);
-          window.removeEventListener("wheel", recordInteraction, interactionListenerOptions);
-          window.removeEventListener("touchstart", recordInteraction, interactionListenerOptions);
+          window.removeEventListener("pointermove", recordInteraction);
+          window.removeEventListener("keydown", recordInteraction);
+          window.removeEventListener("wheel", recordInteraction);
+          window.removeEventListener("touchstart", recordInteraction);
         }),
     );
 

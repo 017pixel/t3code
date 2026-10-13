@@ -35,7 +35,11 @@ import {
 import { SKILL_MENTION_PATTERN } from "@t3tools/shared/composerInlineTokens";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { dynamicToolTitle } from "@t3tools/shared/toolActivity";
+import {
+  COMPUTER_USE_TOOL_SOURCE,
+  dynamicToolSurface,
+  dynamicToolTitle,
+} from "@t3tools/shared/toolActivity";
 import { getModelSelectionStringOptionValue, modelSelectionsEqual } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import type {
@@ -497,9 +501,17 @@ export const projectCodexDynamicToolItem = Effect.fn("CodexAdapterV2.projectDyna
         : [trimText(item.namespace), item.tool].filter(Boolean).join(".");
     const presentation: McpToolPresentation =
       item.type === "mcpToolCall" ? yield* mcpToolPresentation(item) : {};
-    const title = dynamicToolTitle(toolName, item.arguments) ?? presentation.title;
+    const title =
+      dynamicToolTitle(toolName, item.arguments, presentation.title) ?? presentation.title;
+    const toolSurface = presentation.toolSurface ?? dynamicToolSurface(toolName, item.arguments);
+    const toolSource =
+      toolSurface === "computer" && presentation.toolSource?.kind !== "computer"
+        ? COMPUTER_USE_TOOL_SOURCE
+        : presentation.toolSource;
     const projection: CodexDynamicToolProjection = {
       ...presentation,
+      ...(toolSurface ? { toolSurface } : {}),
+      ...(toolSource ? { toolSource } : {}),
       toolName,
       ...(title ? { title } : {}),
       input: item.arguments,
@@ -1415,8 +1427,6 @@ const layerCodexAppServerClientFactoryCommand = (
                   }),
               ),
             );
-            const agentScope = yield* AgentScope;
-            yield* agentScope.trackProcess?.(Number(handle.pid)) ?? Effect.void;
             const context = yield* Layer.build(CodexClient.layerChildProcess(handle, options));
             return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
               Effect.provide(context),
@@ -1538,7 +1548,6 @@ export const layerAppServerClientFactory: Layer.Layer<
                 }),
             ),
           );
-          yield* agentScope.trackProcess?.(Number(handle.pid)) ?? Effect.void;
           const protocolLogger = makeCodexAppServerProtocolLogger({
             nativeEventLogger,
             threadId: input.threadId,
@@ -6630,18 +6639,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (goalCommand !== null) return runGoalCommand(turnInput, goalCommand);
             return Effect.gen(function* () {
               const input =
-                turnInput.restartContinuationOfRunId === undefined ||
-                turnInput.nativeThreadHasTurns === false
+                turnInput.restartContinuationOfRunId === undefined
                   ? yield* toCodexInput(turnInput)
                   : [];
               yield* startNativeTurn(turnInput, input).pipe(
                 Effect.catchTags({
                   CodexAppServerRequestError: (cause) => {
-                    // A completed native goal turn can still hold the T3 run.
-                    // Codex rejects empty input there before starting a turn.
+                    // Codex rejects an empty continuation while a goal turn is
+                    // still active. Send the continue prompt as real input.
                     if (
                       input.length !== 0 ||
-                      turnInput.restartContinuationOfRunId === undefined ||
                       cause.code !== -32603 ||
                       cause.errorMessage !== "failed to submit turn input: EmptyInput"
                     )

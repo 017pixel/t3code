@@ -827,34 +827,80 @@ describe("CodexAdapterV2 process spawning", () => {
 });
 
 describe("CodexAdapterV2 dynamic tool projection", () => {
-  it.effect("uses the CUA call title while leaving other MCP titles as tool arguments", () =>
+  it.effect("keeps a failed Sky MCP call in Computer Use when its error has no metadata", () =>
     Effect.gen(function* () {
-      const call = {
-        type: "mcpToolCall" as const,
-        id: "inspect",
-        server: "cua_repl",
+      const projection = yield* CodexAdapterV2.projectCodexDynamicToolItem({
+        type: "mcpToolCall",
+        id: "failed-sky-js",
+        server: "node_repl",
         tool: "js",
-        status: "completed" as const,
+        status: "failed",
         arguments: {
-          code: "await game.getAXStateAndScreenshot();",
-          title: "Inspect Saga music screen",
+          title: "Restrict the breakpoint to Git actions",
+          code: "await sky.type_text({app:'T3 Code (Nightly)',text:'debug(ga.run)'});",
         },
-        result: { content: [] },
-      };
-      assert.equal(
-        (yield* CodexAdapterV2.projectCodexDynamicToolItem(call)).title,
-        "Inspect Saga music screen",
-      );
-      assert.equal(
-        (yield* CodexAdapterV2.projectCodexDynamicToolItem({ ...call, arguments: { title: "  " } }))
-          .title,
-        "js",
-      );
-      assert.equal(
-        (yield* CodexAdapterV2.projectCodexDynamicToolItem({ ...call, server: "github" })).title,
-        "js",
-      );
+        result: { content: [{ type: "text", text: "Illegal Unicode escape sequence" }] },
+      });
+      assert.equal(projection.title, "Restrict the breakpoint to Git actions");
+      assert.equal(projection.toolSurface, "computer");
+      assert.deepEqual(projection.toolSource, {
+        key: "computer-use",
+        name: "Computer Use",
+        kind: "computer",
+      });
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each(["inProgress", "completed", "failed"] as const)(
+    "preserves a bare js action's title and computer surface when %s without result metadata",
+    (status) =>
+      Effect.gen(function* () {
+        const projection = yield* CodexAdapterV2.projectCodexDynamicToolItem({
+          type: "dynamicToolCall",
+          id: "bare-js",
+          tool: "js",
+          status,
+          arguments: { code: "await sky.get_app_state(app);", title: "Read the desktop window" },
+          contentItems: [],
+          success: status !== "failed",
+        });
+        assert.equal(projection.title, "Read the desktop window");
+        assert.equal(projection.toolSurface, "computer");
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each(["cua_repl", "node_repl"])(
+    "uses the %s call title while leaving other MCP titles as tool arguments",
+    (server) =>
+      Effect.gen(function* () {
+        const call = {
+          type: "mcpToolCall" as const,
+          id: "inspect",
+          server,
+          tool: "js",
+          status: "completed" as const,
+          arguments: {
+            code: "await game.getAXStateAndScreenshot();",
+            title: "Inspect Saga music screen",
+          },
+          result: { content: [] },
+        };
+        assert.equal(
+          (yield* CodexAdapterV2.projectCodexDynamicToolItem(call)).title,
+          "Inspect Saga music screen",
+        );
+        assert.equal(
+          (yield* CodexAdapterV2.projectCodexDynamicToolItem({
+            ...call,
+            arguments: { title: "  " },
+          })).title,
+          server === "cua_repl" ? "Computer use" : "Run JavaScript",
+        );
+        assert.equal(
+          (yield* CodexAdapterV2.projectCodexDynamicToolItem({ ...call, server: "github" })).title,
+          "js",
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect.each(["inProgress", "completed", "failed"] as const)(
@@ -3124,34 +3170,108 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect.each([
-    "interrupted",
-    "goal-hold",
-    "fresh-thread",
-    "other-error",
-    "settled",
-    "paused-goal",
-    "limited-goal",
-  ] as const)(
-    "continues a restarted %s without dropping context or duplicating accepted turns",
+  it.effect("continues an interrupted native thread with empty input and reasoning summaries", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-restart-promptless";
+        const nativeThreadId = "native-restart-promptless";
+        const nativeTurnId = "turn-restart-promptless";
+        const preamble = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId,
+          prompt: "unused",
+        }).slice(0, 5);
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...preamble,
+            {
+              type: "expect_outbound",
+              label: "resume",
+              frame: {
+                id: 3,
+                method: "thread/resume",
+                params: {
+                  threadId: nativeThreadId,
+                  excludeTurns: true,
+                  config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "resume",
+              frame: { id: 3, result: { thread: { id: nativeThreadId, updatedAt: 1782622450 } } },
+            },
+            {
+              type: "expect_outbound",
+              label: "continue",
+              frame: {
+                id: 4,
+                method: "turn/start",
+                params: {
+                  threadId: nativeThreadId,
+                  input: [],
+                  cwd: "/workspace",
+                  model: "gpt-5.4",
+                  approvalPolicy: "never",
+                  approvalsReviewer: "user",
+                  sandboxPolicy: { type: "dangerFullAccess" },
+                  summary: "detailed",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "continue",
+              frame: {
+                id: 4,
+                result: { turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }) },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const resumed = yield* harness.runtime.resumeThread({
+          providerThread: harness.providerThread,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        });
+        yield* harness.runtime.startTurn({
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: resumed,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-restart-promptless"),
+            text: "Continue where you left off.",
+          }),
+          restartContinuationOfRunId: RunId.make("run-before-restart"),
+        });
+        assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each(["active-goal", "no-goal"] as const)(
+    "a continuation Codex rejects as EmptyInput retries only on an active goal (%s)",
     (state) =>
       Effect.scoped(
         Effect.gen(function* () {
-          const scenario = "codex-restart-promptless";
-          const nativeThreadId = "native-restart-promptless";
-          const nativeTurnId = "turn-restart-promptless";
+          const scenario = "codex-restart-empty-input";
+          const nativeThreadId = "native-restart-empty-input";
+          const nativeTurnId = "turn-restart-empty-input";
+          const prompt = "Continue where you left off.";
           const preamble = codexReplayPreamble({
             nativeThreadId,
             nativeTurnId,
             prompt: "unused",
           }).slice(0, 5);
-          const prompt =
-            state === "fresh-thread"
-              ? "Recovered request and partial work.\n\nContinue where you left off."
-              : "Continue where you left off.";
-          const params = {
+          const turnParams = {
             threadId: nativeThreadId,
-            input: state === "fresh-thread" ? [{ type: "text", text: prompt }] : [],
             cwd: "/workspace",
             model: "gpt-5.4",
             approvalPolicy: "never",
@@ -3159,12 +3279,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             sandboxPolicy: { type: "dangerFullAccess" },
             summary: "detailed",
           };
-          const emptyInputRejected = [
-            "goal-hold",
-            "settled",
-            "paused-goal",
-            "limited-goal",
-          ].includes(state);
           const transcript = makeCodexReplayTranscript({
             scenario,
             entries: [
@@ -3189,88 +3303,58 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               },
               {
                 type: "expect_outbound",
-                label: "continue",
-                frame: {
-                  id: 4,
-                  method: "turn/start",
-                  params,
-                },
+                label: "empty continue",
+                frame: { id: 4, method: "turn/start", params: { ...turnParams, input: [] } },
               },
               {
                 type: "emit_inbound",
-                label: "continue",
-                frame:
-                  emptyInputRejected || state === "other-error"
-                    ? {
-                        id: 4,
-                        error: {
-                          code: -32603,
-                          message: emptyInputRejected
-                            ? "failed to submit turn input: EmptyInput"
-                            : "failed to submit turn input: unexpected failure",
-                        },
-                      }
-                    : {
-                        id: 4,
-                        result: {
-                          turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
-                        },
-                      },
+                label: "empty continue",
+                frame: {
+                  id: 4,
+                  error: { code: -32603, message: "failed to submit turn input: EmptyInput" },
+                },
               },
-              ...(emptyInputRejected
+              {
+                type: "expect_outbound",
+                label: "read goal",
+                frame: { id: 5, method: "thread/goal/get", params: { threadId: nativeThreadId } },
+              },
+              {
+                type: "emit_inbound",
+                label: "read goal",
+                frame: {
+                  id: 5,
+                  result: {
+                    goal:
+                      state === "no-goal"
+                        ? null
+                        : {
+                            threadId: nativeThreadId,
+                            objective: "Finish the work",
+                            status: "active",
+                            tokenBudget: null,
+                            tokensUsed: 10,
+                            timeUsedSeconds: 3,
+                            createdAt: 1782622440,
+                            updatedAt: 1782622450,
+                          },
+                  },
+                },
+              },
+              ...(state === "active-goal"
                 ? [
                     {
                       type: "expect_outbound" as const,
-                      label: "read current goal",
-                      frame: {
-                        id: 5,
-                        method: "thread/goal/get",
-                        params: { threadId: nativeThreadId },
-                      },
-                    },
-                    {
-                      type: "emit_inbound" as const,
-                      label: "read current goal",
-                      frame: {
-                        id: 5,
-                        result: {
-                          goal:
-                            state === "settled"
-                              ? null
-                              : {
-                                  threadId: nativeThreadId,
-                                  objective: "Finish the work",
-                                  status:
-                                    state === "paused-goal"
-                                      ? "paused"
-                                      : state === "limited-goal"
-                                        ? "budgetLimited"
-                                        : "active",
-                                  tokenBudget: null,
-                                  tokensUsed: 10,
-                                  timeUsedSeconds: 3,
-                                  createdAt: 1782622440,
-                                  updatedAt: 1782622450,
-                                },
-                        },
-                      },
-                    },
-                  ]
-                : []),
-              ...(state === "goal-hold"
-                ? [
-                    {
-                      type: "expect_outbound" as const,
-                      label: "prompted continuation",
+                      label: "prompted continue",
                       frame: {
                         id: 6,
                         method: "turn/start",
-                        params: { ...params, input: [{ type: "text", text: prompt }] },
+                        params: { ...turnParams, input: [{ type: "text", text: prompt }] },
                       },
                     },
                     {
                       type: "emit_inbound" as const,
-                      label: "prompted continuation",
+                      label: "prompted continue",
                       frame: {
                         id: 6,
                         result: {
@@ -3282,12 +3366,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 : []),
             ],
           });
-          const registered = yield* Deferred.make<void>();
-          const harness = yield* makeCodexReplayHarness(transcript, (event) =>
-            event.type === "provider_turn.updated"
-              ? Deferred.succeed(registered, undefined)
-              : Effect.void,
-          );
+          const harness = yield* makeCodexReplayHarness(transcript);
           const resumed = yield* harness.runtime.resumeThread({
             providerThread: harness.providerThread,
             modelSelection: CODEX_TEST_MODEL_SELECTION,
@@ -3299,34 +3378,24 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 threadId: harness.threadId,
                 providerThread: resumed,
                 now: yield* DateTime.now,
-                attemptId: RunAttemptId.make("attempt-restart-promptless"),
+                attemptId: RunAttemptId.make("attempt-restart-empty-input"),
                 text: prompt,
               }),
-              nativeThreadHasTurns: state !== "fresh-thread",
               restartContinuationOfRunId: RunId.make("run-before-restart"),
             })
             .pipe(Effect.result);
-          if (state === "other-error" || (emptyInputRejected && state !== "goal-hold")) {
-            assert.equal(started._tag, "Failure");
-            if (started._tag === "Failure") {
-              assert.nestedPropertyVal(
-                started.failure,
-                "cause.errorMessage",
-                emptyInputRejected
-                  ? "failed to submit turn input: EmptyInput"
-                  : "failed to submit turn input: unexpected failure",
-              );
-            }
-            assert.isEmpty(
-              harness.events.filter((event) => event.type === "provider_turn.updated"),
-            );
+          if (state === "active-goal") {
+            assert.equal(started._tag, "Success");
             return;
           }
-          assert.equal(started._tag, "Success");
-          yield* Deferred.await(registered);
-          const turns = harness.events.filter((event) => event.type === "provider_turn.updated");
-          assert.lengthOf(turns, 1);
-          assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
+          assert.equal(started._tag, "Failure");
+          if (started._tag === "Failure") {
+            assert.nestedPropertyVal(
+              started.failure,
+              "cause.errorMessage",
+              "failed to submit turn input: EmptyInput",
+            );
+          }
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

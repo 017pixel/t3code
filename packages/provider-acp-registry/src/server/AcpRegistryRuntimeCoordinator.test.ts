@@ -5,34 +5,11 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 
 import type { AcpRegistryAvailableCommands, AcpRegistryLiveConfiguration } from "./probe.ts";
 import * as AcpRegistryRuntimeCoordinator from "./AcpRegistryRuntimeCoordinator.ts";
 
 describe("AcpRegistryRuntimeCoordinator", () => {
-  it.effect("cancels background admission waits when foreground startup begins", () =>
-    Effect.gen(function* () {
-      const coordinator = yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
-      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const holder = yield* admission
-        .withPermit(
-          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
-        )
-        .pipe(Effect.forkScoped);
-      yield* Deferred.await(entered);
-      const probe = yield* coordinator
-        .runBackgroundProbe("kilo", Effect.die("must not probe"))
-        .pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
-      yield* coordinator.withForegroundStartup("kilo", Effect.void);
-      expect(Option.isNone(yield* Fiber.join(probe))).toBe(true);
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(holder);
-    }).pipe(Effect.provide(AcpRegistryRuntimeCoordinator.layer)),
-  );
   it.effect("suppresses a background probe while foreground startup is active", () =>
     Effect.gen(function* () {
       const coordinator = yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;

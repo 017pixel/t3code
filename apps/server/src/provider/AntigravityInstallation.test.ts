@@ -1,4 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -976,30 +975,3 @@ it.layer(NodeServices.layer)("Antigravity installation", (it) => {
     expect(resolveAntigravityReleaseAsset("freebsd", "x64")).toBeNull();
   });
 });
-
-it.effect(
-  "Antigravity first installs wait for admission before changing state or downloading",
-  () =>
-    Effect.gen(function* () {
-      const h = yield* makeHarness();
-      const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const holder = yield* admission
-        .withPermit(
-          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
-        )
-        .pipe(Effect.forkScoped);
-      yield* Deferred.await(entered);
-      const install = yield* h.installation.start.pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
-      expect(install.pollUnsafe() === undefined).toBe(true);
-      expect(h.requests.length).toBe(0);
-      expect((yield* h.installation.state).phase).toBe("idle");
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(holder);
-      yield* Fiber.join(install);
-      expect((yield* terminalState(h.installation)).phase).toBe("succeeded");
-      expect(h.requests.length).toBe(1);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-);

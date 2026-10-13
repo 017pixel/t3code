@@ -48,7 +48,7 @@ const makeClient = (host: FakeLauncherProcess, currentVersion: string) =>
     Effect.provideService(HostProcess.Environment, host.env),
   );
 
-it.effect("activates a patched runtime under a deployed protocol 3 launcher", () =>
+it.effect("waits for the launcher to durably commit the trial update ID", () =>
   Effect.gen(function* () {
     const pending = {
       id: "update-1",
@@ -58,7 +58,7 @@ it.effect("activates a patched runtime under a deployed protocol 3 launcher", ()
       status: "pending" as const,
     };
     const host = new FakeLauncherProcess({
-      protocol: 3,
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
       childVersion: "1.1.0",
       update: pending,
     });
@@ -78,10 +78,10 @@ it.effect("activates a patched runtime under a deployed protocol 3 launcher", ()
   }),
 );
 
-it.effect("requests another self-update under a deployed protocol 3 launcher", () =>
+it.effect("returns the launcher-generated ID only after update acceptance", () =>
   Effect.gen(function* () {
     const host = new FakeLauncherProcess({
-      protocol: 3,
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
       childVersion: "1.0.0",
     });
     const client = yield* makeClient(host, "1.0.0");
@@ -134,23 +134,5 @@ it.effect("rejects contradictory trial context instead of leaving activation clo
     });
     const error = yield* makeClient(host, "1.1.0").pipe(Effect.flip);
     expect(error.message).toBe("The service launcher supplied invalid startup context.");
-  }),
-);
-
-it.effect("exposes migrated crash-loop failure while keeping the candidate active", () =>
-  Effect.gen(function* () {
-    const outcome = {
-      id: "crash-loop",
-      fromVersion: "1.0.0",
-      targetVersion: "1.1.0",
-      status: "failed" as const,
-      reason: "candidate-crash-loop: database schema changed; keeping candidate runtime",
-    };
-    const host = new FakeLauncherProcess({ protocol: 3, childVersion: "1.1.0", update: outcome });
-    const client = yield* makeClient(host, "1.1.0");
-    expect(client.managed).toBe(true);
-    expect(client.lastOutcome).toEqual(outcome);
-    expect(yield* client.prepareTrial).toEqual(outcome);
-    expect(host.sent).toEqual([]);
   }),
 );

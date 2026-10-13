@@ -8,7 +8,6 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { AgentScope } from "@t3tools/shared/AgentScope";
 
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
@@ -297,10 +296,6 @@ export const make = Effect.fn("NodePtyAdapter.make")(function* () {
           ),
         );
       }
-      const agentScope = yield* AgentScope;
-      yield* (agentScope.trackProcess?.(ptyProcess.process.pid) ?? Effect.void).pipe(
-        Effect.onError(() => Effect.sync(() => ptyProcess.process.kill())),
-      );
       return ptyProcess.process;
     }),
   });

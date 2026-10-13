@@ -32,15 +32,12 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import * as SqlClient from "effect/sql/SqlClient";
 
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -403,40 +400,6 @@ it.effect("retains automation and sender attribution while a message waits in th
     assert.equal(message?.text, "Run the audit");
   }).pipe(Effect.provide(harness.layer));
 });
-
-it.effect("tracks workspace preparation for an empty thread with no active run", () =>
-  Effect.gen(function* () {
-    const entered = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
-    const release = yield* Deferred.make<void>();
-    const harness = makeHarness({
-      createWorktree: (input) =>
-        Effect.gen(function* () {
-          yield* Deferred.succeed(entered, yield* Effect.fiber);
-          yield* Deferred.await(release);
-          return {
-            worktree: { path: "/repo-worktrees/empty", refName: input.newRefName, headSha: "abc" },
-          } as never;
-        }),
-    });
-    yield* Effect.gen(function* () {
-      const launches = yield* ThreadLaunch.ThreadLaunchService;
-      const threads = yield* ThreadManagement.ThreadManagementService;
-      const result = yield* launches.launch(
-        launchInput({
-          command: "command:launch:empty-preparation",
-          thread: "thread:launch:empty-preparation",
-          workspace: { type: "worktree", baseRef: "main", branch: "empty" },
-        }),
-      );
-      const fiber = yield* Deferred.await(entered);
-      assert.equal((yield* threads.getThreadProjection(result.threadId)).runs.length, 0);
-      assert.equal(yield* launches.activePreparationCount, 1);
-      yield* Deferred.succeed(release, undefined);
-      assert.isTrue(Exit.isSuccess(yield* Fiber.await(fiber)));
-      assert.equal(yield* launches.activePreparationCount, 0);
-    }).pipe(Effect.provide(harness.layer));
-  }),
-);
 
 it.effect("returns a visible preparing message while provisioning is still blocked", () =>
   Effect.gen(function* () {
@@ -2300,7 +2263,6 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
           ),
         checkWorktreeBase: launches.checkWorktreeBase,
         retryPreparation: launches.retryPreparation,
-        activePreparationCount: launches.activePreparationCount,
       }),
       Effect.flip,
     );
@@ -2646,152 +2608,6 @@ it.effect.each([
       });
     }).pipe(Effect.provide(harness.layer));
   }),
-);
-
-it.effect.each(
-  (["fresh", "bound"] as const).flatMap((binding) =>
-    [false, true].map((edit) => ({ binding, edit })),
-  ),
-)(
-  "replays a committed $binding webhook dispatch through receipts without another run (edited $edit)",
-  ({ binding, edit }) => {
-    const harness = makeHarness({ runSetup: () => Effect.never });
-    const cleanupFailed = Deferred.makeUnsafe<void>();
-    let poll: Effect.Effect<void> | undefined;
-    const layer = ScheduledTasks.layer.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          harness.layer,
-          NodeCrypto.layer,
-          Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.succeed(Scheduler.Scheduler, {
-            register: <E, R>(_name: string, work: Effect.Effect<void, E, R>) =>
-              Effect.context<R>().pipe(
-                Effect.map((context) => {
-                  poll = work.pipe(Effect.provideContext(context), Effect.orDie);
-                }),
-              ),
-          }),
-        ),
-      ),
-    );
-    return Effect.gen(function* () {
-      const tasks = yield* ScheduledTasks.ScheduledTaskService;
-      const launches = yield* ThreadLaunch.ThreadLaunchService;
-      const threads = yield* ThreadManagement.ThreadManagementService;
-      const sql = yield* SqlClient.SqlClient;
-      const bound =
-        binding === "bound"
-          ? yield* launches.launch(
-              launchInput({
-                command: "command:bound",
-                thread: "thread:bound",
-                message: "First message",
-              }),
-            )
-          : null;
-      const { task } = yield* tasks.upsert({
-        id: ScheduledTaskId.make("scheduled-task:durable"),
-        title: "Webhook",
-        prompt: "Handle {{body}}",
-        enabled: true,
-        schedule: { type: "webhook" },
-        projectId,
-        threadId: bound?.threadId ?? null,
-        workspaceStrategy: { type: "root" },
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-      });
-      yield* sql`CREATE TRIGGER hold_delivery BEFORE DELETE ON scheduled_task_webhook_queue
-        BEGIN SELECT RAISE(FAIL, 'disk write failed'); END`;
-      const request = {
-        hookId: task.id,
-        token: task.webhook!.path.split("/").at(-1)!,
-        method: "POST",
-        path: "/hook",
-        query: "",
-        headers: {},
-        body: new TextEncoder().encode('{"number":7}'),
-        bodyText: '{"number":7}',
-        relayDeliveryId: "committed",
-      };
-      const subscribed = yield* Deferred.make<void>();
-      const completion = yield* tasks.subscribeList().pipe(
-        Stream.tap(() => Deferred.succeed(subscribed, undefined)),
-        Stream.filter((list) => list.tasks[0]?.lastRunStatus === "succeeded"),
-        Stream.runHead,
-        Effect.forkScoped,
-      );
-      yield* Deferred.await(subscribed);
-      yield* tasks.triggerWebhook(request);
-      yield* Fiber.join(completion);
-      yield* Deferred.await(cleanupFailed);
-      // The provider handoff committed, but cleanup failed. A new tick must use the same receipts.
-      const pending = yield* sql<{
-        delivery_id: string;
-      }>`SELECT delivery_id FROM scheduled_task_webhook_queue`;
-      assert.lengthOf(pending, 1);
-      const changedTarget =
-        edit && binding === "fresh"
-          ? yield* launches.launch(
-              launchInput({ command: "command:changed-target", thread: "thread:changed-target" }),
-            )
-          : null;
-      if (edit)
-        yield* tasks.upsert({
-          id: task.id,
-          title: "Edited task",
-          prompt: "Edited prompt",
-          enabled: true,
-          schedule: { type: "webhook" },
-          projectId,
-          threadId: changedTarget?.threadId ?? null,
-          workspaceStrategy: { type: "root" },
-          modelSelection,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-        });
-      yield* sql`DROP TRIGGER hold_delivery`;
-      const replaySubscribed = yield* Deferred.make<void>();
-      const replayed = yield* tasks.subscribeList().pipe(
-        Stream.tap(() => Deferred.succeed(replaySubscribed, undefined)),
-        Stream.drop(1),
-        Stream.filter((list) => list.tasks[0]?.lastRunStatus !== "running"),
-        Stream.runHead,
-        Effect.forkScoped,
-      );
-      yield* Deferred.await(replaySubscribed);
-      yield* poll!;
-      yield* Fiber.join(replayed);
-      const projectThreads = yield* threads.listProjectThreads({
-        projectId,
-        includeSubagents: false,
-      });
-      assert.lengthOf(projectThreads, changedTarget === null ? 1 : 2);
-      const original = projectThreads.find((thread) => thread.id !== changedTarget?.threadId)!;
-      const projection = yield* threads.getThreadProjection(original.id);
-      const wire = yield* encodeThreadProjection(projection);
-      const automated = wire.messages.filter((message) => message.scheduledTaskId === task.id);
-      assert.lengthOf(automated, 1);
-      assert.equal(automated[0]?.text, 'Handle {"number":7}');
-      assert.equal(wire.runs.length, binding === "bound" ? 2 : 1);
-      assert.equal((yield* tasks.list()).tasks[0]?.lastRunStatus, "succeeded");
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(harness.layer, layer).pipe(
-          Layer.provideMerge(
-            Logger.layer([
-              Logger.make(({ message }) => {
-                if (Array.isArray(message) && message[0] === "Webhook dispatch failed; will retry")
-                  Deferred.doneUnsafe(cleanupFailed, Effect.void);
-              }),
-            ]),
-          ),
-        ),
-      ),
-    );
-  },
 );
 
 it.effect("replays an accepted send after the project disables the instance", () => {

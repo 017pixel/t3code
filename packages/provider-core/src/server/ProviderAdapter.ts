@@ -34,7 +34,6 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
@@ -411,16 +410,7 @@ export interface ProviderAdapterV2TurnInput {
   /** Whether the current native session has an accepted turn; omitted when unknown. */
   readonly nativeThreadHasTurns?: boolean;
   readonly providerTurnOrdinal: number;
-  readonly runStartedAt?: DateTime.Utc | null;
   readonly restartContinuationOfRunId?: RunId;
-  /** Persisted native admission and original input for an interrupted turn. */
-  readonly restartContinuationSource?: {
-    readonly attemptId?: RunAttemptId | null;
-    readonly nativeTurnRef: OrchestrationV2ProviderTurn["nativeTurnRef"];
-    readonly message: ProviderAdapterV2TurnMessage;
-    readonly awaitingUser?: boolean;
-    readonly startedAt?: DateTime.Utc | null;
-  };
   readonly attemptId: RunAttemptId;
   readonly rootNodeId: NodeId;
   readonly providerThread: OrchestrationV2ProviderThread;
@@ -541,6 +531,13 @@ export interface ProviderAdapterV2McpApps {
   }) => Effect.Effect<{ readonly contents: ReadonlyArray<unknown> }, ProviderAdapterV2Error>;
 }
 
+/** A terminal task outcome observed by the provider, not inferred from a stop timeout. */
+export type ProviderAdapterV2SubagentOutcome = {
+  readonly status: "completed" | "failed" | "cancelled";
+  readonly completedAt: NonNullable<OrchestrationV2Subagent["completedAt"]>;
+  readonly result: OrchestrationV2Subagent["result"];
+};
+
 export interface ProviderAdapterV2SessionRuntime {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
@@ -559,8 +556,6 @@ export interface ProviderAdapterV2SessionRuntime {
    * here so the session manager defers idle release while it is pending.
    */
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
-  /** Records restart intent before scope cleanup; an explicit stop clears it. */
-  readonly prepareForServerShutdown?: (restarting: boolean) => Effect.Effect<void>;
   /**
    * Per-provider-thread pending work for root-run ingestion stop gates. When
    * present, RunExecutionService uses only this probe (never the session-wide
@@ -618,7 +613,9 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly stopSubagent?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly nativeTaskId: string;
-  }) => Effect.Effect<void, ProviderAdapterV2Error>;
+    /** A delayed Stop must not interrupt a task resumed after this request. */
+    readonly requestedAt?: NonNullable<OrchestrationV2Subagent["startedAt"]>;
+  }) => Effect.Effect<void | ProviderAdapterV2SubagentOutcome, ProviderAdapterV2Error>;
   /**
    * Lets a runtime shared by several app threads unload one provider thread's
    * native state (and its MCP servers) when that app thread detaches, while

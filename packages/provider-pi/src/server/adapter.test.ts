@@ -21,7 +21,6 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
@@ -1405,106 +1404,6 @@ describe("PiAdapterV2", () => {
         1,
       );
       yield* startTurn(runtime, replacement, "default");
-      yield* fake.takeRequest("prompt");
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
-  );
-
-  it.effect.each(["settled", "interrupted first", "model entries"] as const)(
-    "rejects a resumed session that lost its persisted conversation after a %s turn",
-    (previous) =>
-      Effect.gen(function* () {
-        const fake = yield* makeFakePi;
-        const { runtime } = yield* openRuntime(fake);
-        const thread = yield* runtime.ensureThread({
-          threadId: THREAD_ID,
-          modelSelection: modelSelection("default"),
-          runtimePolicy,
-        });
-        if (previous === "model entries") {
-          fake.queueEntries({
-            entries: [
-              {
-                type: "model_change",
-                id: "new-model",
-                parentId: null,
-                provider: "cliproxyapi",
-                modelId: "gpt-6-luna",
-              },
-              {
-                type: "thinking_level_change",
-                id: "new-thinking",
-                parentId: "new-model",
-                thinkingLevel: "medium",
-              },
-            ],
-            leafId: "new-thinking",
-          });
-        }
-        const error = yield* runtime
-          .resumeThread({
-            providerThread: {
-              ...thread,
-              firstRunOrdinal: 1,
-              nativeConversationHeadRef:
-                previous === "interrupted first"
-                  ? null
-                  : {
-                      driver: PI_PROVIDER,
-                      nativeId: "saved-leaf",
-                      strength: "strong",
-                    },
-            },
-          })
-          .pipe(Effect.flip);
-        assert.equal(error._tag, "ProviderAdapterResumeThreadError");
-        assert.match(String(error.cause), /persisted conversation/);
-        const replacement = yield* runtime.ensureThread({
-          threadId: THREAD_ID,
-          modelSelection: modelSelection("default"),
-          runtimePolicy,
-          existingProviderThread: { ...thread, nativeThreadRef: null },
-        });
-        assert.notEqual(replacement.nativeThreadRef?.nativeId, thread.nativeThreadRef?.nativeId);
-        yield* startTurn(runtime, replacement);
-        yield* fake.takeRequest("prompt");
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
-  );
-
-  it.effect("resumes a compacted conversation whose older entries were pruned", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const { runtime } = yield* openRuntime(fake);
-      const thread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      fake.queueEntries({
-        entries: [
-          {
-            type: "compaction",
-            id: "summary",
-            parentId: null,
-            summary: "Remember PAPAYA",
-            firstKeptEntryId: "pruned",
-            tokensBefore: 1000,
-          },
-        ],
-        leafId: "summary",
-      });
-      const resumed = yield* runtime.resumeThread({
-        providerThread: {
-          ...thread,
-          firstRunOrdinal: 1,
-          nativeConversationHeadRef: {
-            driver: PI_PROVIDER,
-            nativeId: "pruned",
-            strength: "strong",
-          },
-        },
-      });
-      assert.equal(resumed.nativeThreadRef?.nativeId, thread.nativeThreadRef?.nativeId);
-      yield* startTurn(runtime, resumed);
       yield* fake.takeRequest("prompt");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
@@ -4039,71 +3938,6 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect.each(["persisted", "transport closed"] as const)(
-    "keeps steering delivery pending until Pi's user message is %s",
-    (outcome) =>
-      Effect.gen(function* () {
-        const fake = yield* makeFakePi;
-        const { runtime, takeEvent } = yield* openRuntime(fake);
-        const providerThread = yield* runtime.ensureThread({
-          threadId: THREAD_ID,
-          modelSelection: modelSelection("default"),
-          runtimePolicy,
-        });
-        yield* startTurn(runtime, providerThread);
-        yield* fake.takeRequest("prompt");
-        const running = yield* takeEvent(
-          (event) =>
-            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
-        );
-        assert.equal(running.type, "provider_turn.updated");
-        if (running.type !== "provider_turn.updated") return;
-        yield* fake.emit({ type: "agent_start" });
-        const steering = yield* runtime
-          .steerTurn({
-            threadId: THREAD_ID,
-            runId: RunId.make("run:thread-pi-test:1"),
-            providerThread,
-            providerTurnId: running.providerTurn.id,
-            message: {
-              messageId: "message:thread-pi-test:durable-steer" as never,
-              text: "Keep this steering after a restart",
-              attachments: [],
-              createdBy: "user",
-              creationSource: "web",
-            },
-          })
-          .pipe(Effect.forkChild);
-        const prompt = yield* fake.takeRequest("prompt");
-        assert.equal(prompt["streamingBehavior"], "steer");
-        yield* fake.emit({ type: "response", command: "prompt", success: true });
-        yield* fake.emit({
-          type: "tool_execution_start",
-          toolCallId: "queued-steering-tool",
-          toolName: "bash",
-          args: { command: "sleep 60" },
-        });
-        yield* takeEvent(
-          (event) => event.type === "turn_item.updated" && event.turnItem.status === "running",
-        );
-        assert.isUndefined(steering.pollUnsafe());
-        if (outcome === "transport closed") {
-          yield* fake.closeStdout;
-          assert.isTrue(Exit.isFailure(yield* Fiber.await(steering)));
-        } else {
-          yield* fake.emit({
-            type: "message_end",
-            message: {
-              role: "user",
-              content: [{ type: "text", text: "Keep this steering after a restart" }],
-            },
-          });
-          yield* Fiber.join(steering);
-          yield* fake.takeRequest("get_state");
-        }
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
-  );
-
   it.effect("ignores an idle snapshot made stale by a steer", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -4128,21 +3962,19 @@ describe("PiAdapterV2", () => {
       fake.deferNextState();
       yield* fake.emit({ type: "agent_settled" });
       yield* fake.takeRequest("get_state");
-      const steering = yield* runtime
-        .steerTurn({
-          threadId: THREAD_ID,
-          runId: RunId.make("run:thread-pi-test:1"),
-          providerThread,
-          providerTurnId: providerTurnId!,
-          message: {
-            messageId: "message:thread-pi-test:late-steer" as never,
-            text: "Continue after settlement",
-            attachments: [],
-            createdBy: "user",
-            creationSource: "web",
-          },
-        })
-        .pipe(Effect.forkChild);
+      yield* runtime.steerTurn({
+        threadId: THREAD_ID,
+        runId: RunId.make("run:thread-pi-test:1"),
+        providerThread,
+        providerTurnId: providerTurnId!,
+        message: {
+          messageId: "message:thread-pi-test:late-steer" as never,
+          text: "Continue after settlement",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+      });
       yield* fake.takeRequest("prompt");
       yield* fake.resolveDeferredState({
         isStreaming: false,
@@ -4151,11 +3983,6 @@ describe("PiAdapterV2", () => {
       });
 
       yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({
-        type: "message_end",
-        message: { role: "user", content: [{ type: "text", text: "Continue after settlement" }] },
-      });
-      yield* Fiber.join(steering);
       yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
       yield* fake.emit({
         type: "message_update",

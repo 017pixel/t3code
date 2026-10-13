@@ -1,5 +1,3 @@
-import * as Maintenance from "@t3tools/provider-core/server/maintenance";
-import * as Fiber from "effect/Fiber";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { ProviderInstanceId, type ProviderAuthState } from "@t3tools/contracts";
@@ -362,31 +360,5 @@ it.effect("refreshes advertised methods after a registry version change without 
     assert.deepEqual(h.authenticated, []);
     assert.deepEqual(h.started, []);
     assert.deepEqual(h.closed, [1, 2]);
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-);
-
-it.effect("ACP auth discovery waits for the install permit before constructing its runtime", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness(browserMethod);
-    h.setVersion("2.0.0");
-    const admission = yield* Maintenance.ProviderMaintenanceAdmission;
-    const entered = yield* Deferred.make<void>();
-    const release = yield* Deferred.make<void>();
-    const install = yield* admission
-      .withPermit(
-        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
-      )
-      .pipe(Effect.forkScoped);
-    yield* Deferred.await(entered);
-    const before = h.runtimes();
-    const refresh = yield* h.controller.refreshMethods!.pipe(Effect.forkScoped);
-    yield* Effect.yieldNow;
-    assert.strictEqual(h.runtimes(), before);
-    assert.isTrue(refresh.pollUnsafe() === undefined);
-    yield* Deferred.succeed(release, undefined);
-    yield* Fiber.join(install);
-    yield* Fiber.join(refresh);
-    yield* h.state((value) => value.methods?.[0]?.name === "Browser 2.0.0");
-    assert.strictEqual(h.runtimes(), before + 1);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

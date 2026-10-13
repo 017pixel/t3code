@@ -1,4 +1,3 @@
-import { AgentScope } from "@t3tools/shared/AgentScope";
 /**
  * ClaudeTextGeneration – Text generation layer using the Claude CLI.
  *
@@ -82,7 +81,6 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   modelCatalog: Effect.Effect<ClaudeModelCatalog> = Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG),
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const processScope = yield* AgentScope;
   const fileSystem = yield* FileSystem.FileSystem;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
   const scopedModelCatalog = modelCatalog.pipe(
@@ -243,8 +241,6 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
             normalizeCliError("claude", operation, cause, "Failed to spawn Claude CLI process"),
           ),
         );
-
-      yield* processScope.trackProcess?.(Number(child.pid)) ?? Effect.void;
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [

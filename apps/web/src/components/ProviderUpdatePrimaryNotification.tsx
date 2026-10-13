@@ -1,7 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { DownloadIcon } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   AuthProvidersManageScope,
   type ServerProvider,
@@ -18,12 +18,10 @@ import {
   collectProviderUpdateCandidates,
   collectUpdatedProviderSnapshots,
   firstFailedProviderUpdateMessage,
-  isProviderUpdateCandidate,
   getProviderUpdateInitialToastView,
   getProviderUpdateProgressToastView,
   getProviderUpdateRejectedToastView,
   providerUpdateNotificationKey,
-  providerUpdatePromptActionKey,
   shouldShowPrimaryProviderUpdateToast,
   type ProviderUpdateToastView,
 } from "./ProviderUpdateLaunchNotification.logic";
@@ -39,13 +37,12 @@ type ActiveProviderUpdateToast =
       readonly key: string;
       readonly toastId: ProviderUpdateToastId;
       readonly canManageProviders: boolean;
-      readonly actionKey: string;
     }
   | {
       readonly kind: "update";
       readonly key: string;
       readonly providerInstanceIds: ReadonlySet<ProviderInstanceId>;
-      providerCount: number;
+      readonly providerCount: number;
     };
 
 function ProviderUpdateToastIcon({ provider }: { provider: ServerProvider }) {
@@ -57,7 +54,8 @@ function ProviderUpdateToastIcon({ provider }: { provider: ServerProvider }) {
         acpRegistryIconUrl={provider.iconUrl}
         iconClassName="size-4"
       />
-      <span className="absolute -right-1 -bottom-1 inline-flex size-3 items-center justify-center rounded-full bg-popover">
+      {/* ProviderInstanceIcon stacks at z-30, so the badge must sit above it. */}
+      <span className="absolute -right-1 -bottom-1 z-40 inline-flex size-3 items-center justify-center rounded-full bg-popover">
         <DownloadIcon aria-hidden="true" className="size-2.5 text-success" strokeWidth={2.5} />
       </span>
     </span>
@@ -146,11 +144,6 @@ export function ProviderUpdatePrimaryNotification() {
       updateProviders.filter((provider) => canOneClickUpdateProviderCandidate(provider, providers)),
     [providers, updateProviders],
   );
-  const actionKey = providerUpdatePromptActionKey(providers);
-  const latestProvidersRef = useRef(providers);
-  useLayoutEffect(() => {
-    latestProvidersRef.current = providers;
-  }, [providers]);
 
   const openProviderSettings = useCallback(
     (toastId?: ProviderUpdateToastId) => {
@@ -203,8 +196,7 @@ export function ProviderUpdatePrimaryNotification() {
     const updateExistingPrompt =
       activeToast?.kind === "prompt" &&
       activeToast.key === notificationKey &&
-      (activeToast.canManageProviders !== canManageProviders ||
-        activeToast.actionKey !== actionKey);
+      activeToast.canManageProviders !== canManageProviders;
     if (
       !notificationKey ||
       dismissedNotificationKeys.has(notificationKey) ||
@@ -229,7 +221,6 @@ export function ProviderUpdatePrimaryNotification() {
       if (
         updateStarted ||
         oneClickProviders.length === 0 ||
-        actionKey !== providerUpdatePromptActionKey(latestProvidersRef.current) ||
         !primaryEnvironment ||
         !readEnvironmentScope(primaryEnvironment.environmentId, AuthProvidersManageScope)
       ) {
@@ -237,7 +228,7 @@ export function ProviderUpdatePrimaryNotification() {
       }
       updateStarted = true;
 
-      let providerCount = oneClickProviders.length;
+      const providerCount = oneClickProviders.length;
       const providerInstanceIds = new Set(oneClickProviders.map((provider) => provider.instanceId));
       const activeUpdate: ActiveProviderUpdateToast = {
         kind: "update",
@@ -252,18 +243,6 @@ export function ProviderUpdatePrimaryNotification() {
       void (async () => {
         const results = [];
         for (const provider of oneClickProviders) {
-          const current = latestProvidersRef.current.find(
-            (candidate) => candidate.instanceId === provider.instanceId,
-          );
-          if (
-            !current ||
-            !isProviderUpdateCandidate(current) ||
-            !canOneClickUpdateProviderCandidate(current, latestProvidersRef.current)
-          ) {
-            providerInstanceIds.delete(provider.instanceId);
-            activeUpdate.providerCount = --providerCount;
-            continue;
-          }
           if (!readEnvironmentScope(primaryEnvironment.environmentId, AuthProvidersManageScope)) {
             if (activeToastRef.current === activeUpdate) {
               addProviderUpdateToast({
@@ -290,11 +269,6 @@ export function ProviderUpdatePrimaryNotification() {
 
         const activeUpdateToast = activeToastRef.current;
         if (activeUpdateToast !== activeUpdate) {
-          return;
-        }
-
-        if (providerCount === 0) {
-          activeToastRef.current = null;
           return;
         }
 
@@ -366,15 +340,8 @@ export function ProviderUpdatePrimaryNotification() {
     } else {
       toastId = toastManager.add(toastOptions);
     }
-    activeToastRef.current = {
-      kind: "prompt",
-      key: notificationKey,
-      toastId,
-      canManageProviders,
-      actionKey,
-    };
+    activeToastRef.current = { kind: "prompt", key: notificationKey, toastId, canManageProviders };
   }, [
-    actionKey,
     canManageProviders,
     updateProvider,
     dismissNotificationKey,

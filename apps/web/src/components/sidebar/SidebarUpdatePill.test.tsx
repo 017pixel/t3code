@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   handleSidebarUpdateReleaseNotesPopoverOpenChange,
-  resolveSidebarUpdatePresentation,
   openSidebarUpdateReleaseNotesPopoverOnForwardTab,
   shouldUseSidebarUpdateReleaseNotesPopover,
 } from "./SidebarUpdatePill";
@@ -28,22 +27,6 @@ const nightlyState: DesktopUpdateState = {
 };
 
 describe("sidebar update release notes popover", () => {
-  it.each([
-    ["download", false, "available"],
-    ["none", true, "downloading"],
-    ["install", false, "downloaded"],
-  ] as const)(
-    "shows %s immediately while the check animation is latched",
-    (action, isDownloading, iconStatus) => {
-      expect(
-        resolveSidebarUpdatePresentation({ action, isDownloading, showCheckIcon: true }),
-      ).toEqual({
-        iconStatus,
-        showUpdateDetails: true,
-        showUpdateIconState: true,
-      });
-    },
-  );
   it("uses the popover only for visible nightly release notes", () => {
     expect(shouldUseSidebarUpdateReleaseNotesPopover(true, nightlyState)).toBe(true);
     expect(shouldUseSidebarUpdateReleaseNotesPopover(false, nightlyState)).toBe(false);

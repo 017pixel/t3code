@@ -1,10 +1,10 @@
+import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
   latestProviderTurnForAttempt,
   MessageId,
   type OrchestrationV2Run,
-  type OrchestrationV2RunAttempt,
   type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -17,44 +17,21 @@ import { isNativeMaintenanceCommand } from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import {
   isRestartNoteSource,
-  isWorktreeContinuationRun,
   restartCancelledBackgroundWorkNote,
   restartContinuationNote,
-  restartPromptSource,
-  restartPendingMessageIds,
-  restartRunRanAfter,
 } from "./RestartBackgroundNote.ts";
 
 const CONTINUE_PROMPT = "Continue where you left off.";
 
-/** OpenCode keeps these requests on its server and can list and rebind them. */
-export function hasRestorableOpenCodeRequest(
-  projection: Pick<ProjectionRuntimeRecoveryState, "runtimeRequests" | "providerTurns">,
-  source: OrchestrationV2Run,
-): boolean {
-  return (
-    source.activeAttemptId !== null &&
-    projection.runtimeRequests.some(
-      (request) =>
-        request.nativeRequestRef?.driver === "opencode" &&
-        request.kind !== "dynamic_tool_call" &&
-        request.kind !== "auth_refresh" &&
-        request.responseCapability.type !== "message" &&
-        (request.status === "pending" ||
-          ((request.status === "expired" || request.status === "cancelled") &&
-            request.responseCapability.type === "not_resumable")) &&
-        projection.providerTurns.some(
-          (turn) =>
-            turn.id === request.providerTurnId &&
-            turn.nativeTurnRef?.driver === "opencode" &&
-            turn.runAttemptId === source.activeAttemptId,
-        ),
-    )
-  );
-}
+/** Consecutive automatic continuations allowed before a person has to step in. */
+const MAX_CONTINUATION_CHAIN = 3;
 
-/** A recorded intent must not wake held threads, unbindable requests, or turns with no new input. */
-export function restartContinuationBlocked(
+/**
+ * Whether a restart must leave this run for the user: the thread is put away,
+ * the provider turn already ended, or the user owes an answer. Checked when
+ * intent is recorded and again when the continuation is delivered.
+ */
+function restartContinuationBlocked(
   projection: Pick<
     ProjectionRuntimeRecoveryState,
     "thread" | "runtimeRequests" | "providerTurns" | "turnItems"
@@ -62,65 +39,57 @@ export function restartContinuationBlocked(
   source: OrchestrationV2Run,
   now: DateTime.Utc,
 ): boolean {
-  // An elapsed snooze no longer holds the thread. The early wakes the settlement
-  // service counts (a run that completed or failed after the snooze) cannot
-  // apply here: the source is the latest run and it was cut, not finished.
+  const { thread } = projection;
   if (
-    source.status === "failed" ||
-    source.status === "interrupted" ||
-    source.status === "rolled_back" ||
-    projection.thread.archivedAt !== null ||
-    projection.thread.deletedAt !== null ||
-    projection.thread.settledOverride === "settled" ||
-    (projection.thread.snoozedUntil != null &&
-      DateTime.isGreaterThan(projection.thread.snoozedUntil, now))
+    thread.archivedAt !== null ||
+    thread.deletedAt !== null ||
+    thread.settledOverride === "settled" ||
+    (thread.snoozedUntil != null && DateTime.isGreaterThan(thread.snoozedUntil, now))
   )
     return true;
   const turn = latestProviderTurnForAttempt(projection.providerTurns, source.activeAttemptId);
-  return (
-    (turn !== undefined &&
-      (turn.status === "failed" ||
-        turn.status === "interrupted" ||
-        (turn.status === "completed" && (source.restartPendingMessageIds?.length ?? 0) === 0))) ||
-    projection.runtimeRequests.some(
-      (request) =>
-        !hasRestorableOpenCodeRequest({ ...projection, runtimeRequests: [request] }, source) &&
-        // Tool calls and auth refreshes do not wait on a person, and a
-        // message-capable question stays answerable after the restart.
-        request.kind !== "dynamic_tool_call" &&
-        request.kind !== "auth_refresh" &&
-        request.responseCapability.type !== "message" &&
-        (request.status === "pending" ||
-          // Recovery closes live callbacks; it does not answer their question.
-          ((request.status === "expired" || request.status === "cancelled") &&
-            request.responseCapability.type === "not_resumable" &&
-            turn !== undefined &&
-            turn.id === request.providerTurnId)),
-    ) ||
-    projection.turnItems.some(
-      (item) =>
-        item.type === "secret_request" &&
-        item.runId === source.id &&
-        (item.secretStatus === "pending" ||
-          (item.secretStatus === "cancelled" &&
-            item.completedAt !== null &&
-            source.completedAt !== null &&
-            DateTime.Order(item.completedAt, source.completedAt) === 0)),
-    )
+  if (
+    turn !== undefined &&
+    (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted")
+  )
+    return true;
+  const waitingRequest = projection.runtimeRequests.some(
+    (request) =>
+      // Tool calls and auth refreshes do not wait on a person, and a
+      // message-capable question stays answerable after the restart.
+      request.kind !== "dynamic_tool_call" &&
+      request.kind !== "auth_refresh" &&
+      request.responseCapability.type !== "message" &&
+      (request.status === "pending" ||
+        // Recovery closes live callbacks on the cut turn; it does not answer them.
+        ((request.status === "expired" || request.status === "cancelled") &&
+          request.responseCapability.type === "not_resumable" &&
+          turn !== undefined &&
+          turn.id === request.providerTurnId)),
+  );
+  if (waitingRequest) return true;
+  return projection.turnItems.some(
+    (item) =>
+      item.type === "secret_request" &&
+      item.runId === source.id &&
+      (item.secretStatus === "pending" ||
+        // Recovery cancels an open secret card and its run at the same instant.
+        (item.secretStatus === "cancelled" &&
+          item.completedAt !== null &&
+          source.completedAt !== null &&
+          DateTime.Equivalence(item.completedAt, source.completedAt))),
   );
 }
 
 /**
  * Resume only an unfinished root turn. Leftover background work is cleaned up
  * separately and reported on the next user turn; it must not wake a settled run.
- * Undelivered steering is unfinished input even when the root turn settled.
  */
 export function restartContinuationRun(
   projection: Pick<
     ProjectionRuntimeRecoveryState,
     | "thread"
     | "runs"
-    | "attempts"
     | "providerThreads"
     | "providerSessions"
     | "providerTurns"
@@ -132,37 +101,17 @@ export function restartContinuationRun(
   // Queued runs never started; recovery holds them behind the cut run.
   const run = projection.runs.reduce<OrchestrationV2Run | undefined>(
     (latest, candidate) =>
-      candidate.status !== "queued" &&
-      (!latest ||
-        restartRunRanAfter(
-          candidate,
-          latest,
-          projection.providerTurns,
-          projection.runs,
-          projection.attempts,
-        ))
+      candidate.status !== "queued" && (!latest || runRanAfter(candidate, latest))
         ? candidate
         : latest,
     undefined,
   );
   if (!run) return;
-  const promptSource =
-    run.status === "starting"
-      ? restartPromptSource(run, projection.runs, projection.providerTurns, projection.attempts)
-      : undefined;
   const preparedContinuation =
-    run.status === "starting" &&
-    (run.restartContinuationOfRunId !== undefined || promptSource !== undefined);
-  const pendingSteering = (run.restartPendingMessageIds?.length ?? 0) > 0;
-  if (
-    run.status !== "running" &&
-    !preparedContinuation &&
-    !pendingSteering &&
-    !(run.status === "waiting" && hasRestorableOpenCodeRequest(projection, run))
-  )
-    return;
+    run.status === "starting" && run.restartContinuationOfRunId !== undefined;
+  if (run.status !== "running" && !preparedContinuation) return;
   if (restartContinuationBlocked(projection, run, now)) return;
-  const liveTurnRequired = !preparedContinuation && !pendingSteering;
+  const liveTurnRequired = !preparedContinuation;
   if (projection.thread.providerInstanceId !== run.providerInstanceId) return;
   const providerThread = projection.providerThreads.find(
     (thread) => thread.id === run.providerThreadId,
@@ -172,24 +121,12 @@ export function restartContinuationRun(
     providerThread.appThreadId !== projection.thread.id ||
     providerThread.ownerNodeId !== null ||
     providerThread.providerInstanceId !== run.providerInstanceId ||
-    providerThread.status === "closed" ||
-    providerThread.status === "archived"
-  )
-    return;
-  // Admission can hold an accepted prompt before its first native session exists.
-  if (
-    preparedContinuation &&
-    promptSource !== undefined &&
-    projection.attempts.some(
-      (attempt) => attempt.id === promptSource.activeAttemptId && attempt.reason === "initial",
-    )
-  )
-    return run;
-  if (
     providerThread.nativeThreadRef?.nativeId == null ||
     providerThread.nativeThreadRef.strength !== "strong" ||
     providerThread.nativeThreadRef.driver !== providerThread.driver ||
-    (liveTurnRequired && providerThread.status !== "active")
+    (liveTurnRequired && providerThread.status !== "active") ||
+    providerThread.status === "closed" ||
+    providerThread.status === "archived"
   )
     return;
   const session = projection.providerSessions.find(
@@ -204,40 +141,17 @@ export function restartContinuationRun(
     (liveTurnRequired && (session.status === "stopped" || session.status === "error"))
   )
     return;
-  const turn = latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId);
   if (
     liveTurnRequired &&
-    (turn === undefined || turn.providerThreadId !== providerThread.id || turn.status !== "running")
+    !projection.providerTurns.some(
+      (turn) =>
+        turn.providerThreadId === providerThread.id &&
+        turn.runAttemptId === run.activeAttemptId &&
+        turn.status === "running",
+    )
   )
     return;
   return run;
-}
-
-/** Consecutive automatic continuations allowed before a person has to step in. */
-const MAX_CONTINUATION_CHAIN = 3;
-
-/** Admission and delivery share the cap so stale commands cannot bypass it. */
-export function restartContinuationLimitReached(
-  source: OrchestrationV2Run,
-  runs: ReadonlyArray<OrchestrationV2Run>,
-  attempts: ReadonlyArray<Pick<OrchestrationV2RunAttempt, "id" | "reason">>,
-): boolean {
-  let chainLength = 0;
-  for (
-    let run: OrchestrationV2Run | undefined = source;
-    run?.restartContinuationOfRunId !== undefined && chainLength < MAX_CONTINUATION_CHAIN;
-    run = runs.find((candidate) => candidate.id === run?.restartContinuationOfRunId)
-  ) {
-    // A replacement prompt interrupts the consecutive automatic restart chain.
-    if (
-      attempts.some(
-        (attempt) => attempt.id === run.activeAttemptId && attempt.reason === "steering_restart",
-      )
-    )
-      break;
-    chainLength += 1;
-  }
-  return chainLength >= MAX_CONTINUATION_CHAIN;
 }
 
 export const continueRestartedRun = Effect.fn("RestartContinuation.continueRestartedRun")(
@@ -259,82 +173,45 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       return;
     if (projection.messages.some((message) => message.id === messageId)) return;
     const source = projection.runs.find((run) => run.id === input.sourceRunId);
-    const worktreeContinuation =
-      source !== undefined &&
-      source.status === "queued" &&
-      source.queueHeld !== true &&
-      isWorktreeContinuationRun(source) &&
-      projection.thread.worktreePath != null &&
-      projection.runs.filter(
-        (run) =>
-          run.status === "queued" && run.queueHeld !== true && isWorktreeContinuationRun(run),
-      ).length === 1 &&
-      !projection.runs.some((run) =>
-        ["preparing", "starting", "running", "waiting"].includes(run.status),
-      );
     // Pending effects from older versions may target settled background work,
     // including waiting runs that reconciliation subsequently cancelled.
     if (
       !source ||
-      (source.status !== "cancelled" &&
-        !worktreeContinuation &&
-        (source.restartPendingMessageIds?.length ?? 0) === 0) ||
-      (isWorktreeContinuationRun(source) &&
-        source.status === "cancelled" &&
-        !projection.providerTurns.some((turn) => turn.runAttemptId === source.activeAttemptId)) ||
-      restartContinuationBlocked(projection, source, yield* DateTime.now) ||
-      (isRestartNoteSource(source, projection.providerTurns) &&
-        (source.restartPendingMessageIds?.length ?? 0) === 0)
+      source.status !== "cancelled" ||
+      isRestartNoteSource(source, projection.providerTurns) ||
+      restartContinuationBlocked(projection, source, yield* DateTime.now)
     )
       return;
     // A user submission after reconciliation takes precedence over an automatic
     // prompt. Queued runs never started and stay held behind this one.
     if (
       projection.runs.some(
-        (run) =>
-          run.id !== source.id &&
-          run.status !== "queued" &&
-          (worktreeContinuation
-            ? run.ordinal > source.ordinal
-            : restartRunRanAfter(
-                run,
-                source,
-                projection.providerTurns,
-                projection.runs,
-                projection.attempts,
-              )),
+        (run) => run.id !== source.id && run.status !== "queued" && runRanAfter(run, source),
       )
     )
       return;
     if (projection.thread.providerInstanceId !== source.providerInstanceId) return;
     // A turn that keeps crashing the server would otherwise restart it forever.
-    if (restartContinuationLimitReached(source, projection.runs, projection.attempts)) {
+    let chainLength = 0;
+    for (
+      let run: OrchestrationV2Run | undefined = source;
+      run?.restartContinuationOfRunId !== undefined && chainLength < MAX_CONTINUATION_CHAIN;
+      run = projection.runs.find((candidate) => candidate.id === run?.restartContinuationOfRunId)
+    ) {
+      chainLength += 1;
+    }
+    if (chainLength >= MAX_CONTINUATION_CHAIN) {
       yield* Effect.logWarning("Not continuing a run restarted too many times in a row", {
         threadId: input.threadId,
         sourceRunId: input.sourceRunId,
       });
       return;
     }
-    const promptSource = restartPromptSource(
-      source,
-      projection.runs,
-      projection.providerTurns,
-      projection.attempts,
-    );
-    const pendingMessageIds = restartPendingMessageIds(
-      source,
-      projection.runs,
-      projection.providerTurns,
-    );
     const sourceRecords = yield* threads.getThreadRecords(
       input.threadId,
       ["messages", "turnItems"],
       {
-        messageIds: [
-          source.userMessageId,
-          ...(promptSource ? [promptSource.userMessageId] : []),
-          ...pendingMessageIds,
-        ],
+        messageIds: [source.userMessageId, ...(source.restartPendingMessageIds ?? [])],
         turnItemRunIds: [source.id],
         turnItemTypes: ["run_interrupt_request"],
       },
@@ -350,26 +227,13 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       (message) => message.id === source.userMessageId,
     );
     if (sourceMessage !== undefined && isNativeMaintenanceCommand(sourceMessage)) return;
-    const replacementMessage =
-      promptSource === undefined
-        ? undefined
-        : sourceRecords.messages.find((message) => message.id === promptSource.userMessageId);
-    if (promptSource !== undefined && replacementMessage === undefined) return;
-    const pendingMessages = pendingMessageIds.map((id) =>
-      sourceRecords.messages.find((message) => message.id === id),
+    // Steering the provider never received before the process ended.
+    const pendingMessages = (source.restartPendingMessageIds ?? []).flatMap((id) =>
+      sourceRecords.messages.filter((message) => message.id === id),
     );
-    if (pendingMessages.some((message) => message === undefined)) return;
-    // An undelivered initial prompt can also be pending steering; send it once.
-    const promptMessages = [
-      ...(replacementMessage ? [replacementMessage] : []),
-      ...pendingMessages
-        .filter((message) => message !== undefined)
-        .filter((message) => message.id !== replacementMessage?.id),
-    ];
-    const prompt =
-      promptMessages.length > 0
-        ? promptMessages.map((message) => message.text).join("\n\n")
-        : CONTINUE_PROMPT;
+    const prompt = [CONTINUE_PROMPT, ...pendingMessages.map((message) => message.text)].join(
+      "\n\n",
+    );
     const note = restartContinuationNote(
       source,
       projection.runs,
@@ -390,13 +254,10 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         commandId: CommandId.make(`command:restart-continuation:${input.sourceRunId}`),
         threadId: input.threadId,
         messageId,
-        ...(sourceMessage?.scheduledTaskId === undefined
-          ? {}
-          : { scheduledTaskId: sourceMessage.scheduledTaskId }),
         text,
-        // Shown as a work log row; the prompt the agent got is its detail. A
-        // replacement prompt keeps its own message, attachments and context.
-        ...(replacementMessage === undefined && pendingMessages.length === 0
+        // Shown as a work log row; the prompt the agent got is its detail.
+        // Carried steering stays a visible message so its attachments show.
+        ...(pendingMessages.length === 0
           ? {
               notification: {
                 source: { kind: "system" as const },
@@ -408,15 +269,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
               },
             }
           : {}),
-        attachments: promptMessages.flatMap((message) => message.attachments),
-        ...(promptMessages.some((message) => message.context !== undefined)
-          ? {
-              context: {
-                version: 1 as const,
-                records: promptMessages.flatMap((message) => message.context?.records ?? []),
-              },
-            }
-          : {}),
+        attachments: pendingMessages.flatMap((message) => message.attachments),
         modelSelection: source.modelSelection,
         dispatchMode: { type: "start_immediately" },
         createdBy: "agent",

@@ -269,14 +269,11 @@ function backgroundActivityProfileSettings(profile: BackgroundActivityProfile) {
   };
 }
 
-export function AboutVersionTitle() {
-  const updateState = useDesktopUpdateState();
+function AboutVersionTitle() {
   return (
     <span className="inline-flex items-baseline gap-2">
       <span>Version</span>
-      <code className="text-2xs font-medium text-muted-foreground">
-        {updateState?.currentVersion ?? APP_VERSION}
-      </code>
+      <code className="text-2xs font-medium text-muted-foreground">{APP_VERSION}</code>
     </span>
   );
 }
@@ -633,9 +630,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
         ? ["Provider update checks"]
         : []),
-      ...(settings.automaticUpdates !== DEFAULT_UNIFIED_SETTINGS.automaticUpdates
-        ? ["Update automatically"]
-        : []),
       ...(settings.continueThreadsAfterServerUpdate !==
       DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate
         ? ["Continue threads after restarts"]
@@ -712,7 +706,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.responseStreamingMode,
       settings.persistComposerContextStrip,
       settings.enableProviderUpdateChecks,
-      settings.automaticUpdates,
       settings.continueThreadsAfterServerUpdate,
       settings.sidebarAutoSettleAfterDays,
       settings.sidebarAutoSettleOnMerge,
@@ -827,7 +820,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
-      automaticUpdates: DEFAULT_UNIFIED_SETTINGS.automaticUpdates,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
       backgroundActivityProfile: DEFAULT_UNIFIED_SETTINGS.backgroundActivityProfile,
@@ -2210,11 +2202,6 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadAutoSettlement === true,
     );
-  const supportsAutomaticUpdates =
-    connectedEnvironments.length > 0 &&
-    connectedEnvironments.every(
-      (target) => target.serverConfig?.environment.capabilities.automaticUpdates === true,
-    );
   const supportsRestartContinuation =
     connectedEnvironments.length > 0 &&
     connectedEnvironments.every(
@@ -2924,38 +2911,6 @@ export function GeneralSettingsPanel() {
                 updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
               }
               aria-label="Check provider versions"
-            />
-          }
-        />
-
-        <SettingsRow
-          serverScoped
-          settingKeys={["automaticUpdates"]}
-          {...searchableSetting("automatic-updates")}
-          description="Install one-click provider CLI updates and background service updates on the selected environments while nothing is running."
-          status={
-            !supportsAutomaticUpdates
-              ? "All selected connected environments must support automatic updates."
-              : undefined
-          }
-          resetAction={
-            supportsAutomaticUpdates &&
-            settings.automaticUpdates !== DEFAULT_UNIFIED_SETTINGS.automaticUpdates ? (
-              <SettingResetButton
-                label="automatic updates"
-                onClick={() =>
-                  updateSettings({ automaticUpdates: DEFAULT_UNIFIED_SETTINGS.automaticUpdates })
-                }
-              />
-            ) : null
-          }
-          control={
-            <ScopedSwitch
-              settingKeys={["automaticUpdates"]}
-              checked={settings.automaticUpdates}
-              disabled={!supportsAutomaticUpdates}
-              onCheckedChange={(checked) => updateSettings({ automaticUpdates: Boolean(checked) })}
-              aria-label="Update automatically"
             />
           }
         />

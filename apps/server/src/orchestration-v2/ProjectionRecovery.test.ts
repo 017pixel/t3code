@@ -13,7 +13,6 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
-  RunAttemptId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -25,187 +24,13 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
-import * as ServerSettings from "../serverSettings.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
-import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 
 const layerTest = Layer.mergeAll(ProjectionStore.layer, EffectOutbox.layer).pipe(
   Layer.provideMerge(SqlitePersistence.layerMemory),
-);
-
-it.effect.each(["running", "completed", "failed", "interrupted"] as const)(
-  "retains continuation ancestors and the latest %s phase for pending steering",
-  (status) =>
-    Effect.gen(function* () {
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const now = yield* DateTime.now;
-      const threadId = yield* createThread(`steering-chain-${status}`);
-      const providerThreadId = ProviderThreadId.make(`provider-thread:${threadId}`);
-      const sessionId = ProviderSessionId.make(`session:${threadId}`);
-      const nodeId = NodeId.make(`node:${threadId}`);
-      const sourceAttempt = RunAttemptId.make(`attempt:${threadId}:1`);
-      const currentAttempt = RunAttemptId.make(`attempt:${threadId}:2`);
-      const messageId = MessageId.make(`steering:${threadId}`);
-      const source = yield* createRun(threadId, "cancelled", {
-        providerThreadId,
-        activeAttemptId: sourceAttempt,
-        restartPendingMessageIds: [messageId],
-        completedAt: now,
-      });
-      const current = yield* createRun(threadId, status === "running" ? "starting" : "completed", {
-        ordinal: 2,
-        providerThreadId,
-        activeAttemptId: currentAttempt,
-        restartContinuationOfRunId: source,
-        ...(status === "running" ? {} : { restartPendingMessageIds: [messageId] }),
-      });
-      yield* projections.apply({
-        id: EventId.make(`session:${threadId}`),
-        type: "provider-session.attached",
-        threadId,
-        occurredAt: now,
-        payload: {
-          id: sessionId,
-          driver,
-          providerInstanceId,
-          status: "stopped",
-          cwd: "/workspace",
-          model: modelSelection.model,
-          capabilities: CodexProviderCapabilitiesV2,
-          createdAt: now,
-          updatedAt: now,
-          lastError: null,
-        },
-      });
-      yield* projections.apply({
-        id: EventId.make(`provider-thread:${threadId}`),
-        type: "provider-thread.updated",
-        threadId,
-        occurredAt: now,
-        payload: {
-          id: providerThreadId,
-          appThreadId: threadId,
-          ownerNodeId: null,
-          driver,
-          providerInstanceId,
-          providerSessionId: sessionId,
-          nativeThreadRef: { driver, nativeId: "native", strength: "strong" },
-          nativeConversationHeadRef: null,
-          status: "idle",
-          firstRunOrdinal: 1,
-          lastRunOrdinal: 2,
-          handoffIds: [],
-          forkedFrom: null,
-          createdAt: now,
-          updatedAt: now,
-        },
-      });
-      for (const [runId, attemptId, ordinal] of [
-        [source, sourceAttempt, 1],
-        [current, currentAttempt, 2],
-      ] as const) {
-        yield* projections.apply({
-          id: EventId.make(`attempt:${attemptId}`),
-          type: "run-attempt.created",
-          threadId,
-          occurredAt: now,
-          payload: {
-            id: attemptId,
-            runId,
-            attemptOrdinal: 1,
-            rootNodeId: nodeId,
-            providerInstanceId,
-            providerThreadId,
-            providerTurnId: null,
-            reason: "initial",
-            status: "cancelled",
-            startedAt: now,
-            completedAt: now,
-          },
-        });
-        if (ordinal === 2 && status === "running") continue;
-        yield* projections.apply({
-          id: EventId.make(`turn:${attemptId}`),
-          type: "provider-turn.updated",
-          threadId,
-          occurredAt: now,
-          payload: {
-            id: ProviderTurnId.make(`turn:${attemptId}`),
-            providerThreadId,
-            nodeId,
-            runAttemptId: attemptId,
-            nativeTurnRef: null,
-            ordinal,
-            status: ordinal === 1 ? "cancelled" : status,
-            startedAt: now,
-            completedAt: now,
-          },
-        });
-      }
-      if (status !== "running") {
-        yield* projections.apply({
-          id: EventId.make(`message:${threadId}`),
-          type: "message.updated",
-          threadId,
-          occurredAt: now,
-          payload: {
-            id: messageId,
-            threadId,
-            runId: current,
-            nodeId: null,
-            role: "user",
-            text: "steer",
-            attachments: [],
-            streaming: false,
-            createdBy: "user",
-            creationSource: "web",
-            createdAt: now,
-            updatedAt: now,
-          },
-        });
-        yield* (yield* EffectOutbox.EffectOutboxV2).enqueue([
-          {
-            id: `effect:${threadId}`,
-            commandId: CommandId.make(`command:${threadId}`),
-            threadId,
-            request: {
-              type: "provider-turn.steer",
-              messageId,
-              providerSessionId: sessionId,
-              providerThreadId,
-              providerTurnId: ProviderTurnId.make(`turn:${currentAttempt}`),
-            },
-          },
-        ]);
-      }
-      const recovered = yield* projections.getRuntimeRecoveryProjection(threadId);
-      assert.deepEqual(
-        recovered.runs.map((run) => run.id),
-        [source, current],
-      );
-      assert.deepEqual(
-        recovered.attempts.map((attempt) => attempt.id),
-        [sourceAttempt, currentAttempt],
-      );
-      assert.lengthOf(recovered.providerTurns, status === "running" ? 1 : 2);
-      const withSteering = {
-        ...recovered,
-        runs: recovered.runs.map((run) =>
-          run.id === current && status !== "running"
-            ? { ...run, restartPendingMessageIds: [messageId] }
-            : run,
-        ),
-      };
-      assert.equal(
-        restartContinuationRun(withSteering, now)?.id,
-        status === "failed" || status === "interrupted" ? undefined : current,
-      );
-    }).pipe(Effect.provide(layerTest)),
 );
 const providerInstanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId: providerInstanceId, model: "gpt-5.4" };
@@ -336,43 +161,6 @@ it.effect("selects unfinished recovery work without reading settled thread histo
       },
     });
     const outboxOnly = yield* createThread("outbox-only");
-    const orphanSubagent = yield* createThread("orphan-native-subagent");
-    for (const origin of ["provider_native", "app_owned"] as const) {
-      const threadId =
-        origin === "provider_native" ? orphanSubagent : yield* createThread("app-owned-subagent");
-      const runId = yield* createRun(threadId, "completed");
-      const nodeId = NodeId.make(`node:recovery:orphan:${origin}`);
-      yield* projections.apply({
-        id: EventId.make(`event:recovery:orphan:${origin}`),
-        type: "subagent.updated",
-        threadId,
-        runId,
-        nodeId,
-        occurredAt: now,
-        payload: {
-          id: nodeId,
-          threadId,
-          runId,
-          parentNodeId: NodeId.make(`node:recovery:orphan-root:${origin}`),
-          origin,
-          createdBy: "agent",
-          driver,
-          providerInstanceId,
-          providerThreadId: null,
-          childThreadId:
-            origin === "app_owned" ? ThreadId.make("thread:recovery:delegated-child") : null,
-          nativeTaskRef: null,
-          prompt: "unfinished native work",
-          title: null,
-          model: null,
-          status: "running",
-          result: null,
-          startedAt: now,
-          completedAt: null,
-          updatedAt: now,
-        },
-      });
-    }
     yield* outbox.enqueue([
       {
         id: "effect:recovery:outbox-only",
@@ -421,14 +209,11 @@ it.effect("selects unfinished recovery work without reading settled thread histo
     assert.deepEqual(yield* projections.getRecoveryThreadIds("queued-runs"), [queued]);
     assert.deepEqual(
       new Set(yield* projections.getRecoveryThreadIds("runtime")),
-      new Set([queued, archived, blocked, background, outboxOnly, requestOnly, orphanSubagent]),
+      new Set([queued, archived, blocked, background, outboxOnly, requestOnly]),
     );
     assert.deepEqual(yield* projections.getRecoveryThreadIds("delegated-completions"), [delivery]);
     assert.deepEqual(yield* projections.getRecoveryThreadIds("subagent-results"), []);
     const recoveryState = yield* projections.getRuntimeRecoveryProjection(queued);
-    const orphanState = yield* projections.getRuntimeRecoveryProjection(orphanSubagent);
-    assert.equal(orphanState.subagents.length, 1);
-    assert.equal(orphanState.runs[0]?.id, orphanState.subagents[0]?.runId);
     assert.deepEqual(
       recoveryState.runs.map((run) => run.id),
       [RunId.make(`run:${queued}:2`)],
@@ -438,141 +223,6 @@ it.effect("selects unfinished recovery work without reading settled thread histo
       ThreadId.make("thread:recovery:settled-599"),
     ]);
   }).pipe(Effect.provide(layerTest)),
-);
-
-it.effect.each(["startup", "shutdown"] as const)(
-  "recovers native child turns and their runless streaming descendants on %s",
-  (trigger) =>
-    Effect.gen(function* () {
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const now = yield* DateTime.now;
-      const threadId = yield* createThread("native-child");
-      const rootNodeId = NodeId.make("node:recovery:native-root");
-      const textNodeId = NodeId.make("node:recovery:native-text");
-      const providerThreadId = ProviderThreadId.make("provider-thread:recovery:native-child");
-      const providerTurnId = ProviderTurnId.make("turn:recovery:native-child");
-      yield* projections.apply({
-        id: EventId.make("event:recovery:native-turn"),
-        type: "provider-turn.updated",
-        threadId,
-        nodeId: rootNodeId,
-        occurredAt: now,
-        payload: {
-          id: providerTurnId,
-          providerThreadId,
-          nodeId: rootNodeId,
-          runAttemptId: null,
-          nativeTurnRef: null,
-          ordinal: 1,
-          status: "running",
-          startedAt: now,
-          completedAt: null,
-        },
-      });
-      assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), [threadId]);
-      for (const [id, kind] of [
-        [rootNodeId, "root_turn"],
-        [textNodeId, "assistant_message"],
-      ] as const) {
-        yield* projections.apply({
-          id: EventId.make(`event:${id}`),
-          type: "node.updated",
-          threadId,
-          nodeId: id,
-          occurredAt: now,
-          payload: {
-            id,
-            threadId,
-            runId: null,
-            parentNodeId: id === rootNodeId ? null : rootNodeId,
-            rootNodeId,
-            kind,
-            status: "running",
-            countsForRun: false,
-            providerThreadId,
-            providerTurnId,
-            nativeItemRef: null,
-            runtimeRequestId: null,
-            checkpointScopeId: null,
-            startedAt: now,
-            completedAt: null,
-          },
-        });
-      }
-      const itemId = TurnItemId.make("item:recovery:native-text");
-      yield* projections.apply({
-        id: EventId.make("event:recovery:native-text-item"),
-        type: "turn-item.updated",
-        threadId,
-        occurredAt: now,
-        payload: {
-          id: itemId,
-          threadId,
-          runId: null,
-          nodeId: textNodeId,
-          providerThreadId,
-          providerTurnId,
-          nativeItemRef: null,
-          parentItemId: null,
-          ordinal: 1,
-          type: "assistant_message",
-          status: "running",
-          title: null,
-          startedAt: now,
-          completedAt: null,
-          updatedAt: now,
-          messageId: MessageId.make("message:recovery:native-text"),
-          text: "unfinished native child output",
-          streaming: true,
-        },
-      });
-      const recovered = yield* projections.getRuntimeRecoveryProjection(threadId);
-      assert.deepEqual(
-        recovered.providerTurns.map((turn) => turn.id),
-        [providerTurnId],
-      );
-      assert.deepEqual(
-        new Set(recovered.nodes.map((node) => node.id)),
-        new Set([rootNodeId, textNodeId]),
-      );
-      assert.deepEqual(
-        recovered.turnItems.map((item) => item.id),
-        [itemId],
-      );
-      yield* ProviderRuntimeRecovery.make.pipe(
-        Effect.flatMap((recovery) => recovery.reconcile(trigger)),
-        Effect.provide(
-          Layer.mergeAll(
-            Layer.mock(EventSink.EventSinkV2)({
-              commitCommand: (input) =>
-                Effect.forEach(input.events, (event) => projections.apply(event), {
-                  discard: true,
-                }).pipe(
-                  Effect.orDie,
-                  Effect.as({ committed: true, cancelledEffectCount: 0 } as never),
-                ),
-            }),
-            IdAllocator.layer,
-            ServerSettings.layerTest(),
-          ),
-        ),
-      );
-      const after = yield* projections.getThreadProjection(threadId);
-      assert.deepEqual(
-        after.providerTurns.map((turn) => turn.status),
-        ["cancelled"],
-      );
-      assert.deepEqual(
-        after.nodes.map((node) => node.status),
-        ["cancelled", "cancelled"],
-      );
-      assert.equal(after.turnItems[0]?.status, "cancelled");
-      assert.equal(
-        after.turnItems[0]?.type === "assistant_message" && after.turnItems[0].streaming,
-        false,
-      );
-      assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), []);
-    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("recovers terminal subagent results until their cross-thread transfer exists", () =>
@@ -853,10 +503,7 @@ it.effect("includes shared sessions and provider-owned background rosters in rec
       preparedState.providerSessions.map((session) => session.id),
       [preparedSessionId],
     );
-    assert.equal(
-      restartContinuationRun(preparedState, DateTime.makeUnsafe("2026-10-03T10:00:00.000Z"))?.id,
-      preparedRunId,
-    );
+    assert.equal(restartContinuationRun(preparedState, yield* DateTime.now)?.id, preparedRunId);
     assert.deepEqual(yield* projections.getUnreadableThreadIds(), []);
     const sql = yield* SqlClient.SqlClient;
     yield* sql`
@@ -929,62 +576,6 @@ it.effect("reads the run that owns a background roster, not a queued or resumed 
     });
     yield* withRoster(resumed);
     assert.deepEqual(yield* runIds(resumed), [resumedRun, continuationRun]);
-    // A backward clock and a later turn on another provider must not move
-    // the roster's owning run back to an earlier native turn.
-    const clock = yield* createThread("roster-backward-clock");
-    const clockProviderThreadId = ProviderThreadId.make(`provider-thread:${clock}`);
-    const clockRuns: RunId[] = [];
-    for (const ordinal of [1, 2, 3]) {
-      const attemptId = RunAttemptId.make(`attempt:${clock}:${ordinal}`);
-      const runId = yield* createRun(clock, "completed", {
-        ordinal,
-        providerThreadId: ordinal === 3 ? null : clockProviderThreadId,
-        activeAttemptId: attemptId,
-        completedAt: DateTime.makeUnsafe(
-          ordinal === 2 ? "2026-10-03T09:00:00Z" : "2026-10-03T10:00:00Z",
-        ),
-      });
-      clockRuns.push(runId);
-      if (ordinal === 3) continue;
-      yield* projections.apply({
-        id: EventId.make(`event:${attemptId}`),
-        type: "run-attempt.created",
-        threadId: clock,
-        occurredAt: now,
-        payload: {
-          id: attemptId,
-          runId,
-          attemptOrdinal: 1,
-          rootNodeId: NodeId.make(`node:${clock}:${ordinal}`),
-          providerInstanceId,
-          providerThreadId: clockProviderThreadId,
-          providerTurnId: null,
-          reason: "initial",
-          status: "completed",
-          startedAt: now,
-          completedAt: now,
-        },
-      });
-      yield* projections.apply({
-        id: EventId.make(`event:turn:${attemptId}`),
-        type: "provider-turn.updated",
-        threadId: clock,
-        occurredAt: now,
-        payload: {
-          id: ProviderTurnId.make(`turn:${attemptId}`),
-          providerThreadId: clockProviderThreadId,
-          nodeId: NodeId.make(`node:${clock}:${ordinal}`),
-          runAttemptId: attemptId,
-          nativeTurnRef: null,
-          ordinal,
-          status: "completed",
-          startedAt: now,
-          completedAt: now,
-        },
-      });
-    }
-    yield* withRoster(clock);
-    assert.deepEqual(yield* runIds(clock), clockRuns.slice(1));
     // Without a roster, settled history is not read.
     const quiet = yield* createThread("no-roster-before-queue");
     yield* createRun(quiet, "completed");
@@ -1022,189 +613,81 @@ it.effect("marks fork descendants unreadable when their source is missing or cor
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("retains a native subagent's owning run when no turn item arrived", () =>
-  Effect.gen(function* () {
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const now = yield* DateTime.now;
-    const threadId = yield* createThread("native-before-item");
-    const runId = yield* createRun(threadId, "completed");
-    yield* createRun(threadId, "completed", { ordinal: 2 });
-    yield* projections.apply({
-      id: EventId.make("event:native-before-item"),
-      type: "subagent.updated",
-      threadId,
-      occurredAt: now,
-      payload: {
-        id: NodeId.make("node:native-before-item"),
-        threadId,
-        runId,
-        parentNodeId: NodeId.make("node:native-parent"),
-        origin: "provider_native",
-        createdBy: "agent",
-        driver,
-        providerInstanceId,
-        providerThreadId: null,
-        childThreadId: null,
-        nativeTaskRef: null,
-        prompt: "unfinished task",
-        title: null,
-        model: null,
-        status: "running",
-        result: null,
-        startedAt: now,
-        completedAt: null,
-        updatedAt: now,
-      },
-    });
-    assert.deepEqual(
-      (yield* projections.getRuntimeRecoveryProjection(threadId)).runs.map((run) => run.id),
-      [runId, RunId.make(`run:${threadId}:2`)],
-    );
-  }).pipe(Effect.provide(layerTest)),
-);
-
-it.effect(
-  "snapshots unsettled native steering and excludes delivered input and mailbox deliveries",
-  () =>
-    Effect.gen(function* () {
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const now = yield* DateTime.now;
-      const threadId = yield* createThread("steering-recovery");
-      const runId = yield* createRun(threadId, "running");
-      const ids: Array<MessageId> = [];
-      for (const [index, mailbox] of [false, false, true, false].entries()) {
-        const messageId = MessageId.make(`message:steering:${index}`);
-        ids.push(messageId);
-        yield* projections.apply({
-          id: EventId.make(`event:${messageId}`),
-          type: "message.updated",
-          threadId,
-          runId,
-          occurredAt: now,
-          payload: {
-            id: messageId,
-            threadId,
-            runId,
-            nodeId: null,
-            role: "user",
-            text: `steer ${index}`,
-            attachments: [],
-            streaming: false,
-            createdBy: "user",
-            creationSource: "web",
-            createdAt: now,
-            updatedAt: now,
-            ...(mailbox
-              ? { delegatedCompletion: { parentRunId: runId, generation: 1, taskIds: [] } }
-              : {}),
-          },
-        });
-        yield* outbox.enqueue([
-          {
-            id: `effect:steering:${index}`,
-            commandId: CommandId.make(`command:steering:${index}`),
-            threadId,
-            request: {
-              type: "provider-turn.steer",
-              messageId,
-              providerSessionId: ProviderSessionId.make("session:steering"),
-              providerThreadId: ProviderThreadId.make("provider-thread:steering"),
-              providerTurnId: ProviderTurnId.make("provider-turn:steering"),
-            },
-          },
-        ]);
-      }
-      const sql = yield* SqlClient.SqlClient;
-      yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'succeeded' WHERE effect_id = 'effect:steering:1'`;
-      yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'failed' WHERE effect_id = 'effect:steering:3'`;
-      const recovered = yield* projections.getRuntimeRecoveryProjection(threadId);
-      assert.deepEqual(recovered.pendingSteering, [{ runId, messageId: ids[0]! }]);
-      let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
-      yield* ProviderRuntimeRecovery.make.pipe(
-        Effect.flatMap((recovery) => recovery.reconcile("startup")),
-        Effect.provide(
-          Layer.mergeAll(
-            ServerSettings.layerTest(),
-            IdAllocator.layer,
-            Layer.mock(EventSink.EventSinkV2)({
-              commitCommand: (input) => {
-                committed = input;
-                return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
-              },
-            }),
-          ),
-        ),
-      );
-      const event = committed?.events.find((event) => event.type === "run.updated");
-      assert.deepEqual(
-        event?.type === "run.updated" ? event.payload.restartPendingMessageIds : [],
-        [ids[0]!],
-      );
-      const stale = (yield* projections.getThreadProjection(threadId)).runs[0]!;
-      if (event !== undefined) yield* projections.apply(event);
-      yield* projections.apply({
-        id: EventId.make("event:steering-stale"),
-        type: "run.updated",
-        threadId,
-        runId,
-        occurredAt: now,
-        payload: { ...stale, status: "cancelled" },
-      });
-      assert.deepEqual(
-        (yield* projections.getThreadProjection(threadId)).runs[0]?.restartPendingMessageIds,
-        [ids[0]!],
-      );
-    }).pipe(Effect.provide(layerTest)),
-);
-
-it.effect("preserves steering submission order across equal and backward clocks", () =>
+it.effect("surfaces steering still queued in the outbox and keeps its ids across run upserts", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const outbox = yield* EffectOutbox.EffectOutboxV2;
-    const threadId = yield* createThread("steering-order");
-    const runId = yield* createRun(threadId, "completed");
-    const messageIds = ["z", "y", "a"].map((id) => MessageId.make(`message:steering-order:${id}`));
-    for (const [index, messageId] of messageIds.entries()) {
-      const now = DateTime.makeUnsafe(index < 2 ? "2026-10-03T10:00:00Z" : "2026-10-03T09:00:00Z");
+    const now = yield* DateTime.now;
+    const threadId = yield* createThread("steering");
+    const runId = yield* createRun(threadId, "running");
+    const steer = (name: string) => {
+      const messageId = MessageId.make(`message:steering:${name}`);
+      return {
+        messageId,
+        effect: {
+          id: `effect:steering:${name}`,
+          commandId: CommandId.make(`command:steering:${name}`),
+          threadId,
+          request: {
+            type: "provider-turn.steer" as const,
+            providerSessionId: ProviderSessionId.make("session:steering"),
+            providerThreadId: ProviderThreadId.make("provider-thread:steering"),
+            providerTurnId: ProviderTurnId.make("provider-turn:steering"),
+            messageId,
+          },
+        },
+      };
+    };
+    const delivered = steer("delivered");
+    const queued = steer("queued");
+    for (const { messageId } of [delivered, queued]) {
       yield* projections.apply({
         id: EventId.make(`event:${messageId}`),
         type: "message.updated",
         threadId,
+        runId,
+        driver,
         occurredAt: now,
         payload: {
+          createdBy: "user",
+          creationSource: "web",
           id: messageId,
           threadId,
           runId,
           nodeId: null,
           role: "user",
-          text: String(index),
+          text: "steer",
           attachments: [],
           streaming: false,
-          createdBy: "user",
-          creationSource: "web",
           createdAt: now,
           updatedAt: now,
         },
       });
-      yield* outbox.enqueue([
-        {
-          id: `effect:${messageId}`,
-          commandId: CommandId.make(`command:${messageId}`),
-          threadId,
-          request: {
-            type: "provider-turn.steer",
-            messageId,
-            providerSessionId: ProviderSessionId.make("session:steering-order"),
-            providerThreadId: ProviderThreadId.make("provider-thread:steering-order"),
-            providerTurnId: ProviderTurnId.make("turn:steering-order"),
-          },
-        },
-      ]);
     }
-    assert.deepEqual(
-      (yield* projections.getRuntimeRecoveryProjection(threadId)).pendingSteering,
-      messageIds.map((messageId) => ({ runId, messageId })),
+    yield* outbox.enqueue([delivered.effect]);
+    const claimed = yield* outbox.claimNext({ workerId: "worker:steering", leaseDurationMs: 1000 });
+    assert.isTrue(
+      yield* outbox.succeed({ effectId: delivered.effect.id, workerId: "worker:steering" }),
     );
+    assert.isTrue(claimed._tag === "Some");
+    yield* outbox.enqueue([queued.effect]);
+
+    const before = yield* projections.getRuntimeRecoveryProjection(threadId);
+    assert.deepEqual(before.pendingSteering, [{ runId, messageId: queued.messageId }]);
+
+    const run = before.runs[0]!;
+    const apply = (payload: OrchestrationV2Run, name: string) =>
+      projections.apply({
+        id: EventId.make(`event:steering:${name}`),
+        type: "run.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload,
+      });
+    yield* apply({ ...run, restartPendingMessageIds: [queued.messageId] }, "record");
+    yield* apply({ ...run, status: "cancelled", completedAt: now }, "later-upsert");
+    const after = yield* projections.getRuntimeRecoveryProjection(threadId);
+    assert.deepEqual(after.runs[0]?.restartPendingMessageIds, [queued.messageId]);
   }).pipe(Effect.provide(layerTest)),
 );

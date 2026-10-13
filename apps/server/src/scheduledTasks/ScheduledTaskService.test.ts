@@ -11,7 +11,6 @@ import * as Logger from "effect/Logger";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as Deferred from "effect/Deferred";
-import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
@@ -58,108 +57,6 @@ const insertRow = (
     last_run_error: null,
     run_count: 0,
   })}`;
-
-it.effect.each([
-  ["interval", "pending"],
-  ["interval", "running"],
-  ["fixed_time", "pending"],
-  ["fixed_time", "running"],
-] as const)(
-  "defers a bound %s catch-up while its restart continuation is %s",
-  ([trigger, continuationStatus]) =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      const now = "2026-09-09T12:00:00.000Z";
-      const scheduleJson =
-        trigger === "interval"
-          ? '{"type":"interval","everyMs":60000}'
-          : '{"type":"fixed_time","timeOfDay":"12:00"}';
-      yield* TestClock.setTime(Date.parse(now) + 1_000);
-      for (const id of ["bound", "fresh"]) {
-        yield* insertRow(
-          sql,
-          { id, next: now, enabled: 1, status: "succeeded", scheduleJson },
-          now,
-        );
-      }
-      yield* sql`UPDATE scheduled_tasks SET thread_id = 'thread:restart', run_count = 1
-                 WHERE task_id = 'bound'`;
-      yield* sql`INSERT INTO orchestration_v2_effect_outbox (
-        effect_id, command_id, thread_id, effect_type, payload_json, status,
-        available_at, created_at, updated_at
-      ) VALUES (
-        'effect:restart-continuation:cut', 'command:restart', 'thread:restart',
-        'provider-runtime.continue', '{"type":"provider-runtime.continue","sourceRunId":"cut"}',
-        ${continuationStatus}, ${now}, ${now}, ${now}
-      )`;
-      const sends: Parameters<
-        ThreadManagementService.ThreadManagementService["Service"]["sendToThread"]
-      >[0][] = [];
-      let launches = 0;
-      let poll: Effect.Effect<void> | undefined;
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Layer.build(
-            ScheduledTaskService.layer.pipe(
-              Layer.provide(
-                Layer.mergeAll(
-                  NodeCrypto.layer,
-                  Layer.mock(SecretRequests.SecretRequests)({}),
-                  Layer.mock(ThreadLaunchService.ThreadLaunchService)({
-                    launch: () => {
-                      launches += 1;
-                      return Effect.succeed({} as never);
-                    },
-                  }),
-                  Layer.mock(ThreadManagementService.ThreadManagementService)({
-                    sendToThread: (input) => {
-                      sends.push(input);
-                      return Effect.succeed({} as never);
-                    },
-                  }),
-                  Layer.succeed(Scheduler.Scheduler, {
-                    register: <E, R>(_name: string, work: Effect.Effect<void, E, R>) =>
-                      Effect.context<R>().pipe(
-                        Effect.map((context) => {
-                          poll = work.pipe(Effect.provideContext(context), Effect.orDie);
-                        }),
-                      ),
-                  }),
-                ),
-              ),
-            ),
-          );
-          assert.isDefined(poll);
-          yield* poll!;
-          assert.lengthOf(sends, 0);
-          assert.equal(launches, 1);
-          const deferred = yield* sql<{ next_run_at: string; run_count: number }>`
-            SELECT next_run_at, run_count FROM scheduled_tasks WHERE task_id = 'bound'
-          `;
-          assert.equal(deferred[0]?.next_run_at, now);
-          assert.equal(deferred[0]?.run_count, 1);
-
-          yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'succeeded'`;
-          yield* poll!;
-          assert.lengthOf(sends, 1);
-          assert.equal(sends[0]?.threadId, "thread:restart");
-          assert.equal(sends[0]?.mode, "queue");
-          const completed = yield* sql<{
-            next_run_at: string;
-            run_count: number;
-            last_run_status: string;
-          }>`SELECT next_run_at, run_count, last_run_status FROM scheduled_tasks
-             WHERE task_id = 'bound'`;
-          assert.equal(completed[0]?.last_run_status, "succeeded");
-          assert.equal(completed[0]?.run_count, 2);
-          assert.isAbove(Date.parse(completed[0]!.next_run_at), Date.parse(now) + 1_000);
-          yield* poll!;
-          assert.lengthOf(sends, 1);
-          assert.equal(launches, 1);
-        }),
-      );
-    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
-);
 
 it.effect("loads only due tasks and skips corrupt due rows without decoding settled tasks", () =>
   Effect.gen(function* () {
@@ -271,18 +168,6 @@ it.effect(
       const hugeInterval = '{"type":"interval","everyMs":9000000000000000}';
       for (const row of [
         { id: "stuck-valid", next: now, status: "running" },
-        {
-          id: "stuck-fixed",
-          next: now,
-          status: "running",
-          scheduleJson: '{"type":"fixed_time","timeOfDay":"12:00"}',
-        },
-        {
-          id: "stuck-webhook",
-          next: null,
-          status: "running",
-          scheduleJson: '{"type":"webhook","signature":null}',
-        },
         { id: "stuck-corrupt", next: now, status: "running", scheduleJson: "broken" },
         { id: "stuck-huge", next: now, status: "running", scheduleJson: hugeInterval },
         { id: null, next: now, status: "running" },
@@ -356,29 +241,19 @@ it.effect(
       }>`SELECT task_id, last_run_status, last_run_error, next_run_at, run_count
        FROM scheduled_tasks ORDER BY task_id`;
       const byId = new Map(rows.map((row) => [row.task_id, row]));
-      assert.equal(rows.length, 11);
+      assert.equal(rows.length, 9);
       // The decodable stuck run is rescheduled for its next occurrence; the
       // undecodable and unrepresentable rows are released without a next run.
       // A NULL id must still match its own row — `= NULL` never does.
       assert.equal(byId.get("stuck-valid")?.last_run_status, "failed");
       assert.isNotNull(byId.get("stuck-valid")?.next_run_at);
-      assert.isAbove(Date.parse(byId.get("stuck-fixed")!.next_run_at!), Date.parse(now) + 7_000);
-      assert.isNull(byId.get("stuck-webhook")?.next_run_at);
       assert.equal(byId.get("stuck-corrupt")?.last_run_status, "failed");
       assert.equal(byId.get(null)?.last_run_status, "failed");
       const stuckHuge = byId.get("stuck-huge");
       assert.equal(stuckHuge?.last_run_status, "failed");
       assert.isNull(stuckHuge?.next_run_at);
-      for (const id of [
-        "stuck-valid",
-        "stuck-fixed",
-        "stuck-webhook",
-        "stuck-corrupt",
-        "stuck-huge",
-        null,
-      ]) {
+      for (const id of ["stuck-valid", "stuck-corrupt", "stuck-huge", null]) {
         const row = byId.get(id);
-        assert.equal(row?.last_run_status, "failed");
         assert.equal(row?.last_run_error, "Run was interrupted by a server restart.");
         assert.equal(row?.run_count, 1);
       }
@@ -475,130 +350,4 @@ it.effect(
         }),
       );
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
-);
-
-it.effect("retries failed crash recovery without resetting a live dispatch", () =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const now = "2026-09-09T12:00:00.000Z";
-    yield* TestClock.setTime(Date.parse(now));
-    yield* insertRow(sql, { id: "stuck", next: now, status: "running", enabled: 1 }, now);
-    yield* insertRow(sql, { id: "stuck-second", next: now, status: "running", enabled: 1 }, now);
-    yield* sql`CREATE TRIGGER fail_recovery BEFORE UPDATE ON scheduled_tasks
-      WHEN OLD.task_id = 'stuck' BEGIN SELECT RAISE(FAIL, 'disk write failed'); END`;
-    const entered = yield* Deferred.make<void>();
-    const release = yield* Deferred.make<void>();
-    let poll: Effect.Effect<void> | undefined;
-    const dependencies = Layer.mergeAll(
-      NodeCrypto.layer,
-      Layer.mock(ThreadLaunchService.ThreadLaunchService)({
-        launch: () =>
-          Deferred.succeed(entered, undefined).pipe(
-            Effect.andThen(Deferred.await(release)),
-            Effect.as({} as never),
-          ),
-      }),
-      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
-      Layer.mock(SecretRequests.SecretRequests)({}),
-      Layer.succeed(Scheduler.Scheduler, {
-        register: <E, R>(_name: string, work: Effect.Effect<void, E, R>) =>
-          Effect.context<R>().pipe(
-            Effect.map((context) => {
-              poll = work.pipe(Effect.provideContext(context), Effect.orDie);
-            }),
-          ),
-      }),
-    );
-    yield* Effect.gen(function* () {
-      const service = yield* ScheduledTaskService.ScheduledTaskService;
-      const initial = (yield* service.list()).tasks;
-      assert.equal(initial.find((task) => task.id === "stuck")?.lastRunStatus, "running");
-      assert.equal(initial.find((task) => task.id === "stuck-second")?.lastRunStatus, "failed");
-      yield* sql`DROP TRIGGER fail_recovery`;
-      yield* poll!;
-      const recovered = (yield* service.list()).tasks.find((task) => task.id === "stuck")!;
-      assert.equal(recovered.lastRunStatus, "failed");
-      assert.equal(recovered.runCount, 1);
-      assert.equal(recovered.nextRunAt, "2026-09-09T12:01:00.000Z");
-      yield* poll!;
-      assert.equal((yield* service.list()).tasks.find((task) => task.id === "stuck")?.runCount, 1);
-      yield* insertRow(sql, { id: "live", next: now, status: "never", enabled: 1 }, now);
-      const dispatch = yield* poll!.pipe(Effect.forkScoped);
-      yield* Deferred.await(entered);
-      yield* poll!;
-      const live = (yield* service.list()).tasks.find((task) => task.id === "live");
-      assert.equal(live?.lastRunStatus, "running");
-      assert.equal(live?.runCount, 0);
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(dispatch);
-      assert.equal(
-        (yield* service.list()).tasks.find((task) => task.id === "live")?.lastRunStatus,
-        "succeeded",
-      );
-    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
-  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
-);
-
-it.effect("uses both partial indexes for the inclusive update horizon", () =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const now = "2026-09-09T12:00:00.000Z";
-    const horizon = "2026-09-09T12:05:00.000Z";
-    for (const row of [
-      { id: "running-disabled", enabled: 0, next: null, status: "running" },
-      { id: "disabled", enabled: 0, next: now, status: "succeeded" },
-      { id: "exact-horizon", enabled: 1, next: horizon, status: "succeeded" },
-      { id: "after-horizon", enabled: 1, next: "2026-09-09T12:05:00.001Z", status: "succeeded" },
-    ])
-      yield* insertRow(sql, row, now);
-    const selected = yield* ScheduledTaskService.listRunningOrDueTasks(
-      DateTime.makeUnsafe(horizon),
-    );
-    assert.deepEqual(selected.map((task) => task.id).sort(), ["exact-horizon", "running-disabled"]);
-    const plan = yield* sql<{ detail: string }>`EXPLAIN QUERY PLAN SELECT * FROM scheduled_tasks
-      WHERE last_run_status = 'running'
-        OR (enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ${horizon}
-          AND CASE WHEN json_valid(schedule_json) THEN
-            json_extract(schedule_json, '$.type') IS NOT 'interval'
-              OR json_extract(schedule_json, '$.everyMs') >= ${900000}
-            ELSE 1 END)
-      UNION SELECT task.* FROM scheduled_task_webhook_queue AS delivery
-      CROSS JOIN scheduled_tasks AS task
-      WHERE task.task_id = delivery.task_id AND task.created_at = delivery.task_created_at
-        AND task.enabled = 1`;
-    assert.isTrue(plan.some((row) => row.detail.includes("idx_scheduled_tasks_running")));
-    assert.isTrue(plan.some((row) => row.detail.includes("idx_scheduled_tasks_due")));
-    assert.isFalse(plan.some((row) => /SCAN (scheduled_tasks|task)\b/.test(row.detail)));
-  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
-);
-
-it.effect("update windows exclude frequent due intervals but retain their running tasks", () =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const now = "2026-09-09T12:00:00.000Z";
-    for (const row of [
-      { id: "frequent", next: now, enabled: 1, status: "never" },
-      { id: "running", next: null, enabled: 0, status: "running" },
-      {
-        id: "slow",
-        next: now,
-        enabled: 1,
-        status: "never",
-        scheduleJson: '{"type":"interval","everyMs":900000}',
-      },
-      {
-        id: "later",
-        next: "2026-09-09T13:00:00.000Z",
-        enabled: 1,
-        status: "never",
-        scheduleJson: '{"type":"interval","everyMs":900000}',
-      },
-    ])
-      yield* insertRow(sql, row, now);
-    const tasks = yield* ScheduledTaskService.listRunningOrDueTasks(
-      DateTime.makeUnsafe(now),
-      900000,
-    );
-    assert.deepEqual(tasks.map((task) => task.id).sort(), ["running", "slow"]);
-  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

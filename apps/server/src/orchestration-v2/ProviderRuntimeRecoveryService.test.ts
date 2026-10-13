@@ -14,7 +14,6 @@ import {
   TurnItemId,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -641,6 +640,79 @@ it.effect("closes a secret request card's form when its run is recovered", () =>
     const card = itemEvent?.type === "turn-item.updated" ? itemEvent.payload : null;
     assert.equal(card?.status, "cancelled");
     assert.equal(card?.type === "secret_request" ? card.secretStatus : null, "cancelled");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("records undelivered steering on the cancelled run and ends cut streams", () => {
+  const threadId = ThreadId.make("thread_steer_recovery");
+  const runId = RunId.make("run_steer_recovery");
+  const steerId = MessageId.make("message_steer_recovery");
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    null;
+  const projection = {
+    thread: { id: threadId },
+    pendingSteering: [{ runId, messageId: steerId }],
+    runtimeRequests: [],
+    providerSessions: [],
+    providerThreads: [],
+    providerTurns: [],
+    runs: [{ id: runId, status: "running", providerInstanceId: ProviderInstanceId.make("codex") }],
+    attempts: [],
+    nodes: [],
+    subagents: [],
+    messages: [],
+    turnItems: ["assistant_message", "reasoning", "proposed_plan"].map((type) => ({
+      id: `turn-item:${type}`,
+      threadId,
+      runId,
+      nodeId: null,
+      type,
+      status: "running",
+      streaming: true,
+    })),
+  } as unknown as OrchestrationV2ThreadProjection;
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) => {
+            committedInput = input;
+            return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+          },
+        }),
+        IdAllocator.layer,
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+          runRecoveryOnce: Effect.succeed(false),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          listByCommandId: () => Effect.succeed([]),
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
+    const events = committedInput?.events ?? [];
+    const run = events.find((event) => event.type === "run.updated");
+    assert.equal(run?.type === "run.updated" ? run.payload.status : null, "cancelled");
+    assert.deepEqual(run?.type === "run.updated" ? run.payload.restartPendingMessageIds : null, [
+      steerId,
+    ]);
+    const items = events.flatMap((event) =>
+      event.type === "turn-item.updated" ? [event.payload] : [],
+    );
+    assert.lengthOf(items, 3);
+    for (const item of items) {
+      assert.equal(item.status, "cancelled");
+      assert.isFalse("streaming" in item ? item.streaming : true);
+    }
   }).pipe(Effect.provide(layer));
 });
 
@@ -1281,9 +1353,9 @@ it.effect(
   },
 );
 
-it.effect.each([true, false])(
-  "terminalizes a native subagent on a settled run with a turn item: %s",
-  (hasTurnItem) => {
+it.effect(
+  "terminalizes the linked subagent and node for a stale subagent item on a settled run",
+  () => {
     const threadId = ThreadId.make("thread_recovery_subagent");
     const settledRunId = RunId.make("run_recovery_subagent_settled");
     const providerThreadId = ProviderThreadId.make("provider_thread_recovery_subagent");
@@ -1304,29 +1376,12 @@ it.effect.each([true, false])(
           driver: ProviderDriverKind.make("claude"),
           providerInstanceId: claudeInstanceId,
           status: "idle",
-          ownerNodeId: null,
-          pendingBackgroundTasks: hasTurnItem
-            ? []
-            : [
-                {
-                  taskId: "native-before-item",
-                  kind: "subagent",
-                  status: "running",
-                  description: "recover native child",
-                },
-              ],
+          pendingBackgroundTasks: [],
         },
       ],
       providerTurns: [],
       // Settled run: the stale-item loop owns it, not the nonterminal loop.
-      runs: [
-        {
-          id: settledRunId,
-          status: "completed",
-          providerThreadId,
-          providerInstanceId: claudeInstanceId,
-        },
-      ],
+      runs: [{ id: settledRunId, status: "completed", providerInstanceId: claudeInstanceId }],
       attempts: [],
       nodes: [
         { id: staleSubagentNodeId, runId: settledRunId, status: "running" },
@@ -1335,9 +1390,6 @@ it.effect.each([true, false])(
       subagents: [
         {
           id: staleSubagentNodeId,
-          title: "recover native child",
-          prompt: "native task prompt",
-          nativeTaskRef: { driver: "claude", nativeId: "native-before-item", strength: "strong" },
           runId: settledRunId,
           origin: "provider_native",
           driver: ProviderDriverKind.make("claude"),
@@ -1357,20 +1409,16 @@ it.effect.each([true, false])(
       ],
       messages: [],
       turnItems: [
-        ...(hasTurnItem
-          ? [
-              {
-                id: staleItemId,
-                runId: settledRunId,
-                nodeId: staleSubagentNodeId,
-                providerThreadId,
-                type: "subagent",
-                status: "running",
-                subagentId: staleSubagentNodeId,
-                providerInstanceId: claudeInstanceId,
-              },
-            ]
-          : []),
+        {
+          id: staleItemId,
+          runId: settledRunId,
+          nodeId: staleSubagentNodeId,
+          providerThreadId,
+          type: "subagent",
+          status: "running",
+          subagentId: staleSubagentNodeId,
+          providerInstanceId: claudeInstanceId,
+        },
         {
           id: doneItemId,
           runId: settledRunId,
@@ -1403,8 +1451,6 @@ it.effect.each([true, false])(
           }),
           Layer.mock(EffectOutbox.EffectOutboxV2)({
             listByCommandId: () => Effect.succeed([]),
-            cancelUnsettled: () => Effect.succeed([]),
-            signalCancellations: () => Effect.void,
             reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
           }),
         ),
@@ -1419,7 +1465,7 @@ it.effect.each([true, false])(
       const turnItemCancels = events.filter(
         (event) => event.type === "turn-item.updated" && event.payload.status === "cancelled",
       );
-      assert.equal(turnItemCancels.length, hasTurnItem ? 1 : 0);
+      assert.equal(turnItemCancels.length, 1);
 
       // The linked subagent entity is terminalized alongside its turn item.
       const subagentCancels = events.filter((event) => event.type === "subagent.updated");
@@ -1443,17 +1489,6 @@ it.effect.each([true, false])(
         staleSubagentNodeId,
       );
 
-      const note = events.find((event) => event.type === "run.background-work-cancelled");
-      assert.equal(
-        note?.type === "run.background-work-cancelled"
-          ? note.payload.restartCancelledBackgroundWork.length
-          : 0,
-        1,
-      );
-      if (!hasTurnItem && note?.type === "run.background-work-cancelled") {
-        assert.equal(note.payload.restartCancelledBackgroundWork[0]?.label, "recover native child");
-      }
-
       // The already-completed subagent and node are left untouched.
       assert.isFalse(
         events.some(
@@ -1469,7 +1504,7 @@ it.effect.each([true, false])(
   },
 );
 
-it.effect("notes native child cancellation on its parent", () => {
+it.effect("leaves delegated tasks to their own child threads after process loss", () => {
   const threadId = ThreadId.make("thread_recovery_delegation");
   const settledRunId = RunId.make("run_recovery_delegation_settled");
   const runningRunId = RunId.make("run_recovery_delegation_running");
@@ -1554,11 +1589,7 @@ it.effect("notes native child cancellation on its parent", () => {
     turnItems: [
       subagentItem(settledTaskId, settledRunId, "app_owned"),
       subagentItem(runningTaskId, runningRunId, "app_owned"),
-      {
-        ...subagentItem(nativeSubagentId, settledRunId, "provider_native"),
-        // Codex points this item at the child, while its run belongs to the parent.
-        providerThreadId: ProviderThreadId.make("provider_thread_recovery_native_child"),
-      },
+      subagentItem(nativeSubagentId, settledRunId, "provider_native"),
     ],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
@@ -1620,92 +1651,3 @@ it.effect("notes native child cancellation on its parent", () => {
     assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
   }).pipe(Effect.provide(layer));
 });
-
-it.effect.each(["startup", "shutdown"] as const)(
-  "records lost background work on the last native turn after a backward clock on %s",
-  (trigger) =>
-    Effect.gen(function* () {
-      const threadId = ThreadId.make("thread:clock-background");
-      const providerThreadId = ProviderThreadId.make("provider-thread:clock-background");
-      const earlierId = RunId.make("run:clock-background:earlier");
-      const latestId = RunId.make("run:clock-background:latest");
-      const earlierAttempt = RunAttemptId.make("attempt:clock-background:earlier");
-      const latestAttempt = RunAttemptId.make("attempt:clock-background:latest");
-      const events: Parameters<
-        EventSink.EventSinkV2["Service"]["commitCommand"]
-      >[0]["events"][number][] = [];
-      const projection = {
-        thread: { id: threadId },
-        runtimeRequests: [],
-        providerSessions: [],
-        attempts: [],
-        nodes: [],
-        subagents: [],
-        messages: [],
-        providerThreads: [
-          {
-            id: providerThreadId,
-            ownerNodeId: null,
-            status: "idle",
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            pendingBackgroundTasks: [
-              { kind: "command", taskId: "background", description: "watch build" },
-            ],
-          },
-        ],
-        runs: [
-          {
-            id: earlierId,
-            ordinal: 1,
-            status: "completed",
-            providerThreadId,
-            activeAttemptId: earlierAttempt,
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            completedAt: DateTime.makeUnsafe("2026-10-03T10:00:00Z"),
-          },
-          {
-            id: latestId,
-            ordinal: 2,
-            status: "completed",
-            providerThreadId,
-            activeAttemptId: latestAttempt,
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            completedAt: DateTime.makeUnsafe("2026-10-03T09:00:00Z"),
-          },
-        ],
-        providerTurns: [
-          { providerThreadId, runAttemptId: earlierAttempt, ordinal: 1, status: "completed" },
-          { providerThreadId, runAttemptId: latestAttempt, ordinal: 2, status: "completed" },
-        ],
-        turnItems: [],
-      } as unknown as OrchestrationV2ThreadProjection;
-      yield* ProviderRuntimeRecovery.make.pipe(
-        Effect.flatMap((recovery) => recovery.reconcile(trigger)),
-        Effect.provide(
-          Layer.mergeAll(
-            ServerSettings.layerTest(),
-            IdAllocator.layer,
-            Layer.mock(ProjectionStore.ProjectionStoreV2)({
-              getRecoveryThreadIds: () => Effect.succeed([threadId]),
-              getRuntimeRecoveryProjection: () => Effect.succeed(projection),
-            }),
-            Layer.mock(EventSink.EventSinkV2)({
-              commitCommand: (input) => {
-                events.push(...input.events);
-                return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
-              },
-            }),
-            Layer.mock(EffectOutbox.EffectOutboxV2)({
-              reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
-            }),
-          ),
-        ),
-      );
-      assert.deepEqual(
-        events.flatMap((event) =>
-          event.type === "run.background-work-cancelled" ? [event.runId] : [],
-        ),
-        [latestId],
-      );
-    }),
-);

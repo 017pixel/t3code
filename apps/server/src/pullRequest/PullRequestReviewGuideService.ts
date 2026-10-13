@@ -36,7 +36,6 @@ import {
   type ThreadPullRequestKey,
 } from "@t3tools/contracts";
 import type { ReviewGuideStackLayer } from "@t3tools/provider-core/server/textGeneration";
-import * as ProviderMaintenanceCoordinator from "@t3tools/provider-core/server/maintenance";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 
@@ -72,8 +71,6 @@ export class PullRequestReviewGuideService extends Context.Service<
       PullRequestReviewGuideResult & { readonly started: boolean },
       PullRequestService.PullRequestError
     >;
-    /** All generations, including superseded runs and checkout cleanup. */
-    readonly activeGenerationCount: Effect.Effect<number>;
   }
 >()("t3/pullRequest/PullRequestReviewGuideService") {}
 
@@ -93,10 +90,8 @@ const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const fileSystem = yield* FileSystem.FileSystem;
   const config = yield* ServerConfig.ServerConfig;
-  const admission = yield* ProviderMaintenanceCoordinator.ProviderMaintenanceAdmission;
   // Runs outlive the request that started them and end with the server.
   const serviceScope = yield* Effect.scope;
-  const activeGenerations = yield* Ref.make(0);
   // In memory on purpose: a restart drops a run in progress, and a reader presses Generate again.
   const runs = yield* Ref.make<ReadonlyMap<string, PullRequestReviewGuideRun>>(new Map());
   // Names each run's private git refs; unique for the server's lifetime, like the runs map.
@@ -385,7 +380,6 @@ const make = Effect.gen(function* () {
     return "The review guide could not be written.";
   };
 
-  // Register under admission so a restart cannot read zero then race a new guide.
   const generate: PullRequestReviewGuideService["Service"]["generate"] = Effect.fn(
     "PullRequestReviewGuideService.generate",
   )(function* (input) {
@@ -484,22 +478,12 @@ const make = Effect.gen(function* () {
               ),
             ),
       ),
-      (work) =>
-        Effect.acquireUseRelease(
-          Ref.update(activeGenerations, (count) => count + 1),
-          () => work,
-          () => Ref.update(activeGenerations, (count) => count - 1),
-        ),
-      Effect.forkIn(serviceScope, { startImmediately: true }),
+      Effect.forkIn(serviceScope),
     );
     return { guide: stored, run: running, currentHeadSha, started: true };
-  }, admission.withLaunchPermit);
-
-  return PullRequestReviewGuideService.of({
-    get,
-    generate,
-    activeGenerationCount: Ref.get(activeGenerations),
   });
+
+  return PullRequestReviewGuideService.of({ get, generate });
 });
 
 export const layer = Layer.effect(PullRequestReviewGuideService, make);

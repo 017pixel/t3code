@@ -4,10 +4,8 @@ import {
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
   type ServerLifecycleStreamReadyEvent,
-  type ServerLifecycleStreamUpdateRestartEvent,
   type ServerSelfUpdateProgressEvent,
   type ServerSelfUpdateResult,
-  type ServerSelfUpdateOutcome,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -310,44 +308,6 @@ export function serverUpdateStateForServerVersion(
     : IDLE_SERVER_UPDATE_STATE;
 }
 
-const updateOutcomeStates = new WeakMap<ServerSelfUpdateOutcome, ServerUpdateState>();
-
-export function serverUpdateStateForAnnouncedRestart(
-  state: ServerUpdateState,
-  restart: ServerLifecycleStreamUpdateRestartEvent["payload"] | undefined,
-  outcome?: ServerSelfUpdateOutcome,
-  serverVersion: string | null = null,
-): ServerUpdateState {
-  if (restart !== undefined && state.status !== "running")
-    return {
-      status: "running",
-      stage: "resuming",
-      fromVersion: restart.fromVersion,
-      targetVersion: restart.targetVersion,
-    };
-  if (
-    state.status === "running" ||
-    outcome === undefined ||
-    outcome.status === "committed" ||
-    (serverVersion !== outcome.fromVersion && serverVersion !== outcome.targetVersion) ||
-    state.status === "failed"
-  )
-    return state;
-  const cached = updateOutcomeStates.get(outcome);
-  if (cached?.status === "failed" && cached.fromVersion === serverVersion) return cached;
-  const failure: ServerUpdateState = {
-    status: "failed",
-    stage: "resuming",
-    fromVersion: serverVersion,
-    targetVersion: outcome.targetVersion,
-    message: outcome.reason ?? `The t3@${outcome.targetVersion} update ${outcome.status}.`,
-  };
-  // Existing notice dismissal tracks the state object, so config refreshes must
-  // retain it until a different launcher outcome arrives.
-  updateOutcomeStates.set(outcome, failure);
-  return failure;
-}
-
 export function serverUpdateFailureMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Server update failed.";
 }
@@ -524,23 +484,10 @@ export function applyServerWelcomeEvent(
   current: EnvironmentServerWelcomeState,
   session: RpcSession,
   event: {
-    readonly type: "welcome" | "ready" | "legacyThreadMigration" | "updateRestart";
+    readonly type: "welcome" | "ready" | "legacyThreadMigration";
     readonly payload: unknown;
   },
 ): EnvironmentServerWelcomeState {
-  if (current.currentSession !== session) return current;
-  if (event.type === "updateRestart") {
-    return {
-      ...current,
-      restart: event.payload as ServerLifecycleStreamUpdateRestartEvent["payload"],
-    };
-  }
-  if (event.type === "ready") {
-    const payload = event.payload as ServerLifecycleStreamReadyEvent["payload"];
-    return current.restart === undefined && current.updateOutcome === payload.updateOutcome
-      ? current
-      : { ...current, restart: undefined, updateOutcome: payload.updateOutcome };
-  }
   return event.type === "welcome" && current.currentSession === session
     ? {
         ...current,
@@ -554,8 +501,6 @@ export interface EnvironmentServerWelcomeState {
   readonly currentSession: RpcSession | null;
   readonly welcomeSession: RpcSession | null;
   readonly welcome: ServerLifecycleWelcomePayload | null;
-  readonly restart?: ServerLifecycleStreamUpdateRestartEvent["payload"] | undefined;
-  readonly updateOutcome?: ServerSelfUpdateOutcome | undefined;
 }
 
 export function resolveServerWelcomeState(
@@ -592,7 +537,6 @@ export const makeEnvironmentServerWelcomeState = Effect.fn("EnvironmentServerWel
       );
     });
 
-    let restartObserver: Fiber.Fiber<void> | undefined;
     yield* SubscriptionRef.changes(supervisor.session).pipe(
       Stream.runForEach(() =>
         updateWithCurrentSession((current, currentSession) => ({
@@ -616,41 +560,20 @@ export const makeEnvironmentServerWelcomeState = Effect.fn("EnvironmentServerWel
               }
             : { ...current, currentSession },
         );
-        return { updateRestarts: true };
+        return {};
       }),
     ).pipe(
       Stream.runForEach(([session, event]) =>
-        Effect.gen(function* () {
-          const remaining =
-            event.type === "updateRestart" && event.payload.expiresInMs !== undefined
-              ? event.payload.expiresInMs
-              : Duration.toMillis(SERVER_UPDATE_RESUME_TIMEOUT);
-          if (remaining <= 0) return;
-          yield* updateWithCurrentSession((current, currentSession) =>
-            applyServerWelcomeEvent({ ...current, currentSession }, session, event),
-          );
-          if ((yield* SubscriptionRef.get(state)).currentSession !== session) return;
-          if (event.type === "ready" && restartObserver !== undefined) {
-            yield* Fiber.interrupt(restartObserver);
-            restartObserver = undefined;
-          }
-          if (event.type !== "updateRestart") return;
-          if (restartObserver !== undefined) yield* Fiber.interrupt(restartObserver);
-          restartObserver = yield* nudgeReconnectDuringUpdateRestart({
-            stateChanges: SubscriptionRef.changes(supervisor.state),
-            retryNow: supervisor.retryNow,
-          }).pipe(
-            Effect.timeoutOption(Duration.millis(remaining)),
-            Effect.andThen(
-              SubscriptionRef.update(state, (current) =>
-                current.restart?.updateId === event.payload.updateId
-                  ? { ...current, restart: undefined }
-                  : current,
-              ),
-            ),
-            Effect.forkScoped,
-          );
-        }),
+        updateWithCurrentSession((current, currentSession) =>
+          applyServerWelcomeEvent(
+            {
+              ...current,
+              currentSession,
+            },
+            session,
+            event,
+          ),
+        ),
       ),
       Effect.forkScoped,
     );
@@ -664,7 +587,9 @@ function serverWelcomeStateChanges(environmentId: EnvironmentId) {
     environmentId,
     Stream.unwrap(
       makeEnvironmentServerWelcomeState().pipe(
-        Effect.map((state) => SubscriptionRef.changes(state)),
+        Effect.map((state) =>
+          SubscriptionRef.changes(state).pipe(Stream.map(resolveServerWelcomeState)),
+        ),
       ),
     ),
   );
@@ -749,18 +674,7 @@ export function createServerEnvironmentAtoms<R, E>(
   const updateStateValueAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) =>
       serverUpdateStateForServerVersion(
-        (() => {
-          const manual = get(serverUpdateStateAtom(environmentId));
-          const lifecycle = Option.getOrNull(
-            AsyncResult.value(get(welcomeStateFamily(environmentId))),
-          );
-          return serverUpdateStateForAnnouncedRestart(
-            manual,
-            lifecycle?.restart,
-            lifecycle?.updateOutcome,
-            get(configValueAtom(environmentId))?.environment.serverVersion ?? null,
-          );
-        })(),
+        get(serverUpdateStateAtom(environmentId)),
         get(configValueAtom(environmentId))?.environment.serverVersion ?? null,
       ),
     ).pipe(Atom.withLabel(`environment-data:server:update-state-value:${environmentId}`)),
@@ -1049,14 +963,11 @@ export function createServerEnvironmentAtoms<R, E>(
   );
   const welcomeFamily = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) => {
-      const result = AsyncResult.map(get(welcomeStateFamily(environmentId)), (value) =>
-        value === null ? null : resolveServerWelcomeState(value),
-      );
+      const result = get(welcomeStateFamily(environmentId));
       if (result._tag !== "Success") return result;
-      const welcome = result.value;
-      return welcome === null
+      return result.value === null
         ? AsyncResult.initial<ServerLifecycleWelcomePayload, never>(result.waiting)
-        : AsyncResult.success(welcome, result);
+        : AsyncResult.success(result.value, result);
     }).pipe(Atom.withLabel(`environment-data:server:welcome:${environmentId}`)),
   );
   const welcome = (target: {

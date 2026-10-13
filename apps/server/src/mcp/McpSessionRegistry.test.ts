@@ -59,31 +59,23 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
   }),
 );
 
-it.effect("preserves retry identities after restart while replacing the credential", () =>
+it.effect("keeps the request namespace across credential reissue and splits it per thread", () =>
   Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
     const request = {
       threadId: ThreadId.make("thread-restarted"),
       providerInstanceId: ProviderInstanceId.make("codex"),
     };
-    const before = yield* makeRegistry(() => 1_000);
-    const first = yield* before.issue(request);
-    const firstToken = first.config.authorizationHeader.replace(/^Bearer\s+/, "");
-    const firstScope = yield* before.resolve(firstToken);
-    const after = yield* makeRegistry(() => 2_000);
-    expect(yield* after.resolve(firstToken)).toBeUndefined();
-    const second = yield* after.issue(request);
-    const secondScope = yield* after.resolve(
-      second.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    const scopeOf = (issued: { readonly config: { readonly authorizationHeader: string } }) =>
+      registry.resolve(issued.config.authorizationHeader.replace(/^Bearer\s+/, ""));
+    const first = yield* scopeOf(yield* registry.issue(request));
+    const second = yield* scopeOf(yield* registry.issue(request));
+    const other = yield* scopeOf(
+      yield* registry.issue({ ...request, threadId: ThreadId.make("thread-other") }),
     );
-    expect(second.config.authorizationHeader).not.toBe(first.config.authorizationHeader);
-    expect(secondScope?.thread.providerSessionId).not.toBe(firstScope?.thread.providerSessionId);
-    expect(secondScope?.requestNamespace).toBe(firstScope?.requestNamespace);
-
-    const other = yield* after.issue({ ...request, threadId: ThreadId.make("thread-other") });
-    const otherScope = yield* after.resolve(
-      other.config.authorizationHeader.replace(/^Bearer\s+/, ""),
-    );
-    expect(otherScope?.requestNamespace).not.toBe(secondScope?.requestNamespace);
+    expect(second?.thread.providerSessionId).not.toBe(first?.thread.providerSessionId);
+    expect(second?.requestNamespace).toBe(first?.requestNamespace);
+    expect(other?.requestNamespace).not.toBe(first?.requestNamespace);
   }),
 );
 
