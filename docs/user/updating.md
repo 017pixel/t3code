@@ -80,15 +80,6 @@ update can roll back to the previous version. If the update still fails:
 at once. Hover it to see which providers it will update. Providers that only
 offer a manual update command are not included.
 
-## Compact a long-lived database
-
-Stop the environment's server, then run `t3 db compact --base-dir <your-t3-home>`
-on its host. The command saves a database backup, rewrites equivalent legacy
-PR-sync and visit events, and reclaims unused space. It reports progress and
-refuses event changes if replay differs from the current projections. It never
-runs automatically. Keep the printed backup path until you have checked the
-environment after restarting. Interruption leaves a valid database; completed backups are retained.
-
 ## Mobile updates
 
 To update an environment from your phone, open **Settings → Environments** and
