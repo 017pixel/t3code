@@ -4,13 +4,9 @@ import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-/** Another version's cache directory goes once no start has used it for this long. */
 const UNUSED_VERSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-/**
- * Source dev stays uncached; bundled and SEA dependencies persist under the
- * selected T3 home, in one directory per version.
- */
+/** Cache bundled code under the selected T3 home; leave source dev uncached. */
 export function enableCliCompileCache(input: {
   readonly bundled: boolean;
   readonly argv: readonly string[];
@@ -19,9 +15,7 @@ export function enableCliCompileCache(input: {
 }) {
   if (
     !input.bundled ||
-    // AppImage mounts the app at a new /tmp/.mount_* path every launch and Node
-    // keys entries by path, so they would never hit, only pile up (the desktop's
-    // compileCache.ts skips it for the same reason).
+    // AppImage mount paths change each launch, so path-keyed entries never hit.
     input.environment.APPIMAGE ||
     input.environment.NODE_DISABLE_COMPILE_CACHE === "1" ||
     input.environment.NODE_COMPILE_CACHE
@@ -49,10 +43,7 @@ export function enableCliCompileCache(input: {
     const current = NodePath.join(root, input.version);
     const { status } = NodeModule.enableCompileCache(current);
     if (status !== NodeModule.constants.compileCacheStatus.ENABLED) return;
-    // Bundle chunk names change with their contents, so an old version's entries
-    // never hit again. Installs of other versions can share this home (a global
-    // t3 and npx t3@other), so each start marks its directory as used and only
-    // directories unused for a week go.
+    // Other installed versions share this home; remove only caches unused for a week.
     // @effect-diagnostics-next-line globalDate:off -- Runs before the Effect runtime loads.
     const now = new Date();
     NodeFS.utimes(current, now, now, () => {});

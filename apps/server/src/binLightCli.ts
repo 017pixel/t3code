@@ -7,7 +7,6 @@ import * as NetService from "@t3tools/shared/Net";
 import packageJson from "../package.json" with { type: "json" };
 import { sharedServerCommandFlags } from "./cli/config.ts";
 
-/** Load only the requested command; keep parsing and execution in the existing CLI. */
 export async function runLightCli(
   command: "pair" | "auth" | "service" | "project" | "serve" | "start",
 ) {

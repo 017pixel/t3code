@@ -533,9 +533,7 @@ export class Launcher {
       return;
     }
     this.#timer = undefined;
-    // Copy online while the active child continues serving. Every update keeps a backup:
-    // the trial can write payloads this version cannot read without any migration. A
-    // database the online copy cannot read takes the stopped copy in #startTrial.
+    // Back up every update: even a trial without migrations can write incompatible payloads.
     const backupDir = databaseBackupDir(this.#baseDir, pending.id);
     const stagingDir = `${backupDir}.staging`;
     let prepared: Awaited<ReturnType<typeof prepareServiceDatabaseBackup>> | undefined;
@@ -544,9 +542,7 @@ export class Launcher {
         prepared = await prepareServiceDatabaseBackup(pending.dbPath, stagingDir);
       }
     } catch {
-      // The active server accepted the update and refuses another while it waits for the
-      // handoff, so the update goes on with the stopped copy in #startTrial, as before online
-      // copies. That copy failing restarts the previous version with the failure.
+      // The accepted update must proceed; #startTrial falls back to a stopped copy.
       prepared = undefined;
     }
     this.#child = null;

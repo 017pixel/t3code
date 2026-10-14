@@ -5,8 +5,7 @@
  * terminal-fallback agents run `t3 acp-mcp-call` per tool call, so their
  * startup sits on first-message latency. Both dispatch here before the full
  * CLI module graph (seconds of evaluation) loads; everything else defers to
- * the real CLI in ./binCli.ts. The server's spawn host (`t3 __spawn-host`)
- * starts here for the same reason, and to stay small.
+ * the real CLI in ./binCli.ts.
  */
 import packageJson from "../package.json" with { type: "json" };
 import * as NodeSea from "node:sea";
@@ -21,9 +20,7 @@ if (
   })
 ) {
   const command = process.argv[2];
-  // The server starts these helpers without its --base-dir, so they would cache under
-  // ~/.t3 for a server with another home; `browser setup` runs under sudo, which could
-  // leave a root-owned cache there.
+  // Helpers omit --base-dir; browser setup may run as root. Avoid caching in the wrong home.
   const uncached =
     command === "__spawn-host" ||
     command === "__load-bundle" ||
