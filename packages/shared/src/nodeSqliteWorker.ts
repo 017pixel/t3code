@@ -53,6 +53,8 @@ export function sqliteWorkerMain(
     try {
       if (request.operation === "open") {
         options = request.options;
+        // A sequential lease reuses this worker for another database.
+        cache.clear();
         database = new DatabaseSync(options.filename, {
           readOnly: options.readonly,
           allowExtension: options.allowExtension,

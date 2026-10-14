@@ -147,7 +147,16 @@ const makeWorker = Effect.fnUntraced(function* (): Effect.fn.Return<
     for (const resume of pending.values()) resume(Effect.fail(failure));
     pending.clear();
   };
-  worker.on("error", fail);
+  // "error" means the worker died on its own, for example out of memory. The
+  // client cannot recover: the native connection and its PRAGMAs are gone.
+  // Crash as a failure on the main thread did, so a supervisor restarts the
+  // process instead of leaving it up with every query failing.
+  worker.on("error", (cause) => {
+    fail(cause);
+    process.nextTick(() => {
+      throw new Error("SQLite worker crashed", { cause });
+    });
+  });
   worker.on("exit", (code) => fail(new Error(`SQLite worker exited with code ${code}`)));
   worker.on("message", (response: SqliteWorkerResponse) => {
     const resume = pending.get(response.id);
