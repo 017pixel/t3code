@@ -1,4 +1,4 @@
-import * as CodexAppServerClientFactoryService from "../../provider/CodexAppServerClientFactory.ts";
+import * as CodexFactory from "../../provider/CodexAppServerClientFactory.ts";
 import * as NodeOS from "node:os";
 
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
@@ -801,7 +801,7 @@ describe("CodexAdapterV2 process spawning", () => {
           PlatformError.systemError({ _tag: "NotFound", module: "ChildProcess", method: "spawn" }),
         );
       });
-      const factory = yield* CodexAppServerClientFactoryService.CodexAppServerClientFactory.pipe(
+      const factory = yield* CodexFactory.CodexAppServerClientFactory.pipe(
         Effect.provide(CodexAdapterV2.layerAppServerClientFactory),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(
@@ -1983,38 +1983,37 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const serverConfig = yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie);
       const continuationRequests: Array<ProviderContinuationRequests.ProviderContinuationRequest> =
         [];
-      const clientFactory: CodexAppServerClientFactoryService.CodexAppServerClientFactory["Service"] =
-        {
-          open: (openInput) =>
-            Layer.build(CodexReplay.layerReplay(transcript)).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterOpenSessionError({
-                    driver: CodexAdapterV2.CODEX_DRIVER_KIND,
-                    providerSessionId: openInput.providerSessionId,
-                    cause,
-                  }),
-              ),
-              Effect.flatMap((context) =>
-                Effect.service(CodexClient.CodexAppServerClient).pipe(
-                  Effect.map((client) =>
-                    withCodexReplayChildMetadata(client, transcript, readChildMetadata),
-                  ),
-                  Effect.map(
-                    (client) =>
-                      ({
-                        ...client,
-                        request: (method, params) =>
-                          onRequest(method, params).pipe(
-                            Effect.andThen(client.request(method, params)),
-                          ),
-                      }) satisfies CodexClient.CodexAppServerClient["Service"],
-                  ),
-                  Effect.provide(context),
+      const clientFactory: CodexFactory.CodexAppServerClientFactory["Service"] = {
+        open: (openInput) =>
+          Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                  providerSessionId: openInput.providerSessionId,
+                  cause,
+                }),
+            ),
+            Effect.flatMap((context) =>
+              Effect.service(CodexClient.CodexAppServerClient).pipe(
+                Effect.map((client) =>
+                  withCodexReplayChildMetadata(client, transcript, readChildMetadata),
                 ),
+                Effect.map(
+                  (client) =>
+                    ({
+                      ...client,
+                      request: (method, params) =>
+                        onRequest(method, params).pipe(
+                          Effect.andThen(client.request(method, params)),
+                        ),
+                    }) satisfies CodexClient.CodexAppServerClient["Service"],
+                ),
+                Effect.provide(context),
               ),
             ),
-        };
+          ),
+      };
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_CODEX_SETTINGS,

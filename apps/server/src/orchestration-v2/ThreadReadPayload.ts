@@ -7,11 +7,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-/**
- * Keep shell badges, search, chain order and settlement dates; PR views read canonical snapshots.
- * Stacks stay whole: clients show a stack's saved layers before it refreshes, and the read
- * payload and the shell wire send each distinct stack once per thread.
- */
+/** Keep badge, search and settlement fields; PR views read canonical snapshots. */
 export const compactThreadPullRequests = (
   thread: OrchestrationV2AppThread,
 ): OrchestrationV2AppThread => {
@@ -39,9 +35,7 @@ export const compactThreadPullRequests = (
   };
 };
 
-// Native stacks are repeated on every linked PR. The shell needs their summaries,
-// but reading and decoding the same layer list dozens of times dominates large installs.
-// This is an internal read projection; the public thread and shell schemas stay unchanged.
+// Store repeated stacks once without changing the public thread schema.
 const ReadPayload = Schema.fromJsonString(
   Schema.Struct({
     thread: OrchestrationV2AppThreadJson,

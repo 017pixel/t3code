@@ -9,20 +9,8 @@ import {
   encodeThreadReadPayload,
 } from "../../orchestration-v2/ThreadReadPayload.ts";
 
-/**
- * A read projection of each thread's payload with repeated pull request stacks stored once, plus
- * a compact copy for the shell and background sweeps. ProjectionStore writes it next to the
- * thread row.
- *
- * Another build sharing this database rewrites thread payloads without it. The triggers mark the
- * read row stale on any thread write, whoever makes it, and readers use the thread payload for a
- * stale or missing row until this build writes the thread again.
- *
- * ProjectionStore's readers join this table, so it cannot depend on migration 63 running: a
- * database that recorded another build's migration at or above 63 skips it. runMigrations also
- * runs the default export after every migration pass, and it does nothing once the table and
- * triggers exist.
- */
+// Startup also ensures this table when another build recorded migration 63 or above.
+// Triggers invalidate read rows when a build that does not maintain them writes a thread.
 const ensureInTransaction = (sql: SqlClient.SqlClient, rebuild: boolean) =>
   Effect.gen(function* () {
     const columns = yield* sql<{ readonly name: string }>`
@@ -32,8 +20,7 @@ const ensureInTransaction = (sql: SqlClient.SqlClient, rebuild: boolean) =>
     if (current && rebuild) {
       yield* sql`DELETE FROM orchestration_v2_projection_thread_reads`;
     } else if (!current) {
-      // Development builds of this change created the table without `source_stale`. It is derived
-      // from the thread rows, so rebuild it.
+      // Early builds lacked source_stale; the derived rows can be rebuilt.
       yield* sql`DROP TABLE IF EXISTS orchestration_v2_projection_thread_reads`;
       yield* sql`
         CREATE TABLE orchestration_v2_projection_thread_reads (
@@ -94,7 +81,6 @@ const ensureInTransaction = (sql: SqlClient.SqlClient, rebuild: boolean) =>
     `;
   });
 
-/** Creates the projection when it is missing. */
 const ensureThreadReadProjection = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql.withTransaction(ensureInTransaction(sql, false));
