@@ -408,7 +408,7 @@ available.
 
 - Updater runtime: `apps/desktop/src/updates/DesktopUpdates.ts`.
 - `electron-updater` adapter: `apps/desktop/src/electron/ElectronUpdater.ts`.
-- `apps/desktop/src/application.ts` only wires the updater layers into the desktop runtime.
+- `apps/desktop/src/main.ts` only wires the updater layers into the desktop runtime.
 - Update UX:
   - Background checks run on startup delay + interval.
   - No automatic download or install.

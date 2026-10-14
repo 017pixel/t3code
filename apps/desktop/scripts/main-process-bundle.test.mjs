@@ -24,11 +24,11 @@ it("keeps lazy Linux imports and worker bundles from executing desktop startup t
     ]);
     await Promise.all([
       NodeFSP.copyFile(
-        new URL("../src/main.ts", import.meta.url),
-        NodePath.join(directory, "src/main.ts"),
+        new URL("../src/mainEntry.ts", import.meta.url),
+        NodePath.join(directory, "src/mainEntry.ts"),
       ),
       NodeFSP.writeFile(
-        NodePath.join(directory, "src/application.ts"),
+        NodePath.join(directory, "src/main.ts"),
         `import { shared } from "./shared.ts";
 export function run() {
   process.emit("startup", shared.value);
@@ -51,10 +51,10 @@ export function run() {
       ),
     ]);
     assert.ok(Array.isArray(desktopConfig.pack));
-    const fixtureEntries = new Set(["src/main.ts", "src/application.ts", ...workerEntries]);
+    const fixtureEntries = new Set(["src/mainEntry.ts", "src/main.ts", ...workerEntries]);
     for (const packConfig of desktopConfig.pack) {
-      if (!Array.isArray(packConfig.entry)) continue;
-      if (!packConfig.entry.some((entry) => fixtureEntries.has(entry))) continue;
+      if (!Object.values(packConfig.entry ?? {}).some((entry) => fixtureEntries.has(entry)))
+        continue;
       await build({
         ...packConfig,
         config: false,
@@ -124,8 +124,8 @@ it("keeps the real desktop chunks from requiring the application entry", async (
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-desktop-chunks-"));
   try {
     assert.ok(Array.isArray(desktopConfig.pack));
-    const packConfig = desktopConfig.pack.find(
-      (config) => Array.isArray(config.entry) && config.entry.includes("src/application.ts"),
+    const packConfig = desktopConfig.pack.find((config) =>
+      Object.values(config.entry ?? {}).includes("src/main.ts"),
     );
     assert.ok(packConfig);
     await build({

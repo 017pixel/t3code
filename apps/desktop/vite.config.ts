@@ -56,7 +56,7 @@ export default defineConfig({
       outExtensions: () => ({ js: ".cjs" }),
       define: publicConfigDefine,
       outputOptions: { codeSplitting: true },
-      entry: ["src/main.ts", "src/application.ts"],
+      entry: { main: "src/mainEntry.ts", application: "src/main.ts" },
       clean: true,
       deps: {
         alwaysBundle: (id) => !id.startsWith("node:") && !isMainProcessExternal(id),
