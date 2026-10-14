@@ -13,12 +13,14 @@ const NativeHeader = withUniwind(ScreenStackHeaderConfig, {
   titleColor: { fromClassName: "titleColorClassName", styleProperty: "accentColor" },
 });
 
-/** Native presentation for local context whose owner supplies its dismissal callback. */
-export function AppSheet(props: {
+export interface SheetProps {
   readonly title: string;
   readonly children: ReactNode;
   readonly onClose: () => void;
-}) {
+}
+
+/** Native presentation. Scrollable children use automatic insets beneath the iOS header. */
+export function Sheet(props: SheetProps) {
   const containerStyle = useResolveClassNames("bg-sheet");
   const screenId = useId();
   const [isOpen, setIsOpen] = useState(true);
