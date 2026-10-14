@@ -4966,7 +4966,7 @@ it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("compact PR events", 
         WHERE command_id = ${"compact-pr-sync"}
       `;
       assert.equal(rows.length, 1);
-      assert.equal(rows[0]?.event_type, "thread.pull-request-link-updated");
+      assert.equal(rows[0]?.event_type, "thread.pull-request-link-synced");
       const payload = JSON.parse(rows[0]!.payload_json);
       assert.equal(payload.number, 2);
       assert.isUndefined(payload.pullRequests);
