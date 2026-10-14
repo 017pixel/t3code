@@ -407,13 +407,29 @@ it.effect("keeps the prior activity anchor and hides the system prompt after idl
         items: [item],
       })(item),
     ).toBe(false);
-    for (const status of ["failed", "interrupted", "cancelled", "rolled_back"] as const) {
+    for (const status of [
+      "preparing",
+      "starting",
+      "running",
+      "waiting",
+      "completed",
+      "failed",
+      "interrupted",
+      "cancelled",
+      "rolled_back",
+    ] as const) {
       yield* store.apply({
         id: EventId.make(`idle-${status}`),
         type: "run.updated",
         threadId: value.thread.id,
         occurredAt: at(2 * MINUTE_MS),
-        payload: { ...finished, status },
+        payload: {
+          ...finished,
+          status,
+          completedAt: ["preparing", "starting", "running", "waiting"].includes(status)
+            ? null
+            : finished.completedAt,
+        },
       });
       const persisted = (yield* store.getThreadShell(value.thread.id))!;
       const derived = ProjectionStore.threadShellFromProjection(

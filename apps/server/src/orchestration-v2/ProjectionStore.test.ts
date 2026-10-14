@@ -3203,6 +3203,14 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       });
       yield* applyRun("failed");
       yield* assertSummary("Plan limit reached.", "usage_limit");
+      const candidateSql = yield* SqlClient.SqlClient;
+      yield* candidateSql`UPDATE orchestration_v2_projection_runs
+        SET payload_json = json_set(payload_json, '$.idleCompactionOfRunId', ${RunId.make("run:limit-shell:source")})
+        WHERE run_id = ${original.id}`;
+      yield* assertSummary(null, null);
+      yield* candidateSql`UPDATE orchestration_v2_projection_runs
+        SET payload_json = json_remove(payload_json, '$.idleCompactionOfRunId')
+        WHERE run_id = ${original.id}`;
       const queuedRunId = RunId.make("run:limit-shell:queued");
       yield* store.apply({
         id: EventId.make("event:limit-shell:queued"),
@@ -5510,6 +5518,24 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ],
       );
 
+      yield* sql`UPDATE orchestration_v2_projection_runs
+        SET payload_json = json_set(payload_json, '$.idleCompactionOfRunId', ${sourceRun1Id})
+        WHERE run_id = ${sourceRun1Id}`;
+      for (const forkId of [targetThreadId, nestedThreadId]) {
+        const projection = yield* projectionStore.getThreadProjection(forkId);
+        const page = yield* projectionStore.getTimelinePage(forkId, {
+          view: "messages",
+          limit: 100,
+        });
+        for (const rows of [projection.visibleTurnItems, page.items]) {
+          assert.isFalse(
+            rows.some((row) => row.item.type === "user_message" && row.item.runId === sourceRun1Id),
+          );
+        }
+      }
+      yield* sql`UPDATE orchestration_v2_projection_runs
+        SET payload_json = json_remove(payload_json, '$.idleCompactionOfRunId')
+        WHERE run_id = ${sourceRun1Id}`;
       yield* sql`
         DELETE FROM orchestration_v2_projection_turn_items
         WHERE run_id IN (${sourceRun1Id}, ${sourceRun2Id})

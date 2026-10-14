@@ -1355,8 +1355,15 @@ function visibleTurnItemsThroughRun(input: {
       sourceItemId: row.sourceItemId,
       item: row.item,
     }));
+  const idleRunIds = new Set(
+    input.sourceProjection.runs
+      .filter((run) => run.idleCompactionOfRunId !== undefined)
+      .map((run) => run.id),
+  );
   const localPrefix = inheritedVisibleTurnItemsFromLocalItems(
     input.sourceProjection.turnItems.filter((item) => {
+      if (item.type === "user_message" && item.runId !== null && idleRunIds.has(item.runId))
+        return false;
       if (
         isOrchestrationV2SupersededInterrupt({
           item,
@@ -3585,6 +3592,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             SELECT latest.run_id FROM orchestration_v2_projection_runs latest
             WHERE latest.thread_id = t.thread_id
               AND latest.status <> 'queued'
+              AND json_extract(latest.payload_json, '$.idleCompactionOfRunId') IS NULL
               AND NOT (
                 latest.status = 'cancelled'
                 AND json_extract(latest.payload_json, '$.startedAt') IS NULL
@@ -5004,12 +5012,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         if (sourceRun !== undefined) {
           const ordinals = new Map(source.records.runs.map((run) => [run.id, run.ordinal]));
           const sourceItems = source.local.map((row) => row.item);
+          const idleRunIds = new Set(
+            source.records.runs
+              .filter((run) => run.idleCompactionOfRunId !== undefined)
+              .map((run) => run.id),
+          );
           inherited = [
             ...source.visible.filter(
               (row) => row.item.threadId !== fork.threadId || row.item.type === "fork",
             ),
             ...source.local.filter(
               (row) =>
+                !(
+                  row.item.type === "user_message" &&
+                  row.item.runId !== null &&
+                  idleRunIds.has(row.item.runId)
+                ) &&
                 !isOrchestrationV2SupersededInterrupt({
                   item: row.item,
                   attempts: source.records.attempts,
@@ -5446,10 +5464,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT candidate.run_id
               FROM orchestration_v2_projection_runs candidate
               WHERE candidate.thread_id = t.thread_id
-                AND NOT (
-                  json_extract(candidate.payload_json, '$.idleCompactionOfRunId') IS NOT NULL
-                  AND candidate.status IN ('completed', 'failed', 'interrupted', 'cancelled', 'rolled_back')
-                )
+                AND json_extract(candidate.payload_json, '$.idleCompactionOfRunId') IS NULL
                 AND NOT (
                   candidate.status = 'queued'
                   AND json_extract(candidate.payload_json, '$.queueHeld') IS 1
@@ -5638,7 +5653,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
           AND r.status = 'completed' AND r.completed_at >= ${DateTime.formatIso(completedAfter)}
           AND json_extract(r.payload_json, '$.idleCompactionOfRunId') IS NULL
-          AND lower(trim(json_extract(m.payload_json, '$.text'))) <> '/compact'
+          AND lower(trim(json_extract(m.payload_json, '$.text'), ${javascriptTrimWhitespace})) <> '/compact'
           AND json_extract(p.payload_json, '$.driver') IN ${sql.in(Object.keys(PROMPT_CACHE_TTL_MS))}
           AND COALESCE((
             SELECT json_extract(turn.payload_json, '$.tokenUsage.usedTokens')

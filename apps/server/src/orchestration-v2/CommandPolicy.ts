@@ -141,6 +141,16 @@ export function resolveMessageDispatchIntent(
   if (activeRun.status === "preparing" || activeRun.status === "starting") {
     return { type: "queue_after_active" };
   }
+  const activeMessage = projection.messages.find(
+    (message) => message.id === activeRun.userMessageId,
+  );
+  if (
+    activeMessage !== undefined &&
+    activeMessage.attachments.length === 0 &&
+    ["/compact", "/logout"].includes(activeMessage.text.trim().toLowerCase())
+  ) {
+    return { type: "queue_after_active" };
+  }
 
   const providerThread = projection.providerThreads.find(
     (candidate) => candidate.id === activeRun.providerThreadId,
