@@ -58,7 +58,6 @@ function bootTarget(entry: BootCatalogEntry): ConnectionTarget | null {
 
 let bootCatalogState: EnvironmentCatalogState | null | undefined;
 
-/** The catalog this page booted with, as display-only entries. */
 export function readBootCatalogState(): EnvironmentCatalogState | null {
   if (bootCatalogState !== undefined) return bootCatalogState;
   bootCatalogState = null;
@@ -92,13 +91,7 @@ function hasPrimaryEntry(catalog: EnvironmentCatalogState): boolean {
   return false;
 }
 
-/**
- * True from a boot with a snapshot until its first screen is painted. While
- * held, the boot-aware atoms serve only snapshot data, so connection replies
- * arriving meanwhile do not re-render or restart the first screen's renders;
- * the screen switches to live data once, after it has painted. Connecting
- * itself does not wait for it.
- */
+// Hold display data through first paint to avoid reply-driven rerenders; connecting stays live.
 export const bootHoldAtom = Atom.make(readBootSnapshot() !== null).pipe(
   Atom.keepAlive,
   Atom.withLabel("web-boot-hold"),
@@ -114,10 +107,7 @@ function releaseBootHold(): void {
   appAtomRegistry.set(bootHoldAtom, false);
 }
 
-/**
- * Keeps the boot hold until the returned function runs. The hold ends when
- * every part of the first screen that retained it has painted.
- */
+/** Release once every part of the first screen that retained the hold has painted. */
 export function retainBootHold(): () => void {
   if (!isBootHeld()) return () => {};
   bootHoldRetainers++;
@@ -130,10 +120,7 @@ export function retainBootHold(): () => void {
   };
 }
 
-/**
- * Runs `release` after the next frame paints. Hidden windows get no animation
- * frames, hence the timer.
- */
+/** Release after paint, with a timer fallback for hidden windows. */
 export function releaseBootHoldAfterPaint(release: () => void): () => void {
   const frame = requestAnimationFrame(() => setTimeout(release, 0));
   const timer = setTimeout(release, 250);
@@ -155,17 +142,7 @@ let lastMerged: {
   readonly merged: EnvironmentCatalogState;
 } | null = null;
 
-/**
- * Shows the boot catalog until the live one can stand on its own: the
- * registry has loaded the saved environments and, where there is one,
- * platform discovery has registered the primary environment. Until then the
- * boot entries discovery registers (the primary and desktop-local backends
- * such as WSL) stand in for theirs. After that a desktop-local backend's boot
- * entry stands until discovery registers it or stops expecting it, so a WSL
- * backend that answers later than the primary does not vanish meanwhile. A
- * discovery that ends without the primary drops them, so the workspace
- * settles as it does without a snapshot.
- */
+// Keep primary/WSL stand-ins until discovery registers them or stops expecting them.
 const catalogValueAtom = Atom.make((get): EnvironmentCatalogState => {
   const boot = readBootCatalogState();
   if (boot !== null && get(bootHoldAtom)) return boot;
@@ -216,10 +193,7 @@ const CONNECTING_STATE: SupervisorConnectionState = Object.freeze({
 });
 const CONNECTING_RESULT = AsyncResult.success(CONNECTING_STATE);
 
-/**
- * A boot-only environment has no supervisor yet. It reports connecting, which
- * is what startup is doing, instead of an idle "available" state.
- */
+// Boot-only entries have no supervisor yet but must display Connecting, not idle.
 const stateAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.make((get) => {
     const bootEntry = readBootCatalogState()?.entries.has(environmentId) === true;
@@ -267,7 +241,6 @@ function bootCatalogEntry(
 
 let bootCatalogRecorderStarted = false;
 
-/** Keeps the boot snapshot's environment list in step with the live catalog. */
 export function startBootCatalogRecorder(): void {
   if (bootCatalogRecorderStarted) return;
   bootCatalogRecorderStarted = true;

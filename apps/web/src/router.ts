@@ -13,9 +13,7 @@ export function getRouter(history: RouterHistory) {
     // settings or pull-request navigation.
     defaultPreload: "intent",
   });
-  // Intent preloads are speculative: a chunk they fail to fetch reloads the
-  // page only once a navigation renders it (the split route component keeps
-  // the failure and reloads on render).
+  // Failed intent preloads reload only when navigation renders the route.
   const preloadRoute = router.preloadRoute;
   router.preloadRoute = ((options: Parameters<typeof preloadRoute>[0]) =>
     preloadRouteSpeculatively(() => preloadRoute(options))) as typeof preloadRoute;

@@ -114,9 +114,7 @@ function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
 let landingConsidered = false;
 
 export const Route = createFileRoute("/_chat/")({
-  // On the first load, a browser with a boot snapshot opens its empty draft
-  // without waiting for the server (see bootLanding.ts). Hovering a link to
-  // "/" preloads this route, which is no visit.
+  // Route preloads are not visits and must not open a landing draft.
   beforeLoad: async ({ preload }) => {
     if (preload || landingConsidered) return;
     landingConsidered = true;

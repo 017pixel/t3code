@@ -247,7 +247,6 @@ type PullRequestListItem =
   | {
       readonly kind: "row";
       readonly key: string;
-      /** Rows sit 2px apart within a group and groups 12px apart, as the stacked list did. */
       readonly gap: "none" | "row" | "group";
       readonly entryKey: string;
       readonly entry: EnvironmentPullRequestEntry;
@@ -255,7 +254,6 @@ type PullRequestListItem =
 
 const EMPTY_PULL_REQUEST_LIST_ITEMS: ReadonlyArray<PullRequestListItem> = [];
 
-/** The grouped rows as one flat list, so the page renders only the rows in view. */
 function pullRequestListItems(
   groups: ReadonlyArray<{
     readonly key: string;
@@ -286,7 +284,6 @@ function pullRequestListItems(
 const pullRequestListItemKey = (item: PullRequestListItem) => item.key;
 const pullRequestListItemType = (item: PullRequestListItem) => item.kind;
 
-/** One list item at the page's content width. */
 function PullRequestListLane({
   className,
   children,
@@ -1757,15 +1754,12 @@ function PullRequestsRouteView() {
         if (!viewport) return;
         const bounds = viewport.getBoundingClientRect();
         const visibleY = Math.min(Math.max(y, bounds.top), bounds.bottom - 1);
-        // The row under the pointer: the lowest one starting at or above it,
-        // else the topmost. The list recycles rows, so DOM order is not the
-        // order on screen.
+        // Recycled rows' DOM order differs from their screen order.
         let key: string | null = null;
         let keyTop = -Infinity;
         let topmost: { key: string | null; top: number } | null = null;
         for (const row of viewport.querySelectorAll<HTMLElement>("[data-pull-request-key]")) {
           const rect = row.getBoundingClientRect();
-          // Recycled rows waiting off screen do not count.
           if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
           const top = rect.top;
           const rowKey = row.dataset.pullRequestKey ?? null;
@@ -2036,7 +2030,6 @@ function PullRequestsRouteView() {
       </PullRequestListLane>
     );
   };
-  // Everything a visible row reads; a change re-renders the rows the list has mounted.
   const listExtraData = useMemo(
     () => [
       capableEnvironments.length,

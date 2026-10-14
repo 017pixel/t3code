@@ -24,14 +24,10 @@ import {
 } from "./lib/chunkReloadGuard";
 import { restoreStackTraces } from "./lib/bootStackTraces";
 
-// Every import above has evaluated; startup code runs with full stacks.
 restoreStackTraces();
 prepareProviderAuthDelivery();
 if (readBootSnapshot() !== null) {
-  // The first-run gate renders nothing until saved settings load, and project
-  // icons read their cache synchronously; start both right after this module
-  // runs, in their own task, so a first screen painted from the boot snapshot
-  // already has them.
+  // Hydrate the first-run gate and icons in their own task before snapshot rendering.
   setTimeout(() => {
     void ensureClientSettingsHydrated().catch(() => undefined);
     void projectFaviconCache.hydrate();
@@ -56,8 +52,6 @@ const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string
 // entry URL names the build, and the error names the asset (except in
 // Safari), so each failed asset of each build gets one reload. Later
 // failures while that reload is pending keep their rejection and their reload.
-// An idle or hover preload claims its own failure (see chunkReloadGuard), so
-// it keeps its rejection, and the chunk's first real use reloads.
 let reloadScheduled = false;
 window.addEventListener("vite:preloadError", (event) => {
   if (reloadScheduled || isRoutePreloadPending()) return;

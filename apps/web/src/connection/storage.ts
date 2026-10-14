@@ -375,11 +375,7 @@ function removeDatabaseValuesInRange(
 const bootShellsTaken = new Set<EnvironmentId>();
 const bootServerConfigsTaken = new Set<EnvironmentId>();
 
-/**
- * Hands each environment's boot snapshot value to the first cache load only.
- * A later load (a reconnected environment) reads IndexedDB, which the live
- * state has written since.
- */
+// Reconnects must read the updated IndexedDB cache, not the first boot's snapshot.
 function takeBootValue<A>(
   taken: Set<EnvironmentId>,
   environmentId: EnvironmentId,
@@ -736,7 +732,6 @@ export const layer = Layer.effectContext(
     });
     const cacheStore = Persistence.EnvironmentCacheStore.of({
       loadShell: (environmentId) => {
-        // The boot snapshot already holds this page's copy, decoded.
         const boot = takeBootValue(bootShellsTaken, environmentId, (snapshot) =>
           snapshot.shells.get(environmentId),
         );

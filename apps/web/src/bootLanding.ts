@@ -3,18 +3,12 @@ import { useSyncExternalStore } from "react";
 
 import type { DraftId, DraftSessionState } from "./composerDraftStore";
 
-/**
- * The index route normally opens the most recent project's draft only after
- * the server confirms its defaults (server settings, t3.json). A browser that
- * booted with a snapshot opens the empty draft it already has at once, and the
- * defaults land on it when the server answers. Until then the draft accepts
- * typing but not sending.
- */
+/** A snapshot landing accepts typing but waits for server defaults before sending. */
 export interface PendingLandingDraft {
   readonly draftId: DraftId;
-  /** Where the draft sat when it opened; a move by the user from there drops the landing. */
+  /** A user move from this project drops the landing. */
   readonly projectRef: ScopedProjectRef;
-  /** The draft's workspace context when it opened; a user change keeps theirs. */
+  /** Preserve changes the user makes while defaults load. */
   readonly openedWith: LandingDraftContext;
 }
 
@@ -67,7 +61,6 @@ export function usePendingLandingDraft(): PendingLandingDraft | null {
   return useSyncExternalStore(subscribe, readPendingLandingDraft, readPendingLandingDraft);
 }
 
-/** Whether this draft still waits for the server's defaults before it can send. */
 export function useLandingDraftDefaultsPending(draftId: DraftId | null): boolean {
   const landing = usePendingLandingDraft();
   return draftId !== null && landing?.draftId === draftId;

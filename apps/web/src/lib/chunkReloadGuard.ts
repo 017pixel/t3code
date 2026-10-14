@@ -50,13 +50,7 @@ export function reloadOnceForChunkLoadError(
 let speculativeLoads = 0;
 const speculativeFailures = new WeakSet<object>();
 
-/**
- * Runs a load nothing waits on yet (an idle or hover preload). A chunk it
- * fails to fetch, say on a network blip, does not reload the page: the load
- * claims its failure, and the first real use requests the chunk again and
- * gets the reload if it still fails. That use must call the import itself,
- * not await this load. Resolves to undefined on failure.
- */
+/** Swallow speculative failures; real use must import again to retry and get a guarded reload. */
 export function preloadSpeculatively<T>(load: () => Promise<T>): Promise<T | undefined> {
   speculativeLoads += 1;
   return new Promise<T>((resolve) => resolve(load())).then(
@@ -72,28 +66,18 @@ export function preloadSpeculatively<T>(load: () => Promise<T>): Promise<T | und
   );
 }
 
-/**
- * Whether a speculative load is in flight. It claims its failure only once its
- * rejection settles, after the `vite:preloadError` event, so the listener
- * decides a task later.
- */
+// Rejections settle after vite:preloadError, so the listener must check ownership a task later.
 export function isSpeculativeLoadPending(): boolean {
   return speculativeLoads > 0;
 }
 
-/** Whether a speculative load claimed this `vite:preloadError` payload as its own. */
 export function isSpeculativeLoadFailure(failure: unknown): boolean {
   return typeof failure === "object" && failure !== null && speculativeFailures.has(failure);
 }
 
 let routePreloads = 0;
 
-/**
- * Runs a route intent preload. The split route component keeps a chunk
- * failure to itself and reloads the page once a navigation renders it, so
- * the preload cannot claim the failure. Failures reported while one runs are
- * left to the route.
- */
+// Route components retain chunk failures and reload on navigation; leave those failures to them.
 export function preloadRouteSpeculatively<T>(load: () => Promise<T>): Promise<T> {
   routePreloads += 1;
   return new Promise<T>((resolve) => resolve(load())).finally(() => {

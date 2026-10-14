@@ -225,12 +225,10 @@ function ChatRouteGlobalShortcuts() {
   return null;
 }
 
-/** Applies the server's defaults to a draft the index route opened early. */
 function LandingDraftDefaults() {
   const landing = usePendingLandingDraft();
   const handleNewThread = useNewThreadHandler();
-  // Load balancing can move the draft to another machine of its project
-  // before the defaults land; they come from, and go to, wherever it is now.
+  // Load balancing can move the draft; use defaults from its current machine.
   const draft = useComposerDraftStore((store) =>
     landing === null ? null : store.getDraftSession(landing.draftId),
   );
@@ -243,7 +241,6 @@ function LandingDraftDefaults() {
           : scopeProjectRef(draft.environmentId, draft.projectId),
     [draft, landing],
   );
-  // A machine the user picked stands, and the draft stops waiting on any.
   const movedByUser =
     draft !== null &&
     draft.environmentSelection === "manual" &&
@@ -251,8 +248,7 @@ function LandingDraftDefaults() {
     landing !== null &&
     (projectRef.environmentId !== landing.projectRef.environmentId ||
       projectRef.projectId !== landing.projectRef.projectId);
-  // Waits for the server to answer this session; the live config then also
-  // carries any change made since, for a landing that runs after boot.
+  // Require this session's answer, then prefer its latest config over the boot snapshot.
   const sessionConfig = useAtomValue(
     projectRef === null
       ? NO_LIVE_CONFIG_ATOM
@@ -262,9 +258,7 @@ function LandingDraftDefaults() {
   const liveConfig = sessionConfig === null ? null : (currentConfig ?? sessionConfig);
   // One run per place the draft sits: load balancing can move it during one.
   const startedRef = useRef<string | null>(null);
-  // The snapshot can name an environment this browser has since removed. Its
-  // config never arrives, so the draft stops waiting for it and reports the
-  // environment as unavailable instead of connecting forever.
+  // Removed environments never answer; stop waiting so the unavailable state can show.
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const landingEnvironmentGone =
     projectRef !== null && catalog.isReady && !catalog.entries.has(projectRef.environmentId);
@@ -277,9 +271,7 @@ function LandingDraftDefaults() {
     const startedKey = `${landing.draftId} ${projectRef.environmentId} ${projectRef.projectId}`;
     if (startedRef.current === startedKey) return;
     startedRef.current = startedKey;
-    // A machine the draft moved to can answer before its projects arrive, and
-    // the defaults need the project. The screen may still show the snapshot's
-    // settings; the defaults use the server's.
+    // Config can arrive before projects; defaults need both.
     void waitForProject(projectRef)
       .catch(() => undefined)
       .then(() =>
@@ -317,8 +309,7 @@ function ChatRouteLayout() {
     strict: false,
     select: (params) => resolveThreadRouteTarget(params),
   });
-  // The thread routes render nothing here: the root layout hosts their view
-  // (see KeptChatSurface) so it outlives the route swaps around it.
+  // Root owns the chat view so it survives route swaps.
   useLayoutEffect(() => registerChatSurface(<KeptChatSurface />), []);
   return (
     <>

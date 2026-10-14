@@ -477,11 +477,7 @@ export const primaryEnvironmentMissingAtom = Atom.make(false).pipe(
 
 const NO_DESKTOP_LOCAL_BACKENDS: ReadonlySet<string> = new Set();
 
-/**
- * Desktop-local backends the desktop lists, by backend id, that discovery may
- * still register: their bootstrap was not rejected. A WSL backend that is
- * still booting stays here until it answers or the desktop stops listing it.
- */
+// Pending, non-rejected desktop backends keep their boot entries until discovery settles.
 export const discoverableDesktopLocalBackendsAtom = Atom.make(NO_DESKTOP_LOCAL_BACKENDS).pipe(
   Atom.keepAlive,
   Atom.withLabel("web-discoverable-desktop-local-backends"),

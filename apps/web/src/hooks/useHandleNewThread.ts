@@ -88,11 +88,7 @@ export function useNewThreadHandler() {
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
         replace?: boolean;
-        /**
-         * Applies the defaults to a draft the index route opened before the
-         * server answered (see bootLanding.ts): as if opened from "/", typed
-         * text stays, and a workspace context the user changed meanwhile wins.
-         */
+        /** Apply late defaults without replacing typed text or workspace picks. */
         landing?: PendingLandingDraft;
         /** The server's settings when the caller holds them before this view does. */
         serverSettings?: ServerSettings;
@@ -231,8 +227,7 @@ export function useNewThreadHandler() {
           !composerDraftHasUserContent(getComposerDraft(reusableStoredDraftThread.draftId)))
           ? reusableStoredDraftThread
           : null;
-      // The landing draft stays on screen; one that stopped being this
-      // project's reusable draft keeps whatever it has.
+      // Do not replace a landing draft that stopped being reusable.
       if (landing !== null && emptyStoredDraftThread?.draftId !== landing.draftId) {
         return Promise.resolve(null);
       }
@@ -307,8 +302,7 @@ export function useNewThreadHandler() {
             ) {
               return null;
             }
-            // What the user changed on the landing draft while the defaults
-            // loaded stands; everything else, the model included, gets them.
+            // Preserve user changes while applying defaults to untouched fields.
             const landingNow = landingSession === null ? null : landingDraftContext(landingSession);
             const landingChanged = (field: keyof LandingDraftContext) =>
               landing !== null &&
@@ -321,8 +315,7 @@ export function useNewThreadHandler() {
               !landingChanged("startFromOrigin")
             ) {
               workspaceContext = {
-                // The composer fills a local draft's branch from git status,
-                // which is no pick; it holds while the env mode does.
+                // Preserve the git-status branch if the environment mode stays the same.
                 branch:
                   landingNow !== null && landingNow.envMode === defaultEnvMode
                     ? landingNow.branch

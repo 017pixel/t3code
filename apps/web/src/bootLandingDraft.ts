@@ -28,12 +28,7 @@ import { readProjects, readThreadShell } from "./state/entities";
 import { allEnvironmentShellsBootstrappedAtom } from "./state/shell";
 import { environmentThreadShells } from "./state/threads";
 
-/**
- * The draft the index route can open right away, or null when it must wait
- * for the server: no boot snapshot or no project yet. Like the new-thread
- * handler, it reuses the most recent project's empty draft or mints one; a
- * minted draft starts from the cached settings until the real defaults land.
- */
+/** Open an empty draft with cached defaults until the session answers. */
 export async function resolveLandingDraft(): Promise<DraftId | null> {
   const pending = readPendingLandingDraft();
   if (pending !== null) return pending.draftId;
@@ -47,7 +42,6 @@ export async function resolveLandingDraft(): Promise<DraftId | null> {
       "updated_at",
     )[0] ?? null;
   if (project === null) return null;
-  // The draft is keyed by the user's project grouping.
   await ensureClientSettingsHydrated().catch(() => undefined);
   const logicalProjectKey = deriveLogicalProjectKeyFromSettings(
     project,
@@ -70,7 +64,6 @@ export async function resolveLandingDraft(): Promise<DraftId | null> {
   ) {
     draftId = stored.draftId;
   } else {
-    // A draft with typed text stays where it is; a new one opens beside it.
     const settings = resolveProjectSettings(
       readBootSnapshot()?.serverConfigs.get(project.environmentId)?.settings ??
         DEFAULT_SERVER_SETTINGS,
@@ -101,9 +94,7 @@ export async function resolveLandingDraft(): Promise<DraftId | null> {
     projectRef: scopeProjectRef(draft.environmentId, draft.projectId),
     openedWith: landingDraftContext(draft),
   });
-  // The defaults read t3.json once the session is ready; asking now lets the
-  // query go out with the session instead of after the first render, and the
-  // query cache answers the later read.
+  // Start the cached defaults query with the session, before the first render.
   void readT3ProjectFile(project.environmentId, project.workspaceRoot).catch(() => undefined);
   return draftId;
 }
