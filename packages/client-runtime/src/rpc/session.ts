@@ -218,30 +218,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     const protocolContext = yield* Layer.build(layerProtocol).pipe(
       Effect.withSpan("environment.websocket.connect"),
     );
-    const rawClient = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
-    const [discoverSourceControl, invalidateDiscovery] = yield* Effect.cachedInvalidateWithTTL(
-      rawClient[WS_METHODS.serverDiscoverSourceControl]({}),
-      "30 seconds",
-    );
-    type DiscoveryMethod = WsRpcProtocolClient[typeof WS_METHODS.serverDiscoverSourceControl];
-    const discover = (
-      input: Parameters<DiscoveryMethod>[0],
-      options?: Parameters<DiscoveryMethod>[1],
-    ) =>
-      options !== undefined
-        ? rawClient[WS_METHODS.serverDiscoverSourceControl](input, options)
-        : input.refresh === true
-          ? // Invalidate again to discard any older discovery that was already in flight.
-            invalidateDiscovery.pipe(
-              Effect.andThen(rawClient[WS_METHODS.serverDiscoverSourceControl](input)),
-              Effect.tap(() => invalidateDiscovery),
-            )
-          : discoverSourceControl;
-    const protocolClient: WsRpcProtocolClient = {
-      ...rawClient,
-      // Preserve discard/header options by bypassing the shared response.
-      [WS_METHODS.serverDiscoverSourceControl]: discover as DiscoveryMethod,
-    };
+    const protocolClient = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
     const initialConfigDeferred = yield* Deferred.make<ServerConfig>();
     const serverConfigExit = yield* Deferred.make<void, ServerConfigSubscriptionError>();
     const configSubscriptionClosed = yield* Deferred.make<never, ConnectionAttemptError>();
