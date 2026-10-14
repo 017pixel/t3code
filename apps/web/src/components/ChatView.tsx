@@ -510,7 +510,6 @@ import {
   DRAFT_HERO_TRANSITION_EASING,
   MOBILE_COMPOSER_VIEW_TRANSITION_NAME,
   MOBILE_DRAFT_HEADLINE_VIEW_TRANSITION_NAME,
-  isMobileComposerTransitionEnabled,
   runMobileComposerTransition,
 } from "./chat/draftHeroTransition";
 import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
@@ -553,7 +552,7 @@ import {
   getAntigravitySendBlockReason,
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
-  resolveThreadSettingsUpdatesForNextTurn,
+  resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
@@ -6373,15 +6372,16 @@ export default function ChatView(props: ChatViewProps) {
       runtimeMode: RuntimeMode;
       interactionMode: ProviderInteractionMode;
     }): Promise<AtomCommandResult<void, unknown>> => {
-      const updates = serverThread
-        ? resolveThreadSettingsUpdatesForNextTurn(serverThread, input)
-        : null;
-      if (!updates) {
+      if (!serverThread) {
         return AsyncResult.success(undefined);
       }
 
       let result: AtomCommandResult<void, unknown> = AsyncResult.success(undefined);
-      const { metadataUpdate } = updates;
+      const metadataUpdate = resolveThreadMetadataUpdateForNextTurn({
+        currentModelSelection: serverThread.modelSelection,
+        currentBranch: serverThread.branch,
+        ...(input.branch ? { nextBranch: input.branch } : {}),
+      });
       if (metadataUpdate) {
         result = mapAtomCommandResult(
           await updateThreadMetadata({
@@ -6398,13 +6398,13 @@ export default function ChatView(props: ChatViewProps) {
         }
       }
 
-      if (updates.runtimeMode !== null) {
+      if (input.runtimeMode !== serverThread.runtimeMode) {
         result = mapAtomCommandResult(
           await setThreadRuntimeMode({
             environmentId,
             input: {
               threadId: input.threadId,
-              runtimeMode: updates.runtimeMode,
+              runtimeMode: input.runtimeMode,
               createdAt: input.createdAt,
             },
           }),
@@ -6415,13 +6415,13 @@ export default function ChatView(props: ChatViewProps) {
         }
       }
 
-      if (updates.interactionMode !== null) {
+      if (input.interactionMode !== serverThread.interactionMode) {
         result = mapAtomCommandResult(
           await setThreadInteractionMode({
             environmentId,
             input: {
               threadId: input.threadId,
-              interactionMode: updates.interactionMode,
+              interactionMode: input.interactionMode,
               createdAt: input.createdAt,
             },
           }),
@@ -9545,33 +9545,11 @@ export default function ChatView(props: ChatViewProps) {
       }
     }
 
-    const dockDraftHeroThreadKey =
+    if (
       multipleModelSelections === null &&
-      shouldDockDraftHeroForSubmission({ isDraftHeroState, activeThreadKey, submissionIntent })
-        ? activeThreadKey
-        : null;
-    // A plain send can dispatch before the dock and optimistic render.
-    // Mobile view transitions still snapshot the hero before it changes.
-    const dispatchBeforeRender =
-      multipleModelSelections === null &&
-      submissionIntent !== "background" &&
-      composerAttachmentsSnapshot.length === 0 &&
-      !compactBeforeSend &&
-      (!isServerThread ||
-        serverThread === null ||
-        resolveThreadSettingsUpdatesForNextTurn(serverThread, {
-          ...(localCheckoutBranchMismatch
-            ? { branch: localCheckoutBranchMismatch.currentBranch }
-            : {}),
-          runtimeMode,
-          interactionMode: sendInteractionMode,
-        }) === null) &&
-      !(dockDraftHeroThreadKey && isMobileComposerTransitionEnabled(panelAnimationsActive));
-    if (dockDraftHeroThreadKey && dispatchBeforeRender) {
-      // Batched with the optimistic turn below; the rect is read before React renders any of it.
-      captureDraftHeroComposerRect();
-      setDockedDraftHeroThreadKey(dockDraftHeroThreadKey);
-    } else if (dockDraftHeroThreadKey) {
+      shouldDockDraftHeroForSubmission({ isDraftHeroState, activeThreadKey, submissionIntent }) &&
+      activeThreadKey
+    ) {
       let resolveDockStarted: (() => void) | undefined;
       const dockStarted = new Promise<void>((resolve) => {
         resolveDockStarted = resolve;
@@ -9580,7 +9558,7 @@ export default function ChatView(props: ChatViewProps) {
         () => {
           flushSync(() => {
             captureDraftHeroComposerRect();
-            setDockedDraftHeroThreadKey(dockDraftHeroThreadKey);
+            setDockedDraftHeroThreadKey(activeThreadKey);
           });
           resolveDockStarted?.();
         },
@@ -10021,7 +9999,54 @@ export default function ChatView(props: ChatViewProps) {
       ctxSelectedModelSelection.options,
     );
 
-    const startTurnForSend = (turnAttachments: Awaited<typeof turnAttachmentsPromise>) => {
+    let failure: AtomCommandResult<unknown, unknown> | null = null;
+
+    if (failure === null && isServerThread) {
+      const settingsResult = await persistThreadSettingsForNextTurn({
+        threadId: threadIdForSend,
+        createdAt: messageCreatedAt,
+        ...(localCheckoutBranchMismatch
+          ? { branch: localCheckoutBranchMismatch.currentBranch }
+          : {}),
+        runtimeMode,
+        interactionMode: sendInteractionMode,
+      });
+      if (settingsResult._tag === "Failure") {
+        failure = settingsResult;
+      }
+    }
+
+    const turnAttachmentsResult = await settlePromise(async () => {
+      const turnAttachments = await turnAttachmentsPromise;
+      const liveFileBlockReason = readLiveAttachmentCapabilities().fileBlockReason;
+      if (liveFileBlockReason !== null) {
+        throw new Error(liveFileBlockReason);
+      }
+      return turnAttachments;
+    });
+    if (failure === null && turnAttachmentsResult._tag === "Failure") {
+      failure = turnAttachmentsResult;
+    }
+
+    if (failure === null && compactBeforeSend) {
+      const compactResult = await startThreadTurn({
+        environmentId,
+        input: {
+          threadId: threadIdForSend,
+          message: { messageId: newMessageId(), role: "user", text: "/compact", attachments: [] },
+          modelSelection: ctxSelectedModelSelection,
+          runtimeMode,
+          interactionMode: sendInteractionMode,
+        },
+      });
+      if (compactResult._tag === "Failure") {
+        failure = compactResult;
+      }
+    }
+
+    let backgroundDraftOpened = false;
+    let turnStartSucceeded = false;
+    if (failure === null && turnAttachmentsResult._tag === "Success") {
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
           ? {
@@ -10051,7 +10076,12 @@ export default function ChatView(props: ChatViewProps) {
                 : {}),
             }
           : undefined;
-      return startThreadTurn({
+      const backgroundThreadRef =
+        submissionIntent === "background" && isLocalDraftThread
+          ? scopeThreadRef(environmentId, threadIdForSend)
+          : null;
+      if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
+      const startPromise = startThreadTurn({
         environmentId,
         input: {
           threadId: threadIdForSend,
@@ -10059,10 +10089,10 @@ export default function ChatView(props: ChatViewProps) {
             messageId: messageIdForSend,
             role: "user",
             text: outgoingMessageText,
-            attachments: turnAttachments,
+            attachments: turnAttachmentsResult.value,
             ...(() => {
               const context = buildOutgoingMessageContext(
-                turnAttachments.map((attachment, index) =>
+                turnAttachmentsResult.value.map((attachment, index) =>
                   "id" in attachment && attachment.id !== undefined
                     ? attachment.id
                     : composerAttachmentsSnapshot[index]!.id,
@@ -10096,67 +10126,6 @@ export default function ChatView(props: ChatViewProps) {
           createdAt: messageCreatedAt,
         },
       });
-    };
-    // Nothing above awaited, so React has not rendered the state queued for
-    // this send yet and the command reaches the socket first.
-    const earlyTurnStart = dispatchBeforeRender ? startTurnForSend([]) : null;
-
-    let failure: AtomCommandResult<unknown, unknown> | null = null;
-
-    if (failure === null && isServerThread && !dispatchBeforeRender) {
-      const settingsResult = await persistThreadSettingsForNextTurn({
-        threadId: threadIdForSend,
-        createdAt: messageCreatedAt,
-        ...(localCheckoutBranchMismatch
-          ? { branch: localCheckoutBranchMismatch.currentBranch }
-          : {}),
-        runtimeMode,
-        interactionMode: sendInteractionMode,
-      });
-      if (settingsResult._tag === "Failure") {
-        failure = settingsResult;
-      }
-    }
-
-    const turnAttachmentsResult = dispatchBeforeRender
-      ? AsyncResult.success<Awaited<typeof turnAttachmentsPromise>>([])
-      : await settlePromise(async () => {
-          const turnAttachments = await turnAttachmentsPromise;
-          const liveFileBlockReason = readLiveAttachmentCapabilities().fileBlockReason;
-          if (liveFileBlockReason !== null) {
-            throw new Error(liveFileBlockReason);
-          }
-          return turnAttachments;
-        });
-    if (failure === null && turnAttachmentsResult._tag === "Failure") {
-      failure = turnAttachmentsResult;
-    }
-
-    if (failure === null && compactBeforeSend) {
-      const compactResult = await startThreadTurn({
-        environmentId,
-        input: {
-          threadId: threadIdForSend,
-          message: { messageId: newMessageId(), role: "user", text: "/compact", attachments: [] },
-          modelSelection: ctxSelectedModelSelection,
-          runtimeMode,
-          interactionMode: sendInteractionMode,
-        },
-      });
-      if (compactResult._tag === "Failure") {
-        failure = compactResult;
-      }
-    }
-
-    let backgroundDraftOpened = false;
-    let turnStartSucceeded = false;
-    if (failure === null && turnAttachmentsResult._tag === "Success") {
-      const backgroundThreadRef =
-        submissionIntent === "background" && isLocalDraftThread
-          ? scopeThreadRef(environmentId, threadIdForSend)
-          : null;
-      if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
-      const startPromise = earlyTurnStart ?? startTurnForSend(turnAttachmentsResult.value);
       if (backgroundThreadRef) {
         markPromotedDraftThreadByRef(backgroundThreadRef);
         try {
