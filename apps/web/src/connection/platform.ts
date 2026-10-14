@@ -28,6 +28,7 @@ import {
   type DesktopEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   type EnvironmentId,
+  type ExecutionEnvironmentDescriptor,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -342,15 +343,52 @@ const layerCapabilities = Layer.effectContext(
   }),
 );
 
+let primaryDescriptorPrefetchStarted = false;
+let primaryDescriptorPrefetch: {
+  readonly httpBaseUrl: string;
+  readonly startedAt: number;
+  readonly settled: Promise<ExecutionEnvironmentDescriptor | null>;
+} | null = null;
+
+// Start discovery before route chunks occupy the browser's connections.
+export function prefetchPrimaryEnvironmentDescriptor(): void {
+  if (primaryDescriptorPrefetchStarted) return;
+  primaryDescriptorPrefetchStarted = true;
+  const read = readPrimaryEnvironmentTargetResult();
+  if (read._tag === "Failure" || read.target === null) return;
+  const httpBaseUrl = read.target.target.httpBaseUrl;
+  primaryDescriptorPrefetch = {
+    httpBaseUrl,
+    startedAt: Date.now(),
+    settled: Effect.runPromise(
+      fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
+        Effect.provide(PrimaryEnvironmentHttpLayer.layer),
+      ),
+    ).catch(() => null),
+  };
+}
+
+const PREFETCHED_DESCRIPTOR_MAX_AGE_MS = 10_000;
+
 const loadPrimaryConnectionRegistration = Effect.fn(
   "web.connectionPlatform.loadPrimaryConnectionRegistration",
 )(function* (resolved: PrimaryEnvironmentTarget) {
-  const descriptor = yield* fetchRemoteEnvironmentDescriptor({
-    httpBaseUrl: resolved.target.httpBaseUrl,
-  }).pipe(
-    Effect.provide(PrimaryEnvironmentHttpLayer.layer),
-    Effect.mapError(mapRemoteEnvironmentError),
-  );
+  const prefetch = primaryDescriptorPrefetch;
+  primaryDescriptorPrefetch = null;
+  const now = yield* Clock.currentTimeMillis;
+  const prefetched =
+    prefetch?.httpBaseUrl === resolved.target.httpBaseUrl &&
+    now - prefetch.startedAt <= PREFETCHED_DESCRIPTOR_MAX_AGE_MS
+      ? yield* Effect.promise(() => prefetch.settled)
+      : null;
+  const descriptor =
+    prefetched ??
+    (yield* fetchRemoteEnvironmentDescriptor({
+      httpBaseUrl: resolved.target.httpBaseUrl,
+    }).pipe(
+      Effect.provide(PrimaryEnvironmentHttpLayer.layer),
+      Effect.mapError(mapRemoteEnvironmentError),
+    ));
   return new PrimaryConnectionRegistration({
     target: new PrimaryConnectionTarget({
       environmentId: descriptor.environmentId,
