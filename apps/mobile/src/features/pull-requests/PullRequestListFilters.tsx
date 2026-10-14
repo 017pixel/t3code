@@ -1,5 +1,5 @@
 import { ScrollView } from "react-native";
-import type { ControlPillMenuProps } from "../../components/ControlPillMenu.types";
+import type { MenuProps } from "../../components/Menu.types";
 import { ListFilterMenu } from "../workspace/ListFilterMenu";
 import { DEFAULT_PR_LIST_CONTROLS, type PullRequestListControls } from "./pullRequestList";
 
@@ -146,7 +146,7 @@ export function PullRequestListFilters(props: {
     Number(Boolean(value.filters.review)) +
     Number(Boolean(value.filters.checks)) +
     Number(Boolean(value.projectId));
-  const more: ControlPillMenuProps["actions"] = [
+  const more: MenuProps["actions"] = [
     {
       id: "drafts",
       title: value.filters.draft ? DRAFTS[value.filters.draft] : "Drafts",

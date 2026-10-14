@@ -20,7 +20,7 @@ import {
 } from "./pullRequestAnimations";
 import { openOnProviderLabel } from "./pullRequestActions";
 import * as Clipboard from "expo-clipboard";
-import { ControlPillMenu } from "../../components/ControlPillMenu";
+import { Menu } from "../../components/Menu";
 import { IconButton } from "../../components/IconButton";
 import { Button } from "../../components/Button";
 import { usePullRequestReviewDraft } from "./usePullRequestReviewDraft";
@@ -919,7 +919,7 @@ export function PullRequestFileRouteScreen({
           title={title}
           onBack={() => navigation.goBack()}
           trailing={
-            <ControlPillMenu
+            <Menu
               actions={[
                 {
                   id: "word-wrap",
@@ -964,7 +964,7 @@ export function PullRequestFileRouteScreen({
               <View pointerEvents="none">
                 <IconButton icon="ellipsis" accessibilityLabel="Diff options" />
               </View>
-            </ControlPillMenu>
+            </Menu>
           }
         />
       ) : null}

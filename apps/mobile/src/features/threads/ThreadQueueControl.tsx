@@ -17,7 +17,7 @@ import { Button } from "../../components/Button";
 import { AndroidSheetHeader } from "../../components/AndroidScreenHeader";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
-import { ControlPillMenu } from "../../components/ControlPill";
+import { Menu } from "../../components/Menu";
 import { MaterialScreenContent } from "../../components/MaterialScreenContent";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
@@ -328,7 +328,7 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
                 background={theme["--color-sheet"]}
                 onRemove={() => void act(run.id, "remove")}
               >
-                <ControlPillMenu
+                <Menu
                   accessibilityLabel={`Actions for queued message ${index + 1}`}
                   shouldOpenOnLongPress
                   actions={[
@@ -405,7 +405,7 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
                       </Pressable>
                     ) : null}
                   </Pressable>
-                </ControlPillMenu>
+                </Menu>
               </QueueRowSwipeable>
             </Animated.View>
           </QueueShiftedRow>
