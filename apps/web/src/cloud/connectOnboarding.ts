@@ -18,11 +18,7 @@ export const EMPTY_CONNECT_ONBOARDING_OPT_OUT_STATE: ConnectOnboardingOptOutStat
   optOutAccounts: [],
 };
 
-/**
- * The Clerk account as the managed-auth shell sees it. The shell provides it
- * so startup code can follow sign-ins without importing Clerk. Null when no
- * shell is mounted.
- */
+/** Lets startup observe sign-ins without importing Clerk. */
 export interface ManagedAccountState {
   readonly isLoaded: boolean;
   readonly isSignedIn: boolean | undefined;
@@ -31,14 +27,8 @@ export interface ManagedAccountState {
 
 export const ManagedAccountContext = createContext<ManagedAccountState | null>(null);
 
-/**
- * The account whose sign-in should open the onboarding wizard. Every sign-in
- * or account switch that completes while this is mounted requests it, since
- * account transitions clear the connected relay environments. A cold load
- * observes undefined → account and must not re-prompt. The wizard loads
- * lazily, so this runs eagerly where it mounts and the wizard takes the
- * request whenever its chunk arrives.
- */
+// Observe outside the lazy wizard so sign-ins during its load aren't lost.
+// A restored session must not re-prompt; account switches clear relay connections.
 export function useConnectOnboardingRequest() {
   const account = useContext(ManagedAccountContext);
   const isLoaded = account?.isLoaded ?? false;
@@ -49,9 +39,7 @@ export function useConnectOnboardingRequest() {
 
   useEffect(() => {
     if (!isLoaded) return;
-    // A loaded-but-incomplete snapshot (signed in, user id not yet populated)
-    // must not be recorded as signed-out — the next render would then look
-    // like a fresh sign-in on a cold load.
+    // An incomplete signed-in snapshot must not look like a fresh sign-in later.
     if (isSignedIn && !userId) return;
     const previousAccount = observedAccountRef.current;
     const nextAccount = isSignedIn && userId ? userId : null;

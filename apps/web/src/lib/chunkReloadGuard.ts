@@ -1,20 +1,11 @@
 // Split chunks are fetched lazily, so a deploy (or desktop server swap)
 // between page load and a later fetch can 404 the old hashed assets. One
-// reload picks up the fresh index.html. sessionStorage remembers which
-// failures already had their reload, so a chunk that keeps failing, even one
-// every boot requests, reloads once and then surfaces. A later deploy fails a
-// different asset and gets its own reload. The list is capped per build and
-// restarts when the page's build changes, so a long-lived tab keeps reloading
-// for each new deploy.
+// reload picks up the fresh index.html. Remember failures per build so a
+// persistent failure cannot loop and later deploys still get a reload.
 const CHUNK_RELOAD_GUARD_KEY = "t3code:chunk-load-reloads";
 const MAX_CHUNK_RELOADS = 20;
 
-/**
- * Called from the `vite:preloadError` listener with the page's build and a
- * key naming the asset that failed. Reloads at most once per key and returns
- * whether it did, so the caller knows whether to swallow the event or let
- * the error surface through the normal paths.
- */
+/** Returns whether the preload-error listener should swallow the failure for a reload. */
 export function reloadOnceForChunkLoadError(
   build: string,
   failure: string,

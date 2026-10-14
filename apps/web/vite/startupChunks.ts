@@ -3,8 +3,7 @@ import * as NodePath from "node:path";
 
 import { normalizePath, type HtmlTagDescriptor, type Plugin, type Rolldown } from "vite-plus";
 
-// What a cold open runs before its first commit: the app, then the chat
-// layout, home, a draft, or a thread. Keep in sync with src/routes.
+// Keep the initial route graphs in sync with src/routes.
 const STARTUP_MODULES = {
   main: "src/main.tsx",
   chat: "src/routes/_chat.tsx?tsr-split=component",
@@ -12,27 +11,8 @@ const STARTUP_MODULES = {
   "chat-draft": "src/routes/_chat.draft.$draftId.tsx?tsr-split=component",
   "chat-thread": "src/routes/_chat.$environmentId.$threadId.tsx?tsr-split=component",
 };
-/**
- * Groups the startup graphs into a few chunks while preserving route boundaries.
- *
- * index.html loads `src/bootstrap.ts`, which imports `src/main.tsx` lazily so
- * it can show boot errors. Left alone, the browser learns the main graph only
- * after that entry runs and the route chunks only after the auth check, and
- * both arrive as hundreds of small shared chunks.
- *
- * Listing main and the startup routes as build inputs lets Rolldown tag their
- * static graphs `$initial` after tree shaking. A module belongs to the first
- * startup graph that imports it. Chat modules that other pages (settings, usage,
- * welcome) or the shell's lazy parts (the root notices, the command palette)
- * also import move into one chunk per set of those users. A settings or welcome
- * cold open then downloads only the chat code it uses, and a chat cold open
- * fetches those few extra chunks in the same wave. index.html preloads main's
- * static graph; the router preloads the initial location's route chunks
- * alongside authentication.
- * The bootstrap entry keeps its own modules, so it never statically imports
- * a startup chunk and can still report a failed load.
- */
-// Transformed code size below which a set of shared chat modules joins main.
+// Group static startup graphs without pulling chat-only code into other routes.
+// Bootstrap stays separate so it can report main's chunk-load failures.
 const MAIN_SHARED_SET_SIZE = 100_000;
 const sharedChunkName = (owner: string | undefined) =>
   owner === undefined || owner in STARTUP_MODULES ? null : owner;
@@ -83,7 +63,6 @@ export function startupChunksPlugin(): Plugin {
                     includeDependenciesRecursively: false,
                   })),
                   {
-                    // The chat modules other pages also render; see buildEnd.
                     name: (id: string) =>
                       sharedChunkName(startupModuleOwners.get(normalizePath(id))),
                     debugName: "startup-shared",
@@ -127,9 +106,7 @@ export function startupChunksPlugin(): Plugin {
       }
       const codeLength = (id: string) =>
         this.getModuleInfo(moduleIds.get(id) ?? id)?.code?.length ?? 0;
-      // Other pages and the app shell also load chat modules: route pages outside
-      // the chat layout, grouped by family since settings.general renders inside
-      // settings, and the shell's lazy parts, such as the root notices.
+      // Group nested routes together: settings.general renders inside settings.
       const startupEntries = new Set(
         Object.values(STARTUP_MODULES).map((entry) => normalizePath(NodePath.join(root, entry))),
       );
@@ -152,9 +129,7 @@ export function startupChunksPlugin(): Plugin {
         ([family, entries]) =>
           [NodePath.basename(family).split(".")[0], staticClosure(...entries)] as const,
       );
-      // Each set of families that uses a chat module gets one chunk, so a page or
-      // lazy part downloads only the chat code it uses. A set's chunk imports only
-      // chunks of its supersets, which every family in it also needs.
+      // Shared chunks import only supersets of their users, avoiding unrelated chat code.
       const setSizes = new Map<string, number>();
       for (const [id, owner] of owners) {
         if (owner === "main") continue;
@@ -164,9 +139,7 @@ export function startupChunksPlugin(): Plugin {
         owners.set(id, set);
         setSizes.set(set, (setSizes.get(set) ?? 0) + codeLength(id));
       }
-      // Small sets join main instead of adding requests to every chat cold open.
-      // A module moves only when everything it imports is in main or moves too,
-      // so main never imports a shared chunk.
+      // Absorb small sets only when their imports move too, so main stays self-contained.
       const toMain = new Set(
         [...owners].flatMap(([id, owner]) =>
           (setSizes.get(owner) ?? Infinity) < MAIN_SHARED_SET_SIZE ? [id] : [],
@@ -209,7 +182,6 @@ export function startupChunksPlugin(): Plugin {
           }
           return files;
         };
-        // index.html already loads the bootstrap entry and its imports.
         const bootstrapFiles = importClosure(
           chunks.filter(
             (chunk) => chunk.facadeModuleId === normalizePath(NodePath.join(root, "index.html")),
@@ -231,8 +203,7 @@ export function startupChunksPlugin(): Plugin {
             "The boot entry must catch main's chunk load failures before importing app code.",
           );
         }
-        // The main entry can become a facade after grouping. Preload its
-        // static dependencies only; selected routes retain their own preload lists.
+        // Main may become a facade; routes retain their own preload lists.
         const files = [
           ...importClosure(
             chunks.filter(
@@ -244,7 +215,6 @@ export function startupChunksPlugin(): Plugin {
           const chunk = bundle[file];
           return chunk?.type === "chunk" ? chunk : undefined;
         };
-        // Largest first: those downloads take longest.
         startupFiles = files.toSorted(
           (left, right) => (chunkAt(right)?.code.length ?? 0) - (chunkAt(left)?.code.length ?? 0),
         );
@@ -276,13 +246,7 @@ export function startupChunksPlugin(): Plugin {
   };
 }
 
-/**
- * lucide-react/dynamic imports each of ~1,900 icons lazily. When the app also
- * imports one of those icons statically, Rolldown keeps it as a dynamic entry
- * in a chunk of its own, which put ~140 one-icon files on the startup path.
- * A query suffix gives the lazy copies their own module ids, so static imports
- * bundle normally and only icons picked at runtime load as separate files.
- */
+// Separate dynamic icon ids so static icons don't each become a startup chunk.
 export function lucideDynamicIconsPlugin(): Plugin {
   const suffix = "?lucide-dynamic";
   return {

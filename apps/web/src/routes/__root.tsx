@@ -89,10 +89,8 @@ import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
 
-// These optional notices mount with the shell. A stale chunk still gets the
-// `vite:preloadError` reload first, and while that reload is pending Vite
-// resolves the import to undefined. A chunk that keeps failing renders nothing
-// instead of replacing the shell with the route error view.
+// The preload-error guard runs first and may resolve an import to undefined.
+// Persistent optional-chunk failures must leave the shell usable.
 const renderNothing = () => null;
 const ConnectOnboardingDialog = lazy(() =>
   import("../components/cloud/ConnectOnboardingDialog")
@@ -105,8 +103,6 @@ const NightlyMobileBetaNotice = lazy(() =>
     .catch(() => ({ default: renderNothing })),
 );
 
-// Sign-ins are observed here, outside the lazy wizard chunk, so one that
-// completes while the chunk loads still opens the wizard.
 function ConnectOnboarding() {
   const request = useConnectOnboardingRequest();
   return (

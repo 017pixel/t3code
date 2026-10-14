@@ -37,10 +37,6 @@ export async function waitForDraftHeroTransition(): Promise<void> {
   ]);
 }
 
-/**
- * Whether `runMobileComposerTransition` runs its update inside a view
- * transition. Otherwise it runs the update synchronously.
- */
 export function isMobileComposerTransitionEnabled(active: boolean): boolean {
   if (!active || typeof document === "undefined" || typeof window === "undefined") return false;
   const mobileViewport = window.matchMedia?.("(max-width: 639px)").matches ?? false;
