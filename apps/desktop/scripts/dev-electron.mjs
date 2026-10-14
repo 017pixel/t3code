@@ -23,7 +23,6 @@ if (!Number.isInteger(port) || port <= 0) {
 
 const requiredFiles = [
   "dist-electron/main.cjs",
-  "dist-electron/application.cjs",
   "dist-electron/electron/WindowsForegroundFocusWorker.cjs",
   "dist-electron/preload.cjs",
   "dist-electron/snapShot/GlobalShiftShortcutWorker.cjs",
@@ -209,10 +208,7 @@ function startWatchers() {
       NodePath.join(desktopDir, directory),
       { persistent: true },
       (_eventType, filename) => {
-        if (
-          typeof filename !== "string" ||
-          !(files.has(filename) || (directory === "dist-electron" && filename.endsWith(".cjs")))
-        ) {
+        if (typeof filename !== "string" || !files.has(filename)) {
           return;
         }
 

@@ -3,8 +3,9 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { loadCursorSdk } from "./sdk.ts";
+import { loadCursorSdk, loadCursorSqlite } from "./sdk.ts";
 import type { Agent, createAgentPlatform } from "@cursor/sdk";
+import type { SqliteLocalAgentStore } from "@cursor/sdk/sqlite";
 
 /**
  * The Cursor Agent SDK runs in this process and spawns a shell for tool
@@ -66,6 +67,7 @@ export class CursorSdk extends Context.Service<
   {
     readonly Agent: typeof Agent;
     readonly createAgentPlatform: typeof createAgentPlatform;
+    readonly SqliteLocalAgentStore: typeof SqliteLocalAgentStore;
   }
 >()("@t3tools/provider-cursor/server/CursorSdk") {}
 
@@ -88,6 +90,9 @@ export const layer = Layer.effect(
         },
         get createAgentPlatform() {
           return loadCursorSdk().createAgentPlatform;
+        },
+        get SqliteLocalAgentStore() {
+          return loadCursorSqlite().SqliteLocalAgentStore;
         },
       }),
     ),

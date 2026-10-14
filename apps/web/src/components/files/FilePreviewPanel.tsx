@@ -1358,6 +1358,7 @@ export default function FilePreviewPanel({
               sizeBytes={attachment.sizeBytes}
               asset={{ environmentId, attachmentId: attachment.id }}
               htmlRender={attachment.htmlRender === true}
+              threadRef={threadRef}
             />
           ) : relativePath && isVideo && absolutePath ? (
             <WorkspaceVideoPreview

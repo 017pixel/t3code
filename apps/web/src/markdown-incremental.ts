@@ -3,7 +3,7 @@ import type { Parser as UnifiedParser, Plugin } from "unified";
 
 type Parser = UnifiedParser<Root>;
 
-const parsedDocuments = new Map<number, { source: string; root: Root; bytes: number }>();
+const parsedDocuments = new Map<string, { root: Root; bytes: number }>();
 let parsedDocumentBytes = 0;
 const MAX_PARSED_DOCUMENT_BYTES = 8 * 1024 * 1024;
 
@@ -19,14 +19,10 @@ export function createCachedMarkdownPlugin(): Plugin<[], Root> {
     this.parser = (source, file) => {
       if (documentParsed) return original(source, file);
       documentParsed = true;
-      let hash = 2166136261;
-      for (let index = 0; index < source.length; index++) {
-        hash = Math.imul(hash ^ source.charCodeAt(index), 16777619);
-      }
-      const cached = parsedDocuments.get(hash);
-      if (cached?.source === source) {
-        parsedDocuments.delete(hash);
-        parsedDocuments.set(hash, cached);
+      const cached = parsedDocuments.get(source);
+      if (cached) {
+        parsedDocuments.delete(source);
+        parsedDocuments.set(source, cached);
         return structuredClone(cached.root);
       }
       const root = original(source, file) as Root;
@@ -34,11 +30,7 @@ export function createCachedMarkdownPlugin(): Plugin<[], Root> {
       // both bytes and entry count. Oversized documents are never retained.
       const bytes = source.length * 16 + 1024;
       if (bytes <= MAX_PARSED_DOCUMENT_BYTES) {
-        if (cached) {
-          parsedDocumentBytes -= cached.bytes;
-          parsedDocuments.delete(hash);
-        }
-        parsedDocuments.set(hash, { source, root: structuredClone(root), bytes });
+        parsedDocuments.set(source, { root: structuredClone(root), bytes });
         parsedDocumentBytes += bytes;
         while (parsedDocumentBytes > MAX_PARSED_DOCUMENT_BYTES || parsedDocuments.size > 128) {
           const oldest = parsedDocuments.keys().next().value!;

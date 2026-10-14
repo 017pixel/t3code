@@ -244,10 +244,10 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
   }
   // The runtime needs neither bin shims (symlinks npm rejects), source maps,
   // nor TypeScript declarations. Keep executable JS and native fallback assets.
-  yield* pruneRuntimeInstall(fs, path, path.join(input.stageDir, "node_modules"));
+  yield* removeNestedBinDirectories(fs, path, path.join(input.stageDir, "node_modules"));
 });
 
-const pruneRuntimeInstall = (
+const removeNestedBinDirectories = (
   fs: FileSystem.FileSystem,
   path: Path.Path,
   root: string,
@@ -262,7 +262,7 @@ const pruneRuntimeInstall = (
       }
       const info = yield* fs.stat(child).pipe(Effect.option);
       if (Option.isSome(info) && info.value.type === "Directory") {
-        yield* pruneRuntimeInstall(fs, path, child);
+        yield* removeNestedBinDirectories(fs, path, child);
       }
     }
   });

@@ -42,8 +42,9 @@ describe("V2 preview upgrade", () => {
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
         [61, "PullRequestReviewGuides"],
-        [62, "ProjectionThreadSweepIndexes"],
-        [63, "ProjectionThreadReadPayload"],
+        [62, "ThreadFailureLookupIndex"],
+        [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -128,8 +129,9 @@ describe("V2 preview upgrade", () => {
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
         [61, "PullRequestReviewGuides"],
-        [62, "ProjectionThreadSweepIndexes"],
-        [63, "ProjectionThreadReadPayload"],
+        [62, "ThreadFailureLookupIndex"],
+        [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -149,14 +151,12 @@ describe("V2 preview upgrade", () => {
   );
 });
 
-it.effect("revalidates a cached schema after another build changes its ledger or schema", () =>
+it.effect("repairs read projections after another build changes its ledger or schema", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations();
-    assert.equal((yield* sql`SELECT * FROM t3_schema_cache`).length, 1);
     yield* runMigrations();
     yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 63`;
-    assert.deepStrictEqual(yield* sql`SELECT * FROM t3_schema_cache`, []);
     assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadReadPayload"]]);
 
     yield* sql`UPDATE effect_sql_migrations SET name = 'OtherBuild' WHERE migration_id = 63`;
@@ -182,15 +182,11 @@ it.effect("revalidates a cached schema after another build changes its ledger or
     assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_projection_thread_reads`, []);
     assert.deepStrictEqual(yield* runMigrations(), []);
 
-    // A cache that matches a schema without the read projection's table or a trigger does not
-    // skip the step that restores them.
     for (const drop of [
       sql`DROP TABLE orchestration_v2_projection_thread_reads`,
       sql`DROP TRIGGER orchestration_v2_projection_thread_reads_stale_on_update`,
     ]) {
       yield* drop;
-      const version = yield* sql<{ schema_version: number }>`PRAGMA schema_version`;
-      yield* sql`UPDATE t3_schema_cache SET schema_version = ${version[0]!.schema_version}`;
       assert.deepStrictEqual(yield* runMigrations(), []);
     }
     assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_projection_thread_reads`, []);

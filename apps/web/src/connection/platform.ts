@@ -350,11 +350,7 @@ let primaryDescriptorPrefetch: {
   readonly settled: Promise<ExecutionEnvironmentDescriptor | null>;
 } | null = null;
 
-/**
- * Reads the primary environment's descriptor alongside the boot auth check,
- * before route chunks queue on the browser's connections. The first primary
- * registration reuses the answer instead of fetching it again.
- */
+// Start discovery before route chunks occupy the browser's connections.
 export function prefetchPrimaryEnvironmentDescriptor(): void {
   if (primaryDescriptorPrefetchStarted) return;
   primaryDescriptorPrefetchStarted = true;
@@ -477,11 +473,7 @@ export const primaryEnvironmentMissingAtom = Atom.make(false).pipe(
 
 const NO_DESKTOP_LOCAL_BACKENDS: ReadonlySet<string> = new Set();
 
-/**
- * Desktop-local backends the desktop lists, by backend id, that discovery may
- * still register: their bootstrap was not rejected. A WSL backend that is
- * still booting stays here until it answers or the desktop stops listing it.
- */
+// Pending, non-rejected desktop backends keep their boot entries until discovery settles.
 export const discoverableDesktopLocalBackendsAtom = Atom.make(NO_DESKTOP_LOCAL_BACKENDS).pipe(
   Atom.keepAlive,
   Atom.withLabel("web-discoverable-desktop-local-backends"),

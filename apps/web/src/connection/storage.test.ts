@@ -2,7 +2,7 @@ import {
   ConnectionTransientError,
   PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
-import { EnvironmentId, ThreadId, TurnItemId, MessageId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { ConnectionCatalogDocument, Persistence } from "@t3tools/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -13,7 +13,7 @@ import * as Stream from "effect/Stream";
 import { afterEach, vi } from "vite-plus/test";
 
 import * as ConnectionStorage from "./storage";
-import { makeThreadProjectionFixture } from "../test-fixtures";
+import { makeStreamingTimelineFixture, makeThreadProjectionFixture } from "../test-fixtures";
 
 const emptyCatalog = {
   schemaVersion: 1,
@@ -172,24 +172,8 @@ describe("environment cache removal", () => {
       const v2Projection = makeThreadProjectionFixture();
       const v2Now = v2Projection.updatedAt;
       const item = {
-        id: TurnItemId.make("cached-item"),
+        ...makeStreamingTimelineFixture().visibleTurnItems[2]!.item,
         threadId: v2Projection.thread.id,
-        runId: null,
-        nodeId: null,
-        providerThreadId: null,
-        providerTurnId: null,
-        nativeItemRef: null,
-        parentItemId: null,
-        ordinal: 1,
-        status: "completed" as const,
-        title: "Assistant",
-        startedAt: v2Now,
-        completedAt: v2Now,
-        updatedAt: v2Now,
-        type: "assistant_message" as const,
-        messageId: MessageId.make("cached-message"),
-        text: "cached reply",
-        streaming: false,
       };
       const projection = {
         ...v2Projection,
@@ -245,16 +229,12 @@ describe("environment cache removal", () => {
         // with nothing compacted uses the envelope.
         yield* cache.saveThread(environmentId, { snapshotSequence: 3, projection: v2Projection });
         const entries = [...values.entries()];
-        expect(entries).toEqual([
-          [
-            expect.anything(),
-            expect.objectContaining({
-              format: "compact-thread-1",
-              omitLocal: false,
-              checkpointItemIds: [],
-            }),
-          ],
-        ]);
+        expect(entries).toHaveLength(1);
+        expect(entries[0]?.[1]).toMatchObject({
+          format: "compact-thread-1",
+          omitLocal: false,
+          checkpointItemIds: [],
+        });
         // Plain entries written by earlier builds still load.
         const [key, envelope] = entries[0] as [IDBValidKey, { readonly data: string }];
         values.set(key, envelope.data);

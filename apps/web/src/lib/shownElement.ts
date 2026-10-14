@@ -1,9 +1,4 @@
-/**
- * The first element matching `selector` that is rendered. A kept thread view
- * that is hidden keeps its DOM (React hides it with `display: none`),
- * including open popups and state attributes, so document-wide checks for
- * "is a menu open" must skip it.
- */
+// Hidden kept views retain popup DOM and attributes; global checks must skip them.
 export function queryShownElement(selector: string): Element | null {
   if (typeof document === "undefined") return null;
   for (const element of document.querySelectorAll(selector)) {

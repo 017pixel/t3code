@@ -15,7 +15,7 @@ import { describe } from "vite-plus/test";
 
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
 import * as OpenCodeServerLedger from "../OpenCodeServerLedger.ts";
-import * as OpenCode2Client from "./OpenCode2Client.ts";
+import * as OpenCode2Client from "./OpenCode2ClientTag.ts";
 import * as OpenCode2Server from "./OpenCode2Server.ts";
 
 // Shapes and content types observed on `opencode serve` 2.0.18 (pid and port replaced). 1.x

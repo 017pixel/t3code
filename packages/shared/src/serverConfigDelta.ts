@@ -59,8 +59,7 @@ export function applyServerConfigDelta(current: ServerConfig, event: ConfigDelta
   for (const key of event.removed) Reflect.deleteProperty(config, key);
   const providers = new Map(current.providers.map((provider) => [provider.instanceId, provider]));
   for (const patch of event.providerChanges) {
-    // A patch this build cannot read leaves its provider out, as a snapshot's
-    // forward-compatible provider array leaves out a provider it cannot read.
+    // Match snapshots' forward-compatible handling of unreadable providers.
     if (patch.changes === undefined) {
       providers.delete(patch.instanceId);
       continue;
@@ -75,8 +74,7 @@ export function applyServerConfigDelta(current: ServerConfig, event: ConfigDelta
       : event.providerOrder.flatMap((id) => providers.get(id) ?? []);
   // A patch for a provider this client already left out is partial; leave it out too.
   const decoded = decodeConfig({ ...config, providers: ordered.filter(isServerProvider) });
-  // Decoding copies every field. Keep the objects this delta left alone, so readers of
-  // unchanged settings, keybindings or providers keep their identity.
+  // Restore unchanged objects' identity after decoding copies them.
   const changed = new Set([...Object.keys(event.changes), ...event.removed]);
   const kept: Record<string, unknown> = { ...decoded };
   for (const key of Object.keys(decoded)) {

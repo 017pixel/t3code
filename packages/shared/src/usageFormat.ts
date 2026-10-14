@@ -8,8 +8,7 @@ import { UsageDay, type UsageResolution, type UsageSummaryInput } from "@t3tools
 
 import type { UsageContractMismatch } from "./usageMerge.ts";
 
-// Created on first use: the first Intl.NumberFormat loads ICU number data, which
-// app startup imports this module without needing.
+// Defer loading ICU number data until a formatter is used.
 let currency: Intl.NumberFormat | undefined;
 let integer: Intl.NumberFormat | undefined;
 

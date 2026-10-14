@@ -15,6 +15,7 @@ import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
@@ -91,6 +92,7 @@ function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.De
         }),
         DesktopWslEnvironment.layerTest(),
         ElectronDialog.layer,
+        ElectronApp.layer,
         Layer.succeed(DesktopWindow.DesktopWindow, {
           createMain: Effect.die("unexpected window create"),
           ensureMain: Effect.die("unexpected window ensure"),

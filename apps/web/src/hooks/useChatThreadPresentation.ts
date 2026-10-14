@@ -3,7 +3,7 @@ import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
 import type { OrchestrationV2ThreadProjection, ScopedThreadRef } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 import { useMemo } from "react";
-import { isStreamingProjectionTextUpdate, isStreamingRowContentUpdate } from "../session-logic";
+import { isStreamingProjectionTextUpdate, isStreamingTurnItemTextUpdate } from "../session-logic";
 import { environmentThreadDetails } from "../state/threads";
 
 /** Token text belongs to the assistant row; lifecycle and metadata still update the chat view. */
@@ -22,16 +22,12 @@ export function useChatThreadPresentation(ref: ScopedThreadRef | null, searching
         !searching &&
         previous !== null &&
         next !== null &&
-        isStreamingProjectionTextUpdate(
-          previous.projection,
-          next.projection,
-          isStreamingRowContentUpdate,
-        ) &&
+        isStreamingProjectionTextUpdate(previous.projection, next.projection) &&
         visible.length === previousVisible.length &&
         visible.every(
           (row, index) =>
             row === previousVisible[index] ||
-            isStreamingRowContentUpdate(previousVisible[index]!, row),
+            isStreamingTurnItemTextUpdate(previousVisible[index]!, row),
         );
       previous = next;
       previousVisible = visible;

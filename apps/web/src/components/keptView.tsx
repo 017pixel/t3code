@@ -18,12 +18,7 @@ import {
 
 import { PortalContainerContext, useOwnPortalContainer } from "~/lib/portalContainer";
 
-/**
- * A thread view that `ThreadRouteView` keeps rendered while hidden. React
- * runs a hidden view's effect cleanups without unmounting it, so work that
- * should survive the hide holds its release here; it runs when the view is
- * evicted or unmounted for good.
- */
+/** Activity runs cleanups on hide; held resources release only on eviction or unmount. */
 export interface KeptViewLifetime {
   /** Runs `release` when the kept view goes away. Returns a function that cancels it. */
   hold(release: () => void): () => void;
@@ -54,7 +49,6 @@ export function createKeptViewLifetime(): KeptViewLifetime & { dispose(): void }
   };
 }
 
-/** One lifetime per kept view key, made on first use. */
 export function createKeptViewLifetimes() {
   const lifetimes = new Map<string, ReturnType<typeof createKeptViewLifetime>>();
   return {
@@ -66,7 +60,6 @@ export function createKeptViewLifetimes() {
       }
       return lifetime;
     },
-    /** Releases every view whose key is not in `keys`. */
     retain(keys: ReadonlySet<string>) {
       for (const [key, lifetime] of lifetimes) {
         if (keys.has(key)) continue;
@@ -77,23 +70,7 @@ export function createKeptViewLifetimes() {
   };
 }
 
-type EditorCallbackKey =
-  | "onBeforeCreate"
-  | "onCreate"
-  | "onUpdate"
-  | "onSelectionUpdate"
-  | "onTransaction"
-  | "onFocus"
-  | "onBlur"
-  | "onDestroy"
-  | "onContentError"
-  | "onDrop"
-  | "onPaste"
-  | "onDelete"
-  | "onMount"
-  | "onUnmount";
-
-const EDITOR_CALLBACK_KEYS: ReadonlyArray<EditorCallbackKey> = [
+const EDITOR_CALLBACK_KEYS = [
   "onBeforeCreate",
   "onCreate",
   "onUpdate",
@@ -108,7 +85,9 @@ const EDITOR_CALLBACK_KEYS: ReadonlyArray<EditorCallbackKey> = [
   "onDelete",
   "onMount",
   "onUnmount",
-];
+] as const;
+
+type EditorCallbackKey = (typeof EDITOR_CALLBACK_KEYS)[number];
 
 function forwardCallback<K extends EditorCallbackKey>(
   options: RefObject<Partial<EditorOptions>>,
@@ -162,19 +141,10 @@ function destroyAfter(instance: KeptEditorInstance, delayMs: number) {
   return () => clearTimeout(timeout);
 }
 
-/**
- * How long an editor made during a render may wait for that render to
- * commit. Thread views mount in transitions, which can take longer than the
- * next task; a render React discards frees its editor after this.
- */
+// Allow transition renders to commit before freeing abandoned editors.
 const UNCOMMITTED_EDITOR_GRACE_MS = 5_000;
 
-/**
- * `useEditor` from @tiptap/react, except that hiding a kept thread view does
- * not destroy the editor: its content, selection and undo history are there
- * when the view is shown again. Outside a kept view, an unmounted editor is
- * destroyed on the next task, as with `useEditor`. Changed `deps` recreate it.
- */
+/** Preserves the editor and undo history across Activity hides; changed deps recreate it. */
 export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyList): Editor {
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -234,9 +204,7 @@ class KeptPureEditorContent extends PureEditorContent {
   declare context: KeptViewLifetime | null;
 
   override componentWillUnmount() {
-    // Inside a kept view the editor's DOM and node views stay where they
-    // are. A hidden view shows them again as is; a removed one destroys
-    // the editor with it (see useKeptEditor).
+    // useKeptEditor owns teardown; Activity hides must preserve node views.
     if (this.context !== null) return;
     super.componentWillUnmount();
   }
@@ -257,7 +225,6 @@ function editorContentKey(editor: Editor | null): string {
   return key;
 }
 
-/** `EditorContent` from @tiptap/react for editors made by `useKeptEditor`. */
 export const KeptEditorContent = memo(
   forwardRef<HTMLDivElement, Omit<EditorContentProps, "ref" | "innerRef">>(
     function KeptEditorContent(props, ref) {
@@ -271,12 +238,7 @@ export const KeptEditorContent = memo(
 /** True while a kept view warms up out of sight; it must not act as the shown thread. */
 export const KeptViewWarmingContext = createContext(false);
 
-/**
- * Frames one kept view. While warming, the view lays out at full size but
- * out of sight, and cannot be focused or clicked; `onWarm` runs two frames
- * after it mounted, once its list has settled. Its popups portal into a
- * container of its own, shown only while the view is shown and not warming.
- */
+/** Warm offscreen for two frames so the list settles before hiding. */
 export function KeptViewFrame({
   viewKey,
   warming,

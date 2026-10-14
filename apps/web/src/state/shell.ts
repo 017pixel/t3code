@@ -41,10 +41,7 @@ const bootOverlays = new Map<
   WeakMap<EnvironmentShellState, EnvironmentShellState>
 >();
 
-/**
- * Until the live state holds a snapshot (from IndexedDB or the server), the
- * boot snapshot stands in as cached data, keeping the live status and error.
- */
+// Boot data stands in for missing snapshots without replacing live status or errors.
 function withBootShell(
   environmentId: EnvironmentId,
   live: EnvironmentShellState,
@@ -88,7 +85,6 @@ function bootStateResult(state: EnvironmentShellState) {
   return result;
 }
 
-/** Shell state with the boot snapshot standing in until live data arrives. */
 export const environmentShell = {
   stateAtom: Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) => {
@@ -123,9 +119,7 @@ export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
   ) {
     return false;
   }
-  // The persisted catalog emits before platform discovery registers the
-  // primary environment. Until it does, an empty workspace is unknown. A
-  // discovery that ends without the primary settles the landing without it.
+  // Wait for primary discovery before treating a persisted catalog as complete.
   if (
     !isHostedStaticApp() &&
     !isLocalEnvironmentDisabled() &&
@@ -156,12 +150,7 @@ export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
   return true;
 }).pipe(Atom.withLabel("web-all-environment-shells-bootstrapped"));
 
-/**
- * Keeps every enabled environment's live shell subscribed, which is what
- * connects it. Unlike the boot-aware atoms above, it reads the live atoms even
- * while the first screen paints from the boot snapshot, so connecting runs
- * alongside that paint instead of after it.
- */
+// Subscribe to live shells so connecting proceeds while the display atoms hold boot data.
 const liveEnvironmentShellsAtom = Atom.make((get) => {
   const catalog = AsyncResult.value(get(environmentCatalog.catalogAtom));
   if (Option.isNone(catalog)) return;
@@ -172,12 +161,7 @@ const liveEnvironmentShellsAtom = Atom.make((get) => {
 
 let environmentShellsStarted = false;
 
-/**
- * Builds the connection runtime, reads every enabled environment's cached
- * shell, and starts its connection without waiting for the first render to
- * read them. Called once the app knows it will render the workspace. The
- * mount lasts for the session, like the sidebar that reads the same atoms.
- */
+// Keep the shell mounted for the session, starting cache reads and connections before render.
 export function startEnvironmentShells(): void {
   if (environmentShellsStarted) return;
   environmentShellsStarted = true;

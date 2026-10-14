@@ -11,7 +11,6 @@ import * as DesktopUpdates from "../../updates/DesktopUpdates.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 
-// Each waits for the updater's configuration, which runs after the window opens.
 export const getUpdateState = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.UPDATE_GET_STATE_CHANNEL,
   payload: Schema.Void,

@@ -7,9 +7,9 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { PositiveInt, type PullRequestChecks } from "@t3tools/contracts";
 
-import * as GitHubApi from "./GitHubApi.ts";
+import * as GitHubApi from "./GitHubApiTag.ts";
 import type { GitHubPullRequestDetail } from "./gitHubPullRequestJson.ts";
-import type { GitHubPullRequestApiError } from "./GitHubPullRequestApi.ts";
+import type { GitHubPullRequestApiError } from "./GitHubPullRequestApiTag.ts";
 import type { ProviderRepositoryRef } from "@t3tools/source-control-core/server/PullRequestProvider";
 
 const HeadSchema = Schema.Struct({

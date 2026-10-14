@@ -1,24 +1,23 @@
 // @effect-diagnostics nodeBuiltinImport:off - only node:perf_hooks exposes the event loop delay histogram.
 import * as NodePerfHooks from "node:perf_hooks";
 
+import { RotatingFileSink } from "@t3tools/shared/logging";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 
-// Node's delay histogram wakes a native timer every resolutionMs and records the
-// gap between wakeups, so an idle loop reads about resolutionMs and a stall of S
-// reads between S and S + resolutionMs. We subtract the resolution, so a delay can
-// undercount a stall by up to resolutionMs.
-//
-// Startup stalls are the costly ones (a large database), so the first samples use
-// ten native wakeups a second and report stalls over 250 ms. After that one wakeup
-// a second and a sample every 30 s catch every stall over 3 s, and an idle backend
-// stays idle.
+import * as ServerConfig from "../config.ts";
+
+// Subtract the histogram resolution to exclude idle delay; stalls can undercount by that much.
+// Sample startup more closely, then reduce wakeups so an idle backend stays idle.
 const STARTUP = { resolutionMs: 100, stallThresholdMs: 250, sampleIntervalMs: 1000 };
 const STEADY = { resolutionMs: 1000, stallThresholdMs: 2000, sampleIntervalMs: 30_000 };
 const STARTUP_SAMPLES = 30;
-/** Longer gaps must show the loop was busy for most of them, or they were a system sleep. */
 const SLEEP_CHECK_MS = 5000;
+const STALL_LOG_MAX_BYTES = 256 * 1024;
 
 /** One sample interval as Node reports it. Delay in ns, active time in ms, CPU in µs. */
 export interface EventLoopReadings {
@@ -36,14 +35,12 @@ export interface EventLoopReadings {
     | "involuntaryContextSwitches"
   >;
   readonly rssBytes: number;
-  /** Read after startup, at the steady resolution and threshold. */
   readonly steady?: boolean;
 }
 
 // Enables the delay histogram for the layer's lifetime. Each read returns the
 // readings since the previous read and resets the histogram. Node skips the first
 // gap after a reset, so a stall right at a sample boundary can be missed.
-// After STARTUP_SAMPLES reads it swaps in a histogram at the steady resolution.
 const makeNodeSampler = Effect.gen(function* () {
   const monitor = (resolution: number) => {
     const histogram = NodePerfHooks.monitorEventLoopDelay({ resolution });
@@ -56,8 +53,7 @@ const makeNodeSampler = Effect.gen(function* () {
   let elu = NodePerfHooks.performance.eventLoopUtilization();
   let usage = process.resourceUsage();
   let sampledAt = NodePerfHooks.performance.now();
-  // The native histogram needs one wakeup before it can record a gap. One
-  // startup probe covers a stall that finishes before the first one-second tick.
+  // Cover stalls before the histogram's first wakeup.
   const armedAt = sampledAt;
   let startupDelayMs = 0;
   // @effect-diagnostics-next-line globalTimersInEffect:off -- The native boot probe must arm before Effect scheduling can run startup work.
@@ -118,55 +114,78 @@ export const stallMs = ({
   const { resolutionMs, stallThresholdMs } = steady ? STEADY : STARTUP;
   const delayMs = Math.round(Math.max(delayMaxNs / 1e6 - resolutionMs, tickDelayMs));
   if (delayMs <= stallThresholdMs) return undefined;
-  // libuv's clock keeps running while the system sleeps on macOS and Windows, so waking
-  // reads as a long gap the loop spent idle. A stall runs code: ELU counts it as active
-  // once the loop has started, and CPU time counts it before that (ELU reads 0 there).
-  // Short gaps are reported as read, so startup stalls are never lost to that lag.
+  // System sleep produces an idle gap. CPU time covers startup before ELU counts active time;
+  // short stalls bypass this check because those readings can lag.
   const busyMs = Math.max(activeMs, (usage.userCPUTime + usage.systemCPUTime) / 1000);
   if (delayMs > SLEEP_CHECK_MS && busyMs < delayMs / 2) return undefined;
   return delayMs;
 };
 
-/**
- * Samples event loop health every second at startup and every 30 s after, and
- * records a `server.eventLoop.stall` span with a warning when the loop stalled for
- * more than 250 ms at startup or 2 s after, so stalls land in
- * the local trace file and Settings > Diagnostics without OTLP. Takes the sampler
- * so tests can inject readings.
- */
+const encodeStallLine = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+
+export interface StallLogOptions {
+  readonly filePath: string;
+  readonly maxBytes: number;
+}
+
+/** Records stalls in diagnostics and the capped local log. */
 export const layerWith = (
   makeSampler: Effect.Effect<Effect.Effect<EventLoopReadings>, never, Scope.Scope>,
+  stallLog: StallLogOptions,
 ) =>
   Layer.effectDiscard(
     Effect.gen(function* () {
       const sample = yield* makeSampler;
+      // A log that cannot open must not stop the monitor; the span still records stalls.
+      const stallSink = yield* Effect.try(
+        () =>
+          new RotatingFileSink({
+            filePath: stallLog.filePath,
+            maxBytes: stallLog.maxBytes,
+            maxFiles: 1,
+            throwOnError: true,
+          }),
+      ).pipe(
+        Effect.catch(() =>
+          Effect.logWarning("event loop stall log unavailable", {
+            filePath: stallLog.filePath,
+          }).pipe(Effect.as(undefined)),
+        ),
+      );
       const tick = Effect.gen(function* () {
         const readings = yield* sample;
         const delayMaxMs = stallMs(readings);
         if (delayMaxMs === undefined) return;
         const { utilization, usage, rssBytes } = readings;
+        const attributes = {
+          delayMaxMs,
+          utilization: Math.round(utilization * 100) / 100,
+          cpuUserMs: Math.round(usage.userCPUTime / 1000),
+          cpuSystemMs: Math.round(usage.systemCPUTime / 1000),
+          majorPageFaults: usage.majorPageFault,
+          minorPageFaults: usage.minorPageFault,
+          involuntaryContextSwitches: usage.involuntaryContextSwitches,
+          rssMb: Math.round(rssBytes / 1024 / 1024),
+        };
         // Root, as the stall has no caller to attach to. Warn level keeps it when
         // T3CODE_TRACE_MIN_LEVEL is raised to cut trace noise.
         yield* Effect.logWarning(`event loop stalled for ${delayMaxMs} ms`).pipe(
-          Effect.withSpan("server.eventLoop.stall", {
-            root: true,
-            level: "Warn",
-            attributes: {
-              delayMaxMs,
-              utilization: Math.round(utilization * 100) / 100,
-              cpuUserMs: Math.round(usage.userCPUTime / 1000),
-              cpuSystemMs: Math.round(usage.systemCPUTime / 1000),
-              majorPageFaults: usage.majorPageFault,
-              minorPageFaults: usage.minorPageFault,
-              involuntaryContextSwitches: usage.involuntaryContextSwitches,
-              rssMb: Math.round(rssBytes / 1024 / 1024),
-            },
-          }),
+          Effect.withSpan("server.eventLoop.stall", { root: true, level: "Warn", attributes }),
         );
+        if (stallSink !== undefined) {
+          const time = DateTime.formatIso(yield* DateTime.now);
+          yield* encodeStallLine({ time, ...attributes }).pipe(
+            Effect.flatMap((line) => Effect.try(() => stallSink.write(`${line}\n`))),
+            Effect.catch(() =>
+              Effect.logWarning("event loop stall log write failed", {
+                filePath: stallLog.filePath,
+              }),
+            ),
+          );
+        }
       });
       const sampleAfter = (intervalMs: number) =>
         Effect.sleep(intervalMs).pipe(Effect.andThen(tick));
-      // Include the first sample: startup stalls are particularly costly on a large DB.
       yield* Effect.gen(function* () {
         for (let sample = 0; sample < STARTUP_SAMPLES; sample++) {
           yield* sampleAfter(STARTUP.sampleIntervalMs);
@@ -176,4 +195,14 @@ export const layerWith = (
     }),
   );
 
-export const layer = layerWith(makeNodeSampler);
+/** Writes the stall log next to the server trace file, as `event-loop-stalls.ndjson`. */
+export const layer = Layer.unwrap(
+  Effect.gen(function* () {
+    const { serverTracePath } = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    return layerWith(makeNodeSampler, {
+      filePath: path.join(path.dirname(serverTracePath), "event-loop-stalls.ndjson"),
+      maxBytes: STALL_LOG_MAX_BYTES,
+    });
+  }),
+);

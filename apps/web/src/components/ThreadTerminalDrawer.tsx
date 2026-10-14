@@ -1072,9 +1072,7 @@ export function TerminalViewport({
         mount.focus({ preventScroll: true });
       }
     };
-    // Hiding a kept thread view runs this cleanup but keeps the DOM. The
-    // surface, its scrollback and selection stay until the view is shown
-    // again or goes away for good; while hidden it does not fit or resize.
+    // Preserve terminal state on Activity hides without fitting or resizing.
     const cleanup = () => {
       if (keptViewLifetime === null || !mount.isConnected) {
         release();
@@ -1740,7 +1738,7 @@ export default function ThreadTerminalDrawer({
                           ? "border-border"
                           : "border-border/70"
                       }`}
-                      onMouseDown={() => {
+                      onPointerDown={() => {
                         if (terminalId !== resolvedActiveTerminalId) {
                           onActiveTerminalChange(terminalId);
                         }

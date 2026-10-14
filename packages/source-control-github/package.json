@@ -12,8 +12,8 @@
       "import": "./src/server/driver.ts"
     },
     "./server/GitHubApi": {
-      "types": "./src/server/GitHubApi.ts",
-      "import": "./src/server/GitHubApi.ts"
+      "types": "./src/server/GitHubApiTag.ts",
+      "import": "./src/server/GitHubApiTag.ts"
     },
     "./server/gitHubAuthStatus": {
       "types": "./src/server/gitHubAuthStatus.ts",
@@ -36,8 +36,8 @@
       "import": "./src/server/githubGraphQl.ts"
     },
     "./server/GitHubPullRequestApi": {
-      "types": "./src/server/GitHubPullRequestApi.ts",
-      "import": "./src/server/GitHubPullRequestApi.ts"
+      "types": "./src/server/GitHubPullRequestApiTag.ts",
+      "import": "./src/server/GitHubPullRequestApiTag.ts"
     },
     "./server/gitHubPullRequestJson": {
       "types": "./src/server/gitHubPullRequestJson.ts",

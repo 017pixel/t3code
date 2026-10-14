@@ -457,46 +457,6 @@ describe("RpcSessionFactory", () => {
     }),
   );
 
-  it.effect("deduplicates discovery calls and invalidates on explicit refresh", () =>
-    Effect.gen(function* () {
-      const { factory, sockets } = yield* makeFactory();
-      const session = yield* factory.connect(PREPARED);
-      const socket = yield* awaitSocket(sockets);
-      socket.open();
-      yield* completeInitialConfig(socket);
-      yield* session.ready;
-      const discover = session.client[WS_METHODS.serverDiscoverSourceControl];
-      const first = yield* Effect.all([discover({}), discover({})], { concurrency: 2 }).pipe(
-        Effect.forkChild,
-      );
-      const reply = (request: typeof RpcRequest.Type) =>
-        socket.serverMessage(
-          encodeJson({
-            _tag: "Exit",
-            requestId: request.id,
-            exit: {
-              _tag: "Success",
-              value: { versionControlSystems: [], sourceControlProviders: [] },
-            },
-          }),
-        );
-      reply(yield* awaitRequest(socket, 1));
-      expect(yield* Fiber.join(first)).toHaveLength(2);
-      yield* discover({});
-      expect(socket.sent.map((message) => decodeJson(message)).filter(isRpcRequest)).toHaveLength(
-        2,
-      );
-      const refreshed = yield* discover({ refresh: true }).pipe(Effect.forkChild);
-      const request = yield* awaitRequest(socket, 2);
-      expect(request.payload).toEqual({ refresh: true });
-      reply(request);
-      yield* Fiber.join(refreshed);
-      const next = yield* discover({}).pipe(Effect.forkChild);
-      reply(yield* awaitRequest(socket, 3));
-      yield* Fiber.join(next);
-    }),
-  );
-
   it.effect("restores only acknowledged config versions and applies later deltas", () =>
     Effect.gen(function* () {
       const { factory, sockets } = yield* makeFactory();

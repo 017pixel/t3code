@@ -66,12 +66,7 @@ export class DesktopShellEnvironment extends Context.Service<
   {
     /** Imports the login shell's environment into process.env once; later calls wait for that run. */
     readonly installIntoProcess: Effect.Effect<void>;
-    /**
-     * Waits for the login shell where safeStorage needs it. libsecret reaches
-     * the secret service over the session bus, and the first use decides the
-     * backend for the session; a Linux GUI launch without the bus address
-     * gets it from the shell.
-     */
+    /** safeStorage's first use needs the session bus, which Linux may get from the shell. */
     readonly secretStorageReady: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/shell/DesktopShellEnvironment") {}
@@ -95,6 +90,7 @@ const LOGIN_SHELL_ENV_NAMES = [
   "XDG_SESSION_TYPE",
   "WAYLAND_DISPLAY",
   "T3CODE_TELEMETRY_ENABLED",
+  "__MISE_DIFF",
 ] as const;
 const WINDOWS_PROFILE_ENV_NAMES = ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"] as const;
 const LOCALE_ENV_NAMES = ["LANG", "LC_ALL", "LC_CTYPE"] as const;
@@ -441,6 +437,10 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
       "XDG_CURRENT_DESKTOP",
       "XDG_SESSION_DESKTOP",
       "XDG_SESSION_TYPE",
+      // mise's record of the PATH entries it added. It must travel with the
+      // shell's PATH, or `mise x` can rebuild PATH behind a same-named wrapper
+      // (`exec mise x claude -- claude`) that then re-runs itself forever.
+      "__MISE_DIFF",
     ] as const;
     for (const name of shellPreferredEnvNames) {
       if (shellEnvironment[name]) {
@@ -523,8 +523,6 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  // Runs once. Startup begins it without waiting so the window can open while the
-  // login shell starts, and the local backend awaits the same run before it spawns.
   const installIntoProcess = yield* Effect.cached(
     installShellEnvironment({
       env: process.env,

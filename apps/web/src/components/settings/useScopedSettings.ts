@@ -21,9 +21,7 @@ import {
   useClientSettings,
   useMigrateModelPreferences,
 } from "../../hooks/useSettings";
-import { appAtomRegistry } from "../../rpc/atomRegistry";
-import { environmentServerConfigsAtom, serverEnvironment } from "../../state/server";
-import { beginOptimisticServerSettingsPatch } from "./optimisticServerSettings";
+import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { toastManager } from "../ui/toast";
 import { useOptionalSettingsScope, useSettingsScope } from "./SettingsScopeContext";
@@ -91,22 +89,7 @@ function useRunScopedPlan() {
                 }),
               ),
             );
-          const settle = beginOptimisticServerSettingsPatch(
-            request.environmentId,
-            request.input.patch,
-            appAtomRegistry.get(environmentServerConfigsAtom).get(request.environmentId)
-              ?.settings ?? null,
-          );
-          return persistServer(request).then(
-            (result) => {
-              settle(result._tag === "Success");
-              return result;
-            },
-            (error: unknown) => {
-              settle(false);
-              throw error;
-            },
-          );
+          return persistServer(request);
         },
         persistClientSettingsPatch,
       ).then(({ failedEnvironments, savedEnvironments, savedEnvironmentCount }) => {

@@ -108,11 +108,7 @@ export function shortcutConflictKey(
 
 type EffectiveShortcutsByCommand = ReadonlyMap<string, readonly KeybindingShortcut[]>;
 
-/**
- * Resolved configs are replaced, never mutated, so the effective shortcuts for
- * one config, platform and context never change. Labels resolve on every
- * render and keydown, so they read this index instead of walking every binding.
- */
+// Configs are immutable, so labels and keydowns can reuse their shortcut index.
 const effectiveShortcutIndex = new WeakMap<
   ResolvedKeybindingsConfig,
   Map<string, EffectiveShortcutsByCommand>

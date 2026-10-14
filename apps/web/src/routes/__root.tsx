@@ -31,6 +31,7 @@ import { DesktopAppActivationCoordinator } from "../components/desktop/DesktopAp
 import { DesktopWebLinkCoordinator } from "../components/desktop/DesktopWebLinkCoordinator";
 import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepAlive";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
+import { DesktopUpdateLaunchNotice } from "../components/sidebar/updateEverythingRun";
 import { LegacyThreadMigrationToast } from "../components/LegacyThreadMigrationToast";
 import { ThreadNotificationCoordinator } from "../components/ThreadNotificationCoordinator";
 import { ReopenClosedViewShortcut } from "../components/ReopenClosedViewShortcut";
@@ -95,10 +96,8 @@ import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
 
-// These optional notices mount with the shell. A stale chunk still gets the
-// `vite:preloadError` reload first, and while that reload is pending Vite
-// resolves the import to undefined. A chunk that keeps failing renders nothing
-// instead of replacing the shell with the route error view.
+// The preload-error guard runs first and may resolve an import to undefined.
+// Persistent optional-chunk failures must leave the shell usable.
 const renderNothing = () => null;
 const ConnectOnboardingDialog = lazy(() =>
   import("../components/cloud/ConnectOnboardingDialog")
@@ -106,8 +105,6 @@ const ConnectOnboardingDialog = lazy(() =>
     .catch(() => ({ default: renderNothing })),
 );
 
-// Sign-ins are observed here, outside the lazy wizard chunk, so one that
-// completes while the chunk loads still opens the wizard.
 function ConnectOnboarding() {
   const request = useConnectOnboardingRequest();
   return (
@@ -167,14 +164,8 @@ export const Route = createRootRoute({
 
 type InitialAuthGateState = Awaited<ReturnType<typeof resolveInitialServerAuthGateState>>;
 
-// "pending" while a render that skipped the session check waits for it.
 let earlyAuthGate: "unused" | "pending" | "settled" = "unused";
 
-/**
- * A browser that booted with a snapshot of this server's workspace paints it
- * while the session check runs, and navigations do not wait for it either.
- * Pairing links and first visits wait for the check.
- */
 function shouldRenderBeforeAuthGate(pathname: string): boolean {
   if (pathname === "/pair" || peekPairingTokenFromUrl() !== null) return false;
   if (earlyAuthGate !== "unused") return earlyAuthGate === "pending";
@@ -184,9 +175,7 @@ function shouldRenderBeforeAuthGate(pathname: string): boolean {
 function renderBeforeAuthGate(authGate: Promise<InitialAuthGateState>): InitialAuthGateState {
   if (earlyAuthGate === "unused") {
     earlyAuthGate = "pending";
-    // A rejected session drops the snapshot and boots again into pairing. A
-    // check that failed after its retries (the server is gone) boots again
-    // without the snapshot, which waits for the check and shows its error.
+    // Retry without cached workspace data so pairing or connection errors can surface.
     const bootWithoutSnapshot = () => {
       discardBootSnapshot();
       window.location.reload();
@@ -343,6 +332,7 @@ function RootRouteView() {
             <EventRouter skipInitialBootstrapNavigation={returningFromWelcomeRef.current} />
           ) : null}
           {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
+          {isElectron ? <DesktopUpdateLaunchNotice /> : null}
           {/* Hosted Nightly is "hosted-static", not authenticated, and needs it too. */}
           <NightlyMobileBetaNotice />
           {appShell}
@@ -693,8 +683,7 @@ function EventRouter({
     handleWelcome(serverWelcome);
   }, [serverWelcome]);
 
-  // Before handling the event: the first config can come without one. The
-  // server's, since the boot snapshot can predate a fix made while closed.
+  // Seed from this session before config events; boot data may predate resolved issues.
   useEffect(() => {
     if (serverSessionConfig) keybindingsToastController.seed(serverSessionConfig.issues);
   }, [keybindingsToastController, serverSessionConfig]);

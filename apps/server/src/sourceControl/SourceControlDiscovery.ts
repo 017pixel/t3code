@@ -3,16 +3,12 @@ import {
   type VcsDiscoveryItem,
   type VcsDriverKind,
 } from "@t3tools/contracts";
-import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
-import * as ServerSettings from "../serverSettings.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { detailFromCause, firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
@@ -41,8 +37,6 @@ interface DiscoveryProbeResult<Kind extends string> {
   readonly installHint: string;
   readonly detail: Option.Option<string>;
 }
-
-const DISCOVERY_TTL_MS = 60_000;
 
 const VCS_PROBES: ReadonlyArray<VcsProbe> = [
   {
@@ -143,40 +137,7 @@ export const make = Effect.gen(function* () {
     ),
     sourceControlProviders: sourceControlProviders.discover,
   });
-  // Discovery spawns a process per tool, so callers within a minute share one run. A refresh
-  // or a settings change (credentials are saved through settings) starts a new run for every
-  // later caller, rather than joining one that began before the change.
-  const scope = yield* Effect.scope;
-  let latest:
-    | {
-        readonly startedAt: number;
-        readonly result: Deferred.Deferred<SourceControlDiscoveryResult>;
-      }
-    | undefined;
-  const run = (fresh: boolean) =>
-    Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis;
-      const { result, started } = yield* Effect.sync(() => {
-        if (!fresh && latest !== undefined && now - latest.startedAt < DISCOVERY_TTL_MS) {
-          return { result: latest.result, started: false };
-        }
-        const result = Deferred.makeUnsafe<SourceControlDiscoveryResult>();
-        latest = { startedAt: now, result };
-        return { result, started: true };
-      });
-      if (started) yield* discoverNow.pipe(Deferred.into(result), Effect.forkIn(scope));
-      return yield* Deferred.await(result);
-    });
-  const settingsChanges = yield* (yield* ServerSettings.ServerSettingsService).subscribeChanges;
-  yield* settingsChanges.pipe(
-    Stream.runForEach(() =>
-      Effect.sync(() => {
-        latest = undefined;
-      }),
-    ),
-    Effect.forkIn(scope),
-  );
-  return SourceControlDiscovery.of({ discover: run(false), refresh: run(true) });
+  return SourceControlDiscovery.of({ discover: discoverNow, refresh: discoverNow });
 });
 
 export const layer = Layer.effect(SourceControlDiscovery, make);

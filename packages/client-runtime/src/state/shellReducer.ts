@@ -175,8 +175,7 @@ export function mergeShellSnapshotProjects(
         return project;
       }
       const merged = retainRepositoryIdentity(prior, project);
-      // An unchanged project keeps its object, so the cached-to-live handoff
-      // does not rerender every project reader.
+      // Preserve identity across cached-to-live handoffs.
       return prior !== undefined && sameProjectShell(prior, merged) ? prior : merged;
     }),
   };

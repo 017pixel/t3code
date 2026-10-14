@@ -10,12 +10,7 @@ function subscribe(listener: () => void) {
   };
 }
 
-/**
- * The chat layout registers its thread surface here the first time it
- * renders. The root layout keeps rendering it from then on, so leaving the
- * chat for a full page hides the thread view instead of unmounting it, while
- * routes that never open a thread do not load the chat code.
- */
+/** Register lazily in the root so full-page navigation preserves the chat surface. */
 export function registerChatSurface(element: ReactNode) {
   if (surface !== null) return;
   surface = element;
