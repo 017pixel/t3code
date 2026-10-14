@@ -219,6 +219,23 @@ it("settles a follow-up promoted to Steer with the run its message joined", () =
     )?.id,
     steered.id,
   );
+  // A restart cut the steered turn; its continuation now carries the result.
+  const continuation: OrchestrationV2Run = {
+    ...run,
+    id: RunId.make("run:continuation"),
+    ordinal: 3,
+    restartContinuationOfRunId: steered.id,
+  };
+  assert.equal(
+    delegatedTaskResultRun(
+      {
+        runs: [{ ...steered, status: "cancelled" }, queued, continuation],
+        messages: [{ ...message, runId: steered.id }],
+      },
+      taskId,
+    )?.id,
+    continuation.id,
+  );
 });
 
 it("waits for nested work and retains the report across monitor acknowledgements", () => {
