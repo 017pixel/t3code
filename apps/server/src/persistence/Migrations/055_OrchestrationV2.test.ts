@@ -29,7 +29,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 63 }, (_, index) => index + 1),
+        Array.from({ length: 64 }, (_, index) => index + 1),
       );
     }),
   );
@@ -51,6 +51,7 @@ layer("055_OrchestrationV2", (it) => {
         [61, "PullRequestReviewGuides"],
         [62, "ThreadFailureLookupIndex"],
         [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -80,6 +81,7 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 61, name: "PullRequestReviewGuides" },
         { migration_id: 62, name: "ThreadFailureLookupIndex" },
         { migration_id: 63, name: "ProjectionThreadSweepIndexes" },
+        { migration_id: 64, name: "ProjectionThreadReadPayload" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -215,11 +217,53 @@ layer("055_OrchestrationV2", (it) => {
         ON orchestration_v2_projection_threads(updated_at, thread_id)
         WHERE deleted_at IS NULL AND archived_at IS NULL
       `;
-      assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadSweepIndexes"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
+      ]);
       const [index] = yield* sql<{ readonly sql: string }>`
         SELECT sql FROM sqlite_master WHERE name = 'orchestration_v2_projection_threads_active_idx'
       `;
       assert.include(index!.sql, "json_extract(payload_json, '$.settledOverride')");
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  // Another build's migration at 64 or above makes the migrator skip this build's 64.
+  it.effect("creates the thread read projection when another build took its migration id", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 63 });
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (64, 'OtherBuild')`;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(
+        yield* sql`
+          SELECT name FROM sqlite_master
+          WHERE name LIKE 'orchestration_v2_projection_thread_reads%'
+          ORDER BY name
+        `,
+        [
+          { name: "orchestration_v2_projection_thread_reads" },
+          { name: "orchestration_v2_projection_thread_reads_stale_on_insert" },
+          { name: "orchestration_v2_projection_thread_reads_stale_on_update" },
+        ],
+      );
+      // Restarting keeps the projection.
+      yield* sql`INSERT INTO orchestration_v2_projection_thread_reads
+        (thread_id, compact_payload_json, payload_json) VALUES ('early', '{}', '{}')`;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(
+        yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
+        [{ thread_id: "early" }],
+      );
+      // Builds that ran this migration as 63 run it again as 64, which rebuilds the rows they
+      // wrote from the thread rows.
+      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 63`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (63, 'ProjectionThreadReadPayload')`;
+      assert.deepStrictEqual(yield* runMigrations(), [[64, "ProjectionThreadReadPayload"]]);
+      assert.deepStrictEqual(
+        yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
+        [],
+      );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
@@ -237,7 +281,10 @@ layer("055_OrchestrationV2", (it) => {
         ON orchestration_v2_projection_threads(updated_at, thread_id)`;
       yield* sql`CREATE INDEX orchestration_v2_projection_runs_failed_idx
         ON orchestration_v2_projection_runs(thread_id) WHERE status = 'failed'`;
-      assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadSweepIndexes"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
+      ]);
       assert.deepStrictEqual(skippedWarnings, [["62_ThreadFailureLookupIndex"]]);
       yield* ProjectionThreadSweepIndexes;
       assert.deepStrictEqual(

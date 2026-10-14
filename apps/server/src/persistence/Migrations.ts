@@ -77,7 +77,9 @@ import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
 import Migration0063 from "./Migrations/063_ProjectionThreadSweepIndexes.ts";
-import ensureThreadReadProjection from "./Migrations/063_ProjectionThreadReadPayload.ts";
+import ensureThreadReadProjection, {
+  migrateThreadReadProjection,
+} from "./Migrations/064_ProjectionThreadReadPayload.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -155,6 +157,7 @@ export const migrationEntries = [
   [61, "PullRequestReviewGuides", Migration0061],
   [62, "ThreadFailureLookupIndex", Migration0062],
   [63, "ProjectionThreadSweepIndexes", Migration0063],
+  [64, "ProjectionThreadReadPayload", migrateThreadReadProjection],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -202,7 +205,15 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
     const recordedName = recordedNames.get(id);
     if (recordedName === name) return [];
     // Migration 63 repairs the index skipped by older sweep builds at id 62.
-    if (id === 62 && recordedName === "ProjectionThreadSweepIndexes") return [];
+    if (
+      id === 62 &&
+      (recordedName === "ProjectionThreadSweepIndexes" ||
+        recordedName === "ProjectionThreadReadPayload")
+    )
+      return [];
+    if (id === 63 && recordedName === "ProjectionThreadReadPayload") return [];
+    // The derived read projection is ensured below even when its id was skipped.
+    if (id === 64) return [];
     return [`${id}_${name} (recorded: ${recordedName ?? "nothing"})`];
   });
   if (skipped.length === 0) return;
@@ -287,8 +298,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ).pipe(Effect.annotateLogs({ skipped }));
   }
   // ProjectionStore reads this table, so it must exist even when its migration was skipped.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 63) {
-    yield* Migration0063;
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 64) {
     yield* ensureThreadReadProjection;
   }
   return executedMigrations;

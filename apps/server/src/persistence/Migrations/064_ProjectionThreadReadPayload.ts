@@ -3,13 +3,14 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import ProjectionThreadSweepIndexes from "./063_ProjectionThreadSweepIndexes.ts";
 
 import {
   compactThreadPullRequests,
   encodeThreadReadPayload,
 } from "../../orchestration-v2/ThreadReadPayload.ts";
 
-// Startup also ensures this table when another build recorded migration 63 or above.
+// Startup also ensures this table when another build recorded migration 64 or above.
 // Triggers invalidate read rows when a build that does not maintain them writes a thread.
 const ensureInTransaction = (sql: SqlClient.SqlClient, rebuild: boolean) =>
   Effect.gen(function* () {
@@ -89,10 +90,12 @@ const ensureThreadReadProjection = Effect.gen(function* () {
 export default ensureThreadReadProjection;
 
 /**
- * Migration 63 itself rebuilds every row. Early builds of this change ran it as 62 and wrote
+ * Migration 64 itself rebuilds every row. Early builds of this change ran it as 62 or 63 and wrote
  * compact rows in an older format that the triggers never mark stale.
  */
 export const migrateThreadReadProjection = Effect.gen(function* () {
+  // An old wave-2 ledger at 63 skipped the sweep migration on upgrade.
+  yield* ProjectionThreadSweepIndexes;
   const sql = yield* SqlClient.SqlClient;
   yield* sql.withTransaction(ensureInTransaction(sql, true));
 });
