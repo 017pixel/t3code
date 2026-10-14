@@ -37,7 +37,7 @@ export async function waitForDraftHeroTransition(): Promise<void> {
   ]);
 }
 
-export function isMobileComposerTransitionEnabled(active: boolean): boolean {
+function isMobileComposerTransitionEnabled(active: boolean): boolean {
   if (!active || typeof document === "undefined" || typeof window === "undefined") return false;
   const mobileViewport = window.matchMedia?.("(max-width: 639px)").matches ?? false;
   const prefersReducedMotion =
