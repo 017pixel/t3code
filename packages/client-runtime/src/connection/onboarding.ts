@@ -1,5 +1,8 @@
 import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
-import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
+import {
+  resolveRemoteAddressWithoutCredential,
+  resolveRemotePairingTarget,
+} from "@t3tools/shared/remote";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -32,7 +35,7 @@ import {
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
-import { connectionRoutes, routeEntry, sshTargetKey } from "./routes.ts";
+import { connectionRoutes, hasRelayRoute, routeEntry, sshTargetKey } from "./routes.ts";
 
 export interface PairingConnectionInput {
   readonly pairingUrl?: string;
@@ -154,9 +157,71 @@ export const preparePairingRegistration = Effect.fn(
   });
 });
 
+const notAddable = (error: { readonly message: string }) =>
+  Effect.fail(new ConnectionBlockedError({ reason: "configuration", detail: error.message }));
+
+/**
+ * Adding a route to a machine this client reaches through T3 Connect needs no
+ * pairing code: an address given without one is saved as a route that signs
+ * in with T3 Connect. Returns null when the input should pair as usual.
+ */
+export const addT3ConnectRoute = Effect.fn("clientRuntime.connection.onboarding.addT3ConnectRoute")(
+  function* (input: PairingConnectionInput) {
+    const environmentId = input.expectedEnvironmentId;
+    if (environmentId === undefined) return null;
+    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    const entry = (yield* SubscriptionRef.get(registry.entries)).get(environmentId);
+    if (entry === undefined || !hasRelayRoute(entry)) return null;
+    const address = resolveRemoteAddressWithoutCredential(input);
+    if (address === null) return null;
+    if (
+      address.httpBaseUrl.startsWith("http:") &&
+      typeof globalThis.location !== "undefined" &&
+      globalThis.location.protocol === "https:"
+    ) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail:
+          "This page uses HTTPS, so the browser blocks plain HTTP addresses. Use an HTTPS address, or add this one from the desktop or mobile app.",
+      });
+    }
+    const descriptor = yield* fetchRemoteEnvironmentDescriptor({
+      httpBaseUrl: address.httpBaseUrl,
+    }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+    if (descriptor.environmentId !== environmentId) {
+      return yield* differentMachineError(descriptor.label);
+    }
+    const label = entry.target.label;
+    const connectionId = bearerConnectionId(environmentId, address.httpBaseUrl);
+    yield* registry
+      .addRoute(environmentId, {
+        target: new BearerConnectionTarget({ environmentId, label, connectionId }),
+        profile: Option.some(
+          new BearerConnectionProfile({
+            connectionId,
+            environmentId,
+            label,
+            httpBaseUrl: address.httpBaseUrl,
+            wsBaseUrl: address.wsBaseUrl,
+            authorization: "t3-connect",
+          }),
+        ),
+      })
+      .pipe(
+        Effect.catchTags({
+          EnvironmentNotRegisteredError: notAddable,
+          PlatformEnvironmentRemovalError: notAddable,
+        }),
+      );
+    return environmentId;
+  },
+);
+
 const registerPairingConnection = Effect.fn(
   "clientRuntime.connection.onboarding.registerPairingConnection",
 )(function* (input: PairingConnectionInput) {
+  const added = yield* addT3ConnectRoute(input);
+  if (added !== null) return added;
   const registration = yield* preparePairingRegistration(input);
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
   // A platform-managed environment belongs to the host, so pairing leaves it alone.
