@@ -104,7 +104,10 @@ function AlertDialogFooter({
 function AlertDialogTitle({ className, ...props }: AlertDialogPrimitive.Title.Props) {
   return (
     <AlertDialogPrimitive.Title
-      className={cn("wrap-anywhere shrink-0 font-semibold text-xl leading-none", className)}
+      className={cn(
+        "wrap-anywhere shrink-0 text-balance font-semibold text-xl leading-none",
+        className,
+      )}
       data-slot="alert-dialog-title"
       {...props}
     />
@@ -118,7 +121,7 @@ function AlertDialogDescription({ className, ...props }: AlertDialogPrimitive.De
         // A long description (say, the arguments of a tool call awaiting
         // approval) scrolls in place instead of pushing the actions out of
         // the popup, which the viewport already caps.
-        "wrap-anywhere max-h-[min(24rem,60dvh)] min-h-0 overflow-y-auto overscroll-contain text-muted-foreground text-sm select-text",
+        "wrap-anywhere max-h-[min(24rem,60dvh)] min-h-0 overflow-y-auto overscroll-contain text-pretty text-muted-foreground text-sm select-text",
         className,
       )}
       data-slot="alert-dialog-description"

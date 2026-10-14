@@ -1798,6 +1798,17 @@ code {
   color: var(--contrast-foreground);
 }
 
+/* Balance headings and keep paragraphs from ending on a lone word. Skipped
+   while a response streams, where re-wrapping the last lines on every token
+   would make words jump between lines. */
+.chat-markdown:not([data-streaming]) :is(h1, h2, h3, h4, h5, h6) {
+  text-wrap: balance;
+}
+
+.chat-markdown:not([data-streaming]) :is(p, li, blockquote) {
+  text-wrap: pretty;
+}
+
 :is(.chat-markdown, .composer-tiptap) h1 {
   font-size: 1.25rem;
 }
