@@ -5754,8 +5754,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       });
 
     const getSettlementCandidates: ProjectionStoreV2Shape["getSettlementCandidates"] = (threadId) =>
-      sql
-        .withTransaction(
+      Effect.flatMap(
+        sql.withTransaction(
           Effect.gen(function* () {
             // Settlement needs activity timestamps, not item counts, run history,
             // provider sessions or inherited fork rows. Reject parked and busy
@@ -5824,69 +5824,66 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               pendingTurnItemRows: yield* selectShellPendingTurnItemRows(threadIds),
             };
           }),
-        )
-        .pipe(
-          // Keep the raw snapshot atomic, then release the connection before decoding.
-          Effect.flatMap(({ rows, providerThreadRows, pendingTurnItemRows }) =>
-            Effect.gen(function* () {
-              const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
-                yield* pendingBackgroundDataByThreadId({ providerThreadRows, pendingTurnItemRows });
-              return yield* decodeReadRows(rows, (row) =>
-                Effect.gen(function* () {
-                  const thread = yield* decodeThreadReadRow(row, true);
-                  const status = shellStatusFromStoredRunStatus(row.latest_run_status);
-                  const latestRunId =
-                    row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
-                  return {
-                    ...thread,
-                    pinnedAt: thread.pinnedAt ?? null,
+        ),
+        // Decode after releasing the read transaction.
+        ({ rows, providerThreadRows, pendingTurnItemRows }) =>
+          Effect.gen(function* () {
+            const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
+              yield* pendingBackgroundDataByThreadId({ providerThreadRows, pendingTurnItemRows });
+            return yield* decodeReadRows(rows, (row) =>
+              Effect.gen(function* () {
+                const thread = yield* decodeThreadReadRow(row, true);
+                const status = shellStatusFromStoredRunStatus(row.latest_run_status);
+                const latestRunId =
+                  row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
+                return {
+                  ...thread,
+                  pinnedAt: thread.pinnedAt ?? null,
 
-                    autoSettleDisabledAt: thread.autoSettleDisabledAt ?? null,
-                    snoozedUntil: thread.snoozedUntil ?? null,
-                    snoozedAt: thread.snoozedAt ?? null,
-                    status,
-                    latestRunId,
-                    latestRunRequestedAt:
-                      row.latest_run_requested_at === null
+                  autoSettleDisabledAt: thread.autoSettleDisabledAt ?? null,
+                  snoozedUntil: thread.snoozedUntil ?? null,
+                  snoozedAt: thread.snoozedAt ?? null,
+                  status,
+                  latestRunId,
+                  latestRunRequestedAt:
+                    row.latest_run_requested_at === null
+                      ? null
+                      : DateTime.makeUnsafe(row.latest_run_requested_at),
+                  latestRunStartedAt:
+                    row.latest_run_started_at === null
+                      ? null
+                      : DateTime.makeUnsafe(row.latest_run_started_at),
+                  latestRunCompletedAt:
+                    row.latest_run_completed_at === null
+                      ? null
+                      : DateTime.makeUnsafe(row.latest_run_completed_at),
+                  latestUserMessageAt:
+                    row.latest_user_message_at === null
+                      ? null
+                      : DateTime.makeUnsafe(row.latest_user_message_at),
+                  latestUserAuthoredMessageAt:
+                    row.latest_user_authored_message_at === null
+                      ? null
+                      : DateTime.makeUnsafe(row.latest_user_authored_message_at),
+                  activityRunStatus: null,
+                  activityRunStartedAt: null,
+                  pendingRuntimeRequest: null,
+                  pendingBackgroundTasks: derivePendingBackgroundWork({
+                    latestRun:
+                      latestRunId === null || status === "idle"
                         ? null
-                        : DateTime.makeUnsafe(row.latest_run_requested_at),
-                    latestRunStartedAt:
-                      row.latest_run_started_at === null
-                        ? null
-                        : DateTime.makeUnsafe(row.latest_run_started_at),
-                    latestRunCompletedAt:
-                      row.latest_run_completed_at === null
-                        ? null
-                        : DateTime.makeUnsafe(row.latest_run_completed_at),
-                    latestUserMessageAt:
-                      row.latest_user_message_at === null
-                        ? null
-                        : DateTime.makeUnsafe(row.latest_user_message_at),
-                    latestUserAuthoredMessageAt:
-                      row.latest_user_authored_message_at === null
-                        ? null
-                        : DateTime.makeUnsafe(row.latest_user_authored_message_at),
-                    activityRunStatus: null,
-                    activityRunStartedAt: null,
-                    pendingRuntimeRequest: null,
-                    pendingBackgroundTasks: derivePendingBackgroundWork({
-                      latestRun:
-                        latestRunId === null || status === "idle"
-                          ? null
-                          : { id: latestRunId, ordinal: 0, status },
-                      providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
-                      turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
-                      activeProviderThreadId: thread.activeProviderThreadId,
-                      hasActiveRun: false,
-                      pullRequests: thread.pullRequests,
-                    }),
-                  } satisfies ProjectionSettlementCandidate;
-                }),
-              );
-            }),
-          ),
-          Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
-        );
+                        : { id: latestRunId, ordinal: 0, status },
+                    providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
+                    turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
+                    activeProviderThreadId: thread.activeProviderThreadId,
+                    hasActiveRun: false,
+                    pullRequests: thread.pullRequests,
+                  }),
+                } satisfies ProjectionSettlementCandidate;
+              }),
+            );
+          }),
+      ).pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
 
     const getThreadsWithPullRequests: ProjectionStoreV2Shape["getThreadsWithPullRequests"] = (
       threadId,
