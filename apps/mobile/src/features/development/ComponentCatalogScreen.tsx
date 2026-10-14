@@ -11,7 +11,7 @@ import { ListChoiceRow } from "../../components/ListChoiceRow";
 import { ListRow } from "../../components/ListRow";
 import { ListSection } from "../../components/ListSection";
 import { ListToggleRow } from "../../components/ListToggleRow";
-import { MaterialButton } from "../../components/MaterialButton";
+import { Button } from "../../components/Button";
 import { MaterialIconButton } from "../../components/MaterialIconButton";
 import { MaterialFloatingActionButton } from "../../components/MaterialFloatingActionButton";
 import { MaterialSearchField } from "../../components/MaterialSearchField";
@@ -143,13 +143,13 @@ export function ComponentCatalogScreen() {
             <View className="gap-3">
               <AppText className="text-lg font-t3-semibold">Buttons</AppText>
               <View className="flex-row flex-wrap gap-2">
-                <MaterialButton label="Primary" tone="primary" onPress={announceAction} />
-                <MaterialButton label="Secondary" onPress={announceAction} />
-                <MaterialButton label="Contrast" tone="contrast" onPress={announceAction} />
+                <Button label="Primary" tone="primary" onPress={announceAction} />
+                <Button label="Secondary" onPress={announceAction} />
+                <Button label="Contrast" tone="contrast" onPress={announceAction} />
               </View>
               <View className="flex-row flex-wrap gap-2">
-                <MaterialButton label="Disabled" disabled onPress={announceAction} />
-                <MaterialButton label="Loading" loading onPress={announceAction} />
+                <Button label="Disabled" disabled onPress={announceAction} />
+                <Button label="Loading" loading onPress={announceAction} />
                 <MaterialIconButton
                   accessibilityLabel="Open example sheet"
                   icon="plus"
@@ -216,11 +216,11 @@ export function ComponentCatalogScreen() {
                 onDismiss={() => setNotice(false)}
               />
             ) : (
-              <MaterialButton label="Show notice" onPress={announceAction} />
+              <Button label="Show notice" onPress={announceAction} />
             )}
             <View className="flex-row flex-wrap gap-2">
-              <MaterialButton label="Sheet" onPress={() => setSheet(true)} />
-              <MaterialButton label="Dialog" onPress={confirm} />
+              <Button label="Sheet" onPress={() => setSheet(true)} />
+              <Button label="Dialog" onPress={confirm} />
               <ControlPillMenu
                 title="Example menu"
                 actions={[
