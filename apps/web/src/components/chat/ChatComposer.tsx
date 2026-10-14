@@ -1977,6 +1977,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     useShallow((draft) => ({
       images: draft.images,
       files: draft.files,
+      threadContexts: draft.threadContexts,
       nonPersistedImageIds: draft.nonPersistedImageIds,
     })),
   );
