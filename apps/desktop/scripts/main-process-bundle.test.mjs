@@ -23,17 +23,11 @@ it("keeps lazy Linux imports and worker bundles from executing desktop startup t
       NodeFSP.mkdir(NodePath.join(directory, "src/snapShot"), { recursive: true }),
     ]);
     await Promise.all([
-      NodeFSP.copyFile(
-        new URL("../src/mainEntry.ts", import.meta.url),
-        NodePath.join(directory, "src/mainEntry.ts"),
-      ),
       NodeFSP.writeFile(
         NodePath.join(directory, "src/main.ts"),
         `import { shared } from "./shared.ts";
-export function run() {
-  process.emit("startup", shared.value);
-  void import("./linux.ts").then(({ result }) => process.emit("ready", result));
-}`,
+process.emit("startup", shared.value);
+void import("./linux.ts").then(({ result }) => process.emit("ready", result));`,
       ),
       NodeFSP.writeFile(
         NodePath.join(directory, "src/shared.ts"),
@@ -51,10 +45,10 @@ export function run() {
       ),
     ]);
     assert.ok(Array.isArray(desktopConfig.pack));
-    const fixtureEntries = new Set(["src/mainEntry.ts", "src/main.ts", ...workerEntries]);
+    const fixtureEntries = new Set(["src/main.ts", ...workerEntries]);
     for (const packConfig of desktopConfig.pack) {
-      if (!Object.values(packConfig.entry ?? {}).some((entry) => fixtureEntries.has(entry)))
-        continue;
+      if (!Array.isArray(packConfig.entry)) continue;
+      if (!packConfig.entry.some((entry) => fixtureEntries.has(entry))) continue;
       await build({
         ...packConfig,
         config: false,
@@ -94,7 +88,6 @@ export function run() {
         module,
         require: (specifier) => load(NodePath.resolve(NodePath.dirname(filename), specifier)),
         process: {
-          env: {},
           emit: (event, value) => {
             if (event === "startup") startups.push(value);
             if (event === "worker") workers.push(value);
@@ -119,8 +112,7 @@ export function run() {
 });
 
 it("keeps the real desktop chunks from requiring the application entry", async () => {
-  // conf (through @clerk/electron/storage) evicts application.cjs from the
-  // require cache, so any chunk that requires it re-runs the whole entry.
+  // conf can evict the entry from the require cache. Lazy chunks must not require it.
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-desktop-chunks-"));
   try {
     assert.ok(Array.isArray(desktopConfig.pack));
