@@ -1,9 +1,7 @@
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { AuthPreviewOperateScope, type ServerConfig } from "@t3tools/contracts";
+import { AuthPreviewOperateScope } from "@t3tools/contracts";
 import { Outlet, createFileRoute, redirect, useParams } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
-import { Atom } from "effect/reactivity";
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { registerChatSurface } from "../components/chatSurfaceSlot";
@@ -12,20 +10,14 @@ import { ThreadLinkPrompt } from "../components/promptLinks/ThreadLinkPrompt";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
-import { useProjects, waitForProject } from "../state/entities";
+import { useProjects } from "../state/entities";
 import { isPreviewAvailableFor } from "../browser/previewRuntime";
 import { usePrimaryEnvironmentId } from "../state/environments";
-import { environmentSession, useEnvironmentScope } from "../state/session";
+import { useEnvironmentScope } from "../state/session";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
-import { useHandleNewThread, useNewThreadHandler } from "../hooks/useHandleNewThread";
-import {
-  clearPendingLandingDraft,
-  readPendingLandingDraft,
-  usePendingLandingDraft,
-} from "../bootLanding";
-import { environmentCatalog } from "../connection/catalog";
+import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
@@ -38,8 +30,7 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../termina
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
-import { liveServerConfigValueAtom, primaryServerKeybindingsAtom } from "~/state/server";
-import { useComposerDraftStore } from "../composerDraftStore";
+import { primaryServerKeybindingsAtom } from "~/state/server";
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -225,85 +216,6 @@ function ChatRouteGlobalShortcuts() {
   return null;
 }
 
-function LandingDraftDefaults() {
-  const landing = usePendingLandingDraft();
-  const handleNewThread = useNewThreadHandler();
-  // Load balancing can move the draft; use defaults from its current machine.
-  const draft = useComposerDraftStore((store) =>
-    landing === null ? null : store.getDraftSession(landing.draftId),
-  );
-  const projectRef = useMemo(
-    () =>
-      landing === null
-        ? null
-        : draft === null
-          ? landing.projectRef
-          : scopeProjectRef(draft.environmentId, draft.projectId),
-    [draft, landing],
-  );
-  const movedByUser =
-    draft !== null &&
-    draft.environmentSelection === "manual" &&
-    projectRef !== null &&
-    landing !== null &&
-    (projectRef.environmentId !== landing.projectRef.environmentId ||
-      projectRef.projectId !== landing.projectRef.projectId);
-  // Require this session's answer, then prefer its latest config over the boot snapshot.
-  const sessionConfig = useAtomValue(
-    projectRef === null
-      ? NO_LIVE_CONFIG_ATOM
-      : environmentSession.initialConfigValueAtom(projectRef.environmentId),
-  );
-  const currentConfig = useAtomValue(liveServerConfigValueAtom(projectRef?.environmentId ?? null));
-  const liveConfig = sessionConfig === null ? null : (currentConfig ?? sessionConfig);
-  // One run per place the draft sits: load balancing can move it during one.
-  const startedRef = useRef<string | null>(null);
-  // Removed environments never answer; stop waiting so the unavailable state can show.
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
-  const landingEnvironmentGone =
-    projectRef !== null && catalog.isReady && !catalog.entries.has(projectRef.environmentId);
-  const dropLanding = landingEnvironmentGone || movedByUser;
-  useEffect(() => {
-    if (landing !== null && dropLanding) clearPendingLandingDraft(landing.draftId);
-  }, [dropLanding, landing]);
-  useEffect(() => {
-    if (landing === null || projectRef === null || liveConfig === null || dropLanding) return;
-    const startedKey = `${landing.draftId} ${projectRef.environmentId} ${projectRef.projectId}`;
-    if (startedRef.current === startedKey) return;
-    startedRef.current = startedKey;
-    // Config can arrive before projects; defaults need both.
-    void waitForProject(projectRef)
-      .catch(() => undefined)
-      .then(() =>
-        readPendingLandingDraft() === landing
-          ? handleNewThread(projectRef, {
-              replace: true,
-              landing,
-              serverSettings: liveConfig.settings,
-            })
-          : null,
-      )
-      .catch(() => undefined)
-      .finally(() => {
-        // Moved meanwhile: the run for where it went clears the landing.
-        const draftNow = useComposerDraftStore.getState().getDraftSession(landing.draftId);
-        if (
-          draftNow !== null &&
-          (draftNow.environmentId !== projectRef.environmentId ||
-            draftNow.projectId !== projectRef.projectId)
-        ) {
-          return;
-        }
-        clearPendingLandingDraft(landing.draftId);
-      });
-  }, [dropLanding, handleNewThread, landing, liveConfig, projectRef]);
-  return null;
-}
-
-const NO_LIVE_CONFIG_ATOM = Atom.make<ServerConfig | null>(null).pipe(
-  Atom.withLabel("web-landing-no-live-config"),
-);
-
 function ChatRouteLayout() {
   const threadTarget = useParams({
     strict: false,
@@ -314,7 +226,6 @@ function ChatRouteLayout() {
   return (
     <>
       <ChatRouteGlobalShortcuts />
-      <LandingDraftDefaults />
       {threadTarget?.kind === "server" ? (
         <ThreadLinkPrompt threadRef={threadTarget.threadRef} />
       ) : null}

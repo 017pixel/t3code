@@ -1,10 +1,9 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { createFileRoute, Link, redirect } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { LinkIcon, PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { resolveLandingDraft } from "../bootLandingDraft";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { isElectron } from "../env";
 import { NoProjectsHero } from "../components/NoProjectsHero";
@@ -14,6 +13,9 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/
 import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
+import { useAtomValue } from "@effect/atom-react";
+import { environmentSession } from "../state/session";
+import { liveServerConfigValueAtom } from "../state/server";
 import {
   useAllEnvironmentShellsBootstrapped,
   useProjects,
@@ -56,8 +58,21 @@ function IndexDraftLanding() {
     [bootstrapped, projects, threads],
   );
 
+  const liveConfig = useAtomValue(
+    liveServerConfigValueAtom(mostRecentProject?.environmentId ?? null),
+  );
+  const sessionConfig = useAtomValue(
+    mostRecentProject === null
+      ? liveServerConfigValueAtom(null)
+      : environmentSession.initialConfigValueAtom(mostRecentProject.environmentId),
+  );
   useEffect(() => {
-    if (mostRecentProject === null || startingRef.current) {
+    if (
+      liveConfig === null ||
+      sessionConfig === null ||
+      mostRecentProject === null ||
+      startingRef.current
+    ) {
       return;
     }
     startingRef.current = true;
@@ -67,7 +82,7 @@ function IndexDraftLanding() {
       startingRef.current = false;
       setStartState((state) => ({ ...state, failed: true }));
     });
-  }, [handleNewThread, mostRecentProject, startState.retryRequest]);
+  }, [handleNewThread, liveConfig, mostRecentProject, sessionConfig, startState.retryRequest]);
 
   if (!bootstrapped) {
     return null;
@@ -111,18 +126,7 @@ function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
   );
 }
 
-let landingConsidered = false;
-
 export const Route = createFileRoute("/_chat/")({
-  // Route preloads are not visits and must not open a landing draft.
-  beforeLoad: async ({ preload }) => {
-    if (preload || landingConsidered) return;
-    landingConsidered = true;
-    const draftId = await resolveLandingDraft();
-    if (draftId !== null) {
-      throw redirect({ to: "/draft/$draftId", params: { draftId }, replace: true });
-    }
-  },
   component: ChatIndexRouteView,
 });
 

@@ -389,7 +389,6 @@ import {
   useComposerDraftStore,
   DraftId,
 } from "../composerDraftStore";
-import { useLandingDraftDefaultsPending } from "../bootLanding";
 import {
   formatTerminalContextLabel,
   type TerminalContextDraft,
@@ -1716,8 +1715,6 @@ export default function ChatView(props: ChatViewProps) {
   );
   const canReadTerminal = useEnvironmentScope(environmentId, AuthTerminalReadScope);
   const draftId = routeKind === "draft" ? props.draftId : null;
-  // A draft opened before the server answered sends once its defaults land.
-  const landingDefaultsPending = useLandingDraftDefaultsPending(draftId);
   const handleNewThread = useNewThreadHandler();
   const { settleThread, pinThread, confirmAndUnpinThread } = useThreadActions();
   const routeThreadRef = useMemo(
@@ -12026,7 +12023,7 @@ export default function ChatView(props: ChatViewProps) {
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}
                               sendDisabledReason={
-                                landingDefaultsPending || (!canOperateThread && sessionPending)
+                                !canOperateThread && sessionPending
                                   ? "Connecting"
                                   : !canOperateThread
                                     ? "This connection cannot change threads."
