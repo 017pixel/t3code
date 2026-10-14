@@ -3557,7 +3557,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   // `null` means this instance has no configured home of its own.
   const homePathSetting = adapterOptions.settings.homePath.trim();
   const customClaudeHomePath =
-    homePathSetting.length > 0 ? path.resolve(expandHomePath(homePathSetting)) : null;
+    homePathSetting.length > 0
+      ? path.resolve(expandHomePath(homePathSetting, yield* HostProcess.HomeDirectory))
+      : null;
   // Shared across every session this adapter instance opens (not just one),
   // so the one-time #4927 downgrade notice survives an idle release and
   // resume instead of reappearing on the thread's next provider session.
