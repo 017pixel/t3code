@@ -88,7 +88,7 @@ function isStale(link: ThreadIssueLink, nowMs: number): boolean {
   return link.snapshot === null || nowMs - Date.parse(link.snapshot.syncedAt) > STALE_AFTER_MS;
 }
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const issues = yield* IssueService.IssueService;
   const crypto = yield* Crypto.Crypto;

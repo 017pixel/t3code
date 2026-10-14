@@ -9,8 +9,6 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { useRightPanelStore } from "../rightPanelStore";
 import { useProjects, useServerConfigs } from "../state/entities";
 
-export { parseIssueUrl, type IssueLink } from "@t3tools/shared/issueUrl";
-
 /** The host and scope a project's git-host tracker is bound to, the way the server resolves it. */
 function projectIssueBinding(project: EnvironmentProject): {
   readonly tracker: string;
@@ -34,7 +32,7 @@ function projectIssueBinding(project: EnvironmentProject): {
  * its credentials for a read-only view. The same rule as the server's `IssueService.resolveUrl`,
  * applied here so a lookalike hostname matches no project and stays an ordinary link.
  */
-export function resolveIssueLinkTarget(
+function resolveIssueLinkTarget(
   projects: ReadonlyArray<EnvironmentProject>,
   link: IssueLink,
   preferredProjectId?: string,

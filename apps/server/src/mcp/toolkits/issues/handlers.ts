@@ -37,7 +37,7 @@ interface ResolvedTarget extends IssueRef {
 }
 
 /** What the tools report from a thread shell; exported so the shape is testable without a layer. */
-export function listThreadIssues(
+function listThreadIssues(
   thread: Pick<OrchestrationV2ThreadShell, "issues">,
 ): ListThreadIssuesResult {
   return {
