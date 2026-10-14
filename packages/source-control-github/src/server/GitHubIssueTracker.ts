@@ -86,12 +86,15 @@ function parseNumber(key: string): number | null {
 }
 
 /**
- * The reader's words as one literal phrase of a search. Outside quotes GitHub reads `is:closed`
- * as a qualifier, so text typed into a box could widen the listing it narrows; inside them it is
- * only text. The two characters that could end the phrase early are escaped.
+ * The reader's words as quoted search terms. Outside quotes GitHub reads `is:closed` as a
+ * qualifier, so text typed into a box could widen the listing it narrows; inside them it is only
+ * text. Each word is quoted on its own so the words still match apart, not only as a phrase.
  */
-function searchPhrase(query: string): string {
-  return `"${query.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+function searchTerms(query: string): ReadonlyArray<string> {
+  return query
+    .split(/\s+/)
+    .filter((word) => word.length > 0)
+    .map((word) => `"${word.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`);
 }
 
 const INVOLVEMENT_QUALIFIER: Record<IssueInvolvement, string | null> = {
@@ -108,7 +111,6 @@ function searchQuery(input: {
   readonly viewer: string;
   readonly query?: string | undefined;
 }): string {
-  const text = input.query?.trim() ?? "";
   const qualifier = INVOLVEMENT_QUALIFIER[input.involvement];
   return [
     // The search index holds pull requests as issues; `is:issue` keeps them out.
@@ -117,7 +119,7 @@ function searchQuery(input: {
     ...(input.state === "all" ? [] : [`is:${input.state}`]),
     ...(qualifier === null ? [] : [`${qualifier}:${input.viewer}`]),
     "sort:updated-desc",
-    ...(text.length === 0 ? [] : [searchPhrase(text)]),
+    ...searchTerms(input.query ?? ""),
   ].join(" ");
 }
 
