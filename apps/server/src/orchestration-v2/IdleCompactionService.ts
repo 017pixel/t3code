@@ -20,7 +20,7 @@ import {
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
-export class IdleCompactionServiceV2 extends Context.Service<
+class IdleCompactionServiceV2 extends Context.Service<
   IdleCompactionServiceV2,
   {
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
@@ -64,6 +64,8 @@ export const make = Effect.gen(function* () {
         const instance = yield* instances.getInstance(projection.thread.providerInstanceId);
         if (instance === undefined || !instance.enabled || instance.driverKind !== current.driver)
           return;
+        // Earlier candidates in this sweep can push this one past its cache TTL.
+        if (DateTime.toEpochMillis(yield* DateTime.now) >= window.endMs) return;
         // One idempotent command per completed run survives concurrent scans and
         // restarts; dispatch rechecks eligibility under the thread's lock.
         yield* orchestrator.dispatch({
