@@ -70,7 +70,7 @@ const baseStatus: VcsStatusResult = {
   ...baseRemoteStatus,
 };
 
-it.effect("summarizes passive VCS subscriptions and acknowledges unchanged versions", () => {
+it.effect("summarizes passive VCS subscriptions and sends a fresh snapshot on remount", () => {
   const state = {
     currentLocalStatus: {
       ...baseLocalStatus,
@@ -98,6 +98,7 @@ it.effect("summarizes passive VCS subscriptions and acknowledges unchanged versi
     if (initial._tag !== "snapshot") return;
     assert.strictEqual(initial.local.workingTree.fileCount, 1);
     assert.deepStrictEqual(initial.local.workingTree.files, []);
+    assert.deepStrictEqual(Option.getOrThrow(yield* read({ compact: true })), initial);
     for (const options of [{}, { compact: true, includeFiles: true }]) {
       const full = Option.getOrThrow(yield* read(options));
       assert.strictEqual(full._tag, "snapshot");
