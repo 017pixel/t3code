@@ -1,6 +1,6 @@
 import {
   Box,
-  Button,
+  Button as ComposeButton,
   LoadingIndicator,
   FilledTonalButton,
   Host,
@@ -13,16 +13,16 @@ import { View } from "react-native";
 
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
-import type { MaterialButtonProps } from "./MaterialButton";
+import type { ButtonProps } from "./Button";
 import { useAndroidControlSizing } from "./useAndroidControlSizing";
 
-export function MaterialButton(props: MaterialButtonProps) {
+export function Button(props: ButtonProps) {
   const { themeAppearance, themeVariables: colors } = useAppearancePreferences();
   const typography = useScaledTextRole("footnote");
   const { scale, mediumIconSize } = useAndroidControlSizing();
   const tone = props.tone ?? "secondary";
   const Component =
-    tone === "text" ? TextButton : tone === "secondary" ? FilledTonalButton : Button;
+    tone === "text" ? TextButton : tone === "secondary" ? FilledTonalButton : ComposeButton;
   const containerColor =
     tone === "contrast"
       ? colors["--color-foreground"]

@@ -2,7 +2,7 @@ import { View } from "react-native";
 import type { ReactNode } from "react";
 
 import { AppText as Text } from "./AppText";
-import { MaterialButton } from "./MaterialButton";
+import { Button } from "./Button";
 
 export function EmptyState(props: {
   readonly title: string;
@@ -23,7 +23,7 @@ export function EmptyState(props: {
           <View className="mt-5">{props.action}</View>
         ) : props.actionLabel && props.onAction ? (
           <View className="mt-5">
-            <MaterialButton tone="primary" label={props.actionLabel} onPress={props.onAction} />
+            <Button tone="primary" label={props.actionLabel} onPress={props.onAction} />
           </View>
         ) : null}
       </View>
@@ -40,7 +40,7 @@ export function EmptyState(props: {
         <View className="mt-4 self-start">{props.action}</View>
       ) : props.actionLabel && props.onAction ? (
         <View className="mt-4 self-start">
-          <MaterialButton tone="primary" label={props.actionLabel} onPress={props.onAction} />
+          <Button tone="primary" label={props.actionLabel} onPress={props.onAction} />
         </View>
       ) : null}
     </View>

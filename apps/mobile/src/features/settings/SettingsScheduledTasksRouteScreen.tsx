@@ -39,7 +39,7 @@ import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { Alert, AppState, Platform, Pressable, TextInput as RNTextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { MaterialButton } from "../../components/MaterialButton";
+import { Button } from "../../components/Button";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import {
@@ -1020,7 +1020,7 @@ function TaskForm({
           </Text>
         ) : null}
       </View>
-      <MaterialButton
+      <Button
         tone="primary"
         fullWidth
         loading={saving}

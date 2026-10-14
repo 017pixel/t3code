@@ -3,7 +3,7 @@ import { AppActivityIndicator } from "./AppActivityIndicator";
 import { AppText } from "./AppText";
 import { cn } from "../lib/cn";
 
-export interface MaterialButtonProps {
+export interface ButtonProps {
   readonly label: string;
   readonly onPress: () => void;
   readonly disabled?: boolean;
@@ -21,7 +21,7 @@ const TONE_CLASS_NAMES = {
   text: ["bg-transparent", "text-primary-text"],
 } as const;
 
-export function MaterialButton(props: MaterialButtonProps) {
+export function Button(props: ButtonProps) {
   const [containerClassName, labelClassName] = TONE_CLASS_NAMES[props.tone ?? "secondary"];
   const disabled = Boolean(props.disabled || props.loading);
   return (
