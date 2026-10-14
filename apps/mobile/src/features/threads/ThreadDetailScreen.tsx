@@ -493,7 +493,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const pendingBackgroundWork = presentPendingBackgroundWork(
     props.selectedThread.pendingBackgroundTasks,
   );
-  const floatingStatus = ((): FloatingWorkingStatus | null => {
+  const pillStatus = ((): FloatingWorkingStatus | null => {
     const connectionStatus = connectionFloatingStatus({
       connectionError: props.connectionError,
       connectionState: props.connectionStateLabel,
@@ -561,6 +561,14 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     }
     return null;
   })();
+  // The focused one-row composer of Android split view carries the timer itself,
+  // so the pill row stops taking feed height while the keyboard is up.
+  const composerShowsTimer =
+    Platform.OS === "android" &&
+    props.layoutVariant === "split" &&
+    composerFocused &&
+    pillStatus?.kind === "working";
+  const floatingStatus = composerShowsTimer ? null : pillStatus;
   const showWorkingControl = floatingStatus !== null;
   // Connection and working status occupy the same space. Keep the feed inset
   // stable when reconnecting hands off to syncing and then to a running turn.
@@ -1482,6 +1490,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                         onUpdateRuntimeMode={props.onUpdateThreadRuntimeMode}
                         onUpdateInteractionMode={props.onUpdateThreadInteractionMode}
                         onExpandedChange={setComposerExpanded}
+                        activeWorkStartedAt={
+                          composerShowsTimer && pillStatus?.kind === "working"
+                            ? pillStatus.startedAt
+                            : null
+                        }
                         onEditorFocusChange={handleComposerFocusChange}
                       />
                     </>
