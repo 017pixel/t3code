@@ -74,9 +74,7 @@ interface SupportedProject extends ProjectTrackerBinding {
  * The git-host path of resolution: the tracker is the host's own, named like the remote's
  * provider kind. Null for a project with no remote or a kind no tracker claims.
  */
-function resolveGitHostBinding(
-  project: OrchestrationProjectShell,
-): ProjectTrackerBinding | null {
+function resolveGitHostBinding(project: OrchestrationProjectShell): ProjectTrackerBinding | null {
   const identity = project.repositoryIdentity;
   const scope = sourceControlRepositorySelector(identity);
   const kind = identity?.provider;
