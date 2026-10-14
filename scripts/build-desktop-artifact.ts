@@ -2198,14 +2198,9 @@ const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSel
       });
     }
 
-    // __load-bundle evaluates every chunk the entry reaches, lazily loaded
-    // services and provider adapters included, and loads the Cursor SDK. That
-    // is where a missing dependency shows up, without starting a server or
-    // touching disk state. (--version returns before the server graph loads.)
-    // It does not cover other externals required only when called: node-pty is
-    // checked by the WSL preflight probe at runtime, while ffi-rs and the bun
-    // adapters are covered by the shared runtime-external closure and
-    // emitted-bundle checks.
+    // Load lazy services, adapters and Cursor SDK without starting a server.
+    // --version skips these imports. Call-only externals remain covered by
+    // runtime-external closure checks and the WSL node-pty preflight.
     yield* runCommand(
       ChildProcess.make(
         process.execPath,

@@ -66,12 +66,7 @@ export class DesktopShellEnvironment extends Context.Service<
   {
     /** Imports the login shell's environment into process.env once; later calls wait for that run. */
     readonly installIntoProcess: Effect.Effect<void>;
-    /**
-     * Waits for the login shell where safeStorage needs it. libsecret reaches
-     * the secret service over the session bus, and the first use decides the
-     * backend for the session; a Linux GUI launch without the bus address
-     * gets it from the shell.
-     */
+    /** safeStorage's first use needs the session bus, which Linux may get from the shell. */
     readonly secretStorageReady: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/shell/DesktopShellEnvironment") {}
@@ -523,8 +518,6 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  // Runs once. Startup begins it without waiting so the window can open while the
-  // login shell starts, and the local backend awaits the same run before it spawns.
   const installIntoProcess = yield* Effect.cached(
     installShellEnvironment({
       env: process.env,

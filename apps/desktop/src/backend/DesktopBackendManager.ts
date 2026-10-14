@@ -305,9 +305,7 @@ export interface BackendInstanceSpec {
   // between "fired onReady" and "currentConfig already advanced".
   readonly onReady?: (httpBaseUrl: URL) => Effect.Effect<void>;
   readonly onShutdown?: () => Effect.Effect<void>;
-  // Awaited after a run's config is published and before its process spawns.
-  // The primary waits here for the login shell environment, so its endpoint
-  // and bootstrap token are readable while the shell is still starting.
+  // Wait after publishing config so preload can read credentials before spawn.
   readonly beforeSpawn?: Effect.Effect<void>;
   // Fired once when a fatal or bounded preflight failure has exhausted its
   // retries. Returns true when the callback changed configuration and the
@@ -736,8 +734,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
     });
   });
 
-  // Waits for spec.beforeSpawn, or reports false once stop closes the run's
-  // scope first, so a stopped run never spawns.
+  // Stop must release the spawn gate without starting the stopped run.
   const awaitBeforeSpawn = (runScope: Scope.Scope): Effect.Effect<boolean> => {
     const beforeSpawn = spec.beforeSpawn;
     if (beforeSpawn === undefined) return Effect.succeed(true);

@@ -169,8 +169,7 @@ const bootstrap = Effect.gen(function* () {
   const appActivation = yield* DesktopAppActivation.DesktopAppActivation;
   const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
   const shutdown = yield* DesktopShutdown.DesktopShutdown;
-  // The window can open, close and quit the app while the login shell is still
-  // starting. False when a quit came first: bootstrap starts nothing after it.
+  // A quit during shell startup must prevent subsequent bootstrap work.
   const awaitShellEnvironment = Effect.raceFirst(
     shellEnvironment.installIntoProcess.pipe(Effect.as(true)),
     shutdown.awaitRequest.pipe(Effect.as(false)),
@@ -264,12 +263,8 @@ const bootstrap = Effect.gen(function* () {
     }
     yield* primaryBackend.start;
     yield* logBootstrapInfo("bootstrap backend start requested");
-    // The renderer loads bundled assets and can connect while the backend
-    // boots. Starting first makes its endpoint and bootstrap credential
-    // available before the preload reads them; the spawn itself waits for the
-    // login shell environment. WSL-only retains its splash until the primary
-    // has a usable endpoint. A failed open is not fatal: backend readiness
-    // tries again.
+    // Publish the endpoint and token before preload reads them. Backend readiness
+    // retries a failed window open; WSL keeps its splash until then.
     if (!wslOnly) {
       yield* desktopWindow.ensureMain.pipe(
         Effect.catch((error) =>
@@ -310,9 +305,7 @@ const startup = Effect.gen(function* () {
   const previewPasskeys = yield* PreviewPasskeys.PreviewPasskeys;
   const state = yield* DesktopState.DesktopState;
 
-  // Chromium picks the secret storage backend from --password-store and the
-  // inherited desktop variables before any asynchronous work runs, so the
-  // pre-ready layer's synchronous choice is the one in effect.
+  // Chromium already chose secret storage from the pre-ready environment.
   const linuxElectronOptions = preReadyElectronOptions.linux;
   if (linuxElectronOptions !== null) {
     yield* logStartupInfo("linux password store configured", {
@@ -324,9 +317,7 @@ const startup = Effect.gen(function* () {
       xdgSessionDesktop: process.env.XDG_SESSION_DESKTOP ?? null,
     });
   }
-  // A login shell can take seconds to start, and only spawned processes need
-  // its environment. The window opens without it; the backend and bootstrap's
-  // spawning work wait for this same run.
+  // Open the window while the shell loads; spawning work awaits the same run.
   yield* Effect.forkScoped(shellEnvironment.installIntoProcess);
   const userDataPath = yield* appIdentity.resolveUserDataPath;
   yield* electronApp.setPath("userData", userDataPath);
@@ -358,9 +349,7 @@ const startup = Effect.gen(function* () {
   yield* previewPasskeys.configure;
   yield* applicationMenu.configure;
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
-  // A quit while bootstrap waited for the login shell skips the rest.
   if (yield* Ref.get(state.quitting)) return;
-  // Bootstrap has opened the window (or the WSL splash); neither needs these.
   yield* updates.configure;
   yield* DesktopRemoteUpdates.listen;
   yield* linuxUrlHandler.register;

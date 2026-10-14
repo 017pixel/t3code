@@ -305,7 +305,6 @@ export const layer = Layer.effect(
         ),
       onShutdown: () => desktopWindow.handleBackendNotReady,
       onPreflightFailed: handlePrimaryPreflightFailure,
-      // The backend and the agents it runs need the login shell's PATH.
       beforeSpawn: shellEnvironment.installIntoProcess,
     });
 

@@ -86,9 +86,7 @@ import {
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
   const desktopIpc = yield* DesktopIpc.DesktopIpc;
   const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
-  // The window opens while the login shell is still starting. Invoke handlers
-  // can spawn processes (ssh, editors, the system opener) that need its
-  // environment, so they wait for it; sync handlers only read state.
+  // Process-spawning handlers need the login environment before they run.
   const ipc = {
     handle: <E, R>(method: DesktopIpc.DesktopIpcMethod<E, R>) =>
       desktopIpc.handle({
@@ -129,7 +127,6 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleWithoutShell(getLocalEnvironmentBearerToken);
 
   yield* ipc.handleWithoutShell(getClientSettings);
-  // Saves at once, then waits for the login shell itself before the shortcut.
   yield* ipc.handleWithoutShell(setClientSettings);
   yield* ipc.handleSecretStorage(getConnectionCatalog);
   yield* ipc.handle(getSnapShotState);

@@ -90,8 +90,7 @@ export function applyServerConfigProjection(
         latestEvent: event,
         source: "live",
       }));
-    // An empty set omits the key, as a cached config does, so an unchanged
-    // config stays equal and keeps its identity downstream.
+    // Match the cache's omitted empty sets to preserve config equality.
     case "environmentThemesUpdated":
       return Option.map(current, (projection) => {
         const { environmentThemes: _previous, ...config } = projection.config;
