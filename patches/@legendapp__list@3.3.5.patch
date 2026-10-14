@@ -1507,7 +1507,7 @@ diff --git a/react-native.web.mjs b/react-native.web.mjs
 diff --git a/react.js b/react.js
 --- a/react.js
 +++ b/react.js
-@@ -4702,7 +4702,8 @@
+@@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
        contentBelowAnchor = Math.max(0, contentBelowAnchor - ctx.scrollAxisGap);
        contentBelowAnchor += (ctx.values.get("footerSize") || 0) + getStylePaddingEnd(state.props);
        isReady = !hasUnknownTailSize;
@@ -1517,7 +1517,7 @@ diff --git a/react.js b/react.js
      } else if (anchorIndex >= 0) {
        isReady = false;
      }
-@@ -4722,6 +4723,12 @@
+@@ -4722,6 +4723,12 @@ function maybeUpdateAnchoredEndSpace(ctx) {
        updateScroll(ctx, state.scroll, true, { markHasScrolled: false });
      }
      (_b = anchoredEndSpace == null ? void 0 : anchoredEndSpace.onReady) == null ? void 0 : _b.call(anchoredEndSpace, { anchorIndex: nextAnchorIndex, anchorKey: nextAnchorKey, size: nextSize });
@@ -1604,7 +1604,7 @@ diff --git a/react.js b/react.js
 diff --git a/react.mjs b/react.mjs
 --- a/react.mjs
 +++ b/react.mjs
-@@ -4681,7 +4681,8 @@
+@@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
        contentBelowAnchor = Math.max(0, contentBelowAnchor - ctx.scrollAxisGap);
        contentBelowAnchor += (ctx.values.get("footerSize") || 0) + getStylePaddingEnd(state.props);
        isReady = !hasUnknownTailSize;
@@ -1614,7 +1614,7 @@ diff --git a/react.mjs b/react.mjs
      } else if (anchorIndex >= 0) {
        isReady = false;
      }
-@@ -4701,6 +4702,12 @@
+@@ -4701,6 +4702,12 @@ function maybeUpdateAnchoredEndSpace(ctx) {
        updateScroll(ctx, state.scroll, true, { markHasScrolled: false });
      }
      (_b = anchoredEndSpace == null ? void 0 : anchoredEndSpace.onReady) == null ? void 0 : _b.call(anchoredEndSpace, { anchorIndex: nextAnchorIndex, anchorKey: nextAnchorKey, size: nextSize });

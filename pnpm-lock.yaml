@@ -149,7 +149,7 @@ patchedDependencies:
   '@effect/vitest@4.0.2': 595b7d26fb635caba9c3d39fcb189bb78a000192f8d3b60ead7174b310d1ade9
   '@expo/metro-config@58.0.6': 90fa980e8b6480631fb2fbb04559834e3c612db40c550cd828f11be297d8d760
   '@ff-labs/fff-node@0.11.0': 8956d6ed6938a1bce69b2d0b067ff258dd9ca753c5bbe7006f7b68f760ea3ad2
-  '@legendapp/list@3.3.5': 70069ede322d8584fc3799d33372173ee79de580c2114f6024bb0ac959af0cca
+  '@legendapp/list@3.3.5': b36caf458d7719b550f2ad00866585949473074866bf86edb6b7305647f7262f
   '@opencode/client@2.0.23': f725d6e6d9af0d56dc6ed71b863518fbfc751af1773cff2311209d2c404cf4cd
   '@opencode/protocol@2.0.23': 17a82f6c2c98fd0371e786c211a4fbdaaba403577a25733e5e99a0c25a16a685
   '@opencode/schema@2.0.23': 650f1b8602789407c010861284272dcb6bd6de01ec6a75bf3c0904a0e7596d59
@@ -325,7 +325,7 @@ importers:
         version: 58.0.11(@babel/core@7.29.7)(expo@58.0.2)(react-dom@19.3.0(react@19.3.0))(react-native-worklets@0.13.0(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)
       '@legendapp/list':
         specifier: 'catalog:'
-        version: 3.3.5(patch_hash=70069ede322d8584fc3799d33372173ee79de580c2114f6024bb0ac959af0cca)(react-dom@19.3.0(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)
+        version: 3.3.5(patch_hash=b36caf458d7719b550f2ad00866585949473074866bf86edb6b7305647f7262f)(react-dom@19.3.0(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)
       '@material/material-color-utilities':
         specifier: 0.3.0
         version: 0.3.0
@@ -789,7 +789,7 @@ importers:
         version: 0.9.0
       '@legendapp/list':
         specifier: 'catalog:'
-        version: 3.3.5(patch_hash=70069ede322d8584fc3799d33372173ee79de580c2114f6024bb0ac959af0cca)(react-dom@19.2.6(react@19.2.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.2.6)(utf-8-validate@6.0.6))(react@19.2.6)
+        version: 3.3.5(patch_hash=b36caf458d7719b550f2ad00866585949473074866bf86edb6b7305647f7262f)(react-dom@19.2.6(react@19.2.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.2.6)(utf-8-validate@6.0.6))(react@19.2.6)
       '@noble/hashes':
         specifier: 'catalog:'
         version: 1.8.0
@@ -14996,7 +14996,7 @@ snapshots:
     dependencies:
       jsbi: 4.3.2
 
-  '@legendapp/list@3.3.5(patch_hash=70069ede322d8584fc3799d33372173ee79de580c2114f6024bb0ac959af0cca)(react-dom@19.2.6(react@19.2.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.2.6)(utf-8-validate@6.0.6))(react@19.2.6)':
+  '@legendapp/list@3.3.5(patch_hash=b36caf458d7719b550f2ad00866585949473074866bf86edb6b7305647f7262f)(react-dom@19.2.6(react@19.2.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.2.6)(utf-8-validate@6.0.6))(react@19.2.6)':
     dependencies:
       react: 19.2.6
       use-sync-external-store: 1.6.0(react@19.2.6)
@@ -15004,7 +15004,7 @@ snapshots:
       react-dom: 19.2.6(react@19.2.6)
       react-native: 0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.2.6)(utf-8-validate@6.0.6)
 
-  '@legendapp/list@3.3.5(patch_hash=70069ede322d8584fc3799d33372173ee79de580c2114f6024bb0ac959af0cca)(react-dom@19.3.0(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)':
+  '@legendapp/list@3.3.5(patch_hash=b36caf458d7719b550f2ad00866585949473074866bf86edb6b7305647f7262f)(react-dom@19.3.0(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)':
     dependencies:
       react: 19.3.0
       use-sync-external-store: 1.6.0(react@19.3.0)
