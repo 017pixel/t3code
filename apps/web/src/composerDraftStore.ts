@@ -75,7 +75,7 @@ import {
 import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
-import { createMemoryStorage } from "./lib/storage";
+import { createDeferredStorage, createMemoryStorage } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
@@ -102,52 +102,19 @@ type ComposerPersistState =
   | { capturedState: ComposerDraftStoreState }
   | PersistedComposerDraftStoreState;
 
-const composerBaseStorage =
-  typeof localStorage !== "undefined" ? localStorage : createMemoryStorage();
-let pendingComposerWrite: { name: string; value: StorageValue<ComposerPersistState> } | null = null;
-let composerPersistTimer: ReturnType<typeof setTimeout> | undefined;
-
-function cancelComposerPersistSchedule() {
-  clearTimeout(composerPersistTimer);
-  composerPersistTimer = undefined;
-}
-
-// Keep typing writes in memory. Serialize once typing pauses, or synchronously
-// on unload. Desktop quit destroys the window without unload events, so the
-// pause is the only flush there and must stay short.
-const composerDebouncedStorage = {
-  getItem: (name: string) => composerBaseStorage.getItem(name),
-  setItem: (name: string, value: StorageValue<ComposerPersistState>) => {
-    pendingComposerWrite = { name, value };
-    cancelComposerPersistSchedule();
-    composerPersistTimer = setTimeout(
-      () => composerDebouncedStorage.flush(),
-      COMPOSER_PERSIST_DEBOUNCE_MS,
-    );
-  },
-  removeItem: (name: string) => {
-    pendingComposerWrite = null;
-    cancelComposerPersistSchedule();
-    composerBaseStorage.removeItem(name);
-  },
-  flush: () => {
-    cancelComposerPersistSchedule();
-    const pending = pendingComposerWrite;
-    if (!pending) return;
-    pendingComposerWrite = null;
-    const { name, value } = pending;
-    composerBaseStorage.setItem(
-      name,
-      JSON.stringify({
-        state:
-          "capturedState" in value.state
-            ? partializeComposerDraftStoreState(value.state.capturedState)
-            : value.state,
-        version: value.version,
-      }),
-    );
-  },
-};
+// Desktop quit skips unload events, so drafts must also flush after a short pause.
+const composerDebouncedStorage = createDeferredStorage<StorageValue<ComposerPersistState>>(
+  typeof localStorage !== "undefined" ? localStorage : createMemoryStorage(),
+  (value) =>
+    JSON.stringify({
+      state:
+        "capturedState" in value.state
+          ? partializeComposerDraftStoreState(value.state.capturedState)
+          : value.state,
+      version: value.version,
+    }),
+  COMPOSER_PERSIST_DEBOUNCE_MS,
+);
 
 const composerPersistStorage: PersistStorage<ComposerPersistState> = {
   getItem: (name) => {

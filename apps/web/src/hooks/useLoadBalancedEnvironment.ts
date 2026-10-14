@@ -14,9 +14,7 @@ interface EnvironmentResources {
   readonly failed: boolean;
 }
 
-// Shared by every caller without candidates. A fresh atom per render would be
-// read before it is subscribed and produce a new empty array, which makes
-// React render the chat view again after it commits.
+// A stable empty atom avoids a new array and an extra chat render after subscription.
 const NO_ENVIRONMENT_RESOURCES = Atom.make<ReadonlyArray<EnvironmentResources>>([]);
 
 /** Only mounted for unresolved automatic drafts, so idle clients do not poll hosts. */

@@ -2,25 +2,10 @@ import type { EnvironmentId, OrchestrationV2ShellSnapshot, ServerConfig } from "
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 
-/**
- * The first screen's data, kept in localStorage so the first React commit can
- * paint the real sidebar and composer before the auth check, the connection
- * runtime, IndexedDB or the server answer anything.
- *
- * It mirrors the IndexedDB environment cache (connection/storage.ts writes
- * both), so it is never more authoritative than that cache: consumers present
- * it as cached data and the live connection replaces it. A document written by
- * another build is ignored, because the stored values skip schema decoding.
- */
-
+// Mirrors the IndexedDB cache for first paint. Build-scoped because reads skip schema decoding.
 const STORAGE_KEY = "t3code:boot-snapshot:v1";
 const FORMAT = 1;
-// localStorage allows 5 MB per origin. Safari and Firefox count it as UTF-16,
-// about 2.5M characters; Chromium and Electron allow 10 MB and store ASCII at
-// a byte per character. Drafts keep pasted images there too, as data URLs, so
-// the snapshot only takes room the rest of the app leaves free. In Safari and
-// Firefox it leaves at least 2M characters free, room for a pasted screenshot
-// of over 1 MB.
+// Leave room for drafts' image data URLs, including on browsers that count storage as UTF-16.
 const ORIGIN_CHARACTER_BUDGET =
   typeof navigator !== "undefined" && /\bChrom(?:e|ium)\//.test(navigator.userAgent)
     ? 4_500_000
@@ -91,11 +76,7 @@ function decodeDuration(encoded: unknown): Duration.Duration | null {
   return null;
 }
 
-/**
- * JSON with DateTime and Duration support. Values the reader could not
- * rebuild exactly (class instances, Options, bigints) abort the write instead
- * of coming back as plain objects.
- */
+// Reject values that cannot round-trip, rather than silently losing their types.
 function replacer(this: Record<string, unknown>, key: string, value: unknown): unknown {
   const raw = this[key];
   if (typeof raw === "object" && raw !== null) {
@@ -125,11 +106,7 @@ function hasSingleKey(value: object): boolean {
   return count === 1;
 }
 
-/**
- * Rebuilds DateTime and Duration values in place. A walk over the parsed
- * tree is several times faster than a JSON.parse reviver, which is called
- * for every primitive too.
- */
+// Walking objects avoids JSON.parse reviver calls for every primitive.
 function revive(value: object): unknown {
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index++) {
@@ -237,13 +214,7 @@ function loadStoredBootSnapshot(): BootSnapshot | null {
   return bootSnapshot;
 }
 
-/**
- * Whether this page paints from the snapshot: a reload, which renders long
- * before the session and the cache could answer, or a desktop window, whose
- * backend may still be starting. A new browser tab loads the app graph for
- * long enough that the cache and the session are ready when it renders, so it
- * starts as it always has.
- */
+// New tabs reach the session/cache before rendering; snapshots only help reloads and desktop.
 function bootPaintApplies(): boolean {
   if (typeof window === "undefined") return false;
   if (window.desktopBridge !== undefined) return true;
@@ -260,11 +231,6 @@ function bootPaintApplies(): boolean {
 let paintChecked = false;
 let paintApplies = false;
 
-/**
- * The snapshot this page paints its first screen from, read once. Null when
- * this boot does not paint from a snapshot, there is none, it came from
- * another build, or it was discarded.
- */
 export function readBootSnapshot(): BootSnapshot | null {
   if (!paintChecked) {
     paintChecked = true;
@@ -272,8 +238,6 @@ export function readBootSnapshot(): BootSnapshot | null {
   }
   return paintApplies ? loadStoredBootSnapshot() : null;
 }
-
-// ── Writing ────────────────────────────────────────────────────────────────
 
 let catalog: ReadonlyArray<BootCatalogEntry> | null = null;
 const shells = new Map<EnvironmentId, OrchestrationV2ShellSnapshot>();
@@ -286,13 +250,10 @@ let storedBody: string | null = null;
 let listening = false;
 let discarded = false;
 
-// The first write keeps the values this page booted with for environments the
-// live data has not written yet.
 // Environments cleared during this page, which seeding must not bring back.
 const forgotten = new Set<EnvironmentId>();
 
-// Runs at the first write, in an idle moment, so reading the stored document
-// never lands on the startup path.
+// Seed at the first idle write to keep the localStorage read off the startup path.
 function seedFromBootSnapshot() {
   if (seeded) return;
   seeded = true;
@@ -370,7 +331,6 @@ function encodeShell(
   return json;
 }
 
-/** Characters every other localStorage key of this origin holds. */
 function otherKeysLength(store: Storage): number {
   let total = 0;
   for (let index = 0; index < store.length; index++) {
@@ -454,9 +414,7 @@ function scheduleFlush() {
       if (document.visibilityState === "hidden") flush();
     });
   }
-  // Shell saves are already throttled to one per 10 s; this only batches the
-  // shell, config and catalog that change together, then waits for an idle
-  // moment so the write never lands in the middle of startup work.
+  // Batch the already-throttled cache saves, then wait for idle time to avoid startup work.
   if (flushTimer === null) {
     flushTimer = setTimeout(() => {
       if (typeof requestIdleCallback === "function") {
@@ -468,7 +426,6 @@ function scheduleFlush() {
   }
 }
 
-/** Called after the environment shell cache saved this snapshot. */
 export function recordBootShell(
   environmentId: EnvironmentId,
   snapshot: OrchestrationV2ShellSnapshot,
@@ -479,7 +436,6 @@ export function recordBootShell(
   scheduleFlush();
 }
 
-/** Called after the server configuration cache saved this config. */
 export function recordBootServerConfig(environmentId: EnvironmentId, config: ServerConfig): void {
   if (serverConfigs.get(environmentId) === config) return;
   forgotten.delete(environmentId);
@@ -487,19 +443,16 @@ export function recordBootServerConfig(environmentId: EnvironmentId, config: Ser
   scheduleFlush();
 }
 
-/** The live connection catalog, so the next boot knows which environments to show. */
 export function recordBootCatalog(entries: ReadonlyArray<BootCatalogEntry>): void {
   catalog = entries;
   scheduleFlush();
 }
 
-/** Called when an environment's cache is cleared. */
 export function forgetBootEnvironment(environmentId: EnvironmentId): void {
   forgotten.add(environmentId);
   shells.delete(environmentId);
   serverConfigs.delete(environmentId);
-  // What this page booted with stops standing in for it too, so the
-  // environment, paired again, starts from its own data.
+  // Re-pairing must not reuse the old environment's boot data.
   if (
     bootSnapshot !== null &&
     (bootSnapshot.shells.has(environmentId) || bootSnapshot.serverConfigs.has(environmentId))
@@ -513,10 +466,6 @@ export function forgetBootEnvironment(environmentId: EnvironmentId): void {
   scheduleFlush();
 }
 
-/**
- * Drops the stored snapshot for good in this page, for example when the
- * server no longer accepts this browser's session.
- */
 export function discardBootSnapshot(): void {
   discarded = true;
   bootSnapshot = null;
@@ -527,7 +476,5 @@ export function discardBootSnapshot(): void {
   flushTimer = null;
   try {
     storage()?.removeItem(STORAGE_KEY);
-  } catch {
-    // Nothing else to clean up.
-  }
+  } catch {}
 }

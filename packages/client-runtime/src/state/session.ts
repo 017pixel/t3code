@@ -42,9 +42,7 @@ function initialConfigOption<E>(
 // the settings UI) in a loading state for long.
 const DEFAULT_SESSION_STATE_TIMEOUT_MS = 6_000;
 
-// The session is fetched once per connect attempt and revalidated after 30 s.
-// A fetch that fails while the socket connects (a server still starting, a
-// network blip) retries, so permission-gated UI does not stay off until then.
+// Retry transient startup failures before the next 30 s session revalidation.
 const SESSION_STATE_RETRIES = 5;
 const SESSION_STATE_RETRY_SCHEDULE = Schedule.exponential("500 millis").pipe(
   Schedule.modifyDelay(({ duration }) =>

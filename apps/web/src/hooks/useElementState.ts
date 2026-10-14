@@ -1,11 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 
-/**
- * Element state for a callback ref. A hidden `<Activity>` (a kept thread
- * view) detaches refs but leaves the element in the document, so a null only
- * lands once the element has really left it. Hiding and revealing a view
- * then keeps its measurements instead of resetting and recomputing them.
- */
+// Activity detaches refs while keeping DOM; retain hidden elements to avoid re-measuring on reveal.
 export function useElementState<T extends Element>(): readonly [
   T | null,
   (element: T | null) => void,

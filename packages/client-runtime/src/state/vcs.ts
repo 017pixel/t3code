@@ -25,7 +25,7 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import * as Persistence from "../platform/persistence.ts";
-import { request, subscribeDynamic, type EnvironmentRpcInput } from "../rpc/client.ts";
+import { request, subscribe, type EnvironmentRpcInput } from "../rpc/client.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import { vcsCommandConcurrency, vcsCommandScheduler } from "./vcsCommandScheduler.ts";
 import {
@@ -245,9 +245,6 @@ function cachedVcsRefsChanges(
 export function createVcsEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Persistence.EnvironmentCacheStore | R, E>,
 ) {
-  // Replay survives atom disposal without extending the stream lifetime.
-  const statuses = new Map<string, { status: VcsStatusResult; version: string | undefined }>();
-  const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
   /**
    * One flat family on purpose: families hold entries via WeakRef, so a nested
    * per-environment family can be collected between lookups, dropping every
@@ -288,47 +285,18 @@ export function createVcsEnvironmentAtoms<R, E>(
     status: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:vcs:status",
       idleTtlMs: VCS_STATUS_IDLE_TTL_MS,
-      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) =>
-        Stream.unwrap(
-          Effect.gen(function* () {
-            const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-            const key = encodeKey([supervisor.target.environmentId, input]);
-            // A file list feeds a commit: it starts from the server's answer,
-            // never from a replay that may predate files made since.
-            const cached = input.includeFiles === true ? undefined : statuses.get(key);
-            let current = cached?.status ?? null;
-            const changes = subscribeDynamic(WS_METHODS.subscribeVcsStatus, () =>
-              Effect.sync(() => {
-                const knownVersion =
-                  input.includeFiles === true && current === null
-                    ? undefined
-                    : statuses.get(key)?.version;
-                return {
-                  ...input,
-                  compact: true,
-                  ...(knownVersion === undefined ? {} : { knownVersion }),
-                };
-              }),
-            ).pipe(
-              Stream.filterMap((event) => {
-                if (event._tag === "unchanged") return Result.failVoid;
-                const next = applyGitStatusStreamEvent(current, event);
-                const unchanged = current !== null && sameVcsStatus(current, next);
-                if (!unchanged) current = next;
-                statuses.delete(key);
-                statuses.set(key, {
-                  status: current ?? next,
-                  version: event._tag === "snapshot" ? event.version : undefined,
-                });
-                if (statuses.size > 128) statuses.delete(statuses.keys().next().value!);
-                return unchanged ? Result.failVoid : Result.succeed(next);
-              }),
-            );
-            return cached === undefined
-              ? changes
-              : Stream.concat(Stream.succeed(cached.status), changes);
+      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) => {
+        let current: ReturnType<typeof applyGitStatusStreamEvent> | null = null;
+        return subscribe(WS_METHODS.subscribeVcsStatus, { ...input, compact: true }).pipe(
+          Stream.filterMap((event) => {
+            if (event._tag === "unchanged") return Result.failVoid;
+            const next = applyGitStatusStreamEvent(current, event);
+            if (current !== null && sameVcsStatus(current, next)) return Result.failVoid;
+            current = next;
+            return Result.succeed(next);
           }),
-        ),
+        );
+      },
     }),
     pull: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:pull",

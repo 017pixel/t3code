@@ -1,15 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off - the host client drives a Node child process from its IPC callbacks, outside the Effect runtime.
-/**
- * The server's `ChildProcessSpawner`. On Linux, libuv forks to spawn, and the
- * kernel copies the server's page tables while the event loop waits: 10-60 ms
- * per git, gh, rg or provider CLI once the heap is large. Children start from
- * the small spawn host process instead (spawnHostProcess.ts), and their stdio
- * sockets come back to this process, so streams, exit codes, signals, process
- * groups and kills behave as with a direct spawn. macOS spawns with
- * posix_spawn and Windows with CreateProcess, which copy nothing, so they
- * spawn directly. If the host cannot start or keeps dying, children spawn
- * directly too.
- */
+// Linux forks copy the parent's page tables. Spawn from a small host so a large
+// server heap cannot block the event loop; other platforms spawn directly.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeEvents from "node:events";
 import type * as NodeNet from "node:net";
@@ -23,10 +14,8 @@ import { resolveSelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeR
 
 import type { SpawnHostError, SpawnHostEvent, SpawnHostSpawnRequest } from "./spawnHostProcess.ts";
 
-/** After this many host crashes or failed starts, children spawn directly. */
 const MAX_HOST_FAILURES = 3;
 const HOST_READY_TIMEOUT_MS = 10_000;
-/** The options the Effect spawner passes; anything else spawns directly. */
 const HOSTED_OPTION_KEYS: ReadonlySet<string> = new Set([
   "cwd",
   "env",
@@ -65,7 +54,6 @@ const killGroupOrProcess = (pid: number, signal: NodeJS.Signals) => {
 
 export interface SpawnHostFailure {
   readonly failures: number;
-  /** Every later child spawns directly. */
   readonly disabled: boolean;
   readonly cause: unknown;
 }
@@ -97,7 +85,6 @@ class HostedChildProcess
     if (this.#direct) return this.#direct.kill(signal);
     if (this.state === "exited") return false;
     if (this.state === "queued") {
-      // Never sent: dropping the request is the whole kill.
       this.#client.settle(this);
       return true;
     }
@@ -126,8 +113,7 @@ class HostedChildProcess
   attachStdio(fd: number, socket: NodeNet.Socket): void {
     this.stdio[fd] = socket;
     if (fd === 0) {
-      // Transferred stdin is readable, unlike Node's own, and can reset after
-      // the sink finishes. Its active listener still reports ProcessStdinError.
+      // Transferred stdin can reset after the sink removes its error listener.
       socket.on("error", () => {});
       this.stdin = socket;
     } else if (fd === 1) this.stdout = socket;
@@ -146,8 +132,7 @@ class HostedChildProcess
     // Node destroys a child's stdin when it exits.
     this.stdin?.destroy();
     this.emit("exit", code, signal);
-    // Like Node's flushStdio: output nobody reads any more, for example after a
-    // timeout or an output limit unpiped it, drains to EOF so its socket closes.
+    // Match Node's flushStdio: drain unread output to EOF so its socket closes.
     process.nextTick(() => {
       for (const stream of this.stdio) {
         if (
@@ -168,7 +153,6 @@ class HostedChildProcess
     this.emit("error", error);
   }
 
-  /** Spawns from this process a request no host ever received. */
   spawnDirectly(): void {
     this.#client.settle(this);
     const { command, args, options } = this.request;
@@ -235,7 +219,6 @@ class SpawnHostClient {
     return child;
   };
 
-  /** Forgets a child that exited, failed, was dropped, or moved to a direct spawn. */
   settle(child: HostedChildProcess): void {
     if (child.state === "exited") return;
     child.state = "exited";
@@ -259,8 +242,7 @@ class SpawnHostClient {
     if (host?.connected) host.disconnect();
   }
 
-  // Like a direct child's process handle, the channel keeps this process
-  // alive only while a referenced child runs.
+  // Match a direct child's process handle: only referenced children keep the server alive.
   #syncChannelRef(): void {
     const channel = this.#host?.channel;
     if (!channel) return;
@@ -270,8 +252,7 @@ class SpawnHostClient {
 
   #send(child: HostedChildProcess): void {
     const host = this.#host;
-    // Between the host's IPC EOF and its `close`, a send would only error. The
-    // child stays queued, and `close` hands it to the next host.
+    // After IPC EOF, leave it queued for the next host instead of sending to a closed channel.
     if (!host?.connected) return;
     child.state = "sent";
     host.send(child.request);
@@ -306,7 +287,7 @@ class SpawnHostClient {
         this.#onEvent(event as SpawnHostEvent, socket as NodeNet.Socket | undefined);
       }
     });
-    // Persistent: a host can emit more than one error, and an unhandled one would end the server.
+    // Keep listening: later errors would otherwise crash the server.
     host.on("error", (cause) => this.#lose(host, cause));
     // `close` follows the last IPC message, so every exit the host reported is handled first.
     host.once("close", (code, signal) =>
@@ -360,14 +341,12 @@ class SpawnHostClient {
     this.#onHostFailure({ failures: this.#failures, disabled, cause });
     for (const child of this.#children.values()) {
       if (child.state === "queued") {
-        // The host never saw it, so it cannot have started. It waits for the next host.
         if (disabled) child.spawnDirectly();
       } else if (child.state === "sent") {
         // It may have started; spawning again could run it twice.
         child.markFailed(new Error("The spawn host exited before reporting the spawn."));
       } else if (!child.referenced) {
-        // Its exit status left with the host. A scope release leaves an
-        // unreferenced child, such as a detached editor, running; so does this.
+        // Detached editors outlive the host, as they would a scope release.
         child.markExited(null, null);
       } else if (child.pid !== undefined) {
         // Its exit status left with the host. Stop the group it leads, as a scope release would.
@@ -379,7 +358,6 @@ class SpawnHostClient {
   }
 }
 
-/** Starts children from the spawn host that `command args` runs. */
 export const layerHost = (
   command: string,
   args: ReadonlyArray<string>,

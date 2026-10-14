@@ -8,28 +8,12 @@ export type KeybindingsUpdateToastDecision =
 
 export interface KeybindingsUpdateToastController {
   readonly handle: (event: ServerConfigStreamEvent | null) => KeybindingsUpdateToastDecision | null;
-  /**
-   * The issues of the first config the client shows, which can arrive with no
-   * snapshot event: from a boot snapshot, or from a server that found it unchanged.
-   * Later calls do nothing.
-   */
+  /** Seed once from boot/unchanged configs that arrive without a snapshot event. */
   readonly seed: (issues: ServerConfig["issues"]) => void;
 }
 
-interface KeybindingsUpdate {
-  readonly keybindingsChanged: boolean;
-  /** The config's issues, when the event carries them. */
-  readonly issues: ServerConfig["issues"] | null;
-}
-
-/**
- * A keybindings reload, as a `keybindingsUpdated` event or, from a server
- * that sends config deltas, as a delta that changes the keybindings or the
- * issues (a malformed file leaves the bindings as they were).
- */
-function keybindingsUpdateFromEvent(
-  event: ServerConfigStreamEvent | null,
-): KeybindingsUpdate | null {
+// Malformed files can change issues without changing keybindings.
+function keybindingsUpdateFromEvent(event: ServerConfigStreamEvent | null) {
   if (event?.type === "keybindingsUpdated") {
     return { keybindingsChanged: true, issues: event.payload.issues };
   }
@@ -59,8 +43,7 @@ export function createKeybindingsUpdateToastController(input: {
       reportedIssueMessage = keybindingsIssue(issues)?.message ?? null;
     },
     handle: (event) => {
-      // A file that is already invalid when the config arrives is fixed later
-      // by a delta that only clears the issue.
+      // Seed standing issues so clearing one later counts as a fix.
       if (event?.type === "snapshot") {
         seeded = true;
         reportedIssueMessage = keybindingsIssue(event.config.issues)?.message ?? null;

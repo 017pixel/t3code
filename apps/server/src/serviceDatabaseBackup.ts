@@ -3,7 +3,6 @@ import * as NodeSqlite from "node:sqlite";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
-/** A read transaction on a WAL database, or undefined for a file the online copy cannot read. */
 function openWalReader(databasePath: string) {
   let source: NodeSqlite.DatabaseSync | undefined;
   try {
@@ -12,30 +11,25 @@ function openWalReader(databasePath: string) {
     source.prepare("SELECT name FROM sqlite_schema LIMIT 1").get();
     if (source.prepare("PRAGMA journal_mode").get()?.journal_mode === "wal") return source;
   } catch {
-    // Not a database this copy can read; closed below.
+    // Fall back to the stopped copy.
   }
   source?.close();
   return undefined;
 }
 
 /**
- * Hold the source read transaction until the stopped server's WAL is captured.
- * A WAL reader prevents checkpoint/reset from discarding frames newer than its
- * snapshot. Overlaying the final WAL on the online snapshot therefore reproduces
- * every commit through shutdown, including writes made during the long copy.
- * Copying just an online snapshot would lose those acknowledged writes on rollback.
+ * Pin WAL frames with a read transaction until shutdown, then overlay the final
+ * WAL on the online snapshot so rollback keeps writes made during the copy.
  */
 export async function prepareServiceDatabaseBackup(databasePath: string, stagingDir: string) {
   const source = openWalReader(databasePath);
-  // Anything else takes the stopped copy.
   if (source === undefined) return undefined;
   await NodeFSP.rm(stagingDir, { recursive: true, force: true });
   await NodeFSP.mkdir(stagingDir, { recursive: true, mode: 0o700 });
   try {
     const destination = NodePath.join(stagingDir, "database");
     await NodeSqlite.backup(source, destination, { rate: 256 });
-    // SQLite backup produces a standalone database. Enable WAL before installing
-    // the source WAL; never open the destination between copying WAL and restore.
+    // Enable WAL before installing it; do not open the destination again before restore.
     const snapshot = new NodeSqlite.DatabaseSync(destination);
     try {
       snapshot.exec("PRAGMA journal_mode = WAL");

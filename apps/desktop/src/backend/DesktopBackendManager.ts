@@ -43,6 +43,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
+  SERVER_EXIT_CODE_STATE_DIR_OWNED,
   DesktopBackendBootstrap,
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
@@ -66,7 +67,9 @@ const MAX_PREFLIGHT_FAILURE_ATTEMPTS = 5;
 const DEFAULT_BACKEND_READINESS_TIMEOUT = Duration.minutes(1);
 const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
-const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(2);
+// Same as the service launcher. A killed backend leaves its agents running,
+// and a busy one needs a few seconds to stop every provider session.
+const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(5);
 const DEFAULT_BACKEND_OUTPUT_DRAIN_TIMEOUT = Duration.seconds(5);
 const STOPPED_BEFORE_SPAWN: BackendProcessExit = {
   code: Option.none(),
@@ -305,14 +308,13 @@ export interface BackendInstanceSpec {
   // between "fired onReady" and "currentConfig already advanced".
   readonly onReady?: (httpBaseUrl: URL) => Effect.Effect<void>;
   readonly onShutdown?: () => Effect.Effect<void>;
-  // Awaited after a run's config is published and before its process spawns.
-  // The primary waits here for the login shell environment, so its endpoint
-  // and bootstrap token are readable while the shell is still starting.
+  // Wait after publishing config so preload can read credentials before spawn.
   readonly beforeSpawn?: Effect.Effect<void>;
   // Fired once when a fatal or bounded preflight failure has exhausted its
   // retries. Returns true when the callback changed configuration and the
   // manager should resolve once more; false stops the failed instance.
   readonly onPreflightFailed?: (failure: PreflightFailure) => Effect.Effect<boolean>;
+  readonly onStateDirOwned?: () => Effect.Effect<void>;
 }
 
 interface ActiveBackendRun {
@@ -736,8 +738,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
     });
   });
 
-  // Waits for spec.beforeSpawn, or reports false once stop closes the run's
-  // scope first, so a stopped run never spawns.
+  // Stop must release the spawn gate without starting the stopped run.
   const awaitBeforeSpawn = (runScope: Scope.Scope): Effect.Effect<boolean> => {
     const beforeSpawn = spec.beforeSpawn;
     if (beforeSpawn === undefined) return Effect.succeed(true);
@@ -891,7 +892,9 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
 
         const finalizeRun = Effect.fn("desktop.backendInstance.finalizeRun")(function* (
           reason: string,
+          exitCode?: number,
         ) {
+          const stateDirOwned = exitCode === SERVER_EXIT_CODE_STATE_DIR_OWNED;
           yield* mutex.withPermits(1)(
             Effect.gen(function* () {
               const { isCurrentRun, nextState, pid, exitObserved, stopRequested, wasReady } =
@@ -961,6 +964,11 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
               }
 
               if (isCurrentRun && nextState.desiredRunning) {
+                if (stateDirOwned && !stopRequested) {
+                  yield* Ref.update(state, (latest) => ({ ...latest, desiredRunning: false }));
+                  yield* (spec.onStateDirOwned?.() ?? Effect.void).pipe(Effect.ignore);
+                  return;
+                }
                 yield* scheduleRestart(reason);
               }
             }),
@@ -1039,7 +1047,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           Scope.provide(runScope),
           Effect.matchEffect({
             onFailure: (error) => finalizeRun(error.message),
-            onSuccess: (exit) => finalizeRun(exit.reason),
+            onSuccess: (exit) => finalizeRun(exit.reason, Option.getOrUndefined(exit.code)),
           }),
           Effect.ensuring(Scope.close(runScope, Exit.void).pipe(Effect.ignore)),
         );

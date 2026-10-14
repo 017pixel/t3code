@@ -41,12 +41,7 @@ import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { CommandDialog, CommandDialogPopup } from "./ui/command";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 
-// The palette's views pull in project browsing, search, and syntax highlighting.
-// Only the shortcut handling stays in the startup graph; the dialog loads on first
-// open, or once the app is idle after boot.
-// A failed load closes the palette instead of replacing the app with the route
-// error view. A stale deploy gets its `vite:preloadError` reload first; otherwise
-// the next open requests the chunk again.
+// Keep palette views out of the startup graph; close on a failed load.
 function CommandPaletteUnavailable({ onUnavailable }: { onUnavailable: () => void }) {
   useEffect(() => onUnavailable(), [onUnavailable]);
   return null;
@@ -67,10 +62,7 @@ function paletteTextInputMounted(mode: SearchOverlayMode): boolean {
   );
 }
 
-/**
- * The text a key types, or null for shortcuts and keys that type nothing.
- * Option on macOS and AltGr elsewhere type characters.
- */
+/** Option on macOS and AltGr elsewhere can type characters. */
 function typedText(event: globalThis.KeyboardEvent): string | null {
   if ([...event.key].length !== 1 || event.metaKey) return null;
   const altGraph = event.getModifierState("AltGraph");
@@ -153,8 +145,7 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
       : false,
   );
 
-  // Keyboard handlers outside the palette ignore keys from the moment it is
-  // requested, including while its chunk loads.
+  // Block background shortcuts while the palette's chunk loads too.
   useLayoutEffect(() => {
     setCommandPaletteRequested(state.open);
     return () => setCommandPaletteRequested(false);
@@ -179,10 +170,7 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onModifier, true);
   }, []);
 
-  // While a view's chunk loads (the palette, or content search inside it), the
-  // app behind it is inert and nothing has focus. Text typed then becomes the
-  // view's query, and Escape closes the palette (content and file search
-  // handle their own Escape below).
+  // Buffer typing while lazy views load; file/content search handle their own Escape.
   const loadingQuery =
     state.openIntent === null
       ? ""

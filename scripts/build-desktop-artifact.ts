@@ -114,7 +114,9 @@ const decodeBundleSourceMap = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Struct({ sources: Schema.Array(Schema.String) })),
 );
 
-const readWorkspaceConfig = Effect.fn("readWorkspaceConfig")(function* () {
+// Decodes the repo's pnpm-workspace.yaml. A PR CI test calls this too, so a bad
+// entry fails the PR instead of the nightly desktop build.
+export const readWorkspaceConfig = Effect.fn("readWorkspaceConfig")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const repoRoot = yield* RepoRoot;
@@ -2201,14 +2203,9 @@ const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSel
       });
     }
 
-    // __load-bundle evaluates every chunk the entry reaches, lazily loaded
-    // services and provider adapters included, and loads the Cursor SDK. That
-    // is where a missing dependency shows up, without starting a server or
-    // touching disk state. (--version returns before the server graph loads.)
-    // It does not cover other externals required only when called: node-pty is
-    // checked by the WSL preflight probe at runtime, while ffi-rs and the bun
-    // adapters are covered by the shared runtime-external closure and
-    // emitted-bundle checks.
+    // Load lazy services, adapters and Cursor SDK without starting a server.
+    // --version skips these imports. Call-only externals remain covered by
+    // runtime-external closure checks and the WSL node-pty preflight.
     yield* runCommand(
       ChildProcess.make(
         process.execPath,
@@ -2824,6 +2821,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
       extendInfo: {
+        // macOS 26 offers Messages/Mail codes in every text field unless opted out.
+        NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
         NSLocalNetworkUsageDescription:
           "T3 Code connects to devices on your local network for remote environments and commands run by terminals and coding agents.",
         NSScreenCaptureUsageDescription:

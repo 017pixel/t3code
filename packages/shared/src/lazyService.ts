@@ -4,12 +4,7 @@ import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 
-/**
- * Deferred acquisition keeps services and finalizers in the application scope.
- * Concurrent first uses share one run, and a caller that leaves does not stop
- * it. A failed run is not kept, so the next use starts again: a transient error
- * or a chunk an upgrade replaced under the running server is not permanent.
- */
+/** Share acquisition in the owner's scope; retry failures on the next use. */
 export const cacheInOwnerScope = <A, E, R>(make: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const context = yield* Effect.context<R | Scope.Scope>();

@@ -51,7 +51,6 @@
         "src/boot.ts!",
         "src/compileCache.ts!",
         "src/main.ts!",
-        "src/application.ts!",
         "src/preload.ts!",
         "src/preview-pick-preload.ts!",
         "src/preview-pip-preload.ts!",

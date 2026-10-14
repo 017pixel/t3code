@@ -347,11 +347,7 @@ export function ThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
   return <EnabledThreadPullRequestsPanel threadRef={threadRef} />;
 }
 
-/**
- * The live shell lists the linked pull requests, with trimmed snapshots. The thread
- * detail has full snapshots, but after a reload it may be a cached copy until it
- * syncs. Each link takes the detail's snapshot unless the shell's was synced later.
- */
+/** Prefer full detail snapshots unless the compact shell has synced more recently. */
 function freshestPullRequests(
   shellLinks: ReadonlyArray<ThreadPullRequestLink> | undefined,
   detailLinks: ReadonlyArray<ThreadPullRequestLink> | undefined,

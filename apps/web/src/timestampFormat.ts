@@ -81,11 +81,7 @@ export function resolveWeekStartsOn(locale: string | undefined): WeekdayIndex | 
 
 let cachedWeekStartsOn: { readonly value: WeekdayIndex | undefined } | null = null;
 
-/**
- * Week start for calendars, from the same locale timestamps are shown in.
- * Resolved on first use: reading locale week data costs a few milliseconds
- * that startup does not need.
- */
+/** Week start for the timestamp locale, resolved lazily to keep locale work off startup. */
 export function getWeekStartsOn(): WeekdayIndex | undefined {
   cachedWeekStartsOn ??= { value: resolveWeekStartsOn(timestampLocale) };
   return cachedWeekStartsOn.value;

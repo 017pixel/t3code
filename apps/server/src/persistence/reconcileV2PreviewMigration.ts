@@ -2,6 +2,9 @@ import * as Effect from "effect/Effect";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
+import AutoSettleDisabledAt from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
+
 // Published previews assigned V2 to 53, then 54. Keep their schema and import
 // progress intact while reserving main's migration ids for upgrades from main.
 export const reconcileV2PreviewMigration = Effect.fn("reconcileV2PreviewMigration")(function* () {
@@ -33,13 +36,6 @@ export const reconcileV2PreviewMigration = Effect.fn("reconcileV2PreviewMigratio
           message: "Cannot upgrade V2 preview with unexpected later migrations.",
         });
       }
-      const [{ default: PullRequestFilesViewed }, { default: AutoSettleDisabledAt }] =
-        yield* Effect.promise(() =>
-          Promise.all([
-            import("./Migrations/053_PullRequestFilesViewed.ts"),
-            import("./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts"),
-          ]),
-        );
       const executed: Array<readonly [number, string]> = [];
       if (legacy.migration_id === 53) {
         yield* PullRequestFilesViewed;

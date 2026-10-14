@@ -19,6 +19,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import { migrationEntries, runMigrations } from "../Migrations.ts";
+import ProjectionThreadSweepIndexes from "./063_ProjectionThreadSweepIndexes.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
@@ -28,7 +29,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 63 }, (_, index) => index + 1),
+        Array.from({ length: 64 }, (_, index) => index + 1),
       );
     }),
   );
@@ -48,8 +49,9 @@ layer("055_OrchestrationV2", (it) => {
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
         [61, "PullRequestReviewGuides"],
-        [62, "ProjectionThreadSweepIndexes"],
-        [63, "ProjectionThreadReadPayload"],
+        [62, "ThreadFailureLookupIndex"],
+        [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -77,8 +79,9 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 59, name: "McpAppModelContext" },
         { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
         { migration_id: 61, name: "PullRequestReviewGuides" },
-        { migration_id: 62, name: "ProjectionThreadSweepIndexes" },
-        { migration_id: 63, name: "ProjectionThreadReadPayload" },
+        { migration_id: 62, name: "ThreadFailureLookupIndex" },
+        { migration_id: 63, name: "ProjectionThreadSweepIndexes" },
+        { migration_id: 64, name: "ProjectionThreadReadPayload" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -208,14 +211,15 @@ layer("055_OrchestrationV2", (it) => {
   it.effect("replaces a same-named sweep index", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 61 });
+      yield* runMigrations({ toMigrationInclusive: 62 });
       yield* sql`
         CREATE INDEX orchestration_v2_projection_threads_active_idx
         ON orchestration_v2_projection_threads(updated_at, thread_id)
         WHERE deleted_at IS NULL AND archived_at IS NULL
       `;
-      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 62 }), [
-        [62, "ProjectionThreadSweepIndexes"],
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
       ]);
       const [index] = yield* sql<{ readonly sql: string }>`
         SELECT sql FROM sqlite_master WHERE name = 'orchestration_v2_projection_threads_active_idx'
@@ -224,11 +228,11 @@ layer("055_OrchestrationV2", (it) => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  // Another build's migration at 63 or above makes the migrator skip this build's 63.
+  // Another build's migration at 64 or above makes the migrator skip this build's 64.
   it.effect("creates the thread read projection when another build took its migration id", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 62 });
+      yield* runMigrations({ toMigrationInclusive: 63 });
       yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (64, 'OtherBuild')`;
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(
@@ -251,11 +255,11 @@ layer("055_OrchestrationV2", (it) => {
         yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
         [{ thread_id: "early" }],
       );
-      // Builds that ran this migration as 62 run it again as 63, which rebuilds the rows they
+      // Builds that ran this migration as 63 run it again as 64, which rebuilds the rows they
       // wrote from the thread rows.
-      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 62`;
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (62, 'ProjectionThreadReadPayload')`;
-      assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadReadPayload"]]);
+      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 63`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (63, 'ProjectionThreadReadPayload')`;
+      assert.deepStrictEqual(yield* runMigrations(), [[64, "ProjectionThreadReadPayload"]]);
       assert.deepStrictEqual(
         yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
         [],
@@ -263,8 +267,7 @@ layer("055_OrchestrationV2", (it) => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  // Stacked builds ran ProjectionThreadReadPayload as 62, so they never run this build's 62.
-  it.effect("keeps sweeps correct on a database that recorded a different 62", () => {
+  it.effect("repairs indexes after an older sweep build recorded id 62", () => {
     const skippedWarnings: Array<unknown> = [];
     const logger = Logger.make(({ fiber, logLevel }) => {
       const skipped = fiber.getRef(References.CurrentLogAnnotations).skipped;
@@ -273,22 +276,35 @@ layer("055_OrchestrationV2", (it) => {
     return Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 61 });
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (62, 'ProjectionThreadReadPayload')`;
-      // Ids above the recorded latest still run.
-      assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadReadPayload"]]);
-      assert.deepStrictEqual(skippedWarnings, [["62_ProjectionThreadSweepIndexes"]]);
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (62, 'ProjectionThreadSweepIndexes')`;
+      yield* sql`CREATE INDEX orchestration_v2_projection_threads_active_idx
+        ON orchestration_v2_projection_threads(updated_at, thread_id)`;
+      yield* sql`CREATE INDEX orchestration_v2_projection_runs_failed_idx
+        ON orchestration_v2_projection_runs(thread_id) WHERE status = 'failed'`;
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
+      ]);
+      assert.deepStrictEqual(skippedWarnings, [["62_ThreadFailureLookupIndex"]]);
+      yield* ProjectionThreadSweepIndexes;
       assert.deepStrictEqual(
         yield* sql`
           SELECT name FROM sqlite_master
           WHERE name IN (
             'orchestration_v2_projection_threads_active_idx',
-            'orchestration_v2_projection_runs_failed_idx'
+            'orchestration_v2_projection_runs_failed_idx',
+            'orchestration_v2_projection_turn_items_failed_error_idx'
           )
+          ORDER BY name
         `,
-        [],
+        [
+          { name: "orchestration_v2_projection_runs_failed_idx" },
+          { name: "orchestration_v2_projection_threads_active_idx" },
+          { name: "orchestration_v2_projection_turn_items_failed_error_idx" },
+        ],
       );
 
-      // Without the index, the pull request and usage-limit sweeps still find the thread.
+      // The repaired indexes keep pull request and usage-limit sweeps working.
       const store = yield* ProjectionStore.ProjectionStoreV2;
       const at = DateTime.makeUnsafe("2026-10-01T00:00:00.000Z");
       const threadId = ThreadId.make("thread:peer-links");

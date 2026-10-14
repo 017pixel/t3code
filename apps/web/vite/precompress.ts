@@ -13,12 +13,7 @@ const gzip = NodeUtil.promisify(NodeZlib.gzip);
 const COMPRESSIBLE_FILE = /\.(?:js|mjs|css|json|svg|wasm|txt|xml)$/;
 const MIN_BYTES = 1024;
 
-/**
- * Writes `.br` (quality 11) and `.gz` (level 9) next to each hashed asset so
- * the server sends finished bytes instead of compressing on every cold load.
- * Only `assets/` gets copies: those names are content hashed, so a copy can
- * never describe a different version of its file.
- */
+// Only hashed assets get sidecars, so compressed copies cannot describe stale content.
 export function precompressPlugin(): Plugin {
   return {
     name: "t3code:precompress",

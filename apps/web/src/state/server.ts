@@ -36,11 +36,7 @@ const liveServerEnvironment = createServerEnvironmentAtoms(connectionAtomRuntime
   usageLimitsCommand: true,
 });
 const emptyConfigValueAtom = liveServerEnvironment.configValueAtom(null);
-/**
- * Until the environment's own configuration loads (IndexedDB cache or the
- * server), the boot snapshot's copy stands in, so provider and model labels
- * paint with the first frame.
- */
+// Cached provider/model labels stand in until the environment's configuration loads.
 const configValueAtom = Atom.family((environmentId: EnvironmentId | null) =>
   environmentId === null
     ? emptyConfigValueAtom

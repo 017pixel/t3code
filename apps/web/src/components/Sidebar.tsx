@@ -1,7 +1,10 @@
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "./ThreadHoverCard";
 import { CollapsibleSectionHeader } from "./ui/collapsible-section-header";
-import { setThreadChangeRequestSnapshot } from "./ThreadStatusIndicators";
+import {
+  setThreadChangeRequestSnapshot,
+  ThreadTerminalStatusButton,
+} from "./ThreadStatusIndicators";
 import { ThreadContextDragGhost } from "./chat/ThreadContextDragGhost";
 import {
   dropThreadContext,
@@ -126,30 +129,34 @@ import { isMacPlatform } from "~/lib/utils";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { readLocalApi } from "../localApi";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
-import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
+import { selectProjectGroupingSettings } from "../logicalProject";
 import {
-  buildSidebarProjectSnapshots,
   projectGroupsSpanEnvironments,
   resolveSidebarProjectScopeKey,
   getSidebarProjectSettingsKey,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
-import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
+import { useUiStateStore } from "../uiStateStore";
 import {
   getThreadKeysToDeselectAfterDelete,
   useThreadSelectionStore,
 } from "../threadSelectionStore";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
+import { registerSettleAndAdvance } from "../settleAndAdvance";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useMinuteValue } from "../hooks/useNowMinute";
 import { sidebarThreadShellsAtom } from "./Sidebar.shells";
-import { SidebarTooltip, SidebarTooltipScope } from "./Sidebar.tooltip";
+import {
+  SidebarTooltip as Tooltip,
+  SidebarTooltipScope as TooltipProvider,
+} from "./Sidebar.tooltip";
 import { Atom } from "effect/reactivity";
 import {
   useEnvironmentIdentities,
@@ -224,7 +231,6 @@ import {
   sidebarThreadKeyAtY,
   sortInboxThreadsByReturn,
   sortPinnedThreadsForSidebar,
-  sortSidebarV2ProjectGroups,
   sortThreadsForSidebar,
   sortWorkingThreadsBySend,
   useThreadJumpHintVisibility,
@@ -258,7 +264,6 @@ import {
   terminalStatusFromRunningIds,
   threadChangeRequestSnapshotsAtom,
   type ThreadChangeRequestSnapshot,
-  synchronizeTerminalPulse,
   type TerminalStatusIndicator,
   useLinkedThreadPullRequest,
   ThreadSearchPullRequestNumber,
@@ -611,7 +616,7 @@ function SnoozeMenuButton(props: {
   );
   return (
     <Menu open={open} onOpenChange={onOpenChange}>
-      <SidebarTooltip>
+      <Tooltip>
         <TooltipTrigger
           render={
             <MenuTrigger
@@ -630,7 +635,7 @@ function SnoozeMenuButton(props: {
           <ClockIcon className="size-3" />
         </TooltipTrigger>
         <TooltipPopup>Snooze thread</TooltipPopup>
-      </SidebarTooltip>
+      </Tooltip>
       <MenuPopup side="bottom" align="end">
         {presets.map((preset) => (
           <MenuItem
@@ -996,7 +1001,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
               {props.projectDisplayName}
             </span>
             <span className="ml-auto flex h-5 min-w-5 shrink-0 items-center justify-end">
-              <SidebarTooltip>
+              <Tooltip>
                 <TooltipTrigger
                   render={
                     <button
@@ -1010,7 +1015,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
                   }
                 />
                 <TooltipPopup side="top">Discard draft</TooltipPopup>
-              </SidebarTooltip>
+              </Tooltip>
             </span>
           </div>
           <div aria-hidden className="mt-0.5 truncate text-sm font-medium text-foreground/90">
@@ -1801,23 +1806,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         onOpenPullRequest={handlePrClick}
       />
     ) : null;
-  const terminalStatusIcon = terminalStatus ? (
-    <span
-      role="img"
-      aria-label={terminalProcessLabel(terminalProcessCount)}
-      data-testid={`sidebar-terminal-status-${thread.id}`}
-      className={cn("inline-flex shrink-0 items-center justify-center", terminalStatus.colorClass)}
-    >
-      <TerminalIcon
-        className={cn("size-3.5", terminalStatus.pulse && "motion-safe:animate-status-pulse")}
-        onAnimationStart={synchronizeTerminalPulse}
-      />
-    </span>
-  ) : null;
+  const terminalStatusIcon = (
+    <ThreadTerminalStatusButton
+      threadRef={threadRef}
+      terminalIds={runningTerminalIds}
+      onThreadActivate={onThreadActivate}
+    />
+  );
   // Same pen the new-thread draft rows lead with, so both kinds of unsent
   // work read the same way in the list.
   const draftIndicator = hasUnsentDraft ? (
-    <SidebarTooltip>
+    <Tooltip>
       <TooltipTrigger
         render={
           <span
@@ -1831,13 +1830,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         <SquarePenIcon aria-hidden className={draftPenClassName} />
       </TooltipTrigger>
       <TooltipPopup side="top">Unsent draft</TooltipPopup>
-    </SidebarTooltip>
+    </Tooltip>
   ) : null;
   const showPin =
     props.isPinned && (!sortable?.isDragging || (props.dragOverPinned && props.dropVerb === null));
   const pinIndicator = showPin ? (
     props.pinningSupported && canOperateThread && !sortable?.isDragging ? (
-      <SidebarTooltip>
+      <Tooltip>
         <TooltipTrigger
           render={
             <button
@@ -1860,7 +1859,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           />
         </TooltipTrigger>
         <TooltipPopup>Unpin thread</TooltipPopup>
-      </SidebarTooltip>
+      </Tooltip>
     ) : (
       <PinIcon
         aria-label="Pinned"
@@ -1883,7 +1882,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           sortable?.isDragging && "relative z-20",
         )}
       >
-        <SidebarTooltip disabled={sortable?.isDragging}>
+        <Tooltip disabled={sortable?.isDragging}>
           <TooltipTrigger
             render={
               <div
@@ -1951,7 +1950,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   ) : isWoke ? (
                     // A wake can land straight in the settled tail (e.g. PR
                     // merged while snoozed); the signal must survive the trip.
-                    <SidebarTooltip>
+                    <Tooltip>
                       <TooltipTrigger
                         render={
                           <button
@@ -1966,7 +1965,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                         }
                       />
                       <TooltipPopup side="top">Dismiss Woke notification</TooltipPopup>
-                    </SidebarTooltip>
+                    </Tooltip>
                   ) : (
                     <span className="text-xs">
                       <SidebarTimeLabel thread={thread} settled={variantAction === "unsettle"} />
@@ -1989,7 +1988,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     </button>
                   )
                 ) : !props.settlementSupported ? null : variantAction === "unsettle" ? (
-                  <SidebarTooltip>
+                  <Tooltip>
                     <TooltipTrigger
                       render={
                         <button
@@ -2007,7 +2006,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                       <Undo2Icon className="mb-px size-3.5" />
                     </TooltipTrigger>
                     <TooltipPopup side="top">Un-settle thread</TooltipPopup>
-                  </SidebarTooltip>
+                  </Tooltip>
                 ) : (
                   <button
                     type="button"
@@ -2028,7 +2027,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {props.jumpLabel ? <JumpHintBadge label={props.jumpLabel} /> : null}
           </TooltipTrigger>
           {detailsTooltip}
-        </SidebarTooltip>
+        </Tooltip>
       </li>
     );
   }
@@ -2047,7 +2046,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         sortable?.isDragging && "relative z-20",
       )}
     >
-      <SidebarTooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
+      <Tooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
         <TooltipTrigger
           render={
             <div
@@ -2113,7 +2112,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   >
                     {topStatus ? (
                       isWokeStatus ? (
-                        <SidebarTooltip>
+                        <Tooltip>
                           <TooltipTrigger
                             render={
                               <button
@@ -2131,7 +2130,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             }
                           />
                           <TooltipPopup side="top">Dismiss Woke notification</TooltipPopup>
-                        </SidebarTooltip>
+                        </Tooltip>
                       ) : (
                         <span
                           className={cn(
@@ -2178,7 +2177,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                       )}
                     >
                       {hasUnsentDraft ? (
-                        <SidebarTooltip>
+                        <Tooltip>
                           <TooltipTrigger
                             render={
                               <button
@@ -2192,7 +2191,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             <XIcon className="size-3.5" />
                           </TooltipTrigger>
                           <TooltipPopup side="top">Discard draft</TooltipPopup>
-                        </SidebarTooltip>
+                        </Tooltip>
                       ) : null}
                       {showSnoozeButton ? (
                         <SnoozeMenuButton
@@ -2203,7 +2202,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                         />
                       ) : null}
                       {props.settlementSupported ? (
-                        <SidebarTooltip>
+                        <Tooltip>
                           <TooltipTrigger
                             render={
                               <button
@@ -2219,7 +2218,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             Settle
                           </TooltipTrigger>
                           <TooltipPopup>Settle thread</TooltipPopup>
-                        </SidebarTooltip>
+                        </Tooltip>
                       ) : null}
                     </span>
                   ) : null}
@@ -2298,7 +2297,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           {props.jumpLabel ? <JumpHintBadge label={props.jumpLabel} /> : null}
         </TooltipTrigger>
         {detailsTooltip}
-      </SidebarTooltip>
+      </Tooltip>
     </li>
   );
 });
@@ -2434,7 +2433,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   }, [isFileDragOver]);
   return (
     <li ref={setSlotNode} role="presentation" className="list-none" {...fileDropHandlers}>
-      <SidebarTooltip>
+      <Tooltip>
         <TooltipTrigger
           render={
             <button
@@ -2526,7 +2525,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
           terminalStatus={terminalStatus}
           terminalProcessCount={runningTerminalIds.length}
         />
-      </SidebarTooltip>
+      </Tooltip>
     </li>
   );
 });
@@ -2543,7 +2542,6 @@ export default function Sidebar() {
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
-  const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -2661,41 +2659,7 @@ export default function Sidebar() {
     [environments],
   );
   const environmentMachineById = useEnvironmentMachines();
-  const orderedProjects = useMemo(
-    () =>
-      orderItemsByPreferredIds({
-        items: projects,
-        preferredIds: projectOrder,
-        getId: getProjectOrderKey,
-        getPreferenceIds: (project) => [
-          getProjectOrderKey(project),
-          legacyProjectCwdPreferenceKey(project.workspaceRoot),
-        ],
-      }),
-    [projectOrder, projects],
-  );
-  const unsortedProjectGroups = useMemo(
-    () =>
-      buildSidebarProjectSnapshots({
-        projects: sidebarProjectSortOrder === "manual" ? orderedProjects : projects,
-        groupScratchProjects: true,
-        settings: projectGroupingSettings,
-        primaryEnvironmentId,
-        resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
-      }),
-    [
-      environmentLabelById,
-      orderedProjects,
-      primaryEnvironmentId,
-      projectGroupingSettings,
-      projects,
-      sidebarProjectSortOrder,
-    ],
-  );
-  const projectGroups = useMemo(
-    () => sortSidebarV2ProjectGroups(unsortedProjectGroups, threads, sidebarProjectSortOrder),
-    [sidebarProjectSortOrder, threads, unsortedProjectGroups],
-  );
+  const projectGroups = useSidebarProjectGroups();
   const projectGroupsRef = useRef(projectGroups);
   projectGroupsRef.current = projectGroups;
   // Threads on non-primary environments (T3 Connect, hosted) resolve their
@@ -3578,6 +3542,8 @@ export default function Sidebar() {
     },
     [planForwardNavigation, settleThread],
   );
+  // The thread.settle shortcut parks the open thread through this same path.
+  useEffect(() => registerSettleAndAdvance(attemptSettle), [attemptSettle]);
   // Post-settle navigation must skip threads settling in this same batch —
   // they are all leaving the card block together. Rows that are already
   // explicitly settled are skipped: nothing to do on a valid mixed selection.
@@ -5352,7 +5318,7 @@ export default function Sidebar() {
         <SidebarGroup className="flex-1" role="presentation">
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
-              <SidebarTooltipScope
+              <TooltipProvider
                 key="sidebar-thread-search-tooltips-150"
                 delay={150}
                 closeDelay={0}
@@ -5430,7 +5396,7 @@ export default function Sidebar() {
                     );
                   })}
                 </ul>
-              </SidebarTooltipScope>
+              </TooltipProvider>
             ) : (
               <p
                 role="status"
@@ -5441,7 +5407,7 @@ export default function Sidebar() {
             )
           ) : null}
           {!isSearchingThreads ? (
-            <SidebarTooltipScope
+            <TooltipProvider
               key="sidebar-thread-tooltips-150"
               delay={150}
               closeDelay={0}
@@ -5779,7 +5745,7 @@ export default function Sidebar() {
                   </ul>
                 </SortableContext>
               </DndContext>
-            </SidebarTooltipScope>
+            </TooltipProvider>
           ) : null}
           {shellsBootstrapped &&
           !isSearchingThreads &&

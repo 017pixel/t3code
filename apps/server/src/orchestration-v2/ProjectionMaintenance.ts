@@ -231,6 +231,7 @@ export const layer: Layer.Layer<
     ];
 
     const supersedableThreadEventTypes = new Set(SUPERSEDABLE_THREAD_EVENT_TYPES);
+    // Keep subagent.updated and turn-item.updated rows: slimmed payloads reference their prompts.
     const COMPACTION_PAGE_SIZE = 500;
 
     /**

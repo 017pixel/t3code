@@ -128,9 +128,9 @@ export class ServerUpdateTerminalError extends Schema.TaggedError<ServerUpdateTe
   }
 }
 
-// Covers the 120-second trial deadline and a final restart of the previous
-// version when the trial rolls back.
-const SERVER_UPDATE_RESUME_TIMEOUT = Duration.minutes(4);
+// Covers the service launcher's 30-minute trial deadline (PREPARED_TIMEOUT_MS)
+// and a final restart of the previous version when the trial rolls back.
+const SERVER_UPDATE_RESUME_TIMEOUT = Duration.minutes(32);
 
 export function matchesServerUpdateReadyEvent(
   result: ServerSelfUpdateResult,
@@ -596,11 +596,7 @@ function serverWelcomeStateChanges(environmentId: EnvironmentId) {
   );
 }
 
-/**
- * Plain data compares by value, sharing an object short-circuits, and values
- * with their own equality, such as DateTime and Option, use it. Hashing or a
- * schema equivalence walks a whole config several times over on a cold boot.
- */
+// Avoid repeated config walks from hashing/schema equivalence during boot.
 function sameConfigValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
@@ -706,9 +702,7 @@ export function createServerEnvironmentAtoms<R, E>(
         get(options.initialConfigValueAtom(environmentId)),
       );
     }).pipe(
-      // Boot hands the same config over from the cache, the session, and the
-      // live projection. An equal config keeps its identity, so settings,
-      // keybindings, and every reader do not rerender for each handoff.
+      // Cache/session/live handoffs must not rerender readers of an equal config.
       Atom.withEquality(sameConfigValue),
       Atom.withLabel(`environment-data:server:config:${environmentId}`),
     );

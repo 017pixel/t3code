@@ -355,13 +355,7 @@ function applyTheme(theme: Theme, { suppressTransitions = false, preservePreview
 
 let themeSettleGeneration = 0;
 
-/**
- * Finish a transition-suppressed theme change once the next frame has painted
- * it. Removing `no-transitions` any earlier forces
- * an extra full-document style recalc before the new theme reaches the screen.
- * The frame itself computes styles with transitions off, so nothing animates.
- * Another change before then restarts the wait so it paints without transitions too.
- */
+// Wait for paint before reading colors or restoring transitions to avoid an extra style recalc.
 function settleThemeAfterPaint() {
   const generation = ++themeSettleGeneration;
   requestAnimationFrame(() => {
