@@ -7,7 +7,7 @@ import {
   WS_METHODS,
   type ServerConfig,
   type ServerConfigStreamEvent,
-  type ServerSettings,
+  ServerSettings,
   type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
@@ -19,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
@@ -193,7 +194,7 @@ const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
     // An update equal to the current settings keeps the current object.
     yield* AtomRegistry.toStream(registry, atoms.settingsValueAtom(TARGET.environmentId)).pipe(
       Stream.filter(
-        (current) => current === next || canonicalJson(current) === canonicalJson(next),
+        (current) => current !== null && Schema.toEquivalence(ServerSettings)(current, next),
       ),
       Stream.runHead,
     );
@@ -207,15 +208,6 @@ const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
     summary: (input = INPUT) => atoms.usageSummary({ environmentId: TARGET.environmentId, input }),
   };
 });
-
-/** JSON with object keys sorted, so key order does not matter. */
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_key, nested: unknown) =>
-    nested !== null && typeof nested === "object" && !Array.isArray(nested)
-      ? Object.fromEntries(Object.entries(nested).toSorted(([a], [b]) => a.localeCompare(b)))
-      : nested,
-  );
-}
 
 function settledSummary<E>(
   registry: AtomRegistry.AtomRegistry,
