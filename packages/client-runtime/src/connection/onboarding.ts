@@ -35,7 +35,14 @@ import {
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
-import { connectionRoutes, hasRelayRoute, routeEntry, sshTargetKey } from "./routes.ts";
+import {
+  connectionRoutes,
+  hasRelayRoute,
+  isLearned,
+  routeEntry,
+  routeHttpBaseUrl,
+  sshTargetKey,
+} from "./routes.ts";
 
 export interface PairingConnectionInput {
   readonly pairingUrl?: string;
@@ -174,6 +181,17 @@ export const addT3ConnectRoute = Effect.fn("clientRuntime.connection.onboarding.
     if (entry === undefined || !hasRelayRoute(entry)) return null;
     const address = resolveRemoteAddressWithoutCredential(input);
     if (address === null) return null;
+    // An address the user already saved keeps how it signs in, so a paired
+    // token is never swapped for T3 Connect.
+    const base = (url: string) => url.replace(/\/+$/, "");
+    if (
+      connectionRoutes(entry).some(
+        (route) =>
+          !isLearned(route) && base(routeHttpBaseUrl(route) ?? "") === base(address.httpBaseUrl),
+      )
+    ) {
+      return environmentId;
+    }
     if (
       address.httpBaseUrl.startsWith("http:") &&
       typeof globalThis.location !== "undefined" &&

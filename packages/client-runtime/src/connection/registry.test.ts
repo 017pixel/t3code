@@ -2050,6 +2050,29 @@ describe("EnvironmentRegistry routes", () => {
     }),
   );
 
+  it.effect("keeps a paired address's token when it is added again without a code", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [LAN_TARGET, RELAY_TARGET],
+        [LAN_PROFILE],
+        [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
+      );
+      yield* Effect.gen(function* () {
+        const added = yield* addT3ConnectRoute({
+          host: "192.168.1.10:3773",
+          expectedEnvironmentId: RELAY_TARGET.environmentId,
+        }).pipe(Effect.provide(layerDescriptorHttp(RELAY_TARGET.environmentId)));
+        expect(added).toBe(RELAY_TARGET.environmentId);
+        expect(routesOf(yield* Ref.get(harness.storedTargets), RELAY_TARGET.environmentId)).toEqual(
+          [LAN_TARGET, RELAY_TARGET],
+        );
+        expect((yield* Ref.get(harness.storedProfiles)).get(LAN_TARGET.connectionId)).toEqual(
+          LAN_PROFILE,
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
   it.effect("refuses a codeless address that reaches a different machine", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([RELAY_TARGET]);
