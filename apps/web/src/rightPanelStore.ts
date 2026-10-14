@@ -316,14 +316,14 @@ export interface IssueSurfaceTarget {
   url?: string;
 }
 
-export function issueSurfaceId(target: Omit<IssueSurfaceTarget, "url">): IssueSurface["id"] {
+function issueSurfaceId(target: Omit<IssueSurfaceTarget, "url">): IssueSurface["id"] {
   const environment =
     target.environmentId === undefined ? "" : `${encodeURIComponent(target.environmentId)}:`;
   const host = target.host === undefined ? "" : `${encodeURIComponent(target.host.toLowerCase())}:`;
   return `issue:${environment}${encodeURIComponent(target.projectId)}:${target.tracker}:${host}${encodeURIComponent(target.scope.toLowerCase())}:${encodeURIComponent(target.key)}`;
 }
 
-export function issueSurface(target: IssueSurfaceTarget): IssueSurface {
+function issueSurface(target: IssueSurfaceTarget): IssueSurface {
   return {
     id: issueSurfaceId(target),
     kind: "issue",
