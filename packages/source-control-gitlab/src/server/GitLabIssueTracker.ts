@@ -47,7 +47,7 @@ import {
 
 const KIND = IssueTrackerKind.make("gitlab");
 
-export const CAPABILITIES: IssueCapabilities = {
+const CAPABILITIES: IssueCapabilities = {
   create: true,
   edit: true,
   comment: true,

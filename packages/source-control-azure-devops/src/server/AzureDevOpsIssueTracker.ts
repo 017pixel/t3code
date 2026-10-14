@@ -45,7 +45,7 @@ const KIND = IssueTrackerKind.make("azure-devops");
  * not customised its workflow can be moved between. A project with states of its own refuses a
  * name it lacks at write time, with Azure's own message.
  */
-export const CAPABILITIES: IssueCapabilities = {
+const CAPABILITIES: IssueCapabilities = {
   create: true,
   edit: true,
   comment: true,

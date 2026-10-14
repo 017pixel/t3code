@@ -86,7 +86,9 @@ function azureDevOpsProjectScope(displayName: string | undefined): string | null
  * The git-host path of resolution: the tracker is the host's own, named like the remote's
  * provider kind. Null for a project with no remote or a kind no tracker claims.
  */
-function resolveGitHostBinding(project: OrchestrationProjectShell): ProjectTrackerBinding | null {
+export function resolveGitHostBinding(
+  project: OrchestrationProjectShell,
+): ProjectTrackerBinding | null {
   const identity = project.repositoryIdentity;
   const scope =
     identity?.provider === "azure-devops"

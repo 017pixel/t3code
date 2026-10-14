@@ -47,7 +47,7 @@ import {
 
 const KIND = IssueTrackerKind.make("forgejo");
 
-export const CAPABILITIES: IssueCapabilities = {
+const CAPABILITIES: IssueCapabilities = {
   create: true,
   edit: true,
   comment: true,
