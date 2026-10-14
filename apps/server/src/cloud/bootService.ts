@@ -547,6 +547,10 @@ export class BootService extends Context.Service<
      * restarted.
      */
     readonly restart: Effect.Effect<boolean, BootServiceError>;
+    /** Pause this home's running service for maintenance and restore it on every exit. */
+    readonly withStopped: <A, E, R>(
+      operation: Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | BootServiceError, R>;
     readonly uninstall: Effect.Effect<boolean, BootServiceError>;
     readonly status: Effect.Effect<BootServiceStatus, BootServiceError>;
   }
@@ -931,6 +935,34 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     Effect.withSpan("cloud.boot_service.restart"),
   );
 
+  const withStopped: BootService["Service"]["withStopped"] = (operation) =>
+    Effect.gen(function* () {
+      if (detectedManager === undefined) return yield* operation;
+      const unit = yield* fs.readFileString(unitPath).pipe(Effect.option);
+      if (Option.isNone(unit)) return yield* operation;
+      const installedBaseDir = bootServiceBaseDirOf(unit.value);
+      if (
+        installedBaseDir === undefined ||
+        path.resolve(installedBaseDir) !== path.resolve(input.baseDir)
+      ) {
+        return yield* operation;
+      }
+      const active =
+        detectedManager.kind === "systemd"
+          ? yield* probe("systemctl", ["--user", "is-active", BOOT_SERVICE_UNIT_FILE])
+          : yield* probe("launchctl", ["print", `gui/${uid}/${BOOT_SERVICE_LAUNCHD_LABEL}`]);
+      const running =
+        succeeded(active) &&
+        (detectedManager.kind === "systemd" ||
+          (Option.isSome(active) && /\bpid = \d+/.test(active.value.stdout)));
+      if (!running) return yield* operation;
+      return yield* Effect.acquireUseRelease(
+        runSteps(detectedManager.stop.map((step) => ({ ...step, optional: false }))),
+        () => operation,
+        () => runSteps(detectedManager.activate).pipe(Effect.orDie),
+      );
+    });
+
   const uninstall: BootService["Service"]["uninstall"] = Effect.gen(function* () {
     const manager = yield* requireManager;
     if (
@@ -994,7 +1026,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     Effect.withSpan("cloud.boot_service.status"),
   );
 
-  return BootService.of({ install, restart, uninstall, status });
+  return BootService.of({ install, restart, withStopped, uninstall, status });
 });
 
 export const layer = (input: {

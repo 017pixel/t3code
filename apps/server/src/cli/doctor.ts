@@ -1,9 +1,15 @@
 import * as Config from "effect/Config";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import { FetchHttpClient } from "effect/http";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { Command, Flag } from "effect/cli";
 
+import packageJson from "../../package.json" with { type: "json" };
+import * as BootService from "../cloud/bootService.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import { baseDirFlag } from "./config.ts";
 import { resolveBaseDir } from "../os-jank.ts";
 import * as DatabaseMaintenance from "../persistence/DatabaseMaintenance.ts";
@@ -20,10 +26,7 @@ export const runDoctor = Effect.fn("runDoctor")(function* (
   yield* Console.log(
     `Automatic disk shrinking: ${status.incrementalVacuumEnabled ? "enabled" : "not enabled"}.`,
   );
-  if (status.serverRunning)
-    yield* Console.log(
-      "The server is running. Inspection is safe; stop it before applying repairs.",
-    );
+
   if (status.incrementalVacuumEnabled && status.reclaimableBytes === 0) {
     yield* Console.log("No database repairs needed.");
     return;
@@ -32,7 +35,7 @@ export const runDoctor = Effect.fn("runDoctor")(function* (
     "Database repair: remove superseded history, reclaim unused disk space, and enable automatic disk shrinking.",
   );
   yield* Console.log(
-    "This repair requires stopping T3 Code and its server, may take several minutes, and needs temporary disk space.",
+    "Doctor pauses and restarts the matching background service automatically. Repair may take several minutes and needs temporary disk space.",
   );
   if (options.dryRun || !options.fix) {
     yield* Console.log(
@@ -42,7 +45,8 @@ export const runDoctor = Effect.fn("runDoctor")(function* (
     );
     return;
   }
-  const result = yield* maintenance.compact(directory);
+  const service = yield* BootService.BootService;
+  const result = yield* service.withStopped(maintenance.compact(directory));
   yield* Console.log(
     `Removed ${result.deletedEventCount} events and ${result.deletedReceiptCount} receipts. Database: ${result.beforeBytes} → ${result.afterBytes} bytes.`,
   );
@@ -51,7 +55,9 @@ export const runDoctor = Effect.fn("runDoctor")(function* (
 export const doctorCommand = Command.make("doctor", {
   baseDir: baseDirFlag,
   fix: Flag.Boolean("fix").pipe(
-    Flag.withDescription("Apply the recommended database repair. Stop T3 Code first."),
+    Flag.withDescription(
+      "Apply the recommended repair, pausing and restarting the background service automatically.",
+    ),
     Flag.withDefault(false),
   ),
   dryRun: Flag.Boolean("dry-run").pipe(
@@ -68,7 +74,16 @@ export const doctorCommand = Command.make("doctor", {
       const directory = yield* resolveBaseDir(
         Option.getOrUndefined(Option.orElse(baseDir, () => home)),
       );
-      yield* runDoctor(directory, { fix, dryRun });
+      const path = yield* Path.Path;
+      yield* runDoctor(directory, { fix, dryRun }).pipe(
+        Effect.provide(
+          BootService.layer({
+            baseDir: directory,
+            logsDir: path.join(directory, "userdata", "logs"),
+            cliVersion: packageJson.version,
+          }).pipe(Layer.provide(ProcessRunner.layer), Layer.provide(FetchHttpClient.layer)),
+        ),
+      );
     }).pipe(Effect.provide(DatabaseMaintenance.layer)),
   ),
 );

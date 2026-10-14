@@ -27,8 +27,8 @@ export function DatabaseStorageNotice({ target }: { readonly target: SettingsTar
       <View className="gap-3 p-4">
         <Text className="text-sm text-muted-foreground">
           History cleanup is automatic. To return unused space to disk and enable automatic
-          shrinking, quit T3 and stop its server on {target.label}, then run this command there. It
-          may take several minutes and needs temporary disk space.
+          shrinking, run this command on {target.label}. Doctor pauses and restarts its background
+          service automatically. Close the desktop app first if it hosts this environment.
         </Text>
         <Text selectable className="font-mono text-sm text-foreground">
           {status.compactCommand}

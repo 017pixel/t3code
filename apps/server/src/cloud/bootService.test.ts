@@ -3,6 +3,8 @@ import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -167,7 +169,18 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       if (!failed && command === "loginctl enable-linger --no-ask-password 501")
         control.linger = "yes";
       if (!failed && command === "systemctl --user enable t3code.service") control.enabled = true;
-      if (!failed && command === "systemctl --user restart t3code.service") control.active = true;
+      if (
+        !failed &&
+        (command === "systemctl --user restart t3code.service" ||
+          command.startsWith("launchctl bootstrap "))
+      )
+        control.active = true;
+      if (
+        !failed &&
+        (command === "systemctl --user stop t3code.service" ||
+          command.startsWith("launchctl bootout --wait "))
+      )
+        control.active = false;
       if (
         control.stateAfterStop !== undefined &&
         (command === "systemctl --user stop t3code.service" ||
@@ -187,7 +200,9 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
                 ? control.enabled
                   ? "enabled\n"
                   : "disabled\n"
-                : "",
+                : input.command === "launchctl" && input.args[0] === "print" && control.active
+                  ? "pid = 123"
+                  : "",
         stderr: "",
         code: ChildProcessSpawner.ExitCode(
           failed || (input.args[1] === "is-active" && !control.active) ? 1 : 0,
@@ -557,6 +572,80 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       const error = yield* service.install({ start: false }).pipe(Effect.flip);
       expect(error._tag).toBe("BootServiceUpdatePendingError");
       expect(yield* fs.readFileString(statePath)).toBe(pendingState);
+    }),
+  );
+
+  it.effect.each(["linux", "darwin"] as const)(
+    "pauses and restores a running service around maintenance on %s, including failure",
+    (platform) =>
+      Effect.gen(function* () {
+        const { service, commands, control } = yield* makeHarness(platform);
+        yield* service.install();
+        commands.length = 0;
+        const value = yield* service.withStopped(
+          Effect.sync(() => {
+            expect(control.active).toBe(false);
+            return 42;
+          }),
+        );
+        expect(value).toBe(42);
+        expect(control.active).toBe(true);
+        expect(
+          commands.some((command) => command.includes("stop") || command.includes("bootout")),
+        ).toBe(true);
+        const failure = yield* service.withStopped(Effect.fail("repair failed")).pipe(Effect.flip);
+        expect(failure).toBe("repair failed");
+        expect(control.active).toBe(true);
+      }),
+  );
+
+  it.effect.each(["linux", "darwin"] as const)(
+    "leaves a stopped service stopped during maintenance on %s",
+    (platform) =>
+      Effect.gen(function* () {
+        const { service, commands, control } = yield* makeHarness(platform);
+        yield* service.install();
+        control.active = false;
+        commands.length = 0;
+        expect(yield* service.withStopped(Effect.succeed(42))).toBe(42);
+        expect(control.active).toBe(false);
+        expect(
+          commands.some(
+            (command) =>
+              command.includes("stop") ||
+              command.includes("bootout") ||
+              command.includes("restart") ||
+              command.includes("bootstrap"),
+          ),
+        ).toBe(false);
+      }),
+  );
+
+  it.effect("restores the service when maintenance is interrupted", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+      const started = yield* Deferred.make<void>();
+      const fiber = yield* service
+        .withStopped(Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)))
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      expect(control.active).toBe(false);
+      yield* Fiber.interrupt(fiber);
+      expect(control.active).toBe(true);
+    }),
+  );
+
+  it.effect("maintenance leaves another home's service alone", () =>
+    Effect.gen(function* () {
+      const { service, commands, makeService } = yield* makeHarness();
+      yield* service.install();
+      const fs = yield* FileSystem.FileSystem;
+      const otherHome = yield* fs.makeTempDirectoryScoped({ prefix: "t3-doctor-other-" });
+      const other = yield* makeService(undefined, "1.2.3", otherHome);
+      commands.length = 0;
+      expect(yield* other.withStopped(Effect.succeed(42))).toBe(42);
+      expect(commands).toEqual([]);
     }),
   );
 

@@ -96,30 +96,4 @@ Downloads, it may need Full Disk Access for the `t3` executable listed in
 For failures after signing in to T3 Connect, see
 [connection troubleshooting](./remote-access.md#t3-connect-troubleshooting).
 
-## Reclaim database space
-
-T3 Code periodically removes superseded event history while keeping conversation
-history and current state. SQLite reuses that freed space for future writes, but
-older databases keep their allocated file size until converted. New databases
-return unused space to disk automatically in small background batches.
-
-Run `t3 doctor` to inspect the database and see recommended repairs without
-changing anything. `t3 doctor --dry-run` also previews repairs without applying them,
-even when combined with `--fix`.
-
-To apply the database repair and return freed space to the operating system, quit the desktop app and stop any
-server using the same data directory. If you installed the background service,
-run `t3 service stop`. Then run:
-
-```sh
-t3 doctor --fix
-```
-
-For a separate environment, pass `--base-dir /path/to/t3-home`. The command refuses
-to run while the database is in use and reports its size before and after
-compaction. This one-time maintenance also enables automatic shrinking for an
-older database. Settings > Storage recommends it when at least 1 GB can be
-reclaimed. Run the displayed command on the machine named in the notice.
-
-It can take time and require additional free disk space. Restart the
-server or background service when it finishes.
+For database checks and repairs, see [T3 Doctor](./doctor.md).

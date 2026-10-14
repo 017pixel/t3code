@@ -32,8 +32,8 @@ export function DatabaseStorageNotice({
       description={
         <>
           History cleanup is already automatic. To return unused space to disk and enable automatic
-          shrinking, quit T3 and stop its server on {label}, then run this command there. It may
-          take several minutes and needs temporary disk space.
+          shrinking, run this command on {label}. Doctor pauses and restarts its background service
+          automatically. Close the desktop app first if it hosts this environment.
           <code className="mt-2 block select-text break-all">{status.compactCommand}</code>
         </>
       }
