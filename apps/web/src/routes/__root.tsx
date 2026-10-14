@@ -79,6 +79,7 @@ import {
 } from "../state/server";
 import { readProject, setActiveEnvironmentId, useActiveEnvironmentId } from "../state/entities";
 import { startEnvironmentShells } from "../state/shell";
+import { prefetchPrimaryEnvironmentDescriptor } from "../connection/platform";
 import {
   createKeybindingsUpdateToastController,
   type KeybindingsUpdateToastController,
@@ -131,6 +132,7 @@ export const Route = createRootRoute({
     }
 
     const authGate = resolveInitialServerAuthGateState();
+    prefetchPrimaryEnvironmentDescriptor();
     const authGateState = await authGate;
     // Connect and read cached shells while the route chunks still load.
     if (authGateState.status === "authenticated") startEnvironmentShells();
