@@ -78,11 +78,14 @@ const RawIssueSchema = Schema.Struct({
   labels: nodes(RawLabelSchema),
 });
 
-const ISSUE_ROW_FIELDS = `number title url state stateReason createdAt updatedAt closedAt
+/** A row without its comment count, which the detail reads from its own comment page. */
+const ISSUE_ROW_BASE_FIELDS = `number title url state stateReason createdAt updatedAt closedAt
   author { login avatarUrl ... on User { name } }
-  comments { totalCount }
   assignees(first: 20) { nodes { login name avatarUrl } }
   labels(first: 20) { nodes { name color } }`;
+
+const ISSUE_ROW_FIELDS = `${ISSUE_ROW_BASE_FIELDS}
+  comments { totalCount }`;
 
 /**
  * One repository's issues as a search, which is the only read that takes free text and an
@@ -166,7 +169,7 @@ export const ISSUE_DETAIL_GRAPHQL_QUERY = `query($owner: String!, $name: String!
   repository(owner: $owner, name: $name) {
     viewerPermission
     issue(number: $number) {
-      ${ISSUE_ROW_FIELDS}
+      ${ISSUE_ROW_BASE_FIELDS}
       body
       viewerCanUpdate
       ${REACTION_GROUPS_FIELDS}

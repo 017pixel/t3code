@@ -115,8 +115,10 @@ describe("GitHubIssueTracker", () => {
   it.effect("maps a detail read to the neutral issue shape", () =>
     Effect.gen(function* () {
       let seen: unknown;
-      const api = yield* tracker((_query, variables) => {
+      let sentQuery = "";
+      const api = yield* tracker((query, variables) => {
         seen = variables;
+        sentQuery = query;
         return DETAIL_RESPONSE;
       });
       const issue = yield* api.getIssue({
@@ -126,6 +128,8 @@ describe("GitHubIssueTracker", () => {
         key: "42",
       });
       expect(seen).toEqual({ owner: "acme", name: "web", number: 42 });
+      // GitHub rejects a query that selects one field twice with different arguments.
+      expect(sentQuery.match(/\bcomments\b/g)).toHaveLength(1);
       expect(issue).toMatchObject({
         key: "42",
         displayKey: "#42",
