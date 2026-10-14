@@ -45,6 +45,7 @@ import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirect
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
@@ -248,9 +249,13 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
 
+  // Reads every thread, which takes seconds on large databases, so both
+  // snapshots run on the reader worker instead of the event loop.
   const readThreads = Effect.fn("StorageCleanup.readThreads")(function* () {
-    const active = yield* projections.getShellSnapshot();
-    const archived = yield* projections.getShellSnapshot({ location: "archive" });
+    const active = yield* projections.getShellSnapshot().pipe(NodeSqliteClient.readOnly);
+    const archived = yield* projections
+      .getShellSnapshot({ location: "archive" })
+      .pipe(NodeSqliteClient.readOnly);
     const projects = yield* projectStore.listShells();
     return { projects, threads: [...active.threads, ...archived.threads] };
   });
