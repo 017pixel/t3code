@@ -115,10 +115,9 @@ export const VcsStatusSubscriptionInput = Schema.Struct({
   ...VcsStatusInput.fields,
   /** Passive observers receive cached remote status without retaining its refresh loop. */
   includeRemote: Schema.optional(Schema.Boolean),
-  /** Opt-in summary/ETag stream. Older servers ignore these fields. */
+  /** Opt-in file-free summaries. Older servers ignore these fields. */
   compact: Schema.optionalKey(Schema.Boolean),
   includeFiles: Schema.optionalKey(Schema.Boolean),
-  knownVersion: Schema.optionalKey(TrimmedNonEmptyStringSchema),
 });
 export type VcsStatusSubscriptionInput = typeof VcsStatusSubscriptionInput.Type;
 
