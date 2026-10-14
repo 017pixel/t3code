@@ -34,7 +34,7 @@ import {
 
 import * as LinearApi from "./LinearApi.ts";
 
-export const DESCRIPTOR: StandaloneIssueTrackerDescriptor = {
+const DESCRIPTOR: StandaloneIssueTrackerDescriptor = {
   tracker: LinearApi.KIND,
   displayName: "Linear",
   host: "linear.app",
@@ -51,7 +51,7 @@ export const DESCRIPTOR: StandaloneIssueTrackerDescriptor = {
  * The driver maps `open` to the team's default state and `closed` to its first completed state,
  * with `canceled` as the close reason for its first canceled state.
  */
-export const CAPABILITIES: IssueCapabilities = {
+const CAPABILITIES: IssueCapabilities = {
   create: true,
   edit: true,
   comment: true,
@@ -104,14 +104,14 @@ function parseIdentifier(key: string): string | null {
   return /^[A-Za-z][A-Za-z0-9]*-[1-9]\d*$/.test(key.trim()) ? key.trim().toUpperCase() : null;
 }
 
-export function toState(state: LinearApi.LinearWorkflowState): IssueState {
+function toState(state: LinearApi.LinearWorkflowState): IssueState {
   return CLOSED_STATE_TYPES.includes(state.type)
     ? { category: "closed", name: state.name, closeReason: state.type }
     : { category: "open", name: state.name };
 }
 
 /** Linear identifies people by id, so that is the login; the display name is what people see. */
-export function toActor(user: LinearApi.LinearUser): IssueActor {
+function toActor(user: LinearApi.LinearUser): IssueActor {
   return {
     login: user.id,
     name: user.displayName ?? user.name,
@@ -125,7 +125,7 @@ function userName(user: LinearApi.LinearUser): string {
 }
 
 /** Linear's connections report no totals, so a listing shows no comment count. */
-export function toSummary(issue: LinearApi.LinearIssue, commentCount = 0): TrackerIssueSummary {
+function toSummary(issue: LinearApi.LinearIssue, commentCount = 0): TrackerIssueSummary {
   return {
     key: issue.identifier,
     displayKey: issue.identifier,

@@ -19,7 +19,7 @@ export function issueTrackerSecretName(tracker: IssueTrackerKind): string {
 
 const decoder = new TextDecoder();
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   return IssueTrackerHost.IssueTrackerHost.of({
     credentials: {

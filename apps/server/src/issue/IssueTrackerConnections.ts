@@ -50,7 +50,7 @@ export class IssueTrackerConnections extends Context.Service<
   }
 >()("t3/issue/IssueTrackerConnections") {}
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const registry = yield* IssueTrackerRegistry.IssueTrackerRegistry;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const bindings = yield* IssueTrackerBindings.IssueTrackerBindingsRepository;
