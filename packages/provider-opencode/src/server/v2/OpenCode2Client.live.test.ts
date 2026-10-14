@@ -25,7 +25,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { describe } from "vite-plus/test";
 
-import * as OpenCode2Client from "./OpenCode2Client.ts";
+import * as OpenCode2Client from "./OpenCode2ClientTag.ts";
 
 const binaryPath = process.env.OPENCODE2_BIN;
 

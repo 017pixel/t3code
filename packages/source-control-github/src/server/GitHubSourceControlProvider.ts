@@ -21,7 +21,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import { isSshRemoteUrl } from "@t3tools/shared/sourceControl";
 
-import * as GitHubApi from "./GitHubApi.ts";
+import * as GitHubApi from "./GitHubApiTag.ts";
 import * as GitHubChangeRequestTemplate from "./gitHubChangeRequestTemplate.ts";
 import {
   decodeGitHubPullRequestEntries,

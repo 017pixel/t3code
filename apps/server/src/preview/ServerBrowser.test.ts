@@ -27,7 +27,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as Broker from "../mcp/PreviewAutomationBroker.ts";
 import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
-import * as ServerBrowser from "./ServerBrowser.ts";
+import * as ServerBrowser from "./ServerBrowserTag.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
 // Keep the manager, broker, ownership, refs, and viewer paths real; replace Chromium I/O only.

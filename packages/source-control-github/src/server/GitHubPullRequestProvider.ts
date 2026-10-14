@@ -10,7 +10,7 @@ import type {
 } from "@t3tools/contracts";
 
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
-import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
+import * as GitHubPullRequestApi from "./GitHubPullRequestApiTag.ts";
 import {
   PullRequestProviderError,
   type PullRequestProviderFailure,

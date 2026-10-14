@@ -15,7 +15,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
 import * as CliTokenManager from "./CliTokenManager.ts";
-import * as CloudLink from "./CloudLink.ts";
+import * as CloudLink from "./CloudLinkTag.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
 import {
   HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
