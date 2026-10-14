@@ -269,7 +269,7 @@ export type CloudLinkBackgroundError =
   | PlatformError.PlatformError;
 
 export type ManagedTunnelRegistration =
-  | { readonly status: "not_linked" | "superseded" }
+  | { readonly status: "not_linked" | "superseded" | "revoked" }
   | { readonly status: "recovery_required"; readonly config: RelayManagedEndpointRuntimeConfig }
   | {
       readonly status: "ready";

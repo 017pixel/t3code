@@ -17,11 +17,7 @@ import { GhosttyTerminalSurface } from "~/terminal/ghostty/surface";
 
 const EMPTY_SKILLS: ReadonlyArray<never> = [];
 
-/**
- * True once the element has scrolled into view. The diff and terminal
- * previews pull megabytes of grammars, fonts, and WASM, and sit below the
- * fold, so they load when a reader reaches them rather than with the page.
- */
+// Below-fold previews defer their grammars, fonts, and WASM until visible.
 function useRevealed(ref: RefObject<HTMLElement | null>): boolean {
   const [revealed, setRevealed] = useState(false);
   useEffect(() => {

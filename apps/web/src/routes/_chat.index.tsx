@@ -1,8 +1,8 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
 import { LinkIcon, PlusIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { isElectron } from "../env";
@@ -17,6 +17,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { environmentSession } from "../state/session";
 import { liveServerConfigValueAtom } from "../state/server";
 import {
+  readProject,
   useAllEnvironmentShellsBootstrapped,
   useProjects,
   useThreadShells,
@@ -47,6 +48,10 @@ function IndexDraftLanding() {
   const threads = useThreadShells();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const handleNewThread = useNewThreadHandler();
+  const router = useRouter();
+  // Read at effect time: this page stays mounted while a navigation away from
+  // "/" is still loading, but the router already points at the new location.
+  const isStillOnIndex = useEffectEvent(() => router.state.location.pathname === "/");
   const startingRef = useRef(false);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
 
@@ -67,21 +72,35 @@ function IndexDraftLanding() {
       : environmentSession.initialConfigValueAtom(mostRecentProject.environmentId),
   );
   useEffect(() => {
+    // Starting a draft after the user has left would replace the page they picked.
     if (
       liveConfig === null ||
       sessionConfig === null ||
       mostRecentProject === null ||
-      startingRef.current
+      startingRef.current ||
+      !isStillOnIndex()
     ) {
       return;
     }
+    const projectRef = scopeProjectRef(mostRecentProject.environmentId, mostRecentProject.id);
+    // A project removed since this render is gone from the store; the next
+    // render picks another one.
+    if (readProject(projectRef) === null) {
+      return;
+    }
     startingRef.current = true;
-    void handleNewThread(scopeProjectRef(mostRecentProject.environmentId, mostRecentProject.id), {
-      replace: true,
-    }).catch(() => {
-      startingRef.current = false;
-      setStartState((state) => ({ ...state, failed: true }));
-    });
+    void handleNewThread(projectRef, { replace: true })
+      .then((opened) => {
+        // The project was removed while its draft started; land on the next one.
+        if (opened === null) {
+          startingRef.current = false;
+          setStartState((state) => ({ ...state, retryRequest: state.retryRequest + 1 }));
+        }
+      })
+      .catch(() => {
+        startingRef.current = false;
+        setStartState((state) => ({ ...state, failed: true }));
+      });
   }, [handleNewThread, liveConfig, mostRecentProject, sessionConfig, startState.retryRequest]);
 
   if (!bootstrapped) {

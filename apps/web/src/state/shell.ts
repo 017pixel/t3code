@@ -119,9 +119,7 @@ export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
   ) {
     return false;
   }
-  // The persisted catalog emits before platform discovery registers the
-  // primary environment. Until it does, an empty workspace is unknown. A
-  // discovery that ends without the primary settles the landing without it.
+  // Wait for primary discovery before treating a persisted catalog as complete.
   if (
     !isHostedStaticApp() &&
     !isLocalEnvironmentDisabled() &&
@@ -163,12 +161,7 @@ const liveEnvironmentShellsAtom = Atom.make((get) => {
 
 let environmentShellsStarted = false;
 
-/**
- * Builds the connection runtime, reads every enabled environment's cached
- * shell, and starts its connection without waiting for the first render to
- * read them. Called once the app knows it will render the workspace. The
- * mount lasts for the session, like the sidebar that reads the same atoms.
- */
+// Keep the shell mounted for the session, starting cache reads and connections before render.
 export function startEnvironmentShells(): void {
   if (environmentShellsStarted) return;
   environmentShellsStarted = true;

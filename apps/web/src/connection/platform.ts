@@ -350,11 +350,7 @@ let primaryDescriptorPrefetch: {
   readonly settled: Promise<ExecutionEnvironmentDescriptor | null>;
 } | null = null;
 
-/**
- * Reads the primary environment's descriptor alongside the boot auth check,
- * before route chunks queue on the browser's connections. The first primary
- * registration reuses the answer instead of fetching it again.
- */
+// Start discovery before route chunks occupy the browser's connections.
 export function prefetchPrimaryEnvironmentDescriptor(): void {
   if (primaryDescriptorPrefetchStarted) return;
   primaryDescriptorPrefetchStarted = true;

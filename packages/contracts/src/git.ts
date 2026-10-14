@@ -11,6 +11,7 @@ import { SourceControlProviderError, SourceControlProviderInfo } from "./sourceC
 import { VcsDriverKind } from "./vcs.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
+const GitFilePath = Schema.String.check(Schema.isNonEmpty());
 const GIT_LIST_BRANCHES_MAX_LIMIT = 200;
 
 // Domain Types
@@ -132,9 +133,7 @@ export const GitRunStackedActionInput = Schema.Struct({
   action: GitStackedAction,
   commitMessage: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(10_000))),
   featureBranch: Schema.optional(Schema.Boolean),
-  filePaths: Schema.optional(
-    Schema.Array(TrimmedNonEmptyStringSchema).check(Schema.isMinLength(1)),
-  ),
+  filePaths: Schema.optional(Schema.Array(GitFilePath).check(Schema.isMinLength(1))),
   /** The thread the action runs beside; a pull request it creates is linked to it. */
   threadId: Schema.optional(ThreadId),
   projectId: Schema.optional(ProjectId),
@@ -239,7 +238,7 @@ const VcsStatusLocalShape = {
     fileCount: Schema.optionalKey(NonNegativeInt),
     files: Schema.Array(
       Schema.Struct({
-        path: TrimmedNonEmptyStringSchema,
+        path: GitFilePath,
         insertions: NonNegativeInt,
         deletions: NonNegativeInt,
       }),

@@ -36,17 +36,13 @@ import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { CommandDialog } from "./ui/command";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 
-// The palette's views pull in project browsing, search, and syntax highlighting.
-// Only the shortcut handling stays in the startup graph; the dialog loads on first
-// open, or once the app is idle after boot.
+// Keep browsing, search, and highlighting out of the shortcut handler's startup graph.
 const loadCommandPalette = () => import("./CommandPalette");
 const lazyCommandPaletteDialog = () =>
   lazy(() => loadCommandPalette().then((module) => ({ default: module.CommandPaletteDialog })));
 const COMMAND_PALETTE_PRELOAD_DELAY_MS = 3_000;
 
-// A failed load closes the palette instead of replacing the app with the route
-// error view. A stale deploy gets its `vite:preloadError` reload first; otherwise
-// the next open requests the chunk again.
+// Close on import failure so it cannot replace the app with a route error.
 function CommandPaletteUnavailable({ onUnavailable }: { onUnavailable: () => void }) {
   useEffect(() => onUnavailable(), [onUnavailable]);
   return null;
@@ -141,8 +137,7 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
       : false,
   );
 
-  // Keyboard handlers outside the palette ignore keys from the moment it is
-  // requested, including while its chunk loads.
+  // Block background shortcuts while the palette's chunk loads too.
   useLayoutEffect(() => {
     setCommandPaletteRequested(state.open);
     return () => setCommandPaletteRequested(false);
