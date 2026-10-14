@@ -5,7 +5,6 @@ import {
   selectRunningSubprocessTerminalIds,
   type KnownTerminalSession,
   type TerminalSessionState,
-  type TerminalBufferState,
 } from "@t3tools/client-runtime/state/terminal";
 import {
   ThreadId,
@@ -16,53 +15,12 @@ import {
   type TerminalSummary,
 } from "@t3tools/contracts";
 import { useMemo } from "react";
-import { AsyncResult, Atom } from "effect/reactivity";
-import * as Option from "effect/Option";
 
 import { useEnvironmentQuery } from "./query";
 import { terminalEnvironment } from "./terminal";
 import { useEnvironmentScope } from "./session";
 
 const EMPTY_KNOWN_TERMINAL_SESSIONS = Object.freeze<ReadonlyArray<KnownTerminalSession>>([]);
-
-/** Batch writes into the surface once per frame. Flush lifecycle changes and
- * 64 KiB bursts immediately, well before the retained buffer can lose output.
- */
-export function frameTerminalOutput<E>(
-  source: Atom.Atom<AsyncResult.AsyncResult<TerminalBufferState, E>>,
-) {
-  return Atom.make((get) => {
-    let value = get.once(source);
-    let published = Option.getOrNull(AsyncResult.value(value));
-    let frame: number | undefined;
-    const publish = () => {
-      frame = undefined;
-      published = Option.getOrNull(AsyncResult.value(value));
-      get.setSelf(value);
-    };
-    get.subscribe(source, (next) => {
-      const data = Option.getOrNull(AsyncResult.value(next));
-      const immediate =
-        next._tag !== value._tag ||
-        data?.status !== published?.status ||
-        data?.lifecycleVersion !== published?.lifecycleVersion ||
-        data?.output.generation !== published?.output.generation ||
-        data?.output.resetVersion !== published?.output.resetVersion ||
-        (data?.output.nextOffset ?? 0) - (published?.output.nextOffset ?? 0) >= 64 * 1024;
-      value = next;
-      if (immediate) {
-        if (frame !== undefined) cancelAnimationFrame(frame);
-        publish();
-      } else if (frame === undefined) {
-        frame = requestAnimationFrame(publish);
-      }
-    });
-    get.addFinalizer(() => {
-      if (frame !== undefined) cancelAnimationFrame(frame);
-    });
-    return value;
-  }).pipe(Atom.setIdleTTL(0));
-}
 
 interface TerminalMetadataIndex {
   readonly all: ReadonlyArray<TerminalSummary>;
@@ -172,7 +130,7 @@ export function useAttachedTerminalSession(input: {
 }): TerminalSessionState {
   const canRead = useEnvironmentScope(input.environmentId, AuthTerminalReadScope);
   const canOperate = useEnvironmentScope(input.environmentId, AuthTerminalOperateScope);
-  const attachAtom =
+  const attach = useEnvironmentQuery(
     input.environmentId !== null && input.terminal !== null
       ? canOperate
         ? terminalEnvironment.attach({
@@ -185,12 +143,8 @@ export function useAttachedTerminalSession(input: {
               input: { threadId: input.terminal.threadId, terminalId: input.terminal.terminalId },
             })
           : null
-      : null;
-  const frameAtom = useMemo(
-    () => (attachAtom === null ? null : frameTerminalOutput(attachAtom)),
-    [attachAtom],
+      : null,
   );
-  const attach = useEnvironmentQuery(frameAtom);
   const metadata = useEnvironmentQuery(
     input.environmentId === null || !canRead
       ? null

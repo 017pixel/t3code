@@ -1,80 +1,10 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, type TerminalSummary } from "@t3tools/contracts";
-import {
-  selectRunningSubprocessTerminalIds,
-  EMPTY_TERMINAL_BUFFER_STATE,
-  applyTerminalAttachStreamEvent,
-  type TerminalBufferState,
-} from "@t3tools/client-runtime/state/terminal";
-import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import { selectRunningSubprocessTerminalIds } from "@t3tools/client-runtime/state/terminal";
 
-import { frameTerminalOutput, selectKnownTerminalSessions } from "./terminalSessions";
+import { selectKnownTerminalSessions } from "./terminalSessions";
 
 vi.mock("./terminal", () => ({ terminalEnvironment: {} }));
-
-it("batches terminal output without delaying resets, exits, or overflowing the retained buffer", () => {
-  let callback: FrameRequestCallback | undefined;
-  const request = vi.fn((next: FrameRequestCallback) => {
-    callback = next;
-    return 1;
-  });
-  vi.stubGlobal("requestAnimationFrame", request);
-  vi.stubGlobal(
-    "cancelAnimationFrame",
-    vi.fn(() => {
-      callback = undefined;
-    }),
-  );
-  const registry = AtomRegistry.make();
-  let state: TerminalBufferState = { ...EMPTY_TERMINAL_BUFFER_STATE, status: "running" };
-  const source = Atom.make(AsyncResult.success(state));
-  const framed = frameTerminalOutput(source);
-  const values: (typeof state)[] = [];
-  const unsubscribe = registry.subscribe(framed, (value) => {
-    if (value._tag === "Success") values.push(value.value);
-  });
-  try {
-    const update = (data: string) => {
-      state = applyTerminalAttachStreamEvent(state, {
-        type: "output",
-        data,
-        threadId: "thread",
-        terminalId: "terminal",
-      });
-      registry.set(source, AsyncResult.success(state));
-    };
-    registry.get(framed);
-    values.length = 0;
-    update("one");
-    update("two");
-    expect(values).toHaveLength(0);
-    callback?.(0);
-    expect(values.at(-1)?.output.nextOffset).toBe(6);
-    update("x".repeat(64 * 1024));
-    expect(values.at(-1)?.output.nextOffset).toBe(6 + 64 * 1024);
-    state = applyTerminalAttachStreamEvent(state, {
-      type: "cleared",
-      threadId: "thread",
-      terminalId: "terminal",
-    });
-    registry.set(source, AsyncResult.success(state));
-    expect(values.at(-1)?.output.nextOffset).toBe(0);
-    update("final");
-    const exited = applyTerminalAttachStreamEvent(state, {
-      type: "exited",
-      exitCode: 0,
-      exitSignal: null,
-      threadId: "thread",
-      terminalId: "terminal",
-    });
-    registry.set(source, AsyncResult.success(exited));
-    expect(values.at(-1)).toMatchObject({ status: "exited", output: { nextOffset: 5 } });
-  } finally {
-    unsubscribe();
-    registry.dispose();
-    vi.unstubAllGlobals();
-  }
-});
 
 const environmentA = EnvironmentId.make("environment-a");
 const environmentB = EnvironmentId.make("environment-b");
