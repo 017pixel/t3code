@@ -387,6 +387,25 @@ export class OrchestratorV2 extends Context.Service<OrchestratorV2, Orchestrator
   "t3/orchestration-v2/Orchestrator/OrchestratorV2",
 ) {}
 
+/**
+ * The run whose outcome settles a delegated task. Promoting a queued follow-up
+ * to Steer cancels its run and moves its message into the running turn, so the
+ * task settles with that turn instead of reading as stopped.
+ */
+function delegatedTaskResultRun(
+  child: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
+  taskId: NodeId,
+): OrchestrationV2Run | undefined {
+  const run = child.runs
+    .filter((candidate) => candidate.delegatedTaskId === taskId)
+    .toSorted((a, b) => b.ordinal - a.ordinal)[0];
+  if (run?.status !== "cancelled") return run;
+  const steeredRunId = child.messages.find((message) => message.id === run.userMessageId)?.runId;
+  return (
+    child.runs.find((candidate) => candidate.id === steeredRunId && candidate.id !== run.id) ?? run
+  );
+}
+
 function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs">): number {
   return projection.runs.length + 1;
 }
@@ -10154,8 +10173,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? options.taskId === forkedFrom.nodeId
             ? options.resultRun
             : undefined
-          : taskRuns.toSorted((a, b) => b.ordinal - a.ordinal)[0];
+          : delegatedTaskResultRun(childControls, options.taskId);
       if (childRun === undefined) return;
+      const steered = taskRuns.length > 0 && !taskRuns.includes(childRun);
       const outcome = runOutcome(childRun);
       const terminalStatus = delegatedTaskTerminalStatus(outcome);
       if (terminalStatus === null) {
@@ -10163,7 +10183,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       if (
         yield* childAwaitsRestartContinuation(
-          taskRuns.length === 0 ? childControls.runs : taskRuns,
+          taskRuns.length === 0 || steered ? childControls.runs : taskRuns,
           childRun,
           options?.settledContinuationOf,
         )
@@ -10218,7 +10238,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (transfer.sourcePoint.runId === childRun.id ||
             (options.taskId === forkedFrom.nodeId && transfer.sourcePoint.runId === undefined)),
       );
-      if (existingResultTransfer !== undefined) {
+      // The steered run's own task may already have published that run's result.
+      if (steered ? task.result !== null : existingResultTransfer !== undefined) {
         return;
       }
 
@@ -11428,10 +11449,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         { messageRoles: ["user"] },
       );
       if (taskId !== undefined) {
-        const runs = child.runs.filter((run) => run.delegatedTaskId === taskId);
-        const run = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
+        const run = delegatedTaskResultRun(child, taskId);
         if (run === undefined || delegatedTaskTerminalStatus(run.status) === null) return true;
-        return yield* childAwaitsRestartContinuation(runs, run);
+        return yield* childAwaitsRestartContinuation(
+          run.delegatedTaskId === taskId
+            ? child.runs.filter((candidate) => candidate.delegatedTaskId === taskId)
+            : child.runs,
+          run,
+        );
       }
       const progress = delegatedTaskProgress(child);
       // A caller's older read saw a result; newer work since then means it is not final.

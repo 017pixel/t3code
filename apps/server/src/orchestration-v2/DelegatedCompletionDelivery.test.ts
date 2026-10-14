@@ -1837,3 +1837,168 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     }),
   );
 });
+
+it.layer(layerTest)("delegated follow-ups promoted to Steer", (it) => {
+  it.effect("settles a promoted follow-up with the turn it steered, not as cancelled", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:steer-parent");
+      const projectId = ProjectId.make("project:steer-parent");
+      const runId = RunId.make("run:steer-parent");
+      const rootNodeId = NodeId.make("node:steer-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:steer-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "steer-child",
+        completionWake: "always",
+        continuationPending: false,
+        runStatus: "completed",
+        now,
+      });
+      const steeredRunId = RunId.make("run:steer-child:2");
+      const followUpTaskId = NodeId.make("node:steer-child-follow-up");
+      const followUpMessageId = MessageId.make("message:steer-child-follow-up");
+      const followUpRun = runEvent({
+        threadId: child.childThreadId,
+        runId: RunId.make("run:steer-child:3"),
+        ordinal: 3,
+        status: "cancelled",
+        userMessageId: followUpMessageId,
+        now,
+      });
+      // The follow-up was queued as its own task, then promoted into the running turn.
+      yield* eventSink.write({
+        commandId: CommandId.make("command:steer-child:promoted"),
+        events: [
+          runEvent({
+            threadId: child.childThreadId,
+            runId: steeredRunId,
+            ordinal: 2,
+            status: "running",
+            now,
+          }),
+          {
+            ...followUpRun,
+            payload: { ...followUpRun.payload, startedAt: null, delegatedTaskId: followUpTaskId },
+          },
+          {
+            id: EventId.make("event:steer-child:follow-up-message"),
+            type: "message.updated",
+            threadId: child.childThreadId,
+            runId: steeredRunId,
+            occurredAt: now,
+            payload: {
+              id: followUpMessageId,
+              threadId: child.childThreadId,
+              runId: steeredRunId,
+              nodeId: null,
+              role: "user",
+              text: "Also merge the fixture branch.",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "mcp",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          {
+            id: EventId.make("event:steer-child:follow-up-task"),
+            type: "subagent.updated",
+            threadId,
+            runId,
+            nodeId: followUpTaskId,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              id: followUpTaskId,
+              threadId,
+              runId,
+              parentNodeId: rootNodeId,
+              origin: "app_owned",
+              createdBy: "agent",
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              providerThreadId: null,
+              childThreadId: child.childThreadId,
+              nativeTaskRef: null,
+              prompt: "Also merge the fixture branch.",
+              title: null,
+              model: null,
+              completionWake: "always",
+              status: "pending",
+              result: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+
+      yield* orchestrator.recoverDelegatedTask(child.childThreadId, followUpRun.payload.id);
+
+      const steering = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(steering.subagents.find((row) => row.id === followUpTaskId)?.status, "pending");
+      assert.isTrue(
+        yield* orchestrator.delegatedTaskResultPending(child.childThreadId, followUpTaskId),
+      );
+
+      yield* eventSink.write({
+        commandId: CommandId.make("command:steer-child:completed"),
+        events: [
+          {
+            id: EventId.make("event:steer-child:result"),
+            type: "message.updated",
+            threadId: child.childThreadId,
+            runId: steeredRunId,
+            occurredAt: now,
+            payload: {
+              id: MessageId.make("message:steer-child:result"),
+              threadId: child.childThreadId,
+              runId: steeredRunId,
+              nodeId: null,
+              role: "assistant",
+              text: "Merged both branches.",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "server",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          runEvent({
+            threadId: child.childThreadId,
+            runId: steeredRunId,
+            ordinal: 2,
+            status: "completed",
+            now,
+          }),
+        ],
+      });
+      yield* orchestrator.recoverDelegatedTask(child.childThreadId, steeredRunId);
+
+      const settled = yield* orchestrator.getThreadProjection(threadId);
+      const original = settled.subagents.find((row) => row.id === child.taskId);
+      const followUp = settled.subagents.find((row) => row.id === followUpTaskId);
+      assert.equal(original?.result, "Merged both branches.");
+      assert.equal(followUp?.status, "completed");
+      assert.equal(followUp?.result, "Merged both branches.");
+    }),
+  );
+});
