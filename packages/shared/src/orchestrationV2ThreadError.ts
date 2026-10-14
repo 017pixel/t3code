@@ -118,6 +118,13 @@ export function latestUnheldRun(
   let latest: OrchestrationV2Run | null = null;
   for (const run of runs) {
     if (run.status === "queued" && run.queueHeld === true) continue;
+    // Idle maintenance remains in history, but its outcome cannot produce an
+    // unread/completion alert or wake a snooze. SQL shell reads mirror this.
+    if (
+      run.idleCompactionOfRunId !== undefined &&
+      ["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status)
+    )
+      continue;
     if (latest === null || run.ordinal > latest.ordinal) latest = run;
   }
   return latest;

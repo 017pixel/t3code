@@ -136,6 +136,7 @@ import {
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
+import { idleCompactionCandidate } from "./IdleCompaction.ts";
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -4566,6 +4567,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      if (command.idleCompactionOfRunId !== undefined) {
+        // Normal command reads omit tool history. Recheck active background
+        // items here too, since work can start after the worker's snapshot.
+        const background = yield* projectionStore
+          .getThreadRecords(command.threadId, ["turnItems"], {
+            turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+            turnItemStatuses: ["pending", "running", "waiting"],
+          })
+          .pipe(mapDispatchError(command));
+        const candidate = idleCompactionCandidate(
+          { ...projection, turnItems: [...projection.turnItems, ...background.turnItems] },
+          (yield* serverSettings.getSettings.pipe(mapDispatchError(command))).compactIdleThreads,
+          DateTime.toEpochMillis(yield* DateTime.now),
+        );
+        if (
+          command.createdBy !== "system" ||
+          command.creationSource !== "server" ||
+          command.text !== "/compact" ||
+          command.attachments.length !== 0 ||
+          command.dispatchMode.type !== "start_immediately" ||
+          candidate?.runId !== command.idleCompactionOfRunId
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "This thread is no longer eligible for idle compaction.",
+          });
+        }
+      }
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -4663,7 +4693,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (run) => run.id === command.restartContinuationOfRunId,
       )?.delegatedTaskId;
 
-      if (projection.thread.settledOverride !== null) {
+      if (
+        projection.thread.settledOverride !== null &&
+        command.idleCompactionOfRunId === undefined
+      ) {
         const now = yield* DateTime.now;
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,
@@ -4687,7 +4720,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
         projection = yield* getProjectionWithPendingEvents(command.threadId, events);
       }
-      if (projection.thread.snoozedUntil != null) {
+      if (projection.thread.snoozedUntil != null && command.idleCompactionOfRunId === undefined) {
         const now = yield* DateTime.now;
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,
@@ -5438,6 +5471,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           completedAt: null,
           checkpointId: null,
           contextHandoffId: legacyImportHandoff?.id ?? null,
+          ...(command.idleCompactionOfRunId === undefined
+            ? {}
+            : { idleCompactionOfRunId: command.idleCompactionOfRunId }),
           ...(command.sourcePlanRef === undefined ? {} : { sourcePlanRef: command.sourcePlanRef }),
           ...(command.restartContinuationOfRunId === undefined
             ? {}
@@ -6139,6 +6175,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...(command.idleCompactionOfRunId === undefined
+          ? {}
+          : { idleCompactionOfRunId: command.idleCompactionOfRunId }),
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...wakeWorkStartedAt(projection.runs, command),
       };

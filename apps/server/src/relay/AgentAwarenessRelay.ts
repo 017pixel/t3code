@@ -527,6 +527,14 @@ export const make = Effect.gen(function* () {
     // domain event, so materializing the full shell here would make the cost
     // of one thread's activity proportional to how many threads exist.
     const threadShell = yield* threads.getThreadShell(threadId);
+    if (threadShell?.latestRunId != null && threadShell.activityRunStatus != null) {
+      const { runs } = yield* threads.getThreadRecords(threadId, ["runs"], {
+        runIds: [threadShell.latestRunId],
+      });
+      // Idle maintenance must not publish a new working/completed cycle to
+      // mobile push. Its terminal shell returns to the previous run unchanged.
+      if (runs[0]?.idleCompactionOfRunId !== undefined) return;
+    }
     if (
       threadShell?.lineage.relationshipToParent === "subagent" &&
       !(yield* Ref.get(publishedStateByThreadRef)).has(threadId)
