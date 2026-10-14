@@ -95,5 +95,3 @@ Downloads, it may need Full Disk Access for the `t3` executable listed in
 
 For failures after signing in to T3 Connect, see
 [connection troubleshooting](./remote-access.md#t3-connect-troubleshooting).
-
-For database checks and repairs, see [T3 Doctor](./doctor.md).
