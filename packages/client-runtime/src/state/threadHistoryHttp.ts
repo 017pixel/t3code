@@ -11,7 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
-import { HttpClientError, type HttpClientResponse } from "effect/http";
+import { HttpClientError } from "effect/http";
 
 import type { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
@@ -44,7 +44,6 @@ const decodeNodes = Schema.toCodecJson(Schema.Array(OrchestrationV2ExecutionNode
 const decodeCheckpoints = Schema.toCodecJson(Schema.Array(OrchestrationV2Checkpoint));
 const decodeRuns = Schema.toCodecJson(Schema.Array(OrchestrationV2Run));
 const decodeAttempts = Schema.toCodecJson(Schema.Array(OrchestrationV2RunAttempt));
-const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 // Chained timers are clamped in browsers and delay the completed page. A host
 // task yields to input and painting without adding a timer to every slice.
@@ -103,25 +102,6 @@ const decodeHistoryPage = Effect.fnUntraced(function* (json: unknown) {
   };
 });
 
-/** Large UTF-8 bodies also decode on the client thread; keep each byte slice bounded. */
-const readHistoryJson = Effect.fnUntraced(function* (
-  response: HttpClientResponse.HttpClientResponse,
-) {
-  const bytes = new Uint8Array(yield* response.arrayBuffer);
-  const decoder = new TextDecoder();
-  const parts: string[] = [];
-  let sliceStarted = performance.now();
-  for (let offset = 0; offset < bytes.length; offset += 32_768) {
-    if (performance.now() - sliceStarted >= 4) {
-      yield* yieldHistoryDecode;
-      sliceStarted = performance.now();
-    }
-    parts.push(decoder.decode(bytes.subarray(offset, offset + 32_768), { stream: true }));
-  }
-  parts.push(decoder.decode());
-  return yield* decodeJson(parts.join(""));
-});
-
 export const fetchEnvironmentThreadHistoryPage = Effect.fn(
   "clientRuntime.state.fetchEnvironmentThreadHistoryPage",
 )(function* (input: {
@@ -172,7 +152,7 @@ export const fetchEnvironmentThreadHistoryPage = Effect.fn(
             reason: new HttpClientError.StatusCodeError({ request: response.request, response }),
           });
         }
-        return yield* decodeHistoryPage(yield* readHistoryJson(response));
+        return yield* decodeHistoryPage(yield* response.json);
       }),
   });
 });

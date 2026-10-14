@@ -276,7 +276,6 @@ describe("authenticated environment HTTP requests", () => {
             input: "echo hello",
           },
         }));
-        // The UTF-8 byte slices split a multibyte payload before schema decoding.
         items[0]!.item.input = "é".repeat(17_000);
         if (lastItem === "unknown") items[64]!.item.type = "future_item";
         if (lastItem === "invalid") items[64]!.item.startedAt = "invalid-date";
