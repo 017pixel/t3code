@@ -178,7 +178,6 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import { assistantCitationFromLocation } from "../lib/assistantCitationNavigation";
 import { isMacPlatform } from "../lib/utils";
 import { queryShownElement } from "../lib/shownElement";
-import { preloadSpeculatively } from "../lib/chunkReloadGuard";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -743,34 +742,14 @@ const ThreadPullRequestsPanel = lazy(() =>
     default: module.ThreadPullRequestsPanel,
   })),
 );
-let loadedTerminalDrawer: (typeof import("./ThreadTerminalDrawer"))["default"] | null = null;
-const loadTerminalDrawer = () =>
-  import("./ThreadTerminalDrawer").then((module) => {
-    loadedTerminalDrawer = module.default;
-    return module;
-  });
-const LazyThreadTerminalDrawer = lazy(loadTerminalDrawer);
-// A drawer the saved terminal state opens starts loading with this chunk, so
-// it paints with the composer instead of pushing it up a moment later. A
-// drawer that mounts meanwhile imports it again (the browser shares the
-// fetch), so a failed chunk reloads the page for it.
-if (
-  Object.values(useTerminalUiStateStore.getState().terminalUiStateByThreadKey).some(
-    (state) => state.terminalOpen,
-  )
-) {
-  void preloadSpeculatively(loadTerminalDrawer);
-}
+const LazyThreadTerminalDrawer = lazy(() => import("./ThreadTerminalDrawer"));
 function ThreadTerminalDrawer(props: ComponentProps<typeof LazyThreadTerminalDrawer>) {
-  // Loaded before this drawer mounted: it renders in this commit, without a
-  // fallback frame. Fixed per mount, so a load landing later cannot remount it.
-  const [Drawer] = useState(() => loadedTerminalDrawer ?? LazyThreadTerminalDrawer);
   // Keep existing terminal sessions mounted when hidden, but an empty closed drawer
   // has no terminal to render or synchronize and need not load its renderer.
   if (props.visible === false && props.terminalIds.length === 0) return null;
   return (
     <Suspense fallback={null}>
-      <Drawer {...props} />
+      <LazyThreadTerminalDrawer {...props} />
     </Suspense>
   );
 }
