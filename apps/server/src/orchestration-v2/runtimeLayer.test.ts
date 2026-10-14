@@ -4937,11 +4937,29 @@ it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("compact PR events", 
         (yield* orchestrator.getThreadShell(threadId))?.pullRequests,
         after?.pullRequests,
       );
+      const currentLink = after?.pullRequests?.[1];
+      assert.isDefined(currentLink?.snapshot);
+      if (currentLink?.snapshot == null) return;
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request-link.sync",
+        commandId: CommandId.make("compact-pr-sync-again"),
+        threadId,
+        ...key,
+        number: 2,
+        snapshot: { ...currentLink.snapshot, title: "Latest PR" },
+        stack: currentLink.stack,
+      });
+      const latest = yield* orchestrator.getThreadShell(threadId);
       yield* maintenance.compactEventStore;
+      const retained = yield* sql<{
+        count: number;
+      }>`SELECT COUNT(*) AS count FROM orchestration_events
+        WHERE stream_id = ${threadId} AND event_type = 'thread.pull-request-link-updated'`;
+      assert.equal(retained[0]?.count, 1);
       assert.isTrue((yield* maintenance.rebuild).valid);
       assert.deepEqual(
         (yield* orchestrator.getThreadShell(threadId))?.pullRequests,
-        after?.pullRequests,
+        latest?.pullRequests,
       );
     }),
   );

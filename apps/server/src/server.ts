@@ -169,6 +169,9 @@ import * as ResourceCleanupService from "./orchestration-v2/ResourceCleanupServi
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
 import * as ThreadPullRequestService from "./orchestration-v2/ThreadPullRequestService.ts";
 import * as RunFinalizationService from "./orchestration-v2/RunFinalizationService.ts";
+import * as CompactionEventStore from "./orchestration-v2/EventStore.ts";
+import * as EventCompaction from "./orchestration-v2/EventCompaction.ts";
+import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStoreV2 from "./orchestration-v2/ProjectionStore.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -553,6 +556,10 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
+  EventCompaction.layer.pipe(
+    Layer.provide(ProjectionMaintenance.layer),
+    Layer.provide(Layer.merge(CompactionEventStore.layer, ProjectionStoreV2.layer)),
+  ),
   layerThreadPullRequestWorker,
   Layer.effectDiscard(
     Effect.gen(function* () {

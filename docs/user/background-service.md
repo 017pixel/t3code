@@ -95,3 +95,22 @@ Downloads, it may need Full Disk Access for the `t3` executable listed in
 
 For failures after signing in to T3 Connect, see
 [connection troubleshooting](./remote-access.md#t3-connect-troubleshooting).
+
+## Reclaim database space
+
+T3 Code periodically removes superseded event history while keeping conversation
+history and current state. SQLite reuses that freed space for future writes, but
+the database file does not shrink automatically.
+
+To return freed space to the operating system, quit the desktop app and stop any
+server using the same data directory. If you installed the background service,
+run `t3 service stop`. Then run:
+
+```sh
+t3 database compact
+```
+
+For a separate environment, pass `--base-dir /path/to/t3-home`. The command refuses
+to run while the database is in use and reports its size before and after
+compaction. It can take time and require additional free disk space. Restart the
+server or background service when it finishes.

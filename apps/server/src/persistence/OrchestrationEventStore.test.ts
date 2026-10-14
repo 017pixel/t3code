@@ -382,6 +382,21 @@ layer("OrchestrationEventStore", (it) => {
         rawPayloadBytes: 0,
         hasCreateEvent: false,
       });
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_metadata
+          (projection_name, schema_version, last_sequence, updated_at)
+        VALUES ('event-compaction', 1, ${first}, '2026-10-13T00:00:00.000Z')
+        ON CONFLICT(projection_name) DO UPDATE SET last_sequence = excluded.last_sequence
+      `;
+      assert.isTrue((yield* store.getAgentReplayStats(range)).compacted);
+      assert.isTrue(
+        (yield* store.getReplayStats({ afterSequence: baseline, throughSequence: head })).compacted,
+      );
+      assert.isUndefined(
+        (yield* store.getAgentReplayStats({ ...range, afterSequence: first })).compacted,
+      );
+      yield* sql`DELETE FROM orchestration_v2_projection_metadata WHERE projection_name = 'event-compaction'`;
+
       // The application range skips V1 rows, which a shell resume never replays.
       assert.deepEqual(
         yield* store.getReplayStats({ afterSequence: baseline, throughSequence: head }),

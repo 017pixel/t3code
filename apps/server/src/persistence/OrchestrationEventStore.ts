@@ -97,6 +97,7 @@ export class OrchestrationEventStore extends Context.Service<
         readonly eventCount: number;
         /** UTF-8 bytes in persisted payload JSON before decoding or wire projection. */
         readonly rawPayloadBytes: number;
+        readonly compacted?: true;
         readonly hasCreateEvent: boolean;
       },
       OrchestrationEventStoreError
@@ -114,6 +115,7 @@ export class OrchestrationEventStore extends Context.Service<
         readonly eventCount: number;
         /** UTF-8 bytes in persisted payload JSON before decoding or wire projection. */
         readonly rawPayloadBytes: number;
+        readonly compacted?: true;
       },
       OrchestrationEventStoreError
     >;
@@ -578,11 +580,14 @@ const makeEventStore = Effect.gen(function* () {
       readonly eventCount: number;
       readonly rawPayloadBytes: number;
       readonly hasCreateEvent: number;
+      readonly compactedThrough: number;
     }>`
       SELECT
         COUNT(*) AS "eventCount",
         COALESCE(SUM(octet_length(payload_json)), 0) AS "rawPayloadBytes",
-        COALESCE(MAX(event_type = 'thread.created'), 0) AS "hasCreateEvent"
+        COALESCE(MAX(event_type = 'thread.created'), 0) AS "hasCreateEvent",
+        COALESCE((SELECT last_sequence FROM orchestration_v2_projection_metadata
+          WHERE projection_name = 'event-compaction'), 0) AS "compactedThrough"
       FROM (
         SELECT payload_json, event_type
         FROM orchestration_events
@@ -600,14 +605,23 @@ const makeEventStore = Effect.gen(function* () {
         eventCount: rows[0]?.eventCount ?? 0,
         rawPayloadBytes: rows[0]?.rawPayloadBytes ?? 0,
         hasCreateEvent: (rows[0]?.hasCreateEvent ?? 0) !== 0,
+        ...((rows[0]?.compactedThrough ?? 0) > input.afterSequence
+          ? { compacted: true as const }
+          : {}),
       })),
     );
 
   const getReplayStats: OrchestrationEventStore["Service"]["getReplayStats"] = (input) =>
-    sql<{ readonly eventCount: number; readonly rawPayloadBytes: number }>`
+    sql<{
+      readonly eventCount: number;
+      readonly rawPayloadBytes: number;
+      readonly compactedThrough: number;
+    }>`
       SELECT
         COUNT(*) AS "eventCount",
-        COALESCE(SUM(octet_length(payload_json)), 0) AS "rawPayloadBytes"
+        COALESCE(SUM(octet_length(payload_json)), 0) AS "rawPayloadBytes",
+        COALESCE((SELECT last_sequence FROM orchestration_v2_projection_metadata
+          WHERE projection_name = 'event-compaction'), 0) AS "compactedThrough"
       FROM orchestration_events INDEXED BY idx_orchestration_events_application_high_water
       WHERE sequence > ${input.afterSequence}
         AND sequence <= ${input.throughSequence}
@@ -620,6 +634,9 @@ const makeEventStore = Effect.gen(function* () {
       Effect.map((rows) => ({
         eventCount: rows[0]?.eventCount ?? 0,
         rawPayloadBytes: rows[0]?.rawPayloadBytes ?? 0,
+        ...((rows[0]?.compactedThrough ?? 0) > input.afterSequence
+          ? { compacted: true as const }
+          : {}),
       })),
     );
 

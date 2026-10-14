@@ -230,7 +230,7 @@ export const layer: Layer.Layer<
     ];
 
     const supersedableThreadEventTypes = new Set(SUPERSEDABLE_THREAD_EVENT_TYPES);
-    const COMPACTION_PAGE_SIZE = 500;
+    const COMPACTION_PAGE_SIZE = 50;
 
     /**
      * Scan newest first to retain the newest state for each entity.
@@ -274,6 +274,11 @@ export const layer: Layer.Layer<
               WHEN event.application_event_version = 2
                 AND event.event_type IN ('message.updated', 'node.updated')
               THEN json_extract(event.payload_json, '$.id')
+              WHEN event.application_event_version = 2
+                AND event.event_type = 'thread.pull-request-link-updated'
+              THEN json_array(json_extract(event.payload_json, '$.host'),
+                json_extract(event.payload_json, '$.repository'),
+                json_extract(event.payload_json, '$.number'))
               ELSE NULL
             END AS entity_id,
             CASE
@@ -301,6 +306,11 @@ export const layer: Layer.Layer<
             ) {
               if (retainedThreadIds.has(row.stream_id)) obsolete.push(row.sequence);
               else retainedThreadIds.add(row.stream_id);
+            } else if (row.event_type === "thread.pull-request-link-updated") {
+              const key = encodeEntityKey([row.event_type, row.stream_id, row.entity_id]);
+              if (retainedThreadIds.has(row.stream_id) || retainedEntityKeys.has(key)) {
+                obsolete.push(row.sequence);
+              } else retainedEntityKeys.add(key);
             } else if (row.event_type === "message.updated" || row.event_type === "node.updated") {
               const key = encodeEntityKey([row.event_type, row.stream_id, row.entity_id]);
               if (retainedEntityKeys.has(key)) obsolete.push(row.sequence);
@@ -312,7 +322,21 @@ export const layer: Layer.Layer<
         // when this page has nothing to delete so startup and requests can progress.
         yield* Effect.yieldNow;
         if (obsolete.length > 0) {
-          yield* sql`DELETE FROM orchestration_events WHERE sequence IN ${sql.in(obsolete)}`;
+          // Publish the replay boundary atomically with deletion. A reconnecting client
+          // with an older cursor must receive a projection snapshot instead.
+          yield* sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`
+              INSERT INTO orchestration_v2_projection_metadata
+                (projection_name, schema_version, last_sequence, updated_at)
+              VALUES ('event-compaction', 1, ${Math.max(...obsolete)}, ${DateTime.formatIso(yield* DateTime.now)})
+              ON CONFLICT(projection_name) DO UPDATE SET
+                last_sequence = MAX(last_sequence, excluded.last_sequence),
+                updated_at = excluded.updated_at
+            `;
+              yield* sql`DELETE FROM orchestration_events WHERE sequence IN ${sql.in(obsolete)}`;
+            }),
+          );
           deletedEventCount += obsolete.length;
           yield* Effect.yieldNow;
         }

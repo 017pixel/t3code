@@ -704,7 +704,7 @@ const canReplayPersistedRange = Effect.fnUntraced(function* (
     afterSequence,
     throughSequence: headSequence,
   });
-  if (stats.rawPayloadBytes > ORCHESTRATION_REPLAY_PAYLOAD_BUDGET_BYTES) {
+  if (stats.compacted || stats.rawPayloadBytes > ORCHESTRATION_REPLAY_PAYLOAD_BUDGET_BYTES) {
     yield* Effect.logDebug("orchestration replay replaced by snapshot", {
       afterSequence,
       headSequence,
@@ -910,6 +910,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
       // Bound stored JSON before decoding, then check projected event
       // size separately. Neither byte count is a bound on process memory.
       if (
+        stats.compacted ||
         stats.eventCount > THREAD_RESUME_MAX_REPLAY_EVENTS ||
         !isThreadReplayRawPayloadSafe(stats.rawPayloadBytes)
       ) {
@@ -931,6 +932,20 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
         if (shell !== null) return yield* snapshotThenLive();
       }
       const replay = yield* loadReplayThrough(input.afterSequence, highWater);
+      // Compaction can run while the replay is being decoded. Once collected,
+      // a second boundary check makes this handoff safe without locking writers.
+      const compactedDuringReplay = yield* applicationEvents
+        .getAgentReplayStats({
+          threadId: input.threadId,
+          afterSequence: input.afterSequence,
+          throughSequence: highWater,
+          maxEvents: 0,
+        })
+        .pipe(
+          Effect.map((result) => result.compacted === true),
+          Effect.catch(() => Effect.succeed(true)),
+        );
+      if (compactedDuringReplay) return yield* snapshotThenLive();
       const plan = decideThreadResume({
         afterSequence: input.afterSequence,
         highWater,
@@ -1159,16 +1174,25 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       }
 
       const loaded = yield* loadProjectMetadataSnapshot(highWater);
-      const replay = toShellStream(
-        applicationEvents.readApplicationEvents({
+      const replayEvents = yield* applicationEvents
+        .readApplicationEvents({
           afterSequence: input.afterSequence,
           throughSequence: highWater,
           // A row a newer build wrote (e.g. after a downgrade) must not fail
           // every shell resubscribe. The live tail below resumes from
           // highWater, so a dropped row never hides later events.
           skipUnknownEventTypes: true,
-        }),
-      );
+        })
+        .pipe(Stream.runCollect);
+      if (!(yield* canReplayPersistedRange(input.afterSequence, highWater, SHELL_RESUME_MAX_GAP))) {
+        const fresh = yield* loadSnapshot();
+        return composeShellStreamWithEnrichment({
+          initial: initialSnapshotItems(fresh),
+          tail: completionThenLive(fresh.snapshot.snapshotSequence),
+          enrichment: enrichmentRefreshes,
+        });
+      }
+      const replay = toShellStream(Stream.fromIterable(replayEvents));
       return composeShellStreamWithEnrichment({
         initial: initialEnrichmentItems(loaded),
         tail: Stream.concat(Stream.concat(replay, completionMarker), liveFrom(highWater)),

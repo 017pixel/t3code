@@ -364,3 +364,39 @@ it.live.each(["thread", "shell"] as const)(
       );
     }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
 );
+
+it.effect("shell resume replaces compacted history with a fresh snapshot", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO orchestration_events (
+        event_id, aggregate_kind, stream_id, stream_version, event_type,
+        occurred_at, actor_kind, payload_json, metadata_json, application_event_version
+      ) VALUES ('compacted-shell', 'project', 'project:compacted', 1, 'project.created',
+        '2026-10-13T00:00:00.000Z', 'server', '{}', '{}', 2)
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_metadata
+        (projection_name, schema_version, last_sequence, updated_at)
+      VALUES ('event-compaction', 1, 1, '2026-10-13T00:00:00.000Z')
+    `;
+    const updates = yield* PubSub.unbounded();
+    const items = yield* subscribeOrchestrationV2Shell({ afterSequence: 0 }).pipe(
+      Effect.flatMap((stream) => stream.pipe(Stream.take(1), Stream.runCollect)),
+      Effect.provideService(ThreadManagement.ThreadManagementService, {
+        readShellSnapshot: () => Effect.succeed(Effect.succeed({ schemaVersion: 1, threads: [] })),
+      } as unknown as ThreadManagement.ThreadManagementService["Service"]),
+      Effect.provideService(ProjectStore.ProjectStoreV2, {
+        listShells: () => Effect.succeed([]),
+      } as unknown as ProjectStore.ProjectStoreV2["Service"]),
+      Effect.provideService(
+        ProjectService.ProjectService,
+        {} as ProjectService.ProjectService["Service"],
+      ),
+      Effect.provideService(ProjectEnrichment.ProjectEnrichmentService, {
+        subscribeChanges: PubSub.subscribe(updates),
+      } as ProjectEnrichment.ProjectEnrichmentService["Service"]),
+    );
+    assert.equal(items[0]?.kind, "snapshot");
+  }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
+);
