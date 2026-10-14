@@ -157,7 +157,7 @@ const makeHarness = Effect.fn("TestConnectionHarness.make")(function* (options?:
   ) => Effect.Effect<PreparedConnection, ConnectionAttemptError>;
   readonly ready?: (attempt: number) => Effect.Effect<void, ConnectionAttemptError>;
   readonly probe?: (attempt: number) => Effect.Effect<void, ConnectionAttemptError>;
-  readonly receivedReads?: Effect.Effect<number>;
+  readonly receivedFrames?: Effect.Effect<number>;
   readonly initialConfig?: (attempt: number) => Effect.Effect<ServerConfig, ConnectionAttemptError>;
   readonly checkRoute?: (route: ConnectionRoute) => Effect.Effect<ConnectionDriver.RouteCheck>;
 }) {
@@ -214,7 +214,7 @@ const makeHarness = Effect.fn("TestConnectionHarness.make")(function* (options?:
         subscribeServerConfig: (input) => TEST_RPC_CLIENT.subscribeServerConfig(input),
         ready: options?.ready?.(attempt) ?? Effect.void,
         probe: options?.probe?.(attempt) ?? Effect.void,
-        receivedReads: options?.receivedReads ?? Effect.succeed(0),
+        receivedFrames: options?.receivedFrames ?? Effect.succeed(0),
         closed: Deferred.await(closed),
       } satisfies RpcSession.RpcSession),
       () => Ref.update(releaseCount, (count) => count + 1),
@@ -1393,7 +1393,7 @@ describe("EnvironmentSupervisor", () => {
       const frames = yield* Ref.make(0);
       const harness = yield* makeHarness({
         probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
-        receivedReads: Ref.get(frames),
+        receivedFrames: Ref.get(frames),
       });
       const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
         initiallyDesired: true,
@@ -1445,7 +1445,7 @@ describe("EnvironmentSupervisor", () => {
       const frames = yield* Ref.make(0);
       const harness = yield* makeHarness({
         probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
-        receivedReads: Ref.get(frames),
+        receivedFrames: Ref.get(frames),
       });
       const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
         initiallyDesired: true,
@@ -1476,7 +1476,7 @@ describe("EnvironmentSupervisor", () => {
       const frames = yield* Ref.make(0);
       const harness = yield* makeHarness({
         probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
-        receivedReads: Ref.get(frames),
+        receivedFrames: Ref.get(frames),
       });
       const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
         initiallyDesired: true,

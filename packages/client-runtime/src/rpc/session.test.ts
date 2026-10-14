@@ -1099,9 +1099,13 @@ describe("RpcSessionFactory", () => {
 
       yield* TestClock.adjust("15 seconds");
       expect(closedFiber.pollUnsafe()).toBeUndefined();
-      expect(socket.sent.map((message) => decodeJson(message)).filter(isPing)).toHaveLength(5);
+      expect(socket.sent.map((message) => decodeJson(message)).filter(isPing)).toEqual([
+        { _tag: "Ping" },
+        { _tag: "Ping" },
+        { _tag: "Ping" },
+      ]);
 
-      yield* TestClock.adjust("3 seconds");
+      yield* TestClock.adjust("5 seconds");
       const error = yield* Fiber.join(closedFiber);
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error).toMatchObject({
@@ -1111,7 +1115,7 @@ describe("RpcSessionFactory", () => {
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
-  it.effect("counts every socket read, pongs included", () =>
+  it.effect("counts frames as they arrive while a full stream holds up the read loop", () =>
     Effect.gen(function* () {
       const { factory, sockets } = yield* makeFactory();
       const session = yield* factory.connect(PREPARED);
@@ -1121,13 +1125,31 @@ describe("RpcSessionFactory", () => {
       yield* completeInitialConfig(socket);
       yield* Fiber.join(readyFiber);
 
-      const before = yield* session.receivedReads;
-      expect(before).toBeGreaterThan(0);
-      yield* TestClock.adjust("3 seconds");
+      // The consumer takes one event and stops pulling, so the stream buffer
+      // fills and the read loop stops taking frames.
+      const consuming = yield* Deferred.make<void>();
+      const streamFiber = yield* session.client[WS_METHODS.subscribeServerConfig]({}).pipe(
+        Stream.runForEach(() =>
+          Deferred.succeed(consuming, undefined).pipe(Effect.andThen(Effect.never)),
+        ),
+        Effect.forkChild,
+      );
+      const streamRequest = yield* awaitRequest(socket, 1);
+      const snapshot = { version: 1, type: "snapshot", config: ENCODED_SERVER_CONFIG };
+      socket.serverMessage(
+        encodeJson({
+          _tag: "Chunk",
+          requestId: streamRequest.id,
+          values: Array.from({ length: 64 }, () => snapshot),
+        }),
+      );
+      yield* Deferred.await(consuming);
+
+      const before = yield* session.receivedFrames;
       socket.serverMessage(encodeJson({ _tag: "Pong" }));
-      yield* Effect.yieldNow;
-      expect(yield* session.receivedReads).toBe(before + 1);
-    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+      expect(yield* session.receivedFrames).toBe(before + 1);
+      yield* Fiber.interrupt(streamFiber);
+    }).pipe(Effect.scoped),
   );
 
   it.effect("keeps reading replies after closing a stream with a full buffer", () =>

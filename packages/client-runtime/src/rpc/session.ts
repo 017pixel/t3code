@@ -24,12 +24,7 @@ import * as RpcClientError from "effect/rpc/RpcClientError";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as Socket from "effect/socket/Socket";
 
-import {
-  makeWsRpcProtocolClient,
-  PING_INTERVAL,
-  PING_TIMEOUT,
-  type WsRpcProtocolClient,
-} from "./protocol.ts";
+import { makeWsRpcProtocolClient, PING_TIMEOUT, type WsRpcProtocolClient } from "./protocol.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 import type {
   ConnectionAttemptError,
@@ -57,8 +52,8 @@ export interface RpcSession {
   ) => ServerConfigSubscription;
   readonly ready: Effect.Effect<void, ConnectionAttemptError>;
   readonly probe: Effect.Effect<void, ConnectionAttemptError>;
-  /** How many socket reads have delivered data, pongs included. A rising count means the link still carries traffic. */
-  readonly receivedReads: Effect.Effect<number>;
+  /** How many WebSocket frames have arrived, pongs included. A rising count means the link still delivers. */
+  readonly receivedFrames: Effect.Effect<number>;
   readonly closed: Effect.Effect<never, ConnectionAttemptError>;
 }
 
@@ -201,34 +196,26 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
         Effect.asVoid,
       ),
     });
-    let receivedReads = 0;
-    const layerSocket = Layer.effect(
-      Socket.Socket,
-      Effect.gen(function* () {
-        const socket = yield* Socket.Socket;
-        return Socket.make({
-          reader: Effect.map(socket.reader, (reader) => ({
-            ...reader,
-            pull: Effect.map(reader.pull, (frames) => {
-              receivedReads += 1;
-              return frames;
-            }),
-          })),
-          writer: socket.writer,
-        });
-      }),
-    ).pipe(
+    // Counted as each frame arrives, not when the RPC read loop takes it, so a
+    // loop held up by a full stream buffer still shows a link that delivers.
+    let receivedFrames = 0;
+    const countFrame = () => {
+      receivedFrames += 1;
+    };
+    const layerSocket = Socket.layerWebSocket(connection.socketUrl, {
+      openTimeout: SOCKET_OPEN_TIMEOUT,
+    }).pipe(
       Layer.provide(
-        Socket.layerWebSocket(connection.socketUrl, {
-          openTimeout: SOCKET_OPEN_TIMEOUT,
+        Layer.succeed(Socket.WebSocketConstructor, (url, options) => {
+          const socket = webSocketConstructor(url, options);
+          socket.addEventListener("message", countFrame);
+          return socket;
         }),
       ),
-      Layer.provide(Layer.succeed(Socket.WebSocketConstructor, webSocketConstructor)),
     );
     const layerProtocol = Layer.effect(
       RpcClient.Protocol,
       RpcClient.makeProtocolSocket({
-        pingInterval: PING_INTERVAL,
         pingTimeout: PING_TIMEOUT,
         retryTransientErrors: false,
         retryPolicy: Schedule.recurs(0),
@@ -421,7 +408,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
         Effect.raceFirst(Deferred.await(disconnected)),
       ),
       probe,
-      receivedReads: Effect.sync(() => receivedReads),
+      receivedFrames: Effect.sync(() => receivedFrames),
       closed: Effect.raceFirst(
         Deferred.await(disconnected),
         Deferred.await(configSubscriptionClosed),
