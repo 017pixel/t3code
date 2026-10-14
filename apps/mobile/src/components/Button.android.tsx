@@ -1,9 +1,9 @@
+import { NativeThemeHost } from "./NativeThemeHost.android";
 import {
   Box,
   Button as ComposeButton,
   LoadingIndicator,
   FilledTonalButton,
-  Host,
   Row,
   Text,
   TextButton,
@@ -17,7 +17,7 @@ import type { ButtonProps } from "./Button";
 import { useAndroidControlSizing } from "./useAndroidControlSizing";
 
 export function Button(props: ButtonProps) {
-  const { colorScheme, colors } = useControlTheme();
+  const { colors } = useControlTheme();
   const typography = useScaledTextRole("footnote");
   const { scale, mediumIconSize } = useAndroidControlSizing();
   const tone = props.tone ?? "secondary";
@@ -60,9 +60,8 @@ export function Button(props: ButtonProps) {
       style={props.fullWidth ? { width: "100%" } : { alignSelf: "flex-start" }}
     >
       <View importantForAccessibility="no-hide-descendants">
-        <Host
+        <NativeThemeHost
           matchContents={props.fullWidth ? { vertical: true } : true}
-          colorScheme={colorScheme}
           ignoreSafeAreaKeyboardInsets
           style={props.fullWidth ? { width: "100%" } : { alignSelf: "flex-start" }}
         >
@@ -93,7 +92,7 @@ export function Button(props: ButtonProps) {
               <Text style={{ ...typography, fontWeight: "500" }}>{props.label}</Text>
             </Row>
           </Component>
-        </Host>
+        </NativeThemeHost>
       </View>
     </View>
   );
