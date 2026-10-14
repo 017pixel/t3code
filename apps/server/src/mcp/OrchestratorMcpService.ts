@@ -76,6 +76,7 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import {
   subagentResultForRun,
   delegatedTaskProgress,
+  delegatedTaskResultRun,
 } from "@t3tools/provider-core/server/subagentProjection";
 import {
   DispatchModeLimit,
@@ -1360,9 +1361,7 @@ const make = Effect.gen(function* () {
       const progress = delegatedTaskProgress(childControls);
       const taskResultRun =
         childRun?.delegatedTaskId === task.id
-          ? childControls.runs
-              .filter((run) => run.delegatedTaskId === task.id)
-              .toSorted((a, b) => b.ordinal - a.ordinal)[0]
+          ? delegatedTaskResultRun(childControls, task.id)
           : progress.resultRun;
       const taskWorkState =
         childRun?.delegatedTaskId === task.id

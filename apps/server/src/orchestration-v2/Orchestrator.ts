@@ -126,6 +126,7 @@ import {
   makeSubagentChildThread,
   subagentResultForRun,
   delegatedTaskProgress,
+  delegatedTaskResultRun,
   subagentThreadTitle,
 } from "@t3tools/provider-core/server/subagentProjection";
 import {
@@ -387,23 +388,14 @@ export class OrchestratorV2 extends Context.Service<OrchestratorV2, Orchestrator
   "t3/orchestration-v2/Orchestrator/OrchestratorV2",
 ) {}
 
-/**
- * The run whose outcome settles a delegated task. Promoting a queued follow-up
- * to Steer cancels its run and moves its message into the running turn, so the
- * task settles with that turn instead of reading as stopped.
- */
-function delegatedTaskResultRun(
-  child: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
-  taskId: NodeId,
-): OrchestrationV2Run | undefined {
-  const run = child.runs
-    .filter((candidate) => candidate.delegatedTaskId === taskId)
-    .toSorted((a, b) => b.ordinal - a.ordinal)[0];
-  if (run?.status !== "cancelled") return run;
-  const steeredRunId = child.messages.find((message) => message.id === run.userMessageId)?.runId;
-  return (
-    child.runs.find((candidate) => candidate.id === steeredRunId && candidate.id !== run.id) ?? run
-  );
+/** The runs whose restart continuation can still change `run`'s result: its task's runs, or all runs for the original task. */
+function runsOfTask(
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  run: OrchestrationV2Run,
+): ReadonlyArray<OrchestrationV2Run> {
+  return run.delegatedTaskId === undefined
+    ? runs
+    : runs.filter((candidate) => candidate.delegatedTaskId === run.delegatedTaskId);
 }
 
 function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs">): number {
@@ -10183,7 +10175,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       if (
         yield* childAwaitsRestartContinuation(
-          taskRuns.length === 0 || steered ? childControls.runs : taskRuns,
+          taskRuns.length === 0 ? childControls.runs : runsOfTask(childControls.runs, childRun),
           childRun,
           options?.settledContinuationOf,
         )
@@ -10238,7 +10230,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (transfer.sourcePoint.runId === childRun.id ||
             (options.taskId === forkedFrom.nodeId && transfer.sourcePoint.runId === undefined)),
       );
-      // The steered run's own task may already have published that run's result.
+      // A steered task shares its run's result transfer, so only its own result marks it settled.
       if (steered ? task.result !== null : existingResultTransfer !== undefined) {
         return;
       }
@@ -10285,7 +10277,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : parentProjection.providerThreads.find(
               (candidate) => candidate.id === parentRun.providerThreadId,
             );
+      // The steered run's own task publishes that run's result to the parent's context.
       const resultHandoff: OrchestrationV2ContextHandoff | null =
+        steered ||
         parentRun === undefined ||
         childProviderThread === undefined ||
         parentProviderThread === undefined
@@ -10435,14 +10429,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 payload: resultHandoff,
               },
             ]),
-        {
-          type: "context-transfer.created",
-          threadId: parentThreadId,
-          ...(parentRun === undefined ? {} : { runId: parentRun.id }),
-          providerInstanceId: childRun.providerInstanceId,
-          occurredAt: now,
-          payload: resultTransfer,
-        },
+        ...(steered
+          ? []
+          : [
+              {
+                type: "context-transfer.created" as const,
+                threadId: parentThreadId,
+                ...(parentRun === undefined ? {} : { runId: parentRun.id }),
+                providerInstanceId: childRun.providerInstanceId,
+                occurredAt: now,
+                payload: resultTransfer,
+              },
+            ]),
       ]);
 
       if (completionPlan.offer && completionPlan.parentRun !== undefined) {
@@ -11451,12 +11449,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (taskId !== undefined) {
         const run = delegatedTaskResultRun(child, taskId);
         if (run === undefined || delegatedTaskTerminalStatus(run.status) === null) return true;
-        return yield* childAwaitsRestartContinuation(
-          run.delegatedTaskId === taskId
-            ? child.runs.filter((candidate) => candidate.delegatedTaskId === taskId)
-            : child.runs,
-          run,
-        );
+        return yield* childAwaitsRestartContinuation(runsOfTask(child.runs, run), run);
       }
       const progress = delegatedTaskProgress(child);
       // A caller's older read saw a result; newer work since then means it is not final.

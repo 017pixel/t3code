@@ -209,6 +209,28 @@ export function subagentResultForRun(
   };
 }
 
+/**
+ * The run whose outcome settles a delegated task. Promoting a queued follow-up
+ * to Steer cancels its run and moves its message into the running turn, so the
+ * task settles with that turn instead of reading as stopped.
+ */
+export function delegatedTaskResultRun(
+  child: {
+    readonly runs: OrchestrationV2ThreadProjection["runs"];
+    readonly messages: ReadonlyArray<Pick<OrchestrationV2ConversationMessage, "id" | "runId">>;
+  },
+  taskId: NodeId,
+): OrchestrationV2Run | undefined {
+  const run = child.runs
+    .filter((candidate) => candidate.delegatedTaskId === taskId)
+    .toSorted((a, b) => b.ordinal - a.ordinal)[0];
+  if (run?.status !== "cancelled") return run;
+  const steeredRunId = child.messages.find((message) => message.id === run.userMessageId)?.runId;
+  return (
+    child.runs.find((candidate) => candidate.id === steeredRunId && candidate.id !== run.id) ?? run
+  );
+}
+
 /** A finished turn can still own live children or queued completion follow-ups. */
 export function delegatedTaskProgress(projection: {
   readonly runs: OrchestrationV2ThreadProjection["runs"];
