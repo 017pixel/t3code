@@ -26,7 +26,7 @@ import { describe } from "vite-plus/test";
 
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
 import * as OpenCodeServerLedger from "../OpenCodeServerLedger.ts";
-import * as OpenCode2Client from "./OpenCode2Client.ts";
+import * as OpenCode2Client from "./OpenCode2ClientTag.ts";
 import * as OpenCode2Server from "./OpenCode2Server.ts";
 
 const binaryPath = process.env.OPENCODE2_BIN;

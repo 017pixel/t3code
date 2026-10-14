@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
 import * as Redacted from "effect/Redacted";
 import type { PullRequestCheck } from "@t3tools/contracts";
 
-import * as GitHubApi from "./GitHubApi.ts";
+import * as GitHubApi from "./GitHubApiTag.ts";
 import { KnownWorkflowRuns, makeChecksRevalidator } from "./gitHubConditionalChecks.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));

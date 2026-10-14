@@ -176,7 +176,6 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     const pingTimedOut = yield* Ref.make(false);
     const hooks = RpcClient.ConnectionHooks.of({
       onConnect: Deferred.succeed(connected, undefined).pipe(Effect.asVoid),
-      onPingTimeout: Ref.set(pingTimedOut, true),
       onDisconnect: Effect.all([Deferred.isDone(connected), Ref.get(pingTimedOut)]).pipe(
         Effect.flatMap(([wasConnected, timedOut]) =>
           Deferred.fail(
@@ -205,6 +204,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
         pingTimeout: PING_TIMEOUT,
         retryTransientErrors: false,
         retryPolicy: Schedule.recurs(0),
+        onPingTimeout: Ref.set(pingTimedOut, true),
       }),
     ).pipe(
       Layer.provide(
@@ -218,32 +218,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     const protocolContext = yield* Layer.build(layerProtocol).pipe(
       Effect.withSpan("environment.websocket.connect"),
     );
-    const rawClient = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
-    const [discoverSourceControl, invalidateDiscovery] = yield* Effect.cachedInvalidateWithTTL(
-      rawClient[WS_METHODS.serverDiscoverSourceControl]({}),
-      "30 seconds",
-    );
-    type DiscoveryMethod = WsRpcProtocolClient[typeof WS_METHODS.serverDiscoverSourceControl];
-    const discover = (
-      input: Parameters<DiscoveryMethod>[0],
-      options?: Parameters<DiscoveryMethod>[1],
-    ) =>
-      options !== undefined
-        ? rawClient[WS_METHODS.serverDiscoverSourceControl](input, options)
-        : input.refresh === true
-          ? // A plain call already in flight is not cancelled by the first
-            // invalidate and would store its older result; the second drops it.
-            invalidateDiscovery.pipe(
-              Effect.andThen(rawClient[WS_METHODS.serverDiscoverSourceControl](input)),
-              Effect.tap(() => invalidateDiscovery),
-            )
-          : discoverSourceControl;
-    const protocolClient: WsRpcProtocolClient = {
-      ...rawClient,
-      // Options retain the raw generic discard/header behavior. Only calls
-      // without options use the shared ordinary response.
-      [WS_METHODS.serverDiscoverSourceControl]: discover as DiscoveryMethod,
-    };
+    const protocolClient = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
     const initialConfigDeferred = yield* Deferred.make<ServerConfig>();
     const serverConfigExit = yield* Deferred.make<void, ServerConfigSubscriptionError>();
     const configSubscriptionClosed = yield* Deferred.make<never, ConnectionAttemptError>();
@@ -254,13 +229,10 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
       reason: "remote-unavailable",
       detail: `${connection.label} config subscription ended.`,
     });
-    // Returns false for a delta that left out a provider it patched: this build
-    // could not read the patch, or the provider it patches. Later deltas cannot
-    // restore that provider, so its version is not cached.
+    // Unreadable provider patches require a full snapshot, without caching their version.
     const handleConfigEvent = (wireEvent: ServerConfigStreamEvent) =>
       Effect.gen(function* () {
-        // Restore only after this server acknowledges the cache. Older
-        // servers ignore the opt-in and send their ordinary full snapshot.
+        // Reuse the cache only after the server acknowledges its version.
         const event =
           wireEvent.type === "configUnchanged" && cachedConfig !== undefined
             ? { version: 1 as const, type: "snapshot" as const, config: cachedConfig.config }
@@ -324,10 +296,8 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
         yield* Deferred.succeed(initialConfigDeferred, config);
         return !lostProvider;
       });
-    // Resubscribing starts from a full snapshot, which brings the provider back
-    // once this build can read it. It names a version no config hashes to: a
-    // server defers editors and catalogs only for a subscription without one,
-    // and their late delta would patch the unreadable provider again.
+    // An impossible version forces a full snapshot without deferred catalogs,
+    // whose later delta could drop the recovered provider again.
     const runConfigSubscription = (
       knownConfigVersion: string | undefined,
     ): Effect.Effect<void, ServerConfigSubscriptionError> =>

@@ -252,11 +252,7 @@ export function McpAppFrame(props: {
       cancelled = true;
     };
   }, [props.environmentId, props.threadId, props.itemId, app.tool]);
-  // A hidden kept thread view keeps its DOM while React runs its effect
-  // cleanups, so the host below is torn down but the app would keep running
-  // (and playing sound) and never initialize again. The frame stops while
-  // hidden and loads a new document when shown, as when leaving the thread
-  // unmounted it.
+  // Activity preserves iframe DOM; stop hidden apps and reinitialize on reveal.
   const [parked, setParked] = useState(false);
   useEffect(() => {
     if (parked) {

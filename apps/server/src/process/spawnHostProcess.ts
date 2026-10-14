@@ -1,13 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - the host runs without the Effect runtime to stay small.
-// The spawn host: a small Node process that starts the server's children.
-// Linux libuv forks to spawn, which copies the parent's page tables and
-// blocks its event loop for the copy; a large server pays 10-60 ms per child.
-// This process stays small, so its forks are cheap and off the server's
-// thread. Each child's stdio sockets go back to the server over the IPC
-// channel, so output never passes through here.
-//
-// `t3 __spawn-host` runs this from bin.ts before the CLI module graph loads,
-// so it may import only Node builtins. Nothing runs on import.
+// `t3 __spawn-host` must import only Node builtins to keep its heap small.
+// Transfer stdio sockets over IPC so output bypasses the host.
 import * as NodeChildProcess from "node:child_process";
 import type * as NodeNet from "node:net";
 
@@ -53,10 +46,7 @@ const toSpawnHostError = (cause: unknown): SpawnHostError => {
   };
 };
 
-/**
- * Stops the read Node starts on each stdio socket as it creates it. Child
- * stdio has no public paused option; net's `pauseOnCreate` makes this same call.
- */
+// Child stdio has no public paused option; use net's pauseOnCreate mechanism.
 const stopReading = (socket: NodeNet.Socket) =>
   (socket as unknown as { _handle?: { readStop?: () => void } | null })._handle?.readStop?.();
 
@@ -69,9 +59,7 @@ export function runSpawnHost(): void {
   }
   const send = (event: SpawnHostEvent, socket?: NodeNet.Socket) => channel(event, socket);
 
-  // The server decides when its children stop. A terminal's Ctrl-C or a service
-  // manager's SIGTERM reaches the whole group, and the host must keep reporting
-  // exits while the server cleans up; it leaves when the server's channel closes.
+  // Keep reporting exits during group shutdown until the server closes IPC.
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => {});
   process.on("disconnect", () => process.exit(0));
 
@@ -85,8 +73,7 @@ export function runSpawnHost(): void {
       send({ type: "error", id, error: toSpawnHostError(cause) });
       return;
     }
-    // Every byte the child writes must stay in the kernel until the server owns
-    // the socket. The loop has not polled yet, so nothing was read so far.
+    // Stop reads before the loop polls, preserving every byte for the server.
     const stdio = child.stdio.map((socket) => {
       if (socket) stopReading(socket as NodeNet.Socket);
       return socket as NodeNet.Socket | null;

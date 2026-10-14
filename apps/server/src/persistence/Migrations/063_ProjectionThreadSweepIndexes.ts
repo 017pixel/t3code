@@ -17,7 +17,7 @@ export default Effect.gen(function* () {
   // Replace it so every database gets this definition.
   yield* sql`DROP INDEX IF EXISTS orchestration_v2_projection_threads_active_idx`;
   yield* sql`
-    CREATE INDEX orchestration_v2_projection_threads_active_idx
+    CREATE INDEX IF NOT EXISTS orchestration_v2_projection_threads_active_idx
     ON orchestration_v2_projection_threads(
       updated_at,
       thread_id,
@@ -41,5 +41,13 @@ export default Effect.gen(function* () {
     CREATE INDEX IF NOT EXISTS orchestration_v2_projection_runs_failed_idx
     ON orchestration_v2_projection_runs(thread_id)
     WHERE status = 'failed'
+  `;
+  // Older sweep builds recorded id 62, so they skip main's failed-error index migration.
+  yield* sql`
+    CREATE INDEX IF NOT EXISTS orchestration_v2_projection_turn_items_failed_error_idx
+    ON orchestration_v2_projection_turn_items(
+      thread_id, run_id, node_id, updated_at DESC, ordinal DESC, turn_item_id DESC
+    )
+    WHERE type = 'error' AND status = 'failed'
   `;
 });

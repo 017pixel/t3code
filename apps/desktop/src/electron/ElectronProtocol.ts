@@ -236,8 +236,7 @@ const serveDesktopAsset = Effect.fn("desktop.protocol.serveAsset")(function* (
   if (assetPath !== root && !assetPath.startsWith(root + path.sep)) {
     return new Response(null, { status: 404 });
   }
-  // One filesystem round trip per startup request: the root is the SPA entry,
-  // and anything else is read directly, falling back only when that read fails.
+  // Read directly to avoid a stat for every renderer asset.
   const indexPath = path.join(root, "index.html");
   let filePath = assetPath === root ? indexPath : assetPath;
   let contents = yield* fileSystem.readFile(filePath).pipe(Effect.orElseSucceed(() => null));

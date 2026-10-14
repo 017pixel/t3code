@@ -124,9 +124,7 @@ const ACTION_FAILURE_HINTS: Record<PullRequestAction, string> = {
     "The host refused it. Check that you have Actions write access and that these workflow runs are still awaiting approval.",
 };
 
-// Actions in flight, by pullRequestEntryKey. They outlive the row that started them: a list row
-// that scrolls away and back, another surface showing the same pull request, and the close sweep
-// all see them.
+// Share pending actions across virtualized row remounts and other PR surfaces.
 const pendingActionKeys = new Set<string>();
 const pendingActionListeners = new Set<() => void>();
 

@@ -9,6 +9,7 @@ import {
 } from "~/components/pullRequest/usePullRequestActions";
 import { SidebarPointerSensor } from "~/components/Sidebar.pointer";
 import { resolveSidebarSweepKeys } from "~/components/Sidebar.logic";
+import { sortProjectsByGroupOrder } from "@t3tools/client-runtime/state/project-grouping";
 import { pullRequestHostOf, resolveEnvironmentMachineKind } from "@t3tools/contracts";
 import type {
   EnvironmentId,
@@ -49,6 +50,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -158,6 +160,7 @@ import {
 } from "../rightPanelStore";
 import { useDebouncedValue } from "../state/queries";
 import { useAllEnvironmentShellsBootstrapped, useProjects } from "../state/entities";
+import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
 import { useEnvironments } from "../state/environments";
 import {
   pullRequestEnvironment,
@@ -247,7 +250,6 @@ type PullRequestListItem =
   | {
       readonly kind: "row";
       readonly key: string;
-      /** Rows sit 2px apart within a group and groups 12px apart, as the stacked list did. */
       readonly gap: "none" | "row" | "group";
       readonly entryKey: string;
       readonly entry: EnvironmentPullRequestEntry;
@@ -255,7 +257,6 @@ type PullRequestListItem =
 
 const EMPTY_PULL_REQUEST_LIST_ITEMS: ReadonlyArray<PullRequestListItem> = [];
 
-/** The grouped rows as one flat list, so the page renders only the rows in view. */
 function pullRequestListItems(
   groups: ReadonlyArray<{
     readonly key: string;
@@ -286,7 +287,6 @@ function pullRequestListItems(
 const pullRequestListItemKey = (item: PullRequestListItem) => item.key;
 const pullRequestListItemType = (item: PullRequestListItem) => item.kind;
 
-/** One list item at the page's content width. */
 function PullRequestListLane({
   className,
   children,
@@ -400,7 +400,9 @@ export const Route = createFileRoute("/_chat/pull-requests")({
     ...(typeof raw.selectedEnvironmentId === "string" && raw.selectedEnvironmentId
       ? { selectedEnvironmentId: raw.selectedEnvironmentId as EnvironmentId }
       : {}),
-    ...(typeof raw.q === "string" && raw.q ? { q: raw.q.slice(0, 200) } : {}),
+    // Always an own key: the router lays this result over the parent route's unvalidated
+    // search, so leaving out a `q` the URL parser made a number would let the number through.
+    q: typeof raw.q === "string" && raw.q ? raw.q.slice(0, 200) : undefined,
     ...(raw.draft === "only" || raw.draft === "hide" ? { draft: raw.draft } : {}),
     ...(raw.review === "approved" ||
     raw.review === "changes-requested" ||
@@ -477,9 +479,12 @@ function PullRequestsRouteView() {
   // the one wrong answer the empty state can give.
   const projectsKnown = useAllEnvironmentShellsBootstrapped();
   // Only the projects the page can actually read: one on an environment that cannot list pull
-  // requests could neither be listed nor acted on.
+  // requests could neither be listed nor acted on, and the Scratch folder is never a repository.
   const projects = useMemo(
-    () => allProjects.filter((project) => environmentIds.includes(project.environmentId)),
+    () =>
+      allProjects.filter(
+        (project) => !project.isScratch && environmentIds.includes(project.environmentId),
+      ),
     [allProjects, environmentIds],
   );
   const environmentLabels = useMemo(
@@ -1757,15 +1762,12 @@ function PullRequestsRouteView() {
         if (!viewport) return;
         const bounds = viewport.getBoundingClientRect();
         const visibleY = Math.min(Math.max(y, bounds.top), bounds.bottom - 1);
-        // The row under the pointer: the lowest one starting at or above it,
-        // else the topmost. The list recycles rows, so DOM order is not the
-        // order on screen.
+        // Recycled rows' DOM order differs from their screen order.
         let key: string | null = null;
         let keyTop = -Infinity;
         let topmost: { key: string | null; top: number } | null = null;
         for (const row of viewport.querySelectorAll<HTMLElement>("[data-pull-request-key]")) {
           const rect = row.getBoundingClientRect();
-          // Recycled rows waiting off screen do not count.
           if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
           const top = rect.top;
           const rowKey = row.dataset.pullRequestKey ?? null;
@@ -2036,7 +2038,6 @@ function PullRequestsRouteView() {
       </PullRequestListLane>
     );
   };
-  // Everything a visible row reads; a change re-renders the rows the list has mounted.
   const listExtraData = useMemo(
     () => [
       capableEnvironments.length,
@@ -2182,7 +2183,7 @@ function PullRequestsRouteView() {
     />
   );
   const filtersMenu = (
-    <PullRequestFiltersMenu
+    <PullRequestFiltersMenuInSidebarOrder
       onOpenChange={setFiltersOpen}
       state={search.state}
       stateOptions={STATE_TABS}
@@ -2514,6 +2515,18 @@ function PullRequestsRouteView() {
 }
 
 /** A compact stand-in for one pill group when the header is narrow. */
+/** Lists the projects in the sidebar's order; it re-renders with thread activity, so the page does not. */
+function PullRequestFiltersMenuInSidebarOrder(
+  props: ComponentProps<typeof PullRequestFiltersMenu>,
+) {
+  const sidebarProjectGroups = useSidebarProjectGroups();
+  const projects = useMemo(
+    () => sortProjectsByGroupOrder(props.projects, sidebarProjectGroups),
+    [props.projects, sidebarProjectGroups],
+  );
+  return <PullRequestFiltersMenu {...props} projects={projects} />;
+}
+
 function CompactFilterMenu<Value extends string>({
   label,
   triggerIcon,

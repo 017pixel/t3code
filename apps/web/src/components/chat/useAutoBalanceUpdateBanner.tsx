@@ -31,9 +31,7 @@ interface EnvironmentUpdateState {
   readonly state: ServerUpdateState;
 }
 
-// Shared by every caller without machines. A fresh atom per render would be
-// read before it is subscribed and produce a new empty array, which makes
-// React render the chat view again after it commits.
+// Reuse the empty atom to avoid a post-commit render for its new array.
 const NO_ENVIRONMENT_UPDATE_STATES = Atom.make<ReadonlyArray<EnvironmentUpdateState>>([]);
 
 /** Keep every machine's update visible while auto balance has no single update target. */

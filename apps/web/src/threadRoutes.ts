@@ -92,7 +92,6 @@ export function resolveThreadRouteTarget(
   };
 }
 
-/** A string identity for a route target, stable across renders. */
 export function threadRouteTargetKey(target: ThreadRouteTarget | null): string | null {
   if (target === null) return null;
   return target.kind === "server"
@@ -128,25 +127,19 @@ export function resolveActiveThreadRouteRef(
   return draftThread.promotedTo;
 }
 
-/** A chat view the thread route keeps mounted, shown or hidden by `ThreadRouteView`. */
 export interface KeptThreadView {
-  /** React key. A promoted draft keeps its draft id so its view survives the route swap. */
+  /** Promotion preserves the draft's React key. */
   readonly key: string;
   readonly threadKey: string;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
-  /** Set while the view is a draft route's; drafts are not kept once left. */
+  /** Draft views are dropped once left. */
   readonly draftId: DraftId | null;
-  /** Visit order, used to evict the least recently shown view. */
   readonly visit: number;
-  /**
-   * Mounted in idle time to keep a thread whose view a first open took over.
-   * It lays out once, out of sight, before it is hidden like any kept view.
-   */
+  /** Lay out a released thread out of sight before hiding it. */
   readonly warming?: boolean;
 }
 
-/** Recently shown server threads stay rendered, so a revisit only reveals them. */
 const KEPT_THREAD_VIEW_LIMIT = 4;
 
 function retarget(
@@ -173,20 +166,12 @@ function leastRecentlyShown(views: ReadonlyArray<KeptThreadView>): KeptThreadVie
 
 export interface KeptThreadViewsUpdate {
   readonly views: ReadonlyArray<KeptThreadView>;
-  /** The thread the shown view stopped showing; keep it with `keepReleasedThreadView`. */
+  /** Replaced thread, for idle warming with keepReleasedThreadView. */
   readonly released: KeptThreadView | null;
 }
 
-/**
- * Shows `active` in a kept view. A revisit reveals the view that already
- * shows it. A first open switches the shown view to the new thread, as the
- * single shared view always did, and returns the thread it showed as
- * `released`; mounting a view on the way there would make the open slower.
- * From a draft, a hidden view is reused if there is one. Drafts get their own
- * view and are dropped once left. Entries never reorder: moving a rendered
- * view in the DOM would drop its scroll position. Returns `current` when
- * nothing changed.
- */
+// Reuse the shown view on first opens to avoid mounting on the click path.
+// Preserve entry order: moving rendered DOM loses scroll positions.
 export function resolveKeptThreadViews(
   current: ReadonlyArray<KeptThreadView>,
   active: Omit<KeptThreadView, "visit"> | null,
@@ -194,8 +179,7 @@ export function resolveKeptThreadViews(
 ): KeptThreadViewsUpdate {
   const unchanged = { views: current, released: null };
   const lastVisit = current.reduce((max, view) => Math.max(max, view.visit), 0);
-  // A server thread reuses whichever view already shows it, which is how a
-  // promoted draft's view carries over to the thread route.
+  // Match promoted drafts by thread identity to preserve their view.
   const existing =
     active === null
       ? undefined
@@ -240,7 +224,6 @@ export function resolveKeptThreadViews(
       };
     }
   }
-  // Nothing to switch (the first view, or a new draft): mount one.
   let views: ReadonlyArray<KeptThreadView> = [
     ...servers,
     { ...active, key: active.draftId ?? `view:${active.threadKey}:${visit}`, visit },
@@ -253,11 +236,7 @@ export function resolveKeptThreadViews(
   return { views, released: null };
 }
 
-/**
- * Keeps a released thread in a new view that warms up in idle time, making
- * room by dropping the least recently shown hidden view. Skipped once the
- * thread is shown again.
- */
+/** Warm released threads during idle time so revisits can reveal them. */
 export function keepReleasedThreadView(
   current: ReadonlyArray<KeptThreadView>,
   released: KeptThreadView,
@@ -282,7 +261,6 @@ export function keepReleasedThreadView(
   ];
 }
 
-/** Hides a warmed view like any kept one. */
 export function finishWarmingThreadView(
   current: ReadonlyArray<KeptThreadView>,
   key: string,

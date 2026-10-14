@@ -12,12 +12,12 @@ import * as Redacted from "effect/Redacted";
 
 import { HttpClient, HttpClientResponse } from "effect/http";
 
-import * as GitHubApi from "./GitHubApi.ts";
+import * as GitHubApi from "./GitHubApiTag.ts";
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubQuota from "./GitHubQuota.ts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
-import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
+import * as GitHubPullRequestApi from "./GitHubPullRequestApiTag.ts";
 import { KnownWorkflowRuns } from "./gitHubConditionalChecks.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -3690,7 +3690,14 @@ layer("GitHubPullRequestApi.layer", (it) => {
                 reviewRequests: {
                   nodes: [
                     { requestedReviewer: { login: "reviewer" } },
-                    { requestedReviewer: { slug: "maintainers", name: "Maintainers" } },
+                    {
+                      requestedReviewer: {
+                        slug: "maintainers",
+                        combinedSlug: "octo/maintainers",
+                        name: "Maintainers",
+                        avatarUrl: "https://avatars.githubusercontent.com/t/1",
+                      },
+                    },
                   ],
                 },
                 labels: { nodes: [{ name: "bug", color: "ff0000" }] },
@@ -3739,6 +3746,13 @@ layer("GitHubPullRequestApi.layer", (it) => {
       expect(detail.comparison).toBeNull();
       expect(detail.reviewRequestLogins).toEqual(["reviewer"]);
       expect(detail.hasTeamReviewRequest).toBe(true);
+      expect(detail.reviewRequestTeams).toEqual([
+        {
+          login: "octo/maintainers",
+          name: "Maintainers",
+          avatarUrl: "https://avatars.githubusercontent.com/t/1",
+        },
+      ]);
       expect(detail.labels).toEqual([{ name: "bug", color: "ff0000" }]);
       expect(detail.checks).toHaveLength(2);
       expect(detail.checksState).toBe("failing");

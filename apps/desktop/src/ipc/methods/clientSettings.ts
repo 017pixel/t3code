@@ -27,9 +27,7 @@ export const setClientSettings = DesktopIpc.makeIpcMethod({
     const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
     const snapShot = yield* DesktopSnapShot.DesktopSnapShot;
     const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
-    // Saved first, so a quit in the first seconds keeps it. The shortcut waits
-    // for the login shell: on Linux it can supply the session bus the portal
-    // needs, and the first configure sets the shortcut up for the session.
+    // Persist before waiting; shortcut setup needs the shell's session bus.
     yield* clientSettings.set(settings);
     yield* shellEnvironment.installIntoProcess;
     yield* snapShot.configure(settings);

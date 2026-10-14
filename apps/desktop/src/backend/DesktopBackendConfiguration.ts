@@ -567,10 +567,8 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       host: backendExposure.bindHost,
       desktopBootstrapToken: input.bootstrapToken,
       desktopBootstrapSecret: input.bootstrapSecret,
-      // The primary's spawn waits for the shell environment to be installed into
-      // process.env (DesktopBackendPool's beforeSpawn), and this child extends it
-      // (extendEnv below). WSL gets a different environment, so its bootstrap
-      // never sets this.
+      // DesktopBackendPool's spawn gate installs the shell environment first.
+      // WSL gets a different environment and never sets this.
       shellEnvironmentPrepared: true,
       tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
       tailscaleServePort: backendExposure.tailscaleServePort,
