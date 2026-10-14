@@ -156,25 +156,25 @@ it.effect("repairs read projections after another build changes its ledger or sc
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations();
     yield* runMigrations();
-    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 63`;
-    assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadReadPayload"]]);
+    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 64`;
+    assert.deepStrictEqual(yield* runMigrations(), [[64, "ProjectionThreadReadPayload"]]);
 
-    yield* sql`UPDATE effect_sql_migrations SET name = 'OtherBuild' WHERE migration_id = 63`;
-    yield* runMigrations();
-    assert.deepStrictEqual(
-      yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id = 63`,
-      [{ name: "OtherBuild" }],
-    );
-    yield* sql`UPDATE effect_sql_migrations SET name = 'ProjectionThreadReadPayload' WHERE migration_id = 63`;
-    yield* runMigrations();
-
-    yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (64, 'NewerBuild')`;
+    yield* sql`UPDATE effect_sql_migrations SET name = 'OtherBuild' WHERE migration_id = 64`;
     yield* runMigrations();
     assert.deepStrictEqual(
       yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id = 64`,
+      [{ name: "OtherBuild" }],
+    );
+    yield* sql`UPDATE effect_sql_migrations SET name = 'ProjectionThreadReadPayload' WHERE migration_id = 64`;
+    yield* runMigrations();
+
+    yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (65, 'NewerBuild')`;
+    yield* runMigrations();
+    assert.deepStrictEqual(
+      yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id = 65`,
       [{ name: "NewerBuild" }],
     );
-    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 64`;
+    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 65`;
     yield* runMigrations();
 
     yield* sql`DROP TABLE orchestration_v2_projection_thread_reads`;
