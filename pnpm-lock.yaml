@@ -146,6 +146,7 @@ packageExtensionsChecksum: sha256-FYDaKefjFcda1+vgiq8yMpZC4ehE5CyLi/bsCGLgTtY=
 
 patchedDependencies:
   '@clerk/expo@4.6.8': b8b22ab733de5bea846ad9e88046c10582352fe9ad86f314f368b2a823f0f281
+  '@effect/platform-node-shared@4.0.4': d8494abaca191d0504929916c22a9d37fc242b0e2e3a2020c73e1fc26f0cc1d9
   '@effect/vitest@4.0.4': ebaec66c6bdd25e1b8d5bfd4a14f25ab959bdcca6e22ed8871d061e50e2db0ad
   '@expo/metro-config@58.0.6': 90fa980e8b6480631fb2fbb04559834e3c612db40c550cd828f11be297d8d760
   '@ff-labs/fff-node@0.11.0': 8956d6ed6938a1bce69b2d0b067ff258dd9ca753c5bbe7006f7b68f760ea3ad2
@@ -619,7 +620,7 @@ importers:
         version: 4.0.4(bufferutil@4.1.0)(effect@4.0.4)(redis@6.2.1)(utf-8-validate@6.0.6)
       '@effect/platform-node-shared':
         specifier: 4.0.4
-        version: 4.0.4(bufferutil@4.1.0)(effect@4.0.4)(utf-8-validate@6.0.6)
+        version: 4.0.4(patch_hash=d8494abaca191d0504929916c22a9d37fc242b0e2e3a2020c73e1fc26f0cc1d9)(bufferutil@4.1.0)(effect@4.0.4)(utf-8-validate@6.0.6)
       '@ff-labs/fff-node':
         specifier: 0.11.0
         version: 0.11.0(patch_hash=8956d6ed6938a1bce69b2d0b067ff258dd9ca753c5bbe7006f7b68f760ea3ad2)
@@ -13836,7 +13837,7 @@ snapshots:
     transitivePeerDependencies:
       - encoding
 
-  '@effect/platform-node-shared@4.0.4(bufferutil@4.1.0)(effect@4.0.4)(utf-8-validate@6.0.6)':
+  '@effect/platform-node-shared@4.0.4(patch_hash=d8494abaca191d0504929916c22a9d37fc242b0e2e3a2020c73e1fc26f0cc1d9)(bufferutil@4.1.0)(effect@4.0.4)(utf-8-validate@6.0.6)':
     dependencies:
       '@types/ws': 8.18.2
       effect: 4.0.4
@@ -13847,7 +13848,7 @@ snapshots:
 
   '@effect/platform-node@4.0.4(bufferutil@4.1.0)(effect@4.0.4)(redis@6.2.1)(utf-8-validate@6.0.6)':
     dependencies:
-      '@effect/platform-node-shared': 4.0.4(bufferutil@4.1.0)(effect@4.0.4)(utf-8-validate@6.0.6)
+      '@effect/platform-node-shared': 4.0.4(patch_hash=d8494abaca191d0504929916c22a9d37fc242b0e2e3a2020c73e1fc26f0cc1d9)(bufferutil@4.1.0)(effect@4.0.4)(utf-8-validate@6.0.6)
       effect: 4.0.4
       redis: 6.2.1
       undici: 8.11.2
