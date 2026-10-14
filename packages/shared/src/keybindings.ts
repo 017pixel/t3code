@@ -53,16 +53,8 @@ const EVENT_CODE_SHORTCUT_KEYS: Readonly<Record<string, string>> = {
   Slash: "/",
 };
 
-let lastPlatform: string | null = null;
-let lastPlatformIsMac = false;
-
-/** Keydown handlers ask this for every key, always with the same platform string. */
 export function isMacPlatform(platform: string): boolean {
-  if (platform !== lastPlatform) {
-    lastPlatform = platform;
-    lastPlatformIsMac = /mac|iphone|ipad|ipod/i.test(platform);
-  }
-  return lastPlatformIsMac;
+  return /mac|iphone|ipad|ipod/i.test(platform);
 }
 
 export function normalizeEventKey(key: string): string {
