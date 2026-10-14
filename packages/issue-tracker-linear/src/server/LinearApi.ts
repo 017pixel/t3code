@@ -22,7 +22,7 @@ import * as IssueTrackerHost from "@t3tools/issue-tracker-core/server/IssueTrack
 import { retryAtFromHeader } from "@t3tools/source-control-core/server/SourceControlRateLimit";
 
 export const KIND = IssueTrackerKind.make("linear");
-export const DEFAULT_API_URL = "https://api.linear.app/graphql";
+const DEFAULT_API_URL = "https://api.linear.app/graphql";
 
 const LinearApiConfig = Config.all({
   apiUrl: Config.String("T3CODE_LINEAR_API_URL").pipe(Config.withDefault(DEFAULT_API_URL)),
@@ -39,12 +39,12 @@ export const LinearUser = Schema.Struct({
 });
 export type LinearUser = typeof LinearUser.Type;
 
-export const LinearTeam = Schema.Struct({
+const LinearTeam = Schema.Struct({
   id: Schema.String,
   key: Schema.String,
   name: Schema.String,
 });
-export type LinearTeam = typeof LinearTeam.Type;
+type LinearTeam = typeof LinearTeam.Type;
 
 /** `type` is one of Linear's categories: triage, backlog, unstarted, started, completed, canceled. */
 export const LinearWorkflowState = Schema.Struct({
@@ -55,13 +55,13 @@ export const LinearWorkflowState = Schema.Struct({
 });
 export type LinearWorkflowState = typeof LinearWorkflowState.Type;
 
-export const LinearLabel = Schema.Struct({
+const LinearLabel = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
   color: Schema.NullOr(Schema.String),
   description: Schema.optional(Schema.NullOr(Schema.String)),
 });
-export type LinearLabel = typeof LinearLabel.Type;
+type LinearLabel = typeof LinearLabel.Type;
 
 export const LinearReaction = Schema.Struct({
   id: Schema.String,
@@ -149,14 +149,14 @@ export const LinearTemplate = Schema.Struct({
 });
 export type LinearTemplate = typeof LinearTemplate.Type;
 
-export const LinearIssueDetail = Schema.Struct({
+const LinearIssueDetail = Schema.Struct({
   ...LinearIssue.fields,
   comments: Connection(LinearComment),
   reactions: Schema.Array(LinearReaction),
   attachments: Schema.Struct({ nodes: Schema.Array(LinearAttachment) }),
   history: Schema.Struct({ nodes: Schema.Array(LinearHistoryEntry) }),
 });
-export type LinearIssueDetail = typeof LinearIssueDetail.Type;
+type LinearIssueDetail = typeof LinearIssueDetail.Type;
 
 // --- Documents -----------------------------------------------------------------------------
 
@@ -270,14 +270,14 @@ const IssueData = Schema.Struct({ issue: Schema.NullOr(LinearIssueDetail) });
 const CommentsData = Schema.Struct({
   issue: Schema.NullOr(Schema.Struct({ comments: Connection(LinearComment) })),
 });
-export const LinearTeamDetail = Schema.Struct({
+const LinearTeamDetail = Schema.Struct({
   ...LinearTeam.fields,
   states: Connection(LinearWorkflowState),
   labels: Connection(LinearLabel),
   members: Connection(LinearUser),
   templates: Schema.Struct({ nodes: Schema.Array(LinearTemplate) }),
 });
-export type LinearTeamDetail = typeof LinearTeamDetail.Type;
+type LinearTeamDetail = typeof LinearTeamDetail.Type;
 const TeamData = Schema.Struct({
   teams: Schema.Struct({ nodes: Schema.Array(LinearTeamDetail) }),
   issueLabels: Connection(LinearLabel),

@@ -16,11 +16,11 @@ import * as Option from "effect/Option";
 import * as DateTime from "effect/DateTime";
 import {
   IssueTrackerConnectionError,
+  IssueTrackerKind,
   type IssueTrackerBindProjectInput,
   type IssueTrackerConnectInput,
   type IssueTrackerConnection,
   type IssueTrackerConnectionList,
-  type IssueTrackerKind,
 } from "@t3tools/contracts";
 import type { StandaloneIssueTrackerApi } from "@t3tools/issue-tracker-core/server/IssueTracker";
 
@@ -70,6 +70,9 @@ export const make = Effect.gen(function* () {
       : Effect.succeed(found);
   };
 
+  /** The kind an error about no tracker in particular is filed under. */
+  const anyTracker = registry.standalone[0]?.kind ?? IssueTrackerKind.make("none");
+
   const secretFailure = (tracker: IssueTrackerKind, detail: string) => (cause: unknown) =>
     new IssueTrackerConnectionError({ tracker, reason: "failed", detail, cause });
 
@@ -116,16 +119,8 @@ export const make = Effect.gen(function* () {
     trackers: Effect.forEach(registry.standalone, current, { concurrency: 4 }),
     bindings: bindings.list.pipe(
       Effect.map((bound) => Object.fromEntries(bound)),
-      Effect.mapError(
-        (cause) =>
-          // No single tracker is at fault; the first registered one carries the report.
-          new IssueTrackerConnectionError({
-            tracker: registry.standalone[0]?.kind ?? ("unknown" as IssueTrackerKind),
-            reason: "failed",
-            detail: "The project bindings could not be read.",
-            cause,
-          }),
-      ),
+      // No single tracker is at fault; the first registered one carries the report.
+      Effect.mapError(secretFailure(anyTracker, "The project bindings could not be read.")),
     ),
   });
 
@@ -172,21 +167,13 @@ export const make = Effect.gen(function* () {
 
   const bindProject: IssueTrackerConnections["Service"]["bindProject"] = (input) =>
     Effect.gen(function* () {
-      const api = input.binding === null ? null : yield* requireTracker(input.binding.tracker);
+      // Unbinding names no tracker; the first registered one carries any report.
+      const tracker =
+        input.binding === null ? anyTracker : (yield* requireTracker(input.binding.tracker)).kind;
       const updatedAt = DateTime.formatIso(yield* DateTime.now);
       yield* bindings
         .set({ projectId: input.projectId, binding: input.binding, updatedAt })
-        .pipe(
-          Effect.mapError(
-            secretFailure(
-              api?.kind ??
-                input.binding?.tracker ??
-                registry.standalone[0]?.kind ??
-                ("unknown" as IssueTrackerKind),
-              "The project binding could not be saved.",
-            ),
-          ),
-        );
+        .pipe(Effect.mapError(secretFailure(tracker, "The project binding could not be saved.")));
     });
 
   return IssueTrackerConnections.of({ list, connect, bindProject });

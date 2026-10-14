@@ -179,7 +179,7 @@ function toComment(comment: LinearApi.LinearComment, viewerId: string | null): I
   };
 }
 
-export function toEvents(history: ReadonlyArray<LinearApi.LinearHistoryEntry>): IssueEvent[] {
+function toEvents(history: ReadonlyArray<LinearApi.LinearHistoryEntry>): IssueEvent[] {
   const events: IssueEvent[] = [];
   for (const entry of history) {
     const actor = entry.actor === null ? null : toActor(entry.actor);
@@ -212,7 +212,7 @@ const PULL_REQUEST_URL =
   /^https:\/\/(?:github\.com\/([^/]+\/[^/]+)\/pull|gitlab\.com\/(.+?)\/-\/merge_requests)\/(\d+)\/?(?:[?#]|$)/u;
 
 /** Linear's GitHub and GitLab integrations record change requests as attachments. */
-export function toLinkedPullRequests(
+function toLinkedPullRequests(
   attachments: ReadonlyArray<LinearApi.LinearAttachment>,
 ): IssueLinkedPullRequest[] {
   const seen = new Set<string>();

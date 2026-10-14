@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { IssueTrackerKind } from "@t3tools/contracts";
+import type { StandaloneIssueTrackerApi } from "@t3tools/issue-tracker-core/server/IssueTracker";
 import * as IssueTrackerHost from "@t3tools/issue-tracker-core/server/IssueTrackerHost";
 
 import * as LinearApi from "./LinearApi.ts";
@@ -59,7 +60,7 @@ function fakeLinear(
   const http = Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make((request) =>
-      Effect.gen(function* () {
+      Effect.sync(() => {
         const body = request.body;
         const text =
           body._tag === "Uint8Array" ? new TextDecoder().decode(body.body) : String(body._tag);
@@ -90,7 +91,9 @@ function fakeLinear(
       credentials: { get: () => Effect.succeed(Option.fromNullishOr(stored)) },
     }),
   );
+  // Every optional write is implemented here; the type says so for the calls below.
   const tracker = LinearIssueTracker.make.pipe(
+    Effect.map((api) => api as Required<StandaloneIssueTrackerApi>),
     Effect.provide(LinearApi.layer.pipe(Layer.provide(Layer.merge(http, host)))),
   );
   return { tracker, requests };
