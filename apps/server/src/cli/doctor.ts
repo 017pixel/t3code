@@ -5,50 +5,96 @@ import { FetchHttpClient } from "effect/http";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import { Command, Flag } from "effect/cli";
+import { Command, Flag, Prompt } from "effect/cli";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as BootService from "../cloud/bootService.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { createDoctorProgress } from "./doctorProgress.ts";
 import { baseDirFlag } from "./config.ts";
 import { resolveBaseDir } from "../os-jank.ts";
 import * as DatabaseMaintenance from "../persistence/DatabaseMaintenance.ts";
 
+export interface DoctorRepair {
+  readonly id: "database";
+  readonly title: string;
+  readonly description: string;
+  readonly recommended: boolean;
+}
+
+export const chooseDoctorRepairs = (repairs: ReadonlyArray<DoctorRepair>) =>
+  Prompt.run(
+    Prompt.MultiSelect({
+      message: "Choose repairs to run (Space toggles, Enter starts; Ctrl+C cancels)",
+      choices: repairs.map((repair) => ({
+        title: repair.title + (repair.recommended ? " (recommended)" : ""),
+        description: repair.description,
+        value: repair.id,
+        selected: repair.recommended,
+      })),
+    }),
+  );
+
 export const runDoctor = Effect.fn("runDoctor")(function* (
   directory: string,
-  options: { readonly fix: boolean; readonly dryRun: boolean },
+  options: { readonly fix: boolean; readonly dryRun: boolean; readonly interactive?: boolean },
+  chooseRepairs: typeof chooseDoctorRepairs = chooseDoctorRepairs,
 ) {
   const maintenance = yield* DatabaseMaintenance.DatabaseMaintenance;
   const status = yield* maintenance.inspect(directory);
+  const gib = (bytes: number) => (bytes / 1024 ** 3).toFixed(2);
   yield* Console.log(
-    `Database: ${status.databaseBytes} bytes; reusable space: ${status.reclaimableBytes} bytes.`,
+    `Database: ${gib(status.databaseBytes)} GiB; reusable space: ${gib(status.reclaimableBytes)} GiB.`,
   );
-  yield* Console.log(
-    `Automatic disk shrinking: ${status.incrementalVacuumEnabled ? "enabled" : "not enabled"}.`,
-  );
-
-  if (status.incrementalVacuumEnabled && status.reclaimableBytes === 0) {
-    yield* Console.log("No database repairs needed.");
+  const repairs: ReadonlyArray<DoctorRepair> =
+    status.incrementalVacuumEnabled && status.reclaimableBytes === 0
+      ? []
+      : [
+          {
+            id: "database",
+            title: "Reclaim database space",
+            description:
+              "Compact history and enable automatic shrinking. Pauses the background service; may take several minutes and needs temporary disk space.",
+            recommended: !status.incrementalVacuumEnabled || status.reclaimableBytes >= 1024 ** 3,
+          },
+        ];
+  if (repairs.length === 0) {
+    yield* Console.log("No repairs available.");
     return;
   }
-  yield* Console.log(
-    "Database repair: remove superseded history, reclaim unused disk space, and enable automatic disk shrinking.",
-  );
-  yield* Console.log(
-    "Doctor pauses and restarts the matching background service automatically. Repair may take several minutes and needs temporary disk space.",
-  );
-  if (options.dryRun || !options.fix) {
+  for (const repair of repairs) {
     yield* Console.log(
-      options.dryRun
-        ? "Dry run: no changes made."
-        : "Run t3 doctor --fix with the same --base-dir to apply this repair.",
+      `${repair.recommended ? "[recommended]" : "[optional]"} ${repair.title}: ${repair.description}`,
+    );
+  }
+  if (options.dryRun) {
+    yield* Console.log("Dry run: no repairs applied and no services stopped.");
+    return;
+  }
+  const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (!options.fix && !interactive) {
+    yield* Console.log(
+      "Run t3 doctor in a terminal to choose repairs, or use --fix to apply the recommended set.",
     );
     return;
   }
+  const selected = options.fix
+    ? repairs.filter((repair) => repair.recommended).map((repair) => repair.id)
+    : yield* chooseRepairs(repairs).pipe(Effect.catchTags({ QuitError: () => Effect.succeed([]) }));
+  if (selected.length === 0) {
+    yield* Console.log("No repairs selected.");
+    return;
+  }
   const service = yield* BootService.BootService;
-  const result = yield* service.withStopped(maintenance.compact(directory));
+  const progress = createDoctorProgress();
+  const report = (stage: Parameters<typeof progress.report>[0]) =>
+    Effect.sync(() => progress.report(stage));
+  const result = yield* service
+    .withStopped(maintenance.compact(directory, report), report)
+    .pipe(Effect.ensuring(Effect.sync(progress.finish)));
+  progress.complete();
   yield* Console.log(
-    `Removed ${result.deletedEventCount} events and ${result.deletedReceiptCount} receipts. Database: ${result.beforeBytes} → ${result.afterBytes} bytes.`,
+    `Removed ${result.deletedEventCount} events and ${result.deletedReceiptCount} receipts. Database: ${gib(result.beforeBytes)} → ${gib(result.afterBytes)} GiB.`,
   );
 });
 
@@ -56,7 +102,7 @@ export const doctorCommand = Command.make("doctor", {
   baseDir: baseDirFlag,
   fix: Flag.Boolean("fix").pipe(
     Flag.withDescription(
-      "Apply the recommended repair, pausing and restarting the background service automatically.",
+      "Apply recommended repairs without prompting, pausing and restarting the background service automatically.",
     ),
     Flag.withDefault(false),
   ),
@@ -66,7 +112,7 @@ export const doctorCommand = Command.make("doctor", {
   ),
 }).pipe(
   Command.withDescription(
-    "Inspect T3 Code and show available repairs. Read-only unless --fix is supplied.",
+    "Inspect T3 Code and choose repairs to run. Use --dry-run to inspect without prompting.",
   ),
   Command.withHandler(({ baseDir, fix, dryRun }) =>
     Effect.gen(function* () {

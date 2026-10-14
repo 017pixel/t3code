@@ -51,6 +51,6 @@ it.effect.each([true, false])(
       }
       assert.deepEqual(yield* sql`SELECT value FROM retained`, [{ value: "keep" }]);
       if ((yield* HostProcess.Platform) !== "win32")
-        assert.equal(after.compactCommand, "t3 doctor --fix --base-dir '/tmp/T3 user'\\''s data'");
+        assert.equal(after.compactCommand, "t3 doctor --base-dir '/tmp/T3 user'\\''s data'");
     }).pipe(Effect.provide(withDatabase(incremental))),
 );

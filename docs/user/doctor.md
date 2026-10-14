@@ -1,13 +1,19 @@
 # T3 Doctor
 
-Run `t3 doctor` to inspect your installation and see available repairs. Inspection
-does not change anything.
+Run `t3 doctor` in a terminal to inspect your installation and choose repairs.
+Recommended repairs are selected by default. Use Space to toggle a repair and
+Enter to run the selection, or Ctrl+C to cancel. Selecting nothing makes no changes.
 
 | Command               | What it does                                             |
 | --------------------- | -------------------------------------------------------- |
-| `t3 doctor`           | Inspect and recommend repairs                            |
+| `t3 doctor`           | Inspect and choose repairs                               |
 | `t3 doctor --dry-run` | Preview repairs without applying them, even with `--fix` |
-| `t3 doctor --fix`     | Apply the recommended repairs                            |
+| `t3 doctor --fix`     | Apply recommended repairs without prompting              |
+
+Without an interactive terminal, inspection lists repairs without applying them.
+Use `--fix` for scripts. During repairs, a stage bar shows the current operation
+and elapsed time. Stages have different durations; the bar does not estimate time
+remaining.
 
 For another environment, add `--base-dir /path/to/t3-home`. Run the command on
 the machine that hosts that environment.

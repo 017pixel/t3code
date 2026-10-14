@@ -34,7 +34,7 @@ export const layer = Layer.effect(
         databaseBytes: (pages[0]?.page_count ?? 0) * pageSize,
         reclaimableBytes: (free[0]?.freelist_count ?? 0) * pageSize,
         incrementalVacuumEnabled: mode[0]?.auto_vacuum === 2,
-        compactCommand: `t3 doctor --fix --base-dir ${quotedHome}`,
+        compactCommand: `t3 doctor --base-dir ${quotedHome}`,
       } satisfies DatabaseStorageStatus;
     });
     const reclaim = Effect.gen(function* () {

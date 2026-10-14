@@ -550,6 +550,7 @@ export class BootService extends Context.Service<
     /** Pause this home's running service for maintenance and restore it on every exit. */
     readonly withStopped: <A, E, R>(
       operation: Effect.Effect<A, E, R>,
+      onProgress?: (stage: "stopping-service" | "restarting-service") => Effect.Effect<void>,
     ) => Effect.Effect<A, E | BootServiceError, R>;
     readonly uninstall: Effect.Effect<boolean, BootServiceError>;
     readonly status: Effect.Effect<BootServiceStatus, BootServiceError>;
@@ -935,7 +936,10 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     Effect.withSpan("cloud.boot_service.restart"),
   );
 
-  const withStopped: BootService["Service"]["withStopped"] = (operation) =>
+  const withStopped: BootService["Service"]["withStopped"] = (
+    operation,
+    onProgress = () => Effect.void,
+  ) =>
     Effect.gen(function* () {
       if (detectedManager === undefined) return yield* operation;
       const unit = yield* fs.readFileString(unitPath).pipe(Effect.option);
@@ -957,9 +961,17 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
           (Option.isSome(active) && /\bpid = \d+/.test(active.value.stdout)));
       if (!running) return yield* operation;
       return yield* Effect.acquireUseRelease(
-        runSteps(detectedManager.stop.map((step) => ({ ...step, optional: false }))),
+        onProgress("stopping-service").pipe(
+          Effect.andThen(
+            runSteps(detectedManager.stop.map((step) => ({ ...step, optional: false }))),
+          ),
+        ),
         () => operation,
-        () => runSteps(detectedManager.activate).pipe(Effect.orDie),
+        () =>
+          onProgress("restarting-service").pipe(
+            Effect.andThen(runSteps(detectedManager.activate)),
+            Effect.orDie,
+          ),
       );
     });
 

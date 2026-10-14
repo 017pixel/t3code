@@ -58,7 +58,19 @@ it.effect("reclaims free database pages without losing retained data", () =>
       assert.isFalse(status.incrementalVacuumEnabled);
       assert.isAbove(status.databaseBytes, 0);
       assert.deepEqual(NodeFS.readFileSync(dbPath), beforeInspection);
-      const result = yield* maintenance.compact(directory);
+      const stages: DatabaseMaintenance.DatabaseRepairStage[] = [];
+      const result = yield* maintenance.compact(directory, (stage) =>
+        Effect.sync(() => {
+          stages.push(stage);
+        }),
+      );
+      assert.deepEqual(stages, [
+        "checking-database",
+        "compacting-history",
+        "verifying-history",
+        "reclaiming-space",
+        "checkpointing",
+      ]);
       assert.isBelow(result.afterBytes, result.beforeBytes);
       yield* Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;

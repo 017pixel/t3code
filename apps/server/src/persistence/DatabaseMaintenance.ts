@@ -34,6 +34,14 @@ export class DatabaseMaintenanceError extends Schema.TaggedError<DatabaseMainten
   }
 }
 
+export type DatabaseRepairStage =
+  | "checking-database"
+  | "compacting-history"
+  | "verifying-history"
+  | "reclaiming-space"
+  | "checkpointing";
+export type DatabaseRepairProgress = (stage: DatabaseRepairStage) => Effect.Effect<void>;
+
 export class DatabaseMaintenance extends Context.Service<
   DatabaseMaintenance,
   {
@@ -46,7 +54,10 @@ export class DatabaseMaintenance extends Context.Service<
       },
       DatabaseMaintenanceError
     >;
-    readonly compact: (baseDir: string) => Effect.Effect<
+    readonly compact: (
+      baseDir: string,
+      onProgress?: DatabaseRepairProgress,
+    ) => Effect.Effect<
       {
         readonly beforeBytes: number;
         readonly afterBytes: number;
@@ -99,7 +110,7 @@ const make = Effect.gen(function* () {
     ),
   );
   const compact = Effect.fn("DatabaseMaintenance.compact")(
-    function* (baseDir: string) {
+    function* (baseDir: string, onProgress: DatabaseRepairProgress = () => Effect.void) {
       const stateDir = path.join(baseDir, "userdata");
       const databasePath = path.join(stateDir, "statev2.sqlite");
       const runtime = yield* readPersistedServerRuntimeState(
@@ -122,15 +133,20 @@ const make = Effect.gen(function* () {
           yield* sql`BEGIN EXCLUSIVE`;
           yield* sql`COMMIT`;
           const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+          yield* onProgress("checking-database");
           if (!(yield* maintenance.verify).valid) {
             return yield* new DatabaseMaintenanceError({ reason: "invalid-projections" });
           }
+          yield* onProgress("compacting-history");
           const summary = yield* maintenance.compactEventStore;
+          yield* onProgress("verifying-history");
           if (!(yield* maintenance.verify).valid) {
             return yield* new DatabaseMaintenanceError({ reason: "invalid-projections" });
           }
+          yield* onProgress("reclaiming-space");
           yield* sql`PRAGMA auto_vacuum = INCREMENTAL`;
           yield* sql`VACUUM`;
+          yield* onProgress("checkpointing");
           yield* sql`PRAGMA wal_checkpoint(TRUNCATE)`;
           return summary;
         }).pipe(
