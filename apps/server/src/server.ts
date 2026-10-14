@@ -3,6 +3,7 @@ import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay
 import * as Clock from "effect/Clock";
 import * as Random from "effect/Random";
 import * as Semaphore from "effect/Semaphore";
+import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
@@ -557,6 +558,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerThreadSettlementWorker,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
   EventCompaction.layer.pipe(
+    Layer.provideMerge(DatabaseStorage.layer),
     Layer.provide(ProjectionMaintenance.layer),
     Layer.provide(Layer.merge(CompactionEventStore.layer, ProjectionStoreV2.layer)),
   ),

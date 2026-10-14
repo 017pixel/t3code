@@ -1,3 +1,4 @@
+import { DatabaseStorageNotice } from "./components/DatabaseStorageNotice";
 import { useNavigation } from "@react-navigation/native";
 import { SettingsRow } from "./components/SettingsRow";
 import { AuthSettingsWriteScope } from "@t3tools/contracts";
@@ -428,6 +429,15 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
 
               {props.page === "maintenance" ? (
                 <>
+                  {!projectSelected &&
+                    selectedTargets
+                      .filter(
+                        (target) =>
+                          target.serverConfig.environment.capabilities.databaseStorage === true,
+                      )
+                      .map((target) => (
+                        <DatabaseStorageNotice key={target.environmentId} target={target} />
+                      ))}
                   {!projectSelected ? (
                     <SettingsSection title="Manage environments">
                       {selectedTargets.map((target) => (

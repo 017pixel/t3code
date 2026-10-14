@@ -2,6 +2,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 
+import * as DatabaseStorage from "../persistence/DatabaseStorage.ts";
+
 import { forkParked } from "../serverActivation.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 
@@ -9,6 +11,12 @@ import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const storage = yield* DatabaseStorage.DatabaseStorage;
+    yield* forkParked(
+      Effect.sleep("1 minute").pipe(
+        Effect.andThen(storage.reclaim.pipe(Effect.repeat(Schedule.spaced("1 minute")))),
+      ),
+    );
     yield* forkParked(
       Effect.sleep("1 minute").pipe(
         Effect.andThen(

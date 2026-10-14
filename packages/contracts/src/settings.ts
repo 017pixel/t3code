@@ -1060,6 +1060,14 @@ const NULLABLE_PROJECT_SETTINGS_OVERRIDES: ReadonlySet<ProjectScopedServerSettin
   "sidebarAutoSettleAfterDays",
 ]);
 
+export const DatabaseStorageStatus = Schema.Struct({
+  databaseBytes: Schema.Number,
+  reclaimableBytes: Schema.Number,
+  incrementalVacuumEnabled: Schema.Boolean,
+  compactCommand: Schema.String,
+});
+export type DatabaseStorageStatus = typeof DatabaseStorageStatus.Type;
+
 export const StorageCleanupReportEntry = Schema.Struct({
   kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
   outcome: Schema.Literals(["removed", "kept", "failed"]),

@@ -37,6 +37,15 @@ export class DatabaseMaintenanceError extends Schema.TaggedError<DatabaseMainten
 export class DatabaseMaintenance extends Context.Service<
   DatabaseMaintenance,
   {
+    readonly inspect: (baseDir: string) => Effect.Effect<
+      {
+        readonly databaseBytes: number;
+        readonly reclaimableBytes: number;
+        readonly incrementalVacuumEnabled: boolean;
+        readonly serverRunning: boolean;
+      },
+      DatabaseMaintenanceError
+    >;
     readonly compact: (baseDir: string) => Effect.Effect<
       {
         readonly beforeBytes: number;
@@ -54,6 +63,41 @@ const isDatabaseMaintenanceError = Schema.is(DatabaseMaintenanceError);
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const inspect = Effect.fn("DatabaseMaintenance.inspect")(
+    function* (baseDir: string) {
+      const stateDir = path.join(baseDir, "userdata");
+      const filename = path.join(stateDir, "statev2.sqlite");
+      if (!(yield* fs.exists(filename))) {
+        return yield* new DatabaseMaintenanceError({ reason: "missing" });
+      }
+      const runtime = yield* readPersistedServerRuntimeState(
+        path.join(stateDir, "server-runtime.json"),
+      ).pipe(Effect.provideService(FileSystem.FileSystem, fs));
+      const storage = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const pages = yield* sql<{ page_count: number }>`PRAGMA page_count`;
+          const free = yield* sql<{ freelist_count: number }>`PRAGMA freelist_count`;
+          const size = yield* sql<{ page_size: number }>`PRAGMA page_size`;
+          const mode = yield* sql<{ auto_vacuum: number }>`PRAGMA auto_vacuum`;
+          return {
+            databaseBytes: (pages[0]?.page_count ?? 0) * (size[0]?.page_size ?? 0),
+            reclaimableBytes: (free[0]?.freelist_count ?? 0) * (size[0]?.page_size ?? 0),
+            incrementalVacuumEnabled: mode[0]?.auto_vacuum === 2,
+          };
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename, readonly: true }))),
+      );
+      return {
+        ...storage,
+        serverRunning: Option.isSome(runtime) && isProcessAlive(runtime.value.pid),
+      };
+    },
+    Effect.mapError((cause) =>
+      isDatabaseMaintenanceError(cause)
+        ? cause
+        : new DatabaseMaintenanceError({ reason: "compact", cause }),
+    ),
+  );
   const compact = Effect.fn("DatabaseMaintenance.compact")(
     function* (baseDir: string) {
       const stateDir = path.join(baseDir, "userdata");
@@ -85,6 +129,7 @@ const make = Effect.gen(function* () {
           if (!(yield* maintenance.verify).valid) {
             return yield* new DatabaseMaintenanceError({ reason: "invalid-projections" });
           }
+          yield* sql`PRAGMA auto_vacuum = INCREMENTAL`;
           yield* sql`VACUUM`;
           yield* sql`PRAGMA wal_checkpoint(TRUNCATE)`;
           return summary;
@@ -111,7 +156,7 @@ const make = Effect.gen(function* () {
         : new DatabaseMaintenanceError({ reason: "compact", cause }),
     ),
   );
-  return DatabaseMaintenance.of({ compact });
+  return DatabaseMaintenance.of({ inspect, compact });
 });
 
 export const layer = Layer.effect(DatabaseMaintenance, make);

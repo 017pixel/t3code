@@ -46,11 +46,23 @@ it.effect("reclaims free database pages without losing retained data", () =>
           ),
         ),
       );
+      // Exercise upgrading a legacy database, not just vacuuming a new one.
+      const legacy = new NodeSqlite.DatabaseSync(dbPath);
+      legacy.exec(
+        "PRAGMA auto_vacuum=NONE; VACUUM; CREATE TABLE free_pages (value BLOB); INSERT INTO free_pages VALUES (zeroblob(1048576)); DROP TABLE free_pages",
+      );
+      legacy.close();
       const maintenance = yield* DatabaseMaintenance.DatabaseMaintenance;
+      const beforeInspection = NodeFS.readFileSync(dbPath);
+      const status = yield* maintenance.inspect(directory);
+      assert.isFalse(status.incrementalVacuumEnabled);
+      assert.isAbove(status.databaseBytes, 0);
+      assert.deepEqual(NodeFS.readFileSync(dbPath), beforeInspection);
       const result = yield* maintenance.compact(directory);
       assert.isBelow(result.afterBytes, result.beforeBytes);
       yield* Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
+        assert.deepEqual(yield* sql`PRAGMA auto_vacuum`, [{ auto_vacuum: 2 }]);
         assert.deepEqual(yield* sql`SELECT value FROM retained_data`, [{ value: "keep" }]);
       }).pipe(Effect.provide(Sqlite.layerFromPath(dbPath).pipe(Layer.provide(NodeServices.layer))));
     }).pipe(Effect.provide(layer)),
