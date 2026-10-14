@@ -4,7 +4,7 @@ import { ActivityIndicator, View } from "react-native";
 import type { AppSymbolName } from "./AppSymbol";
 import { AppText as Text } from "./AppText";
 import { cn } from "../lib/cn";
-import { MaterialIconButton } from "./MaterialIconButton";
+import { IconButton } from "./IconButton";
 import { AndroidAnchoredMenu } from "./AndroidAnchoredMenu";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import { useMaterialToolbarLayout } from "./useMaterialToolbarLayout";
@@ -25,7 +25,7 @@ export function AndroidHeaderIconButton(props: {
   readonly disabled?: boolean;
   readonly selected?: boolean;
 }) {
-  return <MaterialIconButton {...props} tintColorClassName="accent-header-foreground" />;
+  return <IconButton {...props} tintColorClassName="accent-header-foreground" />;
 }
 
 export function AndroidScreenHeader(props: {
@@ -61,7 +61,7 @@ export function AndroidScreenHeader(props: {
     >
       <View style={{ minHeight: materialToolbarHeight }} className="flex-row items-center gap-1">
         {props.onBack ? (
-          <MaterialIconButton
+          <IconButton
             accessibilityLabel="Navigate up"
             icon="arrow.left"
             tintColorClassName="accent-header-foreground"
@@ -123,7 +123,7 @@ export function AndroidScreenHeader(props: {
             }
           >
             {(open) => (
-              <MaterialIconButton
+              <IconButton
                 accessibilityLabel="More actions"
                 icon="ellipsis"
                 tintColorClassName="accent-header-foreground"
