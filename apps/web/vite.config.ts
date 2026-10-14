@@ -16,6 +16,7 @@ import {
 
 import { loadRepoEnv } from "../../scripts/lib/public-config";
 import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses";
+import { precompressPlugin } from "./vite/precompress";
 import { lucideDynamicIconsPlugin, startupChunksPlugin } from "./vite/startupChunks";
 import { tailwindPlugins } from "./vite/tailwind";
 
@@ -187,6 +188,8 @@ export default defineConfig(() => {
       tailwindPlugins(bundledDev),
       lucideDynamicIconsPlugin(),
       startupChunksPlugin(),
+      // Vercel compresses the hosted app itself; the T3 server serves these copies.
+      ...(process.env.VERCEL ? [] : [precompressPlugin()]),
     ],
     optimizeDeps: {
       include: [
