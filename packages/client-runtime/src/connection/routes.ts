@@ -159,7 +159,7 @@ export function upsertRoute(
  * its tunnels). Registering it again replaces that route, even when it was
  * saved under another id.
  */
-export function findRouteToSameAddress(
+function findRouteToSameAddress(
   routes: ReadonlyArray<ConnectionRoute>,
   route: ConnectionRoute,
 ): ConnectionRoute | undefined {
