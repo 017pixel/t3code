@@ -15,7 +15,7 @@ export function MaterialRadioIndicator({ selected }: { readonly selected: boolea
           modifiers={[size(24, 24)]}
           colors={
             systemColorsActive
-              ? undefined
+              ? {}
               : {
                   selectedColor: colors["--color-primary-text"],
                   unselectedColor: colors["--color-foreground-muted"],
