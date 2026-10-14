@@ -1,5 +1,5 @@
 import { preloadPatchFile } from "@pierre/diffs/ssr";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { EMPTY_COMPOSER_CONTEXT_RECORDS } from "../composerContextPresentation";
 import { terminalThemeFromApp } from "../ThreadTerminalDrawer";
@@ -8,7 +8,6 @@ import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
 import { resolveDiffThemeName, type DiffThemeName } from "../../lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "../../lib/syntaxHighlighting";
 import { GhosttyTerminalSurface } from "~/terminal/ghostty/surface";
-import { FONT_PREVIEW_PLACEHOLDER } from "./LazySettingsFontPreviews";
 
 // The font previews are the real surfaces, not lookalikes: the composer's
 // Tiptap editor, the diff panel's file diff, and the Ghostty canvas
@@ -29,7 +28,7 @@ const PROMPT_PREVIEW_TEXT =
 function noop() {}
 
 /** A live composer editor: type in it to feel the family and size. */
-export function PromptFontPreview() {
+function PromptPreview() {
   const editorRef = useRef<ComposerPromptEditorHandle>(null);
   const [prompt, setPrompt] = useState(PROMPT_PREVIEW_TEXT);
   const [cursor, setCursor] = useState(PROMPT_PREVIEW_TEXT.length);
@@ -124,7 +123,7 @@ function StaticDiffHtml({ html }: { html: string }) {
 }
 
 /** The diff panel's file diff, statically rendered by its real pipeline. */
-export function CodeFontPreview() {
+function CodePreview() {
   const { resolvedTheme } = useTheme();
   const themeName = resolveDiffThemeName(resolvedTheme);
   const [htmlByFile, setHtmlByFile] = useState<readonly string[] | null>(null);
@@ -181,7 +180,7 @@ function previewTerminalFont(family: string, size: number): { family?: string; s
  * exercises the same glyph atlas, cell metrics, and monospace gate the
  * terminal drawer uses.
  */
-export function TerminalFontPreview({ family, size }: { family: string; size: number }) {
+function TerminalPreview({ family, size }: { family: string; size: number }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<GhosttyTerminalSurface | null>(null);
   const fontRef = useRef({ family, size });
@@ -271,5 +270,61 @@ export function TerminalFontPreview({ family, size }: { family: string; size: nu
       className="relative mt-1 mb-2 h-52 overflow-hidden rounded-lg border border-border"
       aria-label="Terminal font preview"
     />
+  );
+}
+
+/**
+ * Each preview's height at the default font sizes. A placeholder holds it until
+ * the preview loads, so rows below do not move and a settings search jump lands
+ * on its row.
+ */
+const FONT_PREVIEW_PLACEHOLDER = {
+  prompt: "mt-1 mb-2 h-16.5",
+  code: "mt-1 mb-2 h-31.5",
+  terminal: "mt-1 mb-2 h-52",
+} as const;
+
+/** Mount real preview surfaces once their row enters the viewport. */
+function VisiblePreview({ placeholder, children }: { placeholder: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      setVisible(true);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const reserved = <div className={placeholder} />;
+  return <div ref={ref}>{visible ? children : reserved}</div>;
+}
+
+export function PromptFontPreview() {
+  return (
+    <VisiblePreview placeholder={FONT_PREVIEW_PLACEHOLDER.prompt}>
+      <PromptPreview />
+    </VisiblePreview>
+  );
+}
+export function CodeFontPreview() {
+  return (
+    <VisiblePreview placeholder={FONT_PREVIEW_PLACEHOLDER.code}>
+      <CodePreview />
+    </VisiblePreview>
+  );
+}
+export function TerminalFontPreview(props: { family: string; size: number }) {
+  return (
+    <VisiblePreview placeholder={FONT_PREVIEW_PLACEHOLDER.terminal}>
+      <TerminalPreview {...props} />
+    </VisiblePreview>
   );
 }
