@@ -178,7 +178,7 @@ layer("055_OrchestrationV2", (it) => {
           '2026-07-24T00:00:00.000Z', ${payload}
         )
       `;
-      yield* runMigrations({ toMigrationInclusive: 62 });
+      yield* runMigrations({ toMigrationInclusive: 63 });
       const sweep = sql<{ readonly thread_id: string; readonly pull_requests: number }>`
         SELECT thread_id, json_array_length(payload_json, '$.pullRequests') AS pull_requests
         FROM orchestration_v2_projection_threads
