@@ -61,24 +61,18 @@ import {
 // Kept views re-render only when their own thread or route kind changes.
 const KeptChatView = memo(ChatView);
 
-/** Threads with a kept view, as of the last commit; read by KeptChatSurface. */
+// Updated on commit so route reveals use the mounted view pool.
 let keptThreadKeys: ReadonlySet<string> = new Set();
 
-/** How long the user must leave the app alone before a kept view warms up. */
 const WARM_UP_QUIET_MS = 1_000;
 let lastUserInputAt = 0;
 let trackingUserInput = false;
-/**
- * Hides the view that is laying out out of sight. Its effects are live then,
- * so its window shortcut and paste listeners would answer input along with
- * the shown view's.
- */
+// Hide warming views before their live input listeners can handle a user's event.
 let interruptWarmUp: (() => void) | null = null;
 function trackUserInput() {
   if (trackingUserInput || typeof window === "undefined") return;
   trackingUserInput = true;
-  // Added before any warming view's listeners, so it runs first and the
-  // hidden view's listeners are already removed when the event reaches them.
+  // Register before warming views so their listeners disconnect first.
   const record = () => {
     lastUserInputAt = performance.now();
     interruptWarmUp?.();
@@ -88,10 +82,6 @@ function trackUserInput() {
   }
 }
 
-/**
- * Runs `callback` once the user has left the app alone for WARM_UP_QUIET_MS
- * and the browser is idle. Returns a function that cancels it.
- */
 function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => void {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let idle: number | undefined;
@@ -121,22 +111,10 @@ function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => v
 
 let bootChatViewDeferred = false;
 
-// How long the chat view waits for the session before rendering from the
-// snapshot. A local server answers well within it; a starting desktop backend
-// or a slow tunnel does not, and the composer appears without it.
+// A slow backend must not hold the snapshot composer indefinitely.
 const BOOT_SESSION_WAIT_MS = 750;
 
-/**
- * On a boot painting from its snapshot, the first frame shows the sidebar and
- * this view's frame, and the chat view renders after it, so its large first
- * render does not hold back that frame.
- *
- * If the environment's session answers within BOOT_SESSION_WAIT_MS, the
- * screen switches to live data and the chat view renders with it in one
- * task, with nothing left to redo. Otherwise it renders from the snapshot as
- * a transition, which yields so the connection keeps making progress, and the
- * switch to live data waits until it has painted.
- */
+/** Paint the sidebar first, then prefer live data to avoid rendering chat twice. */
 function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
   const [ready, setReady] = useState(() => bootChatViewDeferred || !isBootHeld());
   const pendingReleaseRef = useRef<(() => void) | null>(null);
@@ -153,9 +131,7 @@ function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
       if (mounted) return;
       mounted = true;
       stopWaiting();
-      // The screen switches to live data in this task and the chat view
-      // renders in the next, so neither waits on the other's long task, and
-      // its effects run after it paints.
+      // Separate the live-data switch and chat render into two tasks.
       release();
       setTimeout(() => setReady(true), 0);
     };
@@ -171,8 +147,7 @@ function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
       const configAtom = sessionConfigAtom();
       if (configAtom === null) return renderFromSnapshot();
       if (appAtomRegistry.get(configAtom) !== null) return renderLive();
-      // A task later, so the requests the session sends as it starts go out
-      // before this render instead of queuing behind it.
+      // Let session requests go out before the chat render.
       const unsubscribe = appAtomRegistry.subscribe(configAtom, (config) => {
         if (config !== null) setTimeout(renderLive, 0);
       });
@@ -216,14 +191,7 @@ function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
  * draft's key, so the route swap only changes props and the timeline never
  * paints an empty frame.
  *
- * The last few server threads stay rendered inside hidden `<Activity>`
- * boundaries, so a revisit only reveals the view it already painted. Hidden
- * views keep their DOM and state; React disconnects their effects and store
- * subscriptions until they are shown again. A first open switches an
- * existing view to the new thread, as the single shared view used to, and
- * keeps the thread it showed in a new hidden view once the app is idle (see
- * `resolveKeptThreadViews`). A draft's view is dropped once another view is
- * shown, as before.
+ * Hidden Activity boundaries preserve recent views for warm revisits.
  *
  * Rendered by KeptChatSurface rather than by the two leaf routes, since an
  * element only survives a route swap when the same parent renders it.
@@ -374,13 +342,8 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
     setKeptViews(nextKeptViews);
     if (keptUpdate.released !== null) setReleasedView(keptUpdate.released);
   }
-  // A first open took over the shown view. The thread it showed gets a view
-  // of its own again, which warms up out of sight (see KeptViewFrame) so a
-  // revisit only reveals it. Mounting it is long work, so it waits until the
-  // shown thread has loaded and the user has left the app alone. The view
-  // first renders hidden, which React does at idle priority in small slices;
-  // only laying it out (its effects and measurements) is one task, and that
-  // waits for the next quiet, idle moment.
+  // Warm the displaced view after the shown thread loads and input goes quiet.
+  // Render hidden at idle priority, then lay out at the next quiet moment.
   const shownThreadStatus = useThreadStatus(target.kind === "server" ? target.threadRef : null);
   const shownThreadLoaded =
     target.kind !== "server" || shownThreadStatus === "live" || shownThreadStatus === "deleted";
@@ -403,8 +366,6 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
     if (warmingKey === null || layingOutKey !== null) return;
     return whenQuietAndIdle(() => startTransition(() => setLaidOutWarmKey(warmingKey)), 0);
   }, [layingOutKey, warmingKey]);
-  // Input while the view lays out hides it again; it lays out at the next
-  // quiet moment.
   useLayoutEffect(() => {
     if (layingOutKey === null) return;
     interruptWarmUp = () => flushSync(() => setLaidOutWarmKey(null));
@@ -421,7 +382,6 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
       keptViews.flatMap((view) => (view.draftId === null ? [view.threadKey] : [])),
     );
   }, [keptViews]);
-  // One lifetime per kept view, released once the view is gone for good.
   const [lifetimes] = useState(createKeptViewLifetimes);
   const insetRef = useRef<HTMLElement | null>(null);
   useLayoutEffect(() => {
@@ -430,8 +390,7 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
   useEffect(() => {
     const inset = insetRef.current;
     return () => {
-      // Hidden behind a full page, the views stay in the document and keep their
-      // lifetimes; only an unmount releases them.
+      // Activity hides keep lifetimes; only removal releases them.
       setTimeout(() => {
         if (!inset?.isConnected) lifetimes.retain(new Set());
       }, 0);
@@ -445,9 +404,7 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
             ? view.threadKey === activeView.threadKey
             : view.key === activeView.key,
         )?.key ?? null);
-  // A hidden view keeps its DOM, so its media would keep playing. Pause it
-  // whenever the shown view changes or the whole chat is hidden, as leaving a
-  // thread used to.
+  // Activity preserves DOM; pause media when its view hides.
   useLayoutEffect(() => {
     const inset = insetRef.current;
     return () => {
@@ -498,26 +455,19 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
   );
 });
 
-/**
- * Hosts the thread view above the route outlet. A full page (settings, pull
- * requests) hides the chat rather than unmounting it, so returning to a
- * thread only reveals it.
- */
+/** Hosting above the outlet preserves chat views across full-page navigation. */
 export function KeptChatSurface() {
   const targetKey = useParams({
     strict: false,
     select: (params) => threadRouteTargetKey(resolveThreadRouteTarget(params)),
   });
-  // Revealing a kept thread follows the click in a transition, so the URL and
-  // sidebar selection paint at once. A first open renders with the click, as
-  // the single shared view did: deferring it only delays its data render.
+  // Defer warm reveals so sidebar selection paints first; first opens stay urgent.
   const deferredTargetKey = useDeferredValue(targetKey);
   const targetThreadKey = targetKey?.startsWith("server:")
     ? targetKey.slice("server:".length)
     : null;
   const reveal = targetThreadKey !== null && keptThreadKeys.has(targetThreadKey);
-  // Coming back from a full page there is no thread on screen to keep
-  // showing, so the kept one is revealed with the click.
+  // Full-page returns have no visible thread to hold during a transition.
   const shownKey = reveal && deferredTargetKey !== null ? deferredTargetKey : targetKey;
   // Keys typed before a deferred reveal lands go to the URL's thread.
   useLayoutEffect(() => setUrlRouteTargetKey(targetKey), [targetKey]);

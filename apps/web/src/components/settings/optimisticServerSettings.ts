@@ -2,11 +2,7 @@ import type { EnvironmentId, ServerSettings, ServerSettingsPatch } from "@t3tool
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import { useSyncExternalStore } from "react";
 
-/**
- * Server setting writes shown before the server confirms them. A failed write
- * drops its patch, so the control returns to the server's value while the
- * caller reports the error.
- */
+/** Overlay pending writes until confirmation; failed writes drop their patch. */
 export interface OptimisticServerSettingsPatch {
   readonly environmentId: EnvironmentId;
   readonly patch: ServerSettingsPatch;
@@ -47,8 +43,7 @@ export function beginOptimisticServerSettingsPatch(
       publish(patches.filter((entry) => entry !== pending));
       return;
     }
-    // The settings push normally lands before the reply and has already re-rendered the
-    // page; marking the patch saved needs no render of its own.
+    // The push normally renders before the reply, so saving needs no publish.
     pending.saved = true;
     setTimeout(() => publish(patches.filter((entry) => entry !== pending)), SAVED_PATCH_MAX_MS);
   };

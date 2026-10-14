@@ -131,10 +131,7 @@ export interface ComposerPromptEditorHandle {
 export interface ComposerPromptEditorProps {
   value: string;
   cursor: number;
-  /**
-   * The thread the prompt belongs to. A kept chat view that switches threads
-   * keeps its editor, and a new scope starts a new undo history.
-   */
+  /** Resets undo history when a kept editor switches threads. */
   historyScope?: string;
   /**
    * Render Markdown styling (bold, italic, code, strike, task checkboxes).

@@ -1910,8 +1910,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timestampFormat = settings.timestampFormat;
   const navigate = useNavigate();
-  // A string, and null for every location without this thread's citation, so
-  // ordinary navigation does not re-render the view.
+  // Unrelated navigation must not re-render this view.
   const citationLocation = useLocation({
     select: (location) => {
       const citation = assistantCitationFromLocation(location.href);
@@ -1975,9 +1974,7 @@ export default function ChatView(props: ChatViewProps) {
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const composerFilesRef = useRef<ComposerFileAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
-  // This view's own composer. The palette, the file browser and composer menus
-  // reach the shown view's composer through the shared ref, which only the
-  // shown view publishes (see keptViewWarming below).
+  // Each view owns a composer; only the shown view publishes the shared ref.
   const composerRef = useRef<ChatComposerHandle | null>(null);
   const sharedComposerRef = useComposerHandleContext();
   const publishesComposerRef = useRef(false);
@@ -2123,8 +2120,7 @@ export default function ChatView(props: ChatViewProps) {
   // Space the timeline keeps clear above its end. Tracks the overlay while the
   // composer is expanded and holds that height while it rests, so the resting
   // composer never exposes rows that its expansion will cover.
-  // A new view starts from the last measured inset, so its list scrolls to
-  // the true end on its first frame instead of correcting once measured.
+  // Seed the inset so new views start at the true end before measuring.
   const [composerTimelineInset, setComposerTimelineInset] = useState(
     () => lastComposerTimelineInset,
   );
@@ -3099,10 +3095,8 @@ export default function ChatView(props: ChatViewProps) {
     [openOrReuseProjectDraftThread],
   );
 
-  // A kept view warming up out of sight is not being viewed (see ThreadRouteView).
   const keptViewWarming = useContext(KeptViewWarmingContext);
-  // A warming view lays out with live effects, so it must not take the shared
-  // composer ref over. A view that hides clears it only while it still owns it.
+  // Warming views must not take over the shared composer.
   useLayoutEffect(() => {
     if (sharedComposerRef === null || keptViewWarming) return;
     publishesComposerRef.current = true;
@@ -3112,8 +3106,7 @@ export default function ChatView(props: ChatViewProps) {
       if (sharedComposerRef.current === composerRef.current) sharedComposerRef.current = null;
     };
   }, [keptViewWarming, sharedComposerRef]);
-  // Hiding a kept view ends the visit, so showing it again counts as reopening
-  // the thread, as it did when a single view switched threads.
+  // Activity hides must end visits so reveals count as reopening.
   useEffect(
     () => () => {
       lastDispatchedVisitRef.current = null;
@@ -4424,7 +4417,6 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
-  // A view warming up out of sight is not the timeline the user last saw.
   useLayoutEffect(() => {
     if (
       keptViewWarming ||

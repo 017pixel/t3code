@@ -64,10 +64,7 @@ function paletteTextInputMounted(): boolean {
   return palette?.querySelector("input, textarea, [contenteditable='true']") != null;
 }
 
-/**
- * The text a key types, or null for shortcuts and keys that type nothing.
- * Option on macOS and AltGr elsewhere type characters.
- */
+/** Option on macOS and AltGr elsewhere can type characters. */
 function typedText(event: globalThis.KeyboardEvent): string | null {
   if ([...event.key].length !== 1 || event.metaKey) return null;
   const altGraph = event.getModifierState("AltGraph");
@@ -167,10 +164,7 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // While a view's chunk loads (the palette, or content search inside it), the
-  // app behind it is inert and nothing has focus. Text typed then becomes the
-  // view's query, and Escape closes the palette (content and file search
-  // handle their own Escape below).
+  // Buffer typing while lazy views load; file/content search handle their own Escape.
   const loadingQuery =
     state.openIntent === null
       ? ""

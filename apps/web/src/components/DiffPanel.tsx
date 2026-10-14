@@ -189,10 +189,7 @@ interface DiffPanelProps {
   mode?: DiffPanelMode;
   composerDraftTarget: ScopedThreadRef | DraftId;
   workspaceMutationId: string | null;
-  /**
-   * The server thread of the chat view showing the panel. A kept view the
-   * user just left stays shown for a moment, so this is not the URL's thread.
-   */
+  /** The shown view's thread, which may lag behind the URL during a reveal. */
   threadRef: ScopedThreadRef | null;
 }
 
