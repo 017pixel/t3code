@@ -104,7 +104,7 @@ const ShellRows = Schema.Struct({
 });
 const isShellRows = Schema.is(ShellRows);
 const shellCacheGeneration = Crypto.Crypto.pipe(
-  Effect.flatMap((crypto) => crypto.randomUUIDv4),
+  Effect.flatMap((crypto) => crypto.randomUUIDv4()),
   Effect.provide(browserCryptoLayer),
   Effect.mapError((cause) => persistenceError("save-shell", cause)),
 );
