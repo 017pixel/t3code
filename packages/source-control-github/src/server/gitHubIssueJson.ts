@@ -356,10 +356,6 @@ const RawTemplatesSchema = Schema.Struct({
 
 const RawCreatedIssueSchema = Schema.Struct({ number: Schema.Int, html_url: Schema.String });
 
-export const UPDATE_ISSUE_COMMENT_GRAPHQL_MUTATION = `mutation($commentId: ID!, $body: String!) {
-  updateIssueComment(input: { id: $commentId, body: $body }) { issueComment { id } }
-}`;
-
 const decodeSearch = decodeJsonResult(RawSearchSchema);
 const decodeIssueRow = Schema.decodeUnknownExit(RawIssueSchema);
 const decodeDetail = decodeJsonResult(RawDetailSchema);
@@ -407,7 +403,7 @@ function toLabels(
 }
 
 /** GitHub spells a close reason `COMPLETED` / `NOT_PLANNED`; an open issue has `""` or `REOPENED`. */
-export function toIssueState(
+function toIssueState(
   state: string | null | undefined,
   stateReason: string | null | undefined,
 ): IssueState {
@@ -559,7 +555,7 @@ function previousCursorOf(pageInfo: typeof RawPageInfoSchema.Type | undefined): 
  * or better. Commenting is not gated: seeing the repository is enough to say something in it.
  * An install that reports nothing grants rather than withholds, so the host's own refusal says why.
  */
-export function toViewerPermissions(raw: {
+function toViewerPermissions(raw: {
   readonly viewerPermission?: string | null | undefined;
   readonly issue: typeof RawViewerFieldsSchema.Type | null;
 }): IssueViewerPermissions {

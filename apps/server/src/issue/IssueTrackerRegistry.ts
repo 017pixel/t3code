@@ -27,7 +27,7 @@ export function fromTrackers(
   };
 }
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const trackers = yield* Effect.forEach(
     BuiltInIssueTrackers.BUILT_IN_ISSUE_TRACKERS,
     (driver) => driver.make,
