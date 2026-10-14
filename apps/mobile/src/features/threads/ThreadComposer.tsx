@@ -795,6 +795,52 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     [navigation, settingsSheetPresentation.onStackTransitionsFinished],
   );
 
+  // Removable attachments: inside the card, or above the focused one-row composer.
+  const editingAttachments = (
+    <>
+      {queuedEdit !== null && queuedEdit.existingAttachments.length > 0 ? (
+        <Animated.View
+          className="px-[14px] pb-2.5"
+          entering={COMPOSER_ATTACHMENT_ENTERING}
+          exiting={FadeOut.duration(120)}
+        >
+          <ComposerQueuedEditAttachments
+            environmentId={props.environmentId}
+            attachments={queuedEdit.existingAttachments}
+            disabled={queuedEdit.saving || voiceInput.isBusy}
+            onRemove={queuedEdit.onRemoveExistingAttachment}
+          />
+        </Animated.View>
+      ) : null}
+      {stripAttachments.length > 0 ? (
+        <Animated.View
+          className="px-[14px] pb-2.5"
+          entering={COMPOSER_ATTACHMENT_ENTERING}
+          exiting={FadeOut.duration(120)}
+        >
+          <ComposerAttachmentStrip
+            environmentId={props.environmentId}
+            attachments={stripAttachments}
+            onRemove={voiceInput.isBusy ? () => undefined : props.onRemoveDraftImage}
+            onPressPreview={voiceInput.isBusy ? undefined : onPressPreview}
+            onPressVideo={voiceInput.isBusy ? undefined : onPressVideo}
+            onPressDocument={
+              voiceInput.isBusy
+                ? undefined
+                : (attachment) =>
+                    openDraftDocument({
+                      attachmentId: attachment.id,
+                      name: attachment.name,
+                      mimeType: attachment.mimeType,
+                      sizeBytes: attachment.sizeBytes,
+                    })
+            }
+          />
+        </Animated.View>
+      ) : null}
+    </>
+  );
+
   // The card's toolbar and the one-row composer share this picker.
   const modelControl = (
     <View className="min-w-0 shrink">
@@ -900,24 +946,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 }
           }
         >
-          {/* The one-row composer keeps a queued edit's attachments above its row. */}
-          {isExpanded &&
-          !usesCard &&
-          queuedEdit !== null &&
-          queuedEdit.existingAttachments.length > 0 ? (
-            <Animated.View
-              className="px-[14px] pb-2.5"
-              entering={COMPOSER_ATTACHMENT_ENTERING}
-              exiting={FadeOut.duration(120)}
-            >
-              <ComposerQueuedEditAttachments
-                environmentId={props.environmentId}
-                attachments={queuedEdit.existingAttachments}
-                disabled={queuedEdit.saving || voiceInput.isBusy}
-                onRemove={queuedEdit.onRemoveExistingAttachment}
-              />
-            </Animated.View>
-          ) : null}
+          {/* The one-row composer keeps removable attachments above its row. */}
+          {isExpanded && !usesCard ? editingAttachments : null}
           <ComposerDictationDraftContent
             className={
               usesCard ? undefined : isExpanded ? "flex-row items-end" : "flex-row items-center"
@@ -934,46 +964,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 onPickFiles={props.onPickDraftFiles}
               />
             ) : null}
-            {usesCard && queuedEdit !== null && queuedEdit.existingAttachments.length > 0 ? (
-              <Animated.View
-                className="px-[14px] pb-2.5"
-                entering={COMPOSER_ATTACHMENT_ENTERING}
-                exiting={FadeOut.duration(120)}
-              >
-                <ComposerQueuedEditAttachments
-                  environmentId={props.environmentId}
-                  attachments={queuedEdit.existingAttachments}
-                  disabled={queuedEdit.saving || voiceInput.isBusy}
-                  onRemove={queuedEdit.onRemoveExistingAttachment}
-                />
-              </Animated.View>
-            ) : null}
-            {usesCard && stripAttachments.length > 0 ? (
-              <Animated.View
-                className="px-[14px] pb-2.5"
-                entering={COMPOSER_ATTACHMENT_ENTERING}
-                exiting={FadeOut.duration(120)}
-              >
-                <ComposerAttachmentStrip
-                  environmentId={props.environmentId}
-                  attachments={stripAttachments}
-                  onRemove={voiceInput.isBusy ? () => undefined : props.onRemoveDraftImage}
-                  onPressPreview={voiceInput.isBusy ? undefined : onPressPreview}
-                  onPressVideo={voiceInput.isBusy ? undefined : onPressVideo}
-                  onPressDocument={
-                    voiceInput.isBusy
-                      ? undefined
-                      : (attachment) =>
-                          openDraftDocument({
-                            attachmentId: attachment.id,
-                            name: attachment.name,
-                            mimeType: attachment.mimeType,
-                            sizeBytes: attachment.sizeBytes,
-                          })
-                  }
-                />
-              </Animated.View>
-            ) : null}
+            {usesCard ? editingAttachments : null}
             <Animated.View
               className={usesCard ? "px-[14px]" : "min-w-0 flex-1 px-[4px]"}
               layout={COMPOSER_LAYOUT_TRANSITION}
@@ -1111,7 +1102,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 }}
               />
             </Animated.View>
-            {!usesCard && stripAttachments.length > 0 ? (
+            {!isExpanded && stripAttachments.length > 0 ? (
               <View className="flex-row gap-1 pl-1">
                 {stripAttachments.slice(0, 3).map((attachment) => (
                   <ComposerAttachmentThumbnail
