@@ -63,13 +63,11 @@ it.effect(
     Effect.gen(function* () {
       if ((yield* HostProcess.Platform) !== "linux") return;
       const script = `
-        import fs from 'node:fs';
-        import { syncBuiltinESMExports } from 'node:module';
+        import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
         import * as Effect from ${JSON.stringify(import.meta.resolve("effect/Effect"))};
         import * as HostProcess from ${JSON.stringify(import.meta.resolve("@t3tools/shared/HostProcess"))};
         import { closeInheritedElectronDescriptors } from ${JSON.stringify(new URL("./bootstrap.ts", import.meta.url).href)};
-        const ownFd = fs.openSync('/dev/null', 'r');
-        const readFileSync = fs.readFileSync;
+        const ownFd = fs.openSync('/dev/null', 'r'), readFileSync = fs.readFileSync;
         // A parent's POSIX lock metadata is absent from its inherited fd in the child.
         fs.readFileSync = (path, ...args) => readFileSync(path, ...args) +
         (path === '/proc/' + process.ppid + '/fdinfo/64' ? 'lock:\\t1: POSIX ADVISORY WRITE parent 0 EOF\\n' : '');

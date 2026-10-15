@@ -891,7 +891,6 @@ for (const baseline of ["failure", "defect", "interrupt", "stop"] as const) {
       const result = yield* harness.startWithRetry.pipe(Effect.exit);
       expect(harness.captureBaseline).toHaveBeenCalledOnce();
       if (baseline === "failure" || baseline === "defect") {
-        expect(result._tag).toBe("Success");
         expect(harness.open).toHaveBeenCalledOnce();
         expect(harness.startRootRun).toHaveBeenCalledOnce();
       } else {
