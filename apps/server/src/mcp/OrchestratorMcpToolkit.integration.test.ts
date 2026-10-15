@@ -1138,7 +1138,7 @@ describe("orchestrator MCP toolkit", () => {
             const remainder = yield* decodeThreadReadResult(remainderCall.structuredContent).pipe(
               Effect.orDie,
             );
-            expect(remainder.items[0]?.nextTextOffset).toBeNull();
+            expect(remainder.items[0]?.nextTextOffset).toBeUndefined();
             expect(firstChunk.text + (remainder.items[0]?.text ?? "")).toBe(
               "Claude completed: Complete before a parent reads this child result directly.",
             );
