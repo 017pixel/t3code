@@ -1,9 +1,7 @@
 import { CheckpointScopeId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
-import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
@@ -54,7 +52,6 @@ const make = Effect.gen(function* () {
   const checkpointCapture = yield* CheckpointCapture.CheckpointCaptureServiceV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const observer = yield* RunFinalizationObserver;
-  const refreshScope = yield* Effect.scope;
 
   const finalize: RunFinalizationService["Service"]["finalize"] = Effect.fn(
     "RunFinalizationService.finalize",
@@ -75,25 +72,14 @@ const make = Effect.gen(function* () {
       );
     const cwd = projection.checkpointScopes.find((scope) => scope.id === input.scopeId)?.cwd;
     if (cwd !== undefined) {
-      // The run is already completed and its checkpoint committed. The VCS and
-      // file-list refresh only updates client caches, so it runs beside the
-      // thread's effect lane instead of holding the next turn back for seconds.
-      yield* observer.refresh({ cwd, threadId: input.threadId, runId: input.runId }).pipe(
-        // Retries as the effect worker did when this ran on the lane: five attempts, from 100ms.
-        Effect.retry({ schedule: Schedule.exponential("100 millis"), times: 4 }),
-        Effect.catchCause((cause) =>
-          Cause.hasInterruptsOnly(cause)
-            ? Effect.void
-            : Effect.logWarning("failed to refresh workspace after run completion", cause).pipe(
-                Effect.annotateLogs({
-                  threadId: input.threadId,
-                  runId: input.runId,
-                  cwd,
-                }),
-              ),
-        ),
-        Effect.forkIn(refreshScope),
-      );
+      yield* observer
+        .refresh({ cwd, threadId: input.threadId, runId: input.runId })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new RunFinalizationError({ ...input, operation: "refresh-workspace", cause }),
+          ),
+        );
     }
   });
   return RunFinalizationService.of({ finalize });
