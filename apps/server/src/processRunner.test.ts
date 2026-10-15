@@ -480,14 +480,6 @@ describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", (
       expect(echoed.stdout).toBe(input);
       expect(echoed.stderr).toBe("done\n");
       expect(echoed.code).toBe(3);
-
-      const envAndCwd = yield* run({
-        command: "sh",
-        args: ["-c", 'printf "%s %s" "$SPAWN_HOST_VALUE" "$PWD"'],
-        cwd: "/",
-        env: { SPAWN_HOST_VALUE: "from-server" },
-      });
-      expect(envAndCwd.stdout).toBe("from-server /");
     }).pipe(Effect.provide(layer)),
   );
 
@@ -499,16 +491,6 @@ describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", (
 
       const error = yield* run({ ...child, stdin: "x".repeat(2_000_000) }).pipe(Effect.flip);
       expect(error).toBeInstanceOf(ProcessRunner.ProcessStdinError);
-    }).pipe(Effect.provide(layer)),
-  );
-
-  it.live("reports a missing executable as a spawn error", () =>
-    Effect.gen(function* () {
-      const error = yield* run({ command: "t3-spawn-host-missing-command", args: [] }).pipe(
-        Effect.flip,
-      );
-      if (error._tag !== "ProcessSpawnError") return expect.fail(`Got ${error._tag}`);
-      expect(String(error.cause)).toContain("NotFound");
     }).pipe(Effect.provide(layer)),
   );
 

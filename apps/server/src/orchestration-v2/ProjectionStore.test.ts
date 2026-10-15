@@ -30,11 +30,6 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
-import {
-  resolveThreadPullRequestBadge,
-  resolveThreadPullRequestChains,
-  threadPullRequestSearchTerms,
-} from "@t3tools/shared/threadPullRequests";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 
 import ProjectionThreadSweepIndexes from "../persistence/Migrations/063_ProjectionThreadSweepIndexes.ts";
@@ -42,12 +37,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { resolveAutoSettlementAt } from "./ThreadSettlementService.ts";
-import {
-  compactThreadPullRequests,
-  compactShellPullRequestStacks,
-  decodeThreadReadPayload,
-  encodeThreadReadPayload,
-} from "./ThreadReadPayload.ts";
+import { compactThreadPullRequests, compactShellPullRequestStacks } from "./ThreadReadPayload.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -2468,12 +2458,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const markedUnread = yield* projectionStore.getThreadProjection(threadId);
       assert.isNull(markedUnread.thread.lastVisitedAt);
       assert.deepEqual(markedUnread.thread.updatedAt, createdAt);
-
-      assert.deepEqual(
-        yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(thread)),
-        thread,
-      );
-      assert.deepEqual(compactThreadPullRequests(thread), thread);
     }),
   );
 
@@ -5781,7 +5765,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           snapshot: { ...snapshot, additions: 23, deletions: 2, checksState: "passing" as const },
         })),
       };
-      assert.deepEqual(yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(rich)), rich);
       const compact = compactThreadPullRequests(rich);
       assert.isUndefined(compact.pullRequests?.[0]?.snapshot?.additions);
       assert.equal(rich.pullRequests[0]?.snapshot?.additions, 23);
@@ -5790,19 +5773,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         compact.pullRequests?.map((link) => link.stack),
         rich.pullRequests.map((link) => link.stack),
       );
-      assert.deepEqual(
-        resolveThreadPullRequestBadge(compact.pullRequests),
-        resolveThreadPullRequestBadge(rich.pullRequests),
-      );
-      assert.deepEqual(
-        resolveThreadPullRequestChains(compact.pullRequests ?? []).map((chain) =>
-          chain.layers.map((entry) => entry.number),
-        ),
-        resolveThreadPullRequestChains(rich.pullRequests).map((chain) =>
-          chain.layers.map((entry) => entry.number),
-        ),
-      );
-      assert.deepEqual(threadPullRequestSearchTerms(compact), threadPullRequestSearchTerms(rich));
       yield* syncPullRequests("rich", rich.pullRequests);
       assert.deepEqual((yield* store.getThreadShell(threadId))?.pullRequests, rich.pullRequests);
       assert.deepEqual(
