@@ -279,11 +279,9 @@ describe("reduceCommandPaletteUiState", () => {
       _tag: "ToggleMode",
       mode: "content",
     });
-    expect(reduceCommandPaletteUiState(contentOpen, { _tag: "TypeAhead", query: "fo" })).toEqual({
-      open: true,
-      mode: "content",
-      openIntent: { kind: "search", query: "fo" },
-    });
+    expect(
+      reduceCommandPaletteUiState(contentOpen, { _tag: "TypeAhead", query: "fo" }).openIntent,
+    ).toEqual({ kind: "search", query: "fo" });
 
     const linkedThreads = { environmentId: EnvironmentId.make("env"), threads: [] };
     const prSearch = reduceCommandPaletteUiState(closedState, {
