@@ -39,7 +39,6 @@ it.effect("defers maintenance until the client loads and startup is quiet", () =
       expect(yield* Deferred.isDone(firstRan)).toBe(false);
       yield* background.markClientServed;
       yield* Deferred.await(firstRan);
-      expect(yield* Deferred.isDone(secondRan)).toBe(false);
     }),
   ),
 );

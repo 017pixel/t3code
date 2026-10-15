@@ -26,11 +26,15 @@ it.effect("refreshes workspace after checkpoint capture without reading history"
   const releaseRefresh = Deferred.makeUnsafe<void>();
   const refreshFinished = Deferred.makeUnsafe<void>();
   let shouldFail = false;
+  let failures = 0;
   const refresh = vi.fn(() =>
     shouldFail
-      ? Effect.fail(
-          new RunFinalization.RunFinalizationRefreshError({ cwd: "/repo", cause: "index.lock" }),
-        )
+      ? Effect.suspend(() => {
+          failures++;
+          return Effect.fail(
+            new RunFinalization.RunFinalizationRefreshError({ cwd: "/repo", cause: "index.lock" }),
+          );
+        })
       : Deferred.succeed(refreshStarted, undefined).pipe(
           Effect.andThen(Deferred.await(releaseRefresh)),
           Effect.andThen(Deferred.succeed(refreshFinished, undefined)),
@@ -74,7 +78,7 @@ it.effect("refreshes workspace after checkpoint capture without reading history"
     yield* service.finalize({ threadId, runId, scopeId });
     for (let step = 0; step < 20; step++) yield* TestClock.adjust("100 millis");
     yield* TestClock.adjust("1 minute");
-    assert.equal(refresh.mock.calls.length, 5);
+    assert.equal(failures, 5);
   }).pipe(Effect.provide(layer));
 });
 
