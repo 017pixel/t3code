@@ -10,6 +10,38 @@ import * as Schema from "effect/Schema";
 const sameThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
 const sameProjectShell = Schema.toEquivalence(OrchestrationProjectShell);
 const sameLinks = Schema.toEquivalence(Schema.UndefinedOr(Schema.Array(ThreadPullRequestLink)));
+const sharedShellFields = [
+  "modelSelection",
+  "lineage",
+  "forkedFrom",
+  "pendingRuntimeRequest",
+  "latestVisibleMessage",
+  "pendingBackgroundTasks",
+  "providerInstanceHistory",
+  "pullRequests",
+  "linkedPullRequest",
+  "branchPullRequest",
+  "goal",
+  "limitRecovery",
+] as const satisfies ReadonlyArray<keyof OrchestrationV2ThreadShell>;
+const shellFieldEqual = sharedShellFields.map((key) =>
+  Schema.toEquivalence(OrchestrationV2ThreadShell.fields[key] as Schema.Schema<unknown>),
+);
+
+/** Full wire rows still share fields the update left unchanged. */
+function shareThreadShell(previous: OrchestrationV2ThreadShell, next: OrchestrationV2ThreadShell) {
+  if (sameThreadShell(previous, next)) return previous;
+  let shared = next;
+  for (let index = 0; index < sharedShellFields.length; index++) {
+    const key = sharedShellFields[index]!;
+    const equal = shellFieldEqual[index]!;
+    if (previous[key] !== next[key] && equal(previous[key], next[key])) {
+      if (shared === next) shared = { ...next };
+      Object.assign(shared, { [key]: previous[key] });
+    }
+  }
+  return shared;
+}
 
 /** Whether two rows' pull request links are equal, including both absent. */
 export function sameThreadPullRequests(
@@ -38,11 +70,24 @@ export function reuseUnchangedThreadShells(
       thread.pullRequests === undefined && prior.pullRequests !== undefined
         ? { ...thread, pullRequests: prior.pullRequests }
         : thread;
-    const shared = sameThreadShell(prior, candidate) ? prior : candidate;
-    changed ||= shared !== thread;
-    return shared;
+    if (!sameThreadShell(prior, candidate)) {
+      const shared = shareThreadShell(prior, candidate);
+      changed ||= shared !== thread;
+      return shared;
+    }
+    changed ||= prior !== thread;
+    return prior;
   });
-  return changed ? { ...next, threads } : next;
+  return changed
+    ? {
+        ...next,
+        threads:
+          previous.threads.length === threads.length &&
+          previous.threads.every((thread, index) => thread === threads[index])
+            ? previous.threads
+            : threads,
+      }
+    : next;
 }
 
 function upsertById<T extends { readonly id: unknown }>(
@@ -173,7 +218,9 @@ export function applyShellStreamEvent(
         event.location === "active"
           ? snapshot.threads.find((thread) => thread.id === event.thread.id)
           : undefined;
-      if (existing !== undefined && sameThreadShell(existing, event.thread)) {
+      const thread =
+        existing === undefined ? event.thread : shareThreadShell(existing, event.thread);
+      if (thread === existing) {
         return { ...snapshot, snapshotSequence: event.sequence };
       }
       const withoutThread = (threads: OrchestrationV2ShellSnapshot["threads"]) =>
@@ -182,7 +229,7 @@ export function applyShellStreamEvent(
         ...snapshot,
         threads:
           event.location === "active"
-            ? upsertById(snapshot.threads, event.thread)
+            ? upsertById(snapshot.threads, thread)
             : withoutThread(snapshot.threads),
         // The archive has its own bounded query/subscription. Older servers may
         // still send archive-located deltas here; remove them from the normal

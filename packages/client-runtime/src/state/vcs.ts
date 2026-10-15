@@ -2,6 +2,7 @@ import {
   type EnvironmentId,
   type VcsListRefsInput,
   type VcsListRefsResult,
+  VcsStatusResult,
   WS_METHODS,
 } from "@t3tools/contracts";
 import { applyGitStatusStreamEvent } from "@t3tools/shared/git";
@@ -10,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom, AtomRegistry } from "effect/reactivity";
@@ -37,6 +39,7 @@ const VCS_REFS_IDLE_TTL_MS = 30_000;
 // Rows keep the last status they rendered, so the live stream only needs a
 // short grace period when virtualization or scrolling releases its consumer.
 const VCS_STATUS_IDLE_TTL_MS = 10_000;
+const sameVcsStatus = Schema.toEquivalence(VcsStatusResult);
 const VCS_REFS_RETRY_SCHEDULE = Schedule.exponential("1 second").pipe(
   Schedule.modifyDelay(({ duration }) =>
     Effect.succeed(Duration.min(duration, Duration.seconds(30))),
@@ -287,8 +290,10 @@ export function createVcsEnvironmentAtoms<R, E>(
         return subscribe(WS_METHODS.subscribeVcsStatus, { ...input, compact: true }).pipe(
           Stream.filterMap((event) => {
             if (event._tag === "unchanged") return Result.failVoid;
-            current = applyGitStatusStreamEvent(current, event);
-            return Result.succeed(current);
+            const next = applyGitStatusStreamEvent(current, event);
+            if (current !== null && sameVcsStatus(current, next)) return Result.failVoid;
+            current = next;
+            return Result.succeed(next);
           }),
         );
       },
