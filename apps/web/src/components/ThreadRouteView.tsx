@@ -32,8 +32,6 @@ import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { useEnvironmentThreadRefs, useThreadRefs, useThreadShell } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
-import { environmentThreadDetails } from "../state/threads";
-import { appAtomRegistry } from "../rpc/atomRegistry";
 import {
   buildThreadRouteParams,
   isThreadRouteSnapshotAuthoritative,
@@ -284,12 +282,6 @@ export function KeptChatSurface() {
   const shownKey = reveal && deferredTargetKey !== null ? deferredTargetKey : targetKey;
   // Keys typed before a deferred reveal lands go to the URL's thread.
   useLayoutEffect(() => setUrlRouteTargetKey(targetKey), [targetKey]);
-  // Start loading the thread with the click, ahead of its view.
-  useEffect(() => {
-    const urgentTarget = threadRouteTargetFromKey(targetKey);
-    if (urgentTarget?.kind !== "server") return;
-    return appAtomRegistry.mount(environmentThreadDetails.threadAtom(urgentTarget.threadRef));
-  }, [targetKey]);
   const [shownTargetKey, setShownTargetKey] = useState(shownKey);
   if (shownKey !== null && shownKey !== shownTargetKey) {
     setShownTargetKey(shownKey);
