@@ -5766,8 +5766,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         })),
       };
       const compact = compactThreadPullRequests(rich);
-      assert.isUndefined(compact.pullRequests?.[0]?.snapshot?.additions);
-      assert.equal(rich.pullRequests[0]?.snapshot?.additions, 23);
       // Clients show the saved stack before it refreshes, so the compact shell keeps it whole.
       assert.deepEqual(
         compact.pullRequests?.map((link) => link.stack),

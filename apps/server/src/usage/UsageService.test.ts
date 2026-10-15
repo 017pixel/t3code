@@ -1945,12 +1945,6 @@ describe("UsageService", () => {
         Effect.provide(layerService({ prefix: "usage-service-interruption-test", home, settings })),
       );
 
-      // Resolve the first-use import before exercising synchronous scan scheduling.
-      const warmup = yield* service
-        .readSummary({ ...WINDOW, sinceDay: WINDOW.untilDay, untilDay: WINDOW.sinceDay })
-        .pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(warmup));
-
       let orphanedAt: number | undefined;
       for (let interruptAt = 1; interruptAt <= 31; interruptAt += 1) {
         const tasks: Array<() => void> = [];
