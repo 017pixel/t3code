@@ -17,7 +17,7 @@ import { lazy, Suspense, useEffect, useEffectEvent, useMemo, useRef, useState } 
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
-import { CommandPaletteHost } from "../components/CommandPaletteHost";
+import { CommandPalette } from "../components/CommandPalette";
 import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
 import { KeybindingsConfigWarning } from "../components/KeybindingsConfigWarning";
@@ -229,11 +229,11 @@ function RootRouteView() {
           <FontAppearanceSync />
           <ProviderAuthCallbackCoordinator />
           <CustomSnoozeDialogHost />
-          <CommandPaletteHost>
+          <CommandPalette>
             <AppSidebarLayout>
               <Outlet />
             </AppSidebarLayout>
-          </CommandPaletteHost>
+          </CommandPalette>
         </AnchoredToastProvider>
       </ToastProvider>
     );
@@ -249,11 +249,11 @@ function RootRouteView() {
   }
 
   const appShell = (
-    <CommandPaletteHost>
+    <CommandPalette>
       <AppSidebarLayout>
         <Outlet />
       </AppSidebarLayout>
-    </CommandPaletteHost>
+    </CommandPalette>
   );
 
   // FirstRunGate holds back everything below it — including EventRouter,
