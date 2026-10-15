@@ -2657,8 +2657,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const automaticQueuedRuns = projection.runs.filter(
         (run) => run.status === "queued" && automaticMessageIds.has(run.userMessageId),
       );
-      const runningRunExists = projection.runs.some((run) =>
-        ["preparing", "starting", "running", "waiting"].includes(run.status),
+      // Idle compaction is hidden maintenance and may finish after the thread settles.
+      const runningRunExists = projection.runs.some(
+        (run) =>
+          run.idleCompactionOfRunId === undefined &&
+          ["preparing", "starting", "running", "waiting"].includes(run.status),
       );
       // Includes a queue held after a Stop, which otherwise shows no activity.
       const queuedMessageExists = projection.runs.some(

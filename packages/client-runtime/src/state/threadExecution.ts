@@ -292,7 +292,12 @@ export function deriveThreadRuntime(
     providerName: providerSession?.driver ?? null,
     ...threadErrorSummary(
       latestRootProviderFailure(latestRunProjection, projection.turnItems),
-      providerSession?.lastError ?? null,
+      // Outside the open chat, an idle compaction's session error stays hidden like the shell's.
+      !options.includeIdleCompaction &&
+        latestMatchingRun(projection, () => true, { includeIdleCompaction: true })
+          ?.idleCompactionOfRunId !== undefined
+        ? null
+        : (providerSession?.lastError ?? null),
     ),
     updatedAt: DateTime.formatIso(projection.updatedAt),
   };

@@ -480,10 +480,15 @@ export function isTerminalRunStatus(
   );
 }
 
+// Idle compaction is server maintenance, never a thread outcome agents read or wait on.
+const isUserFacingRun = (run: OrchestrationV2Run) => run.idleCompactionOfRunId === undefined;
+
 export function latestRun(
   projection: Pick<OrchestrationV2ThreadProjection, "runs">,
 ): OrchestrationV2Run | undefined {
-  return projection.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
+  return projection.runs
+    .filter(isUserFacingRun)
+    .toSorted((left, right) => right.ordinal - left.ordinal)[0];
 }
 
 /** The newest run in `run`'s restart continuation chain, or `run` itself. */
@@ -504,7 +509,7 @@ export function latestActiveRun(
   projection: Pick<OrchestrationV2ThreadProjection, "runs">,
 ): OrchestrationV2Run | undefined {
   return projection.runs
-    .filter(isActiveRun)
+    .filter((run) => isUserFacingRun(run) && isActiveRun(run))
     .toSorted((left, right) => right.ordinal - left.ordinal)[0];
 }
 
