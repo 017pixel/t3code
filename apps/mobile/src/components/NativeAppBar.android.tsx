@@ -23,9 +23,7 @@ export function NativeAppBar(props: {
           actionIconContentColor: colors["--color-header-foreground"],
         }}
       >
-        <TopAppBar.Title>
-          <RNHostView matchContents>{props.title}</RNHostView>
-        </TopAppBar.Title>
+        <TopAppBar.Title>{props.title}</TopAppBar.Title>
         {props.navigationIcon ? (
           <TopAppBar.NavigationIcon>
             <RNHostView matchContents>{props.navigationIcon}</RNHostView>

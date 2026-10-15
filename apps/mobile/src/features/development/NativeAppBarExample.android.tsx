@@ -1,12 +1,12 @@
 import { View } from "react-native";
-import { AppText } from "../../components/AppText";
+import { Text } from "@expo/ui/jetpack-compose";
 import { IconButton } from "../../components/IconButton";
 import { NativeAppBar } from "../../components/NativeAppBar.android";
 
 export function NativeAppBarExample() {
   return (
     <NativeAppBar
-      title={<AppText textRole="title">Native app bar</AppText>}
+      title={<Text style={{ fontSize: 21 }}>Native app bar</Text>}
       navigationIcon={
         <IconButton icon="arrow.left" accessibilityLabel="Example back" onPress={() => {}} />
       }
