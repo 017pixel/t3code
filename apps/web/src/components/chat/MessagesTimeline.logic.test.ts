@@ -5504,77 +5504,18 @@ describe("shouldCollapseUserMessage", () => {
   });
 });
 
-describe("timelineRunIdsOpeningWindow", () => {
-  const work = (id: string, runId: string | null, itemType?: "notification") => ({
-    id,
-    kind: "work" as const,
-    createdAt: "2026-01-01T00:00:00Z",
-    entry: {
-      id,
-      createdAt: "2026-01-01T00:00:00Z",
-      runId: runId as never,
-      label: id,
-      tone: "tool" as const,
-      ...(itemType ? { itemType } : {}),
-    },
-  });
-  const prompt = (id: string, runId: string | null) => ({
-    id,
-    kind: "message" as const,
-    createdAt: "2026-01-01T00:00:00Z",
-    message: {
-      id: id as never,
-      role: "user" as const,
-      text: id,
-      runId: runId as never,
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-01T00:00:00Z",
-      streaming: false,
-    },
-  });
-
-  it("names the run a history window starts inside", () => {
-    expect([
-      ...timelineRunIdsOpeningWindow([
-        work("a", "run-1"),
-        prompt("p", "run-2"),
-        work("b", "run-2"),
-      ]),
-    ]).toEqual(["run-1"]);
-  });
-
-  it("stops once the run's prompt or notification is loaded", () => {
-    expect(timelineRunIdsOpeningWindow([prompt("p", "run-1"), work("a", "run-1")]).size).toBe(0);
-    expect(
-      timelineRunIdsOpeningWindow([
-        work("prior", "run-0"),
-        work("wake", "run-1", "notification"),
-        work("a", "run-1"),
-      ]),
-    ).toEqual(new Set(["run-0"]));
-  });
-
-  it("ignores runless rows, which no older page can hydrate by id", () => {
-    expect(timelineRunIdsOpeningWindow([work("a", null), prompt("p", null)]).size).toBe(0);
-  });
+it("hydrates an opening run only until its prompt is loaded", () => {
+  const fixture = makeStreamingTimelineFixture();
+  const entries = deriveTimelineEntriesFromVisibleTurnItems({ visibleTurnItems: fixture.visibleTurnItems });
+  expect(timelineRunIdsOpeningWindow(entries)).toEqual(new Set());
+  expect(timelineRunIdsOpeningWindow(entries.slice(1))).toEqual(new Set([fixture.historyRunId]));
 });
 
-describe("historyCursorAnchorsItem", () => {
-  // Same shape the server's history cursor uses: base64url JSON naming the anchor row.
-  const cursor = (si: string) =>
-    btoa(JSON.stringify({ v: 1, seq: 7, st: "thread", si, p: 40 }))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
-
-  it("matches the row older pages end at", () => {
-    expect(historyCursorAnchorsItem(cursor("prompt-item"), "prompt-item")).toBe(true);
-    expect(historyCursorAnchorsItem(cursor("row-after-gap"), "prompt-item")).toBe(false);
-  });
-
-  it("treats a missing or unreadable cursor as not anchored", () => {
-    expect(historyCursorAnchorsItem(null, "prompt-item")).toBe(false);
-    expect(historyCursorAnchorsItem("%%%", "prompt-item")).toBe(false);
-    expect(historyCursorAnchorsItem(cursor("prompt-item"), undefined)).toBe(false);
-  });
+it("recognizes the history cursor's retained prompt without accepting missing or invalid cursors", () => {
+  const cursor = btoa(JSON.stringify({ v: 1, seq: 7, st: "thread", si: "prompt", p: 40 }));
+  expect(historyCursorAnchorsItem(cursor, "prompt")).toBe(true);
+  for (const value of [null, "%%%", cursor]) {
+    expect(historyCursorAnchorsItem(value, "other")).toBe(false);
+  }
+  expect(historyCursorAnchorsItem(cursor, undefined)).toBe(false);
 });
