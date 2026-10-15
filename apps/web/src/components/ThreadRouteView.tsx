@@ -249,21 +249,17 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
         <Activity key={view.key} mode={view.key === activeViewKey ? "visible" : "hidden"}>
           <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
             <KeptViewFrame>
-              {view.draftId === null ? (
-                <KeptChatView
-                  environmentId={view.environmentId}
-                  threadId={view.threadId}
-                  routeKind="server"
-                />
-              ) : (
-                <KeptChatView
-                  draftId={view.draftId}
-                  environmentId={view.environmentId}
-                  threadId={view.threadId}
-                  routeKind="draft"
-                  forceExpandedMobileComposer
-                />
-              )}
+              <KeptChatView
+                environmentId={view.environmentId}
+                threadId={view.threadId}
+                {...(view.draftId === null
+                  ? { routeKind: "server" as const }
+                  : {
+                      routeKind: "draft" as const,
+                      draftId: view.draftId,
+                      forceExpandedMobileComposer: true,
+                    })}
+              />
             </KeptViewFrame>
           </KeptViewLifetimeContext>
         </Activity>

@@ -124,7 +124,7 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
       rerender();
       return;
     }
-    instance.editor.setOptions({ editorProps: optionsRef.current.editorProps });
+    instance.editor.setOptions({ editorProps: optionsRef.current.editorProps ?? {} });
   });
 
   useEffect(() => {
