@@ -1,9 +1,6 @@
 import { pullRequestHostOf, type SourceControlProviderKind } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { useProjects, useServerConfigs } from "~/state/entities";
-import { useAtomValue } from "@effect/atom-react";
-import { Atom } from "effect/reactivity";
-import { environmentThreadShells } from "~/state/threads";
+import { useProjects, useServerConfigs, useThreadShells } from "~/state/entities";
 import {
   threadPullRequestKeysEqual,
   visibleThreadPullRequests,
@@ -76,6 +73,7 @@ import {
   MenuTrigger,
 } from "~/components/ui/menu";
 import { useBrowserDefaults } from "~/browser/browserDefaults";
+import { ScrollArea } from "~/components/ui/scroll-area";
 import { PanelTabCloseButton } from "~/components/ui/panel-tab-close-button";
 import { faviconUrlForOrigin } from "~/lib/favicon";
 import { useTheme } from "~/hooks/useTheme";
@@ -219,7 +217,7 @@ const TAB_SCROLL_EDGE_TOLERANCE = 1;
 const TAB_DRAG_MODIFIERS = [restrictToHorizontalAxis, restrictToFirstScrollableAncestor];
 
 function tabScrollViewport(root: HTMLDivElement | null): HTMLDivElement | null {
-  return root;
+  return root?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null;
 }
 
 /**
@@ -756,6 +754,7 @@ function PullRequestSurfaceIcon({
   const resolvedEnvironmentId =
     (surface.environmentId as EnvironmentId | undefined) ?? environmentId;
   const projects = useProjects();
+  const threads = useThreadShells();
   const project = projects.find(
     (entry) => entry.environmentId === resolvedEnvironmentId && entry.id === surface.projectId,
   );
@@ -770,25 +769,10 @@ function PullRequestSurfaceIcon({
     resolvedEnvironmentId === null
       ? undefined
       : configs.get(resolvedEnvironmentId)?.environment.capabilities;
-  const linksSupported = capabilities?.threadPullRequests === true;
-  const linkedSnapshotAtom = useMemo(
-    () =>
-      Atom.make((get) =>
-        linksSupported
-          ? (resolvePullRequestTabLink(
-              get(environmentThreadShells.threadShellsAtom),
-              resolvedEnvironmentId,
-              host,
-              {
-                repository: surface.repository,
-                number: surface.number,
-              },
-            )?.snapshot ?? null)
-          : null,
-      ),
-    [linksSupported, resolvedEnvironmentId, host, surface.repository, surface.number],
-  );
-  const linkedSnapshot = useAtomValue(linkedSnapshotAtom);
+  const linkedSnapshot =
+    capabilities?.threadPullRequests === true
+      ? (resolvePullRequestTabLink(threads, resolvedEnvironmentId, host, surface)?.snapshot ?? null)
+      : null;
   const detail = useEnvironmentQuery(
     resolvedEnvironmentId === null || capabilities?.pullRequests !== true || linkedSnapshot !== null
       ? null
@@ -1197,15 +1181,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
         )}
         data-right-panel-tabbar
       >
-        <div
+        <ScrollArea
+          radius="none"
           ref={tabListRef}
-          data-slot="scroll-area-viewport"
-          className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-          style={{
-            maskImage: tabScrollState.hasOverflow
-              ? `linear-gradient(to right, ${tabScrollState.canScrollLeft ? "transparent, black calc(var(--spacing) * 6)" : "black"}, ${tabScrollState.canScrollRight ? "black calc(100% - var(--spacing) * 6), transparent" : "black"})`
-              : undefined,
-          }}
+          hideScrollbars
+          scrollFade
+          className="min-w-0 flex-1"
           data-right-panel-tab-list
         >
           <div className="flex h-full w-max min-w-full items-center gap-1">
@@ -1435,7 +1416,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
               </Menu>
             ) : null}
           </div>
-        </div>
+        </ScrollArea>
         {tabScrollState.hasOverflow ? (
           <div
             className="flex shrink-0 items-center gap-0.5 [-webkit-app-region:no-drag]"
