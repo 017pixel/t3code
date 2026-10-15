@@ -70,24 +70,17 @@ export function reuseUnchangedThreadShells(
       thread.pullRequests === undefined && prior.pullRequests !== undefined
         ? { ...thread, pullRequests: prior.pullRequests }
         : thread;
-    if (!sameThreadShell(prior, candidate)) {
-      const shared = shareThreadShell(prior, thread);
-      changed ||= shared !== thread;
-      return shared;
-    }
-    changed ||= prior !== thread;
-    return prior;
+    const shared = shareThreadShell(prior, candidate);
+    changed ||= shared !== thread;
+    return shared;
   });
-  return changed
-    ? {
-        ...next,
-        threads:
-          previous.threads.length === threads.length &&
-          previous.threads.every((thread, index) => thread === threads[index])
-            ? previous.threads
-            : threads,
-      }
-    : next;
+  if (!changed) return next;
+  return {
+    ...next,
+    threads: previous.threads.length === threads.length &&
+      previous.threads.every((thread, index) => thread === threads[index])
+      ? previous.threads : threads,
+  };
 }
 
 function upsertById<T extends { readonly id: unknown }>(
