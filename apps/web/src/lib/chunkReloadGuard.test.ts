@@ -142,9 +142,10 @@ it.each([preloadSpeculatively, preloadRouteSpeculatively])(
     ).toBe(true);
     const failure = new TypeError(failedImport("chunk.js"));
     fail(failure);
-    await expect(preload).resolves.toBeUndefined();
+    if (load === preloadSpeculatively) await expect(preload).resolves.toBeUndefined();
+    else await expect(preload).rejects.toBe(failure);
     expect(isSpeculativeLoadPending() || isRoutePreloadPending()).toBe(false);
-    expect(isSpeculativeLoadFailure(failure)).toBe(true);
+    expect(isSpeculativeLoadFailure(failure)).toBe(load === preloadSpeculatively);
     expect(isSpeculativeLoadFailure(new TypeError(failedImport("chunk.js")))).toBe(false);
     await expect(load(async () => "module")).resolves.toBe("module");
   },
