@@ -14,8 +14,6 @@ const repoEnv = loadRepoEnv();
 const isMainProcessExternal = (id: string) =>
   id === "electron" || id.startsWith("electron/") || isDesktopRuntimeExternalDependency(id);
 const shouldLaunchElectronAfterPack = process.env.T3CODE_DESKTOP_DEV === "1";
-// Keep names and expressions intact, and leave watched development output readable.
-const minify = shouldLaunchElectronAfterPack ? false : { compress: false, mangle: false };
 const publicConfigDefine = {
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
@@ -55,7 +53,6 @@ export default defineConfig({
       outDir: "dist-electron",
       dts: false,
       sourcemap: true,
-      minify,
       outExtensions: () => ({ js: ".cjs" }),
       define: publicConfigDefine,
       outputOptions: { codeSplitting: false },
@@ -73,7 +70,6 @@ export default defineConfig({
       outDir: "dist-electron",
       dts: false,
       sourcemap: true,
-      minify,
       outExtensions: () => ({ js: ".cjs" }),
       define: publicConfigDefine,
       entry: [
@@ -95,7 +91,6 @@ export default defineConfig({
       outDir: "dist-electron",
       dts: false,
       sourcemap: true,
-      minify,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/boot.ts", "src/compileCache.ts"],
       clean: false,
@@ -108,7 +103,6 @@ export default defineConfig({
       outDir: "dist-electron",
       dts: false,
       sourcemap: true,
-      minify,
       outExtensions: () => ({ js: ".cjs" }),
       define: publicConfigDefine,
       entry: ["src/preload.ts"],
@@ -124,7 +118,6 @@ export default defineConfig({
       outDir: "dist-electron",
       dts: false,
       sourcemap: true,
-      minify,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/preview-pick-preload.ts"],
       deps: {
@@ -136,7 +129,6 @@ export default defineConfig({
       outDir: "dist-electron",
       dts: false,
       sourcemap: true,
-      minify,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/preview-pip-preload.ts"],
     },
@@ -146,7 +138,6 @@ export default defineConfig({
       outDir: "dist-electron",
       dts: false,
       sourcemap: true,
-      minify,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/mac-permission-preload.ts"],
     },

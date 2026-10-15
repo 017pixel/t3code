@@ -272,8 +272,6 @@ overrides:
   "@types/ws@^8": "catalog:"
   "undici@^8": "catalog:"
   "ws@^8": "catalog:"
-  # The updater otherwise bundles a second semver 7 beside the desktop services.
-  "semver@^7": 7.8.5
   vite: "catalog:"
   vite-plus: "catalog:"
   yaml: "catalog:"
