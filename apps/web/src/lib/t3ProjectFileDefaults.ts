@@ -1,9 +1,4 @@
-import {
-  DEFAULT_SERVER_SETTINGS,
-  T3_PROJECT_FILE_NAME,
-  type EnvironmentId,
-  type T3ProjectFile,
-} from "@t3tools/contracts";
+import { T3_PROJECT_FILE_NAME, type EnvironmentId, type T3ProjectFile } from "@t3tools/contracts";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { resolveNewThreadEnvMode, resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
@@ -17,7 +12,10 @@ import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { readProject, readThreadShells } from "~/state/entities";
 import { environmentSession } from "~/state/session";
-import { resolveNewDraftStartFromOrigin } from "./chatThreadActions";
+import {
+  hasExplicitComposerModelSelection,
+  resolveNewDraftStartFromOrigin,
+} from "./chatThreadActions";
 
 /**
  * Read and decode the project's checked-in `t3.json`.
@@ -55,7 +53,15 @@ export async function completeDraftWorkspaceDefaults(draftId: DraftId): Promise<
   if (!draft?.workspaceDefaultsPending) return;
   const project = readProject(scopeProjectRef(draft.environmentId, draft.projectId));
   if (project === null) return;
-  const projectFile = await readT3ProjectFile(project.environmentId, project.workspaceRoot);
+  const config = appAtomRegistry.get(
+    environmentSession.initialConfigValueAtom(draft.environmentId),
+  );
+  if (config === null) return;
+  const projectFile =
+    resolveProjectSettings(config.settings, project.id, project).settings.defaultThreadEnvMode ===
+    null
+      ? await readT3ProjectFile(project.environmentId, project.workspaceRoot)
+      : null;
   const current = store.getDraftSession(draftId);
   if (
     !current?.workspaceDefaultsPending ||
@@ -64,24 +70,26 @@ export async function completeDraftWorkspaceDefaults(draftId: DraftId): Promise<
     readProject(scopeProjectRef(draft.environmentId, draft.projectId)) === null
   )
     return;
-  const config = appAtomRegistry.get(
-    environmentSession.initialConfigValueAtom(draft.environmentId),
-  );
-  const projectSettings = resolveProjectSettings(
-    config?.settings ?? DEFAULT_SERVER_SETTINGS,
-    project.id,
-    project,
-    projectFile,
-  );
+  const projectSettings = resolveProjectSettings(config.settings, project.id, project, projectFile);
   const envMode = resolveNewThreadEnvMode({
     projectSettings,
     workspaceRoot: project.workspaceRoot,
-    newProjectsRoot: config?.newProjectsRoot,
+    newProjectsRoot: config.newProjectsRoot,
     projectHasThreads: readThreadShells().some(
       (thread) =>
         thread.environmentId === draft.environmentId && thread.projectId === draft.projectId,
     ),
   });
+  // Automatic landing drafts have no carried model. Reapply live defaults,
+  // preserving any model the user explicitly picked while connecting.
+  if (!hasExplicitComposerModelSelection(store.getComposerDraft(draftId))) {
+    store.applyStickyState(draftId);
+    if (projectSettings.settings.defaultModelSelection) {
+      store.setModelSelection(draftId, projectSettings.settings.defaultModelSelection, {
+        replaceOptions: true,
+      });
+    }
+  }
   store.setDraftThreadContext(draftId, {
     envMode,
     startFromOrigin: resolveNewDraftStartFromOrigin({

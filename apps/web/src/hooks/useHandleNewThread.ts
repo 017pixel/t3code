@@ -165,7 +165,8 @@ export function useNewThreadHandler() {
       const resolveDefaultEnvMode = async (): Promise<DraftThreadEnvMode> => {
         const consultProjectFile =
           project !== undefined && projectSettings.settings.defaultThreadEnvMode === null;
-        workspaceDefaultsPending = consultProjectFile && options?.deferWorkspaceDefaults === true;
+        workspaceDefaultsPending =
+          project !== undefined && options?.deferWorkspaceDefaults === true;
         const projectFile =
           consultProjectFile && !workspaceDefaultsPending
             ? await readT3ProjectFile(project.environmentId, project.workspaceRoot)
