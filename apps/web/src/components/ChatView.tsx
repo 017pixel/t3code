@@ -180,7 +180,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import { assistantCitationFromLocation } from "../lib/assistantCitationNavigation";
 import { isMacPlatform } from "../lib/utils";
 import { queryShownElement } from "../lib/shownElement";
-import { diffPanelSurface, filePreviewSurface, terminalDrawerSurface } from "./lazySurfaces";
+import { diffPanelSurface, terminalDrawerSurface } from "./lazySurfaces";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -479,7 +479,6 @@ import {
 } from "./chat/PanelLayoutControls";
 import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import type { ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
-import { ThreadDetailsCard } from "./chat/ThreadDetailsCard";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import {
   type EnvironmentOption,
@@ -730,7 +729,7 @@ const selectAutoShowFloatingPreview = (settings: { browserAutoShowFloatingPrevie
 const DevicePanel = lazy(() =>
   import("./device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
-const FilePreviewPanel = filePreviewSurface.Component;
+const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 // Panels that only some threads open load on first use, keeping them out of the
 // chunks that must arrive before the composer can paint.
 const LazyPullRequestDetailPanel = lazy(() =>
@@ -761,27 +760,9 @@ const ThreadPreviewMiniPlayer = lazy(() =>
     default: module.ThreadPreviewMiniPlayer,
   })),
 );
-const ThreadDetailsPanelContent = lazy(() =>
-  import("./chat/ThreadDetailsPanel").then((module) => ({
-    default: module.ThreadDetailsPanelContent,
-  })),
+const ThreadDetailsPanel = lazy(() =>
+  import("./chat/ThreadDetailsPanel").then((module) => ({ default: module.ThreadDetailsPanel })),
 );
-function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
-  return (
-    <ThreadDetailsCard
-      threadRef={{ environmentId: props.environmentId, threadId: props.threadId }}
-      anchor={props.anchor}
-      handle={props.handle}
-      onPresentationChange={props.onPresentationChange}
-    >
-      {(density) => (
-        <Suspense fallback={null}>
-          <ThreadDetailsPanelContent {...props} density={density} />
-        </Suspense>
-      )}
-    </ThreadDetailsCard>
-  );
-}
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
@@ -828,11 +809,9 @@ type EnvironmentUnavailableState = {
 function eventPathContainsSelector(event: Event, selector: string): boolean {
   const path = event.composedPath();
   if (path.length === 0 && event.target) {
-    return event.target instanceof Element && event.target.closest(selector) !== null;
+    path.push(event.target);
   }
-  // The composed path already lists every ancestor, so one match per entry
-  // covers what `closest` from each entry would.
-  return path.some((target) => target instanceof Element && target.matches(selector));
+  return path.some((target) => target instanceof Element && target.closest(selector));
 }
 
 const SECRET_REQUEST_SELECTOR = '[data-v2-item-type="secret_request"]';
@@ -1904,21 +1883,18 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timestampFormat = settings.timestampFormat;
   const navigate = useNavigate();
-  // Unrelated navigation must not re-render this view.
   const citationLocation = useLocation({
-    select: (location) => {
-      const citation = assistantCitationFromLocation(location.href);
-      if (citation?.environmentId !== environmentId || citation.threadId !== threadId) return null;
-      const key = location.state.assistantCitationActivation ?? location.state.__TSR_key;
-      return `${key ?? location.href}\u0000${location.href}`;
-    },
+    select: (location) => ({
+      href: location.href,
+      key: location.state.assistantCitationActivation ?? location.state.__TSR_key,
+    }),
   });
   const citationRequest = useMemo<AssistantCitationRequest | null>(() => {
-    if (citationLocation === null) return null;
-    const separator = citationLocation.indexOf("\u0000");
-    const citation = assistantCitationFromLocation(citationLocation.slice(separator + 1));
-    return citation ? { citation, key: citationLocation.slice(0, separator) } : null;
-  }, [citationLocation]);
+    const citation = assistantCitationFromLocation(citationLocation.href);
+    return citation && citation.environmentId === environmentId && citation.threadId === threadId
+      ? { citation, key: citationLocation.key ?? citationLocation.href }
+      : null;
+  }, [citationLocation.href, citationLocation.key, environmentId, threadId]);
   const { resolvedTheme } = useTheme();
   // Granular store selectors — avoid subscribing to prompt changes.
   const composerRuntimeMode = useComposerDraftStore(
@@ -2086,7 +2062,7 @@ export default function ChatView(props: ChatViewProps) {
     useState<Record<string, number>>({});
   const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const isMobileViewport = useMediaQuery("max-sm");
-  const workspaceLayoutRef = useRef<HTMLDivElement | null>(null);
+  const [workspaceLayoutElement, setWorkspaceLayoutElement] = useState<HTMLDivElement | null>(null);
   const threadPanelPopoverAnchorRef = useRef<HTMLElement | null>(null);
   // Tracks whether the user explicitly dismissed the sidebar for the active turn.
   // When set, the thread-change reset effect will open the sidebar instead of closing it.
@@ -2116,7 +2092,7 @@ export default function ChatView(props: ChatViewProps) {
     () => legendListRef.current?.getScrollableNode() ?? null,
     [],
   );
-  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
+  const [composerOverlayElement, setComposerOverlayElement] = useElementState<HTMLDivElement>();
   // Space the timeline keeps clear above its end. Tracks the overlay while the
   // composer is expanded and holds that height while it rests, so the resting
   // composer never exposes rows that its expansion will cover.
@@ -2262,7 +2238,6 @@ export default function ChatView(props: ChatViewProps) {
   );
   const isServerThread = serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
-  const hasActiveThread = activeThread != null;
   const serverLatestRun = useMemo(
     () => (serverProjection === null ? null : deriveLatestThreadRun(serverProjection)),
     [serverProjection],
@@ -2407,8 +2382,7 @@ export default function ChatView(props: ChatViewProps) {
   // Electron hosts its own browser tabs; other clients need the environment to host them.
   const browserAvailable = isPreviewSupportedInRuntime() || activeEnvironmentServerBrowser;
   const previewPanelInlineSize = usePreviewPanelInlineSize(undefined, {
-    enabled: hasActiveThread,
-    containerRef: workspaceLayoutRef,
+    container: workspaceLayoutElement,
     widthStorageKey: `t3code:preview-panel-width:${activeThreadKey}`,
   });
   const activeThreadShell = useThreadShell(isServerThread ? activeThreadRef : null);
@@ -6705,8 +6679,7 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     const controller = createPageScrollController({
       getContainer: () => legendListRef.current?.getScrollableNode() ?? null,
-      getScrollPaddingBottomPx: () =>
-        composerOverlayRef.current?.getBoundingClientRect().height ?? 0,
+      getScrollPaddingBottomPx: () => composerOverlayElement?.getBoundingClientRect().height ?? 0,
       onScrollStart: handlePageScrollStart,
     });
     pageScrollControllerRef.current = controller;
@@ -6717,7 +6690,7 @@ export default function ChatView(props: ChatViewProps) {
         pageScrollControllerRef.current = null;
       }
     };
-  }, []);
+  }, [composerOverlayElement]);
   const onComposerPageScrollKeyDown = useCallback((key: PageScrollKey) => {
     pageScrollControllerRef.current?.handleKeyDown(key);
   }, []);
@@ -7204,59 +7177,61 @@ export default function ChatView(props: ChatViewProps) {
         : null,
     [activeThreadBranch, activeWorktreePath, envMode, gitStatusQuery.data?.refName, isServerThread],
   );
-  const publishComposerOverlayHeight = useCallback((height: number) => {
-    const composerOverlayElement = composerOverlayRef.current;
-    const nextHeight = Math.ceil(height);
-    if (nextHeight <= 0) return;
-    const isResting = overlayComposerIsResting({
-      composerMounted: composerMountedRef.current,
-      composerReportedResting: composerRestingRef.current,
-    });
-    const modelStrip = composerOverlayElement?.querySelector<HTMLElement>(
-      '[data-composer-model-strip="true"]',
-    );
-    // The model-only strip disappears on expansion; counting it again would
-    // add 32px of timeline padding as soon as the empty composer collapses.
-    const restingOnlyHeight =
-      modelStrip && isResting
-        ? Math.max(
-            0,
-            modelStrip.offsetHeight + Number.parseFloat(getComputedStyle(modelStrip).marginTop),
-          )
-        : 0;
-    const nextInset = resolveComposerTimelineInset({
-      currentInset: composerTimelineInsetRef.current,
-      overlayHeight: nextHeight,
-      isResting,
-      restingOnlyHeight,
-    });
-    if (composerTimelineInsetRef.current !== nextInset) {
-      composerTimelineInsetRef.current = nextInset;
-      lastComposerTimelineInset = nextInset;
-      setComposerTimelineInset(nextInset);
-    }
-    const mainSurface = composerOverlayElement?.querySelector<HTMLElement>(
-      '[data-chat-composer-main-surface="true"]',
-    );
-    const button = composerOverlayElement?.parentElement?.querySelector<HTMLElement>(
-      'button[aria-label="Scroll to end"]',
-    );
-    const clearance =
-      composerOverlayElement && mainSurface && button
-        ? resolveScrollToEndClearance({
-            overlayHeight: nextHeight,
-            mainSurfaceTop: mainSurface.getBoundingClientRect().top,
-            button: button.getBoundingClientRect(),
-            attachments: Array.from(
-              composerOverlayElement.querySelectorAll<HTMLElement>(
-                '[data-composer-banner-surface="attached"]',
+  const publishComposerOverlayHeight = useCallback(
+    (height: number) => {
+      const nextHeight = Math.ceil(height);
+      if (nextHeight <= 0) return;
+      const isResting = overlayComposerIsResting({
+        composerMounted: composerMountedRef.current,
+        composerReportedResting: composerRestingRef.current,
+      });
+      const modelStrip = composerOverlayElement?.querySelector<HTMLElement>(
+        '[data-composer-model-strip="true"]',
+      );
+      // The model-only strip disappears on expansion; counting it again would
+      // add 32px of timeline padding as soon as the empty composer collapses.
+      const restingOnlyHeight =
+        modelStrip && isResting
+          ? Math.max(
+              0,
+              modelStrip.offsetHeight + Number.parseFloat(getComputedStyle(modelStrip).marginTop),
+            )
+          : 0;
+      const nextInset = resolveComposerTimelineInset({
+        currentInset: composerTimelineInsetRef.current,
+        overlayHeight: nextHeight,
+        isResting,
+        restingOnlyHeight,
+      });
+      if (composerTimelineInsetRef.current !== nextInset) {
+        composerTimelineInsetRef.current = nextInset;
+        lastComposerTimelineInset = nextInset;
+        setComposerTimelineInset(nextInset);
+      }
+      const mainSurface = composerOverlayElement?.querySelector<HTMLElement>(
+        '[data-chat-composer-main-surface="true"]',
+      );
+      const button = composerOverlayElement?.parentElement?.querySelector<HTMLElement>(
+        'button[aria-label="Scroll to end"]',
+      );
+      const clearance =
+        composerOverlayElement && mainSurface && button
+          ? resolveScrollToEndClearance({
+              overlayHeight: nextHeight,
+              mainSurfaceTop: mainSurface.getBoundingClientRect().top,
+              button: button.getBoundingClientRect(),
+              attachments: Array.from(
+                composerOverlayElement.querySelectorAll<HTMLElement>(
+                  '[data-composer-banner-surface="attached"]',
+                ),
+                (element) => element.getBoundingClientRect(),
               ),
-              (element) => element.getBoundingClientRect(),
-            ),
-          })
-        : nextHeight;
-    setScrollToEndClearance(clearance);
-  }, []);
+            })
+          : nextHeight;
+      setScrollToEndClearance(clearance);
+    },
+    [composerOverlayElement],
+  );
   // The composer reports its resting flag from a layout effect, which runs
   // before this component's own layout effects and before any resize
   // observation, so every measurement below sees the flag for its layout.
@@ -7269,14 +7244,12 @@ export default function ChatView(props: ChatViewProps) {
   // A held reservation belongs to the previous thread's draft. Rebuild it from
   // this thread's overlay so a tall draft elsewhere does not pad this one.
   useLayoutEffect(() => {
-    const composerOverlayElement = composerOverlayRef.current;
     if (!composerOverlayElement) return;
     composerTimelineInsetRef.current = 0;
     publishComposerOverlayHeight(composerOverlayElement.getBoundingClientRect().height);
-  }, [activeThreadKey, hasActiveThread, publishComposerOverlayHeight]);
+  }, [activeThreadKey, composerOverlayElement, publishComposerOverlayHeight]);
 
   useLayoutEffect(() => {
-    const composerOverlayElement = composerOverlayRef.current;
     if (!composerOverlayElement) return;
 
     const updateHeight = () => {
@@ -7285,17 +7258,16 @@ export default function ChatView(props: ChatViewProps) {
 
     updateHeight();
     return observeResize(composerOverlayElement, updateHeight);
-  }, [hasActiveThread, publishComposerOverlayHeight, showScrollToBottom]);
+  }, [composerOverlayElement, publishComposerOverlayHeight, showScrollToBottom]);
   // Swapping the composer for the status bar (or back) changes what the
   // overlay holds, so rebuild the reservation from the new content.
   useLayoutEffect(() => {
     if (composerMountedRef.current === composerMounted) return;
     composerMountedRef.current = composerMounted;
-    const composerOverlayElement = composerOverlayRef.current;
     if (!composerOverlayElement) return;
     composerTimelineInsetRef.current = 0;
     publishComposerOverlayHeight(composerOverlayElement.getBoundingClientRect().height);
-  }, [composerMounted, publishComposerOverlayHeight]);
+  }, [composerMounted, composerOverlayElement, publishComposerOverlayHeight]);
   const openPanelPullRequestUrl = useOpenPanelPullRequestUrl(activeThreadRef);
   const activeThreadReferenceCopyTarget = useMemo(
     () =>
@@ -11662,7 +11634,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const content = (
     <div
-      ref={workspaceLayoutRef}
+      ref={setWorkspaceLayoutElement}
       className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background"
     >
       <Dialog
@@ -11752,7 +11724,7 @@ export default function ChatView(props: ChatViewProps) {
             controlsRef={threadFindControlsRef}
             onOpenChange={setIsThreadFindActive}
             detailsCardTopInset={isThreadFindActive ? THREAD_FIND_BAR_RESERVED_HEIGHT : 0}
-            composerOverlayRef={isDraftHeroState ? null : composerOverlayRef}
+            composerOverlayElement={isDraftHeroState ? null : composerOverlayElement}
             data-chat-workspace-drop-target="true"
             onDragEnter={workspaceFileDropHandlers.onDragEnter}
             onDragOver={workspaceFileDropHandlers.onDragOver}
@@ -11942,7 +11914,7 @@ export default function ChatView(props: ChatViewProps) {
 
             {/* Input bar — centered for an empty draft, docked after sending. */}
             <div
-              ref={composerOverlayRef}
+              ref={setComposerOverlayElement}
               inert={isRevertingCheckpoint}
               data-chat-composer-overlay="true"
               className={
@@ -12312,7 +12284,9 @@ export default function ChatView(props: ChatViewProps) {
               </AlertDialogPopup>
             </AlertDialog>
 
-            <ThreadDetailsPanel {...threadDetailsPanelProps} />
+            <Suspense fallback={null}>
+              <ThreadDetailsPanel {...threadDetailsPanelProps} />
+            </Suspense>
 
             {pullRequestDialogState ? (
               <PullRequestThreadDialog

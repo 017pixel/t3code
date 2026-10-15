@@ -23,7 +23,7 @@ import * as Socket from "effect/socket/Socket";
 import { authenticateMediaRequest } from "../auth/http.ts";
 import { assetResponseHeaders } from "../http.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
-import * as ServerBrowser from "./ServerBrowserTag.ts";
+import * as ServerBrowser from "./ServerBrowser.ts";
 
 const PREVIEW_STREAM_ROUTE_PREFIX = "/api/preview-stream";
 /** Matches `PREVIEW_STREAM_TAB_GONE_CODE` in the client. */

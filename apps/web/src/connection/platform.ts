@@ -28,7 +28,6 @@ import {
   type DesktopEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   type EnvironmentId,
-  type ExecutionEnvironmentDescriptor,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -38,6 +37,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/http";
 import { Atom } from "effect/reactivity";
@@ -343,53 +343,19 @@ const layerCapabilities = Layer.effectContext(
   }),
 );
 
-let primaryDescriptorPrefetchStarted = false;
-let primaryDescriptorPrefetch: {
-  readonly httpBaseUrl: string;
-  readonly startedAt: number;
-  readonly settled: Promise<ExecutionEnvironmentDescriptor | null>;
-} | null = null;
-
-// Start discovery before route chunks occupy the browser's connections.
-export function prefetchPrimaryEnvironmentDescriptor(): void {
-  if (primaryDescriptorPrefetchStarted) return;
-  primaryDescriptorPrefetchStarted = true;
-  const read = readPrimaryEnvironmentTargetResult();
-  if (read._tag === "Failure" || read.target === null) return;
-  const httpBaseUrl = read.target.target.httpBaseUrl;
-  primaryDescriptorPrefetch = {
-    httpBaseUrl,
-    startedAt: Date.now(),
-    settled: Effect.runPromise(
-      fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
-        Effect.provide(PrimaryEnvironmentHttpLayer.layer),
-      ),
-    ).catch(() => null),
-  };
-}
-
-const PREFETCHED_DESCRIPTOR_MAX_AGE_MS = 10_000;
+const DESKTOP_PRIMARY_TARGET_KEY = "t3code:desktop-primary-target:v1";
+const DesktopPrimaryTargetJson = Schema.fromJsonString(PrimaryConnectionTarget);
 
 const loadPrimaryConnectionRegistration = Effect.fn(
   "web.connectionPlatform.loadPrimaryConnectionRegistration",
 )(function* (resolved: PrimaryEnvironmentTarget) {
-  const prefetch = primaryDescriptorPrefetch;
-  primaryDescriptorPrefetch = null;
-  const now = yield* Clock.currentTimeMillis;
-  const prefetched =
-    prefetch?.httpBaseUrl === resolved.target.httpBaseUrl &&
-    now - prefetch.startedAt <= PREFETCHED_DESCRIPTOR_MAX_AGE_MS
-      ? yield* Effect.promise(() => prefetch.settled)
-      : null;
-  const descriptor =
-    prefetched ??
-    (yield* fetchRemoteEnvironmentDescriptor({
-      httpBaseUrl: resolved.target.httpBaseUrl,
-    }).pipe(
-      Effect.provide(PrimaryEnvironmentHttpLayer.layer),
-      Effect.mapError(mapRemoteEnvironmentError),
-    ));
-  return new PrimaryConnectionRegistration({
+  const descriptor = yield* fetchRemoteEnvironmentDescriptor({
+    httpBaseUrl: resolved.target.httpBaseUrl,
+  }).pipe(
+    Effect.provide(PrimaryEnvironmentHttpLayer.layer),
+    Effect.mapError(mapRemoteEnvironmentError),
+  );
+  const registration = new PrimaryConnectionRegistration({
     target: new PrimaryConnectionTarget({
       environmentId: descriptor.environmentId,
       label: descriptor.label,
@@ -397,6 +363,15 @@ const loadPrimaryConnectionRegistration = Effect.fn(
       wsBaseUrl: resolved.target.wsBaseUrl,
     }),
   });
+  if (window.desktopBridge) {
+    yield* Schema.encodeEffect(DesktopPrimaryTargetJson)(registration.target).pipe(
+      Effect.flatMap((encoded) =>
+        Effect.try(() => localStorage.setItem(DESKTOP_PRIMARY_TARGET_KEY, encoded)),
+      ),
+      Effect.catch(() => Effect.void),
+    );
+  }
+  return registration;
 });
 
 // A desktop-local secondary backend (e.g. a parallel WSL backend) lives on its
@@ -469,14 +444,6 @@ const SECONDARY_BEARER_REFRESH_SKEW_MS = 5_000;
 export const primaryEnvironmentMissingAtom = Atom.make(false).pipe(
   Atom.keepAlive,
   Atom.withLabel("web-primary-environment-missing"),
-);
-
-const NO_DESKTOP_LOCAL_BACKENDS: ReadonlySet<string> = new Set();
-
-// Pending, non-rejected desktop backends keep their boot entries until discovery settles.
-export const discoverableDesktopLocalBackendsAtom = Atom.make(NO_DESKTOP_LOCAL_BACKENDS).pipe(
-  Atom.keepAlive,
-  Atom.withLabel("web-discoverable-desktop-local-backends"),
 );
 
 export function secondaryBearerExpiresAtEpochMs(
@@ -625,6 +592,20 @@ const layerPlatformConnectionSource = Layer.effect(
         registrations: Stream.empty,
       });
     }
+    const cachedTarget = window.desktopBridge
+      ? yield* Effect.try(() => localStorage.getItem(DESKTOP_PRIMARY_TARGET_KEY)).pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(DesktopPrimaryTargetJson)),
+          Effect.option,
+        )
+      : Option.none();
+    const primary = readPrimaryEnvironmentTargetResult();
+    const cachedRegistrations =
+      Option.isSome(cachedTarget) &&
+      primary._tag === "Success" &&
+      cachedTarget.value.httpBaseUrl === primary.target?.target.httpBaseUrl &&
+      cachedTarget.value.wsBaseUrl === primary.target.target.wsBaseUrl
+        ? [new PrimaryConnectionRegistration({ target: cachedTarget.value })]
+        : [];
     const cacheRef = yield* Ref.make(new Map<string, CachedPlatformRegistration>());
     const rejectedRef = yield* Ref.make(new Map<string, RejectedSecondaryBootstrap>());
 
@@ -781,16 +762,6 @@ const layerPlatformConnectionSource = Layer.effect(
           }
         }
         yield* Ref.set(rejectedRef, nextRejected);
-        const discoverable = topologyRead.bootstraps
-          .map((bootstrap) => bootstrap.id)
-          .filter((id) => !nextRejected.has(id));
-        const previousDiscoverable = appAtomRegistry.get(discoverableDesktopLocalBackendsAtom);
-        if (
-          discoverable.length !== previousDiscoverable.size ||
-          discoverable.some((id) => !previousDiscoverable.has(id))
-        ) {
-          appAtomRegistry.set(discoverableDesktopLocalBackendsAtom, new Set(discoverable));
-        }
       }
 
       yield* Ref.set(cacheRef, next);
@@ -802,8 +773,13 @@ const layerPlatformConnectionSource = Layer.effect(
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
     return PlatformConnectionSource.PlatformConnectionSource.of({
-      registrations: Stream.tick(PLATFORM_POLL_INTERVAL).pipe(
-        Stream.mapEffect(() => buildPlatformRegistrations),
+      // Publish only the native endpoint's identity early. The normal discovery
+      // stream replaces it, and the connection resolver checks its environment id.
+      registrations: Stream.concat(
+        Stream.fromIterable(cachedRegistrations.length > 0 ? [cachedRegistrations] : []),
+        Stream.tick(PLATFORM_POLL_INTERVAL).pipe(
+          Stream.mapEffect(() => buildPlatformRegistrations),
+        ),
       ),
     });
   }),

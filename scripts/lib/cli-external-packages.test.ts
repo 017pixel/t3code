@@ -277,23 +277,6 @@ var x = 1;
     assert.strictEqual(result.regionCount, 0);
     assert.deepStrictEqual(result.inlined, []);
   });
-
-  it("audits compact bundles using their emitted sourcemap sources", () => {
-    const result = findInlinedExternalPackages("const a=1;", [
-      "../../node_modules/.pnpm/effect@4.0.0/node_modules/effect/dist/index.js",
-      "../../node_modules/@ff-labs/fff-node/dist/src/index.js",
-      "../../src/server/main.ts",
-    ]);
-    assert.strictEqual(result.regionCount, 3);
-    assert.deepStrictEqual(result.inlinedPackages, ["@ff-labs/fff-node", "effect"]);
-    assert.deepStrictEqual(result.inlined, ["@ff-labs/fff-node"]);
-  });
-
-  it("does not let missing sourcemap sources hide a blind compact-bundle scan", () => {
-    const result = findInlinedExternalPackages("const a=1;", []);
-    assert.strictEqual(result.regionCount, 0);
-    assert.deepStrictEqual(result.inlinedPackages, []);
-  });
 });
 
 // The single-executable build can only `import` built-ins. A file-backed

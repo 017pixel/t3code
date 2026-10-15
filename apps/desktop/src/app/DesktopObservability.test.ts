@@ -396,7 +396,7 @@ describe("DesktopObservability", () => {
     ),
   );
 
-  it.effect("exports main process log records to the configured logs endpoint", () => {
+  it.effect("exports log records after a stalled collector times out", () => {
     const requests: Array<ExportedRequest> = [];
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -406,6 +406,7 @@ describe("DesktopObservability", () => {
       const layerEnvironment = layerEnvironmentFor(baseDir, true, {
         T3CODE_OTLP_LOGS_URL: "https://collector.example.com/v1/logs",
         T3CODE_OTLP_HEADERS: "x-scope=desktop",
+        T3CODE_OTLP_EXPORT_INTERVAL_MS: "1000",
       });
       const tracePath = yield* Effect.gen(function* () {
         const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -413,14 +414,21 @@ describe("DesktopObservability", () => {
       }).pipe(Effect.provide(layerEnvironment));
 
       yield* Effect.scoped(
-        Effect.logInfo("desktop log export").pipe(
-          Effect.withSpan("desktop-log-export-test"),
+        Effect.gen(function* () {
+          yield* Effect.logInfo("before the stall");
+          for (let second = 0; second < 15; second += 1) yield* TestClock.adjust("1 second");
+          yield* Effect.logInfo("desktop log export").pipe(
+            Effect.withSpan("desktop-log-export-test"),
+          );
+          for (let second = 0; second < 5; second += 1) yield* TestClock.adjust("1 second");
+          // Before shutdown, whose flush could hide a stuck exporter.
+          assert.isTrue(requests.some((request) => request.body.includes("desktop log export")));
+        }).pipe(
           Effect.provide(DesktopObservability.layer.pipe(Layer.provideMerge(layerEnvironment))),
         ),
       );
 
-      assert.lengthOf(requests, 1);
-      const [request] = requests;
+      const request = requests.find((value) => value.body.includes("desktop log export"));
       assert.strictEqual(request?.url, "https://collector.example.com/v1/logs");
       assert.include(request?.body ?? "", "desktop log export");
       assert.include(request?.body ?? "", "service.runtime");
@@ -436,36 +444,6 @@ describe("DesktopObservability", () => {
         .find((entry) => entry.name === "desktop-log-export-test");
       assert.notEqual(record, undefined);
       assert.lengthOf(record?.events ?? [], 0);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(Layer.mergeAll(NodeServices.layer, layerCollector(requests), layerEmptyEnv)),
-    );
-  });
-
-  it.effect("keeps exporting after the collector never answers an export", () => {
-    const requests: Array<ExportedRequest> = [];
-    return Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-observability-test-",
-      });
-      const layerEnvironment = layerEnvironmentFor(baseDir, true, {
-        T3CODE_OTLP_LOGS_URL: "https://collector.example.com/v1/logs",
-        T3CODE_OTLP_EXPORT_INTERVAL_MS: "1000",
-      });
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Effect.logInfo("before the stall");
-          for (let second = 0; second < 15; second += 1) yield* TestClock.adjust("1 second");
-          yield* Effect.logInfo("after the stall");
-          for (let second = 0; second < 5; second += 1) yield* TestClock.adjust("1 second");
-          // Checked before shutdown, whose own flush would send the record.
-          assert.isTrue(requests.some((request) => request.body.includes("after the stall")));
-        }).pipe(
-          Effect.provide(DesktopObservability.layer.pipe(Layer.provideMerge(layerEnvironment))),
-        ),
-      );
     }).pipe(
       Effect.scoped,
       Effect.provide(

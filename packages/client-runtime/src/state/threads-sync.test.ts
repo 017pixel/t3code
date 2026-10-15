@@ -110,6 +110,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   readonly resumeCache?: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]>;
   readonly loadCached?: ReturnType<Persistence.EnvironmentCacheStore["Service"]["loadThread"]>;
   readonly saveThread?: Persistence.EnvironmentCacheStore["Service"]["saveThread"];
+  readonly removeThread?: Persistence.EnvironmentCacheStore["Service"]["removeThread"];
   readonly historyPaging?: "enabled" | "no-http" | "no-controller";
   readonly historyHttpClient?: HttpClient.HttpClient;
 }) {
@@ -214,7 +215,9 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
         Effect.andThen(options?.saveThread?.(environmentId, thread) ?? Effect.void),
       ),
     removeThread: (_environmentId, threadId) =>
-      Ref.update(removedThreads, (current) => [...current, threadId]),
+      Ref.update(removedThreads, (current) => [...current, threadId]).pipe(
+        Effect.andThen(options?.removeThread?.(_environmentId, threadId) ?? Effect.void),
+      ),
     loadServerConfig: () => Effect.succeedNone,
     saveServerConfig: () => Effect.void,
     loadVcsRefs: () => Effect.succeedNone,
@@ -500,35 +503,31 @@ describe("EnvironmentThreads", () => {
     Effect.gen(function* () {
       const writing = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
-      const removed = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const h = yield* makeHarness({
-            cached: BASE_PROJECTION,
-            saveThread: (_environmentId, snapshot) =>
-              snapshot.snapshotSequence === 8
-                ? Deferred.succeed(writing, undefined).pipe(Effect.andThen(Deferred.await(release)))
-                : Effect.void,
-          });
-          yield* Queue.offer(h.inputs, titleUpdated("Before deletion", 8));
-          yield* awaitThreadState(
-            h.observed,
-            (value) => Option.getOrNull(value.data)?.thread.title === "Before deletion",
-          );
-          yield* TestClock.adjust("500 millis");
-          // The write passed the deleted check and waits, like web's idle wait.
-          yield* Deferred.await(writing);
-          yield* Queue.offer(h.inputs, deleted(9));
-          yield* awaitThreadState(h.observed, (value) => value.status === "deleted");
-          expect(yield* Ref.get(h.removedThreads)).toEqual([THREAD_ID]);
-          yield* Deferred.succeed(release, undefined);
-          for (let attempt = 0; attempt < 100; attempt += 1) {
-            if ((yield* Ref.get(h.removedThreads)).length >= 2) break;
-            yield* Effect.yieldNow;
-          }
-          return h.removedThreads;
-        }),
+      const removed = yield* Deferred.make<void>();
+      let removals = 0;
+      const h = yield* makeHarness({
+        cached: BASE_PROJECTION,
+        saveThread: (_environmentId, snapshot) =>
+          snapshot.snapshotSequence === 8
+            ? Deferred.succeed(writing, undefined).pipe(Effect.andThen(Deferred.await(release)))
+            : Effect.void,
+        removeThread: () =>
+          Effect.suspend(() =>
+            ++removals === 2 ? Deferred.succeed(removed, undefined) : Effect.void,
+          ),
+      });
+      yield* Queue.offer(h.inputs, titleUpdated("Before deletion", 8));
+      yield* awaitThreadState(
+        h.observed,
+        (value) => Option.getOrNull(value.data)?.thread.title === "Before deletion",
       );
-      expect(yield* Ref.get(removed)).toEqual([THREAD_ID, THREAD_ID]);
+      yield* TestClock.adjust("500 millis");
+      yield* Deferred.await(writing);
+      yield* Queue.offer(h.inputs, deleted(9));
+      yield* awaitThreadState(h.observed, (value) => value.status === "deleted");
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(removed);
+      expect(yield* Ref.get(h.removedThreads)).toEqual([THREAD_ID, THREAD_ID]);
     }),
   );
 

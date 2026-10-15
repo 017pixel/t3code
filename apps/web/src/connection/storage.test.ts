@@ -136,114 +136,47 @@ describe("ConnectionStorage.makeCatalogBackend", () => {
 });
 
 describe("environment cache removal", () => {
-  it.effect("restores local turn items from a compact thread cache", () =>
-    Effect.gen(function* () {
-      vi.stubGlobal("window", {});
-      const values = new Map<IDBValidKey, unknown>();
-      const database = Object.assign(new EventTarget(), {
-        close: vi.fn(),
-        transaction: () => {
-          const transaction = new EventTarget();
-          return Object.assign(transaction, {
-            objectStore: () => ({
-              get: (key: IDBValidKey) => {
-                const request = Object.assign(new EventTarget(), {
-                  result: values.get(key),
-                  error: null,
-                });
-                queueMicrotask(() => request.dispatchEvent(new Event("success")));
-                return request;
-              },
-              put: (value: unknown, key: IDBValidKey) => {
-                values.set(key, value);
-                queueMicrotask(() => transaction.dispatchEvent(new Event("complete")));
-              },
-            }),
-          });
-        },
-      });
-      vi.stubGlobal("indexedDB", {
-        open: () => {
-          const request = Object.assign(new EventTarget(), { result: database, error: null });
-          queueMicrotask(() => request.dispatchEvent(new Event("success")));
-          return request;
-        },
-      });
-      const v2Projection = makeThreadProjectionFixture();
-      const v2Now = v2Projection.updatedAt;
-      const item = {
-        ...makeStreamingTimelineFixture().visibleTurnItems[2]!.item,
-        threadId: v2Projection.thread.id,
-      };
-      const projection = {
-        ...v2Projection,
-        turnItems: [item],
-        visibleTurnItems: [
-          {
-            position: 0,
-            visibility: "local" as const,
-            sourceThreadId: item.threadId,
-            sourceItemId: item.id,
-            item,
+  it.effect("compacts snapshots and reads legacy caches without discarding future formats", () => {
+    vi.stubGlobal("window", {});
+    const values = new Map<IDBValidKey, unknown>();
+    const request = (result: unknown) => {
+      const value = Object.assign(new EventTarget(), { result, error: null });
+      queueMicrotask(() => value.dispatchEvent(new Event("success")));
+      return value;
+    };
+    const database = Object.assign(new EventTarget(), {
+      close: vi.fn(),
+      transaction: () => {
+        const transaction = new EventTarget();
+        return Object.assign(transaction, { objectStore: () => ({
+          get: (key: IDBValidKey) => request(values.get(key)),
+          put: (value: unknown, key: IDBValidKey) => {
+            values.set(key, value);
+            queueMicrotask(() => transaction.dispatchEvent(new Event("complete")));
           },
-        ],
-      };
-      yield* Effect.gen(function* () {
-        const cache = yield* Persistence.EnvironmentCacheStore;
-        const environmentId = EnvironmentId.make("env");
-        yield* cache.saveThread(environmentId, { snapshotSequence: 1, projection });
-        const loaded = Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId));
-        expect(loaded.projection.turnItems).toEqual([item]);
-        expect(loaded.projection.turnItems[0]).toBe(loaded.projection.visibleTurnItems[0]?.item);
-        expect(loaded.snapshotSequence).toBe(1);
-
-        // Older builds read a plain entry's deferred file lists as "no changes".
-        const deferred = {
-          ...v2Projection,
-          checkpoints: [
-            {
-              id: "checkpoint-deferred" as never,
-              threadId: v2Projection.thread.id,
-              scopeId: "scope" as never,
-              runId: null,
-              nodeId: "node" as never,
-              parentCheckpointId: null,
-              ordinalWithinScope: 1,
-              appRunOrdinal: 1,
-              ref: "refs/t3/deferred" as never,
-              status: "ready" as const,
-              files: [],
-              deferredFileCount: 2,
-              capturedAt: v2Now,
-            },
-          ],
-        };
-        yield* cache.saveThread(environmentId, { snapshotSequence: 2, projection: deferred });
-        expect([...values.values()]).toContainEqual(
-          expect.objectContaining({ format: "compact-thread-1", omitLocal: false }),
-        );
-        const reloaded = Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId));
-        expect(reloaded.projection.checkpoints[0]?.deferredFileCount).toBe(2);
-
-        // Viewport windows look complete to older builds, so even an entry
-        // with nothing compacted uses the envelope.
-        yield* cache.saveThread(environmentId, { snapshotSequence: 3, projection: v2Projection });
-        const entries = [...values.entries()];
-        expect(entries).toHaveLength(1);
-        expect(entries[0]?.[1]).toMatchObject({
-          format: "compact-thread-1",
-          omitLocal: false,
-          checkpointItemIds: [],
-        });
-        // Plain entries written by earlier builds still load.
-        const [key, envelope] = entries[0] as [IDBValidKey, { readonly data: string }];
-        values.set(key, envelope.data);
-        const plain = Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId));
-        expect(plain.snapshotSequence).toBe(3);
-        expect(plain.projection.thread).toEqual(v2Projection.thread);
-      }).pipe(Effect.provide(ConnectionStorage.layer));
-    }),
-  );
+        }) });
+      },
+    });
+    vi.stubGlobal("indexedDB", { open: () => request(database) });
+    return Effect.gen(function* () {
+      const cache = yield* Persistence.EnvironmentCacheStore;
+      const environmentId = EnvironmentId.make("env");
+      const projection = makeThreadProjectionFixture();
+      const item = { ...makeStreamingTimelineFixture().visibleTurnItems[2]!.item, threadId: projection.thread.id };
+      const snapshot = { snapshotSequence: 1, projection: { ...projection, turnItems: [item], visibleTurnItems: [{ position: 0, visibility: "local" as const, sourceThreadId: item.threadId, sourceItemId: item.id, item }] } };
+      yield* cache.saveThread(environmentId, snapshot);
+      const [key, envelope] = [...values.entries()][0] as [IDBValidKey, { data: string; omitLocal: boolean }];
+      expect(envelope).toMatchObject({ format: "compact-thread-1", omitLocal: true });
+      const loaded = Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId));
+      expect(loaded.projection.turnItems).toEqual([item]);
+      expect(loaded.projection.turnItems[0]).toBe(loaded.projection.visibleTurnItems[0]?.item);
+      values.set(key, JSON.stringify({ ...JSON.parse(envelope.data), snapshot }));
+      expect(Option.getOrThrow(yield* cache.loadThread(environmentId, item.threadId)).projection.turnItems).toEqual([item]);
+      values.set(key, { format: "future-cache" });
+      expect(Option.isNone(yield* cache.loadThread(environmentId, item.threadId))).toBe(true);
+      expect(values.get(key)).toEqual({ format: "future-cache" });
+    }).pipe(Effect.provide(ConnectionStorage.layer));
+  });
   it.effect("fails both removal operations when IndexedDB aborts their commits", () =>
     Effect.gen(function* () {
       vi.stubGlobal("window", {});

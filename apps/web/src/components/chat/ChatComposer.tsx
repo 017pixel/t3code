@@ -3147,24 +3147,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ],
   );
 
-  const providerTraitsMenuContent = (
-    <ComposerDraftTraits
-      menu
-      target={composerDraftTarget}
-      {...{
-        provider: selectedProvider,
-        instanceId: selectedInstanceId,
-        ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
-        ...(routeKind === "draft" && draftId ? { draftId } : {}),
-        model: selectedModel,
-        models: selectedProviderModels,
-        modelOptions: composerModelOptions?.[selectedInstanceId],
-        reportedModelSelection,
-        onPromptChange: setPromptFromTraits,
-        planModeEnabled: settings.planModeEnabled,
-      }}
-    />
-  );
   const providerTraitsPickerInput = {
     provider: selectedProvider,
     instanceId: selectedInstanceId,
@@ -3178,6 +3160,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     planModeEnabled: settings.planModeEnabled,
     isComposerOwned: true,
   } satisfies Omit<Parameters<typeof renderProviderTraitsPicker>[0], "prompt">;
+  const providerTraitsMenuContent = (
+    <ComposerDraftTraits menu target={composerDraftTarget} {...providerTraitsPickerInput} />
+  );
   const providerTraitsPicker = renderProviderTraitsPicker({
     ...providerTraitsPickerInput,
     prompt,
@@ -4622,36 +4607,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerDraftTarget, promptRef, setComposerDraftPrompt, setComposerTrigger],
   );
 
-  // Approvals and questions own the composer. A composer holding an image,
-  // file, picked element, preview annotation, or review comment is not
-  // empty: recalling text into it would send the old prompt with the new
-  // context, which is never what ArrowUp meant.
-  const isPromptHistoryBlocked = useCallback(
-    () =>
-      isComposerApprovalState ||
-      pendingUserInputs.length > 0 ||
-      composerImagesRef.current.length > 0 ||
-      composerFilesRef.current.length > 0 ||
-      composerTerminalContextsRef.current.length > 0 ||
-      composerPreviewAnnotations.length > 0 ||
-      composerReviewComments.length > 0,
-    [
-      composerTerminalContextsRef,
-      composerFilesRef,
-      composerImagesRef,
-      composerPreviewAnnotations.length,
-      composerReviewComments.length,
-      isComposerApprovalState,
-      pendingUserInputs.length,
-    ],
-  );
+  const promptHistoryBlocked =
+    isComposerApprovalState ||
+    pendingUserInputs.length > 0 ||
+    composerImages.length > 0 ||
+    composerFiles.length > 0 ||
+    composerTerminalContexts.length > 0 ||
+    composerPreviewAnnotations.length > 0 ||
+    composerReviewComments.length > 0;
 
   const navigatePromptHistory = useCallback(
     (direction: "backward" | "forward", event: KeyboardEvent): boolean => {
       if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || event.isComposing) {
         return false;
       }
-      if (isPromptHistoryBlocked()) return false;
+      if (promptHistoryBlocked) return false;
       // A typed draft with no active recall can never step, so skip the
       // layout read and the entry build for that common case.
       if (promptHistoryPositionRef.current === null && promptRef.current.length > 0) {
@@ -4685,7 +4655,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       replacePromptFromHistory(step.prompt);
       return true;
     },
-    [isPromptHistoryBlocked, onLoadOlderPromptHistory, promptRef, replacePromptFromHistory],
+    [promptHistoryBlocked, onLoadOlderPromptHistory, promptRef, replacePromptFromHistory],
   );
 
   useEffect(() => {
@@ -4697,7 +4667,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (
       promptRef.current !== (position?.recalled ?? "") ||
       olderPromptHistoryFailed ||
-      isPromptHistoryBlocked()
+      promptHistoryBlocked
     ) {
       olderPromptRecallPendingRef.current = null;
       return;
@@ -4716,7 +4686,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     promptHistoryPositionRef.current = step.position;
     replacePromptFromHistory(step.prompt);
   }, [
-    isPromptHistoryBlocked,
+    promptHistoryBlocked,
     olderPromptHistoryFailed,
     promptHistoryMessages,
     promptRef,

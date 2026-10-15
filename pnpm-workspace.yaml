@@ -245,8 +245,6 @@ overrides:
   "expo-sharing>@expo/config-plugins": 58.0.4
   "expo-sharing>@expo/config-types": 58.0.2
   "@pierre/diffs>@shikijs/transformers": ^4.2.0
-  # Trees and diffs otherwise ship two byte-identical sets of all 65 themes.
-  "@shikijs/themes": 4.2.0
   # Keep one copy of these native-binary packages. lightningcss ships 11 platform binaries per
   # version, and the workspaces' tailwindcss ^4 ranges drift into two 4.3.x copies of the family.
   "@tailwindcss/node": "catalog:"
@@ -272,8 +270,6 @@ overrides:
   "@types/ws@^8": "catalog:"
   "undici@^8": "catalog:"
   "ws@^8": "catalog:"
-  # The updater otherwise bundles a second semver 7 beside the desktop services.
-  "semver@^7": 7.8.5
   vite: "catalog:"
   vite-plus: "catalog:"
   yaml: "catalog:"

@@ -6,13 +6,12 @@ import {
   settlePromise,
 } from "@t3tools/client-runtime/state/runtime";
 import * as Effect from "effect/Effect";
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
 import { runtime } from "../lib/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useAtomCommand } from "../state/use-atom-command";
-import { ManagedAccountContext } from "./connectOnboarding";
 import { resolveRelayClerkTokenOptions } from "./publicConfig";
 
 export function deactivateManagedRelayAuthentication(): void {
@@ -105,6 +104,5 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
 
   useEffect(() => () => deactivateManagedRelayAuthentication(), []);
 
-  const account = useMemo(() => ({ isLoaded, isSignedIn, userId }), [isLoaded, isSignedIn, userId]);
-  return <ManagedAccountContext value={account}>{children}</ManagedAccountContext>;
+  return children;
 }

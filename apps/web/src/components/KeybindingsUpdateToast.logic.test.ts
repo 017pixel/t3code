@@ -59,8 +59,12 @@ describe("keybindings update toast policy", () => {
     });
   });
 
-  it("reads keybinding reloads from config deltas", () => {
+  it.each(["snapshot", "seed"])("reports unchanged-bindings recovery after %s", (initial) => {
     const controller = createKeybindingsUpdateToastController({});
+    const malformed = {
+      kind: "keybindings.malformed-config",
+      message: "Expected JSON array",
+    } as const;
     const delta = (
       changes: Extract<ServerConfigStreamEvent, { type: "configDelta" }>["changes"],
     ): ServerConfigStreamEvent => ({
@@ -71,84 +75,22 @@ describe("keybindings update toast policy", () => {
       removed: [],
       providerChanges: [],
     });
-    const malformed = {
-      kind: "keybindings.malformed-config",
-      message: "Expected JSON array",
-    } as const;
-
-    expect(controller.handle(delta({ keybindings: [] }))).toEqual({ _tag: "Success" });
+    if (initial === "seed") {
+      controller.seed([malformed]);
+      controller.seed([]);
+    } else
+      controller.handle({ version: 1, type: "snapshot", config: { issues: [malformed] } as never });
+    expect(controller.handle(delta({ issues: [malformed] }))).toBeNull();
+    expect(controller.handle(delta({ issues: [] }))).toEqual({ _tag: "Success" });
+    expect(controller.handle(delta({ issues: [] }))).toBeNull();
     expect(controller.handle(delta({ issues: [malformed] }))).toEqual({
       _tag: "InvalidConfiguration",
-      message: "Expected JSON array",
+      message: malformed.message,
     });
-    // Another issue changes while the file is still malformed.
-    expect(
-      controller.handle(
-        delta({
-          issues: [malformed, { kind: "keybindings.invalid-entry", message: "Unknown", index: 3 }],
-        }),
-      ),
-    ).toBeNull();
     expect(controller.handle(delta({ cwd: "/repo" }))).toBeNull();
-  });
-
-  it("reports a fixed file whose bindings did not change", () => {
-    const controller = createKeybindingsUpdateToastController({});
-    const malformed = {
-      kind: "keybindings.malformed-config",
-      message: "Expected JSON array",
-    } as const;
-    const issues = (
-      next: NonNullable<
-        Extract<ServerConfigStreamEvent, { type: "configDelta" }>["changes"]["issues"]
-      >,
-    ): ServerConfigStreamEvent => ({
-      version: 1,
-      type: "configDelta",
-      configVersion: "v2",
-      changes: { issues: next },
-      removed: [],
-      providerChanges: [],
+    expect(createKeybindingsUpdateToastController({}).handle(delta({ keybindings: [] }))).toEqual({
+      _tag: "Success",
     });
-
-    // The file was already malformed when the config arrived.
-    expect(
-      controller.handle({
-        version: 1,
-        type: "snapshot",
-        config: { issues: [malformed] } as never,
-      }),
-    ).toBeNull();
-    expect(controller.handle(issues([]))).toEqual({ _tag: "Success" });
-    // An unrelated issue clearing later is not a keybindings update.
-    expect(controller.handle(issues([]))).toBeNull();
-  });
-
-  it("reports a fix to a file that was invalid in the config shown at boot", () => {
-    const controller = createKeybindingsUpdateToastController({});
-    const malformed = {
-      kind: "keybindings.malformed-config",
-      message: "Expected JSON array",
-    } as const;
-    const issues = (
-      next: NonNullable<
-        Extract<ServerConfigStreamEvent, { type: "configDelta" }>["changes"]["issues"]
-      >,
-    ): ServerConfigStreamEvent => ({
-      version: 1,
-      type: "configDelta",
-      configVersion: "v2",
-      changes: { issues: next },
-      removed: [],
-      providerChanges: [],
-    });
-
-    // A boot snapshot or an unchanged config arrives with no snapshot event.
-    controller.seed([malformed]);
-    // Only the first config seeds.
-    controller.seed([]);
-    expect(controller.handle(issues([malformed]))).toBeNull();
-    expect(controller.handle(issues([]))).toEqual({ _tag: "Success" });
   });
 
   it("ignores unrelated server config notifications", () => {

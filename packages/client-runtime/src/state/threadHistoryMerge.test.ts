@@ -45,52 +45,7 @@ function row(index: number): OrchestrationV2ProjectedTurnItem {
 }
 
 describe("threadHistoryMerge", () => {
-  it("hydrates older execution metadata without overwriting live entities", () => {
-    const node = {
-      id: "history-node" as never,
-      threadId: v2ThreadId,
-      runId: null,
-      parentNodeId: null,
-      rootNodeId: "history-node" as never,
-      kind: "system" as const,
-      status: "completed" as const,
-      countsForRun: false,
-      providerThreadId: null,
-      providerTurnId: null,
-      nativeItemRef: null,
-      runtimeRequestId: null,
-      checkpointScopeId: null,
-      startedAt: NOW,
-      completedAt: NOW,
-    };
-    const current = {
-      ...v2Projection,
-      nodes: [node],
-      turnItems: [row(4).item],
-      visibleTurnItems: [row(4)],
-    };
-    const older = { ...node, id: "older-node" as never, rootNodeId: "older-node" as never };
-    const merged = mergeOlderHistoryIntoProjection(current, [row(1)], {
-      nodes: [{ ...node, status: "running" }, older],
-      checkpoints: [],
-      runs: [],
-      attempts: [],
-    });
-    expect(merged.nodes).toEqual([older, node]);
-    expect(merged.nodes[1]).toBe(node);
-    expect(merged.visibleTurnItems.map((item) => item.sourceItemId)).toEqual(["item-1", "item-4"]);
-    for (const rows of [[], current.visibleTurnItems]) {
-      const hydrated = mergeOlderHistoryIntoProjection(current, rows, {
-        nodes: [older],
-        checkpoints: [],
-        runs: [],
-        attempts: [],
-      });
-      expect(hydrated.nodes).toEqual([older, node]);
-      expect(hydrated.visibleTurnItems).toBe(current.visibleTurnItems);
-    }
-  });
-  it("keeps support entities the live stream has not applied yet newest-last", () => {
+  it("hydrates support in order, keeps live values and fills deferred files", () => {
     const run = (ordinal: number) => ({
       id: `run-${ordinal}` as never,
       threadId: v2ThreadId,
@@ -135,66 +90,43 @@ describe("threadHistoryMerge", () => {
       startedAt: NOW,
       completedAt: completed ? NOW : null,
     });
-    const current = {
-      ...v2Projection,
-      runs: [run(2)],
-      attempts: [attempt(2, 1, true)],
-      checkpoints: [checkpoint(2)],
-    };
-    const merged = mergeOlderHistoryIntoProjection(current, [], {
-      nodes: [],
-      checkpoints: [checkpoint(1), checkpoint(3)],
-      runs: [run(1), run(3)],
-      // A steer restart on the held run, read before its live event lands.
-      attempts: [attempt(1, 1, true), attempt(2, 2, false)],
-    });
-    expect(merged.attempts.map((value) => value.id)).toEqual([
-      "attempt-1-1",
-      "attempt-2-1",
-      "attempt-2-2",
-    ]);
-    expect(merged.runs.map((value) => value.ordinal)).toEqual([1, 2, 3]);
-    expect(merged.checkpoints.map((value) => value.id)).toEqual([
-      "checkpoint-1",
-      "checkpoint-2",
-      "checkpoint-3",
-    ]);
-  });
-
-  it("replaces a checkpoint listed without files when its history page arrives", () => {
     const full = {
-      id: "checkpoint-listed" as never,
-      threadId: v2ThreadId,
-      scopeId: "scope-listed" as never,
-      runId: "run-listed" as never,
-      nodeId: "node-listed" as never,
-      parentCheckpointId: null,
-      ordinalWithinScope: 1,
-      appRunOrdinal: 3,
-      ref: "refs/t3/listed" as never,
-      status: "ready" as const,
+      ...checkpoint(2),
       files: [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }],
-      capturedAt: NOW,
     };
     const listed = { ...full, files: [], deferredFileCount: 1 };
     const current = {
       ...v2Projection,
+      runs: [run(2)],
+      attempts: [attempt(2, 1, true)],
       checkpoints: [listed],
-      turnItems: [row(4).item],
       visibleTurnItems: [row(4)],
+      turnItems: [row(4).item],
     };
-    const merged = mergeOlderHistoryIntoProjection(current, [row(1)], {
+    const support = {
       nodes: [],
-      checkpoints: [full],
-      runs: [],
-      attempts: [],
-    });
-    expect(merged.checkpoints).toEqual([full]);
-    const kept = mergeOlderHistoryIntoProjection({ ...current, checkpoints: [full] }, [row(1)], {
-      nodes: [],
+      checkpoints: [checkpoint(1), full, checkpoint(3)],
+      runs: [run(1), { ...run(2), status: "running" as const }, run(3)],
+      attempts: [attempt(1, 1, true), attempt(2, 2, false)],
+    };
+    for (const rows of [[], [row(1)], current.visibleTurnItems]) {
+      const merged = mergeOlderHistoryIntoProjection(current, rows, support);
+      expect(merged.runs[1]).toBe(current.runs[0]);
+      expect(merged.runs.map((value) => value.ordinal)).toEqual([1, 2, 3]);
+      expect(merged.attempts.map((value) => value.id)).toEqual([
+        "attempt-1-1",
+        "attempt-2-1",
+        "attempt-2-2",
+      ]);
+      expect(merged.checkpoints).toEqual([checkpoint(1), full, checkpoint(3)]);
+      expect(merged.checkpoints[1]).toBe(full);
+      expect(merged.visibleTurnItems.map((value) => value.sourceItemId)).toEqual(
+        rows[0]?.sourceItemId === "item-1" ? ["item-1", "item-4"] : ["item-4"],
+      );
+    }
+    const kept = mergeOlderHistoryIntoProjection({ ...current, checkpoints: [full] }, [], {
+      ...support,
       checkpoints: [listed],
-      runs: [],
-      attempts: [],
     });
     expect(kept.checkpoints[0]).toBe(full);
   });

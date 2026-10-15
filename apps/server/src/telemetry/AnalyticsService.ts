@@ -19,7 +19,6 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Queue from "effect/Queue";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
@@ -129,7 +128,6 @@ export const make = Effect.gen(function* () {
   const identifier = yield* getTelemetryIdentifier;
   const crypto = yield* Crypto.Crypto;
   const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
-  const flushRequests = yield* Queue.sliding<void>(1);
   const deliveryRef = yield* Ref.make<DeliveryState>({
     failedBatch: [],
     batchAttempts: 0,
@@ -237,7 +235,6 @@ export const make = Effect.gen(function* () {
       const retryAt = (yield* Clock.currentTimeMillis) + retryDelayMs(failures, yield* Random.next);
       if (batchAttempts < MAX_BATCH_ATTEMPTS) {
         yield* Ref.set(deliveryRef, { failedBatch: batch, batchAttempts, failures, retryAt });
-        yield* Queue.offer(flushRequests, undefined);
         yield* Effect.logDebug("Failed to send telemetry batch; will retry", {
           attempt: batchAttempts,
           cause: sent.failure,
@@ -254,6 +251,13 @@ export const make = Effect.gen(function* () {
     }
   }).pipe(flushLock.withPermit);
 
+  const flushWhenDue = Effect.gen(function* () {
+    const { retryAt } = yield* Ref.get(deliveryRef);
+    if ((yield* Clock.currentTimeMillis) >= retryAt) {
+      yield* flush;
+    }
+  });
+
   const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
     function* (event, properties) {
       if (!telemetryConfig.enabled || !identifier) return;
@@ -264,7 +268,6 @@ export const make = Effect.gen(function* () {
       if (Exit.isFailure(uuid)) return;
 
       const enqueueResult = yield* enqueueBufferedEvent(uuid.value, event, properties);
-      yield* Queue.offer(flushRequests, undefined);
       if (enqueueResult.dropped) {
         yield* Effect.logDebug("analytics buffer full; dropping oldest event", {
           size: enqueueResult.size,
@@ -274,23 +277,11 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  // Empty buffers park without a timer. Events coalesce into one request;
-  // failed batches wake at their retry deadline, even without another event.
   if (telemetryConfig.enabled && identifier) {
     yield* awaitBackgroundTurn.pipe(
       Effect.andThen(
-        Effect.gen(function* () {
-          while (true) {
-            yield* Queue.take(flushRequests);
-            while (true) {
-              const delivery = yield* Ref.get(deliveryRef);
-              const buffer = yield* Ref.get(bufferRef);
-              if (delivery.failedBatch.length === 0 && buffer.length === 0) break;
-              const now = yield* Clock.currentTimeMillis;
-              yield* Effect.sleep(Math.max(FLUSH_INTERVAL_MS, delivery.retryAt - now));
-              yield* flush;
-            }
-          }
+        Effect.forever(Effect.sleep(FLUSH_INTERVAL_MS).pipe(Effect.flatMap(() => flushWhenDue)), {
+          disableYield: true,
         }),
       ),
       Effect.forkScoped,

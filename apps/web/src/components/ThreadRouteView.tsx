@@ -1,5 +1,5 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Activity,
@@ -39,10 +39,6 @@ import {
 } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
-import { environmentThreadDetails } from "../state/threads";
-import { appAtomRegistry } from "../rpc/atomRegistry";
-import { environmentSession } from "../state/session";
-import { releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   buildThreadRouteParams,
   finishWarmingThreadView,
@@ -108,44 +104,6 @@ function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => v
   };
 }
 
-let bootChatViewReady = false;
-
-/** Let the sidebar paint, then render the real chat without waiting for a session. */
-function useBootChatView(environmentId: EnvironmentId | null): boolean {
-  const [ready, setReady] = useState(() => bootChatViewReady);
-  useEffect(() => {
-    if (ready) return;
-    const release = retainBootHold();
-    const show = () => {
-      // Use already-connected data so a fast reload doesn't mount chat twice.
-      if (
-        environmentId !== null &&
-        appAtomRegistry.get(environmentSession.initialConfigValueAtom(environmentId)) !== null
-      )
-        release();
-      bootChatViewReady = true;
-      setReady(true);
-    };
-    let task: ReturnType<typeof setTimeout> | undefined;
-    let replyFrame: number | undefined;
-    const frame = requestAnimationFrame(() => {
-      // Let queued connection replies land before the expensive first mount.
-      replyFrame = requestAnimationFrame(() => {
-        task = setTimeout(show, 0);
-      });
-    });
-    const fallback = setTimeout(show, 100);
-    return () => {
-      cancelAnimationFrame(frame);
-      if (replyFrame !== undefined) cancelAnimationFrame(replyFrame);
-      clearTimeout(task);
-      clearTimeout(fallback);
-      releaseBootHoldAfterPaint(release);
-    };
-  }, [environmentId, ready]);
-  return ready;
-}
-
 /**
  * The single chat surface behind both `/draft/$draftId` and
  * `/$environmentId/$threadId`. Each draft gets its own ChatView instance (so
@@ -165,11 +123,6 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
   const draftId = target.kind === "draft" ? target.draftId : null;
   const draftSession = useComposerDraftStore((store) =>
     draftId === null ? null : store.getDraftSession(draftId),
-  );
-  const chatViewReady = useBootChatView(
-    target.kind === "server"
-      ? target.threadRef.environmentId
-      : (draftSession?.environmentId ?? null),
   );
   const threadRefs = useThreadRefs();
   // The server thread this view is about: the route's own ref, or the draft's
@@ -384,37 +337,32 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
       ref={insetRef}
       className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
     >
-      {chatViewReady &&
-        nextKeptViews.map((view) => (
-          <Activity
-            key={view.key}
-            mode={view.key === activeViewKey || view.key === layingOutKey ? "visible" : "hidden"}
-          >
-            <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
-              <KeptViewFrame
-                viewKey={view.key}
-                warming={view.warming === true && view.key !== activeViewKey}
-                onWarm={finishWarming}
-              >
-                {view.draftId === null ? (
-                  <KeptChatView
-                    environmentId={view.environmentId}
-                    threadId={view.threadId}
-                    routeKind="server"
-                  />
-                ) : (
-                  <KeptChatView
-                    draftId={view.draftId}
-                    environmentId={view.environmentId}
-                    threadId={view.threadId}
-                    routeKind="draft"
-                    forceExpandedMobileComposer
-                  />
-                )}
-              </KeptViewFrame>
-            </KeptViewLifetimeContext>
-          </Activity>
-        ))}
+      {nextKeptViews.map((view) => (
+        <Activity
+          key={view.key}
+          mode={view.key === activeViewKey || view.key === layingOutKey ? "visible" : "hidden"}
+        >
+          <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
+            <KeptViewFrame
+              viewKey={view.key}
+              warming={view.warming === true && view.key !== activeViewKey}
+              onWarm={finishWarming}
+            >
+              <KeptChatView
+                environmentId={view.environmentId}
+                threadId={view.threadId}
+                {...(view.draftId === null
+                  ? { routeKind: "server" as const }
+                  : {
+                      routeKind: "draft" as const,
+                      draftId: view.draftId,
+                      forceExpandedMobileComposer: true,
+                    })}
+              />
+            </KeptViewFrame>
+          </KeptViewLifetimeContext>
+        </Activity>
+      ))}
     </SidebarInset>
   );
 });
@@ -435,12 +383,6 @@ export function KeptChatSurface() {
   const shownKey = reveal && deferredTargetKey !== null ? deferredTargetKey : targetKey;
   // Keys typed before a deferred reveal lands go to the URL's thread.
   useLayoutEffect(() => setUrlRouteTargetKey(targetKey), [targetKey]);
-  // Start loading the thread with the click, ahead of its view.
-  useEffect(() => {
-    const urgentTarget = threadRouteTargetFromKey(targetKey);
-    if (urgentTarget?.kind !== "server") return;
-    return appAtomRegistry.mount(environmentThreadDetails.threadAtom(urgentTarget.threadRef));
-  }, [targetKey]);
   const [shownTargetKey, setShownTargetKey] = useState(shownKey);
   if (shownKey !== null && shownKey !== shownTargetKey) {
     setShownTargetKey(shownKey);

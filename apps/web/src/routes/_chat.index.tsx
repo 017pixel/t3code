@@ -15,7 +15,6 @@ import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useAtomValue } from "@effect/atom-react";
 import { serverEnvironment } from "../state/server";
-import { releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   readProject,
   useAllEnvironmentShellsBootstrapped,
@@ -66,15 +65,6 @@ function IndexDraftLanding() {
   const config = useAtomValue(
     serverEnvironment.configValueAtom(mostRecentProject?.environmentId ?? null),
   );
-  const canStartDraft = mostRecentProject !== null && config !== null;
-  // Keep cached projects and defaults through navigation, without holding an empty landing.
-  useEffect(() => {
-    if (!canStartDraft) return;
-    const release = retainBootHold();
-    return () => {
-      releaseBootHoldAfterPaint(release);
-    };
-  }, [canStartDraft]);
   useEffect(() => {
     // Starting a draft after the user has left would replace the page they picked.
     if (config === null || mostRecentProject === null || startingRef.current || !isStillOnIndex()) {

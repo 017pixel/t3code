@@ -5,9 +5,6 @@ import { createHashHistory, createBrowserHistory } from "@tanstack/react-router"
 import "./index.css";
 
 import { prepareProviderAuthDelivery } from "./providerAuthDelivery";
-import { ensureClientSettingsHydrated } from "./hooks/useSettings";
-import { projectFaviconCache } from "./assets/projectFaviconCache";
-import { readBootSnapshot } from "./bootSnapshot";
 import { isElectron } from "./env";
 import { hasCloudPublicConfig } from "./cloud/publicConfig";
 import { getRouter, preloadInitialRouteChunks } from "./router";
@@ -22,17 +19,11 @@ import {
   isSpeculativeLoadPending,
   reloadOnceForChunkLoadError,
 } from "./lib/chunkReloadGuard";
+
 import { restoreStackTraces } from "./lib/bootStackTraces";
 
 restoreStackTraces();
 prepareProviderAuthDelivery();
-if (readBootSnapshot() !== null) {
-  // Hydrate the first-run gate and icons in their own task before snapshot rendering.
-  setTimeout(() => {
-    void ensureClientSettingsHydrated().catch(() => undefined);
-    void projectFaviconCache.hydrate();
-  }, 0);
-}
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();

@@ -6,7 +6,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { describe } from "vite-plus/test";
 
-import * as OpenCode2Client from "./OpenCode2ClientTag.ts";
+import * as OpenCode2Client from "./OpenCode2Client.ts";
 
 const INFO_BODY = '{"version":"2.0.18","pid":4242,"urls":[],"paths":{"tmp":"/tmp"}}';
 

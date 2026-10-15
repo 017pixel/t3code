@@ -107,50 +107,37 @@ describe("guardHttpResponseWriteErrors", () => {
 });
 
 describe("holdRequestsUntilServing", () => {
-  it("answers requests and upgrades accepted before the handlers attach", async () => {
+  it("answers requests and upgrades accepted before handlers attach", async () => {
     const server = holdRequestsUntilServing(guardHttpResponseWriteErrors(NodeHttp.createServer()));
     const port = await listen(server);
-    const requestsParked = Promise.withResolvers<void>();
-    let parsedRequests = 0;
+    const parked = Promise.withResolvers<void>();
+    let parsed = 0;
     server.on("connection", (socket) =>
       socket.once("data", () => {
-        if (++parsedRequests === 2) requestsParked.resolve();
+        if (++parsed === 2) parked.resolve();
       }),
     );
-
     const response = fetchStatus(port, "/early");
-    const upgradeResponse = new Promise<string>((resolve, reject) => {
+    const upgrade = new Promise<string>((resolve, reject) => {
       const client = NodeNet.connect(port, "127.0.0.1", () => {
         client.write(
-          [
-            "GET /ws HTTP/1.1",
-            "Host: 127.0.0.1",
-            "Connection: Upgrade",
-            "Upgrade: websocket",
-            "",
-            "",
-          ].join("\r\n"),
+          "GET /ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
         );
       });
       client.once("data", (data) => {
-        resolve(data.toString().split("\r\n")[0] ?? "");
         client.destroy();
+        resolve(data.toString().split("\r\n")[0]!);
       });
       client.on("error", reject);
     });
-    // Node's HTTP parser handles data before this observer.
-    await requestsParked.promise;
-
-    server.on("request", (_request, response) => {
+    await parked.promise;
+    server.on("request", (_, response) => {
       response.writeHead(204);
       response.end();
     });
-    server.on("upgrade", (_request, socket) => {
-      socket.end("HTTP/1.1 101 Switching Protocols\r\n\r\n");
-    });
-
+    server.on("upgrade", (_, socket) => socket.end("HTTP/1.1 101 Switching Protocols\r\n\r\n"));
     await expect(response).resolves.toBe(204);
-    await expect(upgradeResponse).resolves.toBe("HTTP/1.1 101 Switching Protocols");
+    await expect(upgrade).resolves.toBe("HTTP/1.1 101 Switching Protocols");
   });
 
   it("hands parked requests to the handler before later ones", async () => {

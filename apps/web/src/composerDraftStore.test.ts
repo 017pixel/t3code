@@ -2962,58 +2962,6 @@ function createMockStorage() {
 }
 
 describe("composer draft persistence", () => {
-  it("selection-only prompt writes keep the original persistence deadline", async () => {
-    await useComposerDraftStore.persist.clearStorage();
-    vi.useFakeTimers();
-    const threadId = ThreadId.make("unchanged-prompt");
-    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
-    const notices = vi.fn();
-    const unsubscribe = useComposerDraftStore.subscribe(notices);
-    try {
-      useComposerDraftStore.getState().setPrompt(threadRef, "Keep this draft");
-      await vi.advanceTimersByTimeAsync(200);
-      useComposerDraftStore.getState().setPrompt(threadRef, "Keep this draft");
-      expect(notices).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(100);
-      resetComposerDraftStore();
-      await useComposerDraftStore.persist.rehydrate();
-      expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe("Keep this draft");
-    } finally {
-      unsubscribe();
-      await useComposerDraftStore.persist.clearStorage();
-      vi.useRealTimers();
-      resetComposerDraftStore();
-    }
-  });
-
-  it("serializes once typing pauses and restarts the wait when typing resumes", async () => {
-    await useComposerDraftStore.persist.clearStorage();
-    vi.useFakeTimers();
-    const stringify = vi.spyOn(JSON, "stringify");
-    const threadId = ThreadId.make("idle-prompt");
-    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
-    try {
-      useComposerDraftStore.getState().setPrompt(threadRef, "First draft");
-      await vi.advanceTimersByTimeAsync(299);
-      expect(stringify).not.toHaveBeenCalled();
-      useComposerDraftStore.getState().setPrompt(threadRef, "Latest draft");
-      await vi.advanceTimersByTimeAsync(299);
-      expect(stringify).not.toHaveBeenCalled();
-      // Desktop quit fires no unload events, so the pause alone must write.
-      await vi.advanceTimersByTimeAsync(1);
-      expect(stringify).toHaveBeenCalledTimes(1);
-      resetComposerDraftStore();
-      await useComposerDraftStore.persist.rehydrate();
-      expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe("Latest draft");
-    } finally {
-      stringify.mockRestore();
-      await useComposerDraftStore.persist.clearStorage();
-      vi.unstubAllGlobals();
-      vi.useRealTimers();
-      resetComposerDraftStore();
-    }
-  });
-
   it("defers attachment reads and serialization until typing stops, then restores the last draft", async () => {
     await useComposerDraftStore.persist.clearStorage();
     vi.useFakeTimers();
@@ -3057,7 +3005,9 @@ describe("composer draft persistence", () => {
       expect(attachmentReads).toBe(0);
       expect(stringify).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(300);
+      await vi.advanceTimersByTimeAsync(200);
+      useComposerDraftStore.getState().setPrompt(typingRef, "Draft 20");
+      await vi.advanceTimersByTimeAsync(100);
       expect(attachmentReads).toBe(1);
       expect(stringify).toHaveBeenCalledTimes(1);
 

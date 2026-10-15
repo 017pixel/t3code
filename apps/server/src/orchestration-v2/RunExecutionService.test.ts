@@ -1030,7 +1030,7 @@ it.effect("refreshes MCP credential liveness before calling the provider", () =>
   }).pipe(Effect.provide(layerRunExecutionTest)),
 );
 
-it.effect("starts the provider when checkpoint baseline capture fails", () =>
+it.effect("starts the provider only after checkpoint baseline capture fails", () =>
   Effect.gen(function* () {
     const threadId = ThreadId.make("thread:run-execution-baseline-failure");
     const runId = RunId.make("run:run-execution-baseline-failure");
@@ -1045,6 +1045,7 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
       id: CheckpointScopeId.make("checkpoint-scope:run-execution-baseline-failure"),
     } as OrchestrationV2CheckpointScope;
     const providerStarts = yield* Ref.make(0);
+    let baselineFinished = false;
     const writes = yield* Ref.make<
       ReadonlyArray<{
         events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -1057,12 +1058,21 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({
             captureBaseline: () =>
-              Effect.fail(
-                new CheckpointService.CheckpointBaselineCaptureError({
-                  scopeId: checkpointScope.id,
-                  ordinalWithinScope: 0,
-                  cause: new Error("VCS process timed out"),
-                }),
+              Effect.yieldNow.pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new CheckpointService.CheckpointBaselineCaptureError({
+                      scopeId: checkpointScope.id,
+                      ordinalWithinScope: 0,
+                      cause: new Error("VCS process timed out"),
+                    }),
+                  ),
+                ),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    baselineFinished = true;
+                  }),
+                ),
               ),
           }),
           Layer.mock(EventSink.EventSinkV2)({
@@ -1087,10 +1097,18 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
         commandId: CommandId.make("command:run-execution-baseline-failure"),
         appThread: { id: threadId } as OrchestrationV2AppThread,
         providerSessionId,
-        session: {
-          events: Stream.never,
-          startTurn: () => Ref.update(providerStarts, (count) => count + 1),
-        } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        session: new Proxy(
+          {
+            events: Stream.never,
+            startTurn: () => Ref.update(providerStarts, (count) => count + 1),
+          },
+          {
+            get(target, key, receiver) {
+              assert.isTrue(baselineFinished);
+              return Reflect.get(target, key, receiver);
+            },
+          },
+        ) as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
         run: {
           id: runId,
           threadId,
@@ -1146,107 +1164,6 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
       (event) => event.type === "turn-item.updated" && event.payload.type === "error",
     );
     assert.isUndefined(errorItem);
-  }),
-);
-
-// Opening a provider process already runs workspace-capable startup (Claude's
-// SessionStart hooks and MCP servers), so its edits must land after the baseline.
-it.effect("touches the provider session only after the baseline checkpoint exists", () =>
-  Effect.gen(function* () {
-    const threadId = ThreadId.make("thread:run-execution-baseline-order");
-    const providerInstanceId = ProviderInstanceId.make("codex");
-    // Property reads happen synchronously, so the log is a plain array.
-    const order: Array<string> = [];
-    const runtime = {
-      events: Stream.never,
-      startTurn: () => Effect.void,
-    } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
-    const session = new Proxy(runtime, {
-      get: (target, key, receiver) => {
-        order.push(`session.${String(key)}`);
-        return Reflect.get(target, key, receiver);
-      },
-    });
-    const layerTest = RunExecutionService.layer.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          McpAppModelContext.layerEmpty,
-          Layer.mock(CheckpointService.CheckpointServiceV2)({
-            captureBaseline: () =>
-              Effect.sync(() => {
-                order.push("baseline:start");
-              }).pipe(
-                Effect.andThen(Effect.yieldNow),
-                Effect.andThen(
-                  Effect.sync(() => {
-                    order.push("baseline:end");
-                  }),
-                ),
-              ),
-          }),
-          Layer.mock(EventSink.EventSinkV2)({}),
-          IdAllocator.layer,
-          Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
-            ingestNormalized: () => Effect.succeed([]),
-          }),
-          ServerSettings.layerTest(),
-        ),
-      ),
-    );
-
-    yield* Effect.gen(function* () {
-      const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
-      yield* runExecution.startRootRun({
-        commandId: CommandId.make("command:run-execution-baseline-order"),
-        appThread: { id: threadId } as OrchestrationV2AppThread,
-        providerSessionId: ProviderSessionId.make("session:run-execution-baseline-order"),
-        session,
-        run: {
-          id: RunId.make("run:run-execution-baseline-order"),
-          threadId,
-          ordinal: 1,
-          providerInstanceId,
-        } as OrchestrationV2Run,
-        rootNode: {
-          id: NodeId.make("node:run-execution-baseline-order"),
-        } as OrchestrationV2ExecutionNode,
-        checkpointScope: {
-          id: CheckpointScopeId.make("checkpoint-scope:run-execution-baseline-order"),
-        } as OrchestrationV2CheckpointScope,
-        providerThread: {
-          id: ProviderThreadId.make("provider-thread:run-execution-baseline-order"),
-          driver,
-        } as OrchestrationV2ProviderThread,
-        attempt: {
-          id: RunAttemptId.make("attempt:run-execution-baseline-order"),
-          providerTurnId: null,
-        } as OrchestrationV2RunAttempt,
-        attemptId: RunAttemptId.make("attempt:run-execution-baseline-order"),
-        providerTurnOrdinal: 1,
-        message: {
-          messageId: MessageId.make("message:run-execution-baseline-order"),
-          text: "Start after the baseline.",
-          attachments: [],
-          createdBy: "user",
-          creationSource: "web",
-        },
-        modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
-        runtimePolicy: {
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          cwd: process.cwd(),
-          approvalPolicy: "never",
-          sandboxPolicy: {
-            type: "readOnly",
-            access: { type: "fullAccess" },
-            networkAccess: false,
-          },
-        },
-      });
-    }).pipe(Effect.provide(layerTest));
-
-    assert.deepEqual(order.slice(0, 2), ["baseline:start", "baseline:end"]);
-    assert.include(order, "session.startTurn");
   }),
 );
 

@@ -1,6 +1,4 @@
 import * as NodeBuffer from "node:buffer";
-// @effect-diagnostics-next-line nodeBuiltinImport:off - checkpoint indexes need an incremental digest; Crypto.digest buffers the whole file.
-import * as NodeCrypto from "node:crypto";
 
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -41,36 +39,6 @@ import {
 } from "./GitVcsDriverCore.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
-
-// Ordinary v2/v3 indexes encode assume-unchanged and skip-worktree in each
-// entry. Unsupported formats keep the ls-files check, including sparse v4.
-function checkpointIndexHasFlags(bytes: Uint8Array, objectIdBytes: number): boolean | undefined {
-  const index = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (index.length < 12 + objectIdBytes || index.toString("ascii", 0, 4) !== "DIRC") return;
-  const version = index.readUInt32BE(4);
-  if (version !== 2 && version !== 3) return;
-  const entries = index.readUInt32BE(8);
-  const limit = index.length - objectIdBytes;
-  let offset = 12;
-  for (let entry = 0; entry < entries; entry++) {
-    const start = offset;
-    const flagsOffset = start + 40 + objectIdBytes;
-    if (flagsOffset + 2 > limit) return;
-    const flags = index.readUInt16BE(flagsOffset);
-    if ((flags & 0x8000) !== 0) return true;
-    offset = flagsOffset + 2;
-    if ((flags & 0x4000) !== 0) {
-      if (version !== 3 || offset + 2 > limit) return;
-      if ((index.readUInt16BE(offset) & 0x4000) !== 0) return true;
-      offset += 2;
-    }
-    const end = index.indexOf(0, offset);
-    if (end === -1 || end >= limit) return;
-    offset = start + Math.ceil((end + 1 - start) / 8) * 8;
-    if (offset > limit) return;
-  }
-  return false;
-}
 
 export interface ExecuteGitInput {
   readonly operation: string;
@@ -617,35 +585,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
   const detectRepository: VcsDriver.VcsDriver["Service"]["detectRepository"] = Effect.fn(
     "detectRepository",
   )(function* (cwd) {
-    // One process answers the usual work tree. `--is-inside-work-tree` prints
-    // first, so anything but "true" means no work tree. Output that does not
-    // parse as one path per line takes the separate probes below.
-    const combined = yield* gitCommand(
-      vcsProcess,
-      "GitVcsDriver.detectRepository",
-      cwd,
-      ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir"],
-      { allowNonZeroExit: true, timeoutMs: 5_000, maxOutputBytes: 64 * 1024 },
-    );
-    const [insideWorkTree, rootPath, metadataPath, ...rest] = combined.stdout
-      .replace(/\n$/, "")
-      .split("\n");
-    if (insideWorkTree?.trim() !== "true") {
+    if (!(yield* isInsideWorkTree(cwd))) {
       return null;
-    }
-    if (
-      combined.exitCode === 0 &&
-      rootPath !== undefined &&
-      rootPath.trim().length > 0 &&
-      metadataPath !== undefined &&
-      rest.length === 0
-    ) {
-      return {
-        kind: "git" as const,
-        rootPath: rootPath.trim(),
-        metadataPath: metadataPath.trim() || null,
-        freshness: yield* nowFreshness(),
-      };
     }
 
     const root = yield* gitCommand(vcsProcess, "GitVcsDriver.detectRepository.root", cwd, [
@@ -849,38 +790,15 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       }),
     );
 
-  // One process for both: `--verify` applies to HEAD only, so an unborn branch
-  // still prints the common dir and exits 1, the same answer `hasHeadCommit` gives.
-  const resolveGitCommonDirAndHead = (cwd: string) =>
+  const resolveGitCommonDir = (cwd: string) =>
     Effect.gen(function* () {
-      const operation = "GitVcsDriver.checkpoints.resolveGitCommonDir";
       const result = yield* execute({
-        operation,
+        operation: "GitVcsDriver.checkpoints.resolveGitCommonDir",
         cwd,
-        args: ["rev-parse", "--git-common-dir", "--verify", "--quiet", "HEAD"],
-        allowNonZeroExit: true,
+        args: ["rev-parse", "--git-common-dir"],
       });
-      const output = result.stdout.trimEnd();
-      // HEAD is the final line; the common directory can itself contain newlines.
-      const gitCommonDir = (
-        result.exitCode === 0 ? output.slice(0, output.lastIndexOf("\n")) : output
-      ).trim();
-      if (gitCommonDir.length === 0 || (result.exitCode !== 0 && result.exitCode !== 1)) {
-        return yield* new VcsProcessExitError({
-          operation,
-          command: "git rev-parse",
-          cwd,
-          exitCode: result.exitCode,
-          detail: "git rev-parse --git-common-dir failed",
-        });
-      }
-      return {
-        gitCommonDir: path.isAbsolute(gitCommonDir)
-          ? gitCommonDir
-          : path.resolve(cwd, gitCommonDir),
-        headExists: result.exitCode === 0,
-        headCommit: result.exitCode === 0 ? output.slice(output.lastIndexOf("\n") + 1) : null,
-      };
+      const gitCommonDir = result.stdout.trim();
+      return path.isAbsolute(gitCommonDir) ? gitCommonDir : path.resolve(cwd, gitCommonDir);
     });
 
   // Git renames loose objects and refs into place without fsync by default, so
@@ -894,37 +812,6 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     "core.fsyncMethod=fsync",
   ] as const;
 
-  // Keep only the last ordinary index, before add. Never reuse a captured tree:
-  // add still checks files, ignores, filters and submodules on every capture.
-  const checkpointIndexMaxBytes = 8_388_608;
-  let checkpointIndex:
-    | {
-        cwd: string;
-        headCommit: string;
-        sourceSize: number;
-        sourceDigest: string;
-        normalized: Uint8Array;
-      }
-    | undefined;
-  // Identify the user's exact index bytes by SHA-256 through one small buffer.
-  // Whole-file reads left megabytes of external memory per capture and
-  // brought full GCs forward.
-  const digestIndexFile = (filePath: string) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const file = yield* fileSystem.open(filePath);
-        const hash = NodeCrypto.createHash("sha256");
-        const chunk = new Uint8Array(262_144);
-        let size = 0;
-        for (;;) {
-          const read = Number(yield* file.read(chunk));
-          if (read === 0) return { size, digest: hash.digest("base64") };
-          hash.update(chunk.subarray(0, read));
-          size += read;
-        }
-      }),
-    );
-
   const checkpoints: VcsDriver.VcsCheckpointOps = {
     captureCheckpoint: Effect.fn("GitVcsDriver.checkpoints.captureCheckpoint")(function* (input) {
       const operation = VcsProcess.CHECKPOINT_CAPTURE_OPERATION;
@@ -932,31 +819,9 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         "-c",
         "core.fsmonitor=false",
         "-c",
-        "core.splitIndex=false",
-        "-c",
         "sparse.expectFilesOutsideOfPatterns=false",
       ];
-      // These reads are independent, so they share one round of Git processes.
-      // The index path is only used when HEAD exists; failing to read it only
-      // skips index reuse, as before.
-      const [{ gitCommonDir, headExists, headCommit }, sparseConfig, sourceIndexPath] =
-        yield* Effect.all(
-          [
-            resolveGitCommonDirAndHead(input.cwd),
-            execute({
-              operation,
-              cwd: input.cwd,
-              args: ["config", "--bool", "core.sparseCheckout"],
-              allowNonZeroExit: true,
-            }),
-            execute({
-              operation,
-              cwd: input.cwd,
-              args: ["rev-parse", "--path-format=absolute", "--git-path", "index"],
-            }).pipe(Effect.option),
-          ],
-          { concurrency: "unbounded" },
-        );
+      const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
       const indexId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const tempIndexPath = path.join(gitCommonDir, `t3-checkpoint-index-${indexId}`);
       const commitEnv: NodeJS.ProcessEnv = {
@@ -976,6 +841,13 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       );
 
       yield* Effect.gen(function* () {
+        const headExists = yield* hasHeadCommit(input.cwd);
+        const sparseConfig = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: ["config", "--bool", "core.sparseCheckout"],
+          allowNonZeroExit: true,
+        });
         let sparseCheckout = sparseConfig.stdout.trim() === "true";
         if (sparseCheckout) {
           const help = yield* execute({
@@ -986,61 +858,34 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           });
           sparseCheckout = /--(?:\[no-\])?sparse\b/.test(`${help.stdout}${help.stderr}`);
         }
-        if (headCommit !== null) {
+        if (headExists) {
           const reusedIndex = yield* Effect.gen(function* () {
-            if (Option.isNone(sourceIndexPath)) return false;
-            const indexPath = sourceIndexPath.value;
-            const { mtime, size } = yield* fileSystem.stat(indexPath.stdout.trim());
+            const indexPath = yield* execute({
+              operation,
+              cwd: input.cwd,
+              args: ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            });
+            const { mtime } = yield* fileSystem.stat(indexPath.stdout.trim());
             if (Option.isNone(mtime)) return false;
             // Stay below the source timestamp even if Date rounded up, preserving Git's racy check.
             const indexTime = Math.floor((mtime.value.getTime() - 1) / 1000);
             if (indexTime <= 0) return false;
-            const cacheable = !sparseCheckout && size <= BigInt(checkpointIndexMaxBytes);
-            const cachedIndex = checkpointIndex;
-            if (
-              cacheable &&
-              cachedIndex?.cwd === input.cwd &&
-              cachedIndex.headCommit === headCommit &&
-              size === BigInt(cachedIndex.sourceSize)
-            ) {
-              const source = yield* digestIndexFile(indexPath.stdout.trim());
-              if (
-                source.size === cachedIndex.sourceSize &&
-                source.digest === cachedIndex.sourceDigest
-              ) {
-                yield* fileSystem.writeFile(tempIndexPath, cachedIndex.normalized);
-                yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
-                return true;
-              }
-            }
-            // Key the cache by the exact copied bytes, even if the user's index
-            // changes during copy. A cold capture keeps the original cheap disk copy.
             yield* fileSystem.copyFile(indexPath.stdout.trim(), tempIndexPath);
-            const source = cacheable ? yield* digestIndexFile(tempIndexPath) : undefined;
-            // Pin normalization to the cache key even if HEAD moves during capture.
+            // Retain stat data only where the copied index already matches HEAD.
             yield* execute({
               operation,
               cwd: input.cwd,
-              args: [...indexConfig, "read-tree", "--reset", headCommit],
+              args: [...indexConfig, "read-tree", "--reset", "HEAD"],
               env: commitEnv,
             });
             // read-tree can rewrite the index, so restore its racy timestamp afterward.
             yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
-            const normalized =
-              cacheable &&
-              (yield* fileSystem.stat(tempIndexPath)).size <= BigInt(checkpointIndexMaxBytes)
-                ? yield* fileSystem.readFile(tempIndexPath)
-                : undefined;
-            const indexFlags =
-              normalized === undefined
-                ? undefined
-                : checkpointIndexHasFlags(normalized, headCommit.length / 2);
-            let specialFlags = indexFlags ?? false;
+            let specialFlags = false;
             let recordStart = true;
             let skipped = false;
-            let skippedRecord: Uint8Array[] = [];
+            let skippedRecord: number[] = [];
             const skippedPaths: string[] = [];
-            const inspectFlags = vcsProcess.run({
+            yield* vcsProcess.run({
               operation,
               command: "git",
               cwd: input.cwd,
@@ -1049,42 +894,30 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               maxOutputBytes: 4_096,
               outputMode: "truncate",
               // Inspect every tag; retain only skipped file paths for checking sparse rules.
-              // Jump between NUL terminators: a per-byte loop over large indexes
-              // allocated tens of MiB per capture whenever V8 left it unoptimized.
               onStdoutChunk: (chunk) => {
-                let offset = 0;
-                while (offset < chunk.length) {
-                  if (recordStart) {
-                    const tag = chunk[offset] ?? 0;
-                    skipped = tag === 83;
-                    if ((tag >= 97 && tag <= 122) || (!sparseCheckout && skipped)) {
-                      specialFlags = true;
-                    }
-                  }
-                  const end = chunk.indexOf(0, offset);
-                  const recordEnd = end === -1 ? chunk.length : end;
-                  if (skipped && sparseCheckout && recordEnd > offset) {
-                    skippedRecord.push(Buffer.from(chunk.subarray(offset, recordEnd)));
-                  }
-                  if (end === -1) {
-                    recordStart = false;
-                    return;
-                  }
+                for (const byte of chunk) {
+                  if (recordStart) skipped = byte === 83;
                   if (skipped && sparseCheckout) {
-                    const record = Buffer.concat(skippedRecord);
-                    if (record.at(-1) !== 47) {
-                      const name = record.subarray(2);
-                      if (!NodeBuffer.isUtf8(name)) specialFlags = true;
-                      else skippedPaths.push(name.toString("utf8"));
+                    if (byte !== 0) skippedRecord.push(byte);
+                    else {
+                      if (skippedRecord.at(-1) !== 47) {
+                        const name = Buffer.from(skippedRecord).subarray(2);
+                        if (!NodeBuffer.isUtf8(name)) specialFlags = true;
+                        else skippedPaths.push(name.toString("utf8"));
+                      }
+                      skippedRecord = [];
                     }
-                    skippedRecord = [];
                   }
-                  recordStart = true;
-                  offset = end + 1;
+                  if (
+                    recordStart &&
+                    ((byte >= 97 && byte <= 122) || (!sparseCheckout && byte === 83))
+                  ) {
+                    specialFlags = true;
+                  }
+                  recordStart = byte === 0;
                 }
               },
             });
-            if (indexFlags === undefined) yield* inspectFlags;
             if (skippedPaths.length > 0 && !specialFlags) {
               const selected = yield* execute({
                 operation,
@@ -1099,26 +932,6 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               specialFlags = selected.stdout.length > 0 || selected.stdoutTruncated;
             }
             // Sparse Git clears skip-worktree for present files. Manual flags still need a reset.
-            if (
-              !specialFlags &&
-              !sparseCheckout &&
-              headCommit !== null &&
-              source !== undefined &&
-              source.size <= checkpointIndexMaxBytes
-            ) {
-              checkpointIndex =
-                normalized !== undefined
-                  ? {
-                      cwd: input.cwd,
-                      headCommit,
-                      sourceSize: source.size,
-                      sourceDigest: source.digest,
-                      normalized,
-                    }
-                  : undefined;
-            } else {
-              checkpointIndex = undefined;
-            }
             return !specialFlags;
           }).pipe(Effect.orElseSucceed(() => false));
           if (!reusedIndex) {

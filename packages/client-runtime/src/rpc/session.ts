@@ -158,7 +158,6 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     ...(options.usageLimitSources === true ? { usageLimitSources: true } : {}),
     ...(options.usageLimitsCommand === true ? { usageLimitsCommand: true } : {}),
   };
-  const configCache = new Map<string, { config: ServerConfig; version: string }>();
 
   const connect = Effect.fnUntraced(function* (connection: PreparedConnection) {
     const networkHint =
@@ -222,104 +221,59 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     const initialConfigDeferred = yield* Deferred.make<ServerConfig>();
     const serverConfigExit = yield* Deferred.make<void, ServerConfigSubscriptionError>();
     const configSubscriptionClosed = yield* Deferred.make<never, ConnectionAttemptError>();
-    const cachedConfig = configCache.get(connection.environmentId);
     const serverConfigState = yield* Ref.make(Option.none<ServerConfigReplayState>());
     const serverConfigUpdates = yield* PubSub.sliding<BufferedServerConfigEvent>(64);
     const configSubscriptionEndedError = new ConnectionTransientErrorClass({
       reason: "remote-unavailable",
       detail: `${connection.label} config subscription ended.`,
     });
-    // Unreadable provider patches require a full snapshot, without caching their version.
-    const handleConfigEvent = (wireEvent: ServerConfigStreamEvent) =>
-      Effect.gen(function* () {
-        // Reuse the cache only after the server acknowledges its version.
-        const event =
-          wireEvent.type === "configUnchanged" && cachedConfig !== undefined
-            ? { version: 1 as const, type: "snapshot" as const, config: cachedConfig.config }
-            : wireEvent;
-        const buffered = yield* Ref.modify(serverConfigState, (current) => {
-          const projection = applyServerConfigProjection(
-            Option.map(current, (state) => state.projection),
-            event,
-          );
-          if (Option.isNone(projection)) {
-            return [Option.none<BufferedServerConfigEvent>(), current] as const;
-          }
-          const next = {
-            projection: projection.value,
-            revision: Option.match(current, {
-              onNone: () => 1,
-              onSome: (state) => state.revision + 1,
-            }),
-            themesEvent:
-              event.type === "environmentThemesUpdated"
-                ? event
-                : event.type === "snapshot" &&
-                    event.config.environment.capabilities.environmentThemes !== true
-                  ? undefined
-                  : Option.getOrUndefined(current)?.themesEvent,
-            sourcesEvent:
-              event.type === "usageLimitSourcesUpdated"
-                ? event
-                : event.type === "snapshot" &&
-                    event.config.environment.capabilities.usageLimitSources !== true
-                  ? undefined
-                  : Option.getOrUndefined(current)?.sourcesEvent,
-          } satisfies ServerConfigReplayState;
-          return [
-            Option.some({ event, replay: next, revision: next.revision }),
-            Option.some(next),
-          ] as const;
-        });
-        if (Option.isNone(buffered)) return true;
-        const config = buffered.value.replay.projection.config;
-        const lostProvider =
-          wireEvent.type === "configDelta" &&
-          wireEvent.providerChanges.some(
-            (patch) =>
-              !config.providers.some((provider) => provider.instanceId === patch.instanceId),
-          );
-        if (lostProvider) {
-          configCache.delete(connection.environmentId);
-        } else if ("configVersion" in wireEvent && wireEvent.configVersion !== undefined) {
-          configCache.delete(connection.environmentId);
-          configCache.set(connection.environmentId, {
-            config: withoutEnvironmentThemes(config),
-            version: wireEvent.configVersion,
-          });
-          if (configCache.size > 32) configCache.delete(configCache.keys().next().value!);
-        } else if (wireEvent.type === "snapshot") {
-          // A downgraded environment must not keep a newer wire version.
-          configCache.delete(connection.environmentId);
-        }
-        yield* PubSub.publish(serverConfigUpdates, buffered.value);
-        yield* Deferred.succeed(initialConfigDeferred, config);
-        return !lostProvider;
-      });
-    // An impossible version forces a full snapshot without deferred catalogs,
-    // whose later delta could drop the recovered provider again.
-    const runConfigSubscription = (
-      knownConfigVersion: string | undefined,
-    ): Effect.Effect<void, ServerConfigSubscriptionError> =>
-      Effect.suspend(() => {
-        let resync = false;
-        return protocolClient[WS_METHODS.subscribeServerConfig]({
-          ...serverConfigInput,
-          configDeltas: true,
-          ...(knownConfigVersion === undefined ? {} : { knownConfigVersion }),
-        }).pipe(
-          Stream.runForEachWhile((wireEvent) =>
-            handleConfigEvent(wireEvent).pipe(
-              Effect.map((keep) => {
-                resync = !keep;
-                return keep;
+    const serverConfigSource = protocolClient[WS_METHODS.subscribeServerConfig](
+      serverConfigInput,
+    ).pipe(
+      Stream.runForEach((event) =>
+        Effect.gen(function* () {
+          const buffered = yield* Ref.modify(serverConfigState, (current) => {
+            const projection = applyServerConfigProjection(
+              Option.map(current, (state) => state.projection),
+              event,
+            );
+            if (Option.isNone(projection)) {
+              return [Option.none<BufferedServerConfigEvent>(), current] as const;
+            }
+            const next = {
+              projection: projection.value,
+              revision: Option.match(current, {
+                onNone: () => 1,
+                onSome: (state) => state.revision + 1,
               }),
-            ),
-          ),
-          Effect.flatMap(() => (resync ? runConfigSubscription("resync") : Effect.void)),
-        );
-      });
-    const serverConfigSource = runConfigSubscription(cachedConfig?.version).pipe(
+              themesEvent:
+                event.type === "environmentThemesUpdated"
+                  ? event
+                  : event.type === "snapshot" &&
+                      event.config.environment.capabilities.environmentThemes !== true
+                    ? undefined
+                    : Option.getOrUndefined(current)?.themesEvent,
+              sourcesEvent:
+                event.type === "usageLimitSourcesUpdated"
+                  ? event
+                  : event.type === "snapshot" &&
+                      event.config.environment.capabilities.usageLimitSources !== true
+                    ? undefined
+                    : Option.getOrUndefined(current)?.sourcesEvent,
+            } satisfies ServerConfigReplayState;
+            return [
+              Option.some({ event, replay: next, revision: next.revision }),
+              Option.some(next),
+            ] as const;
+          });
+          if (Option.isSome(buffered)) {
+            yield* PubSub.publish(serverConfigUpdates, buffered.value);
+          }
+          if (event.type === "snapshot") {
+            yield* Deferred.succeed(initialConfigDeferred, event.config);
+          }
+        }),
+      ),
       Effect.onExit((exit) => {
         if (Exit.isSuccess(exit)) {
           return Effect.all([

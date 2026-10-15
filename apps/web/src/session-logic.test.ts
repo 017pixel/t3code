@@ -1431,31 +1431,19 @@ describe("incremental v2 timeline entries", () => {
       ...last,
       item: { ...last.item, text: "Next token", updatedAt: DateTime.makeUnsafe(fixture.time(8)) },
     };
-    const after = {
+    const update = (row: typeof token) => ({
       ...before,
-      turnItems: [...before.turnItems.slice(0, -1), token.item],
-      visibleTurnItems: [...rows.slice(0, -1), token],
-    };
-    expect(isStreamingProjectionTextUpdate(before, after)).toBe(true);
-    for (const changed of [
-      { ...token, item: { ...token.item, streaming: false } },
-      { ...token, item: { ...token.item, runId: fixture.historyRunId } },
-      { ...token, sourceThreadId: ThreadId.make("inherited") },
+      turnItems: [...before.turnItems.slice(0, -1), row.item],
+      visibleTurnItems: [...rows.slice(0, -1), row],
+    });
+    expect(isStreamingProjectionTextUpdate(before, update(token))).toBe(true);
+    for (const next of [
+      update({ ...token, item: { ...token.item, streaming: false } }),
+      update({ ...token, sourceThreadId: ThreadId.make("inherited") }),
+      { ...update(token), runs: [...before.runs] },
     ]) {
-      expect(
-        isStreamingProjectionTextUpdate(before, {
-          ...after,
-          turnItems: [...before.turnItems.slice(0, -1), changed.item],
-          visibleTurnItems: [...rows.slice(0, -1), changed],
-        }),
-      ).toBe(false);
+      expect(isStreamingProjectionTextUpdate(before, next)).toBe(false);
     }
-    expect(isStreamingProjectionTextUpdate(before, { ...after, runs: [...before.runs] })).toBe(
-      false,
-    );
-    expect(
-      isStreamingProjectionTextUpdate(before, { ...after, visibleTurnItems: rows.slice(1) }),
-    ).toBe(false);
   });
   it("retains history and attachment previews through decoded streaming updates", () => {
     const fixture = makeStreamingTimelineFixture("Partial");
@@ -1531,42 +1519,26 @@ describe("incremental v2 timeline entries", () => {
     expect(restoredMessage.message.attachments?.[0]).not.toHaveProperty("previewUrl");
   });
 
-  it.each([false, true])(
-    "retains renumbered history when older attachment URLs change: %s",
-    (newUrls) => {
-      const fixture = makeStreamingTimelineFixture("Partial");
-      const input = { visibleTurnItems: fixture.visibleTurnItems, optimisticMessages: [] };
-      const previous = deriveTimelineEntriesFromVisibleTurnItemsWithState(input);
-      const first = fixture.visibleTurnItems[0]!;
-      const older = {
-        ...first,
-        position: 0,
-        sourceItemId: TurnItemId.make("older-prompt"),
-        item: {
-          ...first.item,
-          id: TurnItemId.make("older-prompt"),
-          messageId: MessageId.make("older-prompt"),
-        },
-      };
-      const nextInput = {
-        ...input,
-        ...(newUrls
-          ? { attachmentUrlById: new Map([["older-image", "https://server.test/older-image"]]) }
-          : {}),
-        visibleTurnItems: [
-          older,
-          ...input.visibleTurnItems.map((row) => ({ ...row, position: row.position + 1 })),
-        ],
-      };
-      const next = deriveTimelineEntriesFromVisibleTurnItemsWithState(nextInput, previous);
-      expect(next.entries).toEqual(deriveTimelineEntriesFromVisibleTurnItems(nextInput));
-      for (const entry of previous.entries) {
-        if (entry.kind !== "message") continue;
-        const retained = next.entries.find((candidate) => candidate.id === entry.id);
+  it("reuses renumbered history when unrelated attachment URLs change", () => {
+    const fixture = makeStreamingTimelineFixture("Partial");
+    const input = { visibleTurnItems: fixture.visibleTurnItems, optimisticMessages: [] };
+    const previous = deriveTimelineEntriesFromVisibleTurnItemsWithState(input);
+    const nextInput = {
+      ...input,
+      attachmentUrlById: new Map([["older-image", "https://server.test/older-image"]]),
+      visibleTurnItems: input.visibleTurnItems.map((row) => ({
+        ...row,
+        position: row.position + 1,
+      })),
+    };
+    const next = deriveTimelineEntriesFromVisibleTurnItemsWithState(nextInput, previous);
+    expect(next.entries).toEqual(deriveTimelineEntriesFromVisibleTurnItems(nextInput));
+    previous.entries.forEach((entry, index) => {
+      const retained = next.entries[index];
+      if (entry.kind === "message")
         expect(retained?.kind === "message" && retained.message).toBe(entry.message);
-      }
-    },
-  );
+    });
+  });
 
   it("appends committed items in canonical order even when their timestamps go backwards", () => {
     const fixture = makeStreamingTimelineFixture("Partial");

@@ -319,17 +319,10 @@ export function truncateTraceAttributes(attributes: TraceAttributes): TraceAttri
   let truncated: Record<string, unknown> | undefined;
   for (const [key, value] of Object.entries(attributes)) {
     if (typeof value === "string" && ALWAYS_TRUNCATED_TRACE_ATTRIBUTES.has(key)) {
-      // Query text is indented source; collapsing whitespace keeps more of the
-      // statement in fewer bytes on one of the most frequent spans.
-      const head = value.slice(0, TRACE_ATTRIBUTE_TRUNCATED_LENGTH * 8);
-      const compact = head.replace(/\s+/g, " ").trim();
-      const fits =
-        head.length === value.length && compact.length <= TRACE_ATTRIBUTE_TRUNCATED_LENGTH;
-      if (fits && compact === value) continue;
+      if (value.length <= TRACE_ATTRIBUTE_TRUNCATED_LENGTH) continue;
       truncated ??= { ...attributes };
-      truncated[key] = fits
-        ? compact
-        : `${compact.slice(0, TRACE_ATTRIBUTE_TRUNCATED_LENGTH)}${TRACE_ATTRIBUTE_TRUNCATION_SUFFIX}`;
+      truncated[key] =
+        `${value.slice(0, TRACE_ATTRIBUTE_TRUNCATED_LENGTH)}${TRACE_ATTRIBUTE_TRUNCATION_SUFFIX}`;
       continue;
     }
     const next = truncateNestedValue(value);
@@ -491,14 +484,12 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
 
   yield* Effect.addFinalizer(() => flush.pipe(Effect.ignore));
   yield* Effect.forkScoped(
-    Effect.gen(function* () {
-      while (true) {
-        yield* Queue.take(flushRequests);
-        if (buffer.length === 0 && pendingFlushStats.count === 0 && droppedCount === 0) continue;
-        yield* Effect.sleep(`${options.batchWindowMs} millis`);
-        yield* flush;
-      }
-    }),
+    // Flush when push fills a batch or the batch window passes.
+    Queue.take(flushRequests).pipe(
+      Effect.timeoutOption(`${options.batchWindowMs} millis`),
+      Effect.andThen(flush),
+      Effect.forever,
+    ),
   );
 
   return {
@@ -517,7 +508,6 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
         if (buffer.length >= FLUSH_BUFFER_THRESHOLD) {
           Queue.offerUnsafe(flushRequests, undefined);
         }
-        Queue.offerUnsafe(flushRequests, undefined);
       } catch {
         return;
       }

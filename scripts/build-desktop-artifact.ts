@@ -110,9 +110,6 @@ const RepoRoot = Effect.service(Path.Path).pipe(
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeWorkspaceConfig = Schema.decodeEffect(fromYaml(WorkspaceConfig));
 const encodeStageWorkspaceConfig = Schema.encodeEffect(fromYaml(StageWorkspaceConfig));
-const decodeBundleSourceMap = Schema.decodeEffect(
-  Schema.fromJsonString(Schema.Struct({ sources: Schema.Array(Schema.String) })),
-);
 
 // Decodes the repo's pnpm-workspace.yaml. A PR CI test calls this too, so a bad
 // entry fails the PR instead of the nightly desktop build.
@@ -3669,11 +3666,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     const inlinedPackages = new Set<string>();
     for (const chunkName of chunkNames) {
       const source = yield* fs.readFileString(path.join(distDirs.serverDist, chunkName));
-      const sourceMapPath = path.join(distDirs.serverDist, `${chunkName}.map`);
-      const sourcePaths = (yield* fs.exists(sourceMapPath))
-        ? (yield* decodeBundleSourceMap(yield* fs.readFileString(sourceMapPath))).sources
-        : undefined;
-      const scan = findInlinedExternalPackages(source, sourcePaths);
+      const scan = findInlinedExternalPackages(source);
       totalRegions += scan.regionCount;
       for (const name of scan.inlined) inlined.add(name);
       for (const name of scan.inlinedPackages) inlinedPackages.add(name);
@@ -3683,7 +3676,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         packages: [...inlined].sort(),
       });
     }
-    // No modules at all means the scan went blind (map or markers missing), not
+    // No regions at all means the scan went blind (marker format changed), not
     // that the bundle is clean.
     if (totalRegions === 0) {
       return yield* new InlinedExternalPackageError({

@@ -1,9 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
-  Activity,
-  lazy,
-  Suspense,
   useEffect,
   useState,
   useSyncExternalStore,
@@ -12,7 +9,6 @@ import {
 } from "react";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 
-import { loadableComponent } from "../lib/loadableComponent";
 import { isElectron } from "../env";
 import { getLocalStorageItem, removeLocalStorageItem } from "../hooks/useLocalStorage";
 import {
@@ -21,7 +17,6 @@ import {
   shortcutLabelForCommand,
 } from "../keybindings";
 import { isEditableFocused } from "../lib/editableFocus";
-import { PortalContainerContext, useOwnPortalContainer } from "../lib/portalContainer";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { isModelPickerOpen } from "../modelPickerVisibility";
@@ -36,8 +31,10 @@ import {
   usePanelAnimationSettings,
   usePanelNavigationSuppression,
 } from "../panelAnimations";
+import LegacyThreadSidebar from "./LegacySidebar";
 import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
 import ThreadSidebar from "./Sidebar";
+import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
@@ -59,26 +56,6 @@ import {
   useSidebarVisibility,
 } from "./ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-
-// Only the sidebar the legacy setting picks should be in the startup graph.
-// While a sidebar chunk loads, or if it fails, the column keeps its chrome
-// header; a stale deploy gets its `vite:preloadError` reload first.
-function SidebarChromeShell() {
-  return <SidebarChromeHeader isElectron={isElectron} />;
-}
-const renderNoSettingsNav = (_props: { pathname: string }) => null;
-const LegacyThreadSidebar = lazy(() =>
-  import("./LegacySidebar")
-    .then((module) => ({ default: module?.default ?? SidebarChromeShell }))
-    .catch(() => ({ default: SidebarChromeShell })),
-);
-/** The settings route loads the nav alongside its own chunks instead of after its first paint. */
-export const loadSettingsSidebarNav = () => import("./settings/SettingsSidebarNav");
-const SettingsSidebarNav = loadableComponent<{ pathname: string }>(() =>
-  loadSettingsSidebarNav()
-    .then((module) => ({ default: module?.SettingsSidebarNav ?? renderNoSettingsNav }))
-    .catch(() => ({ default: renderNoSettingsNav })),
-).Component;
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
 
@@ -242,7 +219,7 @@ function NavigationHistoryShortcuts() {
   return null;
 }
 
-// Settings hides the thread sidebar, which drops its subscriptions. Keep the lightweight
+// Settings swaps the thread sidebar out of the tree. Keep the lightweight
 // project projection subscribed so returning to a draft never renders the
 // zero-project state while the environment snapshot reconnects.
 function ProjectProjectionRetention() {
@@ -263,8 +240,6 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const panelAnimationsSuppressed = usePanelNavigationSuppression(pathname);
   const routePanelAnimationsActive = panelAnimationsActive && !panelAnimationsSuppressed;
   const isOnSettings = pathname === "/settings" || pathname.startsWith("/settings/");
-  // The thread sidebar's popups hide with it on settings, where it is hidden in <Activity>.
-  const threadSidebarPortalContainer = useOwnPortalContainer(isOnSettings, null);
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
   const [sidebarWidth, setSidebarWidth] = useState(readInitialThreadSidebarWidth);
   // Subscribed rather than read once: the clamp must track live window size,
@@ -367,23 +342,13 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           {isOnSettings ? (
             <>
               <SidebarChromeHeader isElectron={isElectron} />
-              <Suspense fallback={null}>
-                <SettingsSidebarNav pathname={pathname} />
-              </Suspense>
+              <SettingsSidebarNav pathname={pathname} />
             </>
-          ) : null}
-          {/* Hidden rather than unmounted on settings, so going back only reveals it. */}
-          <Activity mode={isOnSettings ? "hidden" : "visible"}>
-            <PortalContainerContext value={threadSidebarPortalContainer}>
-              {legacySidebarEnabled ? (
-                <Suspense fallback={<SidebarChromeShell />}>
-                  <LegacyThreadSidebar />
-                </Suspense>
-              ) : (
-                <ThreadSidebar />
-              )}
-            </PortalContainerContext>
-          </Activity>
+          ) : legacySidebarEnabled ? (
+            <LegacyThreadSidebar />
+          ) : (
+            <ThreadSidebar />
+          )}
           <SidebarRail onDoubleClick={resetSidebarWidth} />
         </Sidebar>
         {children}
