@@ -3,46 +3,6 @@ import type { Parser as UnifiedParser, Plugin } from "unified";
 
 type Parser = UnifiedParser<Root>;
 
-const parsedDocuments = new Map<string, { root: Root; bytes: number }>();
-let parsedDocumentBytes = 0;
-const MAX_PARSED_DOCUMENT_BYTES = 8 * 1024 * 1024;
-
-/** Share pristine parse trees across virtualized row mounts. Transforms receive
- * their own tree, so alerts, directives and list recovery cannot mutate the cache.
- * Only the standard parser configuration uses this cache.
- */
-export function createCachedMarkdownPlugin(): Plugin<[], Root> {
-  return function () {
-    const original = this.parser;
-    if (!original) return;
-    let documentParsed = false;
-    this.parser = (source, file) => {
-      if (documentParsed) return original(source, file);
-      documentParsed = true;
-      const cached = parsedDocuments.get(source);
-      if (cached) {
-        parsedDocuments.delete(source);
-        parsedDocuments.set(source, cached);
-        return structuredClone(cached.root);
-      }
-      const root = original(source, file) as Root;
-      // Account for positions and AST nodes as well as source text, and cap
-      // both bytes and entry count. Oversized documents are never retained.
-      const bytes = source.length * 16 + 1024;
-      if (bytes <= MAX_PARSED_DOCUMENT_BYTES) {
-        parsedDocuments.set(source, { root: structuredClone(root), bytes });
-        parsedDocumentBytes += bytes;
-        while (parsedDocumentBytes > MAX_PARSED_DOCUMENT_BYTES || parsedDocuments.size > 128) {
-          const oldest = parsedDocuments.keys().next().value!;
-          parsedDocumentBytes -= parsedDocuments.get(oldest)!.bytes;
-          parsedDocuments.delete(oldest);
-        }
-      }
-      return root;
-    };
-  };
-}
-
 interface ParsedPrefix {
   source: string;
   offset: number;
