@@ -367,7 +367,10 @@ describe("observability", () => {
           yield* TestClock.adjust("1 second");
           yield* Queue.take(flushed);
           names.push(name);
-          assert.deepStrictEqual((yield* readTraceRecords(tracePath)).map((line) => line.name), names);
+          assert.deepStrictEqual(
+            (yield* readTraceRecords(tracePath)).map((line) => line.name),
+            names,
+          );
         }
       }).pipe(Effect.scoped),
     );

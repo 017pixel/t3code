@@ -20,7 +20,12 @@ import {
 import { ComposerHandleContext } from "../composerHandleContext";
 import { useTheme } from "../hooks/useTheme";
 import { resolveShortcutCommand } from "../keybindings";
-import { commandPaletteSurface, diffPanelSurface, preloadTerminalDrawer, preloadAfterComposer } from "./lazySurfaces";
+import {
+  commandPaletteSurface,
+  diffPanelSurface,
+  preloadTerminalDrawer,
+  preloadAfterComposer,
+} from "./lazySurfaces";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
@@ -100,7 +105,9 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     requestedModeRef.current = state.mode;
   }, [state.mode]);
   // Stays mounted after the first open so closing still animates out.
-  const [CommandPaletteDialog, setCommandPaletteDialog] = useState<typeof commandPaletteSurface.Component | null>(null);
+  const [CommandPaletteDialog, setCommandPaletteDialog] = useState<
+    typeof commandPaletteSurface.Component | null
+  >(null);
   if (state.open && CommandPaletteDialog === null) {
     setCommandPaletteDialog(() => commandPaletteSurface.Component);
   }
@@ -142,11 +149,15 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     return () => setCommandPaletteRequested(false);
   }, [state.open]);
 
-  useEffect(() => preloadAfterComposer([
-    commandPaletteSurface.preload,
-    preloadTerminalDrawer,
-    diffPanelSurface.preload,
-  ]), []);
+  useEffect(
+    () =>
+      preloadAfterComposer([
+        commandPaletteSurface.preload,
+        preloadTerminalDrawer,
+        diffPanelSurface.preload,
+      ]),
+    [],
+  );
   useEffect(() => {
     const onModifier = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Control" || event.key === "Meta") void commandPaletteSurface.preload();

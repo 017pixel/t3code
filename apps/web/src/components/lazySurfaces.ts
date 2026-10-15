@@ -30,9 +30,9 @@ function loadableComponent<Props extends object>(
   const resolve = () => load().then((module) => (loaded = module.default));
 
   function Loadable(props: Props) {
-    const [result, setResult] = useState<{ component: ComponentType<Props> } | { error: unknown } | null>(
-      () => loaded === null ? null : { component: loaded },
-    );
+    const [result, setResult] = useState<
+      { component: ComponentType<Props> } | { error: unknown } | null
+    >(() => (loaded === null ? null : { component: loaded }));
     useEffect(() => {
       if (result !== null) return;
       // Real use retries failed speculative imports.
@@ -56,7 +56,12 @@ export function preloadAfterComposer(loads: ReadonlyArray<() => Promise<unknown>
     if (stopped || document.visibilityState !== "visible") return;
     const load = queue.shift();
     if (!load) return;
-    const run = () => { if (!stopped) void load().catch(() => undefined).finally(next); };
+    const run = () => {
+      if (!stopped)
+        void load()
+          .catch(() => undefined)
+          .finally(next);
+    };
     if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(run);
     else window.setTimeout(run, 50);
   };
@@ -66,7 +71,12 @@ export function preloadAfterComposer(loads: ReadonlyArray<() => Promise<unknown>
     requestAnimationFrame(() => requestAnimationFrame(next));
   };
   const observer = new MutationObserver(ready);
-  observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ["contenteditable"] });
+  observer.observe(document, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ["contenteditable"],
+  });
   ready();
   const stop = () => {
     stopped = true;
