@@ -1,10 +1,13 @@
 import { NativeThemeHost } from "./NativeThemeHost.android";
 import {
   AlertDialog,
+  Button,
+  OutlinedButton,
+  Icon,
   Row,
+  Column,
   OutlinedTextField,
   Text,
-  TextButton,
   useNativeState,
 } from "@expo/ui/jetpack-compose";
 
@@ -12,6 +15,7 @@ import { useAppearancePreferences } from "../features/settings/appearance/Appear
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 
 import { useCallback, useEffect, useState } from "react";
+import { themeColorWithContrast } from "../lib/mobileTheme";
 import type { Alert, AlertButton } from "react-native";
 import type { ConfirmDialogRequest, TextInputDialogRequest } from "./Dialog.types";
 
@@ -137,23 +141,37 @@ function DialogPresentation(props: DialogPresentationProps) {
       onPress: confirm,
     },
   ];
-  const renderAction = (action: AlertButton, index: number) => (
-    <TextButton
-      key={index}
-      onClick={() => (props.alertActions ? props.onAlertAction?.(action) : action.onPress?.())}
-      enabled={
-        props.alertActions !== undefined || index !== actions.length - 1 || !props.confirmDisabled
-      }
-      colors={{
-        contentColor:
-          colors[
-            action.style === "destructive" ? "--color-danger-foreground" : "--color-primary-text"
-          ],
-      }}
-    >
-      <Text style={bodyTypography}>{action.text ?? ""}</Text>
-    </TextButton>
-  );
+  const destructive = actions.some((action) => action.style === "destructive");
+  // Error text colors can be pastel in dark themes. Filled actions need a white-label contrast pair.
+  const destructiveFill = themeColorWithContrast(colors["--color-danger-foreground"], "#ffffff");
+  const renderAction = (action: AlertButton, index: number) => {
+    const isDestructive = action.style === "destructive";
+    const isPrimary = isDestructive || index === actions.length - 1;
+    const Component = isPrimary ? Button : OutlinedButton;
+    return (
+      <Component
+        key={index}
+        onClick={() => (props.alertActions ? props.onAlertAction?.(action) : action.onPress?.())}
+        enabled={
+          props.alertActions !== undefined || index !== actions.length - 1 || !props.confirmDisabled
+        }
+        colors={{
+          containerColor: isDestructive
+            ? destructiveFill
+            : isPrimary
+              ? colors["--color-prominent-action"]
+              : "#00000000",
+          contentColor: isDestructive
+            ? "#ffffff"
+            : isPrimary
+              ? colors["--color-prominent-action-foreground"]
+              : colors["--color-foreground"],
+        }}
+      >
+        <Text style={bodyTypography}>{action.text ?? ""}</Text>
+      </Component>
+    );
+  };
   return (
     <NativeThemeHost ignoreSafeAreaKeyboardInsets style={{ height: 0, width: 0 }}>
       <AlertDialog
@@ -164,13 +182,22 @@ function DialogPresentation(props: DialogPresentationProps) {
         }}
         tonalElevation={0}
         colors={{
-          containerColor: colors["--color-card-alt"],
+          containerColor: colors["--color-card"],
           titleContentColor: colors["--color-foreground"],
           textContentColor: colors["--color-foreground-secondary"],
         }}
       >
         <AlertDialog.Title>
-          <Text style={titleTypography}>{props.request.title}</Text>
+          <Column verticalArrangement={{ spacedBy: 16 }}>
+            {destructive ? (
+              <Icon
+                source={require("../../assets/icons/delete.xml")}
+                tint={colors["--color-danger-foreground"]}
+                size={24}
+              />
+            ) : null}
+            <Text style={titleTypography}>{props.request.title}</Text>
+          </Column>
         </AlertDialog.Title>
         {props.inputInitialValue !== undefined ? (
           <AlertDialog.Text>
