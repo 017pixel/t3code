@@ -34,7 +34,11 @@ import {
   TurnItemId,
   VcsListRefsResult,
 } from "@t3tools/contracts";
-import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
+import {
+  boundedSnapshotProjection,
+  omitCheckpointItemFiles,
+  omitLocalVisibleTurnItems,
+} from "@t3tools/shared/orchestrationV2BoundedSnapshot";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -871,24 +875,24 @@ export const layer = Layer.effectContext(
         ),
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
+          const projection = omitLocalVisibleTurnItems(snapshot.projection) ?? snapshot.projection;
+          const compact = omitCheckpointItemFiles(projection);
           const encoded = yield* encodeStoredThreadSnapshot({
             schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
             environmentId,
             threadId: snapshot.projection.thread.id,
-            snapshot,
+            snapshot: { ...snapshot, projection: compact?.projection ?? projection },
           }).pipe(Effect.mapError((cause) => persistenceError("save-thread", cause)));
           yield* writeDatabaseValue(
             database,
             THREAD_STORE_NAME,
             threadCacheKey(environmentId, snapshot.projection.thread.id),
-            // Older builds ignore object-valued cache entries and fetch live
-            // data. They would read a viewport window or its deferred file
-            // lists as the whole thread, so every entry uses the envelope.
+            // Old clients refetch object envelopes instead of misreading bounded history.
             {
               format: "compact-thread-1",
               data: encoded,
-              omitLocal: false,
-              checkpointItemIds: [],
+              omitLocal: projection !== snapshot.projection,
+              checkpointItemIds: compact?.itemIds ?? [],
             },
           );
         }).pipe(
