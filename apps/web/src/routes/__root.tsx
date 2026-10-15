@@ -12,7 +12,7 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 import { Check, Copy } from "lucide";
-import { lazy, Suspense, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
@@ -53,7 +53,8 @@ import {
 } from "../components/ui/toast";
 import { isElectron } from "../env";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
-import { useConnectOnboardingRequest } from "../cloud/connectOnboarding";
+import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
+import { NightlyMobileBetaNotice } from "../components/NightlyMobileBeta";
 import { cn } from "../lib/utils";
 import { applyAppearanceFontVariables } from "~/appearanceFonts";
 import { applyAppearanceContrast } from "~/appearanceContrast";
@@ -88,29 +89,6 @@ import {
 import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
-
-// The preload-error guard runs first and may resolve an import to undefined.
-// Persistent optional-chunk failures must leave the shell usable.
-const renderNothing = () => null;
-const ConnectOnboardingDialog = lazy(() =>
-  import("../components/cloud/ConnectOnboardingDialog")
-    .then((module) => ({ default: module?.ConnectOnboardingDialog ?? renderNothing }))
-    .catch(() => ({ default: renderNothing })),
-);
-const NightlyMobileBetaNotice = lazy(() =>
-  import("../components/NightlyMobileBeta")
-    .then((module) => ({ default: module?.NightlyMobileBetaNotice ?? renderNothing }))
-    .catch(() => ({ default: renderNothing })),
-);
-
-function ConnectOnboarding() {
-  const request = useConnectOnboardingRequest();
-  return (
-    <Suspense fallback={null}>
-      <ConnectOnboardingDialog {...request} />
-    </Suspense>
-  );
-}
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -279,7 +257,7 @@ function RootRouteView() {
           {primaryEnvironmentAuthenticated ? <DesktopWebLinkCoordinator /> : null}
           {isElectron ? <RunningThreadKeepAlive /> : null}
           <RelayClientInstallDialog />
-          {hasCloudPublicConfig() ? <ConnectOnboarding /> : null}
+          {hasCloudPublicConfig() ? <ConnectOnboardingDialog /> : null}
           <SshPasswordPromptDialog />
           <SnapShotCoordinator />
           <ThreadNotificationCoordinator />
@@ -298,9 +276,7 @@ function RootRouteView() {
           {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
           {isElectron ? <DesktopUpdateLaunchNotice /> : null}
           {/* Hosted Nightly is "hosted-static", not authenticated, and needs it too. */}
-          <Suspense fallback={null}>
-            <NightlyMobileBetaNotice />
-          </Suspense>
+          <NightlyMobileBetaNotice />
           {appShell}
           {/* Above the router: a theme draft is judged by walking the app, so the
               editor has to survive navigation away from settings. */}
