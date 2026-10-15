@@ -1,10 +1,6 @@
 // @vitest-environment jsdom
 import { RegistryProvider } from "@effect/atom-react";
-import {
-  DEFAULT_SERVER_SETTINGS,
-  ProjectId,
-  type StorageCleanupReport,
-} from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ProjectId, type StorageCleanupReport } from "@t3tools/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
