@@ -1,9 +1,6 @@
 import { createElement, useEffect, useState, type ComponentProps, type ComponentType } from "react";
 import { preloadSpeculatively } from "../lib/chunkReloadGuard";
 
-export const commandPaletteSurface = loadableComponent<
-  ComponentProps<(typeof import("./CommandPalette"))["CommandPaletteDialog"]>
->(() => import("./CommandPalette").then((module) => ({ default: module.CommandPaletteDialog })));
 export const terminalDrawerSurface: ReturnType<
   typeof loadableComponent<ComponentProps<(typeof import("./ThreadTerminalDrawer"))["default"]>>
 > = loadableComponent(() => import("./ThreadTerminalDrawer"));
