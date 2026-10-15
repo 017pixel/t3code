@@ -122,73 +122,46 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     expect(next?.turnItems).toBe(emptyProjection.turnItems);
   });
 
-  it("refreshes one linked pull request and keeps other links", () => {
-    const link = {
-      host: "github.com",
-      repository: "owner/repo",
-      number: 1,
-      url: "https://github.com/owner/repo/pull/1",
-      source: "manual" as const,
-      linkedAt: DateTime.formatIso(now),
-      snapshot: null,
-      stack: null,
-    };
-    const other = { ...link, number: 2, url: "https://github.com/owner/repo/pull/2" };
-    const projection = {
-      ...emptyProjection,
-      thread: { ...emptyProjection.thread, pullRequests: [link, other] },
-    };
-    const snapshot = {
-      state: "open" as const,
-      title: "Host title",
-      headBranch: "feature",
-      baseBranch: "main",
-      isDraft: false,
-      updatedAt: DateTime.formatIso(now),
-      syncedAt: DateTime.formatIso(now),
-    };
-    const event = {
-      id: "event-pr-link-synced",
-      type: "thread.pull-request-link-synced",
-      threadId,
-      occurredAt: DateTime.add(now, { hours: 1 }),
-      payload: { host: link.host, repository: link.repository, number: 1, snapshot, stack: null },
-    } as OrchestrationV2DomainEvent;
-    const next = applyOrchestrationV2ProjectionEvent(projection, event);
-    expect(next?.thread.pullRequests?.[0]?.snapshot).toEqual(snapshot);
-    expect(next?.thread.pullRequests?.[1]).toBe(other);
-    expect(next?.thread.updatedAt).toEqual(now);
-    expect(next?.updatedAt).toEqual(now);
-    expect(next?.turnItems).toBe(projection.turnItems);
-  });
-
-  it("applies a compact PR sync without replacing other links or thread metadata", () => {
-    const link = (number: number): ThreadPullRequestLink => ({
-      host: "github.com",
-      repository: "pingdotgg/t3code",
-      number,
-      url: `https://github.com/pingdotgg/t3code/pull/${number}`,
-      source: "manual",
-      linkedAt: DateTime.formatIso(now),
-      snapshot: null,
-      stack: null,
-    });
-    const links = [link(1), link(2)];
-    const projection = {
-      ...emptyProjection,
-      thread: { ...emptyProjection.thread, pullRequests: links },
-    };
-    const updated = { ...links[1]!, source: "agent" as const };
-    const next = applyOrchestrationV2ProjectionEvent(projection, {
-      id: "compact-sync" as OrchestrationV2DomainEvent["id"],
-      type: "thread.pull-request-link-updated",
-      threadId,
-      occurredAt: now,
-      payload: updated,
-    });
-    expect(next?.thread).toEqual({ ...projection.thread, pullRequests: [links[0], updated] });
-    expect(next?.thread.pullRequests?.[0]).toBe(links[0]);
-  });
+  it.each(["thread.pull-request-link-updated", "thread.pull-request-link-synced"] as const)(
+    "applies %s without replacing other links or activity",
+    (type) => {
+      const link = (number: number): ThreadPullRequestLink => ({
+        host: "github.com",
+        repository: "pingdotgg/t3code",
+        number,
+        url: `https://github.com/pingdotgg/t3code/pull/${number}`,
+        source: "manual",
+        linkedAt: DateTime.formatIso(now),
+        snapshot: null,
+        stack: null,
+      });
+      const links = [link(1), link(2)];
+      const projection = {
+        ...emptyProjection,
+        thread: { ...emptyProjection.thread, pullRequests: links },
+      };
+      const updated = { ...links[1]!, source: "agent" as const };
+      const next = applyOrchestrationV2ProjectionEvent(projection, {
+        id: "compact-sync" as OrchestrationV2DomainEvent["id"],
+        type,
+        threadId,
+        occurredAt: DateTime.add(now, { hours: 1 }),
+        payload:
+          type === "thread.pull-request-link-updated"
+            ? updated
+            : { ...updated, snapshot: null, stack: null },
+      } as OrchestrationV2DomainEvent);
+      expect(next?.thread).toEqual({
+        ...projection.thread,
+        pullRequests: [links[0], type === "thread.pull-request-link-updated" ? updated : links[1]],
+      });
+      expect(next?.updatedAt).toEqual(
+        type === "thread.pull-request-link-synced" ? now : DateTime.add(now, { hours: 1 }),
+      );
+      expect(next?.turnItems).toBe(projection.turnItems);
+      expect(next?.thread.pullRequests?.[0]).toBe(links[0]);
+    },
+  );
 
   it("keeps live token usage when the terminal provider turn omits it", () => {
     const providerTurnId = ProviderTurnId.make("provider-turn-reducer");
