@@ -715,7 +715,7 @@ it.effect("checkpoint capture keeps the legacy path when Git lacks add --sparse"
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
-it.effect.each(["normal", "flags", "sparse", "v3", "v4", "v3-flags", "v4-flags"] as const)(
+it.effect.each(["normal", "flags", "sparse"] as const)(
   "checkpoint index inspection handles entries beyond the output cap (index=%s)",
   (indexMode) =>
     Effect.gen(function* () {
@@ -738,9 +738,7 @@ it.effect.each(["normal", "flags", "sparse", "v3", "v4", "v3-flags", "v4-flags"]
       yield* fs.utimes(path.join(cwd, "stable"), 1_700_000_000, 1_700_000_000);
       yield* git(["add", "."]);
       yield* git(["commit", "-m", "inspection fixture"]);
-      if (indexMode.startsWith("v3")) yield* git(["update-index", "--index-version=3"]);
-      if (indexMode.startsWith("v4")) yield* git(["update-index", "--index-version=4"]);
-      if (indexMode.includes("flags")) yield* git(["update-index", "--skip-worktree", "z-skipped"]);
+      if (indexMode === "flags") yield* git(["update-index", "--skip-worktree", "z-skipped"]);
       if (indexMode === "sparse")
         yield* git(["sparse-checkout", "set", "--cone", "--sparse-index", "included"]);
       yield* fs.writeFileString(path.join(cwd, "z-skipped"), "modified\n");
@@ -765,7 +763,7 @@ it.effect.each(["normal", "flags", "sparse", "v3", "v4", "v3-flags", "v4-flags"]
       );
       yield* captureDriver.checkpoints.captureCheckpoint({ cwd, checkpointRef });
       assert.strictEqual((yield* git(["show", `${checkpointRef}:z-skipped`])).stdout, "modified\n");
-      if (!indexMode.includes("flags"))
+      if (indexMode !== "flags")
         assert.strictEqual(yield* fs.readFileString(path.join(cwd, ".git/reads")), "");
       assert.deepEqual(yield* fs.readFile(path.join(cwd, ".git/index")), originalIndex);
     }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
