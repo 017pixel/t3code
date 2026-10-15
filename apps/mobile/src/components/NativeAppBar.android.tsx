@@ -1,8 +1,9 @@
 import { RNHostView, TopAppBar } from "@expo/ui/jetpack-compose";
-import { fillMaxWidth } from "@expo/ui/jetpack-compose/modifiers";
+import { fillMaxWidth, height } from "@expo/ui/jetpack-compose/modifiers";
 import type { ReactElement } from "react";
 import { NativeThemeHost } from "./NativeThemeHost.android";
 import { useControlTheme } from "./useControlTheme";
+import { useToolbarLayout } from "./useToolbarLayout";
 
 /** Internal renderer. The surrounding screen owns status-bar and sheet insets. */
 export function NativeAppBar(props: {
@@ -11,11 +12,12 @@ export function NativeAppBar(props: {
   readonly actions?: ReactElement;
 }) {
   const { colors } = useControlTheme();
+  const layout = useToolbarLayout();
   return (
     <NativeThemeHost matchContents={{ vertical: true }} style={{ width: "100%" }}>
       <TopAppBar
         applyWindowInsets={false}
-        modifiers={[fillMaxWidth()]}
+        modifiers={[fillMaxWidth(), height(Math.max(64, layout.height))]}
         colors={{
           containerColor: colors["--color-header"],
           titleContentColor: colors["--color-header-foreground"],
