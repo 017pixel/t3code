@@ -20,6 +20,9 @@ import {
   reloadOnceForChunkLoadError,
 } from "./lib/chunkReloadGuard";
 
+import { restoreStackTraces } from "./lib/bootStackTraces";
+
+restoreStackTraces();
 prepareProviderAuthDelivery();
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
