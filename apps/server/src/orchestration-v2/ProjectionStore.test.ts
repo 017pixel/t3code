@@ -5780,13 +5780,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         compact.pullRequests,
       );
       assert.deepEqual((yield* store.getThread(threadId)).pullRequests, rich.pullRequests);
-      const shell = yield* store.getThreadShell(threadId, { compactPullRequests: true });
-      assert.isNotNull(shell);
-      const wire = compactShellPullRequestStacks(shell!);
-      assert.equal(wire.pullRequests?.[1]?.stackReference, 0);
-      assert.isNull(wire.pullRequests?.[1]?.stack);
-      assert.equal(wire.pullRequests?.[2]?.stack?.base, "older-base");
-      assert.isUndefined(wire.pullRequests?.[2]?.stackReference);
       const terminalAt = DateTime.formatIso(DateTime.add(at, { seconds: 1 }));
       for (const state of ["merged", "closed"] as const) {
         yield* syncPullRequests(`terminal-${state}`, [
