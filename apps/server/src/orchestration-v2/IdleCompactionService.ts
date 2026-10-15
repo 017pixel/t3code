@@ -1,4 +1,9 @@
-import { CommandId, MessageId, type ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  MessageId,
+  resolveProjectProviderInstanceEnabled,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -55,9 +60,15 @@ export const make = Effect.gen(function* () {
         // Only due threads load their history. The minute scan stays independent
         // of transcript size, like the settlement worker's candidate query.
         const projection = yield* projections.getThreadProjection(candidate.threadId);
+        const currentSettings = yield* settings.getSettings;
         const current = idleCompactionCandidate(
           projection,
-          (yield* settings.getSettings).compactIdleThreads,
+          currentSettings.compactIdleThreads &&
+            resolveProjectProviderInstanceEnabled(
+              currentSettings,
+              projection.thread.projectId,
+              projection.thread.providerInstanceId,
+            ),
           nowMs,
         );
         if (current === null || current.runId !== candidate.runId) return;

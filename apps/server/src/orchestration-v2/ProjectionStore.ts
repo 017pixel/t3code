@@ -5649,6 +5649,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ON m.message_id = json_extract(r.payload_json, '$.userMessageId')
         WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}
           AND json_extract(t.payload_json, '$.archivedAt') IS NULL
+          AND json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
           AND json_extract(t.payload_json, '$.settledAt') IS NULL
           AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
           AND r.status = 'completed' AND r.completed_at >= ${DateTime.formatIso(completedAfter)}

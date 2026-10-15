@@ -22,6 +22,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 
@@ -329,6 +330,30 @@ const seed = Effect.fn("seedIdleCompactionThread")(function* (
   });
 });
 
+it.effect.each([null, "fork", "subagent"] as const)(
+  "keeps SQL and memory eligibility aligned for %s children",
+  (relationshipToParent) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const value = projection();
+      value.thread = {
+        ...value.thread,
+        lineage: {
+          rootThreadId: ThreadId.make("root-thread"),
+          parentThreadId: relationshipToParent === null ? null : ThreadId.make("parent-thread"),
+          relationshipToParent,
+        },
+      };
+      yield* seed(value);
+      const persisted = yield* store.getThreadProjection(value.thread.id);
+      const candidate = idleCompactionCandidate(persisted, true, NOW_MS);
+      expect(candidate !== null).toBe(relationshipToParent !== "subagent");
+      expect(yield* store.getIdleCompactionCandidates({ completedAfter: at(-MINUTE_MS) })).toEqual(
+        candidate === null ? [] : [candidate],
+      );
+    }).pipe(Effect.provide(layerProjections)),
+);
+
 it.effect("keeps the prior activity anchor and hides the system prompt after idle compaction", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -452,6 +477,21 @@ it.effect("scans at the deadline and dispatches the system maintenance command o
     const candidateReads = yield* Queue.unbounded<void>();
     const store = yield* ProjectionStore.ProjectionStoreV2;
     const value = projection();
+    const settings = yield* Ref.make({
+      ...DEFAULT_SERVER_SETTINGS,
+      compactIdleThreads: true,
+      providerInstances: {
+        [value.thread.providerInstanceId]: {
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+        },
+      },
+      projectSettingsOverrides: {
+        [value.thread.projectId]: {
+          providerInstances: { [value.thread.providerInstanceId]: { enabled: false } },
+        },
+      },
+    });
     const dependencies = Layer.mergeAll(
       Layer.succeed(ProjectionStore.ProjectionStoreV2, {
         ...store,
@@ -481,7 +521,7 @@ it.effect("scans at the deadline and dispatches the system maintenance command o
           } as ProviderInstance),
       }),
       Layer.mock(ServerSettings.ServerSettingsService)({
-        getSettings: Effect.succeed({ ...DEFAULT_SERVER_SETTINGS, compactIdleThreads: true }),
+        getSettings: Ref.get(settings),
         subscribeChanges: Effect.succeed(Stream.empty),
       }),
       Layer.mock(Orchestrator.OrchestratorV2)({
@@ -498,6 +538,11 @@ it.effect("scans at the deadline and dispatches the system maintenance command o
       yield* Queue.take(candidateReads);
       yield* service.drain;
       expect(yield* Queue.size(commands)).toBe(0);
+      yield* TestClock.adjust("1 minute");
+      yield* Queue.take(candidateReads);
+      yield* service.drain;
+      expect(yield* Queue.size(commands)).toBe(0);
+      yield* Ref.update(settings, (current) => ({ ...current, projectSettingsOverrides: {} }));
       yield* TestClock.adjust("1 minute");
       yield* Queue.take(candidateReads);
       const command = yield* Queue.take(commands);

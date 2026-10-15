@@ -56,6 +56,7 @@ export function idleCompactionCandidate(
   const { thread, runs, messages, providerThreads, providerTurns, runtimeRequests, turnItems } =
     projection;
   if (!enabled || thread.deletedAt !== null || thread.archivedAt !== null) return null;
+  if (thread.lineage.relationshipToParent === "subagent") return null;
   if (thread.settledOverride === "settled" || thread.settledAt !== null) return null;
   if (runtimeRequests.some((request) => request.status === "pending")) return null;
   if (

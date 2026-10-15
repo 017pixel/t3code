@@ -53,7 +53,6 @@ export function latestExecutedRun(
 ): OrchestrationV2Run | null {
   let latest: OrchestrationV2Run | null = null;
   for (const run of runs) {
-    if (run.idleCompactionOfRunId !== undefined) continue;
     if (run.status === "queued") continue;
     if (run.status === "cancelled" && run.startedAt === null) continue;
     if (latest === null || runRanAfter(run, latest)) latest = run;

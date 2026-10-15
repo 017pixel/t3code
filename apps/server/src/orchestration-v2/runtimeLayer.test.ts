@@ -4010,13 +4010,20 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
-  it.effect.each(["usage_limit", "provider_error"] as const)(
-    "handles a queued message after a %s failure",
-    (failureClass) =>
+  it.effect.each([
+    { failureClass: "usage_limit", idleCompaction: false },
+    { failureClass: "provider_error", idleCompaction: false },
+    { failureClass: "usage_limit", idleCompaction: true },
+    { failureClass: "provider_error", idleCompaction: true },
+  ] as const)(
+    "handles a queued message after a $failureClass failure (idle compaction=$idleCompaction)",
+    ({ failureClass, idleCompaction }) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const eventSink = yield* EventSink.EventSinkV2;
-        const threadId = ThreadId.make(`runtime-layer-failed-queue-${failureClass}`);
+        const threadId = ThreadId.make(
+          `runtime-layer-failed-queue-${failureClass}-${idleCompaction}`,
+        );
 
         yield* orchestrator.dispatch({
           type: "thread.create",
@@ -4117,7 +4124,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
               nodeId: activeRun.rootNodeId,
               providerInstanceId: activeRun.providerInstanceId,
               occurredAt: now,
-              payload: { ...activeRun, status: "failed", completedAt: now },
+              payload: {
+                ...activeRun,
+                status: "failed",
+                completedAt: now,
+                ...(idleCompaction
+                  ? { idleCompactionOfRunId: RunId.make(`${threadId}:source`) }
+                  : {}),
+              },
             },
           ],
         });
@@ -4126,6 +4140,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           assert.equal(yield* Queue.take(heldRunIds), queuedRun.id);
           const held = yield* orchestrator.getThreadProjection(threadId);
           assert.equal(held.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+          assert.isTrue(held.runs.find((run) => run.id === queuedRun.id)?.queueHeld);
           yield* orchestrator.dispatch({
             type: "queue.resume",
             commandId: CommandId.make(`${threadId}:resume`),
@@ -4138,6 +4153,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const after = yield* orchestrator.getThreadProjection(threadId);
         assert.equal(after.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
         assert.isFalse(after.turnItems.some((item) => item.runId === queuedRun.id));
+        if (idleCompaction) return;
         const shell = (yield* orchestrator.getShellSnapshot()).threads.find(
           (thread) => thread.id === threadId,
         );

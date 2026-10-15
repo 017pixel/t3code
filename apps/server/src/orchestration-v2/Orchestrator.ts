@@ -54,6 +54,7 @@ import {
   ProviderInstanceId,
   ProviderInteractionMode,
   resolveProviderInstanceEnabled,
+  resolveProjectProviderInstanceEnabled,
   type ProviderSessionId,
   RunId,
   RuntimeMode,
@@ -4576,9 +4577,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             turnItemStatuses: ["pending", "running", "waiting"],
           })
           .pipe(mapDispatchError(command));
+        const settings = yield* serverSettings.getSettings.pipe(mapDispatchError(command));
         const candidate = idleCompactionCandidate(
           { ...projection, turnItems: [...projection.turnItems, ...background.turnItems] },
-          (yield* serverSettings.getSettings.pipe(mapDispatchError(command))).compactIdleThreads,
+          settings.compactIdleThreads &&
+            resolveProjectProviderInstanceEnabled(
+              settings,
+              projection.thread.projectId,
+              projection.thread.providerInstanceId,
+            ),
           DateTime.toEpochMillis(yield* DateTime.now),
         );
         if (
