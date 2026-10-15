@@ -10,8 +10,8 @@ import {
   useRef,
   useState,
   type DependencyList,
-  type ReactNode,
   type RefObject,
+  type ReactNode,
 } from "react";
 
 import { PortalContainerContext, useOwnPortalContainer } from "~/lib/portalContainer";
@@ -68,58 +68,11 @@ export function createKeptViewLifetimes() {
   };
 }
 
-const EDITOR_CALLBACK_KEYS = [
-  "onBeforeCreate",
-  "onCreate",
-  "onUpdate",
-  "onSelectionUpdate",
-  "onTransaction",
-  "onFocus",
-  "onBlur",
-  "onDestroy",
-  "onContentError",
-  "onDrop",
-  "onPaste",
-  "onDelete",
-  "onMount",
-  "onUnmount",
-] as const;
-
-type EditorCallbackKey = (typeof EDITOR_CALLBACK_KEYS)[number];
-
-function forwardCallback<K extends EditorCallbackKey>(
-  options: RefObject<Partial<EditorOptions>>,
-  key: K,
-): EditorOptions[K] {
-  type Callback = (...args: Parameters<EditorOptions[K]>) => void;
-  const forwarded: Callback = (...args) => {
-    const callback = options.current[key] as Callback | undefined;
-    callback?.(...args);
-  };
-  return forwarded as EditorOptions[K];
-}
-
-function createForwardingEditor(options: RefObject<Partial<EditorOptions>>): Editor {
-  const callbacks: Partial<EditorOptions> = {};
-  for (const key of EDITOR_CALLBACK_KEYS) {
-    Object.assign(callbacks, { [key]: forwardCallback(options, key) });
-  }
-  return new Editor({ ...options.current, ...callbacks });
-}
-
-// Matches @tiptap/react's useEditor: callbacks are forwarded, so only the
-// remaining options decide whether the editor needs `setOptions`.
-function editorOptionsMatch(next: Partial<EditorOptions>, current: Partial<EditorOptions>) {
-  return (Object.keys(next) as Array<keyof EditorOptions>).every((key) => {
-    if ((EDITOR_CALLBACK_KEYS as ReadonlyArray<string>).includes(key)) return true;
-    if (key === "extensions" && next.extensions && current.extensions) {
-      const currentExtensions = current.extensions;
-      return (
-        next.extensions.length === currentExtensions.length &&
-        next.extensions.every((extension, index) => extension === currentExtensions[index])
-      );
-    }
-    return next[key] === current[key];
+function createEditor(options: RefObject<Partial<EditorOptions>>) {
+  return new Editor({
+    ...options.current,
+    onUpdate: (event) => options.current.onUpdate?.(event),
+    onSelectionUpdate: (event) => options.current.onSelectionUpdate?.(event),
   });
 }
 
@@ -150,7 +103,7 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const [instance] = useState(() => {
     const created: KeptEditorInstance = {
-      editor: createForwardingEditor(optionsRef),
+      editor: createEditor(optionsRef),
       deps,
       mounted: false,
       cancelDestroy: null,
@@ -162,18 +115,16 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
   useEffect(() => {
     if (instance.editor.isDestroyed) return;
     if (
-      deps.length !== instance.deps.length ||
-      deps.some((dep, index) => !Object.is(dep, instance.deps[index]))
+      deps.some((dep, index) => !Object.is(dep, instance.deps[index])) ||
+      deps.length !== instance.deps.length
     ) {
       instance.deps = deps;
       instance.editor.destroy();
-      instance.editor = createForwardingEditor(optionsRef);
+      instance.editor = createEditor(optionsRef);
       rerender();
       return;
     }
-    if (!editorOptionsMatch(optionsRef.current, instance.editor.options)) {
-      instance.editor.setOptions({ ...optionsRef.current, editable: instance.editor.isEditable });
-    }
+    instance.editor.setOptions({ editorProps: optionsRef.current.editorProps });
   });
 
   useEffect(() => {
@@ -181,7 +132,7 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
     instance.cancelDestroy?.();
     instance.cancelDestroy = null;
     if (instance.editor.isDestroyed) {
-      instance.editor = createForwardingEditor(optionsRef);
+      instance.editor = createEditor(optionsRef);
       rerender();
     }
     return () => {
