@@ -231,9 +231,9 @@ index 0000000000000000000000000000000000000000..95dcb7e59a2072446d45d51f14848075
 +export function TopAppBar({ modifiers, ...props }) {
 +  return jsx(NativeTopAppBar, { ...props, modifiers, ...(modifiers ? createViewModifierEventListener(modifiers) : undefined) });
 +}
-+TopAppBar.Title = function Title({ children }) { return jsx(Slot, { slotName: 'title', children }); };
-+TopAppBar.NavigationIcon = function NavigationIcon({ children }) { return jsx(Slot, { slotName: 'navigationIcon', children }); };
-+TopAppBar.Actions = function Actions({ children }) { return jsx(Slot, { slotName: 'actions', children }); };
++TopAppBar.Title = function Title({ children }) { return jsx(Slot, { style: { position: 'absolute' }, slotName: 'title', children }); };
++TopAppBar.NavigationIcon = function NavigationIcon({ children }) { return jsx(Slot, { style: { position: 'absolute' }, slotName: 'navigationIcon', children }); };
++TopAppBar.Actions = function Actions({ children }) { return jsx(Slot, { style: { position: 'absolute' }, slotName: 'actions', children }); };
 diff --git a/build/jetpack-compose/index.d.ts b/build/jetpack-compose/index.d.ts
 index 8597c8f081d9ee31ac312721eb6a407a184f8133..e3661aac95080b6646a93a3f3b8043b0dd206b2d 100644
 --- a/build/jetpack-compose/index.d.ts
@@ -458,7 +458,7 @@ index 0000000000000000000000000000000000000000..4f2d3ec00db95fb929f08656ebc57056
 @@ -0,0 +1,28 @@
 +import { requireNativeView } from 'expo';
 +import type { ReactNode, ComponentType } from 'react';
-+import type { ColorValue } from 'react-native';
++import type { ColorValue, StyleProp, ViewStyle } from 'react-native';
 +import type { ExpoModifier } from '../../types';
 +import { createViewModifierEventListener } from '../modifiers/utils';
 +
@@ -475,15 +475,15 @@ index 0000000000000000000000000000000000000000..4f2d3ec00db95fb929f08656ebc57056
 +  modifiers?: ExpoModifier[];
 +}
 +const NativeTopAppBar: ComponentType<TopAppBarProps> = requireNativeView('ExpoUI', 'TopAppBarView');
-+const Slot: ComponentType<{ slotName: string; children: ReactNode }> = requireNativeView('ExpoUI', 'SlotView');
++const Slot: ComponentType<{ slotName: string; children: ReactNode; style?: StyleProp<ViewStyle> }> = requireNativeView('ExpoUI', 'SlotView');
 +
-+/** Pinned Material top app bar. Slots contain Compose views or RNHostView content. */
++/** Compose positions the slots; absolute Yoga layout avoids double-counting their offsets. */
 +export function TopAppBar({ modifiers, ...props }: TopAppBarProps) {
 +  return <NativeTopAppBar {...props} modifiers={modifiers} {...(modifiers ? createViewModifierEventListener(modifiers) : undefined)} />;
 +}
-+TopAppBar.Title = function Title({ children }: { children: ReactNode }) { return <Slot slotName="title">{children}</Slot>; };
-+TopAppBar.NavigationIcon = function NavigationIcon({ children }: { children: ReactNode }) { return <Slot slotName="navigationIcon">{children}</Slot>; };
-+TopAppBar.Actions = function Actions({ children }: { children: ReactNode }) { return <Slot slotName="actions">{children}</Slot>; };
++TopAppBar.Title = function Title({ children }: { children: ReactNode }) { return <Slot style={{ position: "absolute" }} slotName="title">{children}</Slot>; };
++TopAppBar.NavigationIcon = function NavigationIcon({ children }: { children: ReactNode }) { return <Slot style={{ position: "absolute" }} slotName="navigationIcon">{children}</Slot>; };
++TopAppBar.Actions = function Actions({ children }: { children: ReactNode }) { return <Slot style={{ position: "absolute" }} slotName="actions">{children}</Slot>; };
 diff --git a/src/jetpack-compose/index.ts b/src/jetpack-compose/index.ts
 index 4e788cf01163a05e5043a36cc852507fe1f0d731..5f0ef493285e966d4f11be15774498df239a7d73 100644
 --- a/src/jetpack-compose/index.ts
