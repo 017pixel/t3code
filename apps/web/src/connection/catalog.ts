@@ -98,7 +98,7 @@ export const bootHoldAtom = Atom.make(readBootSnapshot() !== null).pipe(
 );
 let bootHoldRetainers = 0;
 
-export function isBootHeld(): boolean {
+function isBootHeld(): boolean {
   return appAtomRegistry.get(bootHoldAtom);
 }
 

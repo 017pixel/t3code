@@ -41,7 +41,7 @@ import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { isBootHeld, releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
+import { releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   buildThreadRouteParams,
   finishWarmingThreadView,
@@ -107,13 +107,18 @@ function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => v
   };
 }
 
-/** Let the sidebar paint, then render the real cached chat without waiting for a session. */
+let bootChatViewReady = false;
+
+/** Let the sidebar paint, then render the real chat without waiting for a session. */
 function useBootChatView(): boolean {
-  const [ready, setReady] = useState(() => !isBootHeld());
+  const [ready, setReady] = useState(() => bootChatViewReady);
   useEffect(() => {
     if (ready) return;
     const release = retainBootHold();
-    const show = () => setReady(true);
+    const show = () => {
+      bootChatViewReady = true;
+      setReady(true);
+    };
     let task: ReturnType<typeof setTimeout> | undefined;
     const frame = requestAnimationFrame(() => {
       task = setTimeout(show, 0);
