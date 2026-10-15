@@ -1,9 +1,8 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useState } from "react";
 import { Platform, View } from "react-native";
 import { FormSheet, Screen, ScreenStack, ScreenStackHeaderConfig } from "react-native-screens";
 import { useResolveClassNames, withUniwind } from "uniwind";
 
-import { AndroidSheetHeader } from "./AndroidScreenHeader";
 import { nativeHeaderScrollEdgeEffects } from "../native/StackHeader";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
@@ -13,11 +12,8 @@ const NativeHeader = withUniwind(ScreenStackHeaderConfig, {
   titleColor: { fromClassName: "titleColorClassName", styleProperty: "accentColor" },
 });
 
-export interface SheetProps {
-  readonly title: string;
-  readonly children: ReactNode;
-  readonly onClose: () => void;
-}
+export type { SheetProps } from "./Sheet.types";
+import type { SheetProps } from "./Sheet.types";
 
 /** Native presentation. Scrollable children use automatic insets beneath the iOS header. */
 export function Sheet(props: SheetProps) {
@@ -36,46 +32,39 @@ export function Sheet(props: SheetProps) {
       onNativeDismiss={props.onClose}
     >
       <View collapsable={false} className="flex-1 bg-sheet">
-        {Platform.OS === "ios" ? (
-          <ScreenStack style={{ flex: 1 }}>
-            <NativeScreen
-              activityState={2}
-              enabled
-              isNativeStack
-              screenId={`app-sheet-${screenId}`}
-              scrollEdgeEffects={HEADER_SCROLL_EDGE_EFFECTS}
-              className="flex-1 bg-sheet"
-            >
-              {props.children}
-              <NativeHeader
-                backgroundColor="rgba(0,0,0,0)"
-                tintColorClassName="accent-foreground"
-                hideBackButton
-                hideShadow={false}
-                title={props.title}
-                titleColorClassName="accent-foreground"
-                titleFontSize={18}
-                titleFontWeight="800"
-                translucent
-                headerRightBarButtonItems={[
-                  {
-                    type: "button",
-                    title: "Done",
-                    variant: "done",
-                    accessibilityLabel: `Close ${props.title}`,
-                    identifier: `app-sheet-done-${screenId}`,
-                    onPress: close,
-                  },
-                ]}
-              />
-            </NativeScreen>
-          </ScreenStack>
-        ) : (
-          <>
-            <AndroidSheetHeader title={props.title} onBack={close} />
+        <ScreenStack style={{ flex: 1 }}>
+          <NativeScreen
+            activityState={2}
+            enabled
+            isNativeStack
+            screenId={`app-sheet-${screenId}`}
+            scrollEdgeEffects={HEADER_SCROLL_EDGE_EFFECTS}
+            className="flex-1 bg-sheet"
+          >
             {props.children}
-          </>
-        )}
+            <NativeHeader
+              backgroundColor="rgba(0,0,0,0)"
+              tintColorClassName="accent-foreground"
+              hideBackButton
+              hideShadow={false}
+              title={props.title}
+              titleColorClassName="accent-foreground"
+              titleFontSize={18}
+              titleFontWeight="800"
+              translucent
+              headerRightBarButtonItems={[
+                {
+                  type: "button",
+                  title: "Done",
+                  variant: "done",
+                  accessibilityLabel: `Close ${props.title}`,
+                  identifier: `app-sheet-done-${screenId}`,
+                  onPress: close,
+                },
+              ]}
+            />
+          </NativeScreen>
+        </ScreenStack>
       </View>
     </FormSheet>
   );
