@@ -1,6 +1,8 @@
 import {
+  isUserFacingRun,
   latestRootProviderFailure,
   latestUnheldRun,
+  sessionErrorIsIdleMaintenance,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
 } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -78,16 +80,10 @@ function presentedUsageLimitRun(
     (session) => session.providerInstanceId === projection.thread.providerInstanceId,
   );
   // Mirrors the server shell: idle compaction never stands for the outcome.
-  const latestPhysicalRun = projection.runs.reduce<(typeof projection.runs)[number] | null>(
-    (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
-    null,
-  );
   return usageLimitRunPresentedAsLatest(
-    projection.runs.filter((run) => run.idleCompactionOfRunId === undefined),
+    projection.runs.filter(isUserFacingRun),
     projection.turnItems,
-    latestPhysicalRun?.idleCompactionOfRunId !== undefined
-      ? null
-      : (providerSession?.lastError ?? null),
+    sessionErrorIsIdleMaintenance(projection.runs) ? null : (providerSession?.lastError ?? null),
   );
 }
 
@@ -294,10 +290,7 @@ export function deriveThreadRuntime(
       latestRootProviderFailure(latestRunProjection, projection.turnItems),
       // An idle compaction's session error is never the thread's error, even in the open
       // chat (a no-op compaction can leave one behind). The shell does the same.
-      latestMatchingRun(projection, () => true, { includeIdleCompaction: true })
-        ?.idleCompactionOfRunId !== undefined
-        ? null
-        : (providerSession?.lastError ?? null),
+      sessionErrorIsIdleMaintenance(projection.runs) ? null : (providerSession?.lastError ?? null),
     ),
     updatedAt: DateTime.formatIso(projection.updatedAt),
   };

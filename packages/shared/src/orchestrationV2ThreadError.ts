@@ -10,6 +10,22 @@ export function isUserFacingRun(run: Pick<OrchestrationV2Run, "idleCompactionOfR
   return run.idleCompactionOfRunId === undefined;
 }
 
+/**
+ * Whether the provider session's last error came from idle compaction: the
+ * newest run that actually started is maintenance. Queued or never-started
+ * runs cannot own a session error. Shell SQL mirrors this.
+ */
+export function sessionErrorIsIdleMaintenance(
+  runs: ReadonlyArray<Pick<OrchestrationV2Run, "idleCompactionOfRunId" | "ordinal" | "startedAt">>,
+): boolean {
+  let latest: (typeof runs)[number] | null = null;
+  for (const run of runs) {
+    if (run.startedAt === null) continue;
+    if (latest === null || run.ordinal > latest.ordinal) latest = run;
+  }
+  return latest !== null && !isUserFacingRun(latest);
+}
+
 /** Only a failed root turn of the current run owns the thread's failure state. */
 export function latestRootProviderFailure(
   run: OrchestrationV2Run | null,

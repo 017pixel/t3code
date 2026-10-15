@@ -16,6 +16,7 @@ import {
   isUserFacingRun,
   latestRootProviderFailure,
   latestUnheldRun,
+  sessionErrorIsIdleMaintenance,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
 } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -1461,13 +1462,9 @@ export function threadShellFromProjection(
   const idleRunIds = new Set(
     projection.runs.filter((run) => run.idleCompactionOfRunId !== undefined).map((run) => run.id),
   );
-  const latestPhysicalRun = projection.runs.toSorted(
-    (left, right) => right.ordinal - left.ordinal,
-  )[0];
-  const sessionError =
-    latestPhysicalRun?.idleCompactionOfRunId !== undefined
-      ? null
-      : (providerSession?.lastError ?? null);
+  const sessionError = sessionErrorIsIdleMaintenance(projection.runs)
+    ? null
+    : (providerSession?.lastError ?? null);
   const latestRun =
     usageLimitRunPresentedAsLatest(attentionRuns, projection.turnItems, sessionError) ??
     latestUnheldRun(projection.runs);
@@ -5363,6 +5360,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     WHERE maintenance.run_id = (
                       SELECT latest.run_id FROM orchestration_v2_projection_runs latest
                       WHERE latest.thread_id = t.thread_id
+                        AND json_extract(latest.payload_json, '$.startedAt') IS NOT NULL
                       ORDER BY latest.ordinal DESC, latest.run_id DESC LIMIT 1
                     ) AND json_extract(maintenance.payload_json, '$.idleCompactionOfRunId') IS NOT NULL
                   )

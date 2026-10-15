@@ -6124,7 +6124,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : yield* readHandoffItems(
               mergeBackSourceProjection.thread.id,
               mergeBackSourceProjection.runs
-                .filter((run) => run.ordinal <= mergeBackSourceRun.ordinal)
+                .filter((run) => isUserFacingRun(run) && run.ordinal <= mergeBackSourceRun.ordinal)
                 .map((run) => run.id),
             );
       const mergeBackHandoff =
