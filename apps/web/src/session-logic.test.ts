@@ -1542,7 +1542,8 @@ describe("incremental v2 timeline entries", () => {
     const next = deriveTimelineEntriesFromVisibleTurnItemsWithState(nextInput, previous);
     expect(next.entries).toEqual(deriveTimelineEntriesFromVisibleTurnItems(nextInput));
     previous.entries.forEach((entry, index) => {
-      if (entry.kind === "message") expect(next.entries[index]?.kind === "message" && next.entries[index].message).toBe(entry.message);
+      const retained = next.entries[index];
+      if (entry.kind === "message") expect(retained?.kind === "message" && retained.message).toBe(entry.message);
     });
   });
 
