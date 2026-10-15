@@ -102,7 +102,6 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { useShallow } from "zustand/react/shallow";
 import { useParams, useRouter } from "@tanstack/react-router";
 
 import { useRightPanelStore } from "../rightPanelStore";
@@ -2716,35 +2715,25 @@ export default function Sidebar() {
   // (every non-promoted session with content); it can overcount by one for
   // an open never-left draft, which only softens the empty state.
   const routeDraftIdForRows = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
-  const [visibleDraftSessionCount, inactiveDraftSessionCount, activeDraftSessionPresent] =
-    useComposerDraftStore(
-      useShallow((store) => {
-        let count = 0;
-        let inactiveCount = 0;
-        let activePresent = false;
-        for (const [draftKey, session] of Object.entries(store.draftThreadsByThreadKey)) {
-          if (session.promotedTo != null) {
-            continue;
-          }
-          if (
-            scopedProjectKeys !== null &&
-            !scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
-          ) {
-            continue;
-          }
-          const isActive = draftKey === routeDraftIdForRows;
-          // The active row is frozen or absent while typing. Its live session still
-          // controls send/discard removal, independently of whether it has content.
-          if (isActive) activePresent = true;
-          if (!composerDraftHasUserContent(store.draftsByThreadKey[draftKey])) {
-            continue;
-          }
-          count += 1;
-          if (!isActive) inactiveCount += 1;
-        }
-        return [count, inactiveCount, activePresent] as const;
-      }),
-    );
+  const visibleDraftSessionCount = useComposerDraftStore((store) => {
+    let count = 0;
+    for (const [draftKey, session] of Object.entries(store.draftThreadsByThreadKey)) {
+      if (session.promotedTo != null) {
+        continue;
+      }
+      if (!composerDraftHasUserContent(store.draftsByThreadKey[draftKey])) {
+        continue;
+      }
+      if (
+        scopedProjectKeys !== null &&
+        !scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
+      ) {
+        continue;
+      }
+      count += 1;
+    }
+    return count;
+  });
   // Scope flips drop the selection: rows selected under the old scope may be
   // hidden now, and bulk actions must never count or touch invisible rows.
   useEffect(() => {
@@ -3895,28 +3884,19 @@ export default function Sidebar() {
     [sidebarListItems],
   );
   const sidebarListHasRows = sidebarListItems.length + visibleDraftSessionCount > 0;
-  // The rows that arrive with the first cached or live shell are the initial
-  // list, so they paint in place instead of fading in.
-  const listMotionArmedRef = useRef(false);
   useLayoutEffect(() => {
     // Drag release clears the baseline, so its commit cannot replay the
     // sortable preview; rows glide from their released positions instead.
     // Later thread actions can animate while writes settle.
     // Draft navigation can reveal a frozen row without changing the draft count.
-    // Typing into a never-left draft changes the empty-state count, not the rows.
     void sidebarListOrderKey;
-    listMotionRef.current?.update(
-      listMotionArmedRef.current && !listMotionPaused && sidebarListHasRows,
-    );
-    listMotionArmedRef.current = shellsBootstrapped;
+    listMotionRef.current?.update(!listMotionPaused && sidebarListHasRows);
   }, [
     listMotionPaused,
     routeDraftIdForRows,
-    shellsBootstrapped,
     sidebarListHasRows,
     sidebarListOrderKey,
-    inactiveDraftSessionCount,
-    activeDraftSessionPresent,
+    visibleDraftSessionCount,
   ]);
   const handleThreadDragOver = useCallback(
     (event: DragOverEvent) => {
