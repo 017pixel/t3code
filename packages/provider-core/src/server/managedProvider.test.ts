@@ -731,6 +731,20 @@ describe("makeManagedServerProvider", () => {
   );
 });
 
+const lazyProbeAdapter = ProviderAdapter.ProviderAdapterV2.of({
+  instanceId: ProviderInstanceId.make("lazy"),
+  driver: ProviderDriverKind.make("codex"),
+  getCapabilities: () =>
+    Effect.fail(
+      new ProviderAdapter.ProviderAdapterCapabilitiesError({
+        driver: ProviderDriverKind.make("codex"),
+        cause: "from the adapter",
+      }),
+    ),
+  planSelectionTransition: () => Effect.die("unused"),
+  openSession: () => Effect.die("unused"),
+});
+
 it.effect(
   "constructs a lazy adapter once in its instance scope across concurrent request scopes",
   () =>
@@ -756,19 +770,7 @@ it.effect(
               );
               yield* Deferred.succeed(started, undefined);
               yield* Deferred.await(release);
-              return ProviderAdapter.ProviderAdapterV2.of({
-                instanceId: ProviderInstanceId.make("lazy"),
-                driver,
-                getCapabilities: () =>
-                  Effect.fail(
-                    new ProviderAdapter.ProviderAdapterCapabilitiesError({
-                      driver,
-                      cause: "probe refused",
-                    }),
-                  ),
-                planSelectionTransition: () => Effect.die("unused"),
-                openSession: () => Effect.die("unused"),
-              });
+              return lazyProbeAdapter;
             }),
           );
           assert.equal(constructed, 0);
@@ -785,7 +787,6 @@ it.effect(
             Effect.provideService(HostProcess.Environment, { OWNER: "request" }),
             Effect.forkScoped,
           );
-          yield* Deferred.await(started);
           assert.equal(constructed, 1);
           yield* Deferred.succeed(release, undefined);
           const exits = yield* Fiber.join(requests);
@@ -815,21 +816,7 @@ it.effect("retries a lazy adapter whose construction or module import failed", (
         // An upgrade replaced the adapter's chunk under the running server.
         if (attempts === 1) return Effect.die(new Error("Cannot find module 'adapter-old.mjs'"));
         if (attempts === 2) return Effect.fail("shadow home unavailable");
-        return Effect.succeed(
-          ProviderAdapter.ProviderAdapterV2.of({
-            instanceId: ProviderInstanceId.make("lazy"),
-            driver,
-            getCapabilities: () =>
-              Effect.fail(
-                new ProviderAdapter.ProviderAdapterCapabilitiesError({
-                  driver,
-                  cause: "from the adapter",
-                }),
-              ),
-            planSelectionTransition: () => Effect.die("unused"),
-            openSession: () => Effect.die("unused"),
-          }),
-        );
+        return Effect.succeed(lazyProbeAdapter);
       }),
     );
     const missingModule = yield* adapter.getCapabilities().pipe(Effect.flip);
