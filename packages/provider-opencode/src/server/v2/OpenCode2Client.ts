@@ -1,17 +1,16 @@
-import {
-  OpenCode2Client,
-  OpenCode2SilentStreamError,
-  type OpenCode2StreamEvent,
-} from "./OpenCode2ClientTag.ts";
-import { OpenCode } from "@opencode/client/effect";
+import { OpenCode, type OpenCodeClient } from "@opencode/client/effect";
 import { OpenCodeEvent } from "@opencode/protocol/groups/event";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Sse from "effect/encoding/Sse";
 import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientError from "effect/http/HttpClientError";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 
@@ -23,6 +22,21 @@ const OPENCODE_USERNAME = "opencode";
  * newer server added a field or a value). Only the type and session survive,
  * so the turn still ends.
  */
+export interface OpenCode2UnreadableTerminal {
+  readonly type: "unreadable.execution.ended";
+  readonly executionType: (typeof EXECUTION_ENDS)[number];
+  readonly sessionID: string;
+}
+
+/**
+ * A session's execution started, but this build could not decode the event.
+ * It marks where a new execution begins and never ends a turn.
+ */
+export interface OpenCode2UnreadableStart {
+  readonly type: "unreadable.execution.started";
+  readonly sessionID: string;
+}
+
 /** The events that end an execution; any other undecodable event is skipped. */
 const EXECUTION_ENDS = [
   "session.execution.succeeded",
@@ -33,6 +47,20 @@ const isExecutionEnd = (type: string): type is (typeof EXECUTION_ENDS)[number] =
   (EXECUTION_ENDS as ReadonlyArray<string>).includes(type);
 
 /** The server sent nothing, not even a heartbeat, for `SILENT_STREAM_TIMEOUT`. */
+export class OpenCode2SilentStreamError extends Schema.TaggedError<OpenCode2SilentStreamError>()(
+  "OpenCode2SilentStreamError",
+  {},
+) {
+  override get message(): string {
+    return "The OpenCode server stopped sending events.";
+  }
+}
+
+export type OpenCode2StreamEvent =
+  | OpenCodeEvent
+  | OpenCode2UnreadableTerminal
+  | OpenCode2UnreadableStart;
+
 /**
  * An OpenCode 2 client plus a forward-compatible `/api/event` stream. The
  * client's own `event.subscribe` fails the whole stream on the first event a
@@ -42,7 +70,27 @@ const isExecutionEnd = (type: string): type is (typeof EXECUTION_ENDS)[number] =
  * `events` succeeds once the server accepted the subscription: the stream is
  * volatile, so callers subscribe before they start work whose events they need.
  */
+export interface OpenCode2Api {
+  readonly client: OpenCodeClient;
+  readonly events: Effect.Effect<
+    Stream.Stream<
+      OpenCode2StreamEvent,
+      HttpClientError.HttpClientError | Sse.Retry | Sse.SseError | OpenCode2SilentStreamError
+    >,
+    HttpClientError.HttpClientError
+  >;
+}
+
 /** Builds clients for OpenCode 2 servers, one per base URL and password. */
+export class OpenCode2Client extends Context.Service<
+  OpenCode2Client,
+  {
+    readonly connect: (input: {
+      readonly baseUrl: string;
+      readonly password: string | Redacted.Redacted;
+    }) => Effect.Effect<OpenCode2Api>;
+  }
+>()("@t3tools/provider-opencode/server/v2/OpenCode2Client") {}
 
 /**
  * OpenCode writes a `: heartbeat` comment every 10 to 15 seconds, so this long
@@ -146,3 +194,34 @@ export const make = Effect.gen(function* () {
     },
   });
 });
+
+export const layer = Layer.effect(OpenCode2Client, make);
+
+/**
+ * Streams every item of a cursor-paged OpenCode 2 list. The first request
+ * carries the caller's input (including `order`); later requests send only
+ * the cursor, because OpenCode rejects a cursor combined with `order`.
+ */
+export const paginate = <Input extends { readonly cursor?: unknown }, Item, E, R>(
+  input: Input,
+  list: (
+    input: Input,
+  ) => Effect.Effect<
+    { readonly data: ReadonlyArray<Item>; readonly cursor: { readonly next?: Input["cursor"] } },
+    E,
+    R
+  >,
+): Stream.Stream<Item, E, R> =>
+  Stream.paginate(input, (request) =>
+    list(request).pipe(
+      Effect.map(
+        (page) =>
+          [
+            page.data,
+            page.data.length === 0 || page.cursor.next === undefined
+              ? Option.none()
+              : Option.some({ ...request, order: undefined, cursor: page.cursor.next }),
+          ] as const,
+      ),
+    ),
+  );
