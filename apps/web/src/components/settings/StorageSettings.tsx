@@ -1,4 +1,5 @@
 import type {
+  ServerSettings,
   StorageCleanupReport,
   StorageCleanupSettings,
   WorktreeCleanupRules,
@@ -12,6 +13,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { formatBytes } from "../../lib/formatBytes";
+import type { EnvironmentPresentation } from "../../state/environments";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
@@ -231,6 +233,46 @@ function CleanupResults({
   );
 }
 
+export function storageCleanupHasRules(settings: ServerSettings): boolean {
+  const enabled = (rules: WorktreeCleanupRules) =>
+    rules.worktreeAfterDays !== null ||
+    rules.worktreeSettledAfterDays !== null ||
+    rules.worktreeOnMerge ||
+    rules.worktreeOnDelete ||
+    rules.worktreeUnchanged;
+  return (
+    settings.storageCleanup.browserArtifactsAfterDays !== null ||
+    settings.storageCleanup.logsAfterDays !== null ||
+    enabled(resolveWorktreeCleanup(settings, null)) ||
+    Object.values(settings.projectSettingsOverrides).some(
+      (override) =>
+        override.worktreeCleanup?.mode === "custom" && enabled(override.worktreeCleanup.rules),
+    )
+  );
+}
+
+type CleanupEnvironment = Pick<EnvironmentPresentation, "environmentId" | "label">;
+
+export function storageCleanupEnvironmentLabel(
+  environment: CleanupEnvironment,
+  environments: readonly CleanupEnvironment[],
+): string {
+  const duplicates = environments.filter(
+    (other) =>
+      other.environmentId !== environment.environmentId && other.label === environment.label,
+  );
+  if (duplicates.length === 0) return environment.label;
+  let length = 8;
+  while (
+    length < environment.environmentId.length &&
+    duplicates.some((other) =>
+      other.environmentId.startsWith(environment.environmentId.slice(0, length)),
+    )
+  )
+    length++;
+  return `${environment.label} (${environment.environmentId.slice(0, length)})`;
+}
+
 function CleanupSection() {
   useRelativeTimeTick(60_000);
   const { connectedEnvironments } = useSettingsScope();
@@ -268,34 +310,25 @@ function CleanupSection() {
       [connectedEnvironments],
     ),
   );
-  const hasRules = supported.some((environment) => {
-    const settings = environment.serverConfig?.settings;
-    if (!settings) return false;
-    const enabled = (rules: WorktreeCleanupRules) =>
-      rules.worktreeAfterDays !== null ||
-      rules.worktreeSettledAfterDays !== null ||
-      rules.worktreeOnMerge ||
-      rules.worktreeOnDelete ||
-      rules.worktreeUnchanged;
-    return (
-      settings.storageCleanup.browserArtifactsAfterDays !== null ||
-      settings.storageCleanup.logsAfterDays !== null ||
-      enabled(resolveWorktreeCleanup(settings, null)) ||
-      Object.values(settings.projectSettingsOverrides).some(
-        (override) =>
-          override.worktreeCleanup?.mode === "custom" && enabled(override.worktreeCleanup.rules),
-      )
-    );
-  });
   if (supported.length === 0) return null;
+  const multiple = supported.length > 1;
   const summaries = supported.map((environment) => {
     const query = state.find((entry) => entry.environmentId === environment.environmentId);
     const report = query?.report ?? null;
     return {
       environment,
+      label: storageCleanupEnvironmentLabel(environment, supported),
+      enabled:
+        environment.serverConfig !== null &&
+        storageCleanupHasRules(environment.serverConfig.settings),
       report,
+      counts: report
+        ? `${report.counts.removed} removed, ${report.counts.kept} kept${report.counts.failed > 0 ? `, ${report.counts.failed} failed` : ""}`
+        : undefined,
       description: report
-        ? `Last run ${formatRelativeTimeLabel(report.finishedAt)}. ${formatBytes(report.bytesFreed)} recovered.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
+        ? multiple
+          ? `${formatBytes(report.bytesFreed)} recovered · ${formatRelativeTimeLabel(report.finishedAt)}`
+          : `Last run ${formatRelativeTimeLabel(report.finishedAt)}. ${formatBytes(report.bytesFreed)} recovered.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
         : query?.failed
           ? "Could not load the last run."
           : query?.loading
@@ -303,6 +336,7 @@ function CleanupSection() {
             : "Cleanup hasn't run yet.",
     };
   });
+  const hasRules = summaries.some(({ enabled }) => enabled);
   const deleteNow = async () => {
     if (pending) return;
     setPending(true);
@@ -343,16 +377,11 @@ function CleanupSection() {
         <SettingsRow
           {...searchableSetting("storage-delete-now")}
           description={
-            <span>
-              {!hasRules
-                ? "Turn on a cleanup rule to use this."
-                : summaries.map(({ environment, description }) => (
-                    <span key={environment.environmentId} className="block">
-                      {supported.length > 1 ? `${environment.label}: ` : ""}
-                      {description}
-                    </span>
-                  ))}
-            </span>
+            !hasRules
+              ? "Turn on a cleanup rule to use this."
+              : multiple
+                ? "Run enabled cleanup rules on the selected environments."
+                : summaries[0]?.description
           }
           control={
             <Button
@@ -365,31 +394,35 @@ function CleanupSection() {
             </Button>
           }
         />
+        {multiple &&
+          summaries.map(({ environment, label, enabled, description, counts }) => (
+            <SettingsRow
+              key={environment.environmentId}
+              title={label}
+              description={enabled ? description : "No cleanup rules enabled."}
+              control={
+                enabled && counts ? (
+                  <span className="text-xs text-muted-foreground">{counts}</span>
+                ) : null
+              }
+            />
+          ))}
       </SettingsGroup>
-      {summaries.some(({ report }) => report !== null) && (
+      {summaries.some(({ enabled, report }) => enabled && report !== null) && (
         <FoldedSettingsSection
           id="storage-cleanup-last-run"
           title="Last run"
           headerPlacement="inside"
-          summary={summaries
-            .flatMap(({ environment, report }) =>
-              report
-                ? [
-                    `${connectedEnvironments.length > 1 ? `${environment.label}: ` : ""}${report.counts.removed} removed, ${report.counts.kept} kept${report.counts.failed > 0 ? `, ${report.counts.failed} failed` : ""}`,
-                  ]
-                : [],
-            )
-            .join(" · ")}
+          summary={multiple ? null : (summaries[0]?.counts ?? null)}
         >
           {summaries.map(
-            ({ environment, report }) =>
+            ({ environment, label, enabled, report }) =>
+              enabled &&
               report && (
                 <CleanupResults
                   key={environment.environmentId}
                   report={report}
-                  environmentLabel={
-                    connectedEnvironments.length > 1 ? environment.label : undefined
-                  }
+                  environmentLabel={multiple ? label : undefined}
                 />
               ),
           )}

@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { RegistryProvider } from "@effect/atom-react";
-import { DEFAULT_SERVER_SETTINGS, ProjectId, type StorageCleanupReport } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProjectId,
+  type StorageCleanupReport,
+} from "@t3tools/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -67,7 +72,11 @@ vi.mock("./settingsLayout", () => ({
 }));
 vi.mock("../ui/toast", () => ({ toastManager: { add: vi.fn() } }));
 
-import { StorageSettingsPanel } from "./StorageSettings";
+import {
+  storageCleanupEnvironmentLabel,
+  storageCleanupHasRules,
+  StorageSettingsPanel,
+} from "./StorageSettings";
 
 let root: Root;
 let container: HTMLDivElement;
@@ -165,4 +174,63 @@ it("keeps cleanup disabled when settled retention and all other rules are off", 
   expect(button.disabled).toBe(true);
   await act(async () => button.click());
   expect(state.run).not.toHaveBeenCalled();
+});
+
+it("only adds distinguishing ids to duplicate environment labels, regardless of order", () => {
+  const environments = [
+    { environmentId: EnvironmentId.make("12345678-aaaa"), label: "t3" },
+    { environmentId: EnvironmentId.make("12345678-bbbb"), label: "t3" },
+    { environmentId: EnvironmentId.make("87654321-cccc"), label: "Laptop" },
+  ];
+  const labels = environments.map((environment) =>
+    storageCleanupEnvironmentLabel(environment, environments),
+  );
+
+  expect(labels).toEqual(["t3 (12345678-a)", "t3 (12345678-b)", "Laptop"]);
+  expect(
+    environments.map((environment) =>
+      storageCleanupEnvironmentLabel(environment, environments.toReversed()),
+    ),
+  ).toEqual(labels);
+  expect(storageCleanupEnvironmentLabel(environments[0]!, [environments[0]!])).toBe("t3");
+});
+
+it.each([
+  { worktreeAfterDays: 8 },
+  { worktreeSettledAfterDays: 0 },
+  { worktreeOnMerge: true },
+  { worktreeOnDelete: true },
+  { worktreeUnchanged: true },
+  { browserArtifactsAfterDays: 8 },
+  { logsAfterDays: 8 },
+])("recognizes each cleanup rule: %j", (rule) => {
+  expect(storageCleanupHasRules(state.settings)).toBe(false);
+  expect(
+    storageCleanupHasRules({
+      ...state.settings,
+      storageCleanup: { ...state.settings.storageCleanup, ...rule },
+    }),
+  ).toBe(true);
+});
+
+it("counts custom project rules when environment defaults are off", () => {
+  const projectId = ProjectId.make("project");
+  const settings = {
+    ...state.settings,
+    projectSettingsOverrides: {
+      [projectId]: {
+        worktreeCleanup: {
+          mode: "custom" as const,
+          rules: { ...state.settings.storageCleanup, worktreeSettledAfterDays: 0 },
+        },
+      },
+    },
+  };
+  expect(storageCleanupHasRules(settings)).toBe(true);
+  expect(
+    storageCleanupHasRules({
+      ...settings,
+      projectSettingsOverrides: { [projectId]: { worktreeCleanup: { mode: "off" } } },
+    }),
+  ).toBe(false);
 });
