@@ -35,7 +35,6 @@ describe("sidebar typing during a kept thread navigation", () => {
   afterEach(() => {
     takeHeldText(destination);
     setUrlRouteTargetKey(null);
-    item.remove();
   });
 
   it("holds destination row typing without giving any text to the previous draft", () => {
@@ -50,11 +49,6 @@ describe("sidebar typing during a kept thread navigation", () => {
     holdTextForUrlRouteTarget(previous, "c");
     expect(takeHeldText(destination)).toBe("Ac");
     expect(takeHeldText(destination)).toBeNull();
-  });
-
-  it("rejects other rows and nested controls after reveal", () => {
-    const key = new KeyboardEvent("keydown", { key: "a" });
-    row.dispatchEvent(key);
     setUrlRouteTargetKey(previous);
     expect(isUrlTargetSidebarTextKey(key)).toBe(false);
     setUrlRouteTargetKey(destination);
@@ -286,9 +280,6 @@ describe("resolveKeptThreadViews", () => {
       "d",
     ]);
     expect(resolveKeptThreadViews(back, serverView("a"))).toBe(back);
-  });
-
-  it("keeps promotion identity and drops a draft once left", () => {
     const draftId = DraftId.make("draft-1");
     const draft = resolveKeptThreadViews([], { ...serverView("t"), key: draftId, draftId });
     expect(resolveKeptThreadViews(draft, serverView("t"))[0]).toMatchObject({

@@ -130,18 +130,13 @@ describe("reloadOnceForChunkLoadError", () => {
 it.each([preloadSpeculatively, preloadRouteSpeculatively])(
   "attributes speculative failures and resets pending state: %s",
   async (load) => {
-    let fail = (_error: Error) => {};
-    const preload = load(
-      () =>
-        new Promise<never>((_, reject) => {
-          fail = reject;
-        }),
-    );
+    const pending = Promise.withResolvers<never>();
+    const preload = load(() => pending.promise);
     expect(
       load === preloadSpeculatively ? isSpeculativeLoadPending() : isRoutePreloadPending(),
     ).toBe(true);
     const failure = new TypeError(failedImport("chunk.js"));
-    fail(failure);
+    pending.reject(failure);
     if (load === preloadSpeculatively) await expect(preload).resolves.toBeUndefined();
     else await expect(preload).rejects.toBe(failure);
     expect(isSpeculativeLoadPending() || isRoutePreloadPending()).toBe(false);
