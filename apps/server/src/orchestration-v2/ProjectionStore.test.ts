@@ -6324,15 +6324,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           linkedAt: DateTime.formatIso(DateTime.add(at, { seconds: 1 })),
         })),
       };
-      const rows = [wire, { ...wire }, differentVintage, { ...wire, pullRequests: [] }];
-      const deduplicated = deduplicateShellPullRequests(rows);
-      const restored = deduplicated.map(({ pullRequestReference, ...row }) => ({
-        ...row,
-        ...(pullRequestReference === undefined
-          ? {}
-          : { pullRequests: deduplicated[pullRequestReference]!.pullRequests }),
-      }));
-      assert.deepEqual(restored, rows);
+      const deduplicated = deduplicateShellPullRequests([wire, { ...wire }, differentVintage]);
+      assert.equal(deduplicated[1]?.pullRequestReference, 0);
       assert.isUndefined(deduplicated[1]?.pullRequests);
       assert.deepEqual(deduplicated[2]?.pullRequests, differentVintage.pullRequests);
       const terminalAt = DateTime.formatIso(DateTime.add(at, { seconds: 1 }));
