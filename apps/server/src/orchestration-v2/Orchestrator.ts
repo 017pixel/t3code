@@ -5046,7 +5046,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: `Thread ${command.threadId} has a pending merge-back transfer; queued merge-back consumption is not implemented yet.`,
+            // Idle compaction is hidden and finishes within seconds; say so
+            // instead of exposing the queue limitation.
+            cause:
+              queueBehindRun.idleCompactionOfRunId !== undefined
+                ? "Context compaction is finishing. Try again in a few seconds."
+                : `Thread ${command.threadId} has a pending merge-back transfer; queued merge-back consumption is not implemented yet.`,
           });
         }
         const queueProviderThread =
