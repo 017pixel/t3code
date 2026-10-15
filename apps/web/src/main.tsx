@@ -4,6 +4,8 @@ import { createHashHistory, createBrowserHistory } from "@tanstack/react-router"
 
 import "./index.css";
 
+import { ensureClientSettingsHydrated } from "./hooks/useSettings";
+import { projectFaviconCache } from "./assets/projectFaviconCache";
 import { prepareProviderAuthDelivery } from "./providerAuthDelivery";
 import { isElectron } from "./env";
 import { hasCloudPublicConfig } from "./cloud/publicConfig";
@@ -24,6 +26,8 @@ import { restoreStackTraces } from "./lib/bootStackTraces";
 
 restoreStackTraces();
 prepareProviderAuthDelivery();
+void ensureClientSettingsHydrated().catch(() => undefined);
+void projectFaviconCache.hydrate();
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
