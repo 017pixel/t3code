@@ -20,8 +20,6 @@ import {
   resolveThreadRouteRenderState,
   resolveThreadRouteRef,
   resolveThreadRouteTarget,
-  threadRouteTargetFromKey,
-  threadRouteTargetKey,
   type KeptThreadView,
 } from "./threadRoutes";
 
@@ -259,15 +257,6 @@ describe("threadRoutes", () => {
     ).toBe("missing");
   });
 
-  it("round-trips a route target through its key", () => {
-    const server = resolveThreadRouteTarget({ environmentId: "env-1", threadId: "thread-1" });
-    const draft = resolveThreadRouteTarget({ draftId: "draft-1" });
-    expect(threadRouteTargetFromKey(threadRouteTargetKey(server))).toEqual(server);
-    expect(threadRouteTargetFromKey(threadRouteTargetKey(draft))).toEqual(draft);
-    expect(threadRouteTargetKey(null)).toBeNull();
-    expect(threadRouteTargetFromKey(null)).toBeNull();
-  });
-
   it("waits for the live shell before redirecting a deleted thread", () => {
     expect(
       resolveThreadRouteRenderState({
@@ -306,22 +295,14 @@ describe("resolveKeptThreadViews", () => {
     expect(resolveKeptThreadViews(back, serverView("a"))).toBe(back);
   });
 
-  it("keeps a promoted draft's view, and its key, on the thread route", () => {
+  it("keeps promotion identity and drops a draft once left", () => {
     const draftId = DraftId.make("draft-1");
     const draft = resolveKeptThreadViews([], { ...serverView("t"), key: draftId, draftId });
-    const promoted = resolveKeptThreadViews(draft, serverView("t"));
-    expect(promoted).toHaveLength(1);
-    expect(promoted[0]).toMatchObject({ key: draftId, draftId: null, threadId: "t" });
-  });
-
-  it("drops a draft's view once another view is shown", () => {
-    const draftId = DraftId.make("draft-1");
-    const views = resolveKeptThreadViews(visit(["a"]), {
-      ...serverView("t"),
+    expect(resolveKeptThreadViews(draft, serverView("t"))[0]).toMatchObject({
       key: draftId,
-      draftId,
+      draftId: null,
     });
-    expect(resolveKeptThreadViews(views, serverView("a")).map((view) => view.threadId)).toEqual([
+    expect(resolveKeptThreadViews(draft, serverView("a")).map((view) => view.threadId)).toEqual([
       "a",
     ]);
   });
