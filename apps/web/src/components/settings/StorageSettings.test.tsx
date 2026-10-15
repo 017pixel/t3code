@@ -2,7 +2,6 @@
 import { RegistryProvider } from "@effect/atom-react";
 import {
   DEFAULT_SERVER_SETTINGS,
-  EnvironmentId,
   ProjectId,
   type StorageCleanupReport,
 } from "@t3tools/contracts";
@@ -72,11 +71,7 @@ vi.mock("./settingsLayout", () => ({
 }));
 vi.mock("../ui/toast", () => ({ toastManager: { add: vi.fn() } }));
 
-import {
-  storageCleanupEnvironmentLabel,
-  storageCleanupHasRules,
-  StorageSettingsPanel,
-} from "./StorageSettings";
+import { storageCleanupHasRules, StorageSettingsPanel } from "./StorageSettings";
 
 let root: Root;
 let container: HTMLDivElement;
@@ -174,25 +169,6 @@ it("keeps cleanup disabled when settled retention and all other rules are off", 
   expect(button.disabled).toBe(true);
   await act(async () => button.click());
   expect(state.run).not.toHaveBeenCalled();
-});
-
-it("only adds distinguishing ids to duplicate environment labels, regardless of order", () => {
-  const environments = [
-    { environmentId: EnvironmentId.make("12345678-aaaa"), label: "t3" },
-    { environmentId: EnvironmentId.make("12345678-bbbb"), label: "t3" },
-    { environmentId: EnvironmentId.make("87654321-cccc"), label: "Laptop" },
-  ];
-  const labels = environments.map((environment) =>
-    storageCleanupEnvironmentLabel(environment, environments),
-  );
-
-  expect(labels).toEqual(["t3 (12345678-a)", "t3 (12345678-b)", "Laptop"]);
-  expect(
-    environments.map((environment) =>
-      storageCleanupEnvironmentLabel(environment, environments.toReversed()),
-    ),
-  ).toEqual(labels);
-  expect(storageCleanupEnvironmentLabel(environments[0]!, [environments[0]!])).toBe("t3");
 });
 
 it.each([

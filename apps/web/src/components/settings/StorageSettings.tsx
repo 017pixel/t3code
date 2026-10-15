@@ -13,7 +13,6 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { formatBytes } from "../../lib/formatBytes";
-import type { EnvironmentPresentation } from "../../state/environments";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
@@ -42,6 +41,7 @@ import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { SettingsGroup } from "./SettingsGroup";
 import type { ScopedSettingsTarget } from "./scopedSettings";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { settingsScopeEnvironmentLabel } from "./settingsScopeAxis";
 import { searchableSetting } from "./settingsSearch";
 import {
   useClearScopedSettings,
@@ -251,28 +251,6 @@ export function storageCleanupHasRules(settings: ServerSettings): boolean {
   );
 }
 
-type CleanupEnvironment = Pick<EnvironmentPresentation, "environmentId" | "label">;
-
-export function storageCleanupEnvironmentLabel(
-  environment: CleanupEnvironment,
-  environments: readonly CleanupEnvironment[],
-): string {
-  const duplicates = environments.filter(
-    (other) =>
-      other.environmentId !== environment.environmentId && other.label === environment.label,
-  );
-  if (duplicates.length === 0) return environment.label;
-  let length = 8;
-  while (
-    length < environment.environmentId.length &&
-    duplicates.some((other) =>
-      other.environmentId.startsWith(environment.environmentId.slice(0, length)),
-    )
-  )
-    length++;
-  return `${environment.label} (${environment.environmentId.slice(0, length)})`;
-}
-
 function CleanupSection() {
   useRelativeTimeTick(60_000);
   const { connectedEnvironments } = useSettingsScope();
@@ -311,13 +289,13 @@ function CleanupSection() {
     ),
   );
   if (supported.length === 0) return null;
-  const multiple = supported.length > 1;
+  const multiple = connectedEnvironments.length > 1;
   const summaries = supported.map((environment) => {
     const query = state.find((entry) => entry.environmentId === environment.environmentId);
     const report = query?.report ?? null;
     return {
       environment,
-      label: storageCleanupEnvironmentLabel(environment, supported),
+      label: settingsScopeEnvironmentLabel(environment, connectedEnvironments),
       enabled:
         environment.serverConfig !== null &&
         storageCleanupHasRules(environment.serverConfig.settings),
@@ -349,19 +327,20 @@ function CleanupSection() {
             ),
           )
           .map(async (environment) => {
+            const label = settingsScopeEnvironmentLabel(environment, connectedEnvironments);
             const result = await run({ environmentId: environment.environmentId, input: {} });
             if (result._tag === "Success") {
               const failures = result.value.entries.filter((entry) => entry.outcome === "failed");
               if (failures.length > 0)
                 toastManager.add({
                   type: "error",
-                  title: `Cleanup failed on ${environment.label}`,
+                  title: `Cleanup failed on ${label}`,
                   description: failures[0]!.reason,
                 });
             } else if (!isAtomCommandInterrupted(result)) {
               toastManager.add({
                 type: "error",
-                title: `Could not run cleanup on ${environment.label}`,
+                title: `Could not run cleanup on ${label}`,
                 description: String(squashAtomCommandFailure(result)),
               });
             }
@@ -408,7 +387,7 @@ function CleanupSection() {
             />
           ))}
       </SettingsGroup>
-      {summaries.some(({ enabled, report }) => enabled && report !== null) && (
+      {summaries.some(({ report }) => report !== null) && (
         <FoldedSettingsSection
           id="storage-cleanup-last-run"
           title="Last run"
@@ -416,8 +395,7 @@ function CleanupSection() {
           summary={multiple ? null : (summaries[0]?.counts ?? null)}
         >
           {summaries.map(
-            ({ environment, label, enabled, report }) =>
-              enabled &&
+            ({ environment, label, report }) =>
               report && (
                 <CleanupResults
                   key={environment.environmentId}
