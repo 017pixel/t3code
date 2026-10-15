@@ -54,64 +54,16 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
     node.getAttribute?.("data-sidebar-row-variant") ?? node.className ?? "";
   const measure = (selective = false) => {
     const nodes = rows();
-    const previous = selective && positions ? [...positions.values()] : [];
-    const byKey = new Map(previous.map((position) => [position.key, position]));
-    let start = 0;
-    while (
-      start < nodes.length &&
-      start < previous.length &&
-      rowKey(nodes[start]!) === previous[start]!.key &&
-      rowShape(nodes[start]!) === previous[start]!.shape
-    )
-      start++;
-    let suffix = nodes.length;
-    let oldSuffix = previous.length;
-    while (
-      suffix > start &&
-      oldSuffix > start &&
-      rowKey(nodes[suffix - 1]!) === previous[oldSuffix - 1]!.key &&
-      rowShape(nodes[suffix - 1]!) === previous[oldSuffix - 1]!.shape
-    ) {
-      suffix--;
-      oldSuffix--;
-    }
-    const next = new Map<HTMLElement, RowPosition>();
-    let suffixDelta = 0;
-    let prefixDelta = 0;
-    // Read the changed range and the first retained suffix row before any
-    // animation or clone writes. Fixed row shapes let the unchanged prefix
-    // and the rest of the suffix reuse their boxes, even as content virtualizes.
-    for (const [index, node] of nodes.entries()) {
-      const key = rowKey(node);
-      const shape = rowShape(node);
-      const old = byKey.get(key);
-      if (index < start && old && typeof key === "string") {
-        next.set(node, { ...old, top: old.top + prefixDelta });
-        continue;
-      }
-      if (index > suffix && old && typeof key === "string") {
-        next.set(node, { ...old, top: old.top + suffixDelta });
-        continue;
-      }
-      const top = node.offsetTop;
-      if (old) {
-        if (index < start) prefixDelta = top - old.top;
-        if (index >= suffix) suffixDelta = top - old.top;
-      }
-      next.set(
-        node,
-        old?.shape === shape
-          ? { ...old, top }
-          : {
-              top,
-              left: node.offsetLeft,
-              width: node.offsetWidth,
-              height: node.offsetHeight,
-              key,
-              shape,
-            },
-      );
-    }
+    const next = new Map(
+      nodes.map((node) => [node, {
+        top: node.offsetTop,
+        left: node.offsetLeft,
+        width: node.offsetWidth,
+        height: node.offsetHeight,
+        key: rowKey(node),
+        shape: rowShape(node),
+      }]),
+    );
     if (selective && positions) {
       // A virtual slot and its rendered row share identity for motion. A row
       // that changed variant does not: the old one fades out as it was last
