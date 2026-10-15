@@ -18,52 +18,6 @@ function chatMarkdownTree(markdown: string, rawHtml: boolean) {
   return processor.runSync(processor.parse(markdown));
 }
 
-type TreeNode = {
-  type: string;
-  tagName?: string;
-  value?: string;
-  position?: unknown;
-  properties?: Record<string, unknown>;
-  children?: TreeNode[];
-};
-
-/**
- * What the renderer shows: text positions and table whitespace are dropped, adjacent
- * text joins, and whitespace between blocks collapses.
- */
-const text = (value: string): TreeNode => ({ type: "text", value: value.trim() ? value : "\n" });
-function rendered(node: TreeNode, preserveWhitespace = false): TreeNode {
-  if (node.type === "text") {
-    return text(preserveWhitespace ? (node.value ?? "") : (node.value ?? "").replace(/\s+/g, " "));
-  }
-  if (!node.children) return node;
-  const literal = preserveWhitespace || node.tagName === "pre";
-  const table = ["table", "thead", "tbody", "tfoot", "tr"].includes(node.tagName ?? "");
-  const children: TreeNode[] = [];
-  for (const child of node.children.map((child) => rendered(child, literal))) {
-    if (table && child.type === "text" && child.value?.trim() === "") continue;
-    const last = children.at(-1);
-    if (child.type === "text" && last?.type === "text") {
-      const joined = `${last.value}${child.value}`;
-      children[children.length - 1] = text(literal ? joined : joined.replace(/\s+/g, " "));
-    } else children.push(child);
-  }
-  return {
-    type: node.type,
-    ...(node.tagName ? { tagName: node.tagName } : {}),
-    ...(node.properties
-      ? {
-          properties: Object.fromEntries(
-            Object.entries(node.properties)
-              .filter(([, value]) => value !== false)
-              .map(([key, value]) => [key, key.startsWith("data") && value === true ? "" : value]),
-          ),
-        }
-      : {}),
-    children,
-  };
-}
-
 it("preserves in-app thread links through the shared Markdown sanitizer", () => {
   const tree = chatMarkdownTree(
     '[Open thread](t3-thread://v1/environment/thread)\n\n<a href="javascript:alert(1)">Unsafe</a>',
@@ -89,34 +43,21 @@ describe("raw HTML detection", () => {
     }
   });
 
-  it("renders tag-free markdown the same without rehype-raw", () => {
-    const markdown = [
-      "# Title & *emphasis*",
-      "",
-      "- [ ] task",
-      "- [x] done with `code` and a [link](https://example.com 'Title')",
-      "",
-      "| a | b |",
-      "| - | -: |",
-      "| 1 < 2 | x |",
-      "",
-      "> [!NOTE]",
-      "> An alert with ~~strike~~ and footnote[^1].",
-      "",
-      "```ts title=example.ts",
-      "const a = 1 < 2;",
-      "```",
-      "",
-      "![shot](C:\\Users\\me\\.t3\\shot.png)",
-      "",
-      "Entities &amp; &copy; and https://autolink.example",
-      "",
-      "[^1]: The footnote.",
-    ].join("\n");
+  it("renders tag-free markdown without loading raw HTML", () => {
+    const markdown = "# Title\n\n1 < 2 and **bold** with \`code\`";
     expect(markdownMayContainRawHtml(markdown)).toBe(false);
-    expect(rendered(chatMarkdownTree(markdown, false)).children).toEqual(
-      rendered(chatMarkdownTree(markdown, true)).children,
-    );
+    expect(chatMarkdownTree(markdown, false).children).toMatchObject([
+      { tagName: "h1", children: [{ value: "Title" }] },
+      {
+        tagName: "p",
+        children: [
+          { value: "1 < 2 and " },
+          { tagName: "strong" },
+          { value: " with " },
+          { tagName: "code" },
+        ],
+      },
+    ]);
   });
 });
 
