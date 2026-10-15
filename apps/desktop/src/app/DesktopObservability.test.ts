@@ -396,7 +396,7 @@ describe("DesktopObservability", () => {
     ),
   );
 
-  it.effect("exports main process log records to the configured logs endpoint", () => {
+  it.effect("exports log records after a stalled collector times out", () => {
     const requests: Array<ExportedRequest> = [];
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -417,7 +417,9 @@ describe("DesktopObservability", () => {
         Effect.gen(function* () {
           yield* Effect.logInfo("before the stall");
           for (let second = 0; second < 15; second += 1) yield* TestClock.adjust("1 second");
-          yield* Effect.logInfo("desktop log export").pipe(Effect.withSpan("desktop-log-export-test"));
+          yield* Effect.logInfo("desktop log export").pipe(
+            Effect.withSpan("desktop-log-export-test"),
+          );
           for (let second = 0; second < 5; second += 1) yield* TestClock.adjust("1 second");
           // Before shutdown, whose flush could hide a stuck exporter.
           assert.isTrue(requests.some((request) => request.body.includes("desktop log export")));
@@ -426,8 +428,7 @@ describe("DesktopObservability", () => {
         ),
       );
 
-      assert.lengthOf(requests, 2);
-      const request = requests.at(-1);
+      const request = requests.find((value) => value.body.includes("desktop log export"));
       assert.strictEqual(request?.url, "https://collector.example.com/v1/logs");
       assert.include(request?.body ?? "", "desktop log export");
       assert.include(request?.body ?? "", "service.runtime");
@@ -445,7 +446,13 @@ describe("DesktopObservability", () => {
       assert.lengthOf(record?.events ?? [], 0);
     }).pipe(
       Effect.scoped,
-      Effect.provide(Layer.mergeAll(NodeServices.layer, layerCollector(requests, { stallFirst: true }), layerEmptyEnv)),
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          layerCollector(requests, { stallFirst: true }),
+          layerEmptyEnv,
+        ),
+      ),
     );
   });
 

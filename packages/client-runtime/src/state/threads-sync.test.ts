@@ -507,13 +507,20 @@ describe("EnvironmentThreads", () => {
       let removals = 0;
       const h = yield* makeHarness({
         cached: BASE_PROJECTION,
-        saveThread: (_environmentId, snapshot) => snapshot.snapshotSequence === 8
-          ? Deferred.succeed(writing, undefined).pipe(Effect.andThen(Deferred.await(release)))
-          : Effect.void,
-        removeThread: () => Effect.suspend(() => ++removals === 2 ? Deferred.succeed(removed, undefined) : Effect.void),
+        saveThread: (_environmentId, snapshot) =>
+          snapshot.snapshotSequence === 8
+            ? Deferred.succeed(writing, undefined).pipe(Effect.andThen(Deferred.await(release)))
+            : Effect.void,
+        removeThread: () =>
+          Effect.suspend(() =>
+            ++removals === 2 ? Deferred.succeed(removed, undefined) : Effect.void,
+          ),
       });
       yield* Queue.offer(h.inputs, titleUpdated("Before deletion", 8));
-      yield* awaitThreadState(h.observed, (value) => Option.getOrNull(value.data)?.thread.title === "Before deletion");
+      yield* awaitThreadState(
+        h.observed,
+        (value) => Option.getOrNull(value.data)?.thread.title === "Before deletion",
+      );
       yield* TestClock.adjust("500 millis");
       yield* Deferred.await(writing);
       yield* Queue.offer(h.inputs, deleted(9));

@@ -619,17 +619,26 @@ const layerBackendOutputLogFactory = Layer.effect(
 );
 
 // Bound both headers and body so a stalled collector cannot stop later exports.
-const withOtlpTimeout = (client: HttpClient.HttpClient) => client.pipe(HttpClient.transform((response, request) =>
-  response.pipe(
-    Effect.tap((received) => received.arrayBuffer),
-    Effect.timeoutOrElse({
-      duration: "10 seconds",
-      orElse: () => Effect.fail(new HttpClientError.HttpClientError({
-        reason: new HttpClientError.TransportError({ request, description: "OTLP export timed out" }),
-      })),
-    }),
-  ),
-));
+const withOtlpTimeout = (client: HttpClient.HttpClient) =>
+  client.pipe(
+    HttpClient.transform((response, request) =>
+      response.pipe(
+        Effect.tap((received) => received.arrayBuffer),
+        Effect.timeoutOrElse({
+          duration: "10 seconds",
+          orElse: () =>
+            Effect.fail(
+              new HttpClientError.HttpClientError({
+                reason: new HttpClientError.TransportError({
+                  request,
+                  description: "OTLP export timed out",
+                }),
+              }),
+            ),
+        }),
+      ),
+    ),
+  );
 
 /**
  * Logs and traces for the main process, assembled together because they share

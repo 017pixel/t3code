@@ -156,7 +156,9 @@ function mergeHistorySupport(
       latestAttemptOrdinal.set(attempt.runId, attempt.attemptOrdinal);
   }
   const fullCheckpoints = new Map(
-    support.checkpoints.filter((value) => value.deferredFileCount === undefined).map((value) => [value.id, value]),
+    support.checkpoints
+      .filter((value) => value.deferredFileCount === undefined)
+      .map((value) => [value.id, value]),
   );
   const latestCapture = projection.checkpoints.reduce(
     (max, checkpoint) => Math.max(max, DateTime.toEpochMillis(checkpoint.capturedAt)),
@@ -171,8 +173,11 @@ function mergeHistorySupport(
         ACTIVE_NODE_STATUSES.has(node.status) || (node.runId !== null && newRunIds.has(node.runId)),
     ),
     checkpoints: mergeHistoryEntities(
-      projection.checkpoints.map((checkpoint) => checkpoint.deferredFileCount === undefined
-        ? checkpoint : fullCheckpoints.get(checkpoint.id) ?? checkpoint),
+      projection.checkpoints.map((checkpoint) =>
+        checkpoint.deferredFileCount === undefined
+          ? checkpoint
+          : (fullCheckpoints.get(checkpoint.id) ?? checkpoint),
+      ),
       support.checkpoints,
       (checkpoint) => DateTime.toEpochMillis(checkpoint.capturedAt) > latestCapture,
     ),
