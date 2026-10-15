@@ -30,14 +30,10 @@ export function usePreviewPanelInlineSize(
     readonly widthStorageKey?: string | undefined;
     readonly defaultWidth?: number | undefined;
     /** Measure this row instead of the panel's parent. */
-    readonly containerRef?: RefObject<HTMLElement | null> | undefined;
+    readonly container?: HTMLElement | null | undefined;
   } = {},
 ): PreviewPanelInlineSize {
-  const maxWidth = useViewportClampedMaxWidth(
-    hostRef,
-    options.enabled ?? true,
-    options.containerRef,
-  );
+  const maxWidth = useViewportClampedMaxWidth(hostRef, options.enabled ?? true, options.container);
   return useResizableWidth({
     storageKey: options.widthStorageKey ?? PREVIEW_PANEL_WIDTH_STORAGE_KEY,
     defaultWidth: options.defaultWidth ?? PREVIEW_PANEL_DEFAULT_WIDTH,
@@ -55,14 +51,14 @@ export function usePreviewPanelInlineSize(
 function useViewportClampedMaxWidth(
   hostRef: RefObject<HTMLElement | null> | undefined,
   enabled: boolean,
-  containerRef: RefObject<HTMLElement | null> | undefined,
+  container: HTMLElement | null | undefined,
 ): number {
   const [maxWidth, setMaxWidth] = useState(() =>
     getPreviewPanelMaxWidth(typeof window === "undefined" ? 1280 : window.innerWidth),
   );
   useLayoutEffect(() => {
     if (typeof window === "undefined") return;
-    const row = containerRef?.current ?? (enabled ? hostRef?.current?.parentElement : null) ?? null;
+    const row = container ?? (enabled ? hostRef?.current?.parentElement : null) ?? null;
     // Measure before first paint: the persisted width must be clamped against
     // the row on the initial render, not one observer tick later (the panel
     // would flash over-wide on every mount). Only the derived cap is stored: the
@@ -87,7 +83,7 @@ function useViewportClampedMaxWidth(
       if (frame !== 0) window.cancelAnimationFrame(frame);
       stopObserving?.();
     };
-  }, [containerRef, hostRef, enabled]);
+  }, [container, hostRef, enabled]);
   return maxWidth;
 }
 export function getPreviewPanelMaxWidth(viewportWidth: number, containerWidth?: number): number {
