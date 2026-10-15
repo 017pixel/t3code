@@ -132,7 +132,7 @@ it("keeps the real desktop chunks from requiring the application entry", async (
     for (const filename of await NodeFSP.readdir(directory)) {
       if (!filename.endsWith(".cjs") || filename === "main.cjs") continue;
       const source = await NodeFSP.readFile(NodePath.join(directory, filename), "utf8");
-      assert.doesNotMatch(source, /require\(["'`]\.\/(?:application|main)\.cjs["'`]\)/, filename);
+      assert.notMatch(source, /require\(["'`]\.\/(?:application|main)\.cjs["'`]\)/, filename);
     }
   } finally {
     await NodeFSP.rm(directory, { recursive: true, force: true });
