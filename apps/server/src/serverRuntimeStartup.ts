@@ -467,37 +467,34 @@ const make = (options?: StartupOptions) =>
     );
 
     const startup = Effect.gen(function* () {
-      // Both runtimes read independent files and must be ready before recovery.
-      yield* Effect.all(
-        [
-          runStartupPhase(
-            "keybindings.start",
-            keybindings.start.pipe(
-              Effect.catch((error) =>
-                Effect.logWarning("failed to start keybindings runtime", {
-                  path: error.configPath,
-                  detail: error.detail,
-                  cause: error.cause,
-                }),
-              ),
-            ),
+      yield* Effect.logDebug("startup phase: starting keybindings runtime");
+      yield* runStartupPhase(
+        "keybindings.start",
+        keybindings.start.pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to start keybindings runtime", {
+              path: error.configPath,
+              detail: error.detail,
+              cause: error.cause,
+            }),
           ),
-          runStartupPhase(
-            "settings.start",
-            serverSettings.start.pipe(
-              Effect.catch((error) =>
-                Effect.logWarning("failed to start server settings runtime", {
-                  path: error.settingsPath,
-                  operation: error.operation,
-                  providerInstanceId: error.providerInstanceId,
-                  environmentVariable: error.environmentVariable,
-                  cause: error.cause,
-                }),
-              ),
-            ),
+        ),
+      );
+
+      yield* Effect.logDebug("startup phase: starting server settings runtime");
+      yield* runStartupPhase(
+        "settings.start",
+        serverSettings.start.pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to start server settings runtime", {
+              path: error.settingsPath,
+              operation: error.operation,
+              providerInstanceId: error.providerInstanceId,
+              environmentVariable: error.environmentVariable,
+              cause: error.cause,
+            }),
           ),
-        ],
-        { concurrency: "unbounded", discard: true },
+        ),
       );
 
       const welcomeBase = yield* resolveWelcomeBase;

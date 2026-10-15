@@ -1858,28 +1858,17 @@ const layerWsRpc = (
           const environment = yield* serverEnvironment.getDescriptor;
           const auth = yield* serverAuth.getDescriptor();
           const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
-          const [editorConfig, availableRemoteOpenTargets, availableDirectEndpoints] =
-            yield* Effect.all(
-              [
-                options.deferEditors === true
-                  ? Effect.succeed({ availableEditors: [] })
-                  : resolveAvailableEditorsForConfig(
-                      externalLauncher.resolveAvailableEditors(),
-                    ).pipe(
-                      Effect.flatMap((editors) =>
-                        resolveEditorConfig(
-                          editors,
-                          resolveFileManagerRevealKindForConfig(
-                            externalLauncher.resolveFileManagerRevealKind(),
-                          ),
-                        ),
-                      ),
-                    ),
-                resolveAvailableEditorsForConfig(remoteOpenTargets.resolveTargets()),
-                resolveAvailableEditorsForConfig(directEndpoints.resolve()),
-              ],
-              { concurrency: "unbounded" },
-            );
+          const editorConfig =
+            options.deferEditors === true
+              ? { availableEditors: [] }
+              : yield* resolveEditorConfig(
+                  yield* resolveAvailableEditorsForConfig(
+                    externalLauncher.resolveAvailableEditors(),
+                  ),
+                  resolveFileManagerRevealKindForConfig(
+                    externalLauncher.resolveFileManagerRevealKind(),
+                  ),
+                );
 
           return {
             environment,
@@ -1892,8 +1881,10 @@ const layerWsRpc = (
             ...editorConfig,
             // Same discovery-with-timeout treatment as editors: a slow probe
             // must not stall server.getConfig, so it degrades to no targets.
-            remoteOpenTargets: availableRemoteOpenTargets,
-            directEndpoints: availableDirectEndpoints,
+            remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
+              remoteOpenTargets.resolveTargets(),
+            ),
+            directEndpoints: yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
             observability: {
               logsDirectoryPath: config.logsDir,
               localTracingEnabled: true,
