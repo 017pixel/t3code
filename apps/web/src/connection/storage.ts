@@ -34,9 +34,7 @@ import {
   TurnItemId,
   VcsListRefsResult,
 } from "@t3tools/contracts";
-import {
-  boundedSnapshotProjection,
-} from "@t3tools/shared/orchestrationV2BoundedSnapshot";
+import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -290,15 +288,6 @@ function writeDatabaseValueOnConnection(
     }
   }).pipe(Effect.withSpan("web.connectionStorage.writeDatabaseValue"));
 }
-
-const waitForCacheIdle = Effect.callback<void>((resume) => {
-  if (typeof window === "undefined" || typeof window.requestIdleCallback !== "function") {
-    resume(Effect.void);
-    return;
-  }
-  const id = window.requestIdleCallback(() => resume(Effect.void), { timeout: 1000 });
-  return Effect.sync(() => window.cancelIdleCallback(id));
-});
 
 function removeDatabaseValueOnConnection(
   database: IDBDatabase,
@@ -787,7 +776,6 @@ export const layer = Layer.effectContext(
       },
       saveShell: (environmentId, snapshot) =>
         Effect.gen(function* () {
-          yield* waitForCacheIdle;
           const encoded = yield* encodeStoredShellSnapshot({
             schemaVersion: ORCHESTRATION_CACHE_SCHEMA_VERSION,
             environmentId,
@@ -883,7 +871,6 @@ export const layer = Layer.effectContext(
         ),
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
-          yield* waitForCacheIdle;
           const encoded = yield* encodeStoredThreadSnapshot({
             schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
             environmentId,
