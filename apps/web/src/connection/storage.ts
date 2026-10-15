@@ -36,8 +36,6 @@ import {
 } from "@t3tools/contracts";
 import {
   boundedSnapshotProjection,
-  omitCheckpointItemFiles,
-  omitLocalVisibleTurnItems,
 } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -886,16 +884,11 @@ export const layer = Layer.effectContext(
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
           yield* waitForCacheIdle;
-          const withoutLocal = omitLocalVisibleTurnItems(snapshot.projection);
-          const withoutFiles = omitCheckpointItemFiles(withoutLocal ?? snapshot.projection);
           const encoded = yield* encodeStoredThreadSnapshot({
             schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
             environmentId,
             threadId: snapshot.projection.thread.id,
-            snapshot: {
-              ...snapshot,
-              projection: withoutFiles?.projection ?? withoutLocal ?? snapshot.projection,
-            },
+            snapshot,
           }).pipe(Effect.mapError((cause) => persistenceError("save-thread", cause)));
           yield* writeDatabaseValue(
             database,
@@ -907,8 +900,8 @@ export const layer = Layer.effectContext(
             {
               format: "compact-thread-1",
               data: encoded,
-              omitLocal: withoutLocal !== null,
-              checkpointItemIds: withoutFiles?.itemIds ?? [],
+              omitLocal: false,
+              checkpointItemIds: [],
             },
           );
         }).pipe(
