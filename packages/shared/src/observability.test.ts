@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Order from "effect/Order";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
@@ -354,17 +355,20 @@ describe("observability", () => {
         const clock = yield* Clock.Clock;
         const sleeps = vi.spyOn(clock, "sleep");
         yield* Effect.addFinalizer(() => Effect.sync(() => sleeps.mockRestore()));
+        const flushed = yield* Queue.unbounded<void>();
         const sink = yield* makeTraceSink({
           filePath: tracePath,
           maxBytes: 1024 * 1024,
           maxFiles: 2,
           batchWindowMs: 1_000,
+          onFlush: () => Queue.offer(flushed, undefined).pipe(Effect.asVoid),
         });
 
         yield* TestClock.adjust("1 hour");
         expect(sleeps).not.toHaveBeenCalled();
         sink.push(makeRecord("first"));
         yield* TestClock.adjust("1 second");
+        yield* Queue.take(flushed);
         assert.deepStrictEqual(
           (yield* readTraceRecords(tracePath)).map((line) => line.name),
           ["first"],
@@ -374,6 +378,7 @@ describe("observability", () => {
         expect(sleeps).toHaveBeenCalledTimes(1);
         sink.push(makeRecord("second"));
         yield* TestClock.adjust("1 second");
+        yield* Queue.take(flushed);
         assert.deepStrictEqual(
           (yield* readTraceRecords(tracePath)).map((line) => line.name),
           ["first", "second"],
