@@ -514,24 +514,18 @@ describe("sidebar list motion", () => {
     expectMove(y, -13);
   });
 
-  it("continues a slot's entry on the row that replaces it", () => {
+  it("carries a virtual row's entry and crossfades its old shape", () => {
     let notify: MutationCallback = () => {};
-    vi.stubGlobal(
-      "MutationObserver",
-      class {
-        constructor(callback: MutationCallback) {
-          notify = callback;
-        }
-        observe() {}
-        disconnect() {}
-      },
-    );
-    const slot = new TestRow("slot", 36);
-    const row = new TestRow("row", 36);
-    const above = new TestRow("above");
-    for (const node of [slot, row]) {
+    vi.stubGlobal("MutationObserver", class {
+      constructor(callback: MutationCallback) { notify = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    const slot = new TestRow("slot", 36), row = new TestRow("row", 36);
+    const other = new TestRow("other"), card = new TestRow("card");
+    for (const node of [slot, row, card]) {
       node.setAttribute("data-thread-item", "t");
-      node.setAttribute("data-sidebar-row-variant", "slim");
+      node.setAttribute("data-sidebar-row-variant", node === card ? "card" : "slim");
     }
     const { motion, layout } = fixture([]);
     motion.update(true);
@@ -539,84 +533,21 @@ describe("sidebar list motion", () => {
     motion.update(true);
     const entry = slot.animations[0]!;
     entry.progress = 0.25;
-    // The observer swaps the slot for its rendered row after the motion pass.
     layout([row]);
-    notify(
-      [{ addedNodes: [row], removedNodes: [slot] }] as unknown as MutationRecord[],
-      {} as MutationObserver,
-    );
+    notify([{ addedNodes: [row], removedNodes: [slot] }] as unknown as MutationRecord[], {} as MutationObserver);
     expect(entry.effect).toHaveProperty("target", row);
     expect(entry.cancel).not.toHaveBeenCalled();
-    layout([above, row]);
+    layout([other, row]);
     motion.update(true);
-    // Remaining 27px of the row's 36px entry plus the new 83px shift.
     expectMove(row, -110);
-  });
-
-  it("crossfades a row that changes variant instead of sliding it", () => {
-    const card = new TestRow("card");
-    const other = new TestRow("other");
-    const header = new TestRow("Settled", 32);
-    const slim = new TestRow("slim", 36);
-    for (const [node, variant] of [
-      [card, "card"],
-      [slim, "slim"],
-    ] as const) {
-      node.setAttribute("data-thread-item", "t");
-      node.setAttribute("data-sidebar-row-variant", variant);
-    }
-    const { motion, layout } = fixture([card, other, header]);
-    motion.update(true);
-    layout([other, header, slim]);
-    motion.update(true);
-    expect(card.clones).toHaveLength(1);
-    expect(card.clones[0]!.style.top).toBe("8px");
-    expect(slim.animate).toHaveBeenLastCalledWith(
-      [
-        { opacity: 0, transform: "translateY(83px)" },
-        { opacity: 1, transform: "translateY(0px)" },
-      ],
-      { duration: 150, easing: "ease-out" },
-    );
-    expectMove(header, 83);
-  });
-
-  it("fades a variant change out as the row that was on screen", () => {
-    let notify: MutationCallback = () => {};
-    vi.stubGlobal(
-      "MutationObserver",
-      class {
-        constructor(callback: MutationCallback) {
-          notify = callback;
-        }
-        observe() {}
-        disconnect() {}
-      },
-    );
-    const slot = new TestRow("slot");
-    const card = new TestRow("card");
-    const slim = new TestRow("slim", 36);
-    const other = new TestRow("other");
-    for (const [node, variant] of [
-      [slot, "card"],
-      [card, "card"],
-      [slim, "slim"],
-    ] as const) {
-      node.setAttribute("data-thread-item", "t");
-      node.setAttribute("data-sidebar-row-variant", variant);
-    }
-    const { motion, layout } = fixture([slot, other]);
-    motion.update(true);
-    // The observer swaps the measured slot for its rendered card.
-    layout([card, other]);
-    notify(
-      [{ addedNodes: [card], removedNodes: [slot] }] as unknown as MutationRecord[],
-      {} as MutationObserver,
-    );
-    layout([other, slim]);
+    layout([other, card]);
     motion.update(true);
     expect(slot.clones).toHaveLength(0);
-    expect(card.clones).toHaveLength(1);
+    expect(row.clones).toHaveLength(1);
+    expect(card.animate).toHaveBeenLastCalledWith([
+      { opacity: 0, transform: "translateY(0px)" },
+      { opacity: 1, transform: "translateY(0px)" },
+    ], { duration: 150, easing: "ease-out" });
   });
 
   it("skips fades when a large list change would clone too many rows", () => {
