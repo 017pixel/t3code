@@ -91,9 +91,12 @@ it("retryDelayMs doubles from 2s and stays under the 5 minute cap", () => {
 });
 
 it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
-  it.effect("a batch that keeps failing is retried with backoff, then dropped", () =>
+  it.effect("retries a failed concurrent flush without new events, with backoff, then drops it", () =>
     Effect.gen(function* () {
       const batches: Array<ReadonlyArray<{ readonly uuid: string }>> = [];
+      const firstSend = yield* Deferred.make<void>();
+      const failFirstSend = yield* Deferred.make<void>();
+      const startWorker = yield* Deferred.make<void>();
       const layerRuntime = AnalyticsService.layer.pipe(
         Layer.provideMerge(
           ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-retry-" }),
@@ -111,54 +114,6 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
           Layer.mergeAll(
             Layer.succeed(HostProcess.Platform, "win32"),
             Layer.succeed(HostProcess.Architecture, "x64"),
-            layerAcceptThenFailClient(batches),
-          ),
-        ),
-      );
-
-      yield* Effect.gen(function* () {
-        const analytics = yield* AnalyticsService.AnalyticsService;
-        for (let index = 0; index < 20; index += 1) {
-          yield* analytics.record("test.retry", { index });
-        }
-        // Before the fix this loop sent the batch about once a second.
-        for (let second = 0; second < 600; second += 1) {
-          yield* TestClock.adjust("1 second");
-        }
-      }).pipe(Effect.provide(layerRuntime));
-
-      assert.equal(batches.length, 5);
-      const uuids = batches.map((batch) => batch.map((event) => event.uuid).join(","));
-      assert.equal(new Set(uuids).size, 1, "every retry carries the same uuids");
-      assert.equal(new Set(batches[0]?.map((event) => event.uuid)).size, 20);
-    }),
-  );
-
-  it.effect("retries a failed concurrent public flush without another event", () =>
-    Effect.gen(function* () {
-      const batches: Array<ReadonlyArray<{ readonly uuid: string }>> = [];
-      const firstSend = yield* Deferred.make<void>();
-      const failFirstSend = yield* Deferred.make<void>();
-      const startWorker = yield* Deferred.make<void>();
-      const layerRuntime = AnalyticsService.layer.pipe(
-        Layer.provideMerge(
-          ServerConfig.ServerConfig.layerTest(process.cwd(), {
-            prefix: "t3-telemetry-concurrent-",
-          }),
-        ),
-        Layer.provide(
-          ConfigProvider.layer(
-            ConfigProvider.fromUnknown({
-              T3CODE_TELEMETRY_ENABLED: true,
-              T3CODE_POSTHOG_KEY: "phc_test_key",
-              T3CODE_POSTHOG_HOST: "http://localhost",
-            }),
-          ),
-        ),
-        Layer.provide(
-          Layer.mergeAll(
-            Layer.succeed(HostProcess.Platform, "linux"),
-            Layer.succeed(HostProcess.Architecture, "x64"),
             Layer.succeed(ServerActivation.ServerBackgroundStart, {
               awaitFirstClient: Effect.void,
               awaitTurn: Deferred.await(startWorker),
@@ -173,11 +128,12 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
 
       yield* Effect.gen(function* () {
         const analytics = yield* AnalyticsService.AnalyticsService;
-        yield* analytics.record("test.concurrent.flush");
+        for (let index = 0; index < 20; index += 1) {
+          yield* analytics.record("test.retry", { index });
+        }
         const flushing = yield* analytics.flush.pipe(Effect.forkScoped);
         yield* Deferred.await(firstSend);
         yield* Deferred.succeed(startWorker, undefined);
-        // Let the worker start while the public flush owns the empty buffer.
         yield* TestClock.adjust("0 millis");
         yield* Deferred.succeed(failFirstSend, undefined);
         yield* Fiber.join(flushing);
@@ -185,8 +141,16 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         assert.equal(batches.length, 1);
         yield* TestClock.adjust("1001 millis");
         assert.equal(batches.length, 2);
-        assert.deepEqual(batches[1], batches[0]);
+        // Retries retain their backoff without any new events.
+        for (let second = 0; second < 600; second += 1) {
+          yield* TestClock.adjust("1 second");
+        }
       }).pipe(Effect.provide(layerRuntime));
+
+      assert.equal(batches.length, 5);
+      const uuids = batches.map((batch) => batch.map((event) => event.uuid).join(","));
+      assert.equal(new Set(uuids).size, 1, "every retry carries the same uuids");
+      assert.equal(new Set(batches[0]?.map((event) => event.uuid)).size, 20);
     }),
   );
 
