@@ -1,7 +1,5 @@
-import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import type * as Scope from "effect/Scope";
@@ -45,7 +43,7 @@ export class ServerBackgroundStart extends Context.Reference<BackgroundStart | u
 ) {}
 
 // Probes wait for config delivery (at most 10s). Maintenance also waits for a
-// quiet startup (10s, at most 30s), then starts one job every 2s.
+// quiet startup (10s, at most 30s).
 export const makeBackgroundStart = (activation: Effect.Effect<void>) =>
   Effect.gen(function* () {
     const clientServed = yield* Deferred.make<void>();
@@ -62,17 +60,9 @@ export const makeBackgroundStart = (activation: Effect.Effect<void>) =>
       ),
       Effect.forkScoped,
     );
-    let nextStartAt = 0;
     return {
       awaitFirstClient: Fiber.join(firstClient).pipe(Effect.asVoid),
-      awaitTurn: Fiber.join(quiet).pipe(
-        Effect.andThen(Clock.currentTimeMillis),
-        Effect.flatMap((now) => {
-          const startAt = Math.max(now, nextStartAt);
-          nextStartAt = startAt + 2_000;
-          return Effect.sleep(Duration.millis(startAt - now));
-        }),
-      ),
+      awaitTurn: Fiber.join(quiet).pipe(Effect.asVoid),
       markClientServed: Deferred.succeed(clientServed, undefined).pipe(Effect.asVoid),
     } satisfies BackgroundStart;
   });

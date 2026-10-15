@@ -24,30 +24,22 @@ it.effect("proves a root is parked before returning and releases it with one gat
   ),
 );
 
-it.effect("defers maintenance until the client loads and staggers its startup work", () =>
+it.effect("defers maintenance until the client loads and startup is quiet", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const activation = yield* Deferred.make<void>();
       const firstRan = yield* Deferred.make<void>();
-      const secondRan = yield* Deferred.make<void>();
       const background = yield* ServerActivation.makeBackgroundStart(Deferred.await(activation));
       yield* ServerActivation.forkBackground(Deferred.succeed(firstRan, undefined)).pipe(
-        Effect.provideService(ServerActivation.ServerActivation, Deferred.await(activation)),
-        Effect.provideService(ServerActivation.ServerBackgroundStart, background),
-      );
-      yield* ServerActivation.forkBackground(Deferred.succeed(secondRan, undefined)).pipe(
         Effect.provideService(ServerActivation.ServerActivation, Deferred.await(activation)),
         Effect.provideService(ServerActivation.ServerBackgroundStart, background),
       );
       yield* Deferred.succeed(activation, undefined);
       yield* TestClock.adjust("10 seconds");
       expect(yield* Deferred.isDone(firstRan)).toBe(false);
-      expect(yield* Deferred.isDone(secondRan)).toBe(false);
       yield* background.markClientServed;
       yield* Deferred.await(firstRan);
       expect(yield* Deferred.isDone(secondRan)).toBe(false);
-      yield* TestClock.adjust("2 seconds");
-      yield* Deferred.await(secondRan);
     }),
   ),
 );
