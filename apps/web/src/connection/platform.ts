@@ -343,8 +343,9 @@ const layerCapabilities = Layer.effectContext(
   }),
 );
 
-const DESKTOP_PRIMARY_TARGET_KEY = "t3code:desktop-primary-target:v1";
-const DesktopPrimaryTargetJson = Schema.fromJsonString(PrimaryConnectionTarget);
+// Retain the existing desktop key when sharing its identity cache with the browser.
+const PRIMARY_TARGET_KEY = "t3code:desktop-primary-target:v1";
+const PrimaryTargetJson = Schema.fromJsonString(PrimaryConnectionTarget);
 
 const loadPrimaryConnectionRegistration = Effect.fn(
   "web.connectionPlatform.loadPrimaryConnectionRegistration",
@@ -363,14 +364,12 @@ const loadPrimaryConnectionRegistration = Effect.fn(
       wsBaseUrl: resolved.target.wsBaseUrl,
     }),
   });
-  if (window.desktopBridge) {
-    yield* Schema.encodeEffect(DesktopPrimaryTargetJson)(registration.target).pipe(
-      Effect.flatMap((encoded) =>
-        Effect.try(() => localStorage.setItem(DESKTOP_PRIMARY_TARGET_KEY, encoded)),
-      ),
-      Effect.catch(() => Effect.void),
-    );
-  }
+  yield* Schema.encodeEffect(PrimaryTargetJson)(registration.target).pipe(
+    Effect.flatMap((encoded) =>
+      Effect.try(() => localStorage.setItem(PRIMARY_TARGET_KEY, encoded)),
+    ),
+    Effect.catch(() => Effect.void),
+  );
   return registration;
 });
 
@@ -592,12 +591,10 @@ const layerPlatformConnectionSource = Layer.effect(
         registrations: Stream.empty,
       });
     }
-    const cachedTarget = window.desktopBridge
-      ? yield* Effect.try(() => localStorage.getItem(DESKTOP_PRIMARY_TARGET_KEY)).pipe(
-          Effect.flatMap(Schema.decodeUnknownEffect(DesktopPrimaryTargetJson)),
-          Effect.option,
-        )
-      : Option.none();
+    const cachedTarget = yield* Effect.try(() => localStorage.getItem(PRIMARY_TARGET_KEY)).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(PrimaryTargetJson)),
+      Effect.option,
+    );
     const primary = readPrimaryEnvironmentTargetResult();
     const cachedRegistrations =
       Option.isSome(cachedTarget) &&
@@ -773,7 +770,7 @@ const layerPlatformConnectionSource = Layer.effect(
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
     return PlatformConnectionSource.PlatformConnectionSource.of({
-      // Publish only the native endpoint's identity early. The normal discovery
+      // Publish only the primary endpoint's identity early. The normal discovery
       // stream replaces it, and the connection resolver checks its environment id.
       registrations: Stream.concat(
         Stream.fromIterable(cachedRegistrations.length > 0 ? [cachedRegistrations] : []),
