@@ -507,6 +507,11 @@ describe("reuseUnchangedThreadShells", () => {
     expect(next.threads[0]).toBe(linked);
     expect(next.threads[1]).not.toBe(other);
     expect(next.threads[1]?.title).toBe("Renamed");
+    const renamed = reuseUnchangedThreadShells(previous, {
+      ...v2ShellSnapshot,
+      threads: [{ ...withoutLinks, title: "Renamed" }],
+    });
+    expect(renamed.threads[0]?.pullRequests).toEqual([link]);
   });
 
   it("returns the incoming snapshot when no row is unchanged", () => {
