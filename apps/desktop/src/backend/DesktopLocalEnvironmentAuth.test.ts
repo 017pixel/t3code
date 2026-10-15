@@ -262,7 +262,7 @@ describe("DesktopLocalEnvironmentAuth", () => {
       );
       const result = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth.pipe(
         Effect.flatMap((auth) => auth.getBearerToken),
-        Effect.either,
+        Effect.match({ onSuccess: (token) => token, onFailure: (error) => error._tag }),
         Effect.forkChild,
         Effect.provide(
           DesktopLocalEnvironmentAuth.layer.pipe(Layer.provide(Layer.merge(pool, client))),
@@ -271,9 +271,10 @@ describe("DesktopLocalEnvironmentAuth", () => {
       assert.equal(requests, 0);
       yield* TestClock.adjust("41 seconds");
       const token = yield* Fiber.join(result);
-      assert.equal(token._tag, ready ? "Right" : "Left");
-      if (token._tag === "Right") assert.equal(token.right, "desktop-bearer-token");
-      else assert.equal(token.left._tag, "DesktopLocalEnvironmentAuthSessionBootstrapError");
+      assert.equal(
+        token,
+        ready ? "desktop-bearer-token" : "DesktopLocalEnvironmentAuthSessionBootstrapError",
+      );
       assert.equal(requests, ready ? 1 : 0);
     }).pipe(Effect.provide(TestClock.layer())),
   );

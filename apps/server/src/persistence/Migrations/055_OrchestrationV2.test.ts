@@ -144,8 +144,8 @@ layer("055_OrchestrationV2", (it) => {
   it.effect.each([false, true])("repairs sweep indexes with legacy id 62: %s", (legacy) => {
     const warnings: Array<unknown> = [];
     const logger = Logger.make(({ fiber, logLevel }) => {
-      if (logLevel === "Warn")
-        warnings.push(fiber.getRef(References.CurrentLogAnnotations).skipped);
+      const skipped = fiber.getRef(References.CurrentLogAnnotations).skipped;
+      if (logLevel === "Warn" && skipped !== undefined) warnings.push(skipped);
     });
     return Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
