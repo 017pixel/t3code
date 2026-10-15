@@ -5,7 +5,7 @@ import { useScaledTextRole } from "../features/settings/appearance/useScaledText
 import type { SegmentedControlProps } from "./SegmentedControl.types";
 
 /** Compose content shared by screen controls and native dialogs, inside their existing Host. */
-export function MaterialSegmentedButtons<Value extends number | string>(
+export function SegmentedButtons<Value extends number | string>(
   props: SegmentedControlProps<Value>,
 ) {
   const { themeVariables: colors } = useAppearancePreferences();
