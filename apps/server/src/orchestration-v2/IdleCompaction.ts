@@ -101,7 +101,15 @@ export function idleCompactionCandidate(
       turnItems,
       activeProviderThreadId: thread.activeProviderThreadId,
       pullRequests: thread.pullRequests,
-    }).length > 0
+    }).length > 0 ||
+    // Persistent monitors are left out of pending background work but still report.
+    turnItems.some(
+      (item) =>
+        (item.type === "command_execution" ||
+          item.type === "dynamic_tool" ||
+          item.type === "subagent") &&
+        (item.status === "pending" || item.status === "running" || item.status === "waiting"),
+    )
   )
     return null;
   // Include unadopted messages, even if a queued run has not been persisted yet.
