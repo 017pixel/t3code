@@ -619,7 +619,7 @@ const layerBackendOutputLogFactory = Layer.effect(
 );
 
 // Bound both headers and body so a stalled collector cannot stop later exports.
-const withOtlpTimeout = HttpClient.transform((response, request) =>
+const withOtlpTimeout = (client: HttpClient.HttpClient) => client.pipe(HttpClient.transform((response, request) =>
   response.pipe(
     Effect.tap((received) => received.arrayBuffer),
     Effect.timeoutOrElse({
@@ -629,7 +629,7 @@ const withOtlpTimeout = HttpClient.transform((response, request) =>
       })),
     }),
   ),
-);
+));
 
 /**
  * Logs and traces for the main process, assembled together because they share
