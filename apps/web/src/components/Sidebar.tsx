@@ -153,10 +153,6 @@ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useMinuteValue } from "../hooks/useNowMinute";
 import { sidebarThreadShellsAtom } from "./Sidebar.shells";
-import {
-  SidebarTooltip as Tooltip,
-  SidebarTooltipScope as TooltipProvider,
-} from "./Sidebar.tooltip";
 import { Atom } from "effect/reactivity";
 import {
   useEnvironmentIdentities,
@@ -296,7 +292,7 @@ import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
-import { TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import {
   composerDraftHasUserContent,
