@@ -17,9 +17,7 @@ import {
 
 import { PortalContainerContext, useOwnPortalContainer } from "~/lib/portalContainer";
 
-/** Activity runs cleanups on hide; held resources release only on eviction or unmount. */
 export interface KeptViewLifetime {
-  /** Runs `release` when the kept view goes away. Returns a function that cancels it. */
   hold(release: () => void): () => void;
 }
 
@@ -185,7 +183,6 @@ let heldText: { readonly targetKey: string; readonly text: string; readonly at: 
   null;
 const HELD_TEXT_MAX_AGE_MS = 2_000;
 
-/** Set by KeptChatSurface on each commit. */
 export function setUrlRouteTargetKey(key: string | null): void {
   urlRouteTargetKey = key;
 }
