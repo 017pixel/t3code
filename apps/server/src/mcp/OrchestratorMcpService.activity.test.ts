@@ -537,7 +537,7 @@ it("readThread keeps default pages small and expands one item on request", async
   const toolOutput = "tool-output-line\n".repeat(200);
   const commandOutput = "command-output-line\n".repeat(200);
   const longReply = "r".repeat(10_000);
-  const turnItem = (id: string, fields: Record<string, unknown>) => ({
+  const turnItem = <Fields extends { readonly type: string }>(id: string, fields: Fields) => ({
     id,
     runId: "run-read-1",
     status: "completed",
@@ -626,9 +626,12 @@ it("readThread keeps default pages small and expands one item on request", async
           getThreadShell: () =>
             Effect.succeed(projection.thread as unknown as OrchestrationV2ThreadShell),
           getTimelinePage: (_threadId, options) => {
+            // Mirrors ProjectionStore: the default messages view drops tool rows.
             const matching = rows.filter((row) =>
               options.itemId === undefined
-                ? row.position > (options.afterPosition ?? -1)
+                ? row.position > (options.afterPosition ?? -1) &&
+                  (options.view === "activity" ||
+                    ["user_message", "assistant_message", "proposed_plan"].includes(row.item.type))
                 : row.sourceItemId === options.itemId,
             );
             return Effect.succeed({
@@ -654,7 +657,12 @@ it("readThread keeps default pages small and expands one item on request", async
 
   await Effect.gen(function* () {
     const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-    const first = yield* service.readThread(makeScope(), { threadId: readThreadId });
+    const messages = yield* service.readThread(makeScope(), { threadId: readThreadId });
+    expect(messages.items[0]).toMatchObject({ itemId: "item-reply" });
+    const first = yield* service.readThread(makeScope(), {
+      threadId: readThreadId,
+      view: "activity",
+    });
     expect(first.items).toHaveLength(20);
     expect(first.hasMore).toBe(true);
     expect(first.recentRuns.map((run) => run.ordinal)).toEqual([8, 7, 6, 5, 4]);
@@ -698,6 +706,7 @@ it("readThread keeps default pages small and expands one item on request", async
     // An explicit maxCharsPerItem overrides both type budgets.
     const explicit = yield* service.readThread(makeScope(), {
       threadId: readThreadId,
+      view: "activity",
       limit: 3,
       maxCharsPerItem: 1_000,
     });
