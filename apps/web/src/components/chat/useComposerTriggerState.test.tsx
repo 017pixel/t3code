@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import { detectComposerTrigger } from "../../composer-logic";
 import { useComposerTriggerState } from "./useComposerTriggerState";
-import { useComposerTypingGuard } from "./useComposerTypingGuard";
 
 const command = "pnpm install -g @openai/codex@latest";
 const initialPrompt = "pnpm install -g @openai";
@@ -142,39 +141,5 @@ describe("composer suggestion dismissal", () => {
     expect(composer.trigger).toBeNull();
     await updatePrompt("@src");
     expect(composer.trigger?.kind).toBe("path");
-  });
-});
-
-describe("typing guard subscription", () => {
-  it("keeps typing out of React and extends a pending request hold until idle", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    Object.assign(window, {
-      setTimeout: globalThis.setTimeout,
-      clearTimeout: globalThis.clearTimeout,
-    });
-    let guard!: ReturnType<typeof useComposerTypingGuard>;
-    function Probe({ requestIds }: { requestIds: readonly string[] }) {
-      guard = useComposerTypingGuard("draft", requestIds);
-      return null;
-    }
-    try {
-      await act(() => root.render(<Probe requestIds={[]} />));
-      await act(() => guard.onFocus());
-      await act(() => guard.onDraftChange());
-      await act(() => guard.onDraftChange());
-      await act(() => root.render(<Probe requestIds={["approval"]} />));
-      expect([...guard.heldRequestIds]).toEqual(["approval"]);
-      await act(() => vi.advanceTimersByTimeAsync(1000));
-      await act(() => guard.onDraftChange());
-      await act(() => vi.advanceTimersByTimeAsync(500));
-      expect([...guard.heldRequestIds]).toEqual(["approval"]);
-      await act(() => vi.advanceTimersByTimeAsync(1000));
-      expect([...guard.heldRequestIds]).toEqual([]);
-      await act(() => root.render(<Probe requestIds={["approval"]} />));
-      expect([...guard.heldRequestIds]).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

@@ -1437,21 +1437,13 @@ describe("incremental v2 timeline entries", () => {
       visibleTurnItems: [...rows.slice(0, -1), row],
     });
     expect(isStreamingProjectionTextUpdate(before, update(token))).toBe(true);
-    expect(
-      isStreamingProjectionTextUpdate(
-        before,
-        update({ ...token, item: { ...token.item, streaming: false } }),
-      ),
-    ).toBe(false);
-    expect(
-      isStreamingProjectionTextUpdate(
-        before,
-        update({ ...token, sourceThreadId: ThreadId.make("inherited") }),
-      ),
-    ).toBe(false);
-    expect(
-      isStreamingProjectionTextUpdate(before, { ...update(token), runs: [...before.runs] }),
-    ).toBe(false);
+    for (const next of [
+      update({ ...token, item: { ...token.item, streaming: false } }),
+      update({ ...token, sourceThreadId: ThreadId.make("inherited") }),
+      { ...update(token), runs: [...before.runs] },
+    ]) {
+      expect(isStreamingProjectionTextUpdate(before, next)).toBe(false);
+    }
   });
   it("retains history and attachment previews through decoded streaming updates", () => {
     const fixture = makeStreamingTimelineFixture("Partial");
