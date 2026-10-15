@@ -4,7 +4,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Base64 from "effect/encoding/Base64";
 
-import * as GitHubApi from "./GitHubApiTag.ts";
+import * as GitHubApi from "./GitHubApi.ts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 
 /** One open layer of a stack, bottom to top, with the head the reader reviewed. */
