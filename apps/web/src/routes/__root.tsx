@@ -68,7 +68,10 @@ import {
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import { configureClientTracing } from "../observability/clientTracing";
-import { resolveInitialServerAuthGateState } from "../environments/primary";
+import {
+  peekPairingTokenFromUrl,
+  resolveInitialServerAuthGateState,
+} from "../environments/primary";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
 import { useHostedPromptLinkLanding } from "../components/promptLinks/HostedPromptLinkLanding";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
@@ -91,6 +94,9 @@ import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
 
+let desktopAuthBootstrap: Promise<void> | null = null;
+let desktopAuthPending = false;
+
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
     if (location.pathname === "/pair" && hasHostedPairingRequest(new URL(window.location.href))) {
@@ -110,8 +116,24 @@ export const Route = createRootRoute({
       };
     }
 
+    // The native connection owns its credentials. Let cached workspace reads and
+    // shell mounting overlap server startup; RPCs still await the native bearer.
+    const overlapDesktopAuth =
+      window.desktopBridge !== undefined &&
+      location.pathname !== "/pair" &&
+      peekPairingTokenFromUrl() === null &&
+      (desktopAuthBootstrap === null || desktopAuthPending);
     const authGate = resolveInitialServerAuthGateState();
-    const authGateState = await authGate;
+    if (overlapDesktopAuth && desktopAuthBootstrap === null) {
+      desktopAuthPending = true;
+      const settle = () => {
+        desktopAuthPending = false;
+      };
+      desktopAuthBootstrap = authGate.then(settle, settle);
+    }
+    const authGateState = overlapDesktopAuth
+      ? ({ status: "authenticated" } as const)
+      : await authGate;
     // Connect and read cached shells while the route chunks still load.
     if (authGateState.status === "authenticated") startEnvironmentShells();
     if (
@@ -150,6 +172,14 @@ function RootRouteNotFoundView() {
 }
 
 function RootRouteView() {
+  const router = useRouter();
+  useEffect(() => {
+    // Re-run the authoritative gate on either success or failure. A failed
+    // bootstrap takes the normal pairing/error route, without a reload loop.
+    if (desktopAuthBootstrap !== null) {
+      void desktopAuthBootstrap.then(() => router.invalidate());
+    }
+  }, [router]);
   useEffect(() => installDesktopPasteAsText(window.desktopBridge, window), []);
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();

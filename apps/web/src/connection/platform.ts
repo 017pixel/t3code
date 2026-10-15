@@ -37,6 +37,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/http";
 import { Atom } from "effect/reactivity";
@@ -342,6 +343,9 @@ const layerCapabilities = Layer.effectContext(
   }),
 );
 
+const DESKTOP_PRIMARY_TARGET_KEY = "t3code:desktop-primary-target:v1";
+const DesktopPrimaryTargetJson = Schema.fromJsonString(PrimaryConnectionTarget);
+
 const loadPrimaryConnectionRegistration = Effect.fn(
   "web.connectionPlatform.loadPrimaryConnectionRegistration",
 )(function* (resolved: PrimaryEnvironmentTarget) {
@@ -351,7 +355,7 @@ const loadPrimaryConnectionRegistration = Effect.fn(
     Effect.provide(PrimaryEnvironmentHttpLayer.layer),
     Effect.mapError(mapRemoteEnvironmentError),
   );
-  return new PrimaryConnectionRegistration({
+  const registration = new PrimaryConnectionRegistration({
     target: new PrimaryConnectionTarget({
       environmentId: descriptor.environmentId,
       label: descriptor.label,
@@ -359,6 +363,15 @@ const loadPrimaryConnectionRegistration = Effect.fn(
       wsBaseUrl: resolved.target.wsBaseUrl,
     }),
   });
+  if (window.desktopBridge) {
+    yield* Schema.encodeEffect(DesktopPrimaryTargetJson)(registration.target).pipe(
+      Effect.flatMap((encoded) =>
+        Effect.try(() => localStorage.setItem(DESKTOP_PRIMARY_TARGET_KEY, encoded)),
+      ),
+      Effect.catch(() => Effect.void),
+    );
+  }
+  return registration;
 });
 
 // A desktop-local secondary backend (e.g. a parallel WSL backend) lives on its
@@ -579,6 +592,20 @@ const layerPlatformConnectionSource = Layer.effect(
         registrations: Stream.empty,
       });
     }
+    const cachedTarget = window.desktopBridge
+      ? yield* Effect.try(() => localStorage.getItem(DESKTOP_PRIMARY_TARGET_KEY)).pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(DesktopPrimaryTargetJson)),
+          Effect.option,
+        )
+      : Option.none();
+    const primary = readPrimaryEnvironmentTargetResult();
+    const cachedRegistrations =
+      Option.isSome(cachedTarget) &&
+      primary._tag === "Success" &&
+      cachedTarget.value.httpBaseUrl === primary.target?.target.httpBaseUrl &&
+      cachedTarget.value.wsBaseUrl === primary.target.target.wsBaseUrl
+        ? [new PrimaryConnectionRegistration({ target: cachedTarget.value })]
+        : [];
     const cacheRef = yield* Ref.make(new Map<string, CachedPlatformRegistration>());
     const rejectedRef = yield* Ref.make(new Map<string, RejectedSecondaryBootstrap>());
 
@@ -746,8 +773,13 @@ const layerPlatformConnectionSource = Layer.effect(
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
     return PlatformConnectionSource.PlatformConnectionSource.of({
-      registrations: Stream.tick(PLATFORM_POLL_INTERVAL).pipe(
-        Stream.mapEffect(() => buildPlatformRegistrations),
+      // Publish only the native endpoint's identity early. The normal discovery
+      // stream replaces it, and the connection resolver checks its environment id.
+      registrations: Stream.concat(
+        Stream.fromIterable(cachedRegistrations.length > 0 ? [cachedRegistrations] : []),
+        Stream.tick(PLATFORM_POLL_INTERVAL).pipe(
+          Stream.mapEffect(() => buildPlatformRegistrations),
+        ),
       ),
     });
   }),
