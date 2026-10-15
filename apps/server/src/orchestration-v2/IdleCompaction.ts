@@ -1,8 +1,5 @@
 import type { OrchestrationV2ThreadProjection, ProviderDriverKind } from "@t3tools/contracts";
-import {
-  backgroundWorkHoldsCompletion,
-  derivePendingBackgroundWork,
-} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 
 const MINUTE_MS = 60 * 1_000;
@@ -93,17 +90,18 @@ export function idleCompactionCandidate(
     (thread.snoozedAt == null || DateTime.Order(latestRun.completedAt, thread.snoozedAt) <= 0)
   )
     return null;
+  // Any pending background work (even a dev server that does not hold
+  // completion) can report into the next turn; a hidden compaction would
+  // swallow that report, notably when Claude resumes a released process.
   if (
-    backgroundWorkHoldsCompletion(
-      derivePendingBackgroundWork({
-        latestRun,
-        runs,
-        providerThreads,
-        turnItems,
-        activeProviderThreadId: thread.activeProviderThreadId,
-        pullRequests: thread.pullRequests,
-      }),
-    )
+    derivePendingBackgroundWork({
+      latestRun,
+      runs,
+      providerThreads,
+      turnItems,
+      activeProviderThreadId: thread.activeProviderThreadId,
+      pullRequests: thread.pullRequests,
+    }).length > 0
   )
     return null;
   // Include unadopted messages, even if a queued run has not been persisted yet.

@@ -228,7 +228,7 @@ describe("idle compaction eligibility", () => {
     expect(idleCompactionCandidate(value, true, NOW_MS)).toBeNull();
   });
 
-  it("skips requests and background work that holds completion, while allowing a dev server", () => {
+  it("skips pending requests and any background work, including a dev server", () => {
     const value = projection();
     value.runtimeRequests = [
       { status: "pending" } as OrchestrationV2ThreadProjection["runtimeRequests"][number],
@@ -239,7 +239,7 @@ describe("idle compaction eligibility", () => {
       value.providerThreads = [
         { ...value.providerThreads[0]!, pendingBackgroundTasks: [{ taskId: "work", kind }] },
       ];
-      expect(idleCompactionCandidate(value, true, NOW_MS) !== null).toBe(kind === "command");
+      expect(idleCompactionCandidate(value, true, NOW_MS)).toBeNull();
     }
   });
 
