@@ -756,11 +756,12 @@ function SortableThreadRow(props: {
       ref={attach}
       data-thread-item={props.id}
       className={cn(
-        "list-none [content-visibility:auto]",
-        props.variant === "card"
-          ? "[contain-intrinsic-size:auto_78px]"
-          : "[contain-intrinsic-size:auto_36px]",
-        props.variant === "card" && "py-0.5",
+        "list-none",
+        mounted && "[content-visibility:auto]",
+        mounted &&
+          (props.variant === "card"
+            ? "py-0.5 [contain-intrinsic-size:auto_78px]"
+            : "[contain-intrinsic-size:auto_36px]"),
         bag.isDragging && "relative z-20",
       )}
       style={{
