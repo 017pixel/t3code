@@ -25,6 +25,7 @@ import { AgentElapsed } from "./AgentElapsed";
 import { threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
 import {
   defaultWorkflowPhaseIndex,
+  workflowPhaseStatus,
   workflowRunCounts,
   workflowRunPhases,
 } from "./WorkflowRunView.logic";
@@ -75,12 +76,6 @@ function StatusGlyph({ status }: { readonly status: RuntimeSubagentStatus }) {
       {glyph}
     </span>
   );
-}
-
-function phaseStatus(phase: SubagentWorkflowGroup["phases"][number]): RuntimeSubagentStatus {
-  if (phase.state === "running") return "running";
-  if (phase.state === "pending") return "pending";
-  return phase.members.some((member) => member.status === "failed") ? "failed" : "completed";
 }
 
 const ROW_GRID =
@@ -298,7 +293,7 @@ function WorkflowRunView(props: {
                     phase.state === "pending" && "text-muted-foreground",
                   )}
                 >
-                  <StatusGlyph status={phaseStatus(phase)} />
+                  <StatusGlyph status={workflowPhaseStatus(phase)} />
                   <span className="min-w-0 flex-1 truncate">{phase.title}</span>
                   <span className="text-xs tabular-nums text-muted-foreground">
                     {phase.members.length === 0

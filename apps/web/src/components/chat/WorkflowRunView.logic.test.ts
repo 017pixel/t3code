@@ -9,13 +9,17 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   defaultWorkflowPhaseIndex,
   UNPHASED_WORKFLOW_PHASE_INDEX,
+  workflowPhaseStatus,
   workflowRunCounts,
   workflowRunPhases,
 } from "./WorkflowRunView.logic";
 
 const at = DateTime.makeUnsafe("2026-10-15T10:00:00.000Z");
 
-function phasesOf(workflow: OrchestrationV2SubagentWorkflow) {
+function phasesOf(
+  workflow: OrchestrationV2SubagentWorkflow,
+  status: "running" | "cancelled" = "running",
+) {
   const [group] = deriveWorkflowGroups(
     projectedSubagentsToRuntime([
       {
@@ -23,7 +27,7 @@ function phasesOf(workflow: OrchestrationV2SubagentWorkflow) {
         title: "Build the game",
         prompt: "export const meta = …",
         model: null,
-        status: "running",
+        status,
         workflow,
         result: null,
         startedAt: at,
@@ -73,5 +77,20 @@ describe("workflow run view phases", () => {
     });
     expect(phases.map((phase) => phase.title)).toEqual(["Other"]);
     expect(defaultWorkflowPhaseIndex(phases)).toBe(UNPHASED_WORKFLOW_PHASE_INDEX);
+  });
+
+  it("marks a phase stopped, not done, when the workflow was stopped", () => {
+    const phases = phasesOf(
+      {
+        phases: PLAN,
+        agents: [
+          { index: 0, label: "plan", state: "completed", phaseIndex: 0 },
+          { index: 1, label: "build:a", state: "completed", phaseIndex: 1 },
+          { index: 2, label: "build:b", state: "running", phaseIndex: 1 },
+        ],
+      },
+      "cancelled",
+    );
+    expect(phases.map(workflowPhaseStatus)).toEqual(["completed", "cancelled", "pending"]);
   });
 });

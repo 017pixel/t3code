@@ -1,5 +1,6 @@
 import {
   isTerminalSubagentStatus,
+  type RuntimeSubagentStatus,
   type SubagentWorkflowGroup,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 
@@ -47,4 +48,15 @@ export function workflowRunCounts(phases: ReadonlyArray<WorkflowRunPhase>) {
     settled: members.filter((member) => isTerminalSubagentStatus(member.status)).length,
     failed: members.filter((member) => member.status === "failed").length,
   };
+}
+
+/** One status for a phase's rail glyph. Failure wins, then a stop. */
+export function workflowPhaseStatus(phase: WorkflowRunPhase): RuntimeSubagentStatus {
+  if (phase.state === "running") return "running";
+  if (phase.state === "pending") return "pending";
+  const has = (...statuses: ReadonlyArray<RuntimeSubagentStatus>) =>
+    phase.members.some((member) => statuses.includes(member.status));
+  if (has("failed")) return "failed";
+  if (has("cancelled", "interrupted")) return "cancelled";
+  return "completed";
 }
