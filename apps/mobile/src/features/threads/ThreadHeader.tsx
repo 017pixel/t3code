@@ -16,6 +16,8 @@ export function ThreadHeader(
     readonly onToggleInspector: () => void;
     readonly onOpenGitInspector: () => void;
     readonly onOpenFilesInspector: () => void;
+    /** Android: the feed is scrolled back into history, so the toolbar steps aside. */
+    readonly collapsed?: boolean;
   },
 ) {
   const returnToList = useWorkspaceListNavigation("threads");
@@ -101,6 +103,7 @@ export function ThreadHeader(
         actions={androidHeaderActions}
         hideBottomBorder
         compact={composerKeyboardActive}
+        collapsed={props.collapsed}
       />
       {native.fallback}
     </>

@@ -12,7 +12,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { MenuAction } from "@react-native-menu/menu";
 
 import { AndroidHeaderIconButton } from "../../components/AndroidScreenHeader";
-import { CompactBrandTitle } from "../../components/CompactBrandTitle";
 import { MaterialFloatingActionButton } from "../../components/MaterialFloatingActionButton";
 import { MaterialIconButton } from "../../components/MaterialIconButton";
 import { AndroidAnchoredMenu } from "../../components/AndroidAnchoredMenu";
@@ -27,7 +26,7 @@ import { AndroidWorkspaceTabSwitch } from "../workspace/AndroidWorkspaceTabSwitc
 
 /**
  * One toolbar height for the compact list and expanded sidebar, including search.
- * The sidebar variant swaps the brand for the Chats/PRs switch and keeps Filter and
+ * Both lead with the Chats/PRs switch. The sidebar variant also keeps Filter and
  * New thread in the header, so nothing floats over the list.
  */
 export function MaterialThreadListToolbar(props: {
@@ -178,12 +177,12 @@ export function MaterialThreadListToolbar(props: {
             </>
           ) : (
             <>
-              {/* Match the visible inset of the trailing 48dp icon button. */}
-              <View className="min-w-0 flex-1 pl-4">
+              <View className="min-w-0 flex-1 flex-row items-center">
+                <AndroidWorkspaceTabSwitch />
                 <WorkspaceConnectionTitle
-                  grow
+                  iconOnly
+                  brand={null}
                   onPress={props.onOpenEnvironments}
-                  brand={<CompactBrandTitle allowFontScaling={false} />}
                 />
               </View>
               <AndroidHeaderIconButton

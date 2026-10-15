@@ -983,12 +983,8 @@ function ThreadNavigationSidebarPane(
           Platform.OS === "android"
             ? {
                 marginTop: stickyHeaderHeight,
-                marginHorizontal: 4,
                 paddingBottom: insets.bottom,
                 backgroundColor: drawerColor,
-                borderTopLeftRadius: 28,
-                borderTopRightRadius: 28,
-                overflow: "hidden",
               }
             : { paddingBottom: insets.bottom }
         }

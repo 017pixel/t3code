@@ -17,8 +17,8 @@ export function AndroidWorkspaceSidebar(props: {
   ) : (
     <WorkspaceTabsContext value={context}>
       <View className="flex-1 bg-header">
-        <MaterialPullRequestToolbar sidebar onRequestVisibility={props.onRequestVisibility} />
-        <MaterialScreenContent insetHorizontal>
+        <MaterialPullRequestToolbar onRequestVisibility={props.onRequestVisibility} />
+        <MaterialScreenContent>
           <PullRequestsScreen sidebar selectedPullRequestKey={props.selectedPullRequestKey} />
         </MaterialScreenContent>
       </View>

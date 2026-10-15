@@ -218,6 +218,8 @@ export interface ThreadDetailScreenProps {
   readonly dispatchingMessageId: MessageId | null;
   readonly serverConfig: T3ServerConfig | null;
   readonly layoutVariant?: LayoutVariant;
+  /** True while the feed is scrolled away from its latest message. */
+  readonly onReadingHistoryChange?: (readingHistory: boolean) => void;
   readonly usesAutomaticContentInsets?: boolean;
   readonly onHeaderMaterialVisibilityChange?: (visible: boolean) => void;
   readonly onOpenConnectionEditor: () => void;
@@ -1099,6 +1101,10 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   }, [freeze, scrollMessageToEnd]);
 
   const showScrollToEndButton = contentPresentationKind === "ready" && !endFollowEnabled;
+  const onReadingHistoryChange = props.onReadingHistoryChange;
+  useEffect(() => {
+    onReadingHistoryChange?.(showScrollToEndButton);
+  }, [onReadingHistoryChange, showScrollToEndButton]);
   const { themeAppearance } = useAppearancePreferences();
   const isDarkMode = themeAppearance === "dark";
 

@@ -159,6 +159,7 @@ export function ScreenHeader(props: ScreenHeaderProps) {
       leading={props.sidebar !== false ? <AndroidWorkspaceSidebarButton /> : undefined}
       hideBottomBorder={props.hideBottomBorder}
       compact={props.compact}
+      collapsed={props.collapsed}
       actions={
         search
           ? [

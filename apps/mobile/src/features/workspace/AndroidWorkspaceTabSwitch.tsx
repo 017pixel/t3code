@@ -13,13 +13,13 @@ const TABS = [
   { tab: "pullRequests", label: "Pull requests", icon: "arrow.triangle.pull" },
 ] as const satisfies ReadonlyArray<{ tab: WorkspaceTab; label: string; icon: string }>;
 
-/** Chats/PRs switch that replaces the brand in the Android split-view sidebar header. */
+/** Chats/PRs switch that takes the brand slot in Android list headers. */
 export function AndroidWorkspaceTabSwitch() {
   const workspace = useWorkspaceTabs();
   const selectTab = useSelectAndroidWorkspaceTab();
   const { themeVariables } = useAppearancePreferences();
   const { buttonSize, iconSize, scale } = useAndroidControlSizing();
-  const colors = androidWorkspaceNavigationColors(themeVariables, true);
+  const colors = androidWorkspaceNavigationColors(themeVariables);
   if (workspace === null) return null;
   const segmentHeight = Math.round(32 * Math.max(1, scale));
 
