@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Activity,
   memo,
+  startTransition,
   useDeferredValue,
   useEffect,
   useLayoutEffect,
@@ -11,6 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 
 import ChatView from "./ChatView";
 import {
@@ -29,12 +31,19 @@ import {
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
-import { useEnvironmentThreadRefs, useThreadRefs, useThreadShell } from "../state/entities";
+import {
+  useEnvironmentThreadRefs,
+  useThreadRefs,
+  useThreadShell,
+  useThreadStatus,
+} from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import {
   buildThreadRouteParams,
+  finishWarmingThreadView,
   isThreadRouteSnapshotAuthoritative,
+  keepReleasedThreadView,
   resolveKeptThreadViews,
   resolveThreadRouteRenderState,
   resolveThreadRouteTarget,
@@ -49,6 +58,51 @@ const KeptChatView = memo(ChatView);
 
 // Updated on commit so route reveals use the mounted view pool.
 let keptThreadKeys: ReadonlySet<string> = new Set();
+
+const WARM_UP_QUIET_MS = 1_000;
+let lastUserInputAt = 0;
+let trackingUserInput = false;
+// Hide warming views before their live input listeners can handle a user's event.
+let interruptWarmUp: (() => void) | null = null;
+function trackUserInput() {
+  if (trackingUserInput || typeof window === "undefined") return;
+  trackingUserInput = true;
+  // Register before warming views so their listeners disconnect first.
+  const record = () => {
+    lastUserInputAt = performance.now();
+    interruptWarmUp?.();
+  };
+  for (const type of ["keydown", "pointerdown", "wheel", "paste"] as const) {
+    window.addEventListener(type, record, { capture: true, passive: true });
+  }
+}
+
+function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => void {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let idle: number | undefined;
+  const attempt = () => {
+    const quietFor = performance.now() - lastUserInputAt;
+    if (quietFor < WARM_UP_QUIET_MS) {
+      timeout = setTimeout(attempt, WARM_UP_QUIET_MS - quietFor);
+    } else if (typeof requestIdleCallback === "function") {
+      idle = requestIdleCallback(
+        () => {
+          idle = undefined;
+          if (performance.now() - lastUserInputAt < WARM_UP_QUIET_MS) attempt();
+          else callback();
+        },
+        { timeout: 2_000 },
+      );
+    } else {
+      callback();
+    }
+  };
+  timeout = setTimeout(attempt, initialDelayMs);
+  return () => {
+    clearTimeout(timeout);
+    if (idle !== undefined) cancelIdleCallback(idle);
+  };
+}
 
 /**
  * The single chat surface behind both `/draft/$draftId` and
@@ -198,8 +252,48 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
     };
   }
   const [keptViews, setKeptViews] = useState<ReadonlyArray<KeptThreadView>>([]);
-  const nextKeptViews = resolveKeptThreadViews(keptViews, activeView);
-  if (nextKeptViews !== keptViews) setKeptViews(nextKeptViews);
+  const [releasedView, setReleasedView] = useState<KeptThreadView | null>(null);
+  const keptUpdate = resolveKeptThreadViews(keptViews, activeView);
+  const nextKeptViews = keptUpdate.views;
+  if (nextKeptViews !== keptViews) {
+    setKeptViews(nextKeptViews);
+    if (keptUpdate.released !== null) setReleasedView(keptUpdate.released);
+  }
+  // Warm the displaced view after the shown thread loads and input goes quiet.
+  // Render hidden at idle priority, then lay out at the next quiet moment.
+  const shownThreadStatus = useThreadStatus(target.kind === "server" ? target.threadRef : null);
+  const shownThreadLoaded =
+    target.kind !== "server" || shownThreadStatus === "live" || shownThreadStatus === "deleted";
+  useEffect(trackUserInput, []);
+  useEffect(() => {
+    if (releasedView === null || !shownThreadLoaded) return;
+    return whenQuietAndIdle(
+      () =>
+        startTransition(() => {
+          setKeptViews((current) => keepReleasedThreadView(current, releasedView));
+          setReleasedView(null);
+        }),
+      WARM_UP_QUIET_MS,
+    );
+  }, [releasedView, shownThreadLoaded]);
+  const [laidOutWarmKey, setLaidOutWarmKey] = useState<string | null>(null);
+  const warmingKey = keptViews.find((view) => view.warming === true)?.key ?? null;
+  const layingOutKey = warmingKey !== null && warmingKey === laidOutWarmKey ? warmingKey : null;
+  useEffect(() => {
+    if (warmingKey === null || layingOutKey !== null) return;
+    return whenQuietAndIdle(() => startTransition(() => setLaidOutWarmKey(warmingKey)), 0);
+  }, [layingOutKey, warmingKey]);
+  useLayoutEffect(() => {
+    if (layingOutKey === null) return;
+    interruptWarmUp = () => flushSync(() => setLaidOutWarmKey(null));
+    return () => {
+      interruptWarmUp = null;
+    };
+  }, [layingOutKey]);
+  const finishWarming = (viewKey: string) => {
+    setKeptViews((current) => finishWarmingThreadView(current, viewKey));
+    setLaidOutWarmKey(null);
+  };
   useLayoutEffect(() => {
     keptThreadKeys = new Set(
       keptViews.flatMap((view) => (view.draftId === null ? [view.threadKey] : [])),
@@ -244,9 +338,16 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
       className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
     >
       {nextKeptViews.map((view) => (
-        <Activity key={view.key} mode={view.key === activeViewKey ? "visible" : "hidden"}>
+        <Activity
+          key={view.key}
+          mode={view.key === activeViewKey || view.key === layingOutKey ? "visible" : "hidden"}
+        >
           <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
-            <KeptViewFrame>
+            <KeptViewFrame
+              viewKey={view.key}
+              warming={view.warming === true && view.key !== activeViewKey}
+              onWarm={finishWarming}
+            >
               <KeptChatView
                 environmentId={view.environmentId}
                 threadId={view.threadId}

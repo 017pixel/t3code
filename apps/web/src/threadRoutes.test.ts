@@ -16,6 +16,8 @@ import {
   buildThreadRouteParams,
   isThreadRouteSnapshotAuthoritative,
   resolveActiveThreadRouteRef,
+  finishWarmingThreadView,
+  keepReleasedThreadView,
   resolveKeptThreadViews,
   resolveThreadRouteRenderState,
   resolveThreadRouteRef,
@@ -264,30 +266,76 @@ describe("resolveKeptThreadViews", () => {
     threadId: ThreadId.make(id),
     draftId: null,
   });
-  const visit = (ids: ReadonlyArray<string>, limit = 4) =>
-    ids.reduce<ReadonlyArray<KeptThreadView>>(
-      (views, id) => resolveKeptThreadViews(views, serverView(id), limit),
-      [],
-    );
+  // Opens each thread in turn, keeping released threads and finishing their
+  // warm-up right away, as idle time would.
+  const visit = (ids: ReadonlyArray<string>, limit?: number) =>
+    ids.reduce<ReadonlyArray<KeptThreadView>>((views, id) => {
+      const update = resolveKeptThreadViews(views, serverView(id), limit);
+      if (update.released === null) return update.views;
+      const kept = keepReleasedThreadView(update.views, update.released, limit);
+      const warming = kept.find((view) => view.warming === true);
+      return warming === undefined ? kept : finishWarmingThreadView(kept, warming.key);
+    }, []);
 
-  it("retains views in DOM order and evicts the least recently visited thread", () => {
-    const views = visit(["a", "b", "c"]);
-    const back = resolveKeptThreadViews(views, serverView("a"));
-    expect(back.map((view) => view.key)).toEqual(views.map((view) => view.key));
-    expect(resolveKeptThreadViews(back, serverView("d"), 3).map((view) => view.threadId)).toEqual([
-      "a",
-      "c",
-      "d",
+  it("returns the same list when the shown thread is shown again", () => {
+    const views = visit(["a"]);
+    expect(resolveKeptThreadViews(views, serverView("a")).views).toBe(views);
+  });
+
+  it("opens a new thread in the shown view and releases the thread it showed", () => {
+    const first = resolveKeptThreadViews([], serverView("a")).views;
+    const update = resolveKeptThreadViews(first, serverView("b"));
+    expect(update.views.map((view) => [view.key, view.threadId])).toEqual([
+      ["view:env-1:a:1", "b"],
     ]);
-    expect(resolveKeptThreadViews(back, serverView("a"))).toBe(back);
+    expect(update.released?.threadId).toBe("a");
+  });
+
+  it("keeps a released thread in a warming view, then reveals it on a revisit", () => {
+    const first = resolveKeptThreadViews([], serverView("a")).views;
+    const update = resolveKeptThreadViews(first, serverView("b"));
+    const kept = keepReleasedThreadView(update.views, update.released!);
+    expect(kept.map((view) => [view.threadId, view.warming === true])).toEqual([
+      ["b", false],
+      ["a", true],
+    ]);
+    const revisit = resolveKeptThreadViews(kept, serverView("a"));
+    expect(revisit.released).toBeNull();
+    expect(revisit.views.map((view) => view.key)).toEqual(kept.map((view) => view.key));
+    expect(revisit.views.find((view) => view.threadId === "a")?.warming).toBe(false);
+  });
+
+  it("drops the least recently shown hidden view to keep a released thread in a full pool", () => {
+    const views = visit(["a", "b", "c"], 3);
+    expect(views.map((view) => view.threadId).toSorted()).toEqual(["a", "b", "c"]);
+    const next = visit(["a", "b", "c", "d"], 3);
+    expect(next.map((view) => view.threadId).toSorted()).toEqual(["b", "c", "d"]);
+  });
+
+  it("skips keeping a released thread that is shown again", () => {
+    const first = resolveKeptThreadViews([], serverView("a")).views;
+    const update = resolveKeptThreadViews(first, serverView("b"));
+    const back = resolveKeptThreadViews(update.views, serverView("a"));
+    expect(keepReleasedThreadView(back.views, update.released!)).toBe(back.views);
+  });
+
+  it("keeps a promoted draft's view, and its key, on the thread route", () => {
     const draftId = DraftId.make("draft-1");
-    const draft = resolveKeptThreadViews([], { ...serverView("t"), key: draftId, draftId });
-    expect(resolveKeptThreadViews(draft, serverView("t"))[0]).toMatchObject({
+    const draft = resolveKeptThreadViews([], { ...serverView("t"), key: draftId, draftId }).views;
+    const promoted = resolveKeptThreadViews(draft, serverView("t")).views;
+    expect(promoted).toHaveLength(1);
+    expect(promoted[0]).toMatchObject({ key: draftId, draftId: null, threadId: "t" });
+  });
+
+  it("drops a draft's view once another view is shown", () => {
+    const draftId = DraftId.make("draft-1");
+    const views = resolveKeptThreadViews(visit(["a"]), {
+      ...serverView("t"),
       key: draftId,
-      draftId: null,
-    });
-    expect(resolveKeptThreadViews(draft, serverView("a")).map((view) => view.threadId)).toEqual([
-      "a",
-    ]);
+      draftId,
+    }).views;
+    expect(
+      resolveKeptThreadViews(views, serverView("a")).views.map((view) => view.threadId),
+    ).toEqual(["a"]);
   });
 });

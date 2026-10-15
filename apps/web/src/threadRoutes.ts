@@ -136,45 +136,136 @@ export interface KeptThreadView {
   /** Draft views are dropped once left. */
   readonly draftId: DraftId | null;
   readonly visit: number;
+  /** Lay out a released thread out of sight before hiding it. */
+  readonly warming?: boolean;
 }
 
-/** Keep recent views in DOM order so their scroll positions and editor history survive. */
+const KEPT_THREAD_VIEW_LIMIT = 4;
+
+function retarget(
+  view: KeptThreadView,
+  active: Omit<KeptThreadView, "visit">,
+  visit: number,
+): KeptThreadView {
+  return {
+    ...view,
+    environmentId: active.environmentId,
+    threadId: active.threadId,
+    threadKey: active.threadKey,
+    draftId: active.draftId,
+    visit,
+  };
+}
+
+function leastRecentlyShown(views: ReadonlyArray<KeptThreadView>): KeptThreadView | null {
+  return views.reduce<KeptThreadView | null>(
+    (oldest, view) => (oldest !== null && oldest.visit <= view.visit ? oldest : view),
+    null,
+  );
+}
+
+export interface KeptThreadViewsUpdate {
+  readonly views: ReadonlyArray<KeptThreadView>;
+  /** Replaced thread, for idle warming with keepReleasedThreadView. */
+  readonly released: KeptThreadView | null;
+}
+
+// Reuse the shown view on first opens to avoid mounting on the click path.
+// Preserve entry order: moving rendered DOM loses scroll positions.
 export function resolveKeptThreadViews(
   current: ReadonlyArray<KeptThreadView>,
   active: Omit<KeptThreadView, "visit"> | null,
-  limit = 4,
-): ReadonlyArray<KeptThreadView> {
+  limit = KEPT_THREAD_VIEW_LIMIT,
+): KeptThreadViewsUpdate {
+  const unchanged = { views: current, released: null };
   const lastVisit = current.reduce((max, view) => Math.max(max, view.visit), 0);
+  // Match promoted drafts by thread identity to preserve their view.
   const existing =
     active === null
       ? undefined
       : current.find((view) =>
           active.draftId === null ? view.threadKey === active.threadKey : view.key === active.key,
         );
-  const views = current.flatMap((view) => {
-    if (view === existing && active !== null) {
-      return [
-        { ...active, key: view.key, visit: view.visit === lastVisit ? lastVisit : lastVisit + 1 },
-      ];
-    }
-    return view.draftId === null ? [view] : [];
-  });
-  if (active !== null && existing === undefined) views.push({ ...active, visit: lastVisit + 1 });
-  if (views.length > limit) {
-    const oldest = views.reduce((a, b) => (a.visit < b.visit ? a : b));
-    views.splice(views.indexOf(oldest), 1);
+  const servers = current.filter((view) => view.draftId === null && view !== existing);
+  const same = (views: ReadonlyArray<KeptThreadView>) =>
+    views.length === current.length && views.every((view, index) => view === current[index]);
+  if (active === null) {
+    return same(servers) ? unchanged : { views: servers, released: null };
   }
-  return views.length === current.length &&
-    views.every((view, index) => {
-      const old = current[index];
-      return (
-        old !== undefined &&
-        view.key === old.key &&
-        view.threadKey === old.threadKey &&
-        view.draftId === old.draftId &&
-        view.visit === old.visit
-      );
-    })
-    ? current
-    : views;
+  if (existing !== undefined) {
+    const visit = existing.visit === lastVisit ? lastVisit : lastVisit + 1;
+    const refreshed =
+      existing.draftId === active.draftId &&
+      existing.environmentId === active.environmentId &&
+      existing.threadId === active.threadId &&
+      existing.visit === visit &&
+      existing.warming !== true
+        ? existing
+        : { ...retarget(existing, active, visit), warming: false };
+    const views = current.flatMap((view) =>
+      view === existing ? [refreshed] : view.draftId === null ? [view] : [],
+    );
+    return same(views) ? unchanged : { views, released: null };
+  }
+  const visit = lastVisit + 1;
+  const shown = current.find((view) => view.visit === lastVisit && view.warming !== true);
+  if (active.draftId === null) {
+    if (shown !== undefined && shown.draftId === null) {
+      return {
+        views: servers.map((view) => (view === shown ? retarget(view, active, visit) : view)),
+        released: shown,
+      };
+    }
+    const recycled = leastRecentlyShown(servers.filter((view) => view.warming !== true));
+    if (recycled !== null) {
+      return {
+        views: servers.map((view) => (view === recycled ? retarget(view, active, visit) : view)),
+        released: null,
+      };
+    }
+  }
+  let views: ReadonlyArray<KeptThreadView> = [
+    ...servers,
+    { ...active, key: active.draftId ?? `view:${active.threadKey}:${visit}`, visit },
+  ];
+  while (views.length > limit) {
+    const evicted = leastRecentlyShown(views.slice(0, -1));
+    if (evicted === null) break;
+    views = views.filter((view) => view !== evicted);
+  }
+  return { views, released: null };
+}
+
+/** Warm released threads during idle time so revisits can reveal them. */
+export function keepReleasedThreadView(
+  current: ReadonlyArray<KeptThreadView>,
+  released: KeptThreadView,
+  limit = KEPT_THREAD_VIEW_LIMIT,
+): ReadonlyArray<KeptThreadView> {
+  if (limit < 2 || current.some((view) => view.threadKey === released.threadKey)) return current;
+  const lastVisit = current.reduce((max, view) => Math.max(max, view.visit), 0);
+  let views = current;
+  while (views.length >= limit) {
+    const evicted = leastRecentlyShown(views.filter((view) => view.visit !== lastVisit));
+    if (evicted === null) return current;
+    views = views.filter((view) => view !== evicted);
+  }
+  return [
+    ...views,
+    {
+      ...released,
+      key: `kept:${released.threadKey}:${released.visit}`,
+      draftId: null,
+      warming: true,
+    },
+  ];
+}
+
+export function finishWarmingThreadView(
+  current: ReadonlyArray<KeptThreadView>,
+  key: string,
+): ReadonlyArray<KeptThreadView> {
+  return current.some((view) => view.key === key && view.warming === true)
+    ? current.map((view) => (view.key === key ? { ...view, warming: false } : view))
+    : current;
 }

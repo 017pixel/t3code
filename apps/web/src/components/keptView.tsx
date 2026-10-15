@@ -7,6 +7,8 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useEffectEvent,
+  useLayoutEffect,
   useReducer,
   useRef,
   useState,
@@ -169,10 +171,49 @@ export const KeptEditorContent = memo(
   ),
 );
 
-/** Portals follow the Activity boundary that owns their thread. */
-export function KeptViewFrame({ children }: { children: ReactNode }) {
-  const portalContainer = useOwnPortalContainer(false, useContext(KeptViewLifetimeContext));
-  return <PortalContainerContext value={portalContainer}>{children}</PortalContainerContext>;
+/** True while a kept view warms up out of sight; it must not act as the shown thread. */
+export const KeptViewWarmingContext = createContext(false);
+
+/** Warm offscreen for two frames so the list settles before hiding. */
+export function KeptViewFrame({
+  viewKey,
+  warming,
+  onWarm,
+  children,
+}: {
+  viewKey: string;
+  warming: boolean;
+  onWarm: (viewKey: string) => void;
+  children: ReactNode;
+}) {
+  const portalContainer = useOwnPortalContainer(warming, useContext(KeptViewLifetimeContext));
+  const warmed = useEffectEvent(() => onWarm(viewKey));
+  useLayoutEffect(() => {
+    if (!warming) return;
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(warmed);
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+  }, [warming]);
+  return (
+    <div
+      className={
+        warming
+          ? "pointer-events-none invisible absolute inset-0 flex min-h-0 flex-col"
+          : "contents"
+      }
+      inert={warming || undefined}
+      aria-hidden={warming || undefined}
+    >
+      <KeptViewWarmingContext value={warming}>
+        <PortalContainerContext value={portalContainer}>{children}</PortalContainerContext>
+      </KeptViewWarmingContext>
+    </div>
+  );
 }
 
 // ── Keys typed on the way to a kept thread ────────────────────────────────

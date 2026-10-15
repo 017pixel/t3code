@@ -159,6 +159,7 @@ import {
   type SetStateAction,
   Suspense,
   useCallback,
+  useContext,
   useEffect,
   useEffectEvent,
   useLayoutEffect,
@@ -172,6 +173,7 @@ import {
   holdTextForUrlRouteTarget,
   isUrlTargetSidebarTextKey,
   isUrlRouteTargetElsewhere,
+  KeptViewWarmingContext,
   takeHeldText,
 } from "./keptView";
 import { useLocation, useNavigate } from "@tanstack/react-router";
@@ -472,7 +474,7 @@ import {
   RightPanelMaximizeControl,
 } from "./chat/PanelLayoutControls";
 import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
-import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
+import type { ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import {
   type EnvironmentOption,
@@ -757,6 +759,9 @@ const ThreadPreviewMiniPlayer = lazy(() =>
   import("./preview/ThreadPreviewMiniPlayer").then((module) => ({
     default: module.ThreadPreviewMiniPlayer,
   })),
+);
+const ThreadDetailsPanel = lazy(() =>
+  import("./chat/ThreadDetailsPanel").then((module) => ({ default: module.ThreadDetailsPanel })),
 );
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
@@ -3051,15 +3056,17 @@ export default function ChatView(props: ChatViewProps) {
     [openOrReuseProjectDraftThread],
   );
 
+  const keptViewWarming = useContext(KeptViewWarmingContext);
+  // Warming views must not take over the shared composer.
   useLayoutEffect(() => {
-    if (sharedComposerRef === null) return;
+    if (sharedComposerRef === null || keptViewWarming) return;
     publishesComposerRef.current = true;
     sharedComposerRef.current = composerRef.current;
     return () => {
       publishesComposerRef.current = false;
       if (sharedComposerRef.current === composerRef.current) sharedComposerRef.current = null;
     };
-  }, [sharedComposerRef]);
+  }, [keptViewWarming, sharedComposerRef]);
   // Activity hides must end visits so reveals count as reopening.
   useEffect(
     () => () => {
@@ -3068,7 +3075,7 @@ export default function ChatView(props: ChatViewProps) {
     [],
   );
   useEffect(() => {
-    if (!serverThread?.id) return;
+    if (!serverThread?.id || keptViewWarming) return;
     const threadUpdatedAt = Date.parse(serverThread.updatedAt);
     if (Number.isNaN(threadUpdatedAt)) return;
     const effectiveLastVisitedAt = resolveThreadLastVisitedAt(
@@ -3121,6 +3128,7 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, [
     activeThreadLocalLastVisitedAt,
+    keptViewWarming,
     markThreadVisited,
     routeThreadKey,
     serverThread?.environmentId,
@@ -4372,6 +4380,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
   useLayoutEffect(() => {
     if (
+      keptViewWarming ||
       threadDetailLoading ||
       timelineEntries.length === 0 ||
       timelineHasEphemeralPreviewUrls(timelineEntries)
@@ -4384,7 +4393,14 @@ export default function ChatView(props: ChatViewProps) {
       markdownCwd: gitCwd,
       workspaceRoot: activeWorkspaceRoot ?? null,
     });
-  }, [activeThreadKey, activeWorkspaceRoot, gitCwd, threadDetailLoading, timelineEntries]);
+  }, [
+    activeThreadKey,
+    activeWorkspaceRoot,
+    gitCwd,
+    keptViewWarming,
+    threadDetailLoading,
+    timelineEntries,
+  ]);
   const heldPaintContext = paintOnlyDisplayedTimeline
     ? peekHeldThreadTimeline<typeof timelineEntries>()
     : null;
@@ -8617,13 +8633,14 @@ export default function ChatView(props: ChatViewProps) {
   }, [composerRef, viewRouteTargetKey]);
 
   // A focused desktop browser page forwards these chords as menu actions. They
-  // are for the shown thread.
+  // are for the shown thread, not one warming up out of sight.
   useEffect(() => {
+    if (keptViewWarming) return;
     return window.desktopBridge?.onMenuAction((action) => {
       if (action === "rightPanel.toggle") toggleRightPanel();
       else if (action === "rightPanel.toggleMaximized") toggleRightPanelMaximized();
     });
-  }, [toggleRightPanel, toggleRightPanelMaximized]);
+  }, [keptViewWarming, toggleRightPanel, toggleRightPanelMaximized]);
 
   // Paste-to-focus: the resting composer blurs on a click into the timeline,
   // so a paste that follows has no editable target and would be dropped.
@@ -12247,7 +12264,9 @@ export default function ChatView(props: ChatViewProps) {
               </AlertDialogPopup>
             </AlertDialog>
 
-            <ThreadDetailsPanel {...threadDetailsPanelProps} />
+            <Suspense fallback={null}>
+              <ThreadDetailsPanel {...threadDetailsPanelProps} />
+            </Suspense>
 
             {pullRequestDialogState ? (
               <PullRequestThreadDialog
