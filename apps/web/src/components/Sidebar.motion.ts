@@ -1,3 +1,5 @@
+import { observeResize } from "../lib/observeResize";
+
 const motionTiming = { duration: 150, easing: "ease-out" };
 // Rows normally ride their displaced neighbour's travel. Absent a moving
 // neighbour, a row still travels on its own, clamped so a tall card does not
@@ -10,7 +12,7 @@ const rowTravel = (height: number) => Math.min(height, 40);
 // so only the fade count decides whether an update animates.
 const MAX_FADED_ROWS_PER_UPDATE = 40;
 
-type RowPosition = { top: number; left: number; width: number; height: number };
+type RowPosition = { top: number; left: number; width: number; height: number; shape: string };
 
 function progress(animation: Animation) {
   return animation.playState === "finished"
@@ -37,18 +39,53 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
     Array.from(parent.children).filter(
       (node): node is HTMLElement => node instanceof HTMLElement && !exiting.has(node),
     );
-  const measure = () =>
-    new Map(
-      rows().map((node) => [
-        node,
-        {
-          top: node.offsetTop,
-          left: node.offsetLeft,
-          width: node.offsetWidth,
-          height: node.offsetHeight,
-        },
-      ]),
-    );
+  // Read the changed range and its first retained row; fixed row shapes reuse the rest.
+  const measure = (selective = false) => {
+    const nodes = rows();
+    const previous = selective && positions ? [...positions.keys()] : [];
+    const shape = (node: HTMLElement) => node.className;
+    let start = 0,
+      end = nodes.length,
+      oldEnd = previous.length;
+    while (
+      start < nodes.length &&
+      nodes[start] === previous[start] &&
+      positions?.get(nodes[start]!)?.shape === shape(nodes[start]!)
+    )
+      start++;
+    while (
+      end > start &&
+      oldEnd > start &&
+      nodes[end - 1] === previous[oldEnd - 1] &&
+      positions?.get(nodes[end - 1]!)?.shape === shape(nodes[end - 1]!)
+    ) {
+      end--;
+      oldEnd--;
+    }
+    const next = new Map<HTMLElement, RowPosition>();
+    let shift = 0,
+      prefixShift = 0;
+    for (const [index, node] of nodes.entries()) {
+      const old = positions?.get(node);
+      if (old && node.hasAttribute?.("data-thread-item") && (index < start || index > end)) {
+        next.set(node, { ...old, top: old.top + (index < start ? prefixShift : shift) });
+        continue;
+      }
+      const top = node.offsetTop;
+      if (old) {
+        if (index < start) prefixShift = top - old.top;
+        if (index >= end) shift = top - old.top;
+      }
+      next.set(node, {
+        top,
+        left: node.offsetLeft,
+        width: node.offsetWidth,
+        height: node.offsetHeight,
+        shape: shape(node),
+      });
+    }
+    return next;
+  };
   const cancelBaseline = () => {
     if (baselineFrame !== null) view?.cancelAnimationFrame(baselineFrame);
     baselineFrame = null;
@@ -68,6 +105,17 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
       if (!disposed && positions === null) positions = measure();
     });
   };
+
+  let observedWidth: number | null = null;
+  const stopObserving =
+    typeof ResizeObserver === "undefined"
+      ? null
+      : observeResize(parent, ([entry]) => {
+          if (!entry) return;
+          if (observedWidth !== null && observedWidth !== entry.contentRect.width)
+            scheduleBaseline();
+          observedWidth = entry.contentRect.width;
+        });
 
   const remainingOffset = (node: HTMLElement) => {
     const current = running.get(node);
@@ -176,7 +224,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
         return;
       }
       cancelBaseline();
-      const next = measure();
+      const next = measure(true);
       let fadeCount = 0;
       if (positions !== null) {
         for (const [node, position] of positions) {
@@ -291,6 +339,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
     },
     suspend,
     dispose() {
+      stopObserving?.();
       suspend();
       disposed = true;
     },
