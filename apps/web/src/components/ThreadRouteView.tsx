@@ -1,5 +1,5 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Activity,
@@ -41,6 +41,7 @@ import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { environmentSession } from "../state/session";
 import { releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   buildThreadRouteParams,
@@ -110,27 +111,38 @@ function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => v
 let bootChatViewReady = false;
 
 /** Let the sidebar paint, then render the real chat without waiting for a session. */
-function useBootChatView(): boolean {
+function useBootChatView(environmentId: EnvironmentId | null): boolean {
   const [ready, setReady] = useState(() => bootChatViewReady);
   useEffect(() => {
     if (ready) return;
     const release = retainBootHold();
     const show = () => {
+      // Use already-connected data so a fast reload doesn't mount chat twice.
+      if (
+        environmentId !== null &&
+        appAtomRegistry.get(environmentSession.initialConfigValueAtom(environmentId)) !== null
+      )
+        release();
       bootChatViewReady = true;
       setReady(true);
     };
     let task: ReturnType<typeof setTimeout> | undefined;
+    let replyFrame: number | undefined;
     const frame = requestAnimationFrame(() => {
-      task = setTimeout(show, 0);
+      // Let queued connection replies land before the expensive first mount.
+      replyFrame = requestAnimationFrame(() => {
+        task = setTimeout(show, 0);
+      });
     });
     const fallback = setTimeout(show, 100);
     return () => {
       cancelAnimationFrame(frame);
+      if (replyFrame !== undefined) cancelAnimationFrame(replyFrame);
       clearTimeout(task);
       clearTimeout(fallback);
       releaseBootHoldAfterPaint(release);
     };
-  }, [ready]);
+  }, [environmentId, ready]);
   return ready;
 }
 
@@ -154,7 +166,11 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
   const draftSession = useComposerDraftStore((store) =>
     draftId === null ? null : store.getDraftSession(draftId),
   );
-  const chatViewReady = useBootChatView();
+  const chatViewReady = useBootChatView(
+    target.kind === "server"
+      ? target.threadRef.environmentId
+      : (draftSession?.environmentId ?? null),
+  );
   const threadRefs = useThreadRefs();
   // The server thread this view is about: the route's own ref, or the draft's
   // reserved ref once the server knows it.
