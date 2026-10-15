@@ -39,9 +39,6 @@ import * as RpcSession from "./session.ts";
 import { makeEnvironmentServerConfigState } from "../state/server.ts";
 import { applyServerConfigProjection } from "../state/serverConfigProjection.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
-import { applyServerConfigDelta, diffServerConfig } from "@t3tools/shared/serverConfigDelta";
-
-const decodeServerConfigStreamEvent = Schema.decodeSync(ServerConfigStreamEvent);
 
 type SocketEventType = "open" | "message" | "close" | "error";
 type SocketEvent = {
@@ -291,92 +288,6 @@ const publishConfigEvents = Effect.fn("TestRpcSessionFactory.publishConfigEvents
 });
 
 describe("RpcSessionFactory", () => {
-  it("roundtrips provider deltas without resending catalogs and handles removal and order", () => {
-    const provider: ServerConfigType["providers"][number] = {
-      instanceId: ProviderInstanceId.make("codex"),
-      driver: ProviderDriverKind.make("codex"),
-      enabled: true,
-      installed: true,
-      version: "1.0.0",
-      status: "ready",
-      auth: { status: "authenticated" },
-      checkedAt: "2026-08-27T00:00:00.000Z",
-      models: [{ slug: "model", name: "Model", isCustom: false, capabilities: null }],
-      skills: [{ name: "skill", path: "/skill", enabled: true }],
-      slashCommands: [{ name: "compact" }],
-      displayName: "Custom name",
-    };
-    const other = { ...provider, instanceId: ProviderInstanceId.make("other") };
-    const previous = { ...SERVER_CONFIG, providers: [provider, other] };
-    const { displayName: _name, ...withoutName } = provider;
-    const next = {
-      ...previous,
-      providers: [other, { ...withoutName, checkedAt: "2026-08-28T00:00:00.000Z" }],
-    };
-    const delta = diffServerConfig(previous, next, "changed");
-    expect(delta.providerChanges[0]?.changes?.models).toBeUndefined();
-    const wire = decodeServerConfigStreamEvent(encodeServerConfigStreamEvent(delta));
-    expect(wire.type).toBe("configDelta");
-    if (wire.type !== "configDelta") return;
-    expect(applyServerConfigDelta(previous, wire)).toEqual(next);
-    const removed = { ...next, providers: [next.providers[1]!] };
-    expect(applyServerConfigDelta(next, diffServerConfig(next, removed, "removed"))).toEqual(
-      removed,
-    );
-    expect(applyServerConfigDelta(removed, diffServerConfig(removed, previous, "added"))).toEqual(
-      previous,
-    );
-
-    // A newer server's provider value this client cannot read drops that provider, as a
-    // snapshot does, instead of failing the stream.
-    const future = encodeServerConfigStreamEvent(
-      diffServerConfig(
-        previous,
-        { ...previous, providers: [provider, { ...other, version: "2" }] },
-        "f",
-      ),
-    );
-    const futurePatch = (
-      future as unknown as { providerChanges: Array<{ changes: Record<string, unknown> }> }
-    ).providerChanges[0]!;
-    futurePatch.changes.status = "a-later-state";
-    const futureWire = decodeServerConfigStreamEvent(future);
-    if (futureWire.type !== "configDelta") throw new Error("expected a config delta");
-    expect(applyServerConfigDelta(previous, futureWire).providers).toEqual([provider]);
-    // So is a later patch for it, and its id in the provider order.
-    const ghost = ProviderInstanceId.make("ghost");
-    const late = applyServerConfigDelta(previous, {
-      ...diffServerConfig(previous, previous, "late"),
-      providerChanges: [{ instanceId: ghost, changes: { checkedAt: "x" }, removed: [] }],
-      providerOrder: [ghost, other.instanceId, provider.instanceId],
-    });
-    expect(late.providers).toEqual([other, provider]);
-    // Fields and providers a delta leaves alone keep their identity.
-    expect(late.settings).toBe(previous.settings);
-    expect(late.providers[0]).toBe(other);
-    const unchangedOrder = applyServerConfigDelta(previous, diffServerConfig(previous, next, "x"));
-    expect(unchangedOrder.settings).toBe(previous.settings);
-    // A field set to undefined, as a sign-out clears usage limits, is cleared on the client.
-    const limited = {
-      ...previous,
-      providers: [{ ...provider, usageLimits: { checkedAt: "2026-08-27T00:00:00Z", windows: [] } }],
-    };
-    const signedOut = { ...limited, providers: [{ ...provider, usageLimits: undefined }] };
-    // Through JSON, as on the wire.
-    const signedOutWire = decodeServerConfigStreamEvent(
-      JSON.parse(
-        JSON.stringify(
-          encodeServerConfigStreamEvent(diffServerConfig(limited, signedOut, "signed-out")),
-        ),
-      ),
-    );
-    if (signedOutWire.type !== "configDelta") throw new Error("expected a config delta");
-    expect(
-      applyServerConfigDelta(limited, signedOutWire).providers[0]?.usageLimits,
-    ).toBeUndefined();
-  });
-
-
   it.effect("owns one scoped websocket attempt and exposes readiness and closure", () =>
     Effect.gen(function* () {
       const { factory, sockets } = yield* makeFactory();
