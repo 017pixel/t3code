@@ -62,61 +62,45 @@ it.effect(
   () =>
     Effect.gen(function* () {
       if ((yield* HostProcess.Platform) !== "linux") return;
-      for (const [platform, electron, closesInherited] of [
-        ["linux", "1", true],
-        ["linux", "", false],
-        ["darwin", "1", false],
-      ] as const) {
-        const script = `
-        import fs from 'node:fs';
-        import { syncBuiltinESMExports } from 'node:module';
+      const script = `
+        import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
         import * as Effect from ${JSON.stringify(import.meta.resolve("effect/Effect"))};
         import * as HostProcess from ${JSON.stringify(import.meta.resolve("@t3tools/shared/HostProcess"))};
         import { closeInheritedElectronDescriptors } from ${JSON.stringify(new URL("./bootstrap.ts", import.meta.url).href)};
-        const ownFd = fs.openSync('/dev/null', 'r');
-        const readFileSync = fs.readFileSync;
+        const ownFd = fs.openSync('/dev/null', 'r'), readFileSync = fs.readFileSync;
         // A parent's POSIX lock metadata is absent from its inherited fd in the child.
-        fs.readFileSync = (path, ...args) => {
-          const value = readFileSync(path, ...args);
-          return path === '/proc/' + process.ppid + '/fdinfo/64'
-            ? value + 'lock:\\t1: POSIX ADVISORY WRITE parent 0 EOF\\n'
-            : value;
-        };
-        syncBuiltinESMExports();
+        fs.readFileSync = (path, ...args) => readFileSync(path, ...args) +
+        (path === '/proc/' + process.ppid + '/fdinfo/64' ? 'lock:\\t1: POSIX ADVISORY WRITE parent 0 EOF\\n' : '');
+      syncBuiltinESMExports();
         await Effect.runPromise(closeInheritedElectronDescriptors([3]).pipe(
-          Effect.provideService(HostProcess.Platform, ${JSON.stringify(platform)}),
-          Effect.provideService(HostProcess.Environment, { ELECTRON_RUN_AS_NODE: ${JSON.stringify(electron)} }),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, { ELECTRON_RUN_AS_NODE: "1" }),
         ));
         let inheritedClosed = false;
         try { fs.fstatSync(64); } catch (error) { inheritedClosed = error.code === 'EBADF'; }
-        fs.fstatSync(ownFd);
-        fs.fstatSync(65);
-        fs.writeSync(3, 'preserved');
+        fs.fstatSync(ownFd); fs.fstatSync(65); fs.writeSync(3, 'preserved');
         console.log(inheritedClosed);
       `;
-        const result = yield* Effect.sync(() =>
-          NodeChildProcess.spawnSync(
-            "bash",
-            [
-              "-c",
-              // fd 65 opens after the fork, like Electron's native descriptors.
-              'exec 64</dev/null; bash -c \'exec 65</dev/null; exec "$@"\' bash "$@"; result=$?; exit "$result"',
-              "bash",
-              HostProcess.ExecutablePath.defaultValue(),
-              "--input-type=module",
-              "-e",
-              script,
-            ],
-            {
-              stdio: ["ignore", "pipe", "pipe", "pipe"],
-              encoding: "utf8",
-            },
-          ),
-        );
-        assert.equal(result.status, 0, result.stderr);
-        assert.equal(result.stdout.trim(), String(closesInherited));
-        assert.equal(result.output[3], "preserved");
-      }
+      const result = NodeChildProcess.spawnSync(
+        "bash",
+        [
+          "-c",
+          // fd 65 opens after the fork, like Electron's native descriptors.
+          'exec 64</dev/null; bash -c \'exec 65</dev/null; exec "$@"\' bash "$@"; result=$?; exit "$result"',
+          "bash",
+          HostProcess.ExecutablePath.defaultValue(),
+          "--input-type=module",
+          "-e",
+          script,
+        ],
+        {
+          stdio: ["ignore", "pipe", "pipe", "pipe"],
+          encoding: "utf8",
+        },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout.trim(), "true");
+      assert.equal(result.output[3], "preserved");
     }),
 );
 

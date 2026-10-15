@@ -22,7 +22,7 @@ import { HttpRouter, HttpServer } from "effect/http";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
-import * as ServerBrowser from "./ServerBrowserTag.ts";
+import * as ServerBrowser from "./ServerBrowser.ts";
 import { routeLayer } from "./ServerBrowserStream.ts";
 
 const platformLayer = NodeHttpPlatform.layer.pipe(Layer.provideMerge(NodeServices.layer));

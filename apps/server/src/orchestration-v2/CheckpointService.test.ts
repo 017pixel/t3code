@@ -18,7 +18,7 @@ import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
-it.effect.each([false, true, "interrupt"] as const)(
+it.effect.each([false, true, "interrupt", "no-git", "probe-error", "probe-interrupt"] as const)(
   "materializes baseline, lookup fails=%s",
   (lookupFails) => {
     const scope: OrchestrationV2CheckpointScope = {
@@ -48,14 +48,27 @@ it.effect.each([false, true, "interrupt"] as const)(
             )
           : Effect.succeed(true),
     );
+    const captureCheckpoint = vi.fn(() => Effect.void);
     const layerTest = CheckpointService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
           IdAllocator.layer,
           Layer.mock(CheckpointStore.CheckpointStore)({
-            isGitRepository: () => Effect.succeed(true),
+            isGitRepository: () =>
+              lookupFails === "probe-interrupt"
+                ? Effect.interrupt
+                : lookupFails === "probe-error"
+                  ? Effect.fail(
+                      new VcsProcessTimeoutError({
+                        operation: "probe",
+                        command: "git",
+                        cwd: scope.cwd,
+                        timeoutMs: 1,
+                      }),
+                    )
+                  : Effect.succeed(lookupFails !== "no-git"),
             hasCheckpointRef,
-            captureCheckpoint: () => Effect.void,
+            captureCheckpoint,
           }),
         ),
       ),
@@ -64,6 +77,15 @@ it.effect.each([false, true, "interrupt"] as const)(
 
     return Effect.gen(function* () {
       const checkpoints = yield* CheckpointService.CheckpointServiceV2;
+      if (["no-git", "probe-error", "probe-interrupt"].includes(String(lookupFails))) {
+        const exit = yield* Effect.exit(
+          checkpoints.captureBaseline({ scope, ordinalWithinScope: 0 }),
+        );
+        if (lookupFails === "probe-interrupt") assert.isTrue(Exit.hasInterrupts(exit));
+        else assert.isTrue(Exit.isSuccess(exit));
+        assert.equal(captureCheckpoint.mock.calls.length, 0);
+        return;
+      }
       if (lookupFails === "interrupt") {
         const exit = yield* Effect.exit(
           checkpoints.materializeBaselineCheckpoint({ scope, ordinalWithinScope: 2 }),
@@ -101,60 +123,5 @@ it.effect.each([false, true, "interrupt"] as const)(
         checkpointRef: baseline.ref,
       });
     }).pipe(Effect.provide(layerTest));
-  },
-);
-
-it.effect.each([false, true, "failure", "interrupt"] as const)(
-  "baseline repository probe treats a failed probe like a non-Git workspace (%s)",
-  (probe) => {
-    const scope: OrchestrationV2CheckpointScope = {
-      id: CheckpointScopeId.make("checkpoint-scope:baseline-probe"),
-      threadId: ThreadId.make("thread:baseline-probe"),
-      runId: RunId.make("run:baseline-probe"),
-      nodeId: NodeId.make("node:baseline-probe"),
-      parentScopeId: null,
-      providerThreadId: ProviderThreadId.make("provider-thread:baseline-probe"),
-      kind: "root_run",
-      ordinalWithinParent: 0,
-      advancesAppRunCount: true,
-      cwd: "/repo",
-      createdAt: DateTime.makeUnsafe("2026-07-28T00:00:00.000Z"),
-    };
-    const failure = new VcsProcessTimeoutError({
-      operation: "test.detect",
-      command: "git",
-      cwd: scope.cwd,
-      timeoutMs: 30000,
-    });
-    const hasCheckpointRef = vi.fn(() => Effect.succeed(false));
-    const captureCheckpoint = vi.fn(() => Effect.void);
-    const layer = CheckpointService.layer.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          IdAllocator.layer,
-          Layer.mock(CheckpointStore.CheckpointStore)({
-            isGitRepository: () =>
-              probe === "interrupt"
-                ? Effect.interrupt
-                : probe === "failure"
-                  ? Effect.fail(failure)
-                  : Effect.succeed(probe),
-            hasCheckpointRef,
-            captureCheckpoint,
-          }),
-        ),
-      ),
-      Layer.provide(NodeCrypto.layer),
-    );
-    return Effect.gen(function* () {
-      const checkpoints = yield* CheckpointService.CheckpointServiceV2;
-      const exit = yield* Effect.exit(
-        checkpoints.captureBaseline({ scope, ordinalWithinScope: 0 }),
-      );
-      if (probe === "interrupt") assert.isTrue(Exit.hasInterrupts(exit));
-      else assert.isTrue(Exit.isSuccess(exit));
-      assert.equal(hasCheckpointRef.mock.calls.length, probe === true ? 1 : 0);
-      assert.equal(captureCheckpoint.mock.calls.length, probe === true ? 1 : 0);
-    }).pipe(Effect.provide(layer));
   },
 );

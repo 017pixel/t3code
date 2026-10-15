@@ -1,10 +1,3 @@
-import {
-  ServerBrowser,
-  ServerBrowserTabNotFoundError,
-  ServerBrowserLaunchError,
-  type ServerBrowserViewer,
-  type ServerBrowserViewerOutput,
-} from "./ServerBrowserTag.ts";
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
 // Screencasts ignore emulated device scale; real 2x keeps captures sharp.
 // --disable-gpu uses cheaper software compositing while preserving SwiftShader WebGL.
@@ -16,6 +9,8 @@ import {
   INCOGNITO_BROWSER_PROFILE_ID,
   resolveBrowserProfiles,
   type BrowserProfile,
+  type PreviewReportProfilesInput,
+  PREVIEW_AUTOMATION_SERVER_OPERATIONS,
   PreviewViewportSetting as PreviewViewportSettingSchema,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type PreviewAutomationActionEvent,
@@ -53,8 +48,10 @@ import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import { constVoid } from "effect/Function";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
@@ -94,6 +91,7 @@ const SCREENCAST_SETTLE_MS = 200;
 const SCREENCAST_MOTION_FRAMES = 4;
 const SCREENCAST_MOTION_WINDOW_MS = 300;
 const SCREENCAST_MOTION_QUALITY = 50;
+const HOST_RECONNECT_DELAY = "1 second";
 /** How long a new tab waits for the desktop app to mount it before running headless. */
 const DESKTOP_ATTACH_TIMEOUT = "10 seconds";
 const VIEWER_OUTPUT_LIMIT = 64;
@@ -128,6 +126,15 @@ const NAVIGATION_TIMEOUT_MS = 15_000;
 const VIEWER_NAVIGATION_OPTIONS = { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS } as const;
 const ACTION_TIMELINE_LIMIT = 50;
 
+export class ServerBrowserTabNotFoundError extends Schema.TaggedError<ServerBrowserTabNotFoundError>()(
+  "ServerBrowserTabNotFoundError",
+  { threadId: Schema.String, tabId: Schema.String },
+) {
+  override get message(): string {
+    return "The server preview tab does not exist.";
+  }
+}
+
 const isTabNotFound = Schema.is(ServerBrowserTabNotFoundError);
 const isHostSetupError = Schema.is(
   Schema.Union([
@@ -135,6 +142,116 @@ const isHostSetupError = Schema.is(
     PreviewBrowserHost.PreviewBrowserLibrariesError,
   ]),
 );
+
+export class ServerBrowserLaunchError extends Schema.TaggedError<ServerBrowserLaunchError>()(
+  "ServerBrowserLaunchError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "The server preview browser could not start.";
+  }
+}
+
+export type ServerBrowserViewerOutput =
+  | {
+      readonly _tag: "frame";
+      readonly data: Uint8Array;
+      readonly ack: Effect.Effect<void>;
+    }
+  | { readonly _tag: "viewport"; readonly width: number; readonly height: number }
+  | {
+      readonly _tag: "control";
+      readonly canOperate: boolean;
+      readonly controller: "agent" | "you" | "another-viewer" | "unclaimed";
+      readonly generation: number;
+      readonly dialog: {
+        readonly type: string;
+        readonly message: string;
+        readonly defaultValue: string;
+      } | null;
+    }
+  | {
+      readonly _tag: "probe";
+      readonly x: number;
+      readonly y: number;
+      readonly editable: boolean;
+    }
+  | { readonly _tag: "clipboard"; readonly text: string }
+  | {
+      readonly _tag: "pointer";
+      readonly phase: "move" | "click";
+      readonly x: number;
+      readonly y: number;
+      readonly sequence: number;
+    }
+  | {
+      readonly _tag: "fileChooser";
+      readonly id: string;
+      readonly multiple: boolean;
+      readonly accept: string;
+    }
+  | { readonly _tag: "fileChooserClosed"; readonly id: string }
+  /** The page this viewer controls opened a new tab; the viewer shows it, as a browser would. */
+  | { readonly _tag: "popup"; readonly tabId: string }
+  | {
+      readonly _tag: "download";
+      readonly id: string;
+      readonly fileName: string;
+      readonly sizeBytes: number;
+    }
+  | { readonly _tag: "gone" }
+  /** The page is still open, but this connection to it ended; the viewer reconnects. */
+  | { readonly _tag: "reconnect" };
+
+export interface ServerBrowserViewer {
+  readonly output: Queue.Dequeue<ServerBrowserViewerOutput>;
+  readonly input: (message: unknown) => Effect.Effect<void>;
+}
+
+export class ServerBrowser extends Context.Service<
+  ServerBrowser,
+  {
+    readonly attachViewer: (input: {
+      readonly threadId: string;
+      readonly tabId: string;
+      readonly maxWidth: number;
+      readonly maxHeight: number;
+      readonly quality: number;
+      readonly canOperate: boolean;
+    }) => Effect.Effect<
+      ServerBrowserViewer,
+      ServerBrowserTabNotFoundError | ServerBrowserLaunchError,
+      Scope.Scope
+    >;
+    /**
+     * Gives a page's open file picker the files a viewer uploaded, by path, and
+     * closes it. No files cancels the pick. False when that picker is gone.
+     */
+    readonly answerFileChooser: (input: {
+      readonly threadId: string;
+      readonly tabId: string;
+      readonly chooserId: string;
+      readonly files: ReadonlyArray<{
+        readonly name: string;
+        readonly mimeType: string;
+        readonly buffer: Buffer;
+      }>;
+    }) => Effect.Effect<boolean>;
+    /** A finished download of a live tab, for the authenticated download route. */
+    readonly openDownload: (input: {
+      readonly threadId: string;
+      readonly tabId: string;
+      readonly downloadId: string;
+    }) => Effect.Effect<Option.Option<{ readonly path: string; readonly fileName: string }>>;
+    /** Deletes a human profile's server-side storage, closing its open tabs first. */
+    readonly clearProfile: (profileId: string) => Effect.Effect<void, PreviewClearProfileError>;
+    /**
+     * Records a client's browser profiles for agents' preview_open. In memory:
+     * clients report again on connect and whenever the list changes.
+     */
+    readonly reportProfiles: (input: PreviewReportProfilesInput) => Effect.Effect<void>;
+  }
+>()("t3/preview/ServerBrowser") {}
 
 interface ViewerState {
   readonly id: string;
@@ -357,7 +474,7 @@ const CLIPBOARD_SCRIPT = `(() => {
   };
 })();`;
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const host = { platform: yield* HostProcess.Platform, arch: yield* HostProcess.Architecture };
   const manager = yield* PreviewManager.PreviewManager;
@@ -2267,6 +2384,16 @@ export const make = Effect.gen(function* () {
       } satisfies ServerBrowserViewer;
     });
 
+  yield* manager.events.pipe(Stream.runForEach(mirrorManagerEvent), Effect.forkScoped);
+  // Whoever runs the server learns the fix before anyone opens a tab.
+  if (
+    !PreviewBrowserHost.sandboxDisabled(yield* HostProcess.Environment) &&
+    (yield* PreviewBrowserHost.sandboxBlocked)
+  ) {
+    yield* Effect.logWarning(
+      `This host blocks the sandbox T3's browser runs in, so browser tabs and HTML previews will not start. Run \`${setupCommand}\` once to allow it.`,
+    );
+  }
   // The desktop took its page back (closed, swapped, crashed, or devtools opened).
   // The session stays; the next viewer or agent reconnects when it re-attaches.
   yield* desktopChannel.detached.pipe(
@@ -2278,21 +2405,57 @@ export const make = Effect.gen(function* () {
     ),
     Effect.forkScoped,
   );
-  // The page attached, at the desktop's boot or after its DevTools closed.
-  // Reconnect now rather than on the next viewer or agent, or the tab's URL and
-  // title stop reaching every client in the meantime. ServerBrowserTag.ts listens
-  // from boot, before this module loads, and forwards each attach here.
-  const reconnectDesktopTab = (key: DesktopBrowserChannel.DesktopTabKey) =>
-    Effect.gen(function* () {
-      if (tabs.has(tabKey(key.threadId, key.tabId))) return;
-      const { sessions } = yield* manager.list({ threadId: ThreadId.make(key.threadId) });
-      const snapshot = sessions.find(
-        (session) => session.tabId === key.tabId && session.runtime === "server",
-      );
-      if (snapshot) yield* Effect.promise(() => ensureTab(snapshot).catch(constVoid));
-    }).pipe(Effect.ignore);
+  // The page came back, for example after its DevTools closed. Reconnect now
+  // rather than on the next viewer or agent, or the tab's URL and title stop
+  // reaching every client in the meantime.
+  yield* desktopChannel.attached.pipe(
+    Stream.runForEach((key) =>
+      Effect.gen(function* () {
+        if (tabs.has(tabKey(key.threadId, key.tabId))) return;
+        const { sessions } = yield* manager.list({ threadId: ThreadId.make(key.threadId) });
+        const snapshot = sessions.find(
+          (session) => session.tabId === key.tabId && session.runtime === "server",
+        );
+        if (snapshot) yield* Effect.promise(() => ensureTab(snapshot).catch(constVoid));
+      }).pipe(Effect.ignore),
+    ),
+    Effect.forkScoped,
+  );
   yield* Effect.sync(closeIdleAgentTabs).pipe(
     Effect.repeat(Schedule.spaced(IDLE_SWEEP_INTERVAL)),
+    Effect.forkScoped,
+  );
+  const environmentId = yield* environment.getEnvironmentId;
+  const hostSession = broker
+    .connect(
+      {
+        clientId: SERVER_HOST_CLIENT_ID,
+        environmentId,
+        supportedOperations: [...PREVIEW_AUTOMATION_SERVER_OPERATIONS],
+      },
+      { preferred: true },
+    )
+    .pipe(
+      Effect.flatMap((events) =>
+        events.pipe(
+          Stream.runForEach((event) => {
+            if (event.type === "connected") {
+              hostConnectionId = event.connectionId;
+              return Effect.sync(reportLiveTabs);
+            }
+            return handleRequest(event.connectionId, event.request).pipe(
+              Effect.forkScoped,
+              Effect.asVoid,
+            );
+          }),
+        ),
+      ),
+    );
+  // The broker disconnects timed-out hosts, including slow first installs. Reconnect.
+  yield* hostSession.pipe(
+    Effect.exit,
+    Effect.andThen(Effect.sleep(HOST_RECONNECT_DELAY)),
+    Effect.forever,
     Effect.forkScoped,
   );
   yield* Effect.addFinalizer(() =>
@@ -2307,21 +2470,13 @@ export const make = Effect.gen(function* () {
       catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
     });
 
-  return {
-    handleRequest,
-    mirrorManagerEvent,
-    reconnectDesktopTab,
-    onHostConnected: (connectionId: string) =>
-      Effect.sync(() => {
-        hostConnectionId = connectionId;
-        reportLiveTabs();
-      }),
-    service: ServerBrowser.of({
-      attachViewer,
-      clearProfile,
-      reportProfiles,
-      openDownload,
-      answerFileChooser,
-    }),
-  };
+  return ServerBrowser.of({
+    attachViewer,
+    clearProfile,
+    reportProfiles,
+    openDownload,
+    answerFileChooser,
+  });
 });
+
+export const layer = Layer.effect(ServerBrowser, make);

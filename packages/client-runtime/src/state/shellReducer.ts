@@ -71,7 +71,7 @@ export function reuseUnchangedThreadShells(
         ? { ...thread, pullRequests: prior.pullRequests }
         : thread;
     if (!sameThreadShell(prior, candidate)) {
-      const shared = shareThreadShell(prior, thread);
+      const shared = shareThreadShell(prior, candidate);
       changed ||= shared !== thread;
       return shared;
     }

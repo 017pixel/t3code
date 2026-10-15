@@ -6,11 +6,7 @@ const ROW_OBSERVER_MARGIN_PX = 240;
 
 let initialRowBudgetRem: number | null = null;
 
-/**
- * How far down the list the first paint reaches, in rem: the window height
- * plus the observer margin. Rows that start inside it mount with the list, so
- * a tall window never paints them blank for a frame while the observer runs.
- */
+/** Mount the initial viewport before the observer's first report. */
 export function sidebarInitialRowBudgetRem(): number {
   if (initialRowBudgetRem === null) {
     if (typeof window === "undefined") return 0;
@@ -27,8 +23,7 @@ const observers = new Map<
     listeners: Map<Element, (visible: boolean) => void>;
   }
 >();
-// Scroll viewports the observer has reported on, so they have painted rows.
-// Until then a list starts at the top and the mount budget is exact.
+// Boot uses the budget; rows added to a painted list need their actual position.
 const paintedRoots = new WeakSet<Element>();
 
 /** Share viewport observation across row slots; expensive content mounts only nearby. */
@@ -38,10 +33,7 @@ export function useSidebarRowViewport(node: HTMLElement | null, initiallyVisible
   );
   const placedRef = useRef(false);
   useLayoutEffect(() => {
-    // A slot that joins a painted list (an opened shelf, Show more, a new
-    // search result) can land anywhere in a scrolled viewport. It reads its
-    // real box once before paint rather than showing blank until the observer
-    // reports. Boot keeps the budget, so it never forces a layout.
+    // An opened shelf can join a scrolled list; mount its visible rows before paint.
     if (!node || placedRef.current) return;
     placedRef.current = true;
     const root = node.closest('[data-slot="scroll-area-viewport"]');
@@ -58,10 +50,7 @@ export function useSidebarRowViewport(node: HTMLElement | null, initiallyVisible
     }
   }, [node, visible]);
   useEffect(() => {
-    if (!node) return;
-    if (typeof IntersectionObserver === "undefined") {
-      return;
-    }
+    if (!node || typeof IntersectionObserver === "undefined") return;
     const root = node.closest('[data-slot="scroll-area-viewport"]');
     let group = observers.get(root);
     if (!group) {

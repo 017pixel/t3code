@@ -12,12 +12,12 @@ import * as Redacted from "effect/Redacted";
 
 import { HttpClient, HttpClientResponse } from "effect/http";
 
-import * as GitHubApi from "./GitHubApiTag.ts";
+import * as GitHubApi from "./GitHubApi.ts";
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubQuota from "./GitHubQuota.ts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
-import * as GitHubPullRequestApi from "./GitHubPullRequestApiTag.ts";
+import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
 import { KnownWorkflowRuns } from "./gitHubConditionalChecks.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -503,16 +503,17 @@ it.effect(
           }),
         ),
       );
-      const dependencies = yield* Layer.build(
-        GitHubApi.layer.pipe(
-          Layer.provide(Layer.mergeAll(credentials, http)),
-          Layer.provide(GitHubQuota.layer),
-          Layer.provide(SourceControlRateLimit.layer),
-          Layer.merge(TestSourceControlHost.layer()),
-          Layer.provideMerge(NodeServices.layer),
+      const cli = yield* GitHubPullRequestApi.make.pipe(
+        Effect.provide(
+          GitHubApi.layer.pipe(
+            Layer.provide(Layer.mergeAll(credentials, http)),
+            Layer.provide(GitHubQuota.layer),
+            Layer.provide(SourceControlRateLimit.layer),
+            Layer.merge(TestSourceControlHost.layer()),
+            Layer.provideMerge(NodeServices.layer),
+          ),
         ),
       );
-      const cli = yield* GitHubPullRequestApi.make.pipe(Effect.provideContext(dependencies));
       const input = { cwd: "/repo", host: "github.com" };
       const first = yield* cli.withVerifiedCredential(input, (identity) =>
         Effect.gen(function* () {

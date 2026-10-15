@@ -1,5 +1,4 @@
 import { PermissionUpdateNotice } from "../components/PermissionUpdateNotice";
-import { NightlyMobileBetaNotice } from "../components/NightlyMobileBetaNotice";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
@@ -13,13 +12,13 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 import { Check, Copy } from "lucide";
-import { lazy, Suspense, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { ChatSurfaceSlot } from "../components/chatSurfaceSlot";
-import { CommandPaletteHost } from "../components/CommandPaletteHost";
+import { CommandPalette } from "../components/CommandPalette";
 import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
 import { KeybindingsConfigWarning } from "../components/KeybindingsConfigWarning";
@@ -55,7 +54,8 @@ import {
 } from "../components/ui/toast";
 import { isElectron } from "../env";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
-import { useConnectOnboardingRequest } from "../cloud/connectOnboarding";
+import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
+import { NightlyMobileBetaNotice } from "../components/NightlyMobileBeta";
 import { cn } from "../lib/utils";
 import { applyAppearanceFontVariables } from "~/appearanceFonts";
 import { applyAppearanceContrast } from "~/appearanceContrast";
@@ -72,7 +72,6 @@ import {
   peekPairingTokenFromUrl,
   resolveInitialServerAuthGateState,
 } from "../environments/primary";
-import { discardBootSnapshot, readBootSnapshot } from "../bootSnapshot";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
 import { useHostedPromptLinkLanding } from "../components/promptLinks/HostedPromptLinkLanding";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
@@ -86,7 +85,6 @@ import {
 } from "../state/server";
 import { readProject, setActiveEnvironmentId, useActiveEnvironmentId } from "../state/entities";
 import { startEnvironmentShells } from "../state/shell";
-import { prefetchPrimaryEnvironmentDescriptor } from "../connection/platform";
 import {
   createKeybindingsUpdateToastController,
   type KeybindingsUpdateToastController,
@@ -96,23 +94,8 @@ import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
 
-// The preload-error guard runs first and may resolve an import to undefined.
-// Persistent optional-chunk failures must leave the shell usable.
-const renderNothing = () => null;
-const ConnectOnboardingDialog = lazy(() =>
-  import("../components/cloud/ConnectOnboardingDialog")
-    .then((module) => ({ default: module?.ConnectOnboardingDialog ?? renderNothing }))
-    .catch(() => ({ default: renderNothing })),
-);
-
-function ConnectOnboarding() {
-  const request = useConnectOnboardingRequest();
-  return (
-    <Suspense fallback={null}>
-      <ConnectOnboardingDialog {...request} />
-    </Suspense>
-  );
-}
+let desktopAuthBootstrap: Promise<void> | null = null;
+let desktopAuthPending = false;
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -133,13 +116,24 @@ export const Route = createRootRoute({
       };
     }
 
+    // The native connection owns its credentials. Let cached workspace reads and
+    // shell mounting overlap server startup; RPCs still await the native bearer.
+    const overlapDesktopAuth =
+      window.desktopBridge !== undefined &&
+      location.pathname !== "/pair" &&
+      peekPairingTokenFromUrl() === null &&
+      (desktopAuthBootstrap === null || desktopAuthPending);
     const authGate = resolveInitialServerAuthGateState();
-    prefetchPrimaryEnvironmentDescriptor();
-    const authGateState = shouldRenderBeforeAuthGate(location.pathname)
-      ? renderBeforeAuthGate(authGate)
+    if (overlapDesktopAuth && desktopAuthBootstrap === null) {
+      desktopAuthPending = true;
+      const settle = () => {
+        desktopAuthPending = false;
+      };
+      desktopAuthBootstrap = authGate.then(settle, settle);
+    }
+    const authGateState = overlapDesktopAuth
+      ? ({ status: "authenticated" } as const)
       : await authGate;
-    // A snapshot of a workspace this browser can no longer open must not paint later.
-    if (authGateState.status === "requires-auth") discardBootSnapshot();
     // Connect and read cached shells while the route chunks still load.
     if (authGateState.status === "authenticated") startEnvironmentShells();
     if (
@@ -162,35 +156,6 @@ export const Route = createRootRoute({
   }),
 });
 
-type InitialAuthGateState = Awaited<ReturnType<typeof resolveInitialServerAuthGateState>>;
-
-let earlyAuthGate: "unused" | "pending" | "settled" = "unused";
-
-function shouldRenderBeforeAuthGate(pathname: string): boolean {
-  if (pathname === "/pair" || peekPairingTokenFromUrl() !== null) return false;
-  if (earlyAuthGate !== "unused") return earlyAuthGate === "pending";
-  return readBootSnapshot()?.catalog.some((entry) => entry.kind === "primary") === true;
-}
-
-function renderBeforeAuthGate(authGate: Promise<InitialAuthGateState>): InitialAuthGateState {
-  if (earlyAuthGate === "unused") {
-    earlyAuthGate = "pending";
-    // Retry without cached workspace data so pairing or connection errors can surface.
-    const bootWithoutSnapshot = () => {
-      discardBootSnapshot();
-      window.location.reload();
-    };
-    void authGate.then((state) => {
-      if (state.status === "authenticated") {
-        earlyAuthGate = "settled";
-        return;
-      }
-      bootWithoutSnapshot();
-    }, bootWithoutSnapshot);
-  }
-  return { status: "authenticated" };
-}
-
 function RootRouteNotFoundView() {
   return (
     <main className="flex min-h-0 min-w-0 flex-1 items-center justify-center p-6">
@@ -207,6 +172,14 @@ function RootRouteNotFoundView() {
 }
 
 function RootRouteView() {
+  const router = useRouter();
+  useEffect(() => {
+    // Re-run the authoritative gate on either success or failure. A failed
+    // bootstrap takes the normal pairing/error route, without a reload loop.
+    if (desktopAuthBootstrap !== null) {
+      void desktopAuthBootstrap.then(() => router.invalidate());
+    }
+  }, [router]);
   useEffect(() => installDesktopPasteAsText(window.desktopBridge, window), []);
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
@@ -264,11 +237,11 @@ function RootRouteView() {
           <FontAppearanceSync />
           <ProviderAuthCallbackCoordinator />
           <CustomSnoozeDialogHost />
-          <CommandPaletteHost>
+          <CommandPalette>
             <AppSidebarLayout>
               <Outlet />
             </AppSidebarLayout>
-          </CommandPaletteHost>
+          </CommandPalette>
         </AnchoredToastProvider>
       </ToastProvider>
     );
@@ -284,12 +257,12 @@ function RootRouteView() {
   }
 
   const appShell = (
-    <CommandPaletteHost>
+    <CommandPalette>
       <AppSidebarLayout>
         <ChatSurfaceSlot />
         <Outlet />
       </AppSidebarLayout>
-    </CommandPaletteHost>
+    </CommandPalette>
   );
 
   // FirstRunGate holds back everything below it — including EventRouter,
@@ -315,7 +288,7 @@ function RootRouteView() {
           {primaryEnvironmentAuthenticated ? <DesktopWebLinkCoordinator /> : null}
           {isElectron ? <RunningThreadKeepAlive /> : null}
           <RelayClientInstallDialog />
-          {hasCloudPublicConfig() ? <ConnectOnboarding /> : null}
+          {hasCloudPublicConfig() ? <ConnectOnboardingDialog /> : null}
           <SshPasswordPromptDialog />
           <SnapShotCoordinator />
           <ThreadNotificationCoordinator />

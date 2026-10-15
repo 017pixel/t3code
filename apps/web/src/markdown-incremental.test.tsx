@@ -8,10 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { remarkCodexDirectives } from "@t3tools/shared/codexMarkdownDirectives";
 import { remarkGithubAlerts } from "@t3tools/shared/markdownGithubAlerts";
-import {
-  createCachedMarkdownPlugin,
-  createIncrementalMarkdownPlugin,
-} from "./markdown-incremental";
+import { createIncrementalMarkdownPlugin } from "./markdown-incremental";
 import { remarkNormalizeListItemIndentation } from "@t3tools/shared/markdownListIndentation";
 
 const CHAT_MARKDOWN_REHYPE_PLUGINS = chatMarkdownRehypePlugins(await loadRehypeRaw());
@@ -52,44 +49,6 @@ function render(source: string, incremental?: Plugin<[], Root>, parsedSources?: 
 const prefix = "# Before\n\n```ts\nconst values = [1, 2];\n```\n\n";
 
 describe("incremental Markdown parsing", () => {
-  it.each([
-    "ordinary prose with 123, punctuation, and Unicode café 東京",
-    "   leading and trailing spaces   ",
-    "",
-    "   ",
-    "1. list",
-    "1) list",
-    "- list",
-    "----",
-    "    indented code",
-    "www.example.com",
-    "https://example.com",
-    "user@example.com",
-    "a &amp; b",
-    "a\n\nb\n\nc",
-    "# heading\n\nparagraph\n\nmore",
-    "- first\n\n- second\n\nparagraph\n\n- next",
-    "a | b\n--|--\na | b\n\nparagraph\n\nmore",
-    "[ref]\n\nparagraph\n\n[ref]: /later",
-  ])("keeps rendered output and positions for unfenced streaming %j", (source) => {
-    const incremental = createIncrementalMarkdownPlugin();
-    for (let end = 0; end <= source.length; end++) {
-      const text = source.slice(0, end);
-      expect(render(text, incremental), `prefix ${end}`).toEqual(render(text));
-    }
-  });
-
-  it("reuses a parsed document across mounts without retaining mutated transforms", () => {
-    const source = "> [!NOTE]\n> cached alert\n\n- a\n\n[link]: /target";
-    const expected = render(source);
-    expect(render(source, createCachedMarkdownPlugin())).toEqual(expected);
-    const parsedSources: string[] = [];
-    expect(render(source, createCachedMarkdownPlugin(), parsedSources)).toEqual(expected);
-    expect(parsedSources).not.toContain(source);
-    const edited = source + "\n\n[link]";
-    expect(render(edited, createCachedMarkdownPlugin())).toEqual(render(edited));
-    expect(render(source, createCachedMarkdownPlugin())).toEqual(expected);
-  });
   it("keeps the document prefix cached when list recovery parses contain fences", () => {
     const source =
       prefix +

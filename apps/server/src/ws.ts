@@ -1,7 +1,4 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off - config stream deduplication needs a synchronous content digest.
-import * as NodeCrypto from "node:crypto";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
-import { diffServerConfig } from "@t3tools/shared/serverConfigDelta";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 
@@ -23,7 +20,6 @@ import * as Stream from "effect/Stream";
 import { rpcInitialItems } from "./rpcInitialItems.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import { subscribeCodexAuthCallback } from "./provider/CodexAuthCallback.ts";
-import { compactShellPullRequestStacks } from "./orchestration-v2/ThreadReadPayload.ts";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AcpRegistryOperationError,
@@ -186,7 +182,7 @@ import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
-import * as ServerBrowser from "./preview/ServerBrowserTag.ts";
+import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -231,7 +227,7 @@ import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
-import * as UsageService from "./usage/UsageServiceTag.ts";
+import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
@@ -366,74 +362,6 @@ export const withLateEditorConfig = <E, R>(
     ),
   );
 };
-
-/** Opted-in clients retain catalogs and acknowledge unchanged reconnects. */
-export const withConfigDeltas = <E, R>(
-  events: Stream.Stream<ServerConfigStreamEvent, E, R>,
-  knownVersion?: string,
-) =>
-  events.pipe(
-    Stream.mapAccum(
-      () => null as ClientServerConfig | null,
-      (
-        current,
-        event,
-      ): readonly [ClientServerConfig | null, ReadonlyArray<ServerConfigStreamEvent>] => {
-        if (
-          event.type === "environmentThemesUpdated" ||
-          event.type === "usageLimitSourcesUpdated"
-        ) {
-          return [current, [event]];
-        }
-        const next =
-          event.type === "snapshot"
-            ? event.config
-            : current === null
-              ? null
-              : event.type === "keybindingsUpdated"
-                ? { ...current, ...event.payload }
-                : event.type === "providerStatuses"
-                  ? { ...current, providers: event.payload.providers }
-                  : event.type === "settingsUpdated"
-                    ? { ...current, settings: event.payload.settings }
-                    : current;
-        if (next === null) return [current, []];
-        const configVersion = NodeCrypto.createHash("sha256")
-          // Late editor discovery reconstructs objects in a different key
-          // order. The same config must still acknowledge a reconnect.
-          .update(
-            JSON.stringify(next, (_key, value: unknown) =>
-              value !== null && typeof value === "object" && !Array.isArray(value)
-                ? Object.fromEntries(
-                    Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
-                  )
-                : value,
-            ),
-          )
-          .digest("hex");
-        if (current === null) {
-          return [
-            next,
-            [
-              configVersion === knownVersion
-                ? { version: 1, type: "configUnchanged", configVersion }
-                : { version: 1, type: "snapshot", config: next, configVersion },
-            ],
-          ];
-        }
-        const delta = diffServerConfig(current, next, configVersion);
-        return [
-          next,
-          Object.keys(delta.changes).length === 0 &&
-          delta.removed.length === 0 &&
-          delta.providerChanges.length === 0 &&
-          delta.providerOrder === undefined
-            ? []
-            : [delta],
-        ];
-      },
-    ),
-  );
 
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
@@ -1038,16 +966,14 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
         // Only replace its bounded replay when a snapshot can exist.
         if (shell !== null) return yield* snapshotThenLive();
       }
-      const storedReplay = yield* loadReplayThrough(input.afterSequence, highWater);
-      // Older clients cannot read compact thread events. A visit moves only read state, which
-      // their shell stream carries, so their replay skips it; a pull request sync needs a snapshot.
-      const replay =
-        input.acceptThreadFieldEvents === true
-          ? storedReplay
-          : storedReplay.filter((item) => item.event.type !== "thread.visit-recorded");
+      const replay = yield* loadReplayThrough(input.afterSequence, highWater);
       if (
         input.acceptThreadFieldEvents !== true &&
-        replay.some((item) => item.event.type === "thread.pull-request-link-synced")
+        replay.some(
+          (item) =>
+            item.event.type === "thread.pull-request-link-synced" ||
+            item.event.type === "thread.visit-recorded",
+        )
       ) {
         return yield* snapshotThenLive();
       }
@@ -1116,9 +1042,6 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         snapshot: {
           ...base,
           projects: enriched.projects,
-          threads: input.compactPullRequests
-            ? base.threads.map(compactShellPullRequestStacks)
-            : base.threads,
         } as OrchestrationV2ShellSnapshot,
         resolvedRepositoryIdentityRoots: enriched.resolvedRepositoryIdentityRoots,
       };
@@ -1167,10 +1090,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             });
             return shellStreamItemFromThreadShell({
               stored,
-              shell:
-                shell !== null && input.compactPullRequests
-                  ? compactShellPullRequestStacks(shell)
-                  : shell,
+              shell,
             });
           }),
         { concurrency: 8 },
@@ -1858,28 +1778,17 @@ const layerWsRpc = (
           const environment = yield* serverEnvironment.getDescriptor;
           const auth = yield* serverAuth.getDescriptor();
           const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
-          const [editorConfig, availableRemoteOpenTargets, availableDirectEndpoints] =
-            yield* Effect.all(
-              [
-                options.deferEditors === true
-                  ? Effect.succeed({ availableEditors: [] })
-                  : resolveAvailableEditorsForConfig(
-                      externalLauncher.resolveAvailableEditors(),
-                    ).pipe(
-                      Effect.flatMap((editors) =>
-                        resolveEditorConfig(
-                          editors,
-                          resolveFileManagerRevealKindForConfig(
-                            externalLauncher.resolveFileManagerRevealKind(),
-                          ),
-                        ),
-                      ),
-                    ),
-                resolveAvailableEditorsForConfig(remoteOpenTargets.resolveTargets()),
-                resolveAvailableEditorsForConfig(directEndpoints.resolve()),
-              ],
-              { concurrency: "unbounded" },
-            );
+          const editorConfig =
+            options.deferEditors === true
+              ? { availableEditors: [] }
+              : yield* resolveEditorConfig(
+                  yield* resolveAvailableEditorsForConfig(
+                    externalLauncher.resolveAvailableEditors(),
+                  ),
+                  resolveFileManagerRevealKindForConfig(
+                    externalLauncher.resolveFileManagerRevealKind(),
+                  ),
+                );
 
           return {
             environment,
@@ -1892,8 +1801,10 @@ const layerWsRpc = (
             ...editorConfig,
             // Same discovery-with-timeout treatment as editors: a slow probe
             // must not stall server.getConfig, so it degrades to no targets.
-            remoteOpenTargets: availableRemoteOpenTargets,
-            directEndpoints: availableDirectEndpoints,
+            remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
+              remoteOpenTargets.resolveTargets(),
+            ),
+            directEndpoints: yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
             observability: {
               logsDirectoryPath: config.logsDir,
               localTracingEnabled: true,
@@ -2595,8 +2506,7 @@ const layerWsRpc = (
               : serverSettings.updateProviderInstance(providerInstanceMutation, nextPatch);
             return ServerSettings.redactServerSettingsForClient(settings);
           }),
-        [WS_METHODS.serverDiscoverSourceControl]: (input) =>
-          input.refresh === true ? sourceControlDiscovery.refresh : sourceControlDiscovery.discover,
+        [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,
         [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
           TraceDiagnostics.readTraceDiagnostics({
             traceFilePath: config.serverTracePath,
@@ -3155,10 +3065,8 @@ const layerWsRpc = (
               const usageLimitsCommand = input.usageLimitsCommand === true;
               const config = yield* loadServerConfig({
                 usageLimitsCommand,
-                // Reconnects must match the previous late-editor version.
-                deferEditors: input.configDeltas === true && input.knownConfigVersion === undefined,
-                deferCatalogs:
-                  input.configDeltas === true && input.knownConfigVersion === undefined,
+                deferEditors: input.configDeltas === true,
+                deferCatalogs: input.configDeltas === true,
               });
               yield* ServerActivation.markClientServed;
               const keybindingsUpdates = keybindings.streamChanges.pipe(
@@ -3252,13 +3160,10 @@ const layerWsRpc = (
                 ),
               );
 
-              const events = Stream.concat(
+              return Stream.concat(
                 rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
                 withLateEditorConfig(config, liveUpdates, externalLauncher),
               );
-              return input.configDeltas === true
-                ? withConfigDeltas(events, input.knownConfigVersion)
-                : events;
             }),
           ),
         [WS_METHODS.subscribeServerLifecycle]: (_input) =>

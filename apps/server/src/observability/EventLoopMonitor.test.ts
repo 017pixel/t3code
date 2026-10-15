@@ -143,15 +143,10 @@ describe("EventLoopMonitor", () => {
     Effect.gen(function* () {
       let samples = 0;
       yield* Layer.build(
-        EventLoopMonitor.layerWith(
-          Effect.succeed(
-            Effect.sync(() => {
-              samples += 1;
-              return quiet;
-            }),
-          ),
-          { filePath: "/missing/event-loop-stalls.ndjson", maxBytes: 1024 },
-        ),
+        EventLoopMonitor.layerWith(Effect.succeed(Effect.sync(() => (++samples, quiet))), {
+          filePath: "/missing/event-loop-stalls.ndjson",
+          maxBytes: 1024,
+        }),
       );
       yield* TestClock.adjust("30 seconds");
       assert.strictEqual(samples, 30);

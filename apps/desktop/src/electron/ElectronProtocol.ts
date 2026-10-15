@@ -236,18 +236,16 @@ const serveDesktopAsset = Effect.fn("desktop.protocol.serveAsset")(function* (
   if (assetPath !== root && !assetPath.startsWith(root + path.sep)) {
     return new Response(null, { status: 404 });
   }
-  // Read directly to avoid a stat for every renderer asset.
-  const indexPath = path.join(root, "index.html");
-  let filePath = assetPath === root ? indexPath : assetPath;
-  let contents = yield* fileSystem.readFile(filePath).pipe(Effect.orElseSucceed(() => null));
-  if (contents === null && filePath !== indexPath) {
+  const stat = yield* fileSystem.stat(assetPath).pipe(Effect.orElseSucceed(() => null));
+  let filePath = assetPath;
+  if (stat?.type !== "File") {
     const wantsHtml = request.headers.get("accept")?.includes("text/html") ?? false;
     if (path.extname(assetPath) !== "" && !wantsHtml) {
       return new Response(null, { status: 404 });
     }
-    filePath = indexPath;
-    contents = yield* fileSystem.readFile(filePath).pipe(Effect.orElseSucceed(() => null));
+    filePath = path.join(root, "index.html");
   }
+  const contents = yield* fileSystem.readFile(filePath).pipe(Effect.orElseSucceed(() => null));
   if (contents === null) return new Response(null, { status: 404 });
   return new Response(request.method === "HEAD" ? null : new Uint8Array(contents), {
     headers: {

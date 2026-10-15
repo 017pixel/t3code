@@ -57,7 +57,7 @@ import {
   type ProbedOpenCode,
 } from "./versionProbe.ts";
 import * as OpenCodeServerOwner from "./OpenCodeServerOwner.ts";
-import * as OpenCode2Client from "./v2/OpenCode2ClientTag.ts";
+import * as OpenCode2Client from "./v2/OpenCode2Client.ts";
 import * as OpenCode2Server from "./v2/OpenCode2Server.ts";
 import {
   defaultProviderContinuationIdentity,

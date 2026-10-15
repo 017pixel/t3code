@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { useActiveProjectTarget, type ActiveProjectTarget } from "~/hooks/useActiveProjectTarget";
 import { useTheme } from "~/hooks/useTheme";
-import { preloadSpeculatively } from "~/lib/chunkReloadGuard";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 
@@ -75,9 +74,9 @@ function OpenProjectFilePicker(props: ProjectFilePickerProps & { target: ActiveP
   const { target } = props;
   // Opening the picker is file-viewer intent; overlap the viewer chunk with search.
   useEffect(() => {
-    void preloadSpeculatively(() =>
-      import("./FilePreviewPanel").then(({ preloadFileViewer }) => preloadFileViewer()),
-    );
+    void import("./FilePreviewPanel")
+      .then(({ preloadFileViewer }) => preloadFileViewer())
+      .catch(() => undefined);
   }, []);
   const [query, setQuery] = useState(props.initialQuery ?? "");
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);

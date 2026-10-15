@@ -1,10 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
-import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
@@ -240,69 +238,48 @@ describe("DesktopLocalEnvironmentAuth", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  // A backend that refuses the exchange until it is ready at `readyAfter`, like
-  // a cold start. The window opens while it starts.
-  const makeStartingBackend = (readyAfter: Duration.Duration) =>
+  it.effect.each([true, false])("waits for backend readiness before exchange: %s", (ready) =>
     Effect.gen(function* () {
-      const requestCount = yield* Ref.make(0);
-      const layerStartingPool = Layer.succeed(DesktopBackendPool.DesktopBackendPool, {
+      let requests = 0;
+      const pool = Layer.succeed(DesktopBackendPool.DesktopBackendPool, {
         list: Effect.succeed([
           {
             id: PRIMARY_LOCAL_ENVIRONMENT_ID,
-            label: Effect.succeed("Windows"),
-            waitForReady: (timeout: Duration.Duration) =>
-              Effect.sleep(readyAfter).pipe(
-                Effect.as(true),
-                Effect.timeoutOption(timeout),
-                Effect.map(Option.getOrElse(() => false)),
-              ),
+            label: Effect.succeed("Local"),
+            waitForReady: () =>
+              Effect.sleep(ready ? "40 seconds" : "2 minutes").pipe(Effect.as(ready)),
             currentConfig: Effect.succeedSome(config),
           },
         ]),
       } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]);
-      const layerHttpClient = Layer.succeed(
+      const client = Layer.succeed(
         HttpClient.HttpClient,
         HttpClient.make((request) =>
-          Effect.gen(function* () {
-            yield* Ref.update(requestCount, (count) => count + 1);
-            const now = yield* Clock.currentTimeMillis;
-            return now < Duration.toMillis(readyAfter)
-              ? HttpClientResponse.fromWeb(request, new Response("", { status: 503 }))
-              : tokenResponse(request);
+          Effect.sync(() => {
+            requests++;
+            return ready
+              ? tokenResponse(request)
+              : HttpClientResponse.fromWeb(request, new Response("", { status: 503 }));
           }),
         ),
       );
-      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth.pipe(
+      const result = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth.pipe(
+        Effect.flatMap((auth) => auth.getBearerToken),
+        Effect.match({ onSuccess: (token) => token, onFailure: (error) => error._tag }),
+        Effect.forkChild,
         Effect.provide(
-          DesktopLocalEnvironmentAuth.layer.pipe(
-            Layer.provide(Layer.mergeAll(layerStartingPool, layerHttpClient)),
-          ),
+          DesktopLocalEnvironmentAuth.layer.pipe(Layer.provide(Layer.merge(pool, client))),
         ),
       );
-      return { auth, requestCount };
-    });
-
-  it.effect("waits for a backend that becomes ready after the retry window", () =>
-    Effect.gen(function* () {
-      const { auth, requestCount } = yield* makeStartingBackend(Duration.seconds(40));
-
-      const fiber = yield* auth.getBearerToken.pipe(Effect.forkChild);
-      yield* TestClock.adjust(Duration.seconds(41));
-
-      assert.strictEqual(yield* Fiber.join(fiber), "desktop-bearer-token");
-      assert.strictEqual(yield* Ref.get(requestCount), 1);
-    }).pipe(Effect.provide(TestClock.layer())),
-  );
-
-  it.effect("still fails for a backend that does not become ready", () =>
-    Effect.gen(function* () {
-      const { auth } = yield* makeStartingBackend(Duration.minutes(10));
-
-      const fiber = yield* auth.getBearerToken.pipe(Effect.flip, Effect.forkChild);
-      yield* TestClock.adjust(Duration.minutes(3));
-      const error = yield* Fiber.join(fiber);
-
-      assert.strictEqual(error._tag, "DesktopLocalEnvironmentAuthSessionBootstrapError");
+      assert.equal(requests, 0);
+      yield* TestClock.adjust("3 minutes");
+      const token = yield* Fiber.join(result);
+      assert.equal(
+        token,
+        ready ? "desktop-bearer-token" : "DesktopLocalEnvironmentAuthSessionBootstrapError",
+      );
+      if (ready) assert.equal(requests, 1);
+      else assert.isAbove(requests, 0);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 });

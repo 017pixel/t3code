@@ -685,10 +685,7 @@ describe("DesktopWindow", () => {
 
       yield* Effect.gen(function* () {
         const desktopWindow = yield* DesktopWindow.DesktopWindow;
-        const closeMain = Effect.suspend(() => {
-          const closed = fakeWindow.windowListeners.get("closed");
-          return closed ? Effect.sync(() => closed()) : Effect.die("closed listener missing");
-        });
+        const closeMain = Effect.sync(() => fakeWindow.windowListeners.get("closed")!());
 
         yield* desktopWindow.ensureMain;
         yield* closeMain;

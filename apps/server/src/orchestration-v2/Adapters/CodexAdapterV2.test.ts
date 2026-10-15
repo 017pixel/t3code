@@ -225,63 +225,28 @@ describe("CodexAdapterV2 assistant message streaming", () => {
     }),
   );
 
-  it.effect("shows an item's first text without waiting for the flush interval", () =>
+  it.effect("flushes each item's first text before another item's pending interval", () =>
     Effect.gen(function* () {
-      const updates = yield* Ref.make<ReadonlyArray<ProviderTextDeltaUpdate>>([]);
+      const updates: string[] = [];
       const coalescer = yield* makeProviderTextDeltaCoalescer({
         flushIntervalMs: 50,
-        emit: (update) => Ref.update(updates, (current) => [...current, update]),
+        emit: (update) =>
+          Effect.sync(() => {
+            updates.push(update.text);
+          }),
       });
-
-      yield* coalescer.append({ turnId: "turn-1", itemId: "message-1", delta: "first" });
+      yield* coalescer.append({ turnId: "turn", itemId: "reasoning", delta: "think" });
       yield* Effect.yieldNow;
       yield* Effect.yieldNow;
-      assert.deepEqual(
-        (yield* Ref.get(updates)).map((update) => update.text),
-        ["first"],
-      );
-
-      // Later deltas of the same item wait for the interval and coalesce.
-      yield* coalescer.append({ turnId: "turn-1", itemId: "message-1", delta: " second" });
-      yield* coalescer.append({ turnId: "turn-1", itemId: "message-1", delta: " third" });
+      assert.deepEqual(updates, ["think"]);
+      yield* coalescer.append({ turnId: "turn", itemId: "reasoning", delta: "ing" });
+      yield* coalescer.append({ turnId: "turn", itemId: "reasoning", delta: "..." });
+      yield* coalescer.append({ turnId: "turn", itemId: "answer", delta: "answer" });
       yield* Effect.yieldNow;
-      assert.equal((yield* Ref.get(updates)).length, 1);
+      yield* Effect.yieldNow;
+      assert.deepEqual(updates, ["think", "answer"]);
       yield* TestClock.adjust("50 millis");
-      yield* Effect.yieldNow;
-      assert.deepEqual(
-        (yield* Ref.get(updates)).map((update) => update.text),
-        ["first", "first second third"],
-      );
-    }),
-  );
-
-  it.effect("shows a new item's first text while another item waits for its interval", () =>
-    Effect.gen(function* () {
-      const updates = yield* Ref.make<ReadonlyArray<ProviderTextDeltaUpdate>>([]);
-      const coalescer = yield* makeProviderTextDeltaCoalescer({
-        flushIntervalMs: 50,
-        emit: (update) => Ref.update(updates, (current) => [...current, update]),
-      });
-
-      yield* coalescer.append({ turnId: "turn-1", itemId: "reasoning-1", delta: "think" });
-      yield* Effect.yieldNow;
-      yield* Effect.yieldNow;
-      // This delta schedules the interval flush; the next item's first text skips it.
-      yield* coalescer.append({ turnId: "turn-1", itemId: "reasoning-1", delta: "ing" });
-      yield* coalescer.append({ turnId: "turn-1", itemId: "message-1", delta: "answer" });
-      yield* Effect.yieldNow;
-      yield* Effect.yieldNow;
-      assert.deepEqual(
-        (yield* Ref.get(updates)).map((update) => update.text),
-        ["think", "answer"],
-      );
-
-      yield* TestClock.adjust("50 millis");
-      yield* Effect.yieldNow;
-      assert.deepEqual(
-        (yield* Ref.get(updates)).map((update) => update.text),
-        ["think", "answer", "thinking"],
-      );
+      assert.deepEqual(updates, ["think", "answer", "thinking..."]);
     }),
   );
 

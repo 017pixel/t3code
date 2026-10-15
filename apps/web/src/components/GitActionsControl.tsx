@@ -460,8 +460,6 @@ function GitActionSuccessButtonContent({ success }: { success: InlineGitActionSu
 
 interface PublishRepositoryDialogProps {
   readonly open: boolean;
-  /** Preload discovery only for checkouts that offer publishing. */
-  readonly publishAvailable: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly environmentId: ScopedThreadRef["environmentId"] | null;
   /** Thread the dialog was opened from, so the new repository can open beside it. */
@@ -473,7 +471,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   const openLink = useOpenLink(props.threadRef);
   const navigate = useNavigate();
   const sourceControlDiscovery = useEnvironmentQuery(
-    props.environmentId === null || !(props.open || props.publishAvailable)
+    props.environmentId === null
       ? null
       : sourceControlEnvironment.discovery({
           environmentId: props.environmentId,
@@ -1034,10 +1032,8 @@ export default function GitActionsControl({
         ? store.getDraftThreadByRef(activeThreadRef)
         : null,
   );
-  // The projection is only a fallback for a thread without a shell. Reading it
-  // while the shell exists re-rendered this control on every streamed delta.
   const activeServerThreadProjection = useThreadProjection(
-    activeDraftThread === null && activeServerThreadShell === null ? activeThreadRef : null,
+    activeDraftThread !== null && activeServerThreadShell === null ? null : activeThreadRef,
   );
   const activeServerThread =
     activeServerThreadShell ?? activeServerThreadProjection?.projection.thread ?? null;
@@ -2122,7 +2118,6 @@ export default function GitActionsControl({
 
       <PublishRepositoryDialog
         open={isPublishDialogOpen}
-        publishAvailable={canPublishRepository || quickAction.kind === "open_publish"}
         onOpenChange={setIsPublishDialogOpen}
         environmentId={activeEnvironmentId}
         threadRef={activeThreadRef}

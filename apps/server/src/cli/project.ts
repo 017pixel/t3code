@@ -200,7 +200,7 @@ const projectCommandUuid = Crypto.Crypto.pipe(
 );
 
 const layerProjectCliRuntime = Layer.unwrap(
-  Effect.promise(() => import("../orchestration-v2/projectLayers.ts")).pipe(
+  Effect.promise(() => import("../orchestration-v2/runtimeLayer.ts")).pipe(
     Effect.map((runtime) => runtime.layerProjectService),
   ),
 ).pipe(

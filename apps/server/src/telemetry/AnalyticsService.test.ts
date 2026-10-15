@@ -1,7 +1,6 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import * as Clock from "effect/Clock";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -11,12 +10,10 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientError from "effect/http/HttpClientError";
-import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerActivation from "../serverActivation.ts";
@@ -61,24 +58,27 @@ const SentBatch = Schema.fromJsonString(
     batch: Schema.Array(Schema.Struct({ uuid: Schema.String })),
   }),
 );
-const decodeSentBatch = Schema.decodeEffect(SentBatch);
 
 /**
  * HTTP client that reads each batch, then fails as if the connection dropped
  * before the response arrived. PostHog stores these batches, so the server
  * must not send them forever.
  */
-const layerAcceptThenFailClient = (batches: Array<ReadonlyArray<{ readonly uuid: string }>>) =>
+const layerAcceptThenFailClient = (
+  batches: Array<ReadonlyArray<{ readonly uuid: string }>>,
+  beforeFailure = Effect.void,
+) =>
   Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make((request) =>
       Effect.gen(function* () {
         if (request.body._tag === "Uint8Array") {
-          const body = yield* decodeSentBatch(new TextDecoder().decode(request.body.body)).pipe(
-            Effect.orDie,
-          );
+          const body = yield* Schema.decodeEffect(SentBatch)(
+            new TextDecoder().decode(request.body.body),
+          ).pipe(Effect.orDie);
           batches.push(body.batch);
         }
+        yield* beforeFailure;
         return yield* new HttpClientError.HttpClientError({
           reason: new HttpClientError.TransportError({ request, cause: "connection reset" }),
         });
@@ -94,9 +94,12 @@ it("retryDelayMs doubles from 2s and stays under the 5 minute cap", () => {
 });
 
 it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
-  it.effect("a batch that keeps failing is retried with backoff, then dropped", () =>
+  it.effect("retries a concurrent flush with backoff, then drops it", () =>
     Effect.gen(function* () {
       const batches: Array<ReadonlyArray<{ readonly uuid: string }>> = [];
+      const firstSend = yield* Deferred.make<void>();
+      const failFirstSend = yield* Deferred.make<void>();
+      const startWorker = yield* Deferred.make<void>();
       const layerRuntime = AnalyticsService.layer.pipe(
         Layer.provideMerge(
           ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-retry-" }),
@@ -114,7 +117,17 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
           Layer.mergeAll(
             Layer.succeed(HostProcess.Platform, "win32"),
             Layer.succeed(HostProcess.Architecture, "x64"),
-            layerAcceptThenFailClient(batches),
+            Layer.succeed(ServerActivation.ServerBackgroundStart, {
+              awaitFirstClient: Effect.void,
+              awaitTurn: Deferred.await(startWorker),
+              markClientServed: Effect.void,
+            }),
+            layerAcceptThenFailClient(
+              batches,
+              Deferred.succeed(firstSend, undefined).pipe(
+                Effect.andThen(Deferred.await(failFirstSend)),
+              ),
+            ),
           ),
         ),
       );
@@ -124,7 +137,17 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         for (let index = 0; index < 20; index += 1) {
           yield* analytics.record("test.retry", { index });
         }
-        // Before the fix this loop sent the batch about once a second.
+        const flushing = yield* analytics.flush.pipe(Effect.forkScoped);
+        yield* Deferred.await(firstSend);
+        yield* Deferred.succeed(startWorker, undefined);
+        yield* TestClock.adjust("0 millis");
+        yield* Deferred.succeed(failFirstSend, undefined);
+        yield* Fiber.join(flushing);
+        yield* TestClock.adjust("999 millis");
+        assert.equal(batches.length, 1);
+        yield* TestClock.adjust("1001 millis");
+        assert.equal(batches.length, 2);
+        // Retries retain their backoff without any new events.
         for (let second = 0; second < 600; second += 1) {
           yield* TestClock.adjust("1 second");
         }
@@ -137,87 +160,9 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }),
   );
 
-  it.effect("a failed public flush wakes the parked worker to retry without another event", () =>
-    Effect.gen(function* () {
-      const batches: Array<ReadonlyArray<{ readonly uuid: string }>> = [];
-      const firstSend = yield* Deferred.make<void>();
-      const failFirstSend = yield* Deferred.make<void>();
-      const startWorker = yield* Deferred.make<void>();
-      const layerRuntime = AnalyticsService.layer.pipe(
-        Layer.provideMerge(
-          ServerConfig.ServerConfig.layerTest(process.cwd(), {
-            prefix: "t3-telemetry-concurrent-",
-          }),
-        ),
-        Layer.provide(
-          ConfigProvider.layer(
-            ConfigProvider.fromUnknown({
-              T3CODE_TELEMETRY_ENABLED: true,
-              T3CODE_POSTHOG_KEY: "phc_test_key",
-              T3CODE_POSTHOG_HOST: "http://localhost",
-            }),
-          ),
-        ),
-        Layer.provide(
-          Layer.mergeAll(
-            Layer.succeed(HostProcess.Platform, "linux"),
-            Layer.succeed(HostProcess.Architecture, "x64"),
-            Layer.succeed(ServerActivation.ServerBackgroundStart, {
-              awaitFirstClient: Effect.void,
-              awaitTurn: Deferred.await(startWorker),
-              markClientServed: Effect.void,
-            }),
-            Layer.succeed(
-              HttpClient.HttpClient,
-              HttpClient.make((request) =>
-                Effect.gen(function* () {
-                  if (request.body._tag === "Uint8Array") {
-                    const body = yield* decodeSentBatch(
-                      new TextDecoder().decode(request.body.body),
-                    ).pipe(Effect.orDie);
-                    batches.push(body.batch);
-                  }
-                  if (batches.length === 1) {
-                    yield* Deferred.succeed(firstSend, undefined);
-                    yield* Deferred.await(failFirstSend);
-                    return yield* new HttpClientError.HttpClientError({
-                      reason: new HttpClientError.TransportError({
-                        request,
-                        cause: "connection reset",
-                      }),
-                    });
-                  }
-                  return HttpClientResponse.fromWeb(request, new Response());
-                }),
-              ),
-            ),
-          ),
-        ),
-      );
-
-      yield* Effect.gen(function* () {
-        const analytics = yield* AnalyticsService.AnalyticsService;
-        yield* analytics.record("test.concurrent.flush");
-        const flushing = yield* analytics.flush.pipe(Effect.forkScoped);
-        yield* Deferred.await(firstSend);
-        yield* Deferred.succeed(startWorker, undefined);
-        // Drain runnable fibers so the worker sees the empty buffer and parks.
-        yield* TestClock.adjust("0 millis");
-        yield* Deferred.succeed(failFirstSend, undefined);
-        yield* Fiber.join(flushing);
-        yield* TestClock.adjust("999 millis");
-        assert.equal(batches.length, 1);
-        yield* TestClock.adjust("1001 millis");
-        assert.equal(batches.length, 2);
-        assert.deepEqual(batches[1], batches[0]);
-      }).pipe(Effect.provide(layerRuntime));
-    }),
-  );
-
   it.effect("flush drains all buffered events across multiple batches", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<RecordedBatchRequest> = [];
-      const resumed = yield* Deferred.make<void>();
       const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
         prefix: "t3-telemetry-base-",
       });
@@ -244,9 +189,6 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
           );
 
           capturedRequests.push({ path: request.url, body: payload });
-          if (payload?.batch?.some((event) => event.event === "test.after.idle")) {
-            yield* Deferred.succeed(resumed, undefined);
-          }
 
           return HttpServerResponse.jsonUnsafe({});
         }),
@@ -273,23 +215,13 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         }
 
         yield* analytics.flush;
-
-        const clock = yield* Clock.Clock;
-        const sleeps = vi.spyOn(clock, "sleep");
-        yield* Effect.addFinalizer(() => Effect.sync(() => sleeps.mockRestore()));
-        yield* TestClock.adjust("1 hour");
-        assert.isAtMost(sleeps.mock.calls.length, 1);
-        yield* analytics.record("test.after.idle", { index: 45 });
-        yield* TestClock.adjust("1 second");
-        yield* Deferred.await(resumed);
-        assert.equal(capturedRequests.at(-1)?.body?.batch?.[0]?.event, "test.after.idle");
       }).pipe(Effect.provide(layerRuntime));
 
       const batchRequests = capturedRequests.filter(
         (request): request is RecordedBatchRequest & { readonly body: RecordedBatchBody } =>
           Array.isArray(request.body?.batch),
       );
-      assert.equal(batchRequests.length, 4);
+      assert.equal(batchRequests.length, 3);
       assert.equal(
         batchRequests.every(
           (request) => request.path.endsWith("/batch/") || request.path.endsWith("/batch"),
@@ -367,11 +299,6 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         const analytics = yield* AnalyticsService.AnalyticsService;
         yield* analytics.record("test.disabled", { index: 1 });
         yield* analytics.flush;
-        const clock = yield* Clock.Clock;
-        const sleeps = vi.spyOn(clock, "sleep");
-        yield* Effect.addFinalizer(() => Effect.sync(() => sleeps.mockRestore()));
-        yield* TestClock.adjust("1 hour");
-        assert.equal(sleeps.mock.calls.length, 0);
       }).pipe(Effect.provide(layerRuntime));
 
       assert.deepEqual(capturedPaths, []);

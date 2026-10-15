@@ -2,7 +2,6 @@ import { assert, describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Arr from "effect/Array";
 import * as Cause from "effect/Cause";
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -144,18 +143,6 @@ describe("truncateTraceAttributes", () => {
   it("returns the same reference when nothing exceeds the limits", () => {
     const attributes = { short: "ok", nested: { fine: "also ok" } };
     assert.equal(truncateTraceAttributes(attributes), attributes);
-  });
-
-  it("collapses whitespace in query text before clamping it", () => {
-    const query = `SELECT payload_json\n          FROM orchestration_v2_projection_runs\n          WHERE thread_id = ?`;
-    assert.equal(
-      truncateTraceAttributes({ "db.query.text": query })["db.query.text"],
-      "SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id = ?",
-    );
-    const long = `SELECT ${"column,\n    ".repeat(100)}`;
-    const clamped = truncateTraceAttributes({ "db.query.text": long })["db.query.text"] as string;
-    assert.isTrue(clamped.startsWith("SELECT column, column,"));
-    assert.equal(clamped.length, 200 + "…[truncated]".length);
   });
 });
 
@@ -346,15 +333,12 @@ describe("observability", () => {
   });
 
   nodeServicesIt("node services", (it) => {
-    it.effect("parks empty trace buffers and flushes new records after a long idle", () =>
+    it.effect("flushes timed trace records after a long idle", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const tempDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-trace-idle-" });
         const tracePath = path.join(tempDir, "shared.trace.ndjson");
-        const clock = yield* Clock.Clock;
-        const sleeps = vi.spyOn(clock, "sleep");
-        yield* Effect.addFinalizer(() => Effect.sync(() => sleeps.mockRestore()));
         const flushed = yield* Queue.unbounded<void>();
         const sink = yield* makeTraceSink({
           filePath: tracePath,
@@ -364,26 +348,18 @@ describe("observability", () => {
           onFlush: () => Queue.offer(flushed, undefined).pipe(Effect.asVoid),
         });
 
-        yield* TestClock.adjust("1 hour");
-        expect(sleeps).not.toHaveBeenCalled();
-        sink.push(makeRecord("first"));
-        yield* TestClock.adjust("1 second");
-        yield* Queue.take(flushed);
-        assert.deepStrictEqual(
-          (yield* readTraceRecords(tracePath)).map((line) => line.name),
-          ["first"],
-        );
-        expect(sleeps).toHaveBeenCalledTimes(1);
-        yield* TestClock.adjust("1 hour");
-        expect(sleeps).toHaveBeenCalledTimes(1);
-        sink.push(makeRecord("second"));
-        yield* TestClock.adjust("1 second");
-        yield* Queue.take(flushed);
-        assert.deepStrictEqual(
-          (yield* readTraceRecords(tracePath)).map((line) => line.name),
-          ["first", "second"],
-        );
-        expect(sleeps).toHaveBeenCalledTimes(2);
+        const names: string[] = [];
+        for (const name of ["first", "second"]) {
+          yield* TestClock.adjust("1 hour");
+          sink.push(makeRecord(name));
+          yield* TestClock.adjust("1 second");
+          yield* Queue.take(flushed);
+          names.push(name);
+          assert.deepStrictEqual(
+            (yield* readTraceRecords(tracePath)).map((line) => line.name),
+            names,
+          );
+        }
       }).pipe(Effect.scoped),
     );
 

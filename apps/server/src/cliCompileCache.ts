@@ -48,17 +48,14 @@ export function enableCliCompileCache(input: {
     const now = new Date();
     NodeFS.utimes(current, now, now, () => {});
     const cutoff = now.getTime() - UNUSED_VERSION_MAX_AGE_MS;
-    NodeFS.readdir(root, (error, entries) => {
-      if (error) return;
-      for (const entry of entries) {
-        if (entry === input.version) continue;
-        const path = NodePath.join(root, entry);
-        NodeFS.stat(path, (statError, stats) => {
-          if (statError === null && stats.mtimeMs < cutoff) {
-            NodeFS.rm(path, { recursive: true, force: true }, () => {});
-          }
-        });
-      }
-    });
+    for (const entry of NodeFS.readdirSync(root)) {
+      if (entry === input.version) continue;
+      const path = NodePath.join(root, entry);
+      NodeFS.stat(path, (error, stats) => {
+        if (error === null && stats.mtimeMs < cutoff) {
+          NodeFS.rm(path, { recursive: true, force: true }, () => {});
+        }
+      });
+    }
   } catch {}
 }

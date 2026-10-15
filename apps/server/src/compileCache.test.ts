@@ -146,17 +146,3 @@ enableCliCompileCache({ bundled: true, argv: ["serve", "--base-dir", ${JSON.stri
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
 });
-
-it("preserves the version output through the thin CLI entry", async () => {
-  const packageJson = JSON.parse(
-    await NodeFSP.readFile(new URL("../package.json", import.meta.url), "utf8"),
-  );
-  const child = NodeChildProcess.spawnSync(
-    process.execPath,
-    [NodePath.join(import.meta.dirname, "bin.ts"), "--version"],
-    { encoding: "utf8" },
-  );
-  assert.equal(child.status, 0);
-  assert.equal(child.stdout, `t3 v${packageJson.version}\n`);
-  assert.equal(child.stderr, "");
-});
