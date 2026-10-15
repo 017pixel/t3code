@@ -21,7 +21,7 @@ import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { environmentThreadDetails } from "../../state/threads";
 import { NativeStackScreenOptions, nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { SubagentRow } from "./SubagentRow";
-import { MaterialScreenContent } from "../../components/MaterialScreenContent";
+import { ScreenContent } from "../../components/ScreenContent";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
@@ -118,9 +118,7 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
     <View collapsable={false} className="flex-1 bg-sheet">
       <NativeStackScreenOptions options={{ sheetCornerRadius: 28 }} />
       <AndroidSheetHeader title="Agents" onBack={() => navigation.goBack()} />
-      <MaterialScreenContent insetHorizontal={layout.usesSplitView}>
-        {content}
-      </MaterialScreenContent>
+      <ScreenContent insetHorizontal={layout.usesSplitView}>{content}</ScreenContent>
     </View>
   );
 }

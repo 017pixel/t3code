@@ -4,7 +4,7 @@ import { Platform, View } from "react-native";
 
 import type { AppBarProps } from "../../../components/AppBar.types";
 import { AppBar } from "../../../components/AppBar";
-import { MaterialScreenContent as SettingsScreenContent } from "../../../components/MaterialScreenContent";
+import { ScreenContent as SettingsScreenContent } from "../../../components/ScreenContent";
 
 export { SettingsScreenContent };
 

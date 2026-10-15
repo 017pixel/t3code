@@ -77,7 +77,7 @@ import {
 } from "./homeThreadList";
 import { createSwipeRowActivation } from "./swipe-row-activation";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "./thread-swipe-actions";
-import { useMaterialFabScroll } from "./MaterialFabScrollContext";
+import { useFabScroll } from "./FabScrollContext";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { ThreadListFilters } from "./ThreadListFilters";
 
@@ -344,7 +344,7 @@ export function HomeScreen(props: HomeScreenProps) {
   const handleScrollBeginDrag = useCallback(() => {
     openSwipeableRef.current?.close();
   }, []);
-  const onMaterialFabScroll = useMaterialFabScroll();
+  const onFabScroll = useFabScroll();
   const listRef = useRef<LegendListRef>(null);
   const searchMode = workspace?.state.tabs.threads.searchMode;
   const restoredOffset = workspace?.state.tabs.threads.scrollOffset;
@@ -372,7 +372,7 @@ export function HomeScreen(props: HomeScreenProps) {
   useEffect(() => () => clearTimeout(activationTimerRef.current), []);
   const handleListScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      onMaterialFabScroll?.(event);
+      onFabScroll?.(event);
       if (workspace)
         workspace.recordScrollOffset(
           "threads",
@@ -384,7 +384,7 @@ export function HomeScreen(props: HomeScreenProps) {
         200,
       );
     },
-    [activateVisibleRows, onMaterialFabScroll, workspace, insets.top],
+    [activateVisibleRows, onFabScroll, workspace, insets.top],
   );
   const trackListTouches = useCallback(
     (event: GestureResponderEvent, started: boolean) => {

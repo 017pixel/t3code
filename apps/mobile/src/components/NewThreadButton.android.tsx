@@ -1,11 +1,11 @@
 import type { ComponentProps } from "react";
 import { FloatingActionButton } from "./FloatingActionButton.android";
-import { MaterialScrollComposeButton } from "./MaterialScrollComposeButton.android";
-import type { NewThreadButton as SharedMaterialNewThreadButton } from "./NewThreadButton.shared";
+import { ScrollComposeButton } from "./ScrollComposeButton.android";
+import type { NewThreadButton as SharedNewThreadButton } from "./NewThreadButton.shared";
 
-export function NewThreadButton(props: ComponentProps<typeof SharedMaterialNewThreadButton>) {
+export function NewThreadButton(props: ComponentProps<typeof SharedNewThreadButton>) {
   if (props.extended && props.expanded !== undefined) {
-    return <MaterialScrollComposeButton {...props} expanded={props.expanded} />;
+    return <ScrollComposeButton {...props} expanded={props.expanded} />;
   }
   return (
     <FloatingActionButton

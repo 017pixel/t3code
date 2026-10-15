@@ -35,7 +35,7 @@ import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
-import { MaterialScreenContent } from "../../components/MaterialScreenContent";
+import { ScreenContent } from "../../components/ScreenContent";
 import { cn } from "../../lib/cn";
 import { environmentCatalog } from "../../connection/catalog";
 import { useEnvironmentPresentation } from "../../state/presentation";
@@ -436,7 +436,7 @@ function ReviewFileNavigator({
           </View>
         </View>
       )}
-      <MaterialScreenContent insetHorizontal>{fileList}</MaterialScreenContent>
+      <ScreenContent insetHorizontal>{fileList}</ScreenContent>
     </View>
   );
 }
@@ -735,7 +735,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
         onReturnToThread={handleReturnToThread}
       />
 
-      <MaterialScreenContent>
+      <ScreenContent>
         <View className="flex-1 bg-sheet android:bg-sheet-solid">
           {showConnectionNotice ? (
             <View className="flex-1" style={{ paddingTop: topContentInset }}>
@@ -917,7 +917,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
             onClear={commentSelection.clearSelection}
           />
         </View>
-      </MaterialScreenContent>
+      </ScreenContent>
     </>
   );
 }

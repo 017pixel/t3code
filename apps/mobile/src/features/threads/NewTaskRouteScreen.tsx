@@ -1,5 +1,5 @@
 import { AppActivityIndicator } from "../../components/AppActivityIndicator";
-import { MaterialListRow } from "../../components/MaterialListRow";
+import { NavigationRow } from "../../components/NavigationRow";
 import { AppBar } from "../../components/AppBar";
 import {
   StackActions,
@@ -19,7 +19,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Platform, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { cn } from "../../lib/cn";
-import { MaterialScreenContent } from "../../components/MaterialScreenContent";
+import { ScreenContent } from "../../components/ScreenContent";
 import { Button } from "../../components/Button";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { AppText as Text } from "../../components/AppText";
@@ -302,7 +302,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
         onSearchTextChange={setSearchText}
       />
 
-      <MaterialScreenContent>
+      <ScreenContent>
         <ScrollView
           contentInsetAdjustmentBehavior="automatic"
           showsVerticalScrollIndicator={false}
@@ -322,7 +322,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
           {canStartScratch && listScopes.length > 0 ? (
             Platform.OS === "android" ? (
               <View collapsable={false} className="overflow-hidden rounded-[28px] bg-grouped-card">
-                <MaterialListRow
+                <NavigationRow
                   className="bg-grouped-card"
                   title="No project"
                   subtitle="Start a task without a project"
@@ -463,7 +463,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                 );
                 if (Platform.OS === "android") {
                   return (
-                    <MaterialListRow
+                    <NavigationRow
                       className="bg-grouped-card"
                       key={scope.key}
                       title={scope.title}
@@ -538,7 +538,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
             </View>
           )}
         </ScrollView>
-      </MaterialScreenContent>
+      </ScreenContent>
     </View>
   );
 }

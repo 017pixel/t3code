@@ -15,7 +15,7 @@ import {
 } from "@t3tools/shared/filePreview";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 
-import { MaterialScreenContent } from "../../components/MaterialScreenContent";
+import { ScreenContent } from "../../components/ScreenContent";
 import { AudioFilePreview } from "../../components/AudioFilePreview";
 import { EmptyState } from "../../components/EmptyState";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
@@ -563,7 +563,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
         onRefresh={entriesQuery.refresh}
         onBack={handleReturnToThread}
       />
-      <MaterialScreenContent insetHorizontal={layout.usesSplitView}>
+      <ScreenContent insetHorizontal={layout.usesSplitView}>
         <FileTreeBrowser
           key={JSON.stringify([environmentId, cwd])}
           entries={entriesQuery.entries}
@@ -580,7 +580,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
           onSelectFile={handleSelectFile}
         />
         <FilesToolbarBottomFade />
-      </MaterialScreenContent>
+      </ScreenContent>
     </>
   );
 
@@ -949,7 +949,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
         onReturnToThread={handleReturnToThread}
         actions={fileMenuActions}
       />
-      <MaterialScreenContent>
+      <ScreenContent>
         <FileContent
           key={previewKey}
           activeMode={resolvedActiveMode}
@@ -969,7 +969,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
           truncated={fileData?.truncated ?? false}
           onRefresh={() => fileQuery.refresh()}
         />
-      </MaterialScreenContent>
+      </ScreenContent>
       <FilePreviewModal
         source={fullScreenPreview}
         onRequestClose={() => setFullScreenPreview(null)}

@@ -34,7 +34,7 @@ import {
 import { EmptyState } from "../../components/EmptyState";
 import { GlassSurface } from "../../components/GlassSurface";
 import { LoadingScreen } from "../../components/LoadingScreen";
-import { MaterialScreenContent } from "../../components/MaterialScreenContent";
+import { ScreenContent } from "../../components/ScreenContent";
 import { Button } from "../../components/Button";
 import { IconButton } from "../../components/IconButton";
 import { environmentCatalog } from "../../connection/catalog";
@@ -1196,7 +1196,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         onSelectTerminal={handleSelectTerminal}
       />
 
-      <MaterialScreenContent>
+      <ScreenContent>
         <View
           className="flex-1"
           style={{
@@ -1411,7 +1411,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
             </>
           )}
         </View>
-      </MaterialScreenContent>
+      </ScreenContent>
     </>
   );
 }
