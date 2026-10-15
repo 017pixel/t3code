@@ -152,7 +152,6 @@ import { useClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useMinuteValue } from "../hooks/useNowMinute";
-import { sidebarThreadShellsAtom } from "./Sidebar.shells";
 import { Atom } from "effect/reactivity";
 import {
   useEnvironmentIdentities,
@@ -165,6 +164,7 @@ import {
   useAllEnvironmentProjectSnapshotsReady,
   useAllEnvironmentShellsBootstrapped,
   useProjects,
+  useThreadShells,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
@@ -2406,7 +2406,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
                 />
               </span>
               <span className="w-8 shrink-0 text-right text-xs text-muted-foreground/55 tabular-nums">
-                {threadTimeLabel(thread)}
+                {<SidebarTimeLabel thread={thread} />}
               </span>
             </span>
             {props.searchMatch ? (
@@ -2446,7 +2446,7 @@ export default function Sidebar() {
   // means "not loaded yet", not "no projects".
   const shellsBootstrapped = useAllEnvironmentShellsBootstrapped();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const threads = useAtomValue(sidebarThreadShellsAtom);
+  const threads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
