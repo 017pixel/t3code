@@ -308,11 +308,9 @@ it.layer(TestLayer)("compact bounded snapshot transport", (it) => {
           Effect.provide(liveManagement),
         );
         const live = items[1];
-        assert.equal(live?.kind, "event");
-        if (live?.kind !== "event") return;
+        if (live?.kind !== "event") return assert.fail("missing live event");
         const decoded = decodeStreamItem(JSON.parse(JSON.stringify(encodeStreamItem(live))));
-        assert.equal(decoded.kind, "event");
-        if (decoded.kind !== "event") return;
+        if (decoded.kind !== "event") return assert.fail("missing decoded live event");
         assert.equal(
           decoded.event.type,
           acceptThreadFieldEvents ? "thread.visit-recorded" : "thread.visited",

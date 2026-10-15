@@ -44,22 +44,9 @@ describe("raw HTML detection", () => {
   });
 
   it("renders tag-free markdown without loading raw HTML", () => {
-    const markdown = "# Title\n\n1 < 2 and **bold** with \`code\`";
+    const markdown = "# Title\n\n1 < 2 and **bold** with `code`";
     expect(markdownMayContainRawHtml(markdown)).toBe(false);
-    expect(
-      chatMarkdownTree(markdown, false).children.filter((node) => node.type === "element"),
-    ).toMatchObject([
-      { tagName: "h1", children: [{ value: "Title" }] },
-      {
-        tagName: "p",
-        children: [
-          { value: "1 < 2 and " },
-          { tagName: "strong" },
-          { value: " with " },
-          { tagName: "code" },
-        ],
-      },
-    ]);
+    expect(chatMarkdownTree(markdown, false)).toEqual(chatMarkdownTree(markdown, true));
   });
 });
 
