@@ -5506,7 +5506,7 @@ describe("shouldCollapseUserMessage", () => {
 
 it("hydrates an opening run only until its prompt is loaded", () => {
   const fixture = makeStreamingTimelineFixture();
-  const entries = deriveTimelineEntriesFromVisibleTurnItems({ visibleTurnItems: fixture.visibleTurnItems });
+  const entries = deriveTimelineEntriesFromVisibleTurnItems({ visibleTurnItems: fixture.visibleTurnItems, optimisticMessages: [] });
   expect(timelineRunIdsOpeningWindow(entries)).toEqual(new Set());
   expect(timelineRunIdsOpeningWindow(entries.slice(1))).toEqual(new Set([fixture.historyRunId]));
 });
