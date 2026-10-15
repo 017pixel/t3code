@@ -291,6 +291,7 @@ import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrom
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import { observeResize } from "../lib/observeResize";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import {
   composerDraftHasUserContent,
@@ -2247,7 +2248,7 @@ function latestRunDiff(
   return null;
 }
 
-const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
+type SidebarSearchResultRowProps = {
   isSettled: boolean;
   thread: SidebarThreadSummary;
   project: EnvironmentProject | null;
@@ -2260,10 +2261,48 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   resultId: string;
   searchMatch: EnvironmentThreadSearchMatch | null;
   searchQuery: string;
-  onHighlight: () => void;
-  onSelect: () => void;
+  index: number;
+  onHighlight: (index: number) => void;
+  onSelect: (thread: SidebarThreadSummary) => void;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
-}) {
+};
+
+const SidebarSearchResultRow = memo(function SidebarSearchResultRow(
+  props: SidebarSearchResultRowProps,
+) {
+  const [node, setNode] = useState<HTMLLIElement | null>(null);
+  const [visible] = useSidebarRowViewport(node, props.index < 24);
+  const keepMounted = props.isHighlighted || props.isRouteActive;
+  const [height, setHeight] = useState(props.searchMatch ? "3.75rem" : "2.25rem");
+  useEffect(() => {
+    if (!node || (!visible && !keepMounted)) return;
+    return observeResize(node, ([entry]) => {
+      const size = entry?.borderBoxSize[0]?.blockSize;
+      if (size !== undefined && size > 0) {
+        const rem = Number.parseFloat(
+          getComputedStyle(node.ownerDocument.documentElement).fontSize,
+        );
+        setHeight(`${size / rem}rem`);
+      }
+    });
+  }, [node, visible, keepMounted]);
+  return visible || keepMounted ? (
+    <SidebarSearchResultContent {...props} setSlotNode={setNode} />
+  ) : (
+    <li ref={setNode} role="presentation" className="list-none" style={{ height }}>
+      <div
+        id={props.resultId}
+        role="option"
+        aria-label={props.thread.title}
+        aria-selected={false}
+      />
+    </li>
+  );
+});
+
+function SidebarSearchResultContent(
+  props: SidebarSearchResultRowProps & { setSlotNode: (node: HTMLLIElement | null) => void },
+) {
   const { thread } = props;
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
@@ -2334,7 +2373,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
     return () => window.removeEventListener("dragend", clearFileDrag);
   }, [isFileDragOver]);
   return (
-    <li role="presentation" className="list-none" {...fileDropHandlers}>
+    <li ref={props.setSlotNode} role="presentation" className="list-none" {...fileDropHandlers}>
       <Tooltip>
         <TooltipTrigger
           render={
@@ -2350,8 +2389,8 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
               aria-current={accessibility.current}
               aria-describedby={`${props.resultId}-pr`}
               aria-label={accessibility.label}
-              onMouseMove={props.onHighlight}
-              onClick={props.onSelect}
+              onMouseMove={() => props.onHighlight(props.index)}
+              onClick={() => props.onSelect(thread)}
               className={cn(
                 "group/sidebar-row group/v2-row flex min-h-9 w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1 text-left text-sm outline-none",
                 props.isHighlighted || props.isRouteActive
@@ -2430,7 +2469,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
       </Tooltip>
     </li>
   );
-});
+}
 
 export default function Sidebar() {
   const projects = useProjects();
@@ -5272,8 +5311,9 @@ export default function Sidebar() {
                           ) ?? null
                         }
                         searchQuery={threadSearchQuery}
-                        onHighlight={() => setActiveSearchResultIndex(index)}
-                        onSelect={() => selectThreadSearchResult(thread)}
+                        index={index}
+                        onHighlight={setActiveSearchResultIndex}
+                        onSelect={selectThreadSearchResult}
                         onFileDropThreads={handleThreadFileDrop}
                       />
                     );
