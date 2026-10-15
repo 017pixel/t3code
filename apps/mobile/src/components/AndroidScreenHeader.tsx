@@ -3,7 +3,7 @@ import { ActivityIndicator, View } from "react-native";
 
 import type { AppSymbolName } from "./AppSymbol";
 import { AppText as Text } from "./AppText";
-import { cn } from "../lib/cn";
+import { NativeAppBar } from "./NativeAppBar.android";
 import { IconButton } from "./IconButton";
 import { AndroidAnchoredMenu } from "./AndroidAnchoredMenu";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
@@ -41,7 +41,7 @@ export function AndroidScreenHeader(props: {
 }) {
   const titleTypography = useScaledTextRole("title");
   const subtitleTypography = useScaledTextRole("label");
-  const { height: materialToolbarHeight, ...headerPadding } = useToolbarLayout(props.embedded);
+  const { height: _toolbarHeight, ...headerPadding } = useToolbarLayout(props.embedded);
   const [headerWidth, setHeaderWidth] = useState(0);
   const actions = props.actions ?? [];
   const directCount = actions.length > 2 ? (headerWidth >= 600 ? 3 : 1) : actions.length;
@@ -51,87 +51,97 @@ export function AndroidScreenHeader(props: {
   return (
     <View
       onLayout={(event) => setHeaderWidth(event.nativeEvent.layout.width)}
-      className="border-b border-header-border bg-header px-2"
+      className="border-b border-header-border bg-header"
       style={{
         ...headerPadding,
         borderBottomWidth: props.hideBottomBorder ? 0 : undefined,
       }}
     >
-      <View style={{ minHeight: materialToolbarHeight }} className="flex-row items-center gap-1">
-        {props.onBack ? (
-          <IconButton
-            accessibilityLabel="Navigate up"
-            icon="arrow.left"
-            tintColorClassName="accent-header-foreground"
-            onPress={props.onBack}
-          />
-        ) : null}
+      <NativeAppBar
+        navigationIcon={
+          props.onBack || props.leading ? (
+            <View className="flex-row items-center">
+              {props.onBack ? (
+                <IconButton
+                  accessibilityLabel="Navigate up"
+                  icon="arrow.left"
+                  tintColorClassName="accent-header-foreground"
+                  onPress={props.onBack}
+                />
+              ) : null}
 
-        {props.leading}
-
-        <View className={cn("min-w-0 flex-1", !props.onBack && "pl-1")}>
-          {props.titleContent ?? (
-            <Text numberOfLines={1} style={titleTypography} className="text-header-foreground">
-              {props.title}
-            </Text>
-          )}
-          {props.subtitle ? (
-            <Text
-              numberOfLines={1}
-              style={subtitleTypography}
-              className="mt-px text-[13px] font-t3-medium text-foreground-muted"
-            >
-              {props.subtitle}
-            </Text>
-          ) : null}
-        </View>
-
-        {visibleActions.map((action) =>
-          action.loading ? (
-            <View
-              key={action.accessibilityLabel}
-              accessibilityLabel={action.accessibilityLabel}
-              className="size-12 items-center justify-center"
-            >
-              <ActivityIndicator colorClassName="accent-header-foreground" />
+              {props.leading}
             </View>
-          ) : (
-            <AndroidHeaderIconButton
-              key={action.accessibilityLabel}
-              accessibilityLabel={action.accessibilityLabel}
-              disabled={action.disabled}
-              selected={action.selected}
-              icon={action.icon}
-              onPress={action.onPress}
-            />
-          ),
-        )}
-        {overflowActions.length > 0 ? (
-          <AndroidAnchoredMenu
-            actions={overflowActions.map((action, index) => ({
-              id: String(index),
-              title: action.accessibilityLabel,
-              attributes: {
-                disabled: Boolean(action.disabled),
-                state: action.selected ? "on" : undefined,
-              },
-            }))}
-            onPressAction={({ nativeEvent }) =>
-              overflowActions[Number(nativeEvent.event)]?.onPress()
-            }
-          >
-            {(open) => (
-              <IconButton
-                accessibilityLabel="More actions"
-                icon="ellipsis"
-                tintColorClassName="accent-header-foreground"
-                onPress={open}
-              />
+          ) : undefined
+        }
+        title={
+          <View className="min-w-0">
+            {props.titleContent ?? (
+              <Text numberOfLines={1} style={titleTypography} className="text-header-foreground">
+                {props.title}
+              </Text>
             )}
-          </AndroidAnchoredMenu>
-        ) : null}
-        {props.trailing}
-      </View>
+            {props.subtitle ? (
+              <Text
+                numberOfLines={1}
+                style={subtitleTypography}
+                className="mt-px text-[13px] font-t3-medium text-foreground-muted"
+              >
+                {props.subtitle}
+              </Text>
+            ) : null}
+          </View>
+        }
+        actions={
+          <View className="flex-row items-center">
+            {visibleActions.map((action) =>
+              action.loading ? (
+                <View
+                  key={action.accessibilityLabel}
+                  accessibilityLabel={action.accessibilityLabel}
+                  className="size-12 items-center justify-center"
+                >
+                  <ActivityIndicator colorClassName="accent-header-foreground" />
+                </View>
+              ) : (
+                <AndroidHeaderIconButton
+                  key={action.accessibilityLabel}
+                  accessibilityLabel={action.accessibilityLabel}
+                  disabled={action.disabled}
+                  selected={action.selected}
+                  icon={action.icon}
+                  onPress={action.onPress}
+                />
+              ),
+            )}
+            {overflowActions.length > 0 ? (
+              <AndroidAnchoredMenu
+                actions={overflowActions.map((action, index) => ({
+                  id: String(index),
+                  title: action.accessibilityLabel,
+                  attributes: {
+                    disabled: Boolean(action.disabled),
+                    state: action.selected ? "on" : undefined,
+                  },
+                }))}
+                onPressAction={({ nativeEvent }) =>
+                  overflowActions[Number(nativeEvent.event)]?.onPress()
+                }
+              >
+                {(open) => (
+                  <IconButton
+                    accessibilityLabel="More actions"
+                    icon="ellipsis"
+                    tintColorClassName="accent-header-foreground"
+                    onPress={open}
+                  />
+                )}
+              </AndroidAnchoredMenu>
+            ) : null}
+            {props.trailing}
+          </View>
+        }
+      />
     </View>
   );
 }
