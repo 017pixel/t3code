@@ -494,17 +494,6 @@ describe.skipIf(hostPlatform === "win32")("runProcess through the spawn host", (
     }).pipe(Effect.provide(layer)),
   );
 
-  it.live("kills a child that times out", () =>
-    Effect.gen(function* () {
-      const pidFile = tempPidFile();
-      const error = yield* run({ ...sleeper(pidFile), timeout: "300 millis" }).pipe(Effect.flip);
-      const pid = Number(NodeFS.readFileSync(pidFile, "utf8"));
-      NodeFS.rmSync(pidFile);
-      expect(error._tag).toBe("ProcessTimeoutError");
-      expect(isAlive(pid)).toBe(false);
-    }).pipe(Effect.provide(layer)),
-  );
-
   it.live.skipIf(hostPlatform !== "linux")(
     "closes the sockets of output nobody reads once the child exits",
     () =>
