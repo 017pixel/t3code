@@ -1270,7 +1270,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
             }
           }
           if (
-            (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
+            ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) &&
             !event.shiftKey &&
             !event.altKey &&
             !event.metaKey &&
@@ -1279,10 +1279,22 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
             view.state.selection.empty
           ) {
             const { $from } = view.state.selection;
-            const direction = event.key === "ArrowLeft" ? -1 : 1;
+            const direction = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+            const horizontal = event.key === "ArrowLeft" || event.key === "ArrowRight";
+            // At the document's ends, native Up/Down can cross a marker without
+            // changing the document position. Record the stop so DOM selection
+            // synchronization does not put the caret back inside the styling.
+            const atDocumentEdge =
+              $from.pos ===
+              (direction === -1
+                ? TextSelection.atStart(view.state.doc).from
+                : TextSelection.atEnd(view.state.doc).to);
             // Take the other stop of a styled edge before skipping a chip, so
             // the plain stop between styled text and a chip stays reachable.
-            const step = stepCaretAcrossStyledEdge(view.state, direction);
+            const step =
+              horizontal || atDocumentEdge
+                ? stepCaretAcrossStyledEdge(view.state, direction)
+                : null;
             if (step) {
               event.preventDefault();
               event.stopPropagation();
@@ -1290,7 +1302,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
               return true;
             }
             const adjacent = direction === -1 ? $from.nodeBefore : $from.nodeAfter;
-            if (adjacent?.type.name.startsWith("composer-")) {
+            if (horizontal && adjacent?.type.name.startsWith("composer-")) {
               event.preventDefault();
               event.stopPropagation();
               view.dispatch(
