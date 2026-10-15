@@ -10,8 +10,6 @@ import type {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type * as Crypto from "effect/Crypto";
-import type * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 
 export class ClaudeAgentSdkQueryRunner extends Context.Service<
   ClaudeAgentSdkQueryRunner,
@@ -31,11 +29,7 @@ export class ClaudeAgentSdkQueryRunner extends Context.Service<
   }
 >()("t3/provider/ClaudeAgentSdkQueryRunner") {}
 
-export const layer: Layer.Layer<
-  ClaudeAgentSdkQueryRunner,
-  never,
-  Crypto.Crypto | ProviderEventLoggers.ProviderEventLoggers
-> = Layer.effect(
+export const layer = Layer.effect(
   ClaudeAgentSdkQueryRunner,
   Effect.gen(function* () {
     const service = yield* cacheInOwnerScope(

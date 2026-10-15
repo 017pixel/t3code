@@ -11,8 +11,6 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
-import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import type * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 
 export class CodexAppServerClientFactory extends Context.Service<
   CodexAppServerClientFactory,
@@ -32,11 +30,7 @@ export class CodexAppServerClientFactory extends Context.Service<
   }
 >()("t3/provider/CodexAppServerClientFactory") {}
 
-export const layer: Layer.Layer<
-  CodexAppServerClientFactory,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner | ProviderEventLoggers.ProviderEventLoggers
-> = Layer.effect(
+export const layer = Layer.effect(
   CodexAppServerClientFactory,
   Effect.gen(function* () {
     const service = yield* cacheInOwnerScope(
