@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
@@ -36,33 +36,31 @@ it("preserves in-app thread links through the shared Markdown sanitizer", () => 
   expect(JSON.stringify(tree)).not.toContain("javascript:");
 });
 
-describe("raw HTML detection", () => {
-  it("flags every way markdown can start raw HTML", () => {
-    for (const markdown of ["<br>", "a</b>", "<!-- note -->", "<?php ?>", "<![CDATA[x]]>"]) {
-      expect(markdownMayContainRawHtml(markdown)).toBe(true);
-    }
-  });
-
-  it("renders tag-free markdown without loading raw HTML", () => {
-    const markdown = "# Title\n\n1 < 2 and **bold** with `code`";
-    expect(markdownMayContainRawHtml(markdown)).toBe(false);
-    expect(chatMarkdownTree(markdown, false)).toEqual(chatMarkdownTree(markdown, true));
-  });
+it("flags every way markdown can start raw HTML", () => {
+  for (const markdown of ["<br>", "a</b>", "<!-- note -->", "<?php ?>", "<![CDATA[x]]>"]) {
+    expect(markdownMayContainRawHtml(markdown)).toBe(true);
+  }
 });
 
-describe("loadRehypeRaw", () => {
-  it("keeps a failed load so every render waits on the same settled promise", async () => {
-    vi.resetModules();
-    vi.doMock("rehype-raw", () => {
-      throw new Error("chunk failed");
-    });
-    try {
-      const { loadRehypeRaw } = await import("./markdownPipeline.ts");
-      const failed = loadRehypeRaw();
-      await expect(failed).rejects.toThrow();
-      expect(loadRehypeRaw()).toBe(failed);
-    } finally {
-      vi.doUnmock("rehype-raw");
-    }
+it("renders tag-free markdown without loading raw HTML", () => {
+  const markdown = "# Title\n\n1 < 2 and **bold** with `code`";
+  expect(markdownMayContainRawHtml(markdown)).toBe(false);
+  expect(chatMarkdownTree(markdown, false).children).toEqual(
+    chatMarkdownTree(markdown, true).children,
+  );
+});
+
+it("keeps a failed load so every render waits on the same settled promise", async () => {
+  vi.resetModules();
+  vi.doMock("rehype-raw", () => {
+    throw new Error("chunk failed");
   });
+  try {
+    const { loadRehypeRaw } = await import("./markdownPipeline.ts");
+    const failed = loadRehypeRaw();
+    await expect(failed).rejects.toThrow();
+    expect(loadRehypeRaw()).toBe(failed);
+  } finally {
+    vi.doUnmock("rehype-raw");
+  }
 });
