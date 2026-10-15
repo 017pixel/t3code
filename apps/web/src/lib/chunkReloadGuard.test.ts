@@ -83,13 +83,21 @@ it.each([preloadSpeculatively, preloadRouteSpeculatively])(
     expect(
       load === preloadSpeculatively ? isSpeculativeLoadPending() : isRoutePreloadPending(),
     ).toBe(true);
-    const failure = new TypeError(failedImport("chunk.js"));
+    const failure = new TypeError(
+      "Failed to fetch dynamically imported module: https://app.t3.codes/assets/chunk.js",
+    );
     reject(failure);
     if (load === preloadSpeculatively) await expect(preload).resolves.toBeUndefined();
     else await expect(preload).rejects.toBe(failure);
     expect(isSpeculativeLoadPending() || isRoutePreloadPending()).toBe(false);
     expect(isSpeculativeLoadFailure(failure)).toBe(load === preloadSpeculatively);
-    expect(isSpeculativeLoadFailure(new TypeError(failedImport("chunk.js")))).toBe(false);
+    expect(
+      isSpeculativeLoadFailure(
+        new TypeError(
+          "Failed to fetch dynamically imported module: https://app.t3.codes/assets/chunk.js",
+        ),
+      ),
+    ).toBe(false);
     await expect(load(async () => "module")).resolves.toBe("module");
   },
 );
