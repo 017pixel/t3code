@@ -111,6 +111,8 @@ export const Route = createRootRoute({
     }
 
     const authGate = resolveInitialServerAuthGateState();
+    // Desktop credentials can wait for server startup; read cached shells while they resolve.
+    if (window.desktopBridge) startEnvironmentShells();
     const authGateState = await authGate;
     // Connect and read cached shells while the route chunks still load.
     if (authGateState.status === "authenticated") startEnvironmentShells();
