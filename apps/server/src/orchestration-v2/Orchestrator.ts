@@ -9768,6 +9768,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "No active provider thread exists for rollback.",
         });
       }
+      // Clients hide idle compaction, but the provider cannot roll back while
+      // its compaction turn runs. It finishes within seconds.
+      if (
+        projection.runs.some(
+          (run) =>
+            !isUserFacingRun(run) &&
+            ["preparing", "starting", "running", "waiting"].includes(run.status),
+        )
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Context compaction is finishing. Try again in a few seconds.",
+        });
+      }
       if (providerThread.providerSessionId === null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
