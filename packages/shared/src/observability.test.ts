@@ -360,22 +360,15 @@ describe("observability", () => {
           onFlush: () => Queue.offer(flushed, undefined).pipe(Effect.asVoid),
         });
 
-        yield* TestClock.adjust("1 hour");
-        sink.push(makeRecord("first"));
-        yield* TestClock.adjust("1 second");
-        yield* Queue.take(flushed);
-        assert.deepStrictEqual(
-          (yield* readTraceRecords(tracePath)).map((line) => line.name),
-          ["first"],
-        );
-        yield* TestClock.adjust("1 hour");
-        sink.push(makeRecord("second"));
-        yield* TestClock.adjust("1 second");
-        yield* Queue.take(flushed);
-        assert.deepStrictEqual(
-          (yield* readTraceRecords(tracePath)).map((line) => line.name),
-          ["first", "second"],
-        );
+        const names: string[] = [];
+        for (const name of ["first", "second"]) {
+          yield* TestClock.adjust("1 hour");
+          sink.push(makeRecord(name));
+          yield* TestClock.adjust("1 second");
+          yield* Queue.take(flushed);
+          names.push(name);
+          assert.deepStrictEqual((yield* readTraceRecords(tracePath)).map((line) => line.name), names);
+        }
       }).pipe(Effect.scoped),
     );
 

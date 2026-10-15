@@ -10,7 +10,6 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientError from "effect/http/HttpClientError";
-import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -65,7 +64,7 @@ const SentBatch = Schema.fromJsonString(
  * before the response arrived. PostHog stores these batches, so the server
  * must not send them forever.
  */
-const layerAcceptThenFailClient = (batches: Array<ReadonlyArray<{ readonly uuid: string }>>) =>
+const layerAcceptThenFailClient = (batches: Array<ReadonlyArray<{ readonly uuid: string }>>, beforeFailure = Effect.void) =>
   Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make((request) =>
@@ -76,6 +75,7 @@ const layerAcceptThenFailClient = (batches: Array<ReadonlyArray<{ readonly uuid:
           ).pipe(Effect.orDie);
           batches.push(body.batch);
         }
+        yield* beforeFailure;
         return yield* new HttpClientError.HttpClientError({
           reason: new HttpClientError.TransportError({ request, cause: "connection reset" }),
         });
@@ -164,29 +164,8 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
               awaitTurn: Deferred.await(startWorker),
               markClientServed: Effect.void,
             }),
-            Layer.succeed(
-              HttpClient.HttpClient,
-              HttpClient.make((request) =>
-                Effect.gen(function* () {
-                  if (request.body._tag === "Uint8Array") {
-                    const body = yield* decodeSentBatch(
-                      new TextDecoder().decode(request.body.body),
-                    ).pipe(Effect.orDie);
-                    batches.push(body.batch);
-                  }
-                  if (batches.length === 1) {
-                    yield* Deferred.succeed(firstSend, undefined);
-                    yield* Deferred.await(failFirstSend);
-                    return yield* new HttpClientError.HttpClientError({
-                      reason: new HttpClientError.TransportError({
-                        request,
-                        cause: "connection reset",
-                      }),
-                    });
-                  }
-                  return HttpClientResponse.fromWeb(request, new Response());
-                }),
-              ),
+            layerAcceptThenFailClient(batches,
+              Deferred.succeed(firstSend, undefined).pipe(Effect.andThen(Deferred.await(failFirstSend))),
             ),
           ),
         ),
