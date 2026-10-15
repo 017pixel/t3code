@@ -16,7 +16,7 @@ import {
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { readProject, readThreadShells } from "~/state/entities";
-import { environmentServerConfigsAtom } from "~/state/server";
+import { environmentSession } from "~/state/session";
 import { resolveNewDraftStartFromOrigin } from "./chatThreadActions";
 
 /**
@@ -64,7 +64,9 @@ export async function completeDraftWorkspaceDefaults(draftId: DraftId): Promise<
     readProject(scopeProjectRef(draft.environmentId, draft.projectId)) === null
   )
     return;
-  const config = appAtomRegistry.get(environmentServerConfigsAtom).get(draft.environmentId);
+  const config = appAtomRegistry.get(
+    environmentSession.initialConfigValueAtom(draft.environmentId),
+  );
   const projectSettings = resolveProjectSettings(
     config?.settings ?? DEFAULT_SERVER_SETTINGS,
     project.id,
