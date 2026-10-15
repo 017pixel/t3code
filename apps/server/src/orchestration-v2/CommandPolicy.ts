@@ -132,6 +132,9 @@ export function resolveMessageDispatchIntent(
       run.status === "waiting",
   );
   if (activeRun === undefined) return { type: "start_immediately" };
+  // Idle compaction is invisible maintenance: whatever the user's follow-up
+  // preference, their message waits for it instead of steering into it.
+  if (activeRun.idleCompactionOfRunId !== undefined) return { type: "queue_after_active" };
   if (deliveryIntent === "steer") {
     return { type: "steer_active", targetRunId: activeRun.id };
   }

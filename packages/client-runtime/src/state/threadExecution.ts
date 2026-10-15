@@ -37,16 +37,14 @@ import { formatSubagentDisplayTitle } from "./subagentDisplay.ts";
 const ACTIVITY_RUN_STATUSES = new Set(["preparing", "starting", "running", "waiting"]);
 const INTERRUPTIBLE_RUN_STATUSES = new Set(["preparing", "starting", "running"]);
 
-type ThreadActivityOptions = { readonly includeIdleCompaction?: boolean };
-
 function latestMatchingRun(
   projection: OrchestrationV2ThreadProjection,
   predicate: (run: OrchestrationV2ThreadProjection["runs"][number]) => boolean,
-  { includeIdleCompaction = false }: ThreadActivityOptions = {},
 ): OrchestrationV2ThreadProjection["runs"][number] | null {
+  // Idle compaction is invisible maintenance outside its timeline row.
   return projection.runs.reduce<OrchestrationV2ThreadProjection["runs"][number] | null>(
     (latest, candidate) =>
-      (includeIdleCompaction || candidate.idleCompactionOfRunId === undefined) &&
+      isUserFacingRun(candidate) &&
       predicate(candidate) &&
       (latest === null || candidate.ordinal > latest.ordinal)
         ? candidate
@@ -105,18 +103,13 @@ export function deriveLatestThreadRun(
  * Returns the run that owns live provider work, falling back to the newest run
  * once the thread is idle. A newer queued run must not make an older executing
  * run look settled in clients that render per-run activity.
- * Open chat controls opt into idle compaction so it can still be stopped.
  */
 export function deriveThreadActivityRun(
   projection: OrchestrationV2ThreadProjection,
-  options: ThreadActivityOptions = {},
 ): ThreadRunSummary | null {
   const run =
-    latestMatchingRun(
-      projection,
-      (candidate) => ACTIVITY_RUN_STATUSES.has(candidate.status),
-      options,
-    ) ?? presentedLatestRun(projection);
+    latestMatchingRun(projection, (candidate) => ACTIVITY_RUN_STATUSES.has(candidate.status)) ??
+    presentedLatestRun(projection);
   return run === null ? null : summarizeThreadRun(projection, run);
 }
 
@@ -236,7 +229,6 @@ export function formatProviderSubagentStatus(
 
 export function deriveThreadRuntime(
   projection: OrchestrationV2ThreadProjection,
-  options: ThreadActivityOptions = {},
 ): ThreadRuntimeSummary | null {
   const latestRun = deriveLatestThreadRun(projection);
   const providerSession = projection.providerSessions.findLast(
@@ -244,11 +236,9 @@ export function deriveThreadRuntime(
   );
   const usageLimitedRun = presentedUsageLimitRun(projection);
   const latestRunProjection = presentedLatestRun(projection);
-  const activityRun = deriveThreadActivityRun(projection, options);
-  const liveActivityRun = latestMatchingRun(
-    projection,
-    (run) => ACTIVITY_RUN_STATUSES.has(run.status),
-    options,
+  const activityRun = deriveThreadActivityRun(projection);
+  const liveActivityRun = latestMatchingRun(projection, (run) =>
+    ACTIVITY_RUN_STATUSES.has(run.status),
   );
   // Same rule as the shell runtime: only background work that holds the
   // completion parks the thread at idle; a dev server left running does not.
@@ -271,8 +261,7 @@ export function deriveThreadRuntime(
     return null;
   }
   const activeRunId =
-    latestMatchingRun(projection, (run) => INTERRUPTIBLE_RUN_STATUSES.has(run.status), options)
-      ?.id ?? null;
+    latestMatchingRun(projection, (run) => INTERRUPTIBLE_RUN_STATUSES.has(run.status))?.id ?? null;
   return {
     status: usageLimitedRun
       ? "failed"

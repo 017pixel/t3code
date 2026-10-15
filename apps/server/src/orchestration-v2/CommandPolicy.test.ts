@@ -169,6 +169,19 @@ it("targets the latest active run for explicit steer and restart intent", () => 
     ),
     { type: "steer_active", targetRunId: activeRunId },
   );
+  const idleCompaction = dispatchProjection(baseCapabilities, "/compact");
+  const idleRuns = idleCompaction.runs.map((run) => ({
+    ...run,
+    idleCompactionOfRunId: RunId.make("command-policy-previous-run"),
+  }));
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(
+      { ...idleCompaction, runs: idleRuns },
+      { type: "start_immediately" },
+      "steer",
+    ),
+    { type: "queue_after_active" },
+  );
 });
 
 const layer = it.layer(CommandPolicy.layer);

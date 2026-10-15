@@ -192,7 +192,7 @@ describe("thread execution presentation", () => {
   });
 
   it.each(["preparing", "starting", "running", "waiting", "completed", "failed"] as const)(
-    "keeps %s idle compaction out of thread activity while chat can stop it",
+    "keeps %s idle compaction out of thread activity",
     (status) => {
       const completed = { ...run("completed", 1, "completed"), completedAt: now };
       const maintenance = {
@@ -202,20 +202,13 @@ describe("thread execution presentation", () => {
       const projection = { ...v2Projection, runs: [completed, maintenance] };
       expect(deriveLatestThreadRun(projection)?.runId).toBe(completed.id);
       expect(deriveThreadActivityRun(projection)?.runId).toBe(completed.id);
-      expect(deriveThreadRuntime(projection)).toMatchObject({
+      const runtime = deriveThreadRuntime(projection);
+      expect(runtime).toMatchObject({
         status: "completed",
         activeRunId: null,
         activityStartedAt: null,
       });
-      const chatRuntime = deriveThreadRuntime(projection, { includeIdleCompaction: true });
-      const active = ["preparing", "starting", "running", "waiting"].includes(status);
-      expect(deriveThreadActivityRun(projection, { includeIdleCompaction: true })?.runId).toBe(
-        active ? maintenance.id : completed.id,
-      );
-      expect(chatRuntime?.status).toBe(active ? status : "completed");
-      const interruptible = active && status !== "waiting";
-      expect(threadRuntimeHasInterruptibleRun(chatRuntime)).toBe(interruptible);
-      expect(chatRuntime?.activeRunId).toBe(interruptible ? maintenance.id : null);
+      expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(false);
     },
   );
 

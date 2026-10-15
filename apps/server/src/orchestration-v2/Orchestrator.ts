@@ -654,15 +654,19 @@ function runForSourcePoint(
   switch (sourcePoint.type) {
     case "latest_stable":
       return latestStableRun(projection);
+    // Idle compaction is maintenance and never a fork or merge-back source.
     case "run":
-      return projection.runs.find((run) => run.id === sourcePoint.runId) ?? null;
+      return (
+        projection.runs.find((run) => run.id === sourcePoint.runId && isUserFacingRun(run)) ?? null
+      );
     case "checkpoint": {
       const checkpoint = projection.checkpoints.find(
         (candidate) => candidate.id === sourcePoint.checkpointId,
       );
       return checkpoint?.runId === null || checkpoint === undefined
         ? null
-        : (projection.runs.find((run) => run.id === checkpoint.runId) ?? null);
+        : (projection.runs.find((run) => run.id === checkpoint.runId && isUserFacingRun(run)) ??
+            null);
     }
   }
 }

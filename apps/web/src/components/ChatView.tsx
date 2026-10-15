@@ -2124,17 +2124,11 @@ export default function ChatView(props: ChatViewProps) {
     [serverProjection],
   );
   const serverActivityRun = useMemo(
-    () =>
-      serverProjection === null
-        ? null
-        : deriveThreadActivityRun(serverProjection, { includeIdleCompaction: true }),
+    () => (serverProjection === null ? null : deriveThreadActivityRun(serverProjection)),
     [serverProjection],
   );
   const serverRuntime = useMemo(
-    () =>
-      serverProjection === null
-        ? null
-        : deriveThreadRuntime(serverProjection, { includeIdleCompaction: true }),
+    () => (serverProjection === null ? null : deriveThreadRuntime(serverProjection)),
     [serverProjection],
   );
   const runlessWorkStartedAt = useMemo(
