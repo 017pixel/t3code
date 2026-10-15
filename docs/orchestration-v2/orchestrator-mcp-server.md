@@ -367,7 +367,9 @@ messages, and proposed plans. The `activity` view also returns summarized tool,
 reasoning, checkpoint, handoff, and runtime-request items. Defaults stay small
 because agents pay for every character: prose is bounded at 4,000 characters and
 tool output is only a 600-character preview. Re-reading a truncated item's
-`itemId` at `nextTextOffset` returns the rest of the same text. `afterPosition`
+`itemId` at `nextTextOffset` continues the same text; repeat until
+`nextTextOffset` is absent, or pass a larger `maxCharsPerItem`.
+`afterPosition`
 and `nextPosition` support incremental reads; later pages omit recent runs
 unless `runLimit` is given.
 
