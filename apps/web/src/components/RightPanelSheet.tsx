@@ -1,6 +1,5 @@
-import { type ReactNode, useContext } from "react";
+import { type ReactNode } from "react";
 
-import { KeptViewWarmingContext } from "./keptView";
 import { Sheet, SheetPopup } from "./ui/sheet";
 
 export function RightPanelSheet(props: {
@@ -9,11 +8,8 @@ export function RightPanelSheet(props: {
   open: boolean;
   onClose: () => void;
 }) {
-  // A view warming out of sight must not lock the page or hide it from the shown thread.
-  const warming = useContext(KeptViewWarmingContext);
   return (
     <Sheet
-      modal={!warming}
       open={props.open}
       onOpenChange={(open) => {
         if (!open) {
