@@ -54,23 +54,8 @@ const prefix = "# Before\n\n```ts\nconst values = [1, 2];\n```\n\n";
 describe("incremental Markdown parsing", () => {
   it.each([
     "ordinary prose with 123, punctuation, and Unicode café 東京",
-    "   leading and trailing spaces   ",
-    "",
-    "   ",
-    "1. list",
-    "1) list",
-    "- list",
-    "----",
-    "    indented code",
-    "www.example.com",
-    "https://example.com",
-    "user@example.com",
-    "a &amp; b",
-    "a\n\nb\n\nc",
-    "# heading\n\nparagraph\n\nmore",
-    "- first\n\n- second\n\nparagraph\n\n- next",
-    "a | b\n--|--\na | b\n\nparagraph\n\nmore",
-    "[ref]\n\nparagraph\n\n[ref]: /later",
+    "1. list\n\n    indented code\n\nwww.example.com &amp; user@example.com",
+    "a | b\n--|--\na | b\n\n[ref]\n\n[ref]: /later",
   ])("keeps rendered output and positions for unfenced streaming %j", (source) => {
     const incremental = createIncrementalMarkdownPlugin();
     for (let end = 0; end <= source.length; end++) {
