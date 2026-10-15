@@ -285,42 +285,25 @@ function encode(value: object): string | null {
   return json;
 }
 
-const OVER_BUDGET = Symbol("over budget");
-
-/**
- * Live updates replace a few rows and reuse the rest, so each project and
- * thread row is encoded once and cached by identity. A shell longer than
- * `budget` characters returns OVER_BUDGET as soon as its rows pass it, so a
- * large environment neither builds nor encodes a document it cannot store.
- */
-function encodeShell(
-  snapshot: OrchestrationV2ShellSnapshot,
-  budget: number,
-): string | null | typeof OVER_BUDGET {
+// Cache unchanged rows by identity so live updates only encode the rows they replaced.
+function encodeShell(snapshot: OrchestrationV2ShellSnapshot): string | null {
   const cached = encoded.get(snapshot);
-  if (cached !== undefined) return cached !== null && cached.length > budget ? OVER_BUDGET : cached;
+  if (cached !== undefined) return cached;
   const fields: string[] = [];
-  let length = 2;
   let json: string | null = null;
   try {
     for (const [key, value] of Object.entries(snapshot)) {
       if (value === undefined) continue;
       if (Array.isArray(value)) {
         const rows: string[] = [];
-        length += key.length + 5;
         for (const row of value as ReadonlyArray<object>) {
           const encodedRow = encode(row);
           if (encodedRow === null) throw new UnsupportedBootValue(`row in ${key}`);
-          length += encodedRow.length + 1;
-          if (length > budget) return OVER_BUDGET;
           rows.push(encodedRow);
         }
         fields.push(`${JSON.stringify(key)}:[${rows.join(",")}]`);
       } else {
-        const field = `${JSON.stringify(key)}:${JSON.stringify(value, replacer)}`;
-        length += field.length + 1;
-        if (length > budget) return OVER_BUDGET;
-        fields.push(field);
+        fields.push(`${JSON.stringify(key)}:${JSON.stringify(value, replacer)}`);
       }
     }
     json = `{${fields.join(",")}}`;
@@ -353,24 +336,11 @@ function flush() {
   const known = new Set(
     catalog.filter((entry) => entry.enabled).map((entry) => entry.environmentId),
   );
-  let limit = ORIGIN_CHARACTER_BUDGET - RESERVED_FOR_OTHER_KEYS;
-  try {
-    limit -= otherKeysLength(store);
-  } catch {
-    limit = 0;
-  }
-  let budget = limit;
   const parts: string[] = [];
   for (const [environmentId, snapshot] of shells) {
     if (!known.has(environmentId)) continue;
-    const json = encodeShell(snapshot, budget);
-    if (json === OVER_BUDGET) {
-      removeStoredBootSnapshot(store);
-      return;
-    }
-    if (json === null) continue;
-    parts.push(`${JSON.stringify(environmentId)}:${json}`);
-    budget -= json.length;
+    const json = encodeShell(snapshot);
+    if (json !== null) parts.push(`${JSON.stringify(environmentId)}:${json}`);
   }
   const configParts: string[] = [];
   for (const [environmentId, config] of serverConfigs) {
@@ -382,26 +352,25 @@ function flush() {
   const body =
     `"catalog":${JSON.stringify(catalog)},"shells":{${parts.join(",")}},` +
     `"serverConfigs":{${configParts.join(",")}}}`;
-  if (parts.length === 0 || head.length + body.length > limit) {
-    removeStoredBootSnapshot(store);
-    return;
-  }
-  if (body === storedBody) return;
   try {
+    if (
+      parts.length === 0 ||
+      otherKeysLength(store) + RESERVED_FOR_OTHER_KEYS + head.length + body.length >
+        ORIGIN_CHARACTER_BUDGET
+    ) {
+      storedBody = null;
+      store.removeItem(STORAGE_KEY);
+      return;
+    }
+    if (body === storedBody) return;
     store.setItem(STORAGE_KEY, head + body);
     storedBody = body;
   } catch {
     // Quota or a disabled store: an older document must not outlive this one.
-    removeStoredBootSnapshot(store);
-  }
-}
-
-function removeStoredBootSnapshot(store: Storage) {
-  storedBody = null;
-  try {
-    store.removeItem(STORAGE_KEY);
-  } catch {
-    // Nothing else to clean up.
+    storedBody = null;
+    try {
+      store.removeItem(STORAGE_KEY);
+    } catch {}
   }
 }
 
