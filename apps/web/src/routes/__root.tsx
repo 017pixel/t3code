@@ -124,6 +124,10 @@ export const Route = createRootRoute({
       peekPairingTokenFromUrl() === null &&
       (desktopAuthBootstrap === null || desktopAuthPending);
     const authGate = resolveInitialServerAuthGateState();
+    // Start shell reads alongside auth; rendering still awaits the authoritative result.
+    if (location.pathname !== "/pair" && peekPairingTokenFromUrl() === null) {
+      startEnvironmentShells();
+    }
     if (overlapDesktopAuth && desktopAuthBootstrap === null) {
       desktopAuthPending = true;
       const settle = () => {
