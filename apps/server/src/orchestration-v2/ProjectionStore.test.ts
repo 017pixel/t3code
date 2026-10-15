@@ -1106,26 +1106,15 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ];
         startIds.push(rows[1]!.turn_item_id);
         yield* sql`INSERT INTO orchestration_v2_projection_turn_items ${sql.insert(rows)}`;
-        yield* projectionStore.apply({
-          id: EventId.make(`checkpoint:${run}`),
-          type: "checkpoint.captured",
-          threadId,
-          occurredAt: now,
-          payload: {
-            id: CheckpointId.make(`checkpoint:${run}`),
-            threadId,
-            scopeId: CheckpointScopeId.make(`scope:${run}`),
-            runId: RunId.make(runId),
-            nodeId: NodeId.make(`node:notification-turn-pages:${run}`),
-            parentCheckpointId: null,
-            ordinalWithinScope: 1,
-            appRunOrdinal: run,
-            ref: CheckpointRef.make(`refs/t3/notification-turn-pages/${run}`),
-            status: "ready",
-            files: [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }],
-            capturedAt: now,
-          },
-        });
+        yield* sql`INSERT INTO orchestration_v2_projection_checkpoints VALUES (
+          ${`checkpoint:${run}`}, ${threadId}, ${`scope:${run}`}, ${runId}, ${`node:notification-turn-pages:${run}`},
+          NULL, 1, ${run}, 'ready', ${nowIso}, json_object(
+            'id', ${`checkpoint:${run}`}, 'threadId', ${threadId}, 'scopeId', ${`scope:${run}`},
+            'runId', ${runId}, 'nodeId', ${`node:notification-turn-pages:${run}`}, 'parentCheckpointId', NULL,
+            'ordinalWithinScope', 1, 'appRunOrdinal', ${run}, 'ref', ${`refs/t3/notification-turn-pages/${run}`},
+            'status', 'ready', 'capturedAt', ${nowIso},
+            'files', json('[{"path":"a.ts","kind":"modified","additions":1,"deletions":0}]'))
+        )`;
       }
 
       const { statements, tracer } = traceSqlStatements();
@@ -1181,6 +1170,12 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         cursor = page.nextCursor;
       }
       assert.deepEqual(loaded, allIds);
+      // Exercise the same user/agent input cohorts with this existing run fixture.
+      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        SET type = 'user_message', payload_json = json_set(payload_json,
+          '$.type', 'user_message', '$.createdBy', 'agent', '$.creationSource', 'server',
+          '$.inputIntent', 'queued_turn', '$.messageId', turn_item_id, '$.text', 'wake', '$.attachments', json('[]'))
+        WHERE turn_item_id IN (SELECT value FROM json_each(${encodeUnknownJsonString(startIds)})) AND type = 'notification'`;
       const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
         rowLimit: 77,
         deferHistoricalSupport: true,
@@ -1209,8 +1204,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       );
       // No user turn in the latest 152 starts: only the viewport's checkpoint stays listed.
       yield* sql`UPDATE orchestration_v2_projection_turn_items
-        SET type = 'notification', payload_json = json_set(payload_json,
-          '$.type', 'notification', '$.source', json('{"kind":"monitor"}'), '$.outcome', 'completed', '$.summary', 'wake')
+        SET payload_json = json_set(payload_json, '$.createdBy', 'agent')
         WHERE thread_id = ${threadId} AND type = 'user_message'`;
       const agent = yield* projectionStore.getThreadSnapshotWindow(threadId, {
         rowLimit: 1,
@@ -1454,31 +1448,13 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         assert.deepEqual(sharedNodeSnapshot.projection.nodes, snapshot.projection.nodes);
 
         const promptId = TurnItemId.make("item:bounded-node-history:prompt");
-        const promptBase = snapshot.projection.turnItems.find(
-          (item) => item.type === "command_execution",
-        )!;
-        yield* projectionStore.apply({
-          id: EventId.make("event:bounded-node-history:prompt"),
-          type: "turn-item.updated",
-          threadId,
-          runId,
-          nodeId: rootNodeId,
-          driver,
-          occurredAt: now,
-          payload: {
-            ...promptBase,
-            id: promptId,
-            nodeId: rootNodeId,
-            ordinal: 0,
-            type: "user_message",
-            messageId: MessageId.make("message:bounded-node-history:prompt"),
-            text: "Start the long run",
-            attachments: [],
-            inputIntent: "turn_start",
-            createdBy: "user",
-            creationSource: "web",
-          },
-        });
+        yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+          SELECT ${promptId}, thread_id, run_id, ${rootNodeId}, provider_thread_id,
+            provider_turn_id, parent_item_id, 0, 'user_message', status, updated_at,
+            json_set(payload_json, '$.id', ${promptId}, '$.nodeId', ${rootNodeId}, '$.ordinal', 0,
+              '$.type', 'user_message', '$.messageId', 'prompt', '$.text', 'Start the long run',
+              '$.attachments', json('[]'), '$.inputIntent', 'turn_start', '$.createdBy', 'user', '$.creationSource', 'web')
+          FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${duplicateItemId}`;
         const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
           rowLimit: 75,
           deferHistoricalSupport: true,
