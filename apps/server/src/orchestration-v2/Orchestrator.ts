@@ -417,7 +417,9 @@ function wakeWorkStartedAt(
     return {};
   }
   const previous = runs
-    .flatMap((run) => (run.startedAt === null ? [] : [{ run, startedAt: run.startedAt }]))
+    .flatMap((run) =>
+      run.startedAt === null || !isUserFacingRun(run) ? [] : [{ run, startedAt: run.startedAt }],
+    )
     .toSorted(
       (left, right) =>
         DateTime.Order(right.startedAt, left.startedAt) || right.run.ordinal - left.run.ordinal,

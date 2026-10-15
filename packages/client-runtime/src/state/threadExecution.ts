@@ -292,10 +292,10 @@ export function deriveThreadRuntime(
     providerName: providerSession?.driver ?? null,
     ...threadErrorSummary(
       latestRootProviderFailure(latestRunProjection, projection.turnItems),
-      // Outside the open chat, an idle compaction's session error stays hidden like the shell's.
-      !options.includeIdleCompaction &&
-        latestMatchingRun(projection, () => true, { includeIdleCompaction: true })
-          ?.idleCompactionOfRunId !== undefined
+      // An idle compaction's session error is never the thread's error, even in the open
+      // chat (a no-op compaction can leave one behind). The shell does the same.
+      latestMatchingRun(projection, () => true, { includeIdleCompaction: true })
+        ?.idleCompactionOfRunId !== undefined
         ? null
         : (providerSession?.lastError ?? null),
     ),
