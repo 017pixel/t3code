@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { EmptyState } from "../../components/EmptyState";
@@ -15,12 +16,15 @@ export function WorkspaceRootScreen() {
   const { layout } = useAdaptiveWorkspaceLayout();
   const workspace = useWorkspaceTabs()!;
   const { fabClearance } = useAndroidControlSizing();
+  const insets = useSafeAreaInsets();
   const context = useMemo(
     () => ({
       ...workspace,
-      bottomClearance: workspace.state.selectedTab === "threads" ? fabClearance + 16 : 16,
+      // The Chats FABs sit above the bottom inset; the list clears both.
+      bottomClearance:
+        workspace.state.selectedTab === "threads" ? Math.max(insets.bottom, 16) + fabClearance : 16,
     }),
-    [workspace, fabClearance],
+    [workspace, fabClearance, insets.bottom],
   );
 
   // Split lists live beside the navigator; Home remains an empty detail pane.
