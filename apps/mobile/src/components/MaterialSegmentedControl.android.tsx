@@ -2,19 +2,19 @@ import { Host } from "@expo/ui/jetpack-compose";
 import { MaterialSegmentedButtons } from "./MaterialSegmentedButtons.android";
 import { View } from "react-native";
 
-import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
+import { useControlTheme } from "./useControlTheme";
 import type { SegmentedControlProps } from "./SegmentedControl.types";
 
 export function MaterialSegmentedControl<Value extends number | string>(
   props: SegmentedControlProps<Value>,
 ) {
-  const { themeAppearance } = useAppearancePreferences();
+  const { colorScheme } = useControlTheme();
   return (
     <View className={props.className}>
       <View importantForAccessibility="no-hide-descendants">
         <Host
           matchContents={{ vertical: true }}
-          colorScheme={themeAppearance}
+          colorScheme={colorScheme}
           ignoreSafeAreaKeyboardInsets
           style={{ width: "100%" }}
         >
