@@ -532,12 +532,9 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
-    const widths = [...previousRects].flatMap(([label, previousRect]) =>
-      label.isConnected
-        ? [{ label, previousRect, nextWidth: label.getBoundingClientRect().width }]
-        : [],
-    );
-    for (const { label, previousRect, nextWidth } of widths) {
+    for (const [label, previousRect] of previousRects) {
+      if (!label.isConnected) continue;
+      const nextWidth = label.getBoundingClientRect().width;
       if (Math.abs(previousRect.width - nextWidth) < 0.5) continue;
 
       // Animate the space occupied by each label so flex layout keeps the
