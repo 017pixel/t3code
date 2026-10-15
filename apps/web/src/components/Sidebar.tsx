@@ -708,6 +708,9 @@ function SortableThreadRow(props: {
       data-thread-item={props.id}
       className={cn(
         "list-none [content-visibility:auto]",
+        props.variant === "card"
+          ? "[contain-intrinsic-size:auto_78px]"
+          : "[contain-intrinsic-size:auto_36px]",
         props.variant === "card" && "py-0.5",
         bag.isDragging && "relative z-20",
       )}
