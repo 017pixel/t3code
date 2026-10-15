@@ -50,6 +50,12 @@ function noop() {}
 
 /** A live composer editor: type in it to feel the family and size. */
 export function PromptFontPreview() {
+  const ref = useRef<HTMLDivElement>(null);
+  const revealed = useRevealed(ref);
+  return <div ref={ref}>{revealed ? <PromptPreview /> : <div className="mt-1 mb-2 h-16.5" />}</div>;
+}
+
+function PromptPreview() {
   const editorRef = useRef<ComposerPromptEditorHandle>(null);
   const [prompt, setPrompt] = useState(PROMPT_PREVIEW_TEXT);
   const [cursor, setCursor] = useState(PROMPT_PREVIEW_TEXT.length);
