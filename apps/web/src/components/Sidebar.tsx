@@ -659,15 +659,7 @@ function SnoozeMenuButton(props: {
   );
 }
 
-// Subset of useSortable applied to a thread row's root <li>. Listeners go
-// on the whole row (no dedicated handle): the pointer sensor's distance
-// constraint keeps plain clicks working, and we skip dnd-kit's aria
-// attributes since there is no keyboard sensor and the row body already
-// carries its own button semantics.
-type SortableThreadRowBag = Pick<
-  ReturnType<typeof useSortable>,
-  "listeners" | "setNodeRef" | "transform" | "transition" | "isDragging"
->;
+type SortableThreadRowBag = { isDragging: boolean };
 
 function SortableThreadRow(props: {
   id: string;
@@ -702,20 +694,11 @@ function SortableThreadRow(props: {
     focusedRef.current = false;
     node.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
   }, [visible, node]);
-  // dnd-kit memoizes each field but not the bag, so the memoized row would
-  // rerender on every shell update without this.
   const bag = useMemo(
-    () => ({
-      listeners,
-      setNodeRef: attach,
-      transform: props.contextDrag ? null : transform,
-      // The lifted row normally follows the pointer without a transition.
-      // When it becomes a context ghost, glide its sidebar copy back home.
-      transition: props.contextDrag && isDragging ? "transform 150ms ease-out" : transition,
-      isDragging: isDragging && !props.contextDrag,
-    }),
-    [listeners, attach, transform, transition, isDragging, props.contextDrag],
+    () => ({ isDragging: isDragging && !props.contextDrag }),
+    [isDragging, props.contextDrag],
   );
+  const rowTransform = props.contextDrag ? null : transform;
   const mounted =
     visible || props.keepMounted || isDragging || node?.contains(document.activeElement);
   return (
@@ -730,11 +713,11 @@ function SortableThreadRow(props: {
       )}
       style={{
         height: mounted ? undefined : `${SIDEBAR_ROW_HEIGHT_REM[props.variant]}rem`,
-        transform: CSS.Translate.toString(bag.transform),
-        transition: bag.transition,
-        visibility: !bag.isDragging && bag.transform?.scaleY === 0 ? "hidden" : undefined,
+        transform: CSS.Translate.toString(rowTransform),
+        transition: props.contextDrag && isDragging ? "transform 150ms ease-out" : transition,
+        visibility: !bag.isDragging && rowTransform?.scaleY === 0 ? "hidden" : undefined,
       }}
-      {...bag.listeners}
+      {...listeners}
     >
       {mounted ? (
         props.children(bag)
