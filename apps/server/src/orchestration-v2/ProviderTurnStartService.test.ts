@@ -402,28 +402,21 @@ function makeLocalCommandHarness(input: {
   };
   let baselineSettled = false;
   const captureBaseline = vi.fn(() =>
-    input.interruptBaseline === true
-      ? Effect.interrupt
-      : "baselineFailure" in input
-        ? Effect.sync(() => {
-            baselineSettled = true;
-          }).pipe(
-            Effect.andThen(
-              input.baselineDefect === true
-                ? Effect.die(input.baselineFailure)
-                : Effect.fail(
-                    new CheckpointService.CheckpointBaselineCaptureError({
-                      scopeId: checkpointScopeId,
-                      ordinalWithinScope: 1,
-                      cause: input.baselineFailure,
-                    }),
-                  ),
-            ),
-          )
-        : Effect.sync(() => {
-            baselineSettled = true;
-            if (input.interruptRunDuringBaseline === true) interruptRun();
+    Effect.gen(function* () {
+      if (input.interruptBaseline) return yield* Effect.interrupt;
+      baselineSettled = true;
+      if (input.interruptRunDuringBaseline) interruptRun();
+      if ("baselineFailure" in input) {
+        if (input.baselineDefect) return yield* Effect.die(input.baselineFailure);
+        return yield* Effect.fail(
+          new CheckpointService.CheckpointBaselineCaptureError({
+            scopeId: checkpointScopeId,
+            ordinalWithinScope: 1,
+            cause: input.baselineFailure,
           }),
+        );
+      }
+    }),
   );
   const open = vi.fn(() => {
     expect(baselineSettled).toBe(true);
@@ -902,7 +895,7 @@ for (const baselineDefect of [false, true]) {
           baselineDefect,
           failReadsAfterRunning: true,
         });
-        yield* harness.start;
+        yield* harness.startWithRetry;
         expect(harness.captureBaseline).toHaveBeenCalledOnce();
         expect(harness.open).toHaveBeenCalledOnce();
         expect(harness.startRootRun).toHaveBeenCalledOnce();
@@ -910,19 +903,6 @@ for (const baselineDefect of [false, true]) {
       }),
   );
 }
-
-effectIt.effect("does not retry a turn whose baseline capture fails", () =>
-  Effect.gen(function* () {
-    const harness = makeLocalCommandHarness({
-      text: "Continue",
-      baselineFailure: "disk full",
-      failReadsAfterRunning: true,
-    });
-    yield* harness.startWithRetry;
-    expect(harness.captureBaseline).toHaveBeenCalledOnce();
-    expect(harness.startRootRun).toHaveBeenCalledOnce();
-  }),
-);
 
 effectIt.effect("does not open the provider when baseline capture is interrupted", () =>
   Effect.gen(function* () {
