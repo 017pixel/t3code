@@ -11,7 +11,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as AuthHttp from "../auth/http.ts";
-import * as CloudLink from "./CloudLinkTag.ts";
+import * as CloudLink from "./CloudLink.ts";
 import * as ConnectHttp from "./http.ts";
 
 class ConnectTestApi extends HttpApi.make("environment").add(EnvironmentHttpApi.groups.connect) {}
