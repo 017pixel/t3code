@@ -966,31 +966,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     start: initialSnapshot.expandedCursor,
     end: initialSnapshot.expandedCursor,
   });
-  // Tiptap reads `content` only when it creates the editor, so a re-render with the same prompt
-  // (a paste re-renders the frame several times) skips the parse.
-  const content = useMemo(
-    () =>
-      buildDocJson(
-        value,
-        (name) => {
-          const normalized = name.startsWith("$") ? name.slice(1) : name;
-          const found = skills.find((candidate) => candidate.name === normalized);
-          if (!found) {
-            return {
-              label: formatProviderSkillDisplayName({ name: normalized }),
-              description: null,
-            };
-          }
-          const shortDescription = found.shortDescription?.trim();
-          return {
-            label: formatProviderSkillDisplayName(found),
-            description: shortDescription || found.description?.trim() || null,
-          };
-        },
-        { styling: richText, literalText },
-      ),
-    [literalText, richText, skills, value],
-  );
+  const initialContentRef = useRef<ReturnType<typeof buildDocJson> | null>(null);
   const isApplyingControlledUpdateRef = useRef(false);
   const hasAppliedControlledSelectionRef = useRef(false);
   const citationRequestRef = useRef<ComposerCitationCommentRequest | null>(null);
@@ -1228,7 +1204,25 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
             ]
           : []),
       ],
-      content,
+      content: (initialContentRef.current ??= buildDocJson(
+        value,
+        (name) => {
+          const normalized = name.startsWith("$") ? name.slice(1) : name;
+          const found = skills.find((candidate) => candidate.name === normalized);
+          if (!found) {
+            return {
+              label: formatProviderSkillDisplayName({ name: normalized }),
+              description: null,
+            };
+          }
+          const shortDescription = found.shortDescription?.trim();
+          return {
+            label: formatProviderSkillDisplayName(found),
+            description: shortDescription || found.description?.trim() || null,
+          };
+        },
+        { styling: richText, literalText },
+      )),
       editable: !disabled,
       editorProps: {
         attributes: editorAttributes,

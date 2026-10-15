@@ -3147,24 +3147,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ],
   );
 
-  const providerTraitsMenuContent = (
-    <ComposerDraftTraits
-      menu
-      target={composerDraftTarget}
-      {...{
-        provider: selectedProvider,
-        instanceId: selectedInstanceId,
-        ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
-        ...(routeKind === "draft" && draftId ? { draftId } : {}),
-        model: selectedModel,
-        models: selectedProviderModels,
-        modelOptions: composerModelOptions?.[selectedInstanceId],
-        reportedModelSelection,
-        onPromptChange: setPromptFromTraits,
-        planModeEnabled: settings.planModeEnabled,
-      }}
-    />
-  );
   const providerTraitsPickerInput = {
     provider: selectedProvider,
     instanceId: selectedInstanceId,
@@ -3178,6 +3160,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     planModeEnabled: settings.planModeEnabled,
     isComposerOwned: true,
   } satisfies Omit<Parameters<typeof renderProviderTraitsPicker>[0], "prompt">;
+  const providerTraitsMenuContent = (
+    <ComposerDraftTraits menu target={composerDraftTarget} {...providerTraitsPickerInput} />
+  );
   const providerTraitsPicker = renderProviderTraitsPicker({
     ...providerTraitsPickerInput,
     prompt,
