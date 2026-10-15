@@ -491,14 +491,12 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
 
   yield* Effect.addFinalizer(() => flush.pipe(Effect.ignore));
   yield* Effect.forkScoped(
-    Effect.gen(function* () {
-      while (true) {
-        yield* Queue.take(flushRequests);
-        if (buffer.length === 0 && pendingFlushStats.count === 0 && droppedCount === 0) continue;
-        yield* Effect.sleep(`${options.batchWindowMs} millis`);
-        yield* flush;
-      }
-    }),
+    // Flush when push fills a batch or the batch window passes.
+    Queue.take(flushRequests).pipe(
+      Effect.timeoutOption(`${options.batchWindowMs} millis`),
+      Effect.andThen(flush),
+      Effect.forever,
+    ),
   );
 
   return {
@@ -517,7 +515,6 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
         if (buffer.length >= FLUSH_BUFFER_THRESHOLD) {
           Queue.offerUnsafe(flushRequests, undefined);
         }
-        Queue.offerUnsafe(flushRequests, undefined);
       } catch {
         return;
       }

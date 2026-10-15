@@ -2,7 +2,6 @@ import { assert, describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Arr from "effect/Array";
 import * as Cause from "effect/Cause";
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -346,15 +345,12 @@ describe("observability", () => {
   });
 
   nodeServicesIt("node services", (it) => {
-    it.effect("parks empty trace buffers and flushes new records after a long idle", () =>
+    it.effect("flushes timed trace records after a long idle", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const tempDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-trace-idle-" });
         const tracePath = path.join(tempDir, "shared.trace.ndjson");
-        const clock = yield* Clock.Clock;
-        const sleeps = vi.spyOn(clock, "sleep");
-        yield* Effect.addFinalizer(() => Effect.sync(() => sleeps.mockRestore()));
         const flushed = yield* Queue.unbounded<void>();
         const sink = yield* makeTraceSink({
           filePath: tracePath,
@@ -365,7 +361,6 @@ describe("observability", () => {
         });
 
         yield* TestClock.adjust("1 hour");
-        expect(sleeps).not.toHaveBeenCalled();
         sink.push(makeRecord("first"));
         yield* TestClock.adjust("1 second");
         yield* Queue.take(flushed);
@@ -373,9 +368,7 @@ describe("observability", () => {
           (yield* readTraceRecords(tracePath)).map((line) => line.name),
           ["first"],
         );
-        expect(sleeps).toHaveBeenCalledTimes(1);
         yield* TestClock.adjust("1 hour");
-        expect(sleeps).toHaveBeenCalledTimes(1);
         sink.push(makeRecord("second"));
         yield* TestClock.adjust("1 second");
         yield* Queue.take(flushed);
@@ -383,7 +376,6 @@ describe("observability", () => {
           (yield* readTraceRecords(tracePath)).map((line) => line.name),
           ["first", "second"],
         );
-        expect(sleeps).toHaveBeenCalledTimes(2);
       }).pipe(Effect.scoped),
     );
 
