@@ -28,7 +28,6 @@ class TestRow {
   style: Record<string, string> = {};
   inert = false;
   attributes: { name: string; value: string }[] = [];
-  parentNode: unknown = null;
   children: TestRow[] = [];
   clones: TestRow[] = [];
   remove = vi.fn();
@@ -39,9 +38,6 @@ class TestRow {
   ) {}
   getBoundingClientRect() {
     return { top: this.offsetTop + this.dragTranslate, height: this.offsetHeight };
-  }
-  getAttribute(name: string) {
-    return this.attributes.find((attribute) => attribute.name === name)?.value ?? null;
   }
   setAttribute(name: string, value: string) {
     this.removeAttribute(name);
@@ -94,7 +90,6 @@ function fixture(rows: TestRow[], frames?: FrameRequestCallback[]) {
     let top = 8;
     for (const row of next) {
       row.offsetTop = top;
-      row.parentNode = parent;
       top += row.offsetHeight + 1;
     }
     parent.children = [
@@ -512,55 +507,6 @@ describe("sidebar list motion", () => {
     expect(entry.cancel).not.toHaveBeenCalled();
     // Remaining 27px of the 36px entry plus the new 40px shift.
     expectMove(y, -13);
-  });
-
-  it("carries a virtual row's entry and crossfades its old shape", () => {
-    let notify: MutationCallback = () => {};
-    vi.stubGlobal(
-      "MutationObserver",
-      class {
-        constructor(callback: MutationCallback) {
-          notify = callback;
-        }
-        observe() {}
-        disconnect() {}
-      },
-    );
-    const slot = new TestRow("slot", 36),
-      row = new TestRow("row", 36);
-    const other = new TestRow("other"),
-      card = new TestRow("card");
-    for (const node of [slot, row, card]) {
-      node.setAttribute("data-thread-item", "t");
-      node.setAttribute("data-sidebar-row-variant", node === card ? "card" : "slim");
-    }
-    const { motion, layout } = fixture([]);
-    motion.update(true);
-    layout([slot]);
-    motion.update(true);
-    const entry = slot.animations[0]!;
-    entry.progress = 0.25;
-    layout([row]);
-    notify(
-      [{ addedNodes: [row], removedNodes: [slot] }] as unknown as MutationRecord[],
-      {} as MutationObserver,
-    );
-    expect(entry.effect).toHaveProperty("target", row);
-    expect(entry.cancel).not.toHaveBeenCalled();
-    layout([other, row]);
-    motion.update(true);
-    expectMove(row, -110);
-    layout([other, card]);
-    motion.update(true);
-    expect(slot.clones).toHaveLength(0);
-    expect(row.clones).toHaveLength(1);
-    expect(card.animate).toHaveBeenLastCalledWith(
-      [
-        { opacity: 0, transform: "translateY(-40px)" },
-        { opacity: 1, transform: "translateY(0px)" },
-      ],
-      { duration: 150, easing: "ease-out" },
-    );
   });
 
   it("skips fades when a large list change would clone too many rows", () => {

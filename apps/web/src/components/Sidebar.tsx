@@ -717,21 +717,29 @@ function SortableThreadRow(props: {
     }),
     [listeners, attach, transform, transition, isDragging, props.contextDrag],
   );
-  if (!visible && !props.keepMounted && !isDragging && !node?.contains(document.activeElement)) {
-    return (
-      <li
-        ref={attach}
-        data-thread-item={props.id}
-        data-sidebar-row-variant={props.variant}
-        data-sidebar-row-displaced={bag.transform?.x || bag.transform?.y ? "" : undefined}
-        className="list-none"
-        style={{
-          height: `${SIDEBAR_ROW_HEIGHT_REM[props.variant]}rem`,
-          transform: CSS.Translate.toString(bag.transform),
-          transition: bag.transition,
-          visibility: bag.transform?.scaleY === 0 ? "hidden" : undefined,
-        }}
-      >
+  const mounted =
+    visible || props.keepMounted || isDragging || node?.contains(document.activeElement);
+  return (
+    <li
+      key={props.variant}
+      ref={attach}
+      data-thread-item={props.id}
+      className={cn(
+        "list-none [content-visibility:auto]",
+        props.variant === "card" && "py-0.5",
+        bag.isDragging && "relative z-20",
+      )}
+      style={{
+        height: mounted ? undefined : `${SIDEBAR_ROW_HEIGHT_REM[props.variant]}rem`,
+        transform: CSS.Translate.toString(bag.transform),
+        transition: bag.transition,
+        visibility: !bag.isDragging && bag.transform?.scaleY === 0 ? "hidden" : undefined,
+      }}
+      {...bag.listeners}
+    >
+      {mounted ? (
+        props.children(bag)
+      ) : (
         <div
           role="button"
           tabIndex={0}
@@ -741,10 +749,9 @@ function SortableThreadRow(props: {
             setVisible(true);
           }}
         />
-      </li>
-    );
-  }
-  return props.children(bag);
+      )}
+    </li>
+  );
 }
 
 // Unsent work shares one look: the new-thread draft rows and thread rows
@@ -1681,24 +1688,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // dnd-kit props for the row root. Same bag on both variants: every row in
   // the list translates around the gap as the drag passes it.
   const sortable = props.sortable;
-  const sortableRootProps = sortable
-    ? {
-        ref: sortable.setNodeRef,
-        "data-sidebar-row-displaced":
-          sortable.transform?.x || sortable.transform?.y ? "" : undefined,
-        style: {
-          transform: CSS.Translate.toString(sortable.transform),
-          transition: sortable.transition,
-          // A zero-height boundary also makes dnd-kit scale the source to
-          // zero. Only projected peers use scaleY as a visibility sentinel.
-          visibility:
-            !sortable.isDragging && sortable.transform?.scaleY === 0
-              ? ("hidden" as const)
-              : undefined,
-        },
-        ...sortable.listeners,
-      }
-    : {};
   // Sweeps reuse the corresponding row-drop action badge.
   const destinationVerb = sortable?.isDragging
     ? props.dropVerb
@@ -1859,22 +1848,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
 
   if (variant === "slim") {
     return (
-      <li
-        data-thread-item={threadKey}
-        data-sidebar-row-variant="slim"
-        {...sortableRootProps}
-        {...(fileDropHandlers ?? {})}
-        className={cn(
-          // Matches the h-9 row so unrendered rows never shift the list when they paint.
-          "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
-          sortable?.isDragging && "relative z-20",
-        )}
-      >
+      <>
         <Tooltip disabled={sortable?.isDragging}>
           <TooltipTrigger
             render={
               <div
                 ref={rowRef}
+                {...(fileDropHandlers ?? {})}
                 role="button"
                 tabIndex={0}
                 aria-label={accessibility.label}
@@ -2016,29 +1996,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           </TooltipTrigger>
           {detailsTooltip}
         </Tooltip>
-      </li>
+      </>
     );
   }
 
   const diff = latestRunDiff(thread);
 
   return (
-    <li
-      data-thread-item={threadKey}
-      data-sidebar-row-variant="card"
-      {...sortableRootProps}
-      {...(fileDropHandlers ?? {})}
-      className={cn(
-        // Matches the h-[4.875rem] content box; the py-0.5 padding is added on top.
-        "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
-        sortable?.isDragging && "relative z-20",
-      )}
-    >
+    <>
       <Tooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
         <TooltipTrigger
           render={
             <div
               ref={rowRef}
+              {...(fileDropHandlers ?? {})}
               role="button"
               tabIndex={0}
               aria-label={accessibility.label}
@@ -2286,7 +2257,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         </TooltipTrigger>
         {detailsTooltip}
       </Tooltip>
-    </li>
+    </>
   );
 });
 

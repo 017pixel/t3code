@@ -1,5 +1,3 @@
-import { observeResize } from "../lib/observeResize";
-
 const motionTiming = { duration: 150, easing: "ease-out" };
 // Rows normally ride their displaced neighbour's travel. Absent a moving
 // neighbour, a row still travels on its own, clamped so a tall card does not
@@ -12,14 +10,7 @@ const rowTravel = (height: number) => Math.min(height, 40);
 // so only the fade count decides whether an update animates.
 const MAX_FADED_ROWS_PER_UPDATE = 40;
 
-type RowPosition = {
-  top: number;
-  left: number;
-  width: number;
-  height: number;
-  key: string | HTMLElement;
-  shape: string;
-};
+type RowPosition = { top: number; left: number; width: number; height: number };
 
 function progress(animation: Animation) {
   return animation.playState === "finished"
@@ -37,9 +28,6 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
   const running = new Map<HTMLElement, { animation: Animation; offset: number }>();
   const entering = new Map<HTMLElement, { animation: Animation; travel: number }>();
   const exiting = new Map<HTMLElement, Animation>();
-  // The element each thread row last put on screen: its virtual slot or the
-  // rendered row that replaced it.
-  const rendered = new Map<string, HTMLElement>();
   // Visual tops at drag release, relative to the list, so the release
   // commit can glide every row from where dnd-kit left it into its slot.
   let released: Map<HTMLElement, number> | null = null;
@@ -49,36 +37,18 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
     Array.from(parent.children).filter(
       (node): node is HTMLElement => node instanceof HTMLElement && !exiting.has(node),
     );
-  const rowKey = (node: HTMLElement) => node.getAttribute?.("data-thread-item") ?? node;
-  const rowShape = (node: HTMLElement) =>
-    node.getAttribute?.("data-sidebar-row-variant") ?? node.className ?? "";
-  const measure = (selective = false) => {
-    const nodes = rows();
-    const next = new Map(
-      nodes.map((node) => [node, {
-        top: node.offsetTop,
-        left: node.offsetLeft,
-        width: node.offsetWidth,
-        height: node.offsetHeight,
-        key: rowKey(node),
-        shape: rowShape(node),
-      }]),
+  const measure = () =>
+    new Map(
+      rows().map((node) => [
+        node,
+        {
+          top: node.offsetTop,
+          left: node.offsetLeft,
+          width: node.offsetWidth,
+          height: node.offsetHeight,
+        },
+      ]),
     );
-    if (selective && positions) {
-      // A virtual slot and its rendered row share identity for motion. A row
-      // that changed variant does not: the old one fades out as it was last
-      // rendered and the new one fades in at its slot.
-      const nodesByKey = new Map(nodes.map((node) => [rowKey(node), node]));
-      const live = (old: RowPosition) => {
-        const current = nodesByKey.get(old.key);
-        if (current !== undefined && rowShape(current) === old.shape) return current;
-        const last = typeof old.key === "string" ? rendered.get(old.key) : undefined;
-        return last !== undefined && rowShape(last) === old.shape ? last : undefined;
-      };
-      positions = new Map([...positions].map(([node, old]) => [live(old) ?? node, old]));
-    }
-    return next;
-  };
   const cancelBaseline = () => {
     if (baselineFrame !== null) view?.cancelAnimationFrame(baselineFrame);
     baselineFrame = null;
@@ -98,75 +68,6 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
       if (!disposed && positions === null) positions = measure();
     });
   };
-  let observedWidth: number | null = null;
-  const stopObserving =
-    typeof ResizeObserver === "undefined"
-      ? null
-      : observeResize(parent, ([entry]) => {
-          if (!entry) return;
-          const width = entry.contentRect.width;
-          if (observedWidth !== null && observedWidth !== width) scheduleBaseline();
-          observedWidth = width;
-        });
-
-  // Forget a row's animation when it finishes, unless a newer one replaced it.
-  const track = <Entry extends { animation: Animation }>(
-    map: Map<HTMLElement, Entry>,
-    node: HTMLElement,
-    entry: Entry,
-  ) => {
-    map.set(node, entry);
-    entry.animation.addEventListener(
-      "finish",
-      () => {
-        if (map.get(node) === entry) map.delete(node);
-      },
-      { once: true },
-    );
-  };
-  const adopt = <Entry extends { animation: Animation }>(
-    map: Map<HTMLElement, Entry>,
-    from: HTMLElement,
-    to: HTMLElement,
-  ) => {
-    const entry = map.get(from);
-    if (entry === undefined) return;
-    map.delete(from);
-    const effect = entry.animation.effect as KeyframeEffect | null;
-    if (effect) effect.target = to;
-    track(map, to, entry);
-  };
-  // A virtual slot swaps in its rendered row, or back, outside any motion
-  // pass. Track which element is on screen, and let the replacement continue
-  // an in-flight animation instead of popping in at rest.
-  const swaps =
-    typeof MutationObserver === "undefined"
-      ? null
-      : new MutationObserver((records) => {
-          const added = new Map<string, HTMLElement>();
-          for (const record of records) {
-            for (const node of record.addedNodes) {
-              if (!(node instanceof HTMLElement) || node.parentNode !== parent) continue;
-              const key = rowKey(node);
-              if (typeof key === "string") added.set(key, node);
-            }
-          }
-          for (const record of records) {
-            for (const node of record.removedNodes) {
-              if (!(node instanceof HTMLElement)) continue;
-              const key = rowKey(node);
-              if (typeof key !== "string") continue;
-              if (rendered.get(key) === node) rendered.delete(key);
-              const replacement = added.get(key);
-              if (!replacement || replacement === node) continue;
-              if (rowShape(replacement) !== rowShape(node)) continue;
-              adopt(entering, node, replacement);
-              adopt(running, node, replacement);
-            }
-          }
-          for (const [key, node] of added) rendered.set(key, node);
-        });
-  swaps?.observe(parent, { childList: true });
 
   const remainingOffset = (node: HTMLElement) => {
     const current = running.get(node);
@@ -255,7 +156,14 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
       [{ transform: `translateY(${offset}px)` }, { transform: "translateY(0px)" }],
       motionTiming,
     );
-    track(running, node, { animation, offset });
+    running.set(node, { animation, offset });
+    animation.addEventListener(
+      "finish",
+      () => {
+        if (running.get(node)?.animation === animation) running.delete(node);
+      },
+      { once: true },
+    );
   };
 
   return {
@@ -268,7 +176,7 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
         return;
       }
       cancelBaseline();
-      const next = measure(true);
+      const next = measure();
       let fadeCount = 0;
       if (positions !== null) {
         for (const [node, position] of positions) {
@@ -279,7 +187,6 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
         }
       }
       const shouldAnimate =
-        released === null &&
         animate &&
         positions !== null &&
         !reducedMotion?.matches &&
@@ -341,7 +248,14 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
                 ],
                 motionTiming,
               );
-              track(entering, node, { animation, travel });
+              entering.set(node, { animation, travel });
+              animation.addEventListener(
+                "finish",
+                () => {
+                  if (entering.get(node)?.animation === animation) entering.delete(node);
+                },
+                { once: true },
+              );
             }
             continue;
           }
@@ -362,28 +276,21 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
       }
       positions = next;
     },
-    /** Capture transformed rows before dnd-kit clears its preview. Retain
-     * layout boxes so the release commit reads only the changed range. */
+    /** Called on drag release, before the commit that clears dnd-kit's
+     * transforms. Takes every row's visual top, including the lifted row
+     * under the pointer and the peers holding the label gaps open, so the
+     * next update glides each of them into its committed slot. */
     release() {
-      const baseline = positions;
       suspend();
-      positions = baseline;
       const origin = parent.getBoundingClientRect().top;
       released = new Map(
         Array.from(parent.children)
-          .filter(
-            (node): node is HTMLElement =>
-              node instanceof HTMLElement &&
-              !exiting.has(node) &&
-              (typeof rowKey(node) !== "string" || node.hasAttribute("data-sidebar-row-displaced")),
-          )
+          .filter((node): node is HTMLElement => node instanceof HTMLElement && !exiting.has(node))
           .map((node) => [node, node.getBoundingClientRect().top - origin]),
       );
     },
     suspend,
     dispose() {
-      stopObserving?.();
-      swaps?.disconnect();
       suspend();
       disposed = true;
     },
