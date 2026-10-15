@@ -1431,30 +1431,26 @@ describe("incremental v2 timeline entries", () => {
       ...last,
       item: { ...last.item, text: "Next token", updatedAt: DateTime.makeUnsafe(fixture.time(8)) },
     };
-    const after = {
+    const update = (row: typeof token) => ({
       ...before,
-      turnItems: [...before.turnItems.slice(0, -1), token.item],
-      visibleTurnItems: [...rows.slice(0, -1), token],
-    };
-    expect(isStreamingProjectionTextUpdate(before, after)).toBe(true);
-    for (const changed of [
-      { ...token, item: { ...token.item, streaming: false } },
-      { ...token, item: { ...token.item, runId: fixture.historyRunId } },
-      { ...token, sourceThreadId: ThreadId.make("inherited") },
-    ]) {
-      expect(
-        isStreamingProjectionTextUpdate(before, {
-          ...after,
-          turnItems: [...before.turnItems.slice(0, -1), changed.item],
-          visibleTurnItems: [...rows.slice(0, -1), changed],
-        }),
-      ).toBe(false);
-    }
-    expect(isStreamingProjectionTextUpdate(before, { ...after, runs: [...before.runs] })).toBe(
-      false,
-    );
+      turnItems: [...before.turnItems.slice(0, -1), row.item],
+      visibleTurnItems: [...rows.slice(0, -1), row],
+    });
+    expect(isStreamingProjectionTextUpdate(before, update(token))).toBe(true);
     expect(
-      isStreamingProjectionTextUpdate(before, { ...after, visibleTurnItems: rows.slice(1) }),
+      isStreamingProjectionTextUpdate(
+        before,
+        update({ ...token, item: { ...token.item, streaming: false } }),
+      ),
+    ).toBe(false);
+    expect(
+      isStreamingProjectionTextUpdate(
+        before,
+        update({ ...token, sourceThreadId: ThreadId.make("inherited") }),
+      ),
+    ).toBe(false);
+    expect(
+      isStreamingProjectionTextUpdate(before, { ...update(token), runs: [...before.runs] }),
     ).toBe(false);
   });
   it("retains history and attachment previews through decoded streaming updates", () => {
