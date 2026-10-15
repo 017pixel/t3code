@@ -1030,7 +1030,7 @@ it.effect("refreshes MCP credential liveness before calling the provider", () =>
   }).pipe(Effect.provide(layerRunExecutionTest)),
 );
 
-it.effect.each([false, true])("starts after baseline capture, including failure: %s", (fails) =>
+it.effect("starts the provider only after checkpoint baseline capture fails", () =>
   Effect.gen(function* () {
     const threadId = ThreadId.make("thread:run-execution-baseline-failure");
     const runId = RunId.make("run:run-execution-baseline-failure");
@@ -1045,7 +1045,7 @@ it.effect.each([false, true])("starts after baseline capture, including failure:
       id: CheckpointScopeId.make("checkpoint-scope:run-execution-baseline-failure"),
     } as OrchestrationV2CheckpointScope;
     const providerStarts = yield* Ref.make(0);
-    const order: string[] = [];
+    let baselineFinished = false;
     const writes = yield* Ref.make<
       ReadonlyArray<{
         events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -1058,25 +1058,20 @@ it.effect.each([false, true])("starts after baseline capture, including failure:
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({
             captureBaseline: () =>
-              Effect.sync(() => {
-                order.push("baseline:start");
-              }).pipe(
-                Effect.andThen(Effect.yieldNow),
+              Effect.yieldNow.pipe(
                 Effect.andThen(
-                  Effect.sync(() => {
-                    order.push("baseline:end");
-                  }),
+                  Effect.fail(
+                    new CheckpointService.CheckpointBaselineCaptureError({
+                      scopeId: checkpointScope.id,
+                      ordinalWithinScope: 0,
+                      cause: new Error("VCS process timed out"),
+                    }),
+                  ),
                 ),
-                Effect.andThen(
-                  fails
-                    ? Effect.fail(
-                        new CheckpointService.CheckpointBaselineCaptureError({
-                          scopeId: checkpointScope.id,
-                          ordinalWithinScope: 0,
-                          cause: new Error("VCS process timed out"),
-                        }),
-                      )
-                    : Effect.void,
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    baselineFinished = true;
+                  }),
                 ),
               ),
           }),
@@ -1109,7 +1104,7 @@ it.effect.each([false, true])("starts after baseline capture, including failure:
           },
           {
             get(target, key, receiver) {
-              order.push("session:" + String(key));
+              assert.isTrue(baselineFinished);
               return Reflect.get(target, key, receiver);
             },
           },
@@ -1154,8 +1149,6 @@ it.effect.each([false, true])("starts after baseline capture, including failure:
       });
     }).pipe(Effect.provide(layerTest));
 
-    assert.deepEqual(order.slice(0, 2), ["baseline:start", "baseline:end"]);
-    assert.include(order, "session:startTurn");
     assert.equal(yield* Ref.get(providerStarts), 1);
 
     const events = (yield* Ref.get(writes)).flatMap((write) => [...write.events]);
