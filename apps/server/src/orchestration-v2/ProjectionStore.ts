@@ -5360,7 +5360,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     WHERE maintenance.run_id = (
                       SELECT latest.run_id FROM orchestration_v2_projection_runs latest
                       WHERE latest.thread_id = t.thread_id
-                        AND json_extract(latest.payload_json, '$.startedAt') IS NOT NULL
+                        AND latest.status <> 'queued'
+                        AND NOT (
+                          latest.status = 'cancelled'
+                          AND json_extract(latest.payload_json, '$.startedAt') IS NULL
+                        )
                       ORDER BY latest.ordinal DESC, latest.run_id DESC LIMIT 1
                     ) AND json_extract(maintenance.payload_json, '$.idleCompactionOfRunId') IS NOT NULL
                   )

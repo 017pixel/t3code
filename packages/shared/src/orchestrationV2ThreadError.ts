@@ -12,15 +12,19 @@ export function isUserFacingRun(run: Pick<OrchestrationV2Run, "idleCompactionOfR
 
 /**
  * Whether the provider session's last error came from idle compaction: the
- * newest run that actually started is maintenance. Queued or never-started
- * runs cannot own a session error. Shell SQL mirrors this.
+ * newest executed run is maintenance. Queued runs and runs cancelled before
+ * starting cannot own a session error; one that failed during startup can.
+ * Shell SQL mirrors this.
  */
 export function sessionErrorIsIdleMaintenance(
-  runs: ReadonlyArray<Pick<OrchestrationV2Run, "idleCompactionOfRunId" | "ordinal" | "startedAt">>,
+  runs: ReadonlyArray<
+    Pick<OrchestrationV2Run, "idleCompactionOfRunId" | "ordinal" | "startedAt" | "status">
+  >,
 ): boolean {
   let latest: (typeof runs)[number] | null = null;
   for (const run of runs) {
-    if (run.startedAt === null) continue;
+    if (run.status === "queued") continue;
+    if (run.status === "cancelled" && run.startedAt === null) continue;
     if (latest === null || run.ordinal > latest.ordinal) latest = run;
   }
   return latest !== null && !isUserFacingRun(latest);

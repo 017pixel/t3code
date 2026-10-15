@@ -46,17 +46,10 @@ export function isOrchestrationV2TurnItemVisible(input: {
   readonly items: ReadonlyArray<TimelineTurnItem>;
 }): boolean {
   const { item } = input;
-  if (
-    item.type === "user_message" &&
-    input.runs.some((run) => run.id === item.runId && run.idleCompactionOfRunId !== undefined)
-  )
-    return false;
-  if (
-    item.runId !== null &&
-    input.runs.some((run) => run.id === item.runId && run.status === "rolled_back")
-  ) {
-    return false;
-  }
+  const run = item.runId === null ? undefined : input.runs.find((row) => row.id === item.runId);
+  // Idle compaction shows only its compaction row, never its prompt or errors.
+  if (item.type !== "compaction" && run?.idleCompactionOfRunId !== undefined) return false;
+  if (run?.status === "rolled_back") return false;
 
   // A queued message is composer state, not conversation history. When its run
   // is cancelled the input never reached the provider, so it must not surface
@@ -101,8 +94,7 @@ export function createOrchestrationV2TurnItemVisibility(input: {
     input.items.filter((item) => item.type === "run_interrupt_request").map((item) => item.runId),
   );
   return (item) => {
-    if (item.type === "user_message" && item.runId !== null && idleRuns.has(item.runId))
-      return false;
+    if (item.type !== "compaction" && item.runId !== null && idleRuns.has(item.runId)) return false;
     const status = item.runId === null ? undefined : statuses.get(item.runId);
     if (status === "rolled_back") return false;
     if (
