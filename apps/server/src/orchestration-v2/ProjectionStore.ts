@@ -1024,7 +1024,6 @@ type ThreadReadRow = PayloadRow & {
 
 type ShellThreadRow = ThreadReadRow & {
   readonly thread_id: string;
-  readonly updated_at: string;
   readonly forked_from_run_source_thread_id: string | null;
   readonly latest_run_id: string | null;
   readonly latest_run_status: string | null;
@@ -1238,26 +1237,6 @@ const decodeReadRows = <A, B, E, R>(
       values.push(yield* decode(rows[index]!));
     }
     return values;
-  });
-
-const THREAD_READ_BATCH_SIZE = 64;
-type ThreadReadCursor = { readonly updatedAt: string; readonly threadId: string };
-
-// Call inside the read transaction to keep one snapshot while bounding native SQL work.
-const readThreadRowsInBatches = <A extends { thread_id: string; updated_at: string }, E, R>(
-  read: (after: ThreadReadCursor | undefined) => Effect.Effect<ReadonlyArray<A>, E, R>,
-) =>
-  Effect.gen(function* () {
-    const rows: Array<A> = [];
-    let after: ThreadReadCursor | undefined;
-    while (true) {
-      const batch = yield* read(after);
-      rows.push(...batch);
-      if (batch.length < THREAD_READ_BATCH_SIZE) return rows;
-      const last = batch[batch.length - 1]!;
-      after = { updatedAt: last.updated_at, threadId: last.thread_id };
-      yield* Effect.yieldNow;
-    }
   });
 
 function messageIdForTurnItem(item: OrchestrationV2TurnItem): string | null {
@@ -5525,12 +5504,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         unsettledOnly = false,
         compactPullRequests = false,
       }: ShellSnapshotOptions = {},
-      after?: ThreadReadCursor,
     ) =>
       sql<ShellThreadRow>`
             SELECT
               t.thread_id,
-              t.updated_at,
               CASE
                 WHEN summary.thread_id IS NULL THEN t.payload_json
                 ELSE ${compactPullRequests ? sql`summary.compact_payload_json` : sql`summary.payload_json`}
@@ -5706,11 +5683,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 candidate.ordinal DESC, candidate.run_id DESC
               LIMIT 1
             ) AND blocked.status = 'failed'
-            WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
-              after === undefined
-                ? sql``
-                : sql` AND (t.updated_at, t.thread_id) > (${after.updatedAt}, ${after.threadId})`
-            }${projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`}${
+            WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`}${
               location === "active"
                 ? sql` AND t.archived_at IS NULL`
                 : location === "archive"
@@ -5722,7 +5695,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 : sql``
             }
             ORDER BY t.updated_at ASC, t.thread_id ASC
-            ${threadId === undefined && location === "active" ? sql`LIMIT ${THREAD_READ_BATCH_SIZE}` : sql``}
           `;
 
     const selectShellRunRows = (threadIds?: ReadonlyArray<ThreadId>) =>
@@ -5854,9 +5826,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             // Settlement needs activity timestamps, not item counts, run history,
             // provider sessions or inherited fork rows. Reject parked and busy
             // threads before loading the remaining candidates' background work.
-            const rows = yield* readThreadRowsInBatches(
-              (after) => sql<SettlementThreadRow & { readonly updated_at: string }>`
-            SELECT t.thread_id, t.updated_at,
+            const rows = yield* sql<SettlementThreadRow>`
+            SELECT t.thread_id,
               CASE WHEN summary.thread_id IS NULL THEN t.payload_json ELSE summary.compact_payload_json END AS payload_json,
               summary.thread_id IS NOT NULL AS read_payload,
               r.run_id AS latest_run_id,
@@ -5889,7 +5860,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               LIMIT 1
             )
             WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}
-              ${after === undefined ? sql`` : sql` AND (t.updated_at, t.thread_id) > (${after.updatedAt}, ${after.threadId})`}
               -- These match the sweep index (migration 061), which holds the values.
               AND t.archived_at IS NULL
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
@@ -5905,9 +5875,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE request.thread_id = t.thread_id AND request.status = 'pending'
               )
             ORDER BY t.updated_at ASC, t.thread_id ASC
-            LIMIT ${THREAD_READ_BATCH_SIZE}
-          `,
-            );
+          `;
             if (rows.length === 0) {
               return { rows, providerThreadRows: [], pendingTurnItemRows: [] };
             }
@@ -5984,20 +5952,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       options,
     ) =>
       Effect.gen(function* () {
-        const rows = yield* sql.withTransaction(
-          readThreadRowsInBatches(
-            (after) => sql<
-              ThreadReadRow & { readonly thread_id: string; readonly updated_at: string }
-            >`
+        const rows = yield* sql<ThreadReadRow>`
           SELECT
-            t.thread_id, t.updated_at,
             CASE WHEN summary.thread_id IS NULL THEN t.payload_json ELSE summary.payload_json END AS payload_json,
             summary.thread_id IS NOT NULL AS read_payload
           FROM orchestration_v2_projection_threads t
           LEFT JOIN orchestration_v2_projection_thread_reads summary
             ON summary.thread_id = t.thread_id AND summary.source_stale = 0
           WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}
-            ${after === undefined ? sql`` : sql` AND (t.updated_at, t.thread_id) > (${after.updatedAt}, ${after.threadId})`}
             AND t.archived_at IS NULL
             -- Read from the sweep index (migration 061) rather than each payload.
             AND json_array_length(t.payload_json, '$.pullRequests') > 0
@@ -6013,10 +5975,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 : sql``
             }
           ORDER BY t.updated_at ASC, t.thread_id ASC
-          LIMIT ${THREAD_READ_BATCH_SIZE}
-        `,
-          ),
-        );
+        `;
         return yield* decodeReadRows(rows, (row) =>
           decodeThreadReadRow(row, false).pipe(
             Effect.map((thread): ProjectionThreadPullRequests => ({
@@ -6196,9 +6155,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const readShellSnapshotRows = (options: ShellSnapshotOptions | undefined) =>
       Effect.gen(function* () {
-        const targetThreadRows = yield* options?.location === "active"
-          ? readThreadRowsInBatches((after) => selectShellThreadRows(undefined, options, after))
-          : selectShellThreadRows(undefined, options);
+        const targetThreadRows = yield* selectShellThreadRows(undefined, options);
         const targetThreadIds = new Set(
           targetThreadRows.map((row) => ThreadId.make(row.thread_id)),
         );

@@ -2727,30 +2727,12 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           .filter((id) => id === readThreadId || id === laterThreadId);
 
       yield* createThread(readThreadId);
-      // Equal timestamps across several SQL pages must retain every row in id order.
-      const pagedIds = Array.from({ length: 130 }, (_, index) =>
-        ThreadId.make(`thread:shell-read:page:${String(index).padStart(3, "0")}`),
-      );
-      for (const id of pagedIds) yield* createThread(id);
-      const options = {
-        location: "active" as const,
-        projectId: ProjectId.make("project:shell-read"),
-      };
-      const decode = yield* sql.withTransaction(projectionStore.readShellSnapshot(options));
+      const decode = yield* sql.withTransaction(projectionStore.readShellSnapshot());
       // Commits between the read and the decode, as another request can while
       // the HTTP and WebSocket loaders decode outside their transaction.
       yield* createThread(laterThreadId);
 
-      const decoded = yield* decode;
-      assert.deepEqual(shellIds(decoded), [readThreadId]);
-      assert.deepEqual(
-        decoded.threads.map((thread) => thread.id),
-        [readThreadId, ...pagedIds],
-      );
-      assert.deepEqual(
-        (yield* projectionStore.getShellSnapshot(options)).threads.map((thread) => thread.id),
-        [laterThreadId, readThreadId, ...pagedIds],
-      );
+      assert.deepEqual(shellIds(yield* decode), [readThreadId]);
       assert.sameMembers(shellIds(yield* projectionStore.getShellSnapshot()), [
         readThreadId,
         laterThreadId,
