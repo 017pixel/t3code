@@ -1,3 +1,4 @@
+import { cacheInOwnerScope } from "@t3tools/shared/lazyService";
 import type { ForkSessionResult } from "@anthropic-ai/claude-agent-sdk";
 import type {
   ClaudeAgentSdkQueryRunnerError,
@@ -7,13 +8,8 @@ import type {
   ClaudeAgentSdkSubagentLookupInput,
 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as Context from "effect/Context";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import type * as Scope from "effect/Scope";
-import type * as Crypto from "effect/Crypto";
-import type * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 
 export class ClaudeAgentSdkQueryRunner extends Context.Service<
   ClaudeAgentSdkQueryRunner,
@@ -33,22 +29,14 @@ export class ClaudeAgentSdkQueryRunner extends Context.Service<
   }
 >()("t3/provider/ClaudeAgentSdkQueryRunner") {}
 
-export const layer: Layer.Layer<
-  ClaudeAgentSdkQueryRunner,
-  never,
-  Crypto.Crypto | ProviderEventLoggers.ProviderEventLoggers
-> = Layer.effect(
+export const layer = Layer.effect(
   ClaudeAgentSdkQueryRunner,
   Effect.gen(function* () {
-    const context = yield* Effect.context<Layer.Services<typeof layer> | Scope.Scope>();
-    // A failed load is not kept, so the next session retries it.
-    const service = yield* Effect.cachedWithTTL(
+    const service = yield* cacheInOwnerScope(
       Effect.promise(() => import("../orchestration-v2/Adapters/ClaudeAdapterV2.ts")).pipe(
         Effect.flatMap((adapter) => Layer.build(adapter.layerQueryRunner)),
         Effect.map((services) => Context.get(services, ClaudeAgentSdkQueryRunner)),
-        Effect.provideContext(context),
       ),
-      (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
     );
     return ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: service.pipe(Effect.flatMap((value) => value.allocateSessionId)),

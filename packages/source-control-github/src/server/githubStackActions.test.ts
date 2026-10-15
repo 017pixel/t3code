@@ -7,7 +7,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as FileSystem from "effect/FileSystem";
 import * as Redacted from "effect/Redacted";
 import { ChildProcessSpawner } from "effect/process";
-import * as GitHubApi from "./GitHubApiTag.ts";
+import * as GitHubApi from "./GitHubApi.ts";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 import { runGitHubStackAction as runStackAction } from "./githubStackActions.ts";
 

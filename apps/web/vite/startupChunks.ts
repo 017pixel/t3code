@@ -13,9 +13,6 @@ const STARTUP_MODULES = {
 };
 // Group static startup graphs without pulling chat-only code into other routes.
 // Bootstrap stays separate so it can report main's chunk-load failures.
-const MAIN_SHARED_SET_SIZE = 100_000;
-const sharedChunkName = (owner: string | undefined) =>
-  owner === undefined || owner in STARTUP_MODULES ? null : owner;
 
 export function startupChunksPlugin(): Plugin {
   let root = process.cwd();
@@ -62,17 +59,6 @@ export function startupChunksPlugin(): Plugin {
                     // Otherwise excluded bootstrap helpers are recaptured through main's imports.
                     includeDependenciesRecursively: false,
                   })),
-                  {
-                    name: (id: string) =>
-                      sharedChunkName(startupModuleOwners.get(normalizePath(id))),
-                    debugName: "startup-shared",
-                    tags: ["$initial" as const],
-                    test: (id: string) =>
-                      !id.startsWith("\0") &&
-                      sharedChunkName(startupModuleOwners.get(normalizePath(id))) !== null,
-                    entriesAware: false,
-                    includeDependenciesRecursively: false,
-                  },
                 ],
               },
             },
@@ -104,65 +90,6 @@ export function startupChunksPlugin(): Plugin {
           if (!bootstrapModules.has(id) && !owners.has(id)) owners.set(id, name);
         }
       }
-      const codeLength = (id: string) =>
-        this.getModuleInfo(moduleIds.get(id) ?? id)?.code?.length ?? 0;
-      // Group nested routes together: settings.general renders inside settings.
-      const startupEntries = new Set(
-        Object.values(STARTUP_MODULES).map((entry) => normalizePath(NodePath.join(root, entry))),
-      );
-      const routesDir = normalizePath(NodePath.join(root, "src/routes/"));
-      const families = new Map<string, Array<string>>();
-      for (const id of staticClosure(normalizePath(NodePath.join(root, STARTUP_MODULES.main)))) {
-        for (const lazyId of this.getModuleInfo(moduleIds.get(id) ?? id)?.dynamicallyImportedIds ??
-          []) {
-          const entry = normalizePath(lazyId);
-          const route = entry.startsWith(routesDir)
-            ? entry.slice(routesDir.length).split(/[.?]/)[0]
-            : undefined;
-          // `_` routes render inside the chat layout.
-          if (startupEntries.has(entry) || route?.startsWith("_")) continue;
-          const family = route ?? entry;
-          families.set(family, [...(families.get(family) ?? []), entry]);
-        }
-      }
-      const familyGraphs = [...families].map(
-        ([family, entries]) =>
-          [NodePath.basename(family).split(".")[0], staticClosure(...entries)] as const,
-      );
-      // Shared chunks import only supersets of their users, avoiding unrelated chat code.
-      const setSizes = new Map<string, number>();
-      for (const [id, owner] of owners) {
-        if (owner === "main") continue;
-        const users = familyGraphs.filter(([, graph]) => graph.has(id)).map(([family]) => family);
-        if (users.length === 0) continue;
-        const set = `${[...new Set(users)].sort().join("-")}-shared`;
-        owners.set(id, set);
-        setSizes.set(set, (setSizes.get(set) ?? 0) + codeLength(id));
-      }
-      // Absorb small sets only when their imports move too, so main stays self-contained.
-      const toMain = new Set(
-        [...owners].flatMap(([id, owner]) =>
-          (setSizes.get(owner) ?? Infinity) < MAIN_SHARED_SET_SIZE ? [id] : [],
-        ),
-      );
-      for (let changed = true; changed;) {
-        changed = false;
-        for (const id of toMain) {
-          const imports = this.getModuleInfo(moduleIds.get(id) ?? id)?.importedIds ?? [];
-          if (
-            imports.some((dependency) => {
-              const owner = owners.get(normalizePath(dependency));
-              return (
-                owner !== undefined && owner !== "main" && !toMain.has(normalizePath(dependency))
-              );
-            })
-          ) {
-            toMain.delete(id);
-            changed = true;
-          }
-        }
-      }
-      for (const id of toMain) owners.set(id, "main");
       startupModuleOwners = owners;
     },
     generateBundle: {

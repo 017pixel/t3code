@@ -38,7 +38,6 @@ import {
   subscribeOrchestrationV2Shell,
   subscribeOrchestrationV2Thread,
   withLateEditorConfig,
-  withConfigDeltas,
 } from "./ws.ts";
 
 it("accepts only the current orchestration protocol before websocket RPC setup", () => {
@@ -87,30 +86,6 @@ const settingsUpdated = (settings: object): ServerConfigStreamEvent => ({
   type: "settingsUpdated",
   payload: { settings: settings as ServerConfig["settings"] },
 });
-
-it.effect("sends config deltas and a conditional reconnect acknowledgement", () =>
-  Effect.gen(function* () {
-    const config = snapshotConfig({ providers: [] });
-    const snapshot: ServerConfigStreamEvent = { version: 1, type: "snapshot", config };
-    const first = yield* withConfigDeltas(
-      Stream.make(snapshot, snapshot, settingsUpdated({ enabled: true })),
-    ).pipe(Stream.runCollect);
-    assert.strictEqual(first.length, 2);
-    assert.strictEqual(first[0]?.type, "snapshot");
-    assert.strictEqual(first[1]?.type, "configDelta");
-    if (first[0]?.type !== "snapshot" || first[0].configVersion === undefined) return;
-    const reordered = {
-      ...snapshot,
-      config: Object.fromEntries(Object.entries(config).toReversed()) as ServerConfig,
-    };
-    const reconnect = yield* withConfigDeltas(Stream.make(reordered), first[0].configVersion).pipe(
-      Stream.runCollect,
-    );
-    assert.deepStrictEqual(reconnect, [
-      { version: 1, type: "configUnchanged", configVersion: first[0].configVersion },
-    ]);
-  }),
-);
 
 it.effect("resends late editors without rolling back updates already sent", () =>
   Effect.gen(function* () {

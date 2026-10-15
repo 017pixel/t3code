@@ -12,17 +12,11 @@ import {
   type EnvironmentCatalogState,
   enabledEnvironmentIds,
 } from "@t3tools/client-runtime/state/connections";
-import type { EnvironmentId, OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
-import { readBootSnapshot } from "../bootSnapshot";
-import {
-  bootHoldAtom,
-  environmentCatalog,
-  readBootCatalogState,
-  startBootCatalogRecorder,
-} from "../connection/catalog";
+import { environmentCatalog } from "../connection/catalog";
 import { primaryEnvironmentMissingAtom } from "../connection/platform";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { isHostedStaticApp } from "../hostedPairing";
@@ -30,93 +24,12 @@ import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 
 export const shellEnvironment = createShellEnvironmentAtoms(connectionAtomRuntime);
-const liveEnvironmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
-
-function readBootShell(environmentId: EnvironmentId): OrchestrationV2ShellSnapshot | null {
-  return readBootSnapshot()?.shells.get(environmentId) ?? null;
-}
-
-const bootOverlays = new Map<
-  EnvironmentId,
-  WeakMap<EnvironmentShellState, EnvironmentShellState>
->();
-
-// Boot data stands in for missing snapshots without replacing live status or errors.
-function withBootShell(
-  environmentId: EnvironmentId,
-  live: EnvironmentShellState,
-): EnvironmentShellState {
-  if (Option.isSome(live.snapshot) || live.status === "live") return live;
-  const boot = readBootShell(environmentId);
-  if (boot === null) return live;
-  let overlays = bootOverlays.get(environmentId);
-  if (overlays === undefined) {
-    overlays = new WeakMap();
-    bootOverlays.set(environmentId, overlays);
-  }
-  let overlay = overlays.get(live);
-  if (overlay === undefined) {
-    overlay = {
-      snapshot: Option.some(boot),
-      status: live.status === "empty" ? "cached" : live.status,
-      error: live.error,
-    };
-    overlays.set(live, overlay);
-  }
-  return overlay;
-}
-
-const EMPTY_LIVE_SHELL_STATE: EnvironmentShellState = {
-  snapshot: Option.none(),
-  status: "empty",
-  error: Option.none(),
-};
-const bootStateResults = new WeakMap<
-  EnvironmentShellState,
-  AsyncResult.AsyncResult<EnvironmentShellState, never>
->();
-
-function bootStateResult(state: EnvironmentShellState) {
-  let result = bootStateResults.get(state);
-  if (result === undefined) {
-    result = AsyncResult.success(state);
-    bootStateResults.set(state, result);
-  }
-  return result;
-}
-
-export const environmentShell = {
-  stateAtom: Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) => {
-      if (get(bootHoldAtom)) {
-        const held = withBootShell(environmentId, EMPTY_LIVE_SHELL_STATE);
-        if (held !== EMPTY_LIVE_SHELL_STATE) return bootStateResult(held);
-      }
-      const live = get(liveEnvironmentShell.stateAtom(environmentId));
-      if (AsyncResult.isFailure(live)) return live;
-      const liveState = Option.getOrElse(AsyncResult.value(live), () => EMPTY_LIVE_SHELL_STATE);
-      const shown = withBootShell(environmentId, liveState);
-      return shown === liveState ? live : bootStateResult(shown);
-    }).pipe(Atom.withLabel(`web-environment-shell-state:${environmentId}`)),
-  ),
-  stateValueAtom: Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) => {
-      if (get(bootHoldAtom)) {
-        const held = withBootShell(environmentId, EMPTY_LIVE_SHELL_STATE);
-        if (held !== EMPTY_LIVE_SHELL_STATE) return held;
-      }
-      return withBootShell(environmentId, get(liveEnvironmentShell.stateValueAtom(environmentId)));
-    }).pipe(Atom.withLabel(`web-environment-shell-state-value:${environmentId}`)),
-  ),
-};
+export const environmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
 export const environmentSnapshotAtom = createEnvironmentSnapshotAtom(environmentShell.stateAtom);
 
 export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
-  const catalog = get(environmentCatalog.catalogValueAtom);
-  if (
-    catalog !== readBootCatalogState() &&
-    Option.isNone(AsyncResult.value(get(environmentCatalog.catalogAtom)))
-  ) {
+  const catalog = AsyncResult.value(get(environmentCatalog.catalogAtom));
+  if (Option.isNone(catalog)) {
     return false;
   }
   // Wait for primary discovery before treating a persisted catalog as complete.
@@ -124,13 +37,13 @@ export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
     !isHostedStaticApp() &&
     !isLocalEnvironmentDisabled() &&
     !get(primaryEnvironmentMissingAtom) &&
-    !Array.from(catalog.entries.values()).some(
+    !Array.from(catalog.value.entries.values()).some(
       (entry) => entry.target._tag === "PrimaryConnectionTarget",
     )
   ) {
     return false;
   }
-  for (const environmentId of enabledEnvironmentIds(catalog)) {
+  for (const environmentId of enabledEnvironmentIds(catalog.value)) {
     if (Option.isSome(get(environmentShell.stateValueAtom(environmentId)).snapshot)) {
       continue;
     }
@@ -150,24 +63,13 @@ export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
   return true;
 }).pipe(Atom.withLabel("web-all-environment-shells-bootstrapped"));
 
-// Subscribe to live shells so connecting proceeds while the display atoms hold boot data.
-const liveEnvironmentShellsAtom = Atom.make((get) => {
-  const catalog = AsyncResult.value(get(environmentCatalog.catalogAtom));
-  if (Option.isNone(catalog)) return;
-  for (const environmentId of enabledEnvironmentIds(catalog.value)) {
-    get(liveEnvironmentShell.stateAtom(environmentId));
-  }
-}).pipe(Atom.withLabel("web-live-environment-shells"));
-
 let environmentShellsStarted = false;
 
 // Keep the shell mounted for the session, starting cache reads and connections before render.
 export function startEnvironmentShells(): void {
   if (environmentShellsStarted) return;
   environmentShellsStarted = true;
-  appAtomRegistry.mount(liveEnvironmentShellsAtom);
   appAtomRegistry.mount(allEnvironmentShellsBootstrappedAtom);
-  startBootCatalogRecorder();
 }
 
 /**

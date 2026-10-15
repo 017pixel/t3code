@@ -24,7 +24,6 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "./config.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
@@ -147,18 +146,15 @@ export const makeCommandGate = Effect.gen(function* () {
 const recordStartupHeartbeat = Effect.gen(function* () {
   const analytics = yield* AnalyticsService.AnalyticsService;
   const projects = yield* ProjectService.ProjectService;
-  const sql = yield* SqlClient.SqlClient;
+  const threads = yield* ThreadManagement.ThreadManagementService;
 
   const { threadCount, projectCount } = yield* Effect.all({
     projects: projects.snapshot,
-    // The threads the shell snapshot lists, counted without building it.
-    threads: sql<{ readonly count: number }>`
-      SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
-    `,
+    threads: threads.getShellSnapshot(),
   }).pipe(
-    Effect.map(({ projects: projectSnapshot, threads: rows }) => ({
+    Effect.map(({ projects: projectSnapshot, threads: shellSnapshot }) => ({
       projectCount: projectSnapshot.projects.length,
-      threadCount: rows[0]?.count ?? 0,
+      threadCount: shellSnapshot.threads.length + shellSnapshot.archivedThreads.length,
     })),
     Effect.catch((cause) =>
       Effect.logWarning("failed to gather V2 startup counts for telemetry", {
@@ -467,37 +463,34 @@ const make = (options?: StartupOptions) =>
     );
 
     const startup = Effect.gen(function* () {
-      // Both runtimes read independent files and must be ready before recovery.
-      yield* Effect.all(
-        [
-          runStartupPhase(
-            "keybindings.start",
-            keybindings.start.pipe(
-              Effect.catch((error) =>
-                Effect.logWarning("failed to start keybindings runtime", {
-                  path: error.configPath,
-                  detail: error.detail,
-                  cause: error.cause,
-                }),
-              ),
-            ),
+      yield* Effect.logDebug("startup phase: starting keybindings runtime");
+      yield* runStartupPhase(
+        "keybindings.start",
+        keybindings.start.pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to start keybindings runtime", {
+              path: error.configPath,
+              detail: error.detail,
+              cause: error.cause,
+            }),
           ),
-          runStartupPhase(
-            "settings.start",
-            serverSettings.start.pipe(
-              Effect.catch((error) =>
-                Effect.logWarning("failed to start server settings runtime", {
-                  path: error.settingsPath,
-                  operation: error.operation,
-                  providerInstanceId: error.providerInstanceId,
-                  environmentVariable: error.environmentVariable,
-                  cause: error.cause,
-                }),
-              ),
-            ),
+        ),
+      );
+
+      yield* Effect.logDebug("startup phase: starting server settings runtime");
+      yield* runStartupPhase(
+        "settings.start",
+        serverSettings.start.pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to start server settings runtime", {
+              path: error.settingsPath,
+              operation: error.operation,
+              providerInstanceId: error.providerInstanceId,
+              environmentVariable: error.environmentVariable,
+              cause: error.cause,
+            }),
           ),
-        ],
-        { concurrency: "unbounded", discard: true },
+        ),
       );
 
       const welcomeBase = yield* resolveWelcomeBase;

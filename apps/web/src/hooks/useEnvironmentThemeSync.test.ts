@@ -24,7 +24,6 @@ async function setupThemeSync(mode: "dark" | "system" = "dark") {
     style: {
       setProperty: (name: string, value: string) => styles.set(name, value),
       removeProperty: (name: string) => styles.delete(name),
-      getPropertyValue: (name: string) => styles.get(name) ?? "",
     },
     classList: {
       add: (name: string) => classes.add(name),
@@ -34,11 +33,7 @@ async function setupThemeSync(mode: "dark" | "system" = "dark") {
       contains: (name: string) => classes.has(name),
     },
   };
-  vi.stubGlobal("document", {
-    documentElement: root,
-    body: { style: {} },
-    querySelectorAll: () => [{ setAttribute: () => undefined }],
-  });
+  vi.stubGlobal("document", { documentElement: root });
   vi.stubGlobal("window", {
     localStorage: {
       getItem: (key: string) => storage.get(key) ?? null,

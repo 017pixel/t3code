@@ -59,6 +59,29 @@ const encodeShellSnapshotJson = Schema.encodeEffect(
   Schema.toCodecJson(OrchestrationV2ShellSnapshot),
 );
 
+const sharedStack = {
+  kind: "native" as const,
+  id: "stack:shared",
+  number: 1,
+  url: "https://github.com/pingdotgg/t3code/stack/1",
+  base: "main",
+  layers: [7, 8, 9].map((number) => ({
+    number,
+    headBranch: `branch-${number}`,
+    state: "open" as const,
+  })),
+};
+const sharedStackLink: ThreadPullRequestLink = {
+  host: "github.com",
+  repository: "pingdotgg/t3code",
+  number: 7,
+  url: "https://github.com/pingdotgg/t3code/pull/7",
+  source: "agent",
+  linkedAt: "2026-06-20T00:00:00.000Z",
+  snapshot: null,
+  stack: sharedStack,
+};
+
 function session(client: WsRpcProtocolClient, completionMarker = true): RpcSession.RpcSession {
   return {
     client,
@@ -73,28 +96,8 @@ function session(client: WsRpcProtocolClient, completionMarker = true): RpcSessi
 describe("environment shell synchronization", () => {
   it.effect("restores shared link lists and native stacks after deferred HTTP decoding", () =>
     Effect.gen(function* () {
-      const stack = {
-        kind: "native" as const,
-        id: "stack:shared",
-        number: 1,
-        url: "https://github.com/pingdotgg/t3code/stack/1",
-        base: "main",
-        layers: [7, 8, 9].map((number) => ({
-          number,
-          headBranch: `branch-${number}`,
-          state: "open" as const,
-        })),
-      };
-      const link: ThreadPullRequestLink = {
-        host: "github.com",
-        repository: "pingdotgg/t3code",
-        number: 7,
-        url: "https://github.com/pingdotgg/t3code/pull/7",
-        source: "agent",
-        linkedAt: "2026-06-20T00:00:00.000Z",
-        snapshot: null,
-        stack,
-      };
+      const link = sharedStackLink;
+      const stack = sharedStack;
       const expected = [
         link,
         { ...link, number: 8 },
@@ -219,28 +222,7 @@ describe("environment shell synchronization", () => {
       const state = yield* SubscriptionRef.get(shellState);
       expect(state.status).toBe("live");
       expect(Option.getOrThrow(state.snapshot)).toEqual(LIVE_SHELL_SNAPSHOT);
-      const stack = {
-        kind: "native" as const,
-        id: "stack:live",
-        number: 1,
-        url: "https://github.com/pingdotgg/t3code/stack/1",
-        base: "main",
-        layers: [7, 8].map((number) => ({
-          number,
-          headBranch: `branch-${number}`,
-          state: "open" as const,
-        })),
-      };
-      const link: ThreadPullRequestLink = {
-        host: "github.com",
-        repository: "pingdotgg/t3code",
-        number: 7,
-        url: "https://github.com/pingdotgg/t3code/pull/7",
-        source: "agent",
-        linkedAt: "2026-06-20T00:00:00.000Z",
-        snapshot: null,
-        stack,
-      };
+      const link = sharedStackLink;
       yield* Queue.offer(events, {
         kind: "thread.updated",
         sequence: 2,

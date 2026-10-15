@@ -6,7 +6,6 @@ import {
   useState,
   type ComponentProps,
   type CSSProperties,
-  type RefObject,
 } from "react";
 import { useElementState } from "../../hooks/useElementState";
 import { ChatCanvasContext } from "./ChatCanvasContext";
@@ -19,12 +18,12 @@ import { observeResize } from "../../lib/observeResize";
  * canvas decides when chat moves over to make room for them.
  */
 export function ChatCanvas({
-  composerOverlayRef,
+  composerOverlayElement,
   detailsCardTopInset = 0,
   children,
   ...props
 }: Omit<ComponentProps<"div">, "className" | "style" | "ref"> & {
-  composerOverlayRef: RefObject<HTMLElement | null> | null;
+  composerOverlayElement: HTMLElement | null;
   detailsCardTopInset?: number;
 }) {
   const elementRef = useRef<HTMLDivElement | null>(null);
@@ -73,7 +72,6 @@ export function ChatCanvas({
   useLayoutEffect(() => {
     const element = elementRef.current;
     const probe = widthProbeRef.current;
-    const composerOverlayElement = composerOverlayRef?.current;
     if (!element || !probe) return;
     const findBar =
       detailsCardTopInset > 0 ? element.querySelector<HTMLElement>("[data-thread-find-bar]") : null;
@@ -109,7 +107,7 @@ export function ChatCanvas({
     if (composerOverlayElement) observed.push(composerOverlayElement);
     if (timelineElement) observed.push(timelineElement);
     return observeResize(observed, measure);
-  }, [composerOverlayRef, timelineElement, detailsCardTopInset]);
+  }, [composerOverlayElement, timelineElement, detailsCardTopInset]);
   const context = useMemo(() => {
     const container = { width: measurements.width, height: measurements.height };
     const findBar =

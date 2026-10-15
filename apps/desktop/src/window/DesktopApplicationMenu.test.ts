@@ -57,23 +57,23 @@ const layerElectronDialog = Layer.succeed(ElectronDialog.ElectronDialog, {
   showErrorBox: () => Effect.void,
 } satisfies ElectronDialog.ElectronDialog["Service"]);
 
+const desktopUpdates = {
+  getState: Effect.die("unexpected getState"),
+  isActionActive: Effect.succeed(false),
+  isInstallActive: Effect.succeed(false),
+  subscribe: Effect.die("unexpected subscribe"),
+  emitState: Effect.void,
+  disabledReason: Effect.succeedNone,
+  configure: Effect.void,
+  whenConfigured: Effect.void,
+  setChannel: () => Effect.die("unexpected setChannel"),
+  check: () => Effect.die("unexpected check"),
+  download: Effect.die("unexpected download"),
+  install: Effect.die("unexpected install"),
+  installPrepared: () => Effect.die("unexpected installPrepared"),
+} satisfies DesktopUpdates.DesktopUpdates["Service"];
 const layerDesktopUpdates = (updates: Partial<DesktopUpdates.DesktopUpdates["Service"]>) =>
-  Layer.succeed(DesktopUpdates.DesktopUpdates, {
-    getState: Effect.die("unexpected getState"),
-    isActionActive: Effect.succeed(false),
-    isInstallActive: Effect.succeed(false),
-    subscribe: Effect.die("unexpected subscribe"),
-    emitState: Effect.void,
-    disabledReason: Effect.succeedNone,
-    configure: Effect.void,
-    whenConfigured: Effect.void,
-    setChannel: () => Effect.die("unexpected setChannel"),
-    check: () => Effect.die("unexpected check"),
-    download: Effect.die("unexpected download"),
-    install: Effect.die("unexpected install"),
-    installPrepared: () => Effect.die("unexpected installPrepared"),
-    ...updates,
-  } satisfies DesktopUpdates.DesktopUpdates["Service"]);
+  Layer.succeed(DesktopUpdates.DesktopUpdates, { ...desktopUpdates, ...updates });
 
 const layerDesktopWindow = (selectedAction: Deferred.Deferred<string>) =>
   Layer.succeed(DesktopWindow.DesktopWindow, {
@@ -339,18 +339,11 @@ describe("DesktopApplicationMenu", () => {
       );
 
       const template = yield* Deferred.await(applicationMenuTemplate);
-      const helpMenu = template.find((item) => item.role === "help");
-      if (!Array.isArray(helpMenu?.submenu)) {
-        throw new Error("Expected Help menu submenu to be an array.");
-      }
-      const checkForUpdates = helpMenu.submenu.find(
-        (item) => item.label === "Check for Updates...",
-      );
-      if (typeof checkForUpdates?.click !== "function") {
-        throw new Error("Expected Check for Updates to have a click handler.");
-      }
-
-      checkForUpdates.click(
+      const checkForUpdates = template
+        .flatMap((item) => (Array.isArray(item.submenu) ? item.submenu : []))
+        .find((item) => item.label === "Check for Updates...");
+      assert.isFunction(checkForUpdates?.click);
+      checkForUpdates!.click!(
         {} as Electron.MenuItem,
         {} as Electron.BrowserWindow,
         {} as KeyboardEvent,

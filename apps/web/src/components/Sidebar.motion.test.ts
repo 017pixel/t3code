@@ -28,7 +28,6 @@ class TestRow {
   style: Record<string, string> = {};
   inert = false;
   attributes: { name: string; value: string }[] = [];
-  parentNode: unknown = null;
   children: TestRow[] = [];
   clones: TestRow[] = [];
   remove = vi.fn();
@@ -39,9 +38,6 @@ class TestRow {
   ) {}
   getBoundingClientRect() {
     return { top: this.offsetTop + this.dragTranslate, height: this.offsetHeight };
-  }
-  getAttribute(name: string) {
-    return this.attributes.find((attribute) => attribute.name === name)?.value ?? null;
   }
   setAttribute(name: string, value: string) {
     this.removeAttribute(name);
@@ -69,19 +65,11 @@ class TestRow {
   });
 }
 
-function fixture(rows: TestRow[], frames?: FrameRequestCallback[]) {
+function fixture(rows: TestRow[]) {
   const media = { matches: false };
   const parent = {
     children: rows,
-    ownerDocument: {
-      defaultView: {
-        matchMedia: () => media,
-        ...(frames && {
-          requestAnimationFrame: (callback: FrameRequestCallback) => frames.push(callback),
-          cancelAnimationFrame: () => {},
-        }),
-      },
-    },
+    ownerDocument: { defaultView: { matchMedia: () => media } },
     getBoundingClientRect: () => ({ top: 0 }),
     append(node: TestRow) {
       parent.children.push(node);
@@ -94,7 +82,6 @@ function fixture(rows: TestRow[], frames?: FrameRequestCallback[]) {
     let top = 8;
     for (const row of next) {
       row.offsetTop = top;
-      row.parentNode = parent;
       top += row.offsetHeight + 1;
     }
     parent.children = [
@@ -514,111 +501,6 @@ describe("sidebar list motion", () => {
     expectMove(y, -13);
   });
 
-  it("continues a slot's entry on the row that replaces it", () => {
-    let notify: MutationCallback = () => {};
-    vi.stubGlobal(
-      "MutationObserver",
-      class {
-        constructor(callback: MutationCallback) {
-          notify = callback;
-        }
-        observe() {}
-        disconnect() {}
-      },
-    );
-    const slot = new TestRow("slot", 36);
-    const row = new TestRow("row", 36);
-    const above = new TestRow("above");
-    for (const node of [slot, row]) {
-      node.setAttribute("data-thread-item", "t");
-      node.setAttribute("data-sidebar-row-variant", "slim");
-    }
-    const { motion, layout } = fixture([]);
-    motion.update(true);
-    layout([slot]);
-    motion.update(true);
-    const entry = slot.animations[0]!;
-    entry.progress = 0.25;
-    // The observer swaps the slot for its rendered row after the motion pass.
-    layout([row]);
-    notify(
-      [{ addedNodes: [row], removedNodes: [slot] }] as unknown as MutationRecord[],
-      {} as MutationObserver,
-    );
-    expect(entry.effect).toHaveProperty("target", row);
-    expect(entry.cancel).not.toHaveBeenCalled();
-    layout([above, row]);
-    motion.update(true);
-    // Remaining 27px of the row's 36px entry plus the new 83px shift.
-    expectMove(row, -110);
-  });
-
-  it("crossfades a row that changes variant instead of sliding it", () => {
-    const card = new TestRow("card");
-    const other = new TestRow("other");
-    const header = new TestRow("Settled", 32);
-    const slim = new TestRow("slim", 36);
-    for (const [node, variant] of [
-      [card, "card"],
-      [slim, "slim"],
-    ] as const) {
-      node.setAttribute("data-thread-item", "t");
-      node.setAttribute("data-sidebar-row-variant", variant);
-    }
-    const { motion, layout } = fixture([card, other, header]);
-    motion.update(true);
-    layout([other, header, slim]);
-    motion.update(true);
-    expect(card.clones).toHaveLength(1);
-    expect(card.clones[0]!.style.top).toBe("8px");
-    expect(slim.animate).toHaveBeenLastCalledWith(
-      [
-        { opacity: 0, transform: "translateY(83px)" },
-        { opacity: 1, transform: "translateY(0px)" },
-      ],
-      { duration: 150, easing: "ease-out" },
-    );
-    expectMove(header, 83);
-  });
-
-  it("fades a variant change out as the row that was on screen", () => {
-    let notify: MutationCallback = () => {};
-    vi.stubGlobal(
-      "MutationObserver",
-      class {
-        constructor(callback: MutationCallback) {
-          notify = callback;
-        }
-        observe() {}
-        disconnect() {}
-      },
-    );
-    const slot = new TestRow("slot");
-    const card = new TestRow("card");
-    const slim = new TestRow("slim", 36);
-    const other = new TestRow("other");
-    for (const [node, variant] of [
-      [slot, "card"],
-      [card, "card"],
-      [slim, "slim"],
-    ] as const) {
-      node.setAttribute("data-thread-item", "t");
-      node.setAttribute("data-sidebar-row-variant", variant);
-    }
-    const { motion, layout } = fixture([slot, other]);
-    motion.update(true);
-    // The observer swaps the measured slot for its rendered card.
-    layout([card, other]);
-    notify(
-      [{ addedNodes: [card], removedNodes: [slot] }] as unknown as MutationRecord[],
-      {} as MutationObserver,
-    );
-    layout([other, slim]);
-    motion.update(true);
-    expect(slot.clones).toHaveLength(0);
-    expect(card.clones).toHaveLength(1);
-  });
-
   it("skips fades when a large list change would clone too many rows", () => {
     const rows = Array.from({ length: 41 }, (_, index) => new TestRow(`row-${index}`));
     const { motion, layout, parent } = fixture(rows);
@@ -642,20 +524,6 @@ describe("sidebar list motion", () => {
     motion.update(true);
     expect(removed!.clones).toHaveLength(1);
     expect(rest.every((row) => row.animations.length === 1)).toBe(true);
-  });
-
-  it("reads a non-animating commit's baseline in the next frame", () => {
-    const frames: FrameRequestCallback[] = [];
-    const [a, b] = [new TestRow("a"), new TestRow("b")];
-    const { motion, layout } = fixture([a, b], frames);
-    motion.update(false);
-    expect(frames).toHaveLength(1);
-    layout([b, a]);
-    frames.shift()!(0);
-    layout([a, b]);
-    motion.update(true);
-    expectMove(a, 83);
-    expectMove(b, -83);
   });
 
   it("respects reduced motion while keeping the next baseline fresh", () => {

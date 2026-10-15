@@ -2,7 +2,6 @@ import type { AuthSessionState, EnvironmentId, ServerConfig } from "@t3tools/con
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Equivalence from "effect/Equivalence";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
@@ -139,18 +138,12 @@ function makeEnvironmentSessionAtoms<R, E>(
     ),
   );
 
-  // A connect attempt reports the same prepared connection at each stage, each
-  // in a fresh Option. Comparing the connection itself keeps the session fetch
-  // below to one per attempt.
   const preparedConnectionValueAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) =>
       Option.getOrElse(AsyncResult.value(get(preparedConnectionAtom(environmentId))), () =>
         Option.none<PreparedConnection>(),
       ),
-    ).pipe(
-      Atom.withEquality(Option.makeEquivalence(Equivalence.strictEqual<PreparedConnection>())),
-      Atom.withLabel(`environment-prepared-connection:${environmentId}`),
-    ),
+    ).pipe(Atom.withLabel(`environment-prepared-connection:${environmentId}`)),
   );
 
   // Keyed on the prepared connection's identity: a reconnect (new credential,

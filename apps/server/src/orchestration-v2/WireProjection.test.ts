@@ -67,34 +67,15 @@ describe("orchestration V2 wire projection", () => {
         payload: { ...base, output: { text: "PRIVATE_TOOL_OUTPUT" } },
       });
       const encode = Schema.encodeEffect(schema);
-      const first = yield* encode([{ kind: "event", sequence: 1, event }]);
-      const second = yield* Schema.encodeEffect(schema)([{ kind: "event", sequence: 1, event }]);
-      for (const [requestId, values] of [
-        ["first", first],
-        ["second", second],
-      ] as const) {
+      for (const requestId of ["first", "second"]) {
+        const values = yield* encode([{ kind: "event", sequence: 1, event }]);
         const response = { _tag: "Chunk", requestId, values };
         const json = serialization.makeUnsafe().encode(response);
         expect(json).toBe(RpcSerialization.json.makeUnsafe().encode(response));
         expect(json).not.toContain("PRIVATE_TOOL_OUTPUT");
-        expect(yield* Schema.decodeUnknownEffect(schema)(JSON.parse(String(json)).values)).toEqual([
-          { kind: "event", sequence: 1, event },
-        ]);
       }
-      expect(yield* encode([{ kind: "event", sequence: 2, event }])).toMatchObject([
-        { sequence: 2 },
-      ]);
       expect(
         Exit.isFailure(yield* Effect.exit(encode([{ kind: "event", sequence: -1, event }]))),
-      ).toBe(true);
-      expect(
-        Exit.isFailure(
-          yield* Effect.exit(
-            Schema.encodeUnknownEffect(schema)([
-              { kind: "event", sequence: 1, event: { ...event, occurredAt: null } },
-            ]),
-          ),
-        ),
       ).toBe(true);
     }).pipe(Effect.provide(StreamSerialization.layer)),
   );

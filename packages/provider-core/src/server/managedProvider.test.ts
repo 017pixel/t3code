@@ -148,44 +148,42 @@ const enrichedSnapshotSecond: ServerProvider = {
 
 describe("makeManagedServerProvider", () => {
   it.effect("parks the initial probe and reads settings again when startup releases it", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const host = yield* ProviderHost.ProviderHost;
-        const startup = yield* Deferred.make<void>();
-        const settings = yield* Ref.make<TestSettings>({ enabled: true });
-        const settingsChanges = yield* PubSub.unbounded<TestSettings>();
-        const checkCalls = yield* Ref.make(0);
-        const enrichedWith = yield* Deferred.make<TestSettings>();
-        yield* makeManagedServerProvider<TestSettings>({
-          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
-          getSettings: Ref.get(settings),
-          streamSettings: Stream.fromPubSub(settingsChanges),
-          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
-          initialSnapshot: () => Effect.succeed(initialSnapshot),
-          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
-            Effect.as(refreshedSnapshot),
-          ),
-          enrichSnapshot: ({ settings }) =>
-            Deferred.succeed(enrichedWith, settings).pipe(Effect.asVoid),
-          refreshInterval: "1 hour",
-        }).pipe(
-          Effect.provideService(ProviderHost.ProviderHost, {
-            ...host,
-            awaitStartupProbe: Deferred.await(startup),
-          }),
-        );
-        yield* Effect.yieldNow;
-        assert.strictEqual(yield* Ref.get(checkCalls), 0);
-        yield* Ref.set(settings, { enabled: false });
-        // A settings change while parked does not probe early.
-        yield* PubSub.publish(settingsChanges, { enabled: false });
-        yield* Effect.yieldNow;
-        assert.strictEqual(yield* Ref.get(checkCalls), 0);
-        yield* Deferred.succeed(startup, undefined);
-        assert.deepStrictEqual(yield* Deferred.await(enrichedWith), { enabled: false });
-        assert.strictEqual(yield* Ref.get(checkCalls), 1);
-      }),
-    ).pipe(Effect.provide(layerAlwaysRunTest)),
+    Effect.gen(function* () {
+      const host = yield* ProviderHost.ProviderHost;
+      const startup = yield* Deferred.make<void>();
+      const settings = yield* Ref.make<TestSettings>({ enabled: true });
+      const settingsChanges = yield* PubSub.unbounded<TestSettings>();
+      const checkCalls = yield* Ref.make(0);
+      const enrichedWith = yield* Deferred.make<TestSettings>();
+      yield* makeManagedServerProvider<TestSettings>({
+        resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+        getSettings: Ref.get(settings),
+        streamSettings: Stream.fromPubSub(settingsChanges),
+        haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+        initialSnapshot: () => Effect.succeed(initialSnapshot),
+        checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+          Effect.as(refreshedSnapshot),
+        ),
+        enrichSnapshot: ({ settings }) =>
+          Deferred.succeed(enrichedWith, settings).pipe(Effect.asVoid),
+        refreshInterval: "1 hour",
+      }).pipe(
+        Effect.provideService(ProviderHost.ProviderHost, {
+          ...host,
+          awaitStartupProbe: Deferred.await(startup),
+        }),
+      );
+      yield* Effect.yieldNow;
+      assert.strictEqual(yield* Ref.get(checkCalls), 0);
+      yield* Ref.set(settings, { enabled: false });
+      // A settings change while parked does not probe early.
+      yield* PubSub.publish(settingsChanges, { enabled: false });
+      yield* Effect.yieldNow;
+      assert.strictEqual(yield* Ref.get(checkCalls), 0);
+      yield* Deferred.succeed(startup, undefined);
+      assert.deepStrictEqual(yield* Deferred.await(enrichedWith), { enabled: false });
+      assert.strictEqual(yield* Ref.get(checkCalls), 1);
+    }).pipe(Effect.provide(layerAlwaysRunTest)),
   );
 
   it.effect(
@@ -731,6 +729,20 @@ describe("makeManagedServerProvider", () => {
   );
 });
 
+const lazyProbeAdapter = ProviderAdapter.ProviderAdapterV2.of({
+  instanceId: ProviderInstanceId.make("lazy"),
+  driver: ProviderDriverKind.make("codex"),
+  getCapabilities: () =>
+    Effect.fail(
+      new ProviderAdapter.ProviderAdapterCapabilitiesError({
+        driver: ProviderDriverKind.make("codex"),
+        cause: "from the adapter",
+      }),
+    ),
+  planSelectionTransition: () => Effect.die("unused"),
+  openSession: () => Effect.die("unused"),
+});
+
 it.effect(
   "constructs a lazy adapter once in its instance scope across concurrent request scopes",
   () =>
@@ -756,19 +768,7 @@ it.effect(
               );
               yield* Deferred.succeed(started, undefined);
               yield* Deferred.await(release);
-              return ProviderAdapter.ProviderAdapterV2.of({
-                instanceId: ProviderInstanceId.make("lazy"),
-                driver,
-                getCapabilities: () =>
-                  Effect.fail(
-                    new ProviderAdapter.ProviderAdapterCapabilitiesError({
-                      driver,
-                      cause: "probe refused",
-                    }),
-                  ),
-                planSelectionTransition: () => Effect.die("unused"),
-                openSession: () => Effect.die("unused"),
-              });
+              return lazyProbeAdapter;
             }),
           );
           assert.equal(constructed, 0);
@@ -785,7 +785,6 @@ it.effect(
             Effect.provideService(HostProcess.Environment, { OWNER: "request" }),
             Effect.forkScoped,
           );
-          yield* Deferred.await(started);
           assert.equal(constructed, 1);
           yield* Deferred.succeed(release, undefined);
           const exits = yield* Fiber.join(requests);
@@ -815,21 +814,7 @@ it.effect("retries a lazy adapter whose construction or module import failed", (
         // An upgrade replaced the adapter's chunk under the running server.
         if (attempts === 1) return Effect.die(new Error("Cannot find module 'adapter-old.mjs'"));
         if (attempts === 2) return Effect.fail("shadow home unavailable");
-        return Effect.succeed(
-          ProviderAdapter.ProviderAdapterV2.of({
-            instanceId: ProviderInstanceId.make("lazy"),
-            driver,
-            getCapabilities: () =>
-              Effect.fail(
-                new ProviderAdapter.ProviderAdapterCapabilitiesError({
-                  driver,
-                  cause: "from the adapter",
-                }),
-              ),
-            planSelectionTransition: () => Effect.die("unused"),
-            openSession: () => Effect.die("unused"),
-          }),
-        );
+        return Effect.succeed(lazyProbeAdapter);
       }),
     );
     const missingModule = yield* adapter.getCapabilities().pipe(Effect.flip);

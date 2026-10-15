@@ -34,12 +34,14 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -181,6 +183,42 @@ function sharedSessions(
 }
 const decodeCachedSources = Schema.decodeUnknownOption(
   Schema.Struct({ sources: Schema.Record(Schema.String, CachedSource) }),
+);
+
+export class UsageService extends Context.Service<
+  UsageService,
+  {
+    readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    /** Refetches the rate table ahead of its TTL. See `ensureRates`. */
+    readonly refreshRates: Effect.Effect<UsagePricing>;
+  }
+>()("t3/usage/UsageService") {}
+
+const EMPTY_PRICING: UsagePricing = {
+  status: "unavailable",
+  source: LITELLM_RATES_URL,
+  fetchedAt: null,
+  knownModels: 0,
+};
+
+/** Empty summary, for suites that only need the RPC surface to resolve. */
+const layerTest = Layer.succeed(
+  UsageService,
+  UsageService.of({
+    readSummary: (input) =>
+      Effect.succeed({
+        contractVersion: USAGE_CONTRACT_VERSION,
+        readAt: "1970-01-01T00:00:00.000Z",
+        timeZone: input.timeZone,
+        sinceDay: input.sinceDay,
+        untilDay: input.untilDay,
+        buckets: [],
+        sources: [],
+        pricing: EMPTY_PRICING,
+        scanDurationMs: 0,
+      }),
+    refreshRates: Effect.succeed(EMPTY_PRICING),
+  }),
 );
 
 export const make = Effect.gen(function* () {
@@ -894,3 +932,5 @@ export const make = Effect.gen(function* () {
   // against what a previous instance wrote.
   return { readSummary, refreshRates, awaitPersisted } as const;
 });
+
+export const layer = Layer.effect(UsageService, make);

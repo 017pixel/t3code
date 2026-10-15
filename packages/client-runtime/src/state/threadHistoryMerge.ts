@@ -155,6 +155,11 @@ function mergeHistorySupport(
     if (attempt.attemptOrdinal > held)
       latestAttemptOrdinal.set(attempt.runId, attempt.attemptOrdinal);
   }
+  const fullCheckpoints = new Map(
+    support.checkpoints
+      .filter((value) => value.deferredFileCount === undefined)
+      .map((value) => [value.id, value]),
+  );
   const latestCapture = projection.checkpoints.reduce(
     (max, checkpoint) => Math.max(max, DateTime.toEpochMillis(checkpoint.capturedAt)),
     Number.NEGATIVE_INFINITY,
@@ -168,7 +173,11 @@ function mergeHistorySupport(
         ACTIVE_NODE_STATUSES.has(node.status) || (node.runId !== null && newRunIds.has(node.runId)),
     ),
     checkpoints: mergeHistoryEntities(
-      fillDeferredCheckpoints(projection.checkpoints, support.checkpoints),
+      projection.checkpoints.map((checkpoint) =>
+        checkpoint.deferredFileCount === undefined
+          ? checkpoint
+          : (fullCheckpoints.get(checkpoint.id) ?? checkpoint),
+      ),
       support.checkpoints,
       (checkpoint) => DateTime.toEpochMillis(checkpoint.capturedAt) > latestCapture,
     ),
@@ -182,28 +191,6 @@ function mergeHistorySupport(
         attempt.attemptOrdinal > (latestAttemptOrdinal.get(attempt.runId) ?? Infinity),
     ),
   };
-}
-
-/** A viewport snapshot lists recent checkpoints without files; their page fills them in. */
-function fillDeferredCheckpoints(
-  current: OrchestrationV2ThreadProjection["checkpoints"],
-  older: OrchestrationV2ThreadProjection["checkpoints"],
-): OrchestrationV2ThreadProjection["checkpoints"] {
-  if (!current.some((checkpoint) => checkpoint.deferredFileCount !== undefined)) return current;
-  const olderById = new Map(older.map((checkpoint) => [checkpoint.id, checkpoint]));
-  let filled = false;
-  const next = current.map((checkpoint) => {
-    const candidate = olderById.get(checkpoint.id);
-    if (
-      checkpoint.deferredFileCount === undefined ||
-      candidate === undefined ||
-      candidate.deferredFileCount !== undefined
-    )
-      return checkpoint;
-    filled = true;
-    return candidate;
-  });
-  return filled ? next : current;
 }
 
 /** Historical pages fill missing entities without replacing newer live values. */

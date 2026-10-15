@@ -30,11 +30,6 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
-import {
-  resolveThreadPullRequestBadge,
-  resolveThreadPullRequestChains,
-  threadPullRequestSearchTerms,
-} from "@t3tools/shared/threadPullRequests";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 
 import ProjectionThreadSweepIndexes from "../persistence/Migrations/063_ProjectionThreadSweepIndexes.ts";
@@ -42,14 +37,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { resolveAutoSettlementAt } from "./ThreadSettlementService.ts";
-import {
-  compactThreadPullRequests,
-  compactShellPullRequestStacks,
-  deduplicateShellPullRequests,
-  decodeThreadReadPayload,
-  encodeThreadReadPayload,
-} from "./ThreadReadPayload.ts";
-import { compactThreadFieldEvent } from "../persistence/DatabaseCompaction.ts";
+import { compactThreadPullRequests } from "./ThreadReadPayload.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -1107,6 +1095,15 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ];
         startIds.push(rows[1]!.turn_item_id);
         yield* sql`INSERT INTO orchestration_v2_projection_turn_items ${sql.insert(rows)}`;
+        yield* sql`INSERT INTO orchestration_v2_projection_checkpoints VALUES (
+          ${`checkpoint:${run}`}, ${threadId}, ${`scope:${run}`}, ${runId}, ${`node:notification-turn-pages:${run}`},
+          NULL, 1, ${run}, 'ready', ${nowIso}, json_object(
+            'id', ${`checkpoint:${run}`}, 'threadId', ${threadId}, 'scopeId', ${`scope:${run}`},
+            'runId', ${runId}, 'nodeId', ${`node:notification-turn-pages:${run}`}, 'parentCheckpointId', NULL,
+            'ordinalWithinScope', 1, 'appRunOrdinal', ${run}, 'ref', ${`refs/t3/notification-turn-pages/${run}`},
+            'status', 'ready', 'capturedAt', ${nowIso},
+            'files', json('[{"path":"a.ts","kind":"modified","additions":1,"deletions":0}]'))
+        )`;
       }
 
       const { statements, tracer } = traceSqlStatements();
@@ -1162,6 +1159,50 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         cursor = page.nextCursor;
       }
       assert.deepEqual(loaded, allIds);
+      // Exercise the same user/agent input cohorts with this existing run fixture.
+      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        SET type = 'user_message', payload_json = json_set(payload_json,
+          '$.type', 'user_message', '$.createdBy', 'agent', '$.creationSource', 'server',
+          '$.inputIntent', 'queued_turn', '$.messageId', turn_item_id, '$.text', 'wake', '$.attachments', json('[]'))
+        WHERE turn_item_id IN (SELECT value FROM json_each(${encodeUnknownJsonString(startIds)})) AND type = 'notification'`;
+      const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+        rowLimit: 77,
+        deferHistoricalSupport: true,
+      });
+      const boundedViewport = buildBoundedThreadProjection({ ...viewport, viewportWindow: true });
+      assert.deepEqual(
+        boundedViewport.projection.checkpoints
+          .map((checkpoint) => checkpoint.appRunOrdinal)
+          .toSorted((a, b) => Number(a) - Number(b)),
+        Array.from({ length: 152 }, (_, index) => index + 261),
+      );
+      assert.deepInclude(
+        boundedViewport.projection.checkpoints.find(
+          (checkpoint) => checkpoint.appRunOrdinal === 393,
+        ),
+        {
+          files: [],
+          deferredFileCount: 1,
+        },
+      );
+      assert.lengthOf(
+        boundedViewport.projection.checkpoints.find(
+          (checkpoint) => checkpoint.appRunOrdinal === 412,
+        )!.files,
+        1,
+      );
+      // No user turn in the latest 152 starts: only the viewport's checkpoint stays listed.
+      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        SET payload_json = json_set(payload_json, '$.createdBy', 'agent')
+        WHERE thread_id = ${threadId} AND type = 'user_message'`;
+      const agent = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+        rowLimit: 1,
+        deferHistoricalSupport: true,
+      });
+      assert.deepEqual(
+        agent.projection.checkpoints.map((checkpoint) => checkpoint.appRunOrdinal),
+        [412],
+      );
     }),
   );
 
@@ -1395,401 +1436,25 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         assert.lengthOf(sharedNodeSnapshot.projection.visibleTurnItems, 76);
         assert.deepEqual(sharedNodeSnapshot.projection.nodes, snapshot.projection.nodes);
 
-        // A viewport that starts inside the long run keeps the run's prompt.
         const promptId = TurnItemId.make("item:bounded-node-history:prompt");
-        yield* projectionStore.apply({
-          id: EventId.make("event:bounded-node-history:prompt"),
-          type: "turn-item.updated",
-          threadId,
-          runId,
-          nodeId: rootNodeId,
-          driver,
-          occurredAt: now,
-          payload: {
-            id: promptId,
-            threadId,
-            runId,
-            nodeId: rootNodeId,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal: 0,
-            status: "completed",
-            title: null,
-            startedAt: now,
-            completedAt: now,
-            updatedAt: now,
-            type: "user_message",
-            messageId: MessageId.make("message:bounded-node-history:prompt"),
-            text: "Start the long run",
-            attachments: [],
-            inputIntent: "turn_start",
-            createdBy: "user",
-            creationSource: "web",
-          },
-        });
-        const promptViewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-          rowLimit: 75,
-          deferHistoricalSupport: true,
-        });
-        assert.strictEqual(promptViewport.projection.visibleTurnItems[0]?.sourceItemId, promptId);
-        assert.lengthOf(promptViewport.projection.visibleTurnItems, 76);
-        const promptLegacy = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-          rowLimit: 75,
-        });
-        assert.isFalse(
-          promptLegacy.projection.visibleTurnItems.some((row) => row.sourceItemId === promptId),
-        );
-
-        // Viewport reads list the latest turns for the Diff panel without their files.
-        const files = [
-          { path: "a.ts", kind: "modified", additions: 1, deletions: 0 },
-          { path: "b.ts", kind: "added", additions: 2, deletions: 0 },
-        ];
-        for (let ordinal = 1; ordinal <= 12; ordinal += 1) {
-          const checkpointRunId =
-            ordinal === 12 ? runId : RunId.make(`run:bounded-node-history:old-${ordinal}`);
-          yield* projectionStore.apply({
-            id: EventId.make(`event:bounded-node-history:checkpoint:${ordinal}`),
-            type: "checkpoint.captured",
-            threadId,
-            occurredAt: now,
-            payload: {
-              id: CheckpointId.make(`checkpoint:bounded-node-history:${ordinal}`),
-              threadId,
-              scopeId: CheckpointScopeId.make(`scope:bounded-node-history:${ordinal}`),
-              runId: checkpointRunId,
-              nodeId:
-                ordinal === 12
-                  ? rootNodeId
-                  : NodeId.make(`node:bounded-node-history:old-${ordinal}`),
-              parentCheckpointId: null,
-              ordinalWithinScope: 1,
-              appRunOrdinal: ordinal,
-              ref: CheckpointRef.make(`refs/t3/bounded-node-history/${ordinal}`),
-              status: "ready",
-              files,
-              capturedAt: now,
-            },
-          });
-        }
+        yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+          SELECT ${promptId}, thread_id, run_id, ${rootNodeId}, provider_thread_id,
+            provider_turn_id, parent_item_id, 0, 'user_message', status, updated_at,
+            json_set(payload_json, '$.id', ${promptId}, '$.nodeId', ${rootNodeId}, '$.ordinal', 0,
+              '$.type', 'user_message', '$.messageId', 'prompt', '$.text', 'Start the long run',
+              '$.attachments', json('[]'), '$.inputIntent', 'turn_start', '$.createdBy', 'user', '$.creationSource', 'web')
+          FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${duplicateItemId}`;
         const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
           rowLimit: 75,
           deferHistoricalSupport: true,
         });
-        // One user turn is fewer than a page of turns, so every turn stays listed.
-        assert.deepEqual(
-          viewport.projection.checkpoints.map((checkpoint) => [
-            checkpoint.appRunOrdinal,
-            checkpoint.files.length,
-            checkpoint.deferredFileCount,
-          ]),
-          [
-            [12, 2, undefined],
-            ...Array.from({ length: 11 }, (_, index) => [index + 1, 0, 2]),
-          ].toSorted((left, right) => {
-            // Rows come back in scope ID order, which compares ordinals as text.
-            const [a, b] = [String(left[0]), String(right[0])];
-            return a < b ? -1 : a > b ? 1 : 0;
-          }),
-        );
-        const legacyWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-          rowLimit: 75,
-        });
-        assert.deepEqual(
-          legacyWindow.projection.checkpoints.map((checkpoint) => checkpoint.appRunOrdinal),
-          [12],
+        assert.strictEqual(viewport.projection.visibleTurnItems[0]?.sourceItemId, promptId);
+        assert.lengthOf(viewport.projection.visibleTurnItems, 76);
+        const legacy = yield* projectionStore.getThreadSnapshotWindow(threadId, { rowLimit: 75 });
+        assert.isFalse(
+          legacy.projection.visibleTurnItems.some((row) => row.sourceItemId === promptId),
         );
       }),
-  );
-
-  it.effect("viewport snapshots list the runs a turn-aligned window covers", () =>
-    Effect.gen(function* () {
-      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-      const now = yield* DateTime.now;
-      const threadId = ThreadId.make("thread:viewport-turn-coverage");
-      yield* projectionStore.apply({
-        id: EventId.make("event:viewport-turn-coverage:thread"),
-        type: "thread.created",
-        threadId,
-        occurredAt: now,
-        payload: {
-          createdBy: "user",
-          creationSource: "web",
-          id: threadId,
-          projectId: ProjectId.make("project:viewport-turn-coverage"),
-          title: "Viewport turn coverage",
-          providerInstanceId,
-          modelSelection,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: null,
-          activeProviderThreadId: null,
-          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-          forkedFrom: null,
-          createdAt: now,
-          updatedAt: now,
-          archivedAt: null,
-          settledOverride: null,
-          settledAt: null,
-          lastVisitedAt: null,
-          deletedAt: null,
-        },
-      });
-      // Twelve user turns, each followed by a run that a delegated task's
-      // result woke up. Wake-up runs must not use up the turn budget.
-      for (let ordinal = 1; ordinal <= 24; ordinal += 1) {
-        const runId = RunId.make(`run:viewport-turn-coverage:${ordinal}`);
-        const nodeId = NodeId.make(`node:viewport-turn-coverage:${ordinal}`);
-        const byUser = ordinal % 2 === 1;
-        yield* projectionStore.apply({
-          id: EventId.make(`event:viewport-turn-coverage:run:${ordinal}`),
-          type: "run.created",
-          threadId,
-          runId,
-          occurredAt: now,
-          payload: {
-            id: runId,
-            threadId,
-            ordinal,
-            providerInstanceId,
-            modelSelection,
-            providerThreadId: null,
-            userMessageId: MessageId.make(`message:viewport-turn-coverage:${ordinal}`),
-            rootNodeId: nodeId,
-            activeAttemptId: null,
-            status: "completed",
-            requestedAt: now,
-            startedAt: now,
-            completedAt: now,
-            checkpointId: null,
-            contextHandoffId: null,
-          },
-        });
-        yield* projectionStore.apply({
-          id: EventId.make(`event:viewport-turn-coverage:node:${ordinal}`),
-          type: "node.updated",
-          threadId,
-          runId,
-          nodeId,
-          driver,
-          occurredAt: now,
-          payload: {
-            id: nodeId,
-            threadId,
-            runId,
-            rootNodeId: nodeId,
-            parentNodeId: null,
-            kind: "root_turn",
-            status: "completed",
-            countsForRun: true,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: null,
-            runtimeRequestId: null,
-            checkpointScopeId: null,
-            startedAt: now,
-            completedAt: now,
-          },
-        });
-        yield* projectionStore.apply({
-          id: EventId.make(`event:viewport-turn-coverage:prompt:${ordinal}`),
-          type: "turn-item.updated",
-          threadId,
-          runId,
-          nodeId,
-          driver,
-          occurredAt: now,
-          payload: {
-            id: TurnItemId.make(`item:viewport-turn-coverage:${ordinal}`),
-            threadId,
-            runId,
-            nodeId,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal: ordinal * 100,
-            status: "completed",
-            title: null,
-            startedAt: now,
-            completedAt: now,
-            updatedAt: now,
-            type: "user_message",
-            messageId: MessageId.make(`message:viewport-turn-coverage:${ordinal}`),
-            text: byUser ? "Next step" : "Delegated task finished",
-            attachments: [],
-            inputIntent: byUser ? "turn_start" : "queued_turn",
-            createdBy: byUser ? "user" : "agent",
-            creationSource: byUser ? "web" : "server",
-          },
-        });
-        yield* projectionStore.apply({
-          id: EventId.make(`event:viewport-turn-coverage:checkpoint:${ordinal}`),
-          type: "checkpoint.captured",
-          threadId,
-          occurredAt: now,
-          payload: {
-            id: CheckpointId.make(`checkpoint:viewport-turn-coverage:${ordinal}`),
-            threadId,
-            scopeId: CheckpointScopeId.make(`scope:viewport-turn-coverage:${ordinal}`),
-            runId,
-            nodeId,
-            parentCheckpointId: null,
-            ordinalWithinScope: 1,
-            appRunOrdinal: ordinal,
-            ref: CheckpointRef.make(`refs/t3/viewport-turn-coverage/${ordinal}`),
-            status: "ready",
-            files: [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }],
-            capturedAt: now,
-          },
-        });
-      }
-      const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: 1,
-        deferHistoricalSupport: true,
-      });
-      // Twelve user turns are not more than a turn-aligned window holds, so
-      // every run is listed, as a turn-aligned snapshot lists them.
-      const listed = viewport.projection.checkpoints.map((checkpoint) => [
-        checkpoint.appRunOrdinal ?? 0,
-        checkpoint.deferredFileCount,
-      ]);
-      assert.deepEqual(
-        listed.toSorted((left, right) => Number(left[0]) - Number(right[0])),
-        Array.from({ length: 24 }, (_, index) => [index + 1, index + 1 === 24 ? undefined : 1]),
-      );
-
-      // Like a turn-aligned window, a thread whose latest 152 turns all
-      // started without the user lists only the window's runs.
-      const agentThreadId = ThreadId.make("thread:viewport-agent-turns");
-      yield* projectionStore.apply({
-        id: EventId.make("event:viewport-agent-turns:thread"),
-        type: "thread.created",
-        threadId: agentThreadId,
-        occurredAt: now,
-        payload: {
-          createdBy: "user",
-          creationSource: "web",
-          id: agentThreadId,
-          projectId: ProjectId.make("project:viewport-turn-coverage"),
-          title: "Viewport agent turns",
-          providerInstanceId,
-          modelSelection,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: null,
-          activeProviderThreadId: null,
-          lineage: {
-            parentThreadId: null,
-            relationshipToParent: null,
-            rootThreadId: agentThreadId,
-          },
-          forkedFrom: null,
-          createdAt: now,
-          updatedAt: now,
-          archivedAt: null,
-          settledOverride: null,
-          settledAt: null,
-          lastVisitedAt: null,
-          deletedAt: null,
-        },
-      });
-      for (let ordinal = 1; ordinal <= 152; ordinal += 1) {
-        const runId = RunId.make(`run:viewport-agent-turns:${ordinal}`);
-        const nodeId = NodeId.make(`node:viewport-agent-turns:${ordinal}`);
-        yield* projectionStore.apply({
-          id: EventId.make(`event:viewport-agent-turns:run:${ordinal}`),
-          type: "run.created",
-          threadId: agentThreadId,
-          runId,
-          occurredAt: now,
-          payload: {
-            id: runId,
-            threadId: agentThreadId,
-            ordinal,
-            providerInstanceId,
-            modelSelection,
-            providerThreadId: null,
-            userMessageId: MessageId.make(`message:viewport-agent-turns:${ordinal}`),
-            rootNodeId: nodeId,
-            activeAttemptId: null,
-            status: "completed",
-            requestedAt: now,
-            startedAt: now,
-            completedAt: now,
-            checkpointId: null,
-            contextHandoffId: null,
-          },
-        });
-        yield* projectionStore.apply({
-          id: EventId.make(`event:viewport-agent-turns:prompt:${ordinal}`),
-          type: "turn-item.updated",
-          threadId: agentThreadId,
-          runId,
-          nodeId,
-          driver,
-          occurredAt: now,
-          payload: {
-            id: TurnItemId.make(`item:viewport-agent-turns:${ordinal}`),
-            threadId: agentThreadId,
-            runId,
-            nodeId,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal: ordinal * 100,
-            status: "completed",
-            title: null,
-            startedAt: now,
-            completedAt: now,
-            updatedAt: now,
-            type: "user_message",
-            messageId: MessageId.make(`message:viewport-agent-turns:${ordinal}`),
-            text: "Delegated task finished",
-            attachments: [],
-            inputIntent: "queued_turn",
-            createdBy: "agent",
-            creationSource: "server",
-          },
-        });
-        yield* projectionStore.apply({
-          id: EventId.make(`event:viewport-agent-turns:checkpoint:${ordinal}`),
-          type: "checkpoint.captured",
-          threadId: agentThreadId,
-          occurredAt: now,
-          payload: {
-            id: CheckpointId.make(`checkpoint:viewport-agent-turns:${ordinal}`),
-            threadId: agentThreadId,
-            scopeId: CheckpointScopeId.make(`scope:viewport-agent-turns:${ordinal}`),
-            runId,
-            nodeId,
-            parentCheckpointId: null,
-            ordinalWithinScope: 1,
-            appRunOrdinal: ordinal,
-            ref: CheckpointRef.make(`refs/t3/viewport-agent-turns/${ordinal}`),
-            status: "ready",
-            files: [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }],
-            capturedAt: now,
-          },
-        });
-      }
-      const agentViewport = yield* projectionStore.getThreadSnapshotWindow(agentThreadId, {
-        rowLimit: 1,
-        deferHistoricalSupport: true,
-      });
-      assert.deepEqual(
-        agentViewport.projection.checkpoints.map((checkpoint) => [
-          checkpoint.appRunOrdinal,
-          checkpoint.deferredFileCount,
-        ]),
-        [[152, undefined]],
-      );
-    }),
   );
 
   it.effect("reads a fixed SQL turn-item window for long histories and repeated clients", () =>
@@ -2865,28 +2530,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const markedUnread = yield* projectionStore.getThreadProjection(threadId);
       assert.isNull(markedUnread.thread.lastVisitedAt);
       assert.deepEqual(markedUnread.thread.updatedAt, createdAt);
-
-      const visitedPayload = { ...thread, lastVisitedAt: visitedOccurredAt };
-      const legacy = {
-        id: EventId.make("event:compact-visit"),
-        type: "thread.visited" as const,
-        threadId,
-        occurredAt: visitedOccurredAt,
-        payload: visitedPayload,
-      };
-      assert.equal(compactThreadFieldEvent(legacy, thread).type, "thread.visit-recorded");
-      assert.strictEqual(
-        compactThreadFieldEvent(
-          { ...legacy, payload: { ...visitedPayload, title: "Also changed" } },
-          thread,
-        ).type,
-        "thread.visited",
-      );
-      assert.deepEqual(
-        yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(thread)),
-        thread,
-      );
-      assert.deepEqual(compactThreadPullRequests(thread), thread);
     }),
   );
 
@@ -3565,38 +3208,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const otherThreadId = yield* addRolledBackRecoveryCandidate("other-limit-shell");
       const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
       const now = yield* DateTime.now;
-      const thread = yield* store.getThread(threadId);
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:pull-request"),
-        type: "thread.pull-request-synced",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...thread,
-          pullRequests: [
-            {
-              host: "github.com",
-              repository: "pingdotgg/t3code",
-              number: 42,
-              url: "https://github.com/pingdotgg/t3code/pull/42",
-              source: "manual",
-              linkedAt: DateTime.formatIso(now),
-              stack: null,
-              snapshot: {
-                state: "open",
-                title: "Recovery with a linked PR",
-                headBranch: "recovery",
-                baseBranch: "main",
-                isDraft: false,
-                updatedAt: DateTime.formatIso(now),
-                syncedAt: DateTime.formatIso(now),
-                additions: 100,
-                deletions: 20,
-              },
-            },
-          ],
-        },
-      });
       const limitItem = {
         id: TurnItemId.make("limit-shell:error"),
         threadId,
@@ -3829,20 +3440,15 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ),
       );
       const reset = DateTime.makeUnsafe(limitItem.failure.resetAt);
-      const recoveryBaseline = yield* store.getThread(threadId);
       const recovery = {
         runId: original.id,
         resetAt: limitItem.failure.resetAt,
         autoResume: true,
         requestId: CommandId.make("recovery:choice"),
       };
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-choice"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: { ...recoveryBaseline, limitRecovery: recovery },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.limitRecovery', json(${encodeUnknownJsonString(recovery)}))
+        WHERE thread_id = ${threadId}`;
       // Armed future retries need no state decoding until they become due.
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, autoResume: true })).find(
@@ -3873,32 +3479,17 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ),
       );
       yield* sql`DELETE FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id = 'limit-shell:pending-request'`;
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-snooze"),
-        type: "thread.snoozed",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...(yield* store.getThread(threadId)),
-          snoozedUntil: DateTime.add(reset, { minutes: 1 }),
-        },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.snoozedUntil', ${DateTime.formatIso(DateTime.add(reset, { minutes: 1 }))})
+        WHERE thread_id = ${threadId}`;
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, now: reset })).find(
           (row) => row.id === threadId,
         ),
       );
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-disabled"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...recoveryBaseline,
-          snoozedUntil: null,
-          limitRecovery: { ...recovery, autoResume: false },
-        },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.snoozedUntil', NULL, '$.limitRecovery.autoResume', json('false'))
+        WHERE thread_id = ${threadId}`;
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({
           ...recoveryOptions,
@@ -3906,13 +3497,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           autoResume: true,
         })).find((row) => row.id === threadId),
       );
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-restored"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: recoveryBaseline,
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = ${originalRow!.payload_json} WHERE thread_id = ${threadId}`;
       const session = {
         id: ProviderSessionId.make("session:limit-shell:shared"),
         driver,
@@ -3995,13 +3580,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       // A new attempt's root cannot inherit an earlier attempt's limit.
       yield* applyRun("failed", NodeId.make("new-attempt-root"));
       yield* assertSummary(null, null);
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:pull-request-removed"),
-        type: "thread.pull-request-synced",
-        threadId,
-        occurredAt: now,
-        payload: { ...(yield* store.getThread(threadId)), pullRequests: thread.pullRequests },
-      });
     }),
   );
 
@@ -6237,28 +5815,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.deepEqual(synced.pullRequests?.[0]?.snapshot, snapshot);
       assert.isDefined(synced.pullRequests?.[0]?.watch);
       assert.deepEqual(synced.updatedAt, at);
-      const previous = {
-        ...synced,
-        pullRequests: [{ ...synced.pullRequests![0]!, snapshot: null }],
-      };
-      const legacySync = {
-        id: EventId.make("event:compact-pr-sync"),
-        type: "thread.pull-request-synced" as const,
-        threadId,
-        occurredAt: at,
-        payload: synced,
-      };
-      assert.equal(
-        compactThreadFieldEvent(legacySync, previous).type,
-        "thread.pull-request-link-synced",
-      );
-      assert.equal(
-        compactThreadFieldEvent(
-          { ...legacySync, payload: { ...synced, title: "Changed too" } },
-          previous,
-        ).type,
-        "thread.pull-request-synced",
-      );
       const stack = {
         kind: "native" as const,
         id: "stack:codec",
@@ -6281,28 +5837,12 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           snapshot: { ...snapshot, additions: 23, deletions: 2, checksState: "passing" as const },
         })),
       };
-      assert.deepEqual(yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(rich)), rich);
       const compact = compactThreadPullRequests(rich);
-      assert.isUndefined(compact.pullRequests?.[0]?.snapshot?.additions);
-      assert.equal(rich.pullRequests[0]?.snapshot?.additions, 23);
       // Clients show the saved stack before it refreshes, so the compact shell keeps it whole.
       assert.deepEqual(
         compact.pullRequests?.map((link) => link.stack),
         rich.pullRequests.map((link) => link.stack),
       );
-      assert.deepEqual(
-        resolveThreadPullRequestBadge(compact.pullRequests),
-        resolveThreadPullRequestBadge(rich.pullRequests),
-      );
-      assert.deepEqual(
-        resolveThreadPullRequestChains(compact.pullRequests ?? []).map((chain) =>
-          chain.layers.map((entry) => entry.number),
-        ),
-        resolveThreadPullRequestChains(rich.pullRequests).map((chain) =>
-          chain.layers.map((entry) => entry.number),
-        ),
-      );
-      assert.deepEqual(threadPullRequestSearchTerms(compact), threadPullRequestSearchTerms(rich));
       yield* syncPullRequests("rich", rich.pullRequests);
       assert.deepEqual((yield* store.getThreadShell(threadId))?.pullRequests, rich.pullRequests);
       assert.deepEqual(
@@ -6310,24 +5850,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         compact.pullRequests,
       );
       assert.deepEqual((yield* store.getThread(threadId)).pullRequests, rich.pullRequests);
-      const shell = yield* store.getThreadShell(threadId, { compactPullRequests: true });
-      assert.isNotNull(shell);
-      const wire = compactShellPullRequestStacks(shell!);
-      assert.equal(wire.pullRequests?.[1]?.stackReference, 0);
-      assert.isNull(wire.pullRequests?.[1]?.stack);
-      assert.equal(wire.pullRequests?.[2]?.stack?.base, "older-base");
-      assert.isUndefined(wire.pullRequests?.[2]?.stackReference);
-      const differentVintage = {
-        ...wire,
-        pullRequests: wire.pullRequests!.map((link) => ({
-          ...link,
-          linkedAt: DateTime.formatIso(DateTime.add(at, { seconds: 1 })),
-        })),
-      };
-      const deduplicated = deduplicateShellPullRequests([wire, { ...wire }, differentVintage]);
-      assert.equal(deduplicated[1]?.pullRequestReference, 0);
-      assert.isUndefined(deduplicated[1]?.pullRequests);
-      assert.deepEqual(deduplicated[2]?.pullRequests, differentVintage.pullRequests);
       const terminalAt = DateTime.formatIso(DateTime.add(at, { seconds: 1 }));
       for (const state of ["merged", "closed"] as const) {
         yield* syncPullRequests(`terminal-${state}`, [
@@ -6357,21 +5879,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       yield* syncPullRequests("restore", synced.pullRequests ?? []);
       assert.equal(yield* phase, "running");
       assert.equal((yield* store.getThreadsWithPullRequests()).length, 1);
-
-      yield* store.apply({
-        id: EventId.make("event:watched-pull-request:missing-link-synced"),
-        type: "thread.pull-request-link-synced",
-        threadId,
-        occurredAt: DateTime.add(at, { seconds: 2 }),
-        payload: {
-          host: link.host,
-          repository: link.repository,
-          number: 999,
-          snapshot,
-          stack: null,
-        },
-      });
-      assert.deepEqual((yield* store.getThread(threadId)).pullRequests, synced.pullRequests);
 
       // An older build sharing the database writes only the payload; the sweep still follows it.
       const sql = yield* SqlClient.SqlClient;

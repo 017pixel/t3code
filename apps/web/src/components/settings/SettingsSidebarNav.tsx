@@ -25,7 +25,7 @@ import {
   Settings2Icon,
   XIcon,
 } from "lucide-react";
-import { useLocation, useNavigate, useRouter } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
@@ -111,7 +111,6 @@ function SettingsSectionIcon({ to }: { to: SettingsPath }) {
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const navigate = useNavigate();
-  const router = useRouter();
   const currentHash = useLocation({ select: (location) => location.hash });
   const currentSearch = useLocation({ select: (location) => location.search });
   const scopeSearch = useMemo(() => validateSettingsScopeSearch(currentSearch), [currentSearch]);
@@ -351,12 +350,6 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     <SidebarMenuItem key={item.to}>
                       <SidebarMenuButton
                         isActive={isActive}
-                        onPointerEnter={() =>
-                          void router.preloadRoute({ to: item.to }).catch(() => undefined)
-                        }
-                        onFocus={() =>
-                          void router.preloadRoute({ to: item.to }).catch(() => undefined)
-                        }
                         onClick={() => handleSectionClick(item.to)}
                       >
                         <Icon />

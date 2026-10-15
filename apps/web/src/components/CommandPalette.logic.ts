@@ -404,37 +404,12 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   });
 }
 
-// Items retain their immutable terms while a query changes. Keep the joined
-// haystack and ranking fields together, without retaining closed palettes.
-const searchIndex = new WeakMap<ReadonlyArray<string>, { fields: string[]; haystack: string }>();
-const normalizedTermCache = new Map<string, string>();
-
-function normalizeSearchTerm(term: string): string {
-  let normalized = normalizedTermCache.get(term);
-  if (normalized === undefined) {
-    if (normalizedTermCache.size >= 10_000) normalizedTermCache.clear();
-    normalized = normalizeSearchText(term);
-    normalizedTermCache.set(term, normalized);
-  }
-  return normalized;
-}
-
-function indexedSearchTerms(terms: ReadonlyArray<string>) {
-  let indexed = searchIndex.get(terms);
-  if (indexed === undefined) {
-    const fields = terms.filter((term) => term.length > 0).map(normalizeSearchTerm);
-    indexed = { fields, haystack: fields.join(" ") };
-    searchIndex.set(terms, indexed);
-  }
-  return indexed;
-}
-
 function rankSearchFieldMatch(
   field: string,
   normalizedQuery: string,
   queryTokens: ReadonlyArray<string>,
 ): number {
-  const normalizedField = field;
+  const normalizedField = normalizeSearchText(field);
   if (
     normalizedField.length === 0 ||
     !queryTokens.every((token) => normalizedField.includes(token))
@@ -458,7 +433,7 @@ function rankCommandPaletteItemMatch(
   normalizedQuery: string,
   queryTokens: ReadonlyArray<string>,
 ): number {
-  const terms = indexedSearchTerms(item.searchTerms).fields;
+  const terms = item.searchTerms.filter((term) => term.length > 0);
   if (terms.length === 0) {
     return 0;
   }
@@ -531,7 +506,7 @@ export function filterCommandPaletteGroups(input: {
 
   return searchableGroups.flatMap((group) => {
     const items = Arr.filterMap(group.items, (item, index) => {
-      const haystack = indexedSearchTerms(item.searchTerms).haystack;
+      const haystack = normalizeSearchText(item.searchTerms.join(" "));
       if (!queryTokens.every((token) => haystack.includes(token))) {
         return Result.failVoid;
       }
