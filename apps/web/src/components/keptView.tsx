@@ -6,6 +6,7 @@ import {
   memo,
   useContext,
   useEffect,
+  useMemo,
   useReducer,
   useRef,
   useState,
@@ -159,27 +160,13 @@ class KeptPureEditorContent extends PureEditorContent {
   }
 }
 
-const editorContentKeys = new WeakMap<Editor, string>();
 let nextEditorContentKey = 0;
-
-// Like EditorContent, a new editor instance gets a fresh content component.
-function editorContentKey(editor: Editor | null): string {
-  if (editor === null) return "none";
-  let key = editorContentKeys.get(editor);
-  if (key === undefined) {
-    nextEditorContentKey += 1;
-    key = String(nextEditorContentKey);
-    editorContentKeys.set(editor, key);
-  }
-  return key;
-}
 
 export const KeptEditorContent = memo(
   forwardRef<HTMLDivElement, Omit<EditorContentProps, "ref" | "innerRef">>(
     function KeptEditorContent(props, ref) {
-      return (
-        <KeptPureEditorContent key={editorContentKey(props.editor)} innerRef={ref} {...props} />
-      );
+      const key = useMemo(() => ++nextEditorContentKey, [props.editor]);
+      return <KeptPureEditorContent key={key} innerRef={ref} {...props} />;
     },
   ),
 );
