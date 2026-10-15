@@ -204,7 +204,10 @@ layer("055_OrchestrationV2", (it) => {
         runtime_mode, interaction_mode, created_at, updated_at, payload_json
       ) VALUES ('thread', 'project', 'Title', 'codex', 'codex', 'full-access', 'default',
         '2026-07-24', '2026-07-24', '{"settledOverride":"settled","pullRequests":[{"number":1}]}')`;
-      assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadSweepIndexes"], [64, "ProjectionThreadReadPayload"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [63, "ProjectionThreadSweepIndexes"],
+        [64, "ProjectionThreadReadPayload"],
+      ]);
       assert.deepStrictEqual(warnings, legacy ? [["62_ThreadFailureLookupIndex"]] : []);
       yield* ProjectionThreadSweepIndexes;
       assert.deepStrictEqual(yield* runMigrations(), []);
