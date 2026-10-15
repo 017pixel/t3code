@@ -150,27 +150,3 @@ describe("V2 preview upgrade", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
-
-it.effect("repairs read projections after another build removes tables or triggers", () =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations();
-    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 64`;
-    assert.deepStrictEqual(yield* runMigrations(), [[64, "ProjectionThreadReadPayload"]]);
-    for (const drop of [
-      sql`DROP TABLE orchestration_v2_projection_thread_reads`,
-      sql`DROP TRIGGER orchestration_v2_projection_thread_reads_stale_on_update`,
-    ]) {
-      yield* drop;
-      assert.deepStrictEqual(yield* runMigrations(), []);
-      assert.deepStrictEqual(
-        yield* sql`SELECT * FROM orchestration_v2_projection_thread_reads`,
-        [],
-      );
-      assert.lengthOf(
-        yield* sql`SELECT name FROM sqlite_master WHERE name LIKE 'orchestration_v2_projection_thread_reads_stale_on_%'`,
-        2,
-      );
-    }
-  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
-);

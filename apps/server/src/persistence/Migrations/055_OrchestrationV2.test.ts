@@ -264,6 +264,17 @@ layer("055_OrchestrationV2", (it) => {
         yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
         [],
       );
+      for (const drop of [
+        sql`DROP TABLE orchestration_v2_projection_thread_reads`,
+        sql`DROP TRIGGER orchestration_v2_projection_thread_reads_stale_on_update`,
+      ]) {
+        yield* drop;
+        assert.deepStrictEqual(yield* runMigrations(), []);
+        assert.lengthOf(
+          yield* sql`SELECT name FROM sqlite_master WHERE name LIKE 'orchestration_v2_projection_thread_reads%'`,
+          3,
+        );
+      }
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
