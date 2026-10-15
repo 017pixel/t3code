@@ -1,4 +1,3 @@
-import * as ProjectLayers from "./orchestration-v2/projectLayers.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
@@ -502,7 +501,7 @@ const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
     RunFinalizationService.layerObserver.pipe(
       Layer.provide(ProjectionStoreV2.layer),
       Layer.provide(layerPullRequestService),
-      Layer.provide(ProjectLayers.layerProjectService),
+      Layer.provide(RuntimeLayer.layerProjectService),
     ),
   ),
 );
@@ -594,7 +593,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
 ).pipe(
   // Core Services
   Layer.provideMerge(layerOrchestrationApplication),
-  Layer.provideMerge(ProjectLayers.layerEventInfrastructure),
+  Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(layerServerSettings),
   // The asset route uses the registry's GitHub credential for private PR media, which the
