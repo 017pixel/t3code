@@ -1,3 +1,4 @@
+import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "./ThreadHoverCard";
 import { CollapsibleSectionHeader } from "./ui/collapsible-section-header";
@@ -92,6 +93,12 @@ import {
   memo,
   useCallback,
   useEffect,
+  Children,
+  cloneElement,
+  createContext,
+  isValidElement,
+  use,
+  type ComponentProps,
   useLayoutEffect,
   useMemo,
   useReducer,
@@ -290,7 +297,12 @@ import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
-import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import {
+  Tooltip as TooltipRoot,
+  TooltipPopup,
+  TooltipProvider as TooltipProviderRoot,
+  TooltipTrigger,
+} from "./ui/tooltip";
 import { observeResize } from "../lib/observeResize";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import {
@@ -338,6 +350,53 @@ function checkThreadOperations(
     description: "This connection cannot change one or more selected threads.",
   });
   return false;
+}
+
+const SidebarTooltipHandle = createContext<TooltipPrimitive.Handle<ReactNode> | null>(null);
+
+/** One floating popup serves every row and its quick actions. */
+function TooltipProvider({ children, ...props }: ComponentProps<typeof TooltipProviderRoot>) {
+  const [handle] = useState(() => TooltipPrimitive.createHandle<ReactNode>());
+  useEffect(() => {
+    // Only a scroll that moves the open trigger dismisses it; the chat
+    // timeline scrolls on its own while a reply streams.
+    const close = (event: Event) => {
+      if (!handle.isOpen) return;
+      const trigger = document.querySelector('[data-slot="tooltip-trigger"][data-popup-open]');
+      if (!(event.target instanceof Node) || !trigger || !event.target.contains(trigger)) return;
+      if (trigger === document.activeElement) return;
+      handle.close();
+    };
+    document.addEventListener("scroll", close, true);
+    return () => document.removeEventListener("scroll", close, true);
+  }, [handle]);
+  return (
+    <TooltipProviderRoot {...props}>
+      <SidebarTooltipHandle value={handle}>
+        {children}
+        <TooltipRoot handle={handle}>{({ payload }) => payload}</TooltipRoot>
+      </SidebarTooltipHandle>
+    </TooltipProviderRoot>
+  );
+}
+
+function Tooltip({
+  children,
+  disabled = false,
+}: {
+  children: ReactNode;
+  disabled?: boolean | undefined;
+}) {
+  const handle = use(SidebarTooltipHandle);
+  useEffect(() => {
+    if (disabled) handle?.close();
+  }, [disabled, handle]);
+  const parts = Children.toArray(children);
+  const trigger = parts.find((child) => isValidElement(child) && child.type === TooltipTrigger);
+  if (handle === null || !isValidElement<TooltipPrimitive.Trigger.Props<ReactNode>>(trigger))
+    return null;
+  const payload = parts.filter((child) => child !== trigger);
+  return cloneElement(trigger, { handle, payload, disabled });
 }
 
 function compactSidebarTimeLabel(label: string): string {
