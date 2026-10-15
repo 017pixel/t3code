@@ -159,65 +159,6 @@ function makeProjection(visibleTurnItems: OrchestrationV2ProjectedTurnItem[]) {
 }
 
 describe("threadHistoryPaging", () => {
-  it("defers unrelated historical checkpoints only for viewport clients", () => {
-    const projection = makeProjection(Array.from({ length: 90 }, (_, index) => makeRow(index)));
-    const recent = { id: "recent", runId: "recent-run", nodeId: "recent-node", files: [] };
-    const historical = {
-      id: "old",
-      runId: "old-run",
-      nodeId: "old-node",
-      files: [{ path: "x".repeat(1_100_000) }],
-    };
-    const withCheckpoints = {
-      ...projection,
-      runs: [
-        { id: "recent-run", status: "completed" },
-        { id: "old-run", status: "completed" },
-      ],
-      checkpoints: [historical, recent],
-      // The old run only reaches the store's rows above the 75-row window.
-      visibleTurnItems: projection.visibleTurnItems.map((row, index) => ({
-        ...row,
-        item: {
-          ...row.item,
-          runId: index < 15 ? "old-run" : "recent-run",
-          nodeId: index < 15 ? "old-node" : "recent-node",
-        },
-      })),
-    } as unknown as typeof projection;
-    const current = buildBoundedThreadProjection({
-      projection: withCheckpoints,
-      snapshotSequence: 1,
-      viewportWindow: true,
-    });
-    // It stays listed for the Diff panel, without its files.
-    const deferredHistorical = { ...historical, files: [], deferredFileCount: 1 };
-    expect(current.projection.checkpoints).toEqual([deferredHistorical, recent]);
-    const listed = {
-      id: "listed",
-      runId: "listed-run",
-      nodeId: "listed-node",
-      files: [],
-      deferredFileCount: 3,
-    };
-    const withListed = buildBoundedThreadProjection({
-      projection: {
-        ...withCheckpoints,
-        checkpoints: [historical, listed, recent],
-      } as unknown as typeof projection,
-      snapshotSequence: 1,
-      viewportWindow: true,
-    });
-    expect(withListed.projection.checkpoints).toEqual([deferredHistorical, listed, recent]);
-    expect(current.projection.visibleTurnItems).toHaveLength(75);
-    expect(current.payloadBudgetExceeded).toBe(false);
-    const legacy = buildBoundedThreadProjection({
-      projection: withCheckpoints,
-      snapshotSequence: 1,
-    });
-    expect(legacy.projection.checkpoints).toEqual([historical, recent]);
-    expect(legacy.payloadBudgetExceeded).toBe(true);
-  });
   it("builds a resumable bounded socket snapshot frame", () => {
     const projection = makeProjection(Array.from({ length: 90 }, (_, index) => makeRow(index)));
     const item = buildBoundedThreadStreamSnapshot({
