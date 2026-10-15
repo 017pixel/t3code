@@ -1365,7 +1365,8 @@ function visibleTurnItemsThroughRun(input: {
   );
   const localPrefix = inheritedVisibleTurnItemsFromLocalItems(
     input.sourceProjection.turnItems.filter((item) => {
-      if (item.type === "user_message" && item.runId !== null && idleRunIds.has(item.runId))
+      // Idle compaction keeps only its compaction row, like the live timeline.
+      if (item.type !== "compaction" && item.runId !== null && idleRunIds.has(item.runId))
         return false;
       if (
         isOrchestrationV2SupersededInterrupt({
@@ -5025,7 +5026,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             ...source.local.filter(
               (row) =>
                 !(
-                  row.item.type === "user_message" &&
+                  row.item.type !== "compaction" &&
                   row.item.runId !== null &&
                   idleRunIds.has(row.item.runId)
                 ) &&
