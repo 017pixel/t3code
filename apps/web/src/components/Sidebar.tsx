@@ -249,7 +249,6 @@ import {
   sidebarInitialRowBudgetRem,
   useSidebarRowViewport,
 } from "./Sidebar.viewport";
-import { observeResize } from "../lib/observeResize";
 import {
   ThreadPullRequestBadgeControl,
   ThreadPullRequestsMiniList,
@@ -2270,38 +2269,6 @@ function latestRunDiff(
   return null;
 }
 
-function SidebarSearchResultSlot(props: {
-  title: string;
-  resultId: string;
-  index: number;
-  keepMounted: boolean;
-  hasExcerpt: boolean;
-  children: (setSlotNode: (node: HTMLLIElement | null) => void) => ReactNode;
-}) {
-  const [node, setNode] = useState<HTMLLIElement | null>(null);
-  const [visible] = useSidebarRowViewport(node, props.index < 24);
-  const [height, setHeight] = useState(props.hasExcerpt ? "3.75rem" : "2.25rem");
-  useEffect(() => {
-    if (!node || (!visible && !props.keepMounted)) return;
-    return observeResize(node, ([entry]) => {
-      const size = entry?.borderBoxSize[0]?.blockSize;
-      if (size !== undefined && size > 0) {
-        const rem = Number.parseFloat(
-          getComputedStyle(node.ownerDocument.documentElement).fontSize,
-        );
-        setHeight(`${size / rem}rem`);
-      }
-    });
-  }, [node, visible, props.keepMounted]);
-  return visible || props.keepMounted ? (
-    props.children(setNode)
-  ) : (
-    <li ref={setNode} role="presentation" className="list-none" style={{ height }}>
-      <div id={props.resultId} role="option" aria-label={props.title} aria-selected={false} />
-    </li>
-  );
-}
-
 const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   isSettled: boolean;
   thread: SidebarThreadSummary;
@@ -2315,13 +2282,11 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   resultId: string;
   searchMatch: EnvironmentThreadSearchMatch | null;
   searchQuery: string;
-  index: number;
-  setSlotNode: (node: HTMLLIElement | null) => void;
-  onHighlight: (index: number) => void;
-  onSelect: (thread: SidebarThreadSummary) => void;
+  onHighlight: () => void;
+  onSelect: () => void;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
 }) {
-  const { thread, setSlotNode } = props;
+  const { thread } = props;
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
     statusLabel: null,
@@ -2391,7 +2356,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
     return () => window.removeEventListener("dragend", clearFileDrag);
   }, [isFileDragOver]);
   return (
-    <li ref={setSlotNode} role="presentation" className="list-none" {...fileDropHandlers}>
+    <li role="presentation" className="list-none" {...fileDropHandlers}>
       <Tooltip>
         <TooltipTrigger
           render={
@@ -2407,8 +2372,8 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
               aria-current={accessibility.current}
               aria-describedby={`${props.resultId}-pr`}
               aria-label={accessibility.label}
-              onMouseMove={() => props.onHighlight(props.index)}
-              onClick={() => props.onSelect(thread)}
+              onMouseMove={props.onHighlight}
+              onClick={props.onSelect}
               className={cn(
                 "group/sidebar-row group/v2-row flex min-h-9 w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1 text-left text-sm outline-none",
                 props.isHighlighted || props.isRouteActive
@@ -2455,7 +2420,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
                 />
               </span>
               <span className="w-8 shrink-0 text-right text-xs text-muted-foreground/55 tabular-nums">
-                <SidebarTimeLabel thread={thread} />
+                {threadTimeLabel(thread)}
               </span>
             </span>
             {props.searchMatch ? (
@@ -5294,64 +5259,42 @@ export default function Sidebar() {
                       scopeThreadRef(thread.environmentId, thread.id),
                     );
                     return (
-                      <SidebarSearchResultSlot
+                      <SidebarSearchResultRow
+                        isSettled={settledThreadKeys.has(threadKey)}
                         key={threadKey}
-                        title={thread.title}
-                        resultId={`sidebar-thread-search-result-${index}`}
-                        index={index}
-                        keepMounted={
-                          activeSearchResultIndex === index || routeThreadKey === threadKey
+                        thread={thread}
+                        project={
+                          projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null
                         }
-                        hasExcerpt={threadSearchMatchByKey.has(
-                          threadSearchMatchKey({
-                            environmentId: thread.environmentId,
-                            threadId: thread.id,
-                          }),
-                        )}
-                      >
-                        {(setSlotNode) => (
-                          <SidebarSearchResultRow
-                            setSlotNode={setSlotNode}
-                            isSettled={settledThreadKeys.has(threadKey)}
-                            index={index}
-                            thread={thread}
-                            project={
-                              projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
-                              null
-                            }
-                            projectDisplayName={
-                              projectDisplayNameByKey.get(
-                                `${thread.environmentId}:${thread.projectId}`,
-                              ) ?? null
-                            }
-                            environmentLabel={
-                              environmentLabelById.get(thread.environmentId) ?? null
-                            }
-                            environmentMachine={
-                              environmentMachineById.get(thread.environmentId) ?? "server"
-                            }
-                            providerEntryByInstanceId={
-                              providerEntriesByEnvironment.get(thread.environmentId) ??
-                              EMPTY_PROVIDER_ENTRIES
-                            }
-                            isHighlighted={activeSearchResultIndex === index}
-                            isRouteActive={routeThreadKey === threadKey}
-                            resultId={`sidebar-thread-search-result-${index}`}
-                            searchMatch={
-                              threadSearchMatchByKey.get(
-                                threadSearchMatchKey({
-                                  environmentId: thread.environmentId,
-                                  threadId: thread.id,
-                                }),
-                              ) ?? null
-                            }
-                            searchQuery={threadSearchQuery}
-                            onHighlight={setActiveSearchResultIndex}
-                            onSelect={selectThreadSearchResult}
-                            onFileDropThreads={handleThreadFileDrop}
-                          />
-                        )}
-                      </SidebarSearchResultSlot>
+                        projectDisplayName={
+                          projectDisplayNameByKey.get(
+                            `${thread.environmentId}:${thread.projectId}`,
+                          ) ?? null
+                        }
+                        environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
+                        environmentMachine={
+                          environmentMachineById.get(thread.environmentId) ?? "server"
+                        }
+                        providerEntryByInstanceId={
+                          providerEntriesByEnvironment.get(thread.environmentId) ??
+                          EMPTY_PROVIDER_ENTRIES
+                        }
+                        isHighlighted={activeSearchResultIndex === index}
+                        isRouteActive={routeThreadKey === threadKey}
+                        resultId={`sidebar-thread-search-result-${index}`}
+                        searchMatch={
+                          threadSearchMatchByKey.get(
+                            threadSearchMatchKey({
+                              environmentId: thread.environmentId,
+                              threadId: thread.id,
+                            }),
+                          ) ?? null
+                        }
+                        searchQuery={threadSearchQuery}
+                        onHighlight={() => setActiveSearchResultIndex(index)}
+                        onSelect={() => selectThreadSearchResult(thread)}
+                        onFileDropThreads={handleThreadFileDrop}
+                      />
                     );
                   })}
                 </ul>
