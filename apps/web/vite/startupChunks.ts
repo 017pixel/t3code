@@ -229,17 +229,17 @@ export function startupChunksPlugin(): Plugin {
     transformIndexHtml: {
       order: "post",
       handler: (): HtmlTagDescriptor[] => [
-        // Start fetching before the inline theme script. A stylesheet link would
-        // hold the splash; the runtime still inserts the stylesheet before main runs.
+        // A stylesheet link would hold the splash until the CSS arrives; the
+        // runtime still inserts the stylesheet before main runs.
         ...startupCss.map((file): HtmlTagDescriptor => ({
           tag: "link",
           attrs: { rel: "preload", as: "style", crossorigin: true, href: `${base}${file}` },
-          injectTo: "head-prepend",
+          injectTo: "head",
         })),
         ...startupFiles.map((file): HtmlTagDescriptor => ({
           tag: "link",
           attrs: { rel: "modulepreload", crossorigin: true, href: `${base}${file}` },
-          injectTo: "head-prepend",
+          injectTo: "head",
         })),
       ],
     },
