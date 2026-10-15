@@ -67,11 +67,7 @@ import {
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import { configureClientTracing } from "../observability/clientTracing";
-import {
-  peekPairingTokenFromUrl,
-  resolveInitialServerAuthGateState,
-} from "../environments/primary";
-import { discardBootSnapshot, readBootSnapshot } from "../bootSnapshot";
+import { resolveInitialServerAuthGateState } from "../environments/primary";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
 import { useHostedPromptLinkLanding } from "../components/promptLinks/HostedPromptLinkLanding";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
@@ -140,11 +136,7 @@ export const Route = createRootRoute({
 
     const authGate = resolveInitialServerAuthGateState();
     prefetchPrimaryEnvironmentDescriptor();
-    const authGateState = shouldRenderBeforeAuthGate(location.pathname)
-      ? renderBeforeAuthGate(authGate)
-      : await authGate;
-    // A snapshot of a workspace this browser can no longer open must not paint later.
-    if (authGateState.status === "requires-auth") discardBootSnapshot();
+    const authGateState = await authGate;
     // Connect and read cached shells while the route chunks still load.
     if (authGateState.status === "authenticated") startEnvironmentShells();
     if (
@@ -166,35 +158,6 @@ export const Route = createRootRoute({
     meta: [{ name: "title", content: APP_DISPLAY_NAME }],
   }),
 });
-
-type InitialAuthGateState = Awaited<ReturnType<typeof resolveInitialServerAuthGateState>>;
-
-let earlyAuthGate: "unused" | "pending" | "settled" = "unused";
-
-function shouldRenderBeforeAuthGate(pathname: string): boolean {
-  if (pathname === "/pair" || peekPairingTokenFromUrl() !== null) return false;
-  if (earlyAuthGate !== "unused") return earlyAuthGate === "pending";
-  return readBootSnapshot()?.catalog.some((entry) => entry.kind === "primary") === true;
-}
-
-function renderBeforeAuthGate(authGate: Promise<InitialAuthGateState>): InitialAuthGateState {
-  if (earlyAuthGate === "unused") {
-    earlyAuthGate = "pending";
-    // Retry without cached workspace data so pairing or connection errors can surface.
-    const bootWithoutSnapshot = () => {
-      discardBootSnapshot();
-      window.location.reload();
-    };
-    void authGate.then((state) => {
-      if (state.status === "authenticated") {
-        earlyAuthGate = "settled";
-        return;
-      }
-      bootWithoutSnapshot();
-    }, bootWithoutSnapshot);
-  }
-  return { status: "authenticated" };
-}
 
 function RootRouteNotFoundView() {
   return (

@@ -1,13 +1,11 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Activity,
   memo,
-  startTransition,
   useDeferredValue,
   useEffect,
-  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -36,8 +34,6 @@ import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { environmentSession } from "../state/session";
-import { isBootHeld, releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   buildThreadRouteParams,
   isThreadRouteSnapshotAuthoritative,
@@ -55,79 +51,6 @@ const KeptChatView = memo(ChatView);
 
 // Updated on commit so route reveals use the mounted view pool.
 let keptThreadKeys: ReadonlySet<string> = new Set();
-
-let bootChatViewDeferred = false;
-
-// A slow backend must not hold the snapshot composer indefinitely.
-const BOOT_SESSION_WAIT_MS = 750;
-
-/** Paint the sidebar first, then prefer live data to avoid rendering chat twice. */
-function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
-  const [ready, setReady] = useState(() => bootChatViewDeferred || !isBootHeld());
-  const pendingReleaseRef = useRef<(() => void) | null>(null);
-  const sessionConfigAtom = useEffectEvent(() =>
-    environmentId === null ? null : environmentSession.initialConfigValueAtom(environmentId),
-  );
-  useEffect(() => {
-    if (ready) return;
-    bootChatViewDeferred = true;
-    const release = retainBootHold();
-    let mounted = false;
-    let stopWaiting = () => {};
-    const renderLive = () => {
-      if (mounted) return;
-      mounted = true;
-      stopWaiting();
-      // Separate the live-data switch and chat render into two tasks.
-      release();
-      setTimeout(() => setReady(true), 0);
-    };
-    const renderFromSnapshot = () => {
-      if (mounted) return;
-      mounted = true;
-      stopWaiting();
-      // Released after the chat view's own commit paints, or on unmount.
-      pendingReleaseRef.current = release;
-      startTransition(() => setReady(true));
-    };
-    const afterFirstFrame = () => {
-      const configAtom = sessionConfigAtom();
-      if (configAtom === null) return renderFromSnapshot();
-      if (appAtomRegistry.get(configAtom) !== null) return renderLive();
-      // Let session requests go out before the chat render.
-      const unsubscribe = appAtomRegistry.subscribe(configAtom, (config) => {
-        if (config !== null) setTimeout(renderLive, 0);
-      });
-      const timeout = setTimeout(renderFromSnapshot, BOOT_SESSION_WAIT_MS);
-      stopWaiting = () => {
-        unsubscribe();
-        clearTimeout(timeout);
-      };
-    };
-    let started = false;
-    const start = () => {
-      if (started) return;
-      started = true;
-      afterFirstFrame();
-    };
-    const frame = requestAnimationFrame(() => setTimeout(start, 0));
-    const timer = setTimeout(start, 100);
-    return () => {
-      cancelAnimationFrame(frame);
-      clearTimeout(timer);
-      stopWaiting();
-      if (!mounted) release();
-    };
-  }, [ready]);
-  useEffect(() => {
-    const release = pendingReleaseRef.current;
-    if (!ready || release === null) return;
-    const cancel = releaseBootHoldAfterPaint(release);
-    pendingReleaseRef.current = null;
-    return cancel;
-  }, [ready]);
-  return ready;
-}
 
 /**
  * The single chat surface behind both `/draft/$draftId` and
@@ -148,11 +71,6 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
   const draftId = target.kind === "draft" ? target.draftId : null;
   const draftSession = useComposerDraftStore((store) =>
     draftId === null ? null : store.getDraftSession(draftId),
-  );
-  const chatViewReady = useBootDeferredChatView(
-    target.kind === "server"
-      ? target.threadRef.environmentId
-      : (draftSession?.environmentId ?? null),
   );
   const threadRefs = useThreadRefs();
   // The server thread this view is about: the route's own ref, or the draft's
@@ -327,30 +245,29 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
       ref={insetRef}
       className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
     >
-      {chatViewReady &&
-        nextKeptViews.map((view) => (
-          <Activity key={view.key} mode={view.key === activeViewKey ? "visible" : "hidden"}>
-            <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
-              <KeptViewFrame>
-                {view.draftId === null ? (
-                  <KeptChatView
-                    environmentId={view.environmentId}
-                    threadId={view.threadId}
-                    routeKind="server"
-                  />
-                ) : (
-                  <KeptChatView
-                    draftId={view.draftId}
-                    environmentId={view.environmentId}
-                    threadId={view.threadId}
-                    routeKind="draft"
-                    forceExpandedMobileComposer
-                  />
-                )}
-              </KeptViewFrame>
-            </KeptViewLifetimeContext>
-          </Activity>
-        ))}
+      {nextKeptViews.map((view) => (
+        <Activity key={view.key} mode={view.key === activeViewKey ? "visible" : "hidden"}>
+          <KeptViewLifetimeContext value={lifetimes.get(view.key)}>
+            <KeptViewFrame>
+              {view.draftId === null ? (
+                <KeptChatView
+                  environmentId={view.environmentId}
+                  threadId={view.threadId}
+                  routeKind="server"
+                />
+              ) : (
+                <KeptChatView
+                  draftId={view.draftId}
+                  environmentId={view.environmentId}
+                  threadId={view.threadId}
+                  routeKind="draft"
+                  forceExpandedMobileComposer
+                />
+              )}
+            </KeptViewFrame>
+          </KeptViewLifetimeContext>
+        </Activity>
+      ))}
     </SidebarInset>
   );
 });
