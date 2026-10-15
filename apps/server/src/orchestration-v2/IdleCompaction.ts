@@ -57,6 +57,17 @@ export function idleCompactionCandidate(
     projection;
   if (!enabled || thread.deletedAt !== null || thread.archivedAt !== null) return null;
   if (thread.lineage.relationshipToParent === "subagent") return null;
+  // A pending merge-back belongs to the user's next message; compaction would
+  // consume it and bind the merged context to the current provider thread.
+  if (
+    projection.contextTransfers.some(
+      (transfer) =>
+        transfer.type === "merge_back" &&
+        transfer.targetThreadId === thread.id &&
+        transfer.status === "pending",
+    )
+  )
+    return null;
   if (thread.settledOverride === "settled" || thread.settledAt !== null) return null;
   if (runtimeRequests.some((request) => request.status === "pending")) return null;
   if (
