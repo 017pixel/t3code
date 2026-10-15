@@ -37,7 +37,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { resolveAutoSettlementAt } from "./ThreadSettlementService.ts";
-import { compactThreadPullRequests, compactShellPullRequestStacks } from "./ThreadReadPayload.ts";
+import { compactThreadPullRequests } from "./ThreadReadPayload.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
