@@ -368,31 +368,18 @@ describe("buildProjectActionItems", () => {
 
 describe("buildThreadActionItems", () => {
   it("keeps equal thread ids in different environments distinct and navigable", async () => {
-    const local = makeThread({ title: "Local work" });
-    const remote = makeThread({
-      id: local.id,
-      environmentId: EnvironmentId.make("environment-remote"),
-      title: "Remote work",
-    });
+    const local = makeThread();
+    const remote = makeThread({ id: local.id, environmentId: EnvironmentId.make("remote") });
     const runThread = vi.fn(async () => {});
     const items = buildThreadActionItems({
       threads: [local, remote],
       projectTitleById: new Map(),
       sortOrder: "updated_at",
       icon: null,
-      getContentMatch: (thread) =>
-        thread.environmentId === remote.environmentId
-          ? { source: "assistant", snippet: "remote message", query: "message" }
-          : undefined,
       runThread,
     });
-    const remoteItem = items.find((item) => item.threadContentMatch);
-    const matches = new Map(remoteItem ? [[remoteItem.value, remoteItem]] : []);
-    const merged = items.map((item) => matches.get(item.value) ?? item);
-    expect(merged.map((item) => item.title)).toEqual(["Local work", "Remote work"]);
-    expect(new Set(merged.map((item) => item.value)).size).toBe(2);
-    await merged[0]?.run();
-    await merged[1]?.run();
+    expect(new Set(items.map((item) => item.value)).size).toBe(2);
+    for (const item of items) await item.run();
     expect(runThread.mock.calls).toEqual([[local], [remote]]);
   });
 

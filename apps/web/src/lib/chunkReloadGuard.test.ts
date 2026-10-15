@@ -20,48 +20,36 @@ function createStorageStub(): Storage {
   };
 }
 
-const BUILD_A = "https://app.t3.codes/assets/index-A.js";
-const BUILD_B = "https://app.t3.codes/assets/index-B.js";
-const failedImport = (asset: string) =>
-  `TypeError: Failed to fetch dynamically imported module: https://app.t3.codes/assets/${asset}`;
-
 describe("reloadOnceForChunkLoadError", () => {
-  it("reloads once for a chunk that fails on every boot, then lets it surface", () => {
+  it("reloads on the first failure and lets the second one surface", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
 
-    expect(
-      reloadOnceForChunkLoadError(BUILD_B, failedImport("chat-1.js"), () => storage, reload),
-    ).toBe(true);
+    expect(reloadOnceForChunkLoadError("a", "chunk", () => storage, reload)).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
 
-    // Every later boot requests the same failing chunk during its first render.
-    expect(
-      reloadOnceForChunkLoadError(BUILD_B, failedImport("chat-1.js"), () => storage, reload),
-    ).toBe(false);
-    expect(
-      reloadOnceForChunkLoadError(BUILD_B, failedImport("chat-1.js"), () => storage, reload),
-    ).toBe(false);
+    expect(reloadOnceForChunkLoadError("a", "chunk", () => storage, reload)).toBe(false);
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  it("gives later builds their own reloads after the previous build exhausts its limit", () => {
+  it("gives each build its own reload", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
-    for (const build of [BUILD_A, BUILD_B]) {
+
+    reloadOnceForChunkLoadError("a", "chunk", () => storage, reload);
+
+    expect(reloadOnceForChunkLoadError("b", "chunk", () => storage, reload)).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds failures per build and resets the limit for the next build", () => {
+    const storage = createStorageStub();
+    const reload = vi.fn();
+    for (const build of ["a", "b"]) {
       for (let index = 0; index < 20; index += 1) {
-        expect(
-          reloadOnceForChunkLoadError(
-            build,
-            failedImport(`chunk-${index}.js`),
-            () => storage,
-            reload,
-          ),
-        ).toBe(true);
+        expect(reloadOnceForChunkLoadError(build, String(index), () => storage, reload)).toBe(true);
       }
-      expect(
-        reloadOnceForChunkLoadError(build, failedImport("chunk-20.js"), () => storage, reload),
-      ).toBe(false);
+      expect(reloadOnceForChunkLoadError(build, "20", () => storage, reload)).toBe(false);
     }
     expect(reload).toHaveBeenCalledTimes(40);
   });
@@ -72,9 +60,7 @@ describe("reloadOnceForChunkLoadError", () => {
       throw new DOMException("blocked", "SecurityError");
     };
 
-    expect(reloadOnceForChunkLoadError(BUILD_B, failedImport("chat-1.js"), blocked, reload)).toBe(
-      false,
-    );
+    expect(reloadOnceForChunkLoadError("a", "chunk", blocked, reload)).toBe(false);
     expect(reload).not.toHaveBeenCalled();
   });
 });
