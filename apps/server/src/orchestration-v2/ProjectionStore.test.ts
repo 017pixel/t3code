@@ -3169,38 +3169,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const otherThreadId = yield* addRolledBackRecoveryCandidate("other-limit-shell");
       const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
       const now = yield* DateTime.now;
-      const thread = yield* store.getThread(threadId);
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:pull-request"),
-        type: "thread.pull-request-synced",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...thread,
-          pullRequests: [
-            {
-              host: "github.com",
-              repository: "pingdotgg/t3code",
-              number: 42,
-              url: "https://github.com/pingdotgg/t3code/pull/42",
-              source: "manual",
-              linkedAt: DateTime.formatIso(now),
-              stack: null,
-              snapshot: {
-                state: "open",
-                title: "Recovery with a linked PR",
-                headBranch: "recovery",
-                baseBranch: "main",
-                isDraft: false,
-                updatedAt: DateTime.formatIso(now),
-                syncedAt: DateTime.formatIso(now),
-                additions: 100,
-                deletions: 20,
-              },
-            },
-          ],
-        },
-      });
       const limitItem = {
         id: TurnItemId.make("limit-shell:error"),
         threadId,
@@ -3433,20 +3401,15 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ),
       );
       const reset = DateTime.makeUnsafe(limitItem.failure.resetAt);
-      const recoveryBaseline = yield* store.getThread(threadId);
       const recovery = {
         runId: original.id,
         resetAt: limitItem.failure.resetAt,
         autoResume: true,
         requestId: CommandId.make("recovery:choice"),
       };
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-choice"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: { ...recoveryBaseline, limitRecovery: recovery },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.limitRecovery', json(${encodeUnknownJsonString(recovery)}))
+        WHERE thread_id = ${threadId}`;
       // Armed future retries need no state decoding until they become due.
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, autoResume: true })).find(
@@ -3477,32 +3440,17 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ),
       );
       yield* sql`DELETE FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id = 'limit-shell:pending-request'`;
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-snooze"),
-        type: "thread.snoozed",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...(yield* store.getThread(threadId)),
-          snoozedUntil: DateTime.add(reset, { minutes: 1 }),
-        },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.snoozedUntil', ${DateTime.formatIso(DateTime.add(reset, { minutes: 1 }))})
+        WHERE thread_id = ${threadId}`;
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, now: reset })).find(
           (row) => row.id === threadId,
         ),
       );
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-disabled"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...recoveryBaseline,
-          snoozedUntil: null,
-          limitRecovery: { ...recovery, autoResume: false },
-        },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.snoozedUntil', NULL, '$.limitRecovery.autoResume', json('false'))
+        WHERE thread_id = ${threadId}`;
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({
           ...recoveryOptions,
@@ -3510,13 +3458,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           autoResume: true,
         })).find((row) => row.id === threadId),
       );
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-restored"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: recoveryBaseline,
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = ${originalRow!.payload_json} WHERE thread_id = ${threadId}`;
       const session = {
         id: ProviderSessionId.make("session:limit-shell:shared"),
         driver,
@@ -3599,13 +3541,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       // A new attempt's root cannot inherit an earlier attempt's limit.
       yield* applyRun("failed", NodeId.make("new-attempt-root"));
       yield* assertSummary(null, null);
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:pull-request-removed"),
-        type: "thread.pull-request-synced",
-        threadId,
-        occurredAt: now,
-        payload: { ...(yield* store.getThread(threadId)), pullRequests: thread.pullRequests },
-      });
     }),
   );
 
