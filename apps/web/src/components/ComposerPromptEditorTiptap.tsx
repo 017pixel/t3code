@@ -951,21 +951,15 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     };
   }, []);
 
-  // Each scan walks the whole prompt, so only the first render pays for it.
-  const [initialSnapshot] = useState(() => {
-    const initialCursor = clampEditorCursor(value, cursor);
-    return {
-      value,
-      cursor: initialCursor,
-      expandedCursor: expandEditorCursor(value, initialCursor),
-      contextIds: literalText ? [] : collectInlineContextIds(value),
-    };
+  const initialCursor = clampEditorCursor(value, cursor);
+  const initialExpandedCursor = expandEditorCursor(value, initialCursor);
+  const snapshotRef = useRef({
+    value,
+    cursor: initialCursor,
+    expandedCursor: initialExpandedCursor,
+    contextIds: literalText ? [] : collectInlineContextIds(value),
   });
-  const snapshotRef = useRef(initialSnapshot);
-  const selectionRangeRef = useRef({
-    start: initialSnapshot.expandedCursor,
-    end: initialSnapshot.expandedCursor,
-  });
+  const selectionRangeRef = useRef({ start: initialExpandedCursor, end: initialExpandedCursor });
   const initialContentRef = useRef<ReturnType<typeof buildDocJson> | null>(null);
   const isApplyingControlledUpdateRef = useRef(false);
   const hasAppliedControlledSelectionRef = useRef(false);
