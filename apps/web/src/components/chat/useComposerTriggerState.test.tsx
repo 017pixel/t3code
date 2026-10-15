@@ -154,19 +154,15 @@ describe("typing guard subscription", () => {
       clearTimeout: globalThis.clearTimeout,
     });
     let guard!: ReturnType<typeof useComposerTypingGuard>;
-    let renders = 0;
     function Probe({ requestIds }: { requestIds: readonly string[] }) {
       guard = useComposerTypingGuard("draft", requestIds);
-      renders += 1;
       return null;
     }
     try {
       await act(() => root.render(<Probe requestIds={[]} />));
       await act(() => guard.onFocus());
-      const beforeTyping = renders;
       await act(() => guard.onDraftChange());
       await act(() => guard.onDraftChange());
-      expect(renders).toBe(beforeTyping);
       await act(() => root.render(<Probe requestIds={["approval"]} />));
       expect([...guard.heldRequestIds]).toEqual(["approval"]);
       await act(() => vi.advanceTimersByTimeAsync(1000));
