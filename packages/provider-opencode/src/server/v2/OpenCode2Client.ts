@@ -1,5 +1,5 @@
 import type { OpenCodeClient } from "@opencode/client/effect";
-import { OpenCodeEvent } from "@opencode/protocol/groups/event";
+import type { OpenCodeEvent } from "@opencode/protocol/groups/event";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -98,7 +98,6 @@ export class OpenCode2Client extends Context.Service<
  */
 const SILENT_STREAM_TIMEOUT = "45 seconds";
 
-const decodeEvent = Schema.decodeUnknownResult(Schema.fromJsonString(OpenCodeEvent));
 // Just enough of an event to route it, for frames the full schema rejects.
 const decodeEnvelope = Schema.decodeUnknownOption(
   Schema.fromJsonString(
@@ -139,27 +138,31 @@ const undecodable = (data: string) =>
   });
 
 /** Subscribes to `/api/event`, then streams every frame this build can route. */
-const readEvents = HttpClient.get("/api/event", {
-  headers: { accept: "text/event-stream" },
-}).pipe(
-  Effect.flatMap(HttpClientResponse.filterStatusOk),
-  Effect.map((response) =>
-    response.stream.pipe(
-      Stream.timeoutOrElse({
-        duration: SILENT_STREAM_TIMEOUT,
-        orElse: () => Stream.fail(new OpenCode2SilentStreamError()),
-      }),
-      Stream.decodeText,
-      Stream.pipeThroughChannel(Sse.decode()),
-      Stream.filterMapEffect((frame) => {
-        const decoded = decodeEvent(frame.data);
-        return Result.isSuccess(decoded)
-          ? Effect.succeed(Result.succeed<OpenCode2StreamEvent>(decoded.success))
-          : undecodable(frame.data);
-      }),
+const readEvents = Effect.gen(function* () {
+  const { OpenCodeEvent } = yield* Effect.promise(() => import("@opencode/protocol/groups/event"));
+  const decodeEvent = Schema.decodeUnknownResult(Schema.fromJsonString(OpenCodeEvent));
+  return yield* HttpClient.get("/api/event", {
+    headers: { accept: "text/event-stream" },
+  }).pipe(
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.map((response) =>
+      response.stream.pipe(
+        Stream.timeoutOrElse({
+          duration: SILENT_STREAM_TIMEOUT,
+          orElse: () => Stream.fail(new OpenCode2SilentStreamError()),
+        }),
+        Stream.decodeText,
+        Stream.pipeThroughChannel(Sse.decode()),
+        Stream.filterMapEffect((frame) => {
+          const decoded = decodeEvent(frame.data);
+          return Result.isSuccess(decoded)
+            ? Effect.succeed(Result.succeed<OpenCode2StreamEvent>(decoded.success))
+            : undecodable(frame.data);
+        }),
+      ),
     ),
-  ),
-);
+  );
+});
 
 /**
  * OpenCode decodes Basic credentials as UTF-8. `HttpClientRequest.basicAuth`
