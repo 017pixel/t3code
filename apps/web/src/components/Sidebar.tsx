@@ -2360,7 +2360,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(
   );
 });
 
-function SidebarSearchResultContent(
+const SidebarSearchResultContent = memo(function SidebarSearchResultContent(
   props: SidebarSearchResultRowProps & { setSlotNode: (node: HTMLLIElement | null) => void },
 ) {
   const { thread } = props;
@@ -2529,7 +2529,7 @@ function SidebarSearchResultContent(
       </Tooltip>
     </li>
   );
-}
+});
 
 export default function Sidebar() {
   const projects = useProjects();
