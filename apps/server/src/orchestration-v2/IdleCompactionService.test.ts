@@ -464,6 +464,9 @@ it.effect("keeps the prior activity anchor and hides the system prompt after idl
         expect(result.status).toBe("completed");
         expect(result.latestRunId).toBe(value.runs[0]!.id);
         expect(result.latestRunCompletedAt).toEqual(at());
+        expect(result.activityRunStatus).toBeNull();
+        expect(result.activityRunStartedAt).toBeNull();
+        expect(result.activeRunId).toBeNull();
       }
     }
   }).pipe(Effect.provide(layerProjections)),

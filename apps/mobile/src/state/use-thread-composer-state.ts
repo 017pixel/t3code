@@ -368,14 +368,16 @@ export function useThreadComposerState() {
   const selectedThreadRuntime = useMemo(
     () =>
       selectedThreadProjection
-        ? deriveThreadRuntime(selectedThreadProjection.projection)
+        ? deriveThreadRuntime(selectedThreadProjection.projection, { includeIdleCompaction: true })
         : (selectedThreadShell?.runtime ?? null),
     [selectedThreadProjection, selectedThreadShell?.runtime],
   );
   const selectedThreadActivityRun = useMemo(
     () =>
       selectedThreadProjection
-        ? deriveThreadActivityRun(selectedThreadProjection.projection)
+        ? deriveThreadActivityRun(selectedThreadProjection.projection, {
+            includeIdleCompaction: true,
+          })
         : (selectedThreadShell?.latestRun ?? null),
     [selectedThreadProjection, selectedThreadShell?.latestRun],
   );

@@ -2842,7 +2842,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     let markUnreadVisitedAt: DateTime.Utc | null = null;
     if (command.type === "thread.mark-unread") {
       const projection = yield* loadProjectionForCommand(command, ["runs"]);
-      const latestRunCompletedAt = projection.runs.at(-1)?.completedAt ?? null;
+      // Clients compare against the presented run, which never is idle maintenance.
+      const latestRunCompletedAt =
+        projection.runs.findLast((run) => run.idleCompactionOfRunId === undefined)?.completedAt ??
+        null;
       if (latestRunCompletedAt === null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,

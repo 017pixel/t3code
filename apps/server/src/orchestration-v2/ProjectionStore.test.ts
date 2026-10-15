@@ -2917,6 +2917,57 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           DateTime.toEpochMillis(now),
         );
       }
+
+      const maintenance = {
+        ...run,
+        id: RunId.make("run:projection-shell-interruptible:idle-compaction"),
+        ordinal: 3,
+        idleCompactionOfRunId: runId,
+        requestedAt: later,
+        startedAt: later,
+      };
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-interruptible:idle-compaction"),
+        type: "run.created",
+        threadId,
+        occurredAt: later,
+        payload: maintenance,
+      });
+      for (const status of ["running", "waiting", "completed"] as const) {
+        yield* projectionStore.apply({
+          id: EventId.make(`event:projection-shell-interruptible:maintenance:${status}`),
+          type: "run.updated",
+          threadId,
+          occurredAt: later,
+          payload: {
+            ...wakeProjection.runs[0]!,
+            status,
+            completedAt: status === "completed" ? later : null,
+          },
+        });
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        const shells = [
+          (yield* projectionStore.getShellSnapshot()).threads.find((row) => row.id === threadId)!,
+          (yield* projectionStore.getThreadShell(threadId))!,
+          ProjectionStore.threadShellFromProjection(projection),
+        ];
+        for (const shell of shells) {
+          assert.equal(shell.status, status);
+          assert.equal(shell.latestRunId, runId);
+          assert.equal(shell.activeRunId, status === "running" ? runId : null);
+          assert.equal(shell.activityRunStatus, status === "completed" ? null : status);
+          assert.equal(
+            shell.activityRunStartedAt == null
+              ? null
+              : DateTime.toEpochMillis(shell.activityRunStartedAt),
+            status === "completed" ? null : DateTime.toEpochMillis(now),
+          );
+        }
+        assert.equal(
+          projection.runs.find((candidate) => candidate.id === maintenance.id)?.status,
+          "running",
+        );
+      }
     }),
   );
 
