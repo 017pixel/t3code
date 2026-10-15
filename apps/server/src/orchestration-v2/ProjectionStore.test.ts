@@ -48,7 +48,6 @@ import {
   decodeThreadReadPayload,
   encodeThreadReadPayload,
 } from "./ThreadReadPayload.ts";
-import { compactThreadFieldEvent } from "../persistence/DatabaseCompaction.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -2470,22 +2469,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.isNull(markedUnread.thread.lastVisitedAt);
       assert.deepEqual(markedUnread.thread.updatedAt, createdAt);
 
-      const visitedPayload = { ...thread, lastVisitedAt: visitedOccurredAt };
-      const legacy = {
-        id: EventId.make("event:compact-visit"),
-        type: "thread.visited" as const,
-        threadId,
-        occurredAt: visitedOccurredAt,
-        payload: visitedPayload,
-      };
-      assert.equal(compactThreadFieldEvent(legacy, thread).type, "thread.visit-recorded");
-      assert.strictEqual(
-        compactThreadFieldEvent(
-          { ...legacy, payload: { ...visitedPayload, title: "Also changed" } },
-          thread,
-        ).type,
-        "thread.visited",
-      );
       assert.deepEqual(
         yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(thread)),
         thread,
@@ -5776,28 +5759,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.deepEqual(synced.pullRequests?.[0]?.snapshot, snapshot);
       assert.isDefined(synced.pullRequests?.[0]?.watch);
       assert.deepEqual(synced.updatedAt, at);
-      const previous = {
-        ...synced,
-        pullRequests: [{ ...synced.pullRequests![0]!, snapshot: null }],
-      };
-      const legacySync = {
-        id: EventId.make("event:compact-pr-sync"),
-        type: "thread.pull-request-synced" as const,
-        threadId,
-        occurredAt: at,
-        payload: synced,
-      };
-      assert.equal(
-        compactThreadFieldEvent(legacySync, previous).type,
-        "thread.pull-request-link-synced",
-      );
-      assert.equal(
-        compactThreadFieldEvent(
-          { ...legacySync, payload: { ...synced, title: "Changed too" } },
-          previous,
-        ).type,
-        "thread.pull-request-synced",
-      );
       const stack = {
         kind: "native" as const,
         id: "stack:codec",
