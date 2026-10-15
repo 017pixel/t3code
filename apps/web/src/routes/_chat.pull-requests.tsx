@@ -1992,68 +1992,53 @@ function PullRequestsRouteView() {
     () => (listRowsShown ? pullRequestListItems(displayGroups) : EMPTY_PULL_REQUEST_LIST_ITEMS),
     [displayGroups, listRowsShown],
   );
-  const renderListItem = ({ item }: { item: PullRequestListItem }) => {
-    if (item.kind === "group") {
+  const renderListItem = useCallback(
+    ({ item }: { item: PullRequestListItem }) => {
+      if (item.kind === "group") {
+        return (
+          <PullRequestListLane className={item.first ? undefined : "pt-3"}>
+            <PullRequestGroupHeader group={item.group} />
+          </PullRequestListLane>
+        );
+      }
+      const { entry, entryKey } = item;
       return (
-        <PullRequestListLane className={item.first ? undefined : "pt-3"}>
-          <PullRequestGroupHeader group={item.group} />
+        <PullRequestListLane
+          className={item.gap === "row" ? "pt-0.5" : item.gap === "group" ? "pt-3" : undefined}
+        >
+          <PullRequestRow
+            statsKey={entryKey}
+            statsRef={registerStatsRow}
+            entry={entry}
+            showProjectTitle
+            showProvider={showProvider}
+            {...(capableEnvironments.length > 1 &&
+            environmentLabels.get(entry.environmentId) !== undefined
+              ? { environmentLabel: environmentLabels.get(entry.environmentId)! }
+              : {})}
+            // Ten is the floor the ranking gives a row whose own fields say nothing
+            // about the search: the host matched something this row cannot show.
+            matchedElsewhere={
+              typedParsed.text.length > 0 &&
+              scorePullRequestMatch(entry, typedParsed.text) <= MATCHED_ELSEWHERE_SCORE
+            }
+            selected={
+              selected?.environmentId === entry.environmentId &&
+              selected.repository === entry.repository &&
+              selected.host?.toLowerCase() === entry.host.toLowerCase() &&
+              selected.number === entry.number
+            }
+            onSelect={selectEntry}
+            speedMode={speedMode}
+            hostActions={hostActionsOf(entry)}
+            onActed={onSpeedAction}
+            closing={closingKeys.has(entryKey)}
+            sweeping={closeSweepKeys.has(entryKey)}
+            onCloseSweepStart={startCloseSweep}
+          />
         </PullRequestListLane>
       );
-    }
-    const { entry, entryKey } = item;
-    return (
-      <PullRequestListLane
-        className={item.gap === "row" ? "pt-0.5" : item.gap === "group" ? "pt-3" : undefined}
-      >
-        <PullRequestRow
-          statsKey={entryKey}
-          statsRef={registerStatsRow}
-          entry={entry}
-          showProjectTitle
-          showProvider={showProvider}
-          {...(capableEnvironments.length > 1 &&
-          environmentLabels.get(entry.environmentId) !== undefined
-            ? { environmentLabel: environmentLabels.get(entry.environmentId)! }
-            : {})}
-          // Ten is the floor the ranking gives a row whose own fields say nothing
-          // about the search: the host matched something this row cannot show.
-          matchedElsewhere={
-            typedParsed.text.length > 0 &&
-            scorePullRequestMatch(entry, typedParsed.text) <= MATCHED_ELSEWHERE_SCORE
-          }
-          selected={
-            selected?.environmentId === entry.environmentId &&
-            selected.repository === entry.repository &&
-            selected.host?.toLowerCase() === entry.host.toLowerCase() &&
-            selected.number === entry.number
-          }
-          onSelect={selectEntry}
-          speedMode={speedMode}
-          hostActions={hostActionsOf(entry)}
-          onActed={onSpeedAction}
-          closing={closingKeys.has(entryKey)}
-          sweeping={closeSweepKeys.has(entryKey)}
-          onCloseSweepStart={startCloseSweep}
-        />
-      </PullRequestListLane>
-    );
-  };
-  const listExtraData = useMemo(
-    () => [
-      capableEnvironments.length,
-      environmentLabels,
-      typedParsed.text,
-      selected,
-      selectEntry,
-      speedMode,
-      onSpeedAction,
-      closingKeys,
-      closeSweepKeys,
-      showProvider,
-      hostActionsOf,
-      registerStatsRow,
-      startCloseSweep,
-    ],
+    },
     [
       capableEnvironments.length,
       environmentLabels,
@@ -2278,7 +2263,6 @@ function PullRequestsRouteView() {
     listBody,
     listItems,
     renderListItem,
-    listExtraData,
     listLocked: closeSweepKeys.size > 0,
     scrollRef,
   };
@@ -2704,7 +2688,6 @@ function PullRequestsColumn({
   listBody,
   listItems,
   renderListItem,
-  listExtraData,
   listLocked,
   scrollRef,
 }: {
@@ -2729,7 +2712,6 @@ function PullRequestsColumn({
   listBody: ReactNode;
   listItems: ReadonlyArray<PullRequestListItem>;
   renderListItem: (info: { item: PullRequestListItem }) => ReactNode;
-  listExtraData: unknown;
   listLocked: boolean;
   scrollRef: RefObject<HTMLDivElement | null>;
 }) {
@@ -2881,7 +2863,7 @@ function PullRequestsColumn({
         keyExtractor={pullRequestListItemKey}
         getItemType={pullRequestListItemType}
         renderItem={renderListItem}
-        extraData={listExtraData}
+        extraData={renderListItem}
         estimatedItemSize={56}
         recycleItems={false}
         className={cn(
