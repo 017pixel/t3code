@@ -23,51 +23,15 @@ function progress(animation: Animation) {
 export function createSidebarListMotion(parent: HTMLUListElement) {
   let positions: Map<HTMLElement, RowPosition> | null = null;
   let disposed = false;
-  const view = parent.ownerDocument.defaultView;
-  const reducedMotion = view?.matchMedia("(prefers-reduced-motion: reduce)");
+  const reducedMotion = parent.ownerDocument.defaultView?.matchMedia(
+    "(prefers-reduced-motion: reduce)",
+  );
   const running = new Map<HTMLElement, { animation: Animation; offset: number }>();
   const entering = new Map<HTMLElement, { animation: Animation; travel: number }>();
   const exiting = new Map<HTMLElement, Animation>();
   // Visual tops at drag release, relative to the list, so the release
   // commit can glide every row from where dnd-kit left it into its slot.
   let released: Map<HTMLElement, number> | null = null;
-  let baselineFrame: number | null = null;
-
-  const rows = () =>
-    Array.from(parent.children).filter(
-      (node): node is HTMLElement => node instanceof HTMLElement && !exiting.has(node),
-    );
-  const measure = () =>
-    new Map(
-      rows().map((node) => [
-        node,
-        {
-          top: node.offsetTop,
-          left: node.offsetLeft,
-          width: node.offsetWidth,
-          height: node.offsetHeight,
-        },
-      ]),
-    );
-  const cancelBaseline = () => {
-    if (baselineFrame !== null) view?.cancelAnimationFrame(baselineFrame);
-    baselineFrame = null;
-  };
-  // Reading every row box during a commit forces a layout, and boot runs
-  // several commits before its first paint. A commit that cannot animate takes
-  // the next baseline in the following frame, which lays out anyway.
-  const scheduleBaseline = () => {
-    positions = null;
-    if (typeof view?.requestAnimationFrame !== "function") {
-      positions = measure();
-      return;
-    }
-    if (baselineFrame !== null) return;
-    baselineFrame = view.requestAnimationFrame(() => {
-      baselineFrame = null;
-      if (!disposed && positions === null) positions = measure();
-    });
-  };
 
   const remainingOffset = (node: HTMLElement) => {
     const current = running.get(node);
@@ -142,7 +106,6 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
   const suspend = () => {
     for (const node of running.keys()) cancel(node);
     clearFades();
-    cancelBaseline();
     positions = null;
     released = null;
   };
@@ -169,14 +132,19 @@ export function createSidebarListMotion(parent: HTMLUListElement) {
   return {
     update(animate: boolean) {
       if (disposed) return;
-      if (released === null && (!animate || positions === null || reducedMotion?.matches)) {
-        clearFades();
-        for (const node of running.keys()) cancel(node);
-        scheduleBaseline();
-        return;
-      }
-      cancelBaseline();
-      const next = measure();
+      const next = new Map(
+        Array.from(parent.children)
+          .filter((node): node is HTMLElement => node instanceof HTMLElement && !exiting.has(node))
+          .map((node) => [
+            node,
+            {
+              top: node.offsetTop,
+              left: node.offsetLeft,
+              width: node.offsetWidth,
+              height: node.offsetHeight,
+            },
+          ]),
+      );
       let fadeCount = 0;
       if (positions !== null) {
         for (const [node, position] of positions) {
