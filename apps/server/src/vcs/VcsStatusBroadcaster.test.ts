@@ -96,8 +96,10 @@ it.effect("summarizes passive VCS subscriptions and sends a fresh snapshot on re
     const initial = Option.getOrThrow(yield* read({ compact: true }));
     assert.strictEqual(initial._tag, "snapshot");
     if (initial._tag !== "snapshot") return;
-    assert.strictEqual(initial.local.workingTree.fileCount, 1);
-    assert.deepStrictEqual(initial.local.workingTree.files, []);
+    assert.deepStrictEqual(
+      initial.local.workingTree.files,
+      state.currentLocalStatus.workingTree.files,
+    );
     assert.deepStrictEqual(Option.getOrThrow(yield* read({ compact: true })), initial);
     for (const options of [{}, { compact: true, includeFiles: true }]) {
       const full = Option.getOrThrow(yield* read(options));
