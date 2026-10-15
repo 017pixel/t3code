@@ -180,10 +180,12 @@ export function AppBar(props: AppBarProps) {
           : props.actions
       }
       trailing={
-        <>
-          {menuView}
-          {props.trailing}
-        </>
+        menuView?.length || props.trailing ? (
+          <>
+            {menuView}
+            {props.trailing}
+          </>
+        ) : undefined
       }
     />
   );
