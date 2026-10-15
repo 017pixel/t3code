@@ -356,14 +356,20 @@ export function WorkflowRunSurface(props: {
   const canStop = useAtomValue(orchestrationEnvironment.stopWorkflow.permissionAtom(environmentId));
 
   // Hold the slot until the parent loads, so a workflow does not flash its
-  // script chat first. A failed or deleted parent shows the chat instead.
+  // script chat first. The parent stream retries on its own, so this waits
+  // (offline, too) rather than guessing; a failed or deleted parent shows the
+  // chat instead. Static text: we cannot tell yet whether this is a workflow.
   if (
     parentThreadId !== null &&
     parentSubagents === undefined &&
     Option.isNone(parent.error) &&
     parent.status !== "deleted"
   ) {
-    return null;
+    return (
+      <div className="workflow-run-lane">
+        <p className="chat-content-lane pt-4 text-sm text-muted-foreground sm:pt-6">Loading…</p>
+      </div>
+    );
   }
   if (group === undefined || coordinator === undefined || parentThreadId === null) {
     return props.children;
