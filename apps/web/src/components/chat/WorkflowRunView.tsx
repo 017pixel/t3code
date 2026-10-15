@@ -32,7 +32,7 @@ import {
 export type WorkflowRunTab = "agents" | "script";
 
 /** Switches a workflow thread between its run view and the raw script chat. */
-export function WorkflowRunTabs(props: {
+function WorkflowRunTabs(props: {
   readonly value: WorkflowRunTab;
   readonly onChange: (tab: WorkflowRunTab) => void;
 }) {
@@ -183,7 +183,7 @@ function AgentRow(props: {
  * and one row per agent. It renders the coordinator's progress snapshot, so it
  * shows the same data as the Lineage panel at a size that fits a full run.
  */
-export function WorkflowRunView(props: {
+function WorkflowRunView(props: {
   readonly group: SubagentWorkflowGroup;
   readonly provider: ServerProvider | undefined;
   readonly tab: WorkflowRunTab;
