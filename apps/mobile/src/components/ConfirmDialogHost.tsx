@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { MaterialConfirmDialog } from "./MaterialConfirmDialog";
+import { DialogPresentation } from "./DialogPresentation";
 import type { ConfirmDialogRequest, TextInputDialogRequest } from "./ConfirmDialog.types";
 
 export type { ConfirmDialogRequest, TextInputDialogRequest } from "./ConfirmDialog.types";
@@ -52,7 +52,7 @@ export function ConfirmDialogHost() {
   const confirmDisabled = presented?.kind === "text-input" && inputValue.trim().length === 0;
 
   return presented ? (
-    <MaterialConfirmDialog
+    <DialogPresentation
       key={`${presented.kind}:${presented.request.title}:${presented.kind === "text-input" ? presented.request.initialValue : ""}`}
       request={presented.request}
       inputInitialValue={

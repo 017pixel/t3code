@@ -1,6 +1,6 @@
 import type { ConfirmDialogRequest } from "./ConfirmDialog.types";
 
-export interface MaterialConfirmDialogProps {
+export interface DialogPresentationProps {
   readonly request: Pick<
     ConfirmDialogRequest,
     "title" | "message" | "cancelText" | "confirmText" | "destructive"
@@ -12,6 +12,6 @@ export interface MaterialConfirmDialogProps {
   readonly onConfirm: (inputValue?: string) => void;
 }
 
-export function MaterialConfirmDialog(_props: MaterialConfirmDialogProps) {
+export function DialogPresentation(_props: DialogPresentationProps) {
   return null;
 }

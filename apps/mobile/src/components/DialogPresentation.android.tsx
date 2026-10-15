@@ -9,9 +9,9 @@ import {
 
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
-import type { MaterialConfirmDialogProps } from "./MaterialConfirmDialog";
+import type { DialogPresentationProps } from "./DialogPresentation";
 
-export function MaterialConfirmDialog(props: MaterialConfirmDialogProps) {
+export function DialogPresentation(props: DialogPresentationProps) {
   const { themeVariables: colors } = useAppearancePreferences();
   const titleTypography = useScaledTextRole("title");
   const bodyTypography = useScaledTextRole("footnote");
