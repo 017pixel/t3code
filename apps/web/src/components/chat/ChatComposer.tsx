@@ -4608,9 +4608,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const promptHistoryBlocked =
-    isComposerApprovalState || pendingUserInputs.length > 0 ||
-    composerImages.length > 0 || composerFiles.length > 0 ||
-    composerTerminalContexts.length > 0 || composerPreviewAnnotations.length > 0 ||
+    isComposerApprovalState ||
+    pendingUserInputs.length > 0 ||
+    composerImages.length > 0 ||
+    composerFiles.length > 0 ||
+    composerTerminalContexts.length > 0 ||
+    composerPreviewAnnotations.length > 0 ||
     composerReviewComments.length > 0;
 
   const navigatePromptHistory = useCallback(
