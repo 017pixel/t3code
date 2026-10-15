@@ -53,6 +53,10 @@ export function latestExecutedRun(
 ): OrchestrationV2Run | null {
   let latest: OrchestrationV2Run | null = null;
   for (const run of runs) {
+    // A failed idle compaction is invisible maintenance: it neither presents as
+    // the outcome nor holds the queue. A queued message that then meets the same
+    // usage limit fails as an ordinary run with the normal recovery controls.
+    if (run.idleCompactionOfRunId !== undefined) continue;
     if (run.status === "queued") continue;
     if (run.status === "cancelled" && run.startedAt === null) continue;
     if (latest === null || runRanAfter(run, latest)) latest = run;

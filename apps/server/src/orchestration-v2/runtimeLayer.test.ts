@@ -4136,6 +4136,11 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           ],
         });
 
+        // A failed idle compaction is maintenance: the queued message still runs.
+        if (idleCompaction) {
+          assert.equal(yield* Queue.take(promotedRunIds), queuedRun.id);
+          return;
+        }
         if (failureClass === "provider_error") {
           assert.equal(yield* Queue.take(heldRunIds), queuedRun.id);
           const held = yield* orchestrator.getThreadProjection(threadId);
@@ -4153,7 +4158,6 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const after = yield* orchestrator.getThreadProjection(threadId);
         assert.equal(after.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
         assert.isFalse(after.turnItems.some((item) => item.runId === queuedRun.id));
-        if (idleCompaction) return;
         const shell = (yield* orchestrator.getShellSnapshot()).threads.find(
           (thread) => thread.id === threadId,
         );

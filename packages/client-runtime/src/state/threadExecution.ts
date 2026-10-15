@@ -72,10 +72,17 @@ function presentedUsageLimitRun(
   const providerSession = projection.providerSessions.findLast(
     (session) => session.providerInstanceId === projection.thread.providerInstanceId,
   );
+  // Mirrors the server shell: idle compaction never stands for the outcome.
+  const latestPhysicalRun = projection.runs.reduce<(typeof projection.runs)[number] | null>(
+    (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
+    null,
+  );
   return usageLimitRunPresentedAsLatest(
-    projection.runs,
+    projection.runs.filter((run) => run.idleCompactionOfRunId === undefined),
     projection.turnItems,
-    providerSession?.lastError ?? null,
+    latestPhysicalRun?.idleCompactionOfRunId !== undefined
+      ? null
+      : (providerSession?.lastError ?? null),
   );
 }
 

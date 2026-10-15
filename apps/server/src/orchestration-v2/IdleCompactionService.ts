@@ -73,8 +73,9 @@ export const make = Effect.gen(function* () {
         );
         if (current === null || current.runId !== candidate.runId) return;
         const instance = yield* instances.getInstance(projection.thread.providerInstanceId);
-        if (instance === undefined || !instance.enabled || instance.driverKind !== current.driver)
-          return;
+        // Enablement is the project-resolved value above; a project can enable
+        // an instance that is disabled machine-wide.
+        if (instance === undefined || instance.driverKind !== current.driver) return;
         // Earlier candidates in this sweep can push this one past its cache TTL.
         if (DateTime.toEpochMillis(yield* DateTime.now) >= window.endMs) return;
         // One idempotent command per completed run survives concurrent scans and
