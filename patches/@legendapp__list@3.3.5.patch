@@ -1377,15 +1377,9 @@ index 40e87cd..93aac74 100644
        recycleItems,
        refreshControl: refreshControlElement ? stylePaddingTopState > 0 ? React2.cloneElement(refreshControlElement, {
 diff --git a/react-native.web.js b/react-native.web.js
-index 914d2da..554d7d3 100644
+index 914d2da..8b88b09 100644
 --- a/react-native.web.js
 +++ b/react-native.web.js
-@@ -5351 +5351 @@
--      const previousRect = prevRect != null ? prevRect : getContainerLayoutBaseline(element);
-+      const previousRect = prevRect;
-@@ -5477 +5477 @@
--      measureInLayoutEffect: !IsNewArchitecture,
-+      measureInLayoutEffect: false,
 @@ -5651,6 +5651,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
@@ -1418,15 +1412,9 @@ index 914d2da..554d7d3 100644
      }
    }
 diff --git a/react-native.web.mjs b/react-native.web.mjs
-index 95465f2..b2dcb98 100644
+index 95465f2..d7cbe1c 100644
 --- a/react-native.web.mjs
 +++ b/react-native.web.mjs
-@@ -5330 +5330 @@
--      const previousRect = prevRect != null ? prevRect : getContainerLayoutBaseline(element);
-+      const previousRect = prevRect;
-@@ -5456 +5456 @@
--      measureInLayoutEffect: !IsNewArchitecture,
-+      measureInLayoutEffect: false,
 @@ -5630,6 +5630,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
@@ -1459,7 +1447,7 @@ index 95465f2..b2dcb98 100644
      }
    }
 diff --git a/react.js b/react.js
-index 914d2da..0cafc8b 100644
+index 914d2da..0c2917d 100644
 --- a/react.js
 +++ b/react.js
 @@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1485,12 +1473,6 @@ index 914d2da..0cafc8b 100644
    }
    return nextSize;
  }
-@@ -5351 +5358 @@
--      const previousRect = prevRect != null ? prevRect : getContainerLayoutBaseline(element);
-+      const previousRect = prevRect;
-@@ -5477 +5484 @@
--      measureInLayoutEffect: !IsNewArchitecture,
-+      measureInLayoutEffect: false,
 @@ -5651,6 +5658,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
@@ -1533,7 +1515,7 @@ index 914d2da..0cafc8b 100644
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
 diff --git a/react.mjs b/react.mjs
-index 95465f2..da6debd 100644
+index 95465f2..b73bfdf 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1559,12 +1541,6 @@ index 95465f2..da6debd 100644
    }
    return nextSize;
  }
-@@ -5330 +5337 @@
--      const previousRect = prevRect != null ? prevRect : getContainerLayoutBaseline(element);
-+      const previousRect = prevRect;
-@@ -5456 +5463 @@
--      measureInLayoutEffect: !IsNewArchitecture,
-+      measureInLayoutEffect: false,
 @@ -5630,6 +5637,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
