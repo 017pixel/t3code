@@ -516,13 +516,20 @@ describe("sidebar list motion", () => {
 
   it("carries a virtual row's entry and crossfades its old shape", () => {
     let notify: MutationCallback = () => {};
-    vi.stubGlobal("MutationObserver", class {
-      constructor(callback: MutationCallback) { notify = callback; }
-      observe() {}
-      disconnect() {}
-    });
-    const slot = new TestRow("slot", 36), row = new TestRow("row", 36);
-    const other = new TestRow("other"), card = new TestRow("card");
+    vi.stubGlobal(
+      "MutationObserver",
+      class {
+        constructor(callback: MutationCallback) {
+          notify = callback;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const slot = new TestRow("slot", 36),
+      row = new TestRow("row", 36);
+    const other = new TestRow("other"),
+      card = new TestRow("card");
     for (const node of [slot, row, card]) {
       node.setAttribute("data-thread-item", "t");
       node.setAttribute("data-sidebar-row-variant", node === card ? "card" : "slim");
@@ -534,7 +541,10 @@ describe("sidebar list motion", () => {
     const entry = slot.animations[0]!;
     entry.progress = 0.25;
     layout([row]);
-    notify([{ addedNodes: [row], removedNodes: [slot] }] as unknown as MutationRecord[], {} as MutationObserver);
+    notify(
+      [{ addedNodes: [row], removedNodes: [slot] }] as unknown as MutationRecord[],
+      {} as MutationObserver,
+    );
     expect(entry.effect).toHaveProperty("target", row);
     expect(entry.cancel).not.toHaveBeenCalled();
     layout([other, row]);
@@ -544,10 +554,13 @@ describe("sidebar list motion", () => {
     motion.update(true);
     expect(slot.clones).toHaveLength(0);
     expect(row.clones).toHaveLength(1);
-    expect(card.animate).toHaveBeenLastCalledWith([
-      { opacity: 0, transform: "translateY(0px)" },
-      { opacity: 1, transform: "translateY(0px)" },
-    ], { duration: 150, easing: "ease-out" });
+    expect(card.animate).toHaveBeenLastCalledWith(
+      [
+        { opacity: 0, transform: "translateY(-40px)" },
+        { opacity: 1, transform: "translateY(0px)" },
+      ],
+      { duration: 150, easing: "ease-out" },
+    );
   });
 
   it("skips fades when a large list change would clone too many rows", () => {
