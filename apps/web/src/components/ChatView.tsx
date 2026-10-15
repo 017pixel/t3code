@@ -418,7 +418,11 @@ import { useEnvironmentDisconnectDelay } from "../hooks/useEnvironmentDisconnect
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useEnvironmentQuery } from "../state/query";
-import { useEnvironmentScope, useEnvironmentSessionPending } from "~/state/session";
+import {
+  environmentSession,
+  useEnvironmentScope,
+  useEnvironmentSessionPending,
+} from "~/state/session";
 import {
   environmentServerConfigsAtom,
   primaryServerAvailableEditorsAtom,
@@ -605,6 +609,7 @@ import {
 } from "./ui/alert-dialog";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ServerUpdateAction } from "./ServerUpdateAction";
+import { completeDraftWorkspaceDefaults } from "../lib/t3ProjectFileDefaults";
 import { useAutoBalanceUpdateBanner } from "./chat/useAutoBalanceUpdateBanner";
 import {
   ComposerServerUpdateIcon,
@@ -1682,7 +1687,7 @@ export default function ChatView(props: ChatViewProps) {
     reserveTitleBarControlInset = true,
     forceExpandedMobileComposer = false,
   } = props;
-  const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
+  const hasThreadWriteAccess = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   // Before the session answers, missing grants mean "not connected yet".
   const sessionPending = useEnvironmentSessionPending(environmentId);
   const canOperateTerminal = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
@@ -1810,6 +1815,13 @@ export default function ChatView(props: ChatViewProps) {
         ? store.getDraftSession(draftId)
         : null,
   );
+  const workspaceDefaultsPending = draftThread?.workspaceDefaultsPending === true;
+  const canOperateThread = hasThreadWriteAccess && !workspaceDefaultsPending;
+  const sessionConfig = useAtomValue(environmentSession.initialConfigValueAtom(environmentId));
+  useEffect(() => {
+    if (draftId === null || !workspaceDefaultsPending || sessionConfig === null) return;
+    void completeDraftWorkspaceDefaults(draftId);
+  }, [draftId, environmentId, draftThread?.projectId, sessionConfig, workspaceDefaultsPending]);
   const serverThread = useThreadShell(routeThreadRef);
   const routeThreadDetailRef = resolveThreadDetailRef(routeThreadRef, {
     shellExists: serverThread !== null,
@@ -9071,6 +9083,11 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
+    if (
+      draftId !== null &&
+      useComposerDraftStore.getState().getDraftSession(draftId)?.workspaceDefaultsPending
+    )
+      return;
     // Typed out in full rather than picked from the menu. Attachments or contexts
     // mean the user is sending a prompt, so those go through as usual.
     if (
@@ -12045,21 +12062,23 @@ export default function ChatView(props: ChatViewProps) {
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}
                               sendDisabledReason={
-                                !canOperateThread && sessionPending
-                                  ? "Connecting"
-                                  : !canOperateThread
-                                    ? "This connection cannot change threads."
-                                    : isEnvironmentChanging
-                                      ? "Preparing machine"
-                                      : isRevertingCheckpoint
-                                        ? "Rewinding conversation"
-                                        : feedbackUploading
-                                          ? "Sending feedback"
-                                          : threadDetailLoading
-                                            ? "Messages loading"
-                                            : worktreeSetupBlocksSend
-                                              ? "Preparing worktree"
-                                              : projectCloneSendBlockReason
+                                workspaceDefaultsPending && !sessionPending
+                                  ? "Preparing workspace"
+                                  : !canOperateThread && sessionPending
+                                    ? "Connecting"
+                                    : !canOperateThread
+                                      ? "This connection cannot change threads."
+                                      : isEnvironmentChanging
+                                        ? "Preparing machine"
+                                        : isRevertingCheckpoint
+                                          ? "Rewinding conversation"
+                                          : feedbackUploading
+                                            ? "Sending feedback"
+                                            : threadDetailLoading
+                                              ? "Messages loading"
+                                              : worktreeSetupBlocksSend
+                                                ? "Preparing worktree"
+                                                : projectCloneSendBlockReason
                               }
                               isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                               queuedRunsControl={queuedRunsControl}

@@ -332,6 +332,7 @@ const PersistedDraftThreadState = Schema.Struct({
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   envMode: DraftThreadEnvModeSchema,
+  workspaceDefaultsPending: Schema.optionalKey(Schema.Boolean),
   startFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
@@ -464,6 +465,7 @@ export interface DraftSessionState {
   branch: string | null;
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
+  workspaceDefaultsPending?: boolean;
   startFromOrigin: boolean;
   promotedTo?: ScopedThreadRef | null;
 }
@@ -542,6 +544,7 @@ interface ComposerDraftStoreState {
       worktreePath?: string | null;
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
+      workspaceDefaultsPending?: boolean;
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
@@ -559,6 +562,7 @@ interface ComposerDraftStoreState {
       worktreePath?: string | null;
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
+      workspaceDefaultsPending?: boolean;
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
@@ -575,6 +579,7 @@ interface ComposerDraftStoreState {
       projectRef?: ScopedProjectRef;
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
+      workspaceDefaultsPending?: boolean;
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
@@ -1595,6 +1600,7 @@ function createDraftThreadState(
     worktreePath?: string | null;
     createdAt?: string;
     envMode?: DraftThreadEnvMode;
+    workspaceDefaultsPending?: boolean;
     startFromOrigin?: boolean;
     runtimeMode?: RuntimeMode;
     interactionMode?: ProviderInteractionMode;
@@ -1651,6 +1657,15 @@ function createDraftThreadState(
     worktreePath: nextWorktreePath,
     envMode:
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
+    ...((options?.workspaceDefaultsPending ??
+    ((options?.environmentSelection === "auto" ||
+      (options?.envMode === undefined &&
+        options?.branch === undefined &&
+        options?.worktreePath === undefined &&
+        options?.startFromOrigin === undefined)) &&
+      existingThread?.workspaceDefaultsPending))
+      ? { workspaceDefaultsPending: true }
+      : {}),
     startFromOrigin: nextStartFromOrigin,
     promotedTo: null,
   };
@@ -1685,6 +1700,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
+    left.workspaceDefaultsPending === right.workspaceDefaultsPending &&
     left.startFromOrigin === right.startFromOrigin &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
@@ -1834,6 +1850,9 @@ function normalizePersistedDraftThreads(
         worktreePath: normalizedWorktreePath,
         envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
         startFromOrigin,
+        ...(candidateDraftThread.workspaceDefaultsPending === true
+          ? { workspaceDefaultsPending: true }
+          : {}),
         ...(candidateDraftThread.environmentSelection === "manual" ||
         candidateDraftThread.environmentSelection === "auto"
           ? { environmentSelection: candidateDraftThread.environmentSelection }
@@ -2596,6 +2615,7 @@ function toHydratedDraftThreadState(
     branch: persistedDraftThread.branch,
     worktreePath: persistedDraftThread.worktreePath,
     envMode: persistedDraftThread.envMode,
+    ...(persistedDraftThread.workspaceDefaultsPending ? { workspaceDefaultsPending: true } : {}),
     startFromOrigin: persistedDraftThread.startFromOrigin,
     ...(persistedDraftThread.environmentSelection
       ? { environmentSelection: persistedDraftThread.environmentSelection }
@@ -2901,6 +2921,17 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               worktreePath: nextWorktreePath,
               envMode:
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
+              // Automatic branch/host discovery must still wait for the real defaults.
+              ...((options.workspaceDefaultsPending ??
+              ((options.environmentSelection === "auto" ||
+                (options.envMode === undefined &&
+                  options.branch === undefined &&
+                  options.worktreePath === undefined &&
+                  options.projectRef === undefined &&
+                  options.startFromOrigin === undefined)) &&
+                existing.workspaceDefaultsPending))
+                ? { workspaceDefaultsPending: true }
+                : {}),
               startFromOrigin: nextStartFromOrigin,
               promotedTo: existing.promotedTo ?? null,
             };
@@ -2916,6 +2947,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.branch === existing.branch &&
               nextDraftThread.worktreePath === existing.worktreePath &&
               nextDraftThread.envMode === existing.envMode &&
+              nextDraftThread.workspaceDefaultsPending === existing.workspaceDefaultsPending &&
               nextDraftThread.startFromOrigin === existing.startFromOrigin &&
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {

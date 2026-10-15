@@ -1,5 +1,5 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Activity,
@@ -7,7 +7,6 @@ import {
   startTransition,
   useDeferredValue,
   useEffect,
-  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -42,8 +41,6 @@ import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import { environmentThreadDetails } from "../state/threads";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { environmentSession } from "../state/session";
-import { isElectron } from "../env";
 import { isBootHeld, releaseBootHoldAfterPaint, retainBootHold } from "../connection/catalog";
 import {
   buildThreadRouteParams,
@@ -110,79 +107,24 @@ function whenQuietAndIdle(callback: () => void, initialDelayMs: number): () => v
   };
 }
 
-let bootChatViewDeferred = false;
-
-// A slow backend must not hold the snapshot composer indefinitely.
-const BOOT_SESSION_WAIT_MS = 750;
-
-/** Paint the sidebar first, then prefer live data to avoid rendering chat twice. */
-function useBootDeferredChatView(environmentId: EnvironmentId | null): boolean {
-  const [ready, setReady] = useState(() => bootChatViewDeferred || !isBootHeld());
-  const pendingReleaseRef = useRef<(() => void) | null>(null);
-  const sessionConfigAtom = useEffectEvent(() =>
-    environmentId === null ? null : environmentSession.initialConfigValueAtom(environmentId),
-  );
+/** Let the sidebar paint, then render the real cached chat without waiting for a session. */
+function useBootChatView(): boolean {
+  const [ready, setReady] = useState(() => !isBootHeld());
   useEffect(() => {
     if (ready) return;
-    bootChatViewDeferred = true;
     const release = retainBootHold();
-    let mounted = false;
-    let stopWaiting = () => {};
-    const renderLive = () => {
-      if (mounted) return;
-      mounted = true;
-      stopWaiting();
-      // Separate the live-data switch and chat render into two tasks.
-      release();
-      setTimeout(() => setReady(true), 0);
-    };
-    const renderFromSnapshot = () => {
-      if (mounted) return;
-      mounted = true;
-      stopWaiting();
-      // Released after the chat view's own commit paints, or on unmount.
-      pendingReleaseRef.current = release;
-      setReady(true);
-    };
-    const afterFirstFrame = () => {
-      const configAtom = sessionConfigAtom();
-      if (configAtom === null) return renderFromSnapshot();
-      if (appAtomRegistry.get(configAtom) !== null) return renderLive();
-      // A desktop backend is still booting. Let the user type from the cached
-      // screen immediately; sending still waits for the authenticated session.
-      if (isElectron) return renderFromSnapshot();
-      // A task later, so the requests the session sends as it starts go out
-      // before this render instead of queuing behind it.
-      const unsubscribe = appAtomRegistry.subscribe(configAtom, (config) => {
-        if (config !== null) setTimeout(renderLive, 0);
-      });
-      const timeout = setTimeout(renderFromSnapshot, BOOT_SESSION_WAIT_MS);
-      stopWaiting = () => {
-        unsubscribe();
-        clearTimeout(timeout);
-      };
-    };
-    let started = false;
-    const start = () => {
-      if (started) return;
-      started = true;
-      afterFirstFrame();
-    };
-    const frame = requestAnimationFrame(() => setTimeout(start, 0));
-    const timer = setTimeout(start, 100);
+    const show = () => setReady(true);
+    let task: ReturnType<typeof setTimeout> | undefined;
+    const frame = requestAnimationFrame(() => {
+      task = setTimeout(show, 0);
+    });
+    const fallback = setTimeout(show, 100);
     return () => {
       cancelAnimationFrame(frame);
-      clearTimeout(timer);
-      stopWaiting();
-      if (!mounted) release();
+      clearTimeout(task);
+      clearTimeout(fallback);
+      releaseBootHoldAfterPaint(release);
     };
-  }, [ready]);
-  useEffect(() => {
-    const release = pendingReleaseRef.current;
-    if (!ready || release === null) return;
-    const cancel = releaseBootHoldAfterPaint(release);
-    pendingReleaseRef.current = null;
-    return cancel;
   }, [ready]);
   return ready;
 }
@@ -207,11 +149,7 @@ const ThreadRouteView = memo(function ThreadRouteView({ target }: { target: Thre
   const draftSession = useComposerDraftStore((store) =>
     draftId === null ? null : store.getDraftSession(draftId),
   );
-  const chatViewReady = useBootDeferredChatView(
-    target.kind === "server"
-      ? target.threadRef.environmentId
-      : (draftSession?.environmentId ?? null),
-  );
+  const chatViewReady = useBootChatView();
   const threadRefs = useThreadRefs();
   // The server thread this view is about: the route's own ref, or the draft's
   // reserved ref once the server knows it.
