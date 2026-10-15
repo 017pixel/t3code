@@ -15,7 +15,7 @@ import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useAtomValue } from "@effect/atom-react";
 import { environmentSession } from "../state/session";
-import { liveServerConfigValueAtom } from "../state/server";
+import { serverEnvironment } from "../state/server";
 import {
   readProject,
   useAllEnvironmentShellsBootstrapped,
@@ -64,11 +64,11 @@ function IndexDraftLanding() {
   );
 
   const liveConfig = useAtomValue(
-    liveServerConfigValueAtom(mostRecentProject?.environmentId ?? null),
+    serverEnvironment.configValueAtom(mostRecentProject?.environmentId ?? null),
   );
   const sessionConfig = useAtomValue(
     mostRecentProject === null
-      ? liveServerConfigValueAtom(null)
+      ? serverEnvironment.configValueAtom(null)
       : environmentSession.initialConfigValueAtom(mostRecentProject.environmentId),
   );
   useEffect(() => {

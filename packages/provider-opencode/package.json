@@ -32,8 +32,8 @@
       "import": "./src/server/v2/adapter.ts"
     },
     "./server/v2/OpenCode2Client": {
-      "types": "./src/server/v2/OpenCode2ClientTag.ts",
-      "import": "./src/server/v2/OpenCode2ClientTag.ts"
+      "types": "./src/server/v2/OpenCode2Client.ts",
+      "import": "./src/server/v2/OpenCode2Client.ts"
     },
     "./server/v2/OpenCode2Server": {
       "types": "./src/server/v2/OpenCode2Server.ts",

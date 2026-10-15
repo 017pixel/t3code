@@ -268,7 +268,10 @@ export const make = Effect.gen(function* () {
           ...previous,
           local: nextLocal,
         });
-        return [previous.local?.fingerprint !== nextLocal.fingerprint, trimCache(nextCache)] as const;
+        return [
+          previous.local?.fingerprint !== nextLocal.fingerprint,
+          trimCache(nextCache),
+        ] as const;
       });
 
       if (options?.publish && shouldPublish) {
@@ -298,7 +301,10 @@ export const make = Effect.gen(function* () {
           ...previous,
           remote: nextRemote,
         });
-        return [previous.remote?.fingerprint !== nextRemote.fingerprint, trimCache(nextCache)] as const;
+        return [
+          previous.remote?.fingerprint !== nextRemote.fingerprint,
+          trimCache(nextCache),
+        ] as const;
       });
 
       if (options?.publish && shouldPublish) {
@@ -752,28 +758,7 @@ export const make = Effect.gen(function* () {
             Stream.filter((event) => event.cwd === cwd),
             Stream.map((event) => event.event),
           ),
-        ).pipe(
-          (stream) =>
-            input.compact !== true
-              ? stream
-              : stream.pipe(
-                  Stream.map((event) => {
-                    if (!("local" in event) || input.includeFiles === true) return event;
-                    return {
-                      ...event,
-                      local: {
-                        ...event.local,
-                        workingTree: {
-                          ...event.local.workingTree,
-                          fileCount: event.local.workingTree.files.length,
-                          files: [],
-                        },
-                      },
-                    };
-                  }),
-                ),
-          Stream.ensuring(release),
-        );
+        ).pipe(Stream.ensuring(release));
       }),
     );
 

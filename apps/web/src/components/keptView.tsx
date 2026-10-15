@@ -6,21 +6,20 @@ import {
   memo,
   useContext,
   useEffect,
+  useMemo,
   useEffectEvent,
   useLayoutEffect,
   useReducer,
   useRef,
   useState,
   type DependencyList,
-  type ReactNode,
   type RefObject,
+  type ReactNode,
 } from "react";
 
 import { PortalContainerContext, useOwnPortalContainer } from "~/lib/portalContainer";
 
-/** Activity runs cleanups on hide; held resources release only on eviction or unmount. */
 export interface KeptViewLifetime {
-  /** Runs `release` when the kept view goes away. Returns a function that cancels it. */
   hold(release: () => void): () => void;
 }
 
@@ -70,58 +69,11 @@ export function createKeptViewLifetimes() {
   };
 }
 
-const EDITOR_CALLBACK_KEYS = [
-  "onBeforeCreate",
-  "onCreate",
-  "onUpdate",
-  "onSelectionUpdate",
-  "onTransaction",
-  "onFocus",
-  "onBlur",
-  "onDestroy",
-  "onContentError",
-  "onDrop",
-  "onPaste",
-  "onDelete",
-  "onMount",
-  "onUnmount",
-] as const;
-
-type EditorCallbackKey = (typeof EDITOR_CALLBACK_KEYS)[number];
-
-function forwardCallback<K extends EditorCallbackKey>(
-  options: RefObject<Partial<EditorOptions>>,
-  key: K,
-): EditorOptions[K] {
-  type Callback = (...args: Parameters<EditorOptions[K]>) => void;
-  const forwarded: Callback = (...args) => {
-    const callback = options.current[key] as Callback | undefined;
-    callback?.(...args);
-  };
-  return forwarded as EditorOptions[K];
-}
-
-function createForwardingEditor(options: RefObject<Partial<EditorOptions>>): Editor {
-  const callbacks: Partial<EditorOptions> = {};
-  for (const key of EDITOR_CALLBACK_KEYS) {
-    Object.assign(callbacks, { [key]: forwardCallback(options, key) });
-  }
-  return new Editor({ ...options.current, ...callbacks });
-}
-
-// Matches @tiptap/react's useEditor: callbacks are forwarded, so only the
-// remaining options decide whether the editor needs `setOptions`.
-function editorOptionsMatch(next: Partial<EditorOptions>, current: Partial<EditorOptions>) {
-  return (Object.keys(next) as Array<keyof EditorOptions>).every((key) => {
-    if ((EDITOR_CALLBACK_KEYS as ReadonlyArray<string>).includes(key)) return true;
-    if (key === "extensions" && next.extensions && current.extensions) {
-      const currentExtensions = current.extensions;
-      return (
-        next.extensions.length === currentExtensions.length &&
-        next.extensions.every((extension, index) => extension === currentExtensions[index])
-      );
-    }
-    return next[key] === current[key];
+function createEditor(options: RefObject<Partial<EditorOptions>>) {
+  return new Editor({
+    ...options.current,
+    onUpdate: (event) => options.current.onUpdate?.(event),
+    onSelectionUpdate: (event) => options.current.onSelectionUpdate?.(event),
   });
 }
 
@@ -152,7 +104,7 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const [instance] = useState(() => {
     const created: KeptEditorInstance = {
-      editor: createForwardingEditor(optionsRef),
+      editor: createEditor(optionsRef),
       deps,
       mounted: false,
       cancelDestroy: null,
@@ -164,18 +116,16 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
   useEffect(() => {
     if (instance.editor.isDestroyed) return;
     if (
-      deps.length !== instance.deps.length ||
-      deps.some((dep, index) => !Object.is(dep, instance.deps[index]))
+      deps.some((dep, index) => !Object.is(dep, instance.deps[index])) ||
+      deps.length !== instance.deps.length
     ) {
       instance.deps = deps;
       instance.editor.destroy();
-      instance.editor = createForwardingEditor(optionsRef);
+      instance.editor = createEditor(optionsRef);
       rerender();
       return;
     }
-    if (!editorOptionsMatch(optionsRef.current, instance.editor.options)) {
-      instance.editor.setOptions({ ...optionsRef.current, editable: instance.editor.isEditable });
-    }
+    instance.editor.setOptions({ editorProps: optionsRef.current.editorProps ?? {} });
   });
 
   useEffect(() => {
@@ -183,7 +133,7 @@ export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyL
     instance.cancelDestroy?.();
     instance.cancelDestroy = null;
     if (instance.editor.isDestroyed) {
-      instance.editor = createForwardingEditor(optionsRef);
+      instance.editor = createEditor(optionsRef);
       rerender();
     }
     return () => {
@@ -210,27 +160,13 @@ class KeptPureEditorContent extends PureEditorContent {
   }
 }
 
-const editorContentKeys = new WeakMap<Editor, string>();
 let nextEditorContentKey = 0;
-
-// Like EditorContent, a new editor instance gets a fresh content component.
-function editorContentKey(editor: Editor | null): string {
-  if (editor === null) return "none";
-  let key = editorContentKeys.get(editor);
-  if (key === undefined) {
-    nextEditorContentKey += 1;
-    key = String(nextEditorContentKey);
-    editorContentKeys.set(editor, key);
-  }
-  return key;
-}
 
 export const KeptEditorContent = memo(
   forwardRef<HTMLDivElement, Omit<EditorContentProps, "ref" | "innerRef">>(
     function KeptEditorContent(props, ref) {
-      return (
-        <KeptPureEditorContent key={editorContentKey(props.editor)} innerRef={ref} {...props} />
-      );
+      const key = useMemo(() => ++nextEditorContentKey, [props.editor]);
+      return <KeptPureEditorContent key={key} innerRef={ref} {...props} />;
     },
   ),
 );
@@ -288,7 +224,6 @@ let heldText: { readonly targetKey: string; readonly text: string; readonly at: 
   null;
 const HELD_TEXT_MAX_AGE_MS = 2_000;
 
-/** Set by KeptChatSurface on each commit. */
 export function setUrlRouteTargetKey(key: string | null): void {
   urlRouteTargetKey = key;
 }
@@ -309,12 +244,7 @@ export function isUrlTargetSidebarTextKey(event: KeyboardEvent): boolean {
   return threadKey !== undefined && urlRouteTargetKey === `server:${threadKey}`;
 }
 
-/**
- * Revealing a kept thread follows the click in a transition, so for a moment
- * the view the user left is still shown and gets their keys. Text it would
- * type into its own composer is held for the view the URL names instead.
- * Returns whether the text was held.
- */
+/** Holds typing for the URL destination while the previous view finishes its transition. */
 export function holdTextForUrlRouteTarget(viewTargetKey: string, text: string): boolean {
   const targetKey = urlRouteTargetKey;
   if (targetKey === null || targetKey === viewTargetKey) return false;

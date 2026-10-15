@@ -41,7 +41,7 @@ import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as ProviderHostLive from "../provider/ProviderHostLive.ts";
 import { totalTokens, type UsageRecord } from "@t3tools/provider-core/server/usage";
-import * as UsageService from "./UsageServiceTag.ts";
+import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -1944,12 +1944,6 @@ describe("UsageService", () => {
       const service = yield* UsageService.make.pipe(
         Effect.provide(layerService({ prefix: "usage-service-interruption-test", home, settings })),
       );
-
-      // Resolve the first-use import before exercising synchronous scan scheduling.
-      const warmup = yield* service
-        .readSummary({ ...WINDOW, sinceDay: WINDOW.untilDay, untilDay: WINDOW.sinceDay })
-        .pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(warmup));
 
       let orphanedAt: number | undefined;
       for (let interruptAt = 1; interruptAt <= 31; interruptAt += 1) {

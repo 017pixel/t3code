@@ -1,7 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   type EditorId,
-  type EnvironmentId,
   type EnvironmentTheme,
   type ServerConfig,
   type ServerConfigStreamEvent,
@@ -17,8 +16,7 @@ import { mergeWithDefaultKeybindings } from "@t3tools/shared/keybindings";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
-import { readBootSnapshot } from "../bootSnapshot";
-import { bootHoldAtom, environmentCatalog } from "../connection/catalog";
+import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { environmentSession } from "./session";
@@ -29,26 +27,12 @@ import { environmentSession } from "./session";
 // gating on "primary right now" would leave a newly promoted environment with
 // no themes until it reconnected. The set is capped server-side and stripped
 // before caching, so following all of them costs a few KB per environment.
-const liveServerEnvironment = createServerEnvironmentAtoms(connectionAtomRuntime, {
+export const serverEnvironment = createServerEnvironmentAtoms(connectionAtomRuntime, {
   initialConfigValueAtom: environmentSession.initialConfigValueAtom,
   environmentThemes: true,
   usageLimitSources: true,
   usageLimitsCommand: true,
 });
-const emptyConfigValueAtom = liveServerEnvironment.configValueAtom(null);
-// Cached provider/model labels stand in until the environment's configuration loads.
-const configValueAtom = Atom.family((environmentId: EnvironmentId | null) =>
-  environmentId === null
-    ? emptyConfigValueAtom
-    : Atom.make((get): ServerConfig | null => {
-        const boot = readBootSnapshot()?.serverConfigs.get(environmentId) ?? null;
-        if (boot !== null && get(bootHoldAtom)) return boot;
-        return get(liveServerEnvironment.configValueAtom(environmentId)) ?? boot;
-      }).pipe(Atom.withLabel(`web-environment-server-config:${environmentId}`)),
-);
-export const serverEnvironment = { ...liveServerEnvironment, configValueAtom };
-/** The server's current config, without the boot snapshot standing in for it. */
-export const liveServerConfigValueAtom = liveServerEnvironment.configValueAtom;
 /** Updates a host whose protocol is too old for this client to connect to. */
 export const updateOutdatedServer = createOutdatedServerUpdateCommand(connectionAtomRuntime);
 export const environmentServerConfigsAtom = createEnvironmentServerConfigsAtom({
@@ -76,13 +60,6 @@ const primaryServerStateAtom = Atom.make((get): PrimaryServerState => {
     return EMPTY_PRIMARY_SERVER_STATE;
   }
 
-  if (get(bootHoldAtom)) {
-    return {
-      config: get(serverEnvironment.configValueAtom(environmentId)),
-      latestEvent: null,
-      welcome: null,
-    };
-  }
   const target = { environmentId, input: {} };
   const configProjection = Option.getOrNull(
     AsyncResult.value(get(serverEnvironment.configProjection(target))),
@@ -104,7 +81,7 @@ export const primaryServerConfigEventAtom = Atom.make(
   (get): ServerConfigStreamEvent | null => get(primaryServerStateAtom).latestEvent,
 ).pipe(Atom.withLabel("web-primary-server-config-event"));
 
-/** The primary server's first config this session; never the boot snapshot's copy. */
+/** The primary server's first config this session. */
 export const primaryServerSessionConfigAtom = Atom.make((get): ServerConfig | null => {
   const environmentId = get(primaryEnvironmentIdAtom);
   return environmentId === null

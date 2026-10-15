@@ -7,7 +7,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { describe } from "vite-plus/test";
 
 import { loadOpenCode2Catalog } from "./openCode2Catalog.ts";
-import * as OpenCode2Client from "./v2/OpenCode2ClientTag.ts";
+import * as OpenCode2Client from "./v2/OpenCode2Client.ts";
 
 /**
  * `GET /api/model` from an `opencode serve` 2.0.26 with credentials for both

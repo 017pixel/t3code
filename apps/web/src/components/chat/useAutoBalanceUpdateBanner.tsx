@@ -26,28 +26,18 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 import { ComposerServerUpdateIcon } from "./ComposerServerUpdateStatus";
 
-interface EnvironmentUpdateState {
-  readonly environment: EnvironmentPresentation;
-  readonly state: ServerUpdateState;
-}
-
-// Reuse the empty atom to avoid a post-commit render for its new array.
-const NO_ENVIRONMENT_UPDATE_STATES = Atom.make<ReadonlyArray<EnvironmentUpdateState>>([]);
-
 /** Keep every machine's update visible while auto balance has no single update target. */
 export function useAutoBalanceUpdateBanner(
   environments: readonly EnvironmentPresentation[],
 ): ComposerBannerStackItem | null {
   const statesAtom = useMemo(
     () =>
-      environments.length === 0
-        ? NO_ENVIRONMENT_UPDATE_STATES
-        : Atom.make((get): ReadonlyArray<EnvironmentUpdateState> =>
-            environments.map((environment) => ({
-              environment,
-              state: get(serverEnvironment.updateStateAtom(environment.environmentId)),
-            })),
-          ),
+      Atom.make((get) =>
+        environments.map((environment) => ({
+          environment,
+          state: get(serverEnvironment.updateStateAtom(environment.environmentId)),
+        })),
+      ),
     [environments],
   );
   const states = useAtomValue(statesAtom);

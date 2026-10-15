@@ -1204,7 +1204,7 @@ it.effect("GitVcsDriver flushes checkpoint objects and refs to disk before publi
                 : input.args.includes("commit-tree")
                   ? "commit0000\n"
                   : input.args.includes("--git-common-dir")
-                    ? ".git\nhead0000\n"
+                    ? ".git\n"
                     : "";
               return {
                 exitCode: ChildProcessSpawner.ExitCode(0),

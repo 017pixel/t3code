@@ -61,26 +61,13 @@ export type MediaQueryInput = {
   pointer?: "coarse" | "fine";
 };
 
-// A MediaQueryList stays live, so one per query serves every render.
-// matchMedia() on each render was a measurable share of a keystroke.
-const mediaQueryLists = new Map<string, MediaQueryList>();
-
-function mediaQueryList(mediaQuery: string): MediaQueryList {
-  let mql = mediaQueryLists.get(mediaQuery);
-  if (!mql) {
-    mql = window.matchMedia(mediaQuery);
-    mediaQueryLists.set(mediaQuery, mql);
-  }
-  return mql;
-}
-
 export function useMediaQuery(query: BreakpointQuery | MediaQueryInput | (string & {})): boolean {
   const mediaQuery = parseQuery(query);
 
   const subscribe = useCallback(
     (callback: () => void) => {
       if (typeof window === "undefined") return () => {};
-      const mql = mediaQueryList(mediaQuery);
+      const mql = window.matchMedia(mediaQuery);
       mql.addEventListener("change", callback);
       return () => mql.removeEventListener("change", callback);
     },
@@ -89,7 +76,7 @@ export function useMediaQuery(query: BreakpointQuery | MediaQueryInput | (string
 
   const getSnapshot = useCallback(() => {
     if (typeof window === "undefined") return false;
-    return mediaQueryList(mediaQuery).matches;
+    return window.matchMedia(mediaQuery).matches;
   }, [mediaQuery]);
 
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);

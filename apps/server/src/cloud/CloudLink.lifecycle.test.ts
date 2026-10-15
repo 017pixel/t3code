@@ -42,8 +42,8 @@ import {
   RELAY_ISSUER_SECRET,
   RELAY_URL_SECRET,
 } from "./config.ts";
-import * as CloudLink from "./CloudLinkTag.ts";
-import { consumeCloudReplayGuards } from "./CloudLinkTag.ts";
+import * as CloudLink from "./CloudLink.ts";
+import { consumeCloudReplayGuards } from "./CloudLink.ts";
 import { pendingServiceUpdateExists } from "./updateHandoff.ts";
 import {
   managedTunnelStartupAction,

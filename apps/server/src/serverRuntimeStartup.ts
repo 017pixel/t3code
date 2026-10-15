@@ -24,7 +24,6 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "./config.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
@@ -147,18 +146,15 @@ export const makeCommandGate = Effect.gen(function* () {
 const recordStartupHeartbeat = Effect.gen(function* () {
   const analytics = yield* AnalyticsService.AnalyticsService;
   const projects = yield* ProjectService.ProjectService;
-  const sql = yield* SqlClient.SqlClient;
+  const threads = yield* ThreadManagement.ThreadManagementService;
 
   const { threadCount, projectCount } = yield* Effect.all({
     projects: projects.snapshot,
-    // The threads the shell snapshot lists, counted without building it.
-    threads: sql<{ readonly count: number }>`
-      SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
-    `,
+    threads: threads.getShellSnapshot(),
   }).pipe(
-    Effect.map(({ projects: projectSnapshot, threads: rows }) => ({
+    Effect.map(({ projects: projectSnapshot, threads: shellSnapshot }) => ({
       projectCount: projectSnapshot.projects.length,
-      threadCount: rows[0]?.count ?? 0,
+      threadCount: shellSnapshot.threads.length + shellSnapshot.archivedThreads.length,
     })),
     Effect.catch((cause) =>
       Effect.logWarning("failed to gather V2 startup counts for telemetry", {

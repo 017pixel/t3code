@@ -30,11 +30,6 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
-import {
-  resolveThreadPullRequestBadge,
-  resolveThreadPullRequestChains,
-  threadPullRequestSearchTerms,
-} from "@t3tools/shared/threadPullRequests";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 
 import ProjectionThreadSweepIndexes from "../persistence/Migrations/063_ProjectionThreadSweepIndexes.ts";
@@ -42,13 +37,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { resolveAutoSettlementAt } from "./ThreadSettlementService.ts";
-import {
-  compactThreadPullRequests,
-  compactShellPullRequestStacks,
-  decodeThreadReadPayload,
-  encodeThreadReadPayload,
-} from "./ThreadReadPayload.ts";
-import { compactThreadFieldEvent } from "../persistence/DatabaseCompaction.ts";
+import { compactThreadPullRequests } from "./ThreadReadPayload.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -2541,28 +2530,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const markedUnread = yield* projectionStore.getThreadProjection(threadId);
       assert.isNull(markedUnread.thread.lastVisitedAt);
       assert.deepEqual(markedUnread.thread.updatedAt, createdAt);
-
-      const visitedPayload = { ...thread, lastVisitedAt: visitedOccurredAt };
-      const legacy = {
-        id: EventId.make("event:compact-visit"),
-        type: "thread.visited" as const,
-        threadId,
-        occurredAt: visitedOccurredAt,
-        payload: visitedPayload,
-      };
-      assert.equal(compactThreadFieldEvent(legacy, thread).type, "thread.visit-recorded");
-      assert.strictEqual(
-        compactThreadFieldEvent(
-          { ...legacy, payload: { ...visitedPayload, title: "Also changed" } },
-          thread,
-        ).type,
-        "thread.visited",
-      );
-      assert.deepEqual(
-        yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(thread)),
-        thread,
-      );
-      assert.deepEqual(compactThreadPullRequests(thread), thread);
     }),
   );
 
@@ -3241,38 +3208,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const otherThreadId = yield* addRolledBackRecoveryCandidate("other-limit-shell");
       const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
       const now = yield* DateTime.now;
-      const thread = yield* store.getThread(threadId);
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:pull-request"),
-        type: "thread.pull-request-synced",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...thread,
-          pullRequests: [
-            {
-              host: "github.com",
-              repository: "pingdotgg/t3code",
-              number: 42,
-              url: "https://github.com/pingdotgg/t3code/pull/42",
-              source: "manual",
-              linkedAt: DateTime.formatIso(now),
-              stack: null,
-              snapshot: {
-                state: "open",
-                title: "Recovery with a linked PR",
-                headBranch: "recovery",
-                baseBranch: "main",
-                isDraft: false,
-                updatedAt: DateTime.formatIso(now),
-                syncedAt: DateTime.formatIso(now),
-                additions: 100,
-                deletions: 20,
-              },
-            },
-          ],
-        },
-      });
       const limitItem = {
         id: TurnItemId.make("limit-shell:error"),
         threadId,
@@ -3505,20 +3440,15 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ),
       );
       const reset = DateTime.makeUnsafe(limitItem.failure.resetAt);
-      const recoveryBaseline = yield* store.getThread(threadId);
       const recovery = {
         runId: original.id,
         resetAt: limitItem.failure.resetAt,
         autoResume: true,
         requestId: CommandId.make("recovery:choice"),
       };
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-choice"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: { ...recoveryBaseline, limitRecovery: recovery },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.limitRecovery', json(${encodeUnknownJsonString(recovery)}))
+        WHERE thread_id = ${threadId}`;
       // Armed future retries need no state decoding until they become due.
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, autoResume: true })).find(
@@ -3549,32 +3479,17 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ),
       );
       yield* sql`DELETE FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id = 'limit-shell:pending-request'`;
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-snooze"),
-        type: "thread.snoozed",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...(yield* store.getThread(threadId)),
-          snoozedUntil: DateTime.add(reset, { minutes: 1 }),
-        },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.snoozedUntil', ${DateTime.formatIso(DateTime.add(reset, { minutes: 1 }))})
+        WHERE thread_id = ${threadId}`;
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, now: reset })).find(
           (row) => row.id === threadId,
         ),
       );
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-disabled"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: {
-          ...recoveryBaseline,
-          snoozedUntil: null,
-          limitRecovery: { ...recovery, autoResume: false },
-        },
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.snoozedUntil', NULL, '$.limitRecovery.autoResume', json('false'))
+        WHERE thread_id = ${threadId}`;
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({
           ...recoveryOptions,
@@ -3582,13 +3497,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           autoResume: true,
         })).find((row) => row.id === threadId),
       );
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:recovery-restored"),
-        type: "thread.metadata-updated",
-        threadId,
-        occurredAt: now,
-        payload: recoveryBaseline,
-      });
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = ${originalRow!.payload_json} WHERE thread_id = ${threadId}`;
       const session = {
         id: ProviderSessionId.make("session:limit-shell:shared"),
         driver,
@@ -3671,13 +3580,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       // A new attempt's root cannot inherit an earlier attempt's limit.
       yield* applyRun("failed", NodeId.make("new-attempt-root"));
       yield* assertSummary(null, null);
-      yield* store.apply({
-        id: EventId.make("event:limit-shell:pull-request-removed"),
-        type: "thread.pull-request-synced",
-        threadId,
-        occurredAt: now,
-        payload: { ...(yield* store.getThread(threadId)), pullRequests: thread.pullRequests },
-      });
     }),
   );
 
@@ -5913,28 +5815,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.deepEqual(synced.pullRequests?.[0]?.snapshot, snapshot);
       assert.isDefined(synced.pullRequests?.[0]?.watch);
       assert.deepEqual(synced.updatedAt, at);
-      const previous = {
-        ...synced,
-        pullRequests: [{ ...synced.pullRequests![0]!, snapshot: null }],
-      };
-      const legacySync = {
-        id: EventId.make("event:compact-pr-sync"),
-        type: "thread.pull-request-synced" as const,
-        threadId,
-        occurredAt: at,
-        payload: synced,
-      };
-      assert.equal(
-        compactThreadFieldEvent(legacySync, previous).type,
-        "thread.pull-request-link-synced",
-      );
-      assert.equal(
-        compactThreadFieldEvent(
-          { ...legacySync, payload: { ...synced, title: "Changed too" } },
-          previous,
-        ).type,
-        "thread.pull-request-synced",
-      );
       const stack = {
         kind: "native" as const,
         id: "stack:codec",
@@ -5957,28 +5837,12 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           snapshot: { ...snapshot, additions: 23, deletions: 2, checksState: "passing" as const },
         })),
       };
-      assert.deepEqual(yield* decodeThreadReadPayload(yield* encodeThreadReadPayload(rich)), rich);
       const compact = compactThreadPullRequests(rich);
-      assert.isUndefined(compact.pullRequests?.[0]?.snapshot?.additions);
-      assert.equal(rich.pullRequests[0]?.snapshot?.additions, 23);
       // Clients show the saved stack before it refreshes, so the compact shell keeps it whole.
       assert.deepEqual(
         compact.pullRequests?.map((link) => link.stack),
         rich.pullRequests.map((link) => link.stack),
       );
-      assert.deepEqual(
-        resolveThreadPullRequestBadge(compact.pullRequests),
-        resolveThreadPullRequestBadge(rich.pullRequests),
-      );
-      assert.deepEqual(
-        resolveThreadPullRequestChains(compact.pullRequests ?? []).map((chain) =>
-          chain.layers.map((entry) => entry.number),
-        ),
-        resolveThreadPullRequestChains(rich.pullRequests).map((chain) =>
-          chain.layers.map((entry) => entry.number),
-        ),
-      );
-      assert.deepEqual(threadPullRequestSearchTerms(compact), threadPullRequestSearchTerms(rich));
       yield* syncPullRequests("rich", rich.pullRequests);
       assert.deepEqual((yield* store.getThreadShell(threadId))?.pullRequests, rich.pullRequests);
       assert.deepEqual(
@@ -5986,13 +5850,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         compact.pullRequests,
       );
       assert.deepEqual((yield* store.getThread(threadId)).pullRequests, rich.pullRequests);
-      const shell = yield* store.getThreadShell(threadId, { compactPullRequests: true });
-      assert.isNotNull(shell);
-      const wire = compactShellPullRequestStacks(shell!);
-      assert.equal(wire.pullRequests?.[1]?.stackReference, 0);
-      assert.isNull(wire.pullRequests?.[1]?.stack);
-      assert.equal(wire.pullRequests?.[2]?.stack?.base, "older-base");
-      assert.isUndefined(wire.pullRequests?.[2]?.stackReference);
       const terminalAt = DateTime.formatIso(DateTime.add(at, { seconds: 1 }));
       for (const state of ["merged", "closed"] as const) {
         yield* syncPullRequests(`terminal-${state}`, [
@@ -6022,21 +5879,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       yield* syncPullRequests("restore", synced.pullRequests ?? []);
       assert.equal(yield* phase, "running");
       assert.equal((yield* store.getThreadsWithPullRequests()).length, 1);
-
-      yield* store.apply({
-        id: EventId.make("event:watched-pull-request:missing-link-synced"),
-        type: "thread.pull-request-link-synced",
-        threadId,
-        occurredAt: DateTime.add(at, { seconds: 2 }),
-        payload: {
-          host: link.host,
-          repository: link.repository,
-          number: 999,
-          snapshot,
-          stack: null,
-        },
-      });
-      assert.deepEqual((yield* store.getThread(threadId)).pullRequests, synced.pullRequests);
 
       // An older build sharing the database writes only the payload; the sweep still follows it.
       const sql = yield* SqlClient.SqlClient;

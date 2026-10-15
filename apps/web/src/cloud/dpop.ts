@@ -8,7 +8,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import type { JWK } from "jose";
+import { importJWK, SignJWT, type JWK } from "jose";
 
 export interface BrowserDpopKey {
   readonly privateKey: CryptoKey;
@@ -26,9 +26,6 @@ const DPOP_DATABASE_VERSION = 1;
 const DPOP_KEY_STORE_NAME = "keys";
 const DPOP_KEY_ID = "relay-dpop-proof-key";
 const decodeDpopPublicJwk = Schema.decodeUnknownEffect(DpopPublicJwk);
-// jose only signs proofs for T3 Connect, so local-only sessions never load it.
-const loadJoseKeyImport = () => import("jose/key/import");
-const loadJoseJwtSign = () => import("jose/jwt/sign");
 
 export const layer = Layer.succeed(
   Crypto.Crypto,
@@ -135,11 +132,7 @@ export const generateBrowserDpopKey = Effect.gen(function* () {
     ),
   );
   const privateKey = yield* Effect.tryPromise({
-    try: () =>
-      loadJoseKeyImport().then(
-        ({ importJWK }) =>
-          importJWK(privateJwk as JWK, "ES256", { extractable: false }) as Promise<CryptoKey>,
-      ),
+    try: () => importJWK(privateJwk as JWK, "ES256", { extractable: false }) as Promise<CryptoKey>,
     catch: (cause) => dpopError("Could not import DPoP private key.", cause),
   });
   return {
@@ -172,21 +165,19 @@ export function createBrowserDpopProof(input: {
     );
     const proof = yield* Effect.tryPromise({
       try: () =>
-        loadJoseJwtSign().then(({ SignJWT }) =>
-          new SignJWT({
-            htm: input.method.toUpperCase(),
-            htu: normalizedUrl.toString(),
-            jti,
-            ...(input.accessToken ? { ath: computeDpopAccessTokenHash(input.accessToken) } : {}),
+        new SignJWT({
+          htm: input.method.toUpperCase(),
+          htu: normalizedUrl.toString(),
+          jti,
+          ...(input.accessToken ? { ath: computeDpopAccessTokenHash(input.accessToken) } : {}),
+        })
+          .setProtectedHeader({
+            typ: "dpop+jwt",
+            alg: "ES256",
+            jwk: input.proofKey.publicJwk,
           })
-            .setProtectedHeader({
-              typ: "dpop+jwt",
-              alg: "ES256",
-              jwk: input.proofKey.publicJwk,
-            })
-            .setIssuedAt()
-            .sign(input.proofKey.privateKey),
-        ),
+          .setIssuedAt()
+          .sign(input.proofKey.privateKey),
       catch: (cause) => dpopError("Could not sign DPoP proof.", cause),
     });
     return { proof, thumbprint: input.proofKey.thumbprint };

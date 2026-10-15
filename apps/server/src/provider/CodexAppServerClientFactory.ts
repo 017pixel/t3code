@@ -1,3 +1,4 @@
+import { cacheInOwnerScope } from "@t3tools/shared/lazyService";
 import type {
   ProviderInstanceId,
   ThreadId,
@@ -7,13 +8,9 @@ import type {
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as CodexClient from "effect-codex-app-server/client";
 import * as Context from "effect/Context";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
-import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import type * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 
 export class CodexAppServerClientFactory extends Context.Service<
   CodexAppServerClientFactory,
@@ -33,22 +30,14 @@ export class CodexAppServerClientFactory extends Context.Service<
   }
 >()("t3/provider/CodexAppServerClientFactory") {}
 
-export const layer: Layer.Layer<
-  CodexAppServerClientFactory,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner | ProviderEventLoggers.ProviderEventLoggers
-> = Layer.effect(
+export const layer = Layer.effect(
   CodexAppServerClientFactory,
   Effect.gen(function* () {
-    const context = yield* Effect.context<Layer.Services<typeof layer> | Scope.Scope>();
-    // A failed load is not kept, so the next session retries it.
-    const service = yield* Effect.cachedWithTTL(
+    const service = yield* cacheInOwnerScope(
       Effect.promise(() => import("../orchestration-v2/Adapters/CodexAdapterV2.ts")).pipe(
         Effect.flatMap((adapter) => Layer.build(adapter.layerAppServerClientFactory)),
         Effect.map((services) => Context.get(services, CodexAppServerClientFactory)),
-        Effect.provideContext(context),
       ),
-      (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
     );
     return CodexAppServerClientFactory.of({
       open: (input) => service.pipe(Effect.flatMap((value) => value.open(input))),

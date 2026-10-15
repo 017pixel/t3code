@@ -474,7 +474,6 @@ import {
 } from "./chat/PanelLayoutControls";
 import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import type { ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
-import { ThreadDetailsCard } from "./chat/ThreadDetailsCard";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import {
   type EnvironmentOption,
@@ -760,27 +759,9 @@ const ThreadPreviewMiniPlayer = lazy(() =>
     default: module.ThreadPreviewMiniPlayer,
   })),
 );
-const ThreadDetailsPanelContent = lazy(() =>
-  import("./chat/ThreadDetailsPanel").then((module) => ({
-    default: module.ThreadDetailsPanelContent,
-  })),
+const ThreadDetailsPanel = lazy(() =>
+  import("./chat/ThreadDetailsPanel").then((module) => ({ default: module.ThreadDetailsPanel })),
 );
-function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
-  return (
-    <ThreadDetailsCard
-      threadRef={{ environmentId: props.environmentId, threadId: props.threadId }}
-      anchor={props.anchor}
-      handle={props.handle}
-      onPresentationChange={props.onPresentationChange}
-    >
-      {(density) => (
-        <Suspense fallback={null}>
-          <ThreadDetailsPanelContent {...props} density={density} />
-        </Suspense>
-      )}
-    </ThreadDetailsCard>
-  );
-}
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
@@ -827,11 +808,9 @@ type EnvironmentUnavailableState = {
 function eventPathContainsSelector(event: Event, selector: string): boolean {
   const path = event.composedPath();
   if (path.length === 0 && event.target) {
-    return event.target instanceof Element && event.target.closest(selector) !== null;
+    path.push(event.target);
   }
-  // The composed path already lists every ancestor, so one match per entry
-  // covers what `closest` from each entry would.
-  return path.some((target) => target instanceof Element && target.matches(selector));
+  return path.some((target) => target instanceof Element && target.closest(selector));
 }
 
 const SECRET_REQUEST_SELECTOR = '[data-v2-item-type="secret_request"]';
@@ -1896,21 +1875,18 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timestampFormat = settings.timestampFormat;
   const navigate = useNavigate();
-  // Unrelated navigation must not re-render this view.
   const citationLocation = useLocation({
-    select: (location) => {
-      const citation = assistantCitationFromLocation(location.href);
-      if (citation?.environmentId !== environmentId || citation.threadId !== threadId) return null;
-      const key = location.state.assistantCitationActivation ?? location.state.__TSR_key;
-      return `${key ?? location.href}\u0000${location.href}`;
-    },
+    select: (location) => ({
+      href: location.href,
+      key: location.state.assistantCitationActivation ?? location.state.__TSR_key,
+    }),
   });
   const citationRequest = useMemo<AssistantCitationRequest | null>(() => {
-    if (citationLocation === null) return null;
-    const separator = citationLocation.indexOf("\u0000");
-    const citation = assistantCitationFromLocation(citationLocation.slice(separator + 1));
-    return citation ? { citation, key: citationLocation.slice(0, separator) } : null;
-  }, [citationLocation]);
+    const citation = assistantCitationFromLocation(citationLocation.href);
+    return citation && citation.environmentId === environmentId && citation.threadId === threadId
+      ? { citation, key: citationLocation.key ?? citationLocation.href }
+      : null;
+  }, [citationLocation.href, citationLocation.key, environmentId, threadId]);
   const { resolvedTheme } = useTheme();
   // Granular store selectors — avoid subscribing to prompt changes.
   const composerRuntimeMode = useComposerDraftStore(
@@ -12293,7 +12269,9 @@ export default function ChatView(props: ChatViewProps) {
               </AlertDialogPopup>
             </AlertDialog>
 
-            <ThreadDetailsPanel {...threadDetailsPanelProps} />
+            <Suspense fallback={null}>
+              <ThreadDetailsPanel {...threadDetailsPanelProps} />
+            </Suspense>
 
             {pullRequestDialogState ? (
               <PullRequestThreadDialog

@@ -49,12 +49,6 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { projectFaviconCache } from "../assets/projectFaviconCache";
-import {
-  forgetBootEnvironment,
-  readBootSnapshot,
-  recordBootServerConfig,
-  recordBootShell,
-} from "../bootSnapshot";
 
 const DATABASE_NAME = "t3code:connection-runtime";
 const DATABASE_VERSION = 4;
@@ -389,21 +383,6 @@ function removeDatabaseValuesInRange(
   return withDatabase(database, (opened) =>
     removeDatabaseValuesInRangeOnConnection(opened, storeName, range),
   );
-}
-
-const bootShellsTaken = new Set<EnvironmentId>();
-const bootServerConfigsTaken = new Set<EnvironmentId>();
-
-// Reconnects must read the updated IndexedDB cache, not the first boot's snapshot.
-function takeBootValue<A>(
-  taken: Set<EnvironmentId>,
-  environmentId: EnvironmentId,
-  read: (snapshot: NonNullable<ReturnType<typeof readBootSnapshot>>) => A | undefined,
-): A | undefined {
-  if (taken.has(environmentId)) return undefined;
-  taken.add(environmentId);
-  const snapshot = readBootSnapshot();
-  return snapshot === null ? undefined : read(snapshot);
 }
 
 function threadCacheKey(environmentId: EnvironmentId, threadId: ThreadId) {
@@ -749,16 +728,8 @@ export const layer = Layer.effectContext(
         })),
     });
     const cacheStore = Persistence.EnvironmentCacheStore.of({
-      loadShell: (environmentId) => {
-        const boot = takeBootValue(bootShellsTaken, environmentId, (snapshot) =>
-          snapshot.shells.get(environmentId),
-        );
-        if (boot !== undefined) {
-          return Effect.promise(() => projectFaviconCache.hydrate()).pipe(
-            Effect.as(Option.some(boot)),
-          );
-        }
-        return readDatabaseValue(database, SHELL_STORE_NAME, environmentId).pipe(
+      loadShell: (environmentId) =>
+        readDatabaseValue(database, SHELL_STORE_NAME, environmentId).pipe(
           Effect.tap(() => Effect.promise(() => projectFaviconCache.hydrate())),
           Effect.flatMap((raw) => {
             // Row manifests and future formats stay intact until live data refills the cache.
@@ -776,8 +747,7 @@ export const layer = Layer.effectContext(
             );
           }),
           Effect.mapError((cause) => persistenceError("load-shell", cause)),
-        );
-      },
+        ),
       saveShell: (environmentId, snapshot) =>
         Effect.gen(function* () {
           const encoded = yield* encodeStoredShellSnapshot({
@@ -786,7 +756,6 @@ export const layer = Layer.effectContext(
             snapshot,
           }).pipe(Effect.mapError((cause) => persistenceError("save-shell", cause)));
           yield* writeDatabaseValue(database, SHELL_STORE_NAME, environmentId, encoded);
-          recordBootShell(environmentId, snapshot);
         }).pipe(
           Effect.mapError((cause) =>
             cause._tag === "ConnectionPersistenceError"
@@ -794,12 +763,8 @@ export const layer = Layer.effectContext(
               : persistenceError("save-shell", cause),
           ),
         ),
-      loadServerConfig: (environmentId) => {
-        const boot = takeBootValue(bootServerConfigsTaken, environmentId, (snapshot) =>
-          snapshot.serverConfigs.get(environmentId),
-        );
-        if (boot !== undefined) return Effect.succeedSome(boot);
-        return readDatabaseValue(database, SERVER_CONFIG_STORE_NAME, environmentId).pipe(
+      loadServerConfig: (environmentId) =>
+        readDatabaseValue(database, SERVER_CONFIG_STORE_NAME, environmentId).pipe(
           Effect.flatMap((raw) => {
             if (typeof raw !== "string") {
               return Effect.succeedNone;
@@ -816,8 +781,7 @@ export const layer = Layer.effectContext(
               ? cause
               : persistenceError("load-server-config", cause),
           ),
-        );
-      },
+        ),
       saveServerConfig: (environmentId, config) =>
         Effect.gen(function* () {
           const encoded = yield* encodeStoredServerConfig({
@@ -826,7 +790,6 @@ export const layer = Layer.effectContext(
             config,
           }).pipe(Effect.mapError((cause) => persistenceError("save-server-config", cause)));
           yield* writeDatabaseValue(database, SERVER_CONFIG_STORE_NAME, environmentId, encoded);
-          recordBootServerConfig(environmentId, config);
         }).pipe(
           Effect.mapError((cause) =>
             cause._tag === "ConnectionPersistenceError"
@@ -965,7 +928,6 @@ export const layer = Layer.effectContext(
       clear: (environmentId) =>
         Effect.all(
           [
-            Effect.sync(() => forgetBootEnvironment(environmentId)),
             Effect.promise(() => projectFaviconCache.clearEnvironment(environmentId)),
             removeDatabaseValue(database, SHELL_STORE_NAME, environmentId),
             removeDatabaseValuesInRange(
