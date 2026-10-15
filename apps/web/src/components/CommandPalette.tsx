@@ -143,6 +143,7 @@ import {
   isUnsupportedWindowsProjectPath,
   resolveProjectPathForDispatch,
 } from "../lib/projectPaths";
+import { COMMAND_PALETTE_ELEMENT_ID } from "../commandPaletteBus";
 import { PULL_REQUESTS_PANEL_REF, useRightPanelStore } from "../rightPanelStore";
 import { getLatestThreadForProject, sortThreads } from "../lib/threadSort";
 import {
@@ -222,12 +223,13 @@ import {
   type ProviderInstanceEntry,
 } from "../providerInstances";
 import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
-import { CommandFooterAction } from "./ui/command";
+import { CommandDialogPopup, CommandFooterAction } from "./ui/command";
 import { Button } from "./ui/button";
 import { Kbd, KbdGroup } from "./ui/kbd";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { useComposerHandleContext } from "../composerHandleContext";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
@@ -349,6 +351,7 @@ export function CommandPaletteDialog(props: {
   readonly openOverlayMode: (mode: SearchOverlayMode) => void;
   readonly clearOpenIntent: () => void;
 }) {
+  const composerHandleRef = useComposerHandleContext();
   // File and content search start from text typed while they loaded.
   const typedAheadQuery =
     props.mode !== "command" && props.openIntent?.kind === "search" && props.openIntent.query
@@ -356,7 +359,27 @@ export function CommandPaletteDialog(props: {
       : {};
 
   return (
-    <>
+    <CommandDialogPopup
+      aria-label={
+        props.mode === "files"
+          ? "File picker"
+          : props.mode === "content"
+            ? "Search project contents"
+            : "Command palette"
+      }
+      className={cn("overflow-hidden", props.mode === "content" && "h-105")}
+      id={COMMAND_PALETTE_ELEMENT_ID}
+      data-command-palette="true"
+      data-palette-mode={props.mode}
+      data-testid="command-palette"
+      finalFocus={() => {
+        composerHandleRef?.current?.focusAtEnd();
+        return false;
+      }}
+      onBackdropPointerDown={() => {
+        props.setOpen(false);
+      }}
+    >
       {props.mode === "files" ? (
         <ProjectFilePicker setOpen={props.setOpen} {...typedAheadQuery} />
       ) : props.mode === "content" ? (
@@ -371,7 +394,7 @@ export function CommandPaletteDialog(props: {
           clearOpenIntent={props.clearOpenIntent}
         />
       )}
-    </>
+    </CommandDialogPopup>
   );
 }
 

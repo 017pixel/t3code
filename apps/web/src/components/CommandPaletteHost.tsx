@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
+import { useNavigate, useParams } from "@tanstack/react-router";
 import { MonitorIcon, MoonIcon, SunIcon } from "lucide-react";
 import {
   Suspense,
@@ -20,10 +20,10 @@ import {
 import { ComposerHandleContext } from "../composerHandleContext";
 import { useTheme } from "../hooks/useTheme";
 import { resolveShortcutCommand } from "../keybindings";
-import { preloadAfterComposer } from "../lib/loadableComponent";
+import { commandPaletteSurface, diffPanelSurface, preloadTerminalDrawer, preloadAfterComposer } from "./lazySurfaces";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { cn, isMacPlatform } from "../lib/utils";
+import { isMacPlatform } from "../lib/utils";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
@@ -31,17 +31,11 @@ import { resolveThreadRouteTarget } from "../threadRoutes";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import { reduceCommandPaletteUiState, type SearchOverlayMode } from "./CommandPalette.logic";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
-import {
-  commandPaletteSurface,
-  diffPanelSurface,
-  filePreviewSurface,
-  preloadTerminalDrawer,
-} from "./lazySurfaces";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
-import { CommandDialog, CommandDialogPopup } from "./ui/command";
+import { CommandDialog } from "./ui/command";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 
-// Keep palette views out of the startup graph; close on a failed load.
+// Close on import failure so it cannot replace the app with a route error.
 function CommandPaletteUnavailable({ onUnavailable }: { onUnavailable: () => void }) {
   useEffect(() => onUnavailable(), [onUnavailable]);
   return null;
@@ -96,7 +90,6 @@ export function notifyThemeSaveFailure(): void {
 
 export function CommandPaletteHost({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const router = useRouter();
   const [state, dispatch] = useReducer(reduceCommandPaletteUiState, {
     open: false,
     mode: "command",
@@ -107,9 +100,7 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     requestedModeRef.current = state.mode;
   }, [state.mode]);
   // Stays mounted after the first open so closing still animates out.
-  const [CommandPaletteDialog, setCommandPaletteDialog] = useState<
-    typeof commandPaletteSurface.Component | null
-  >(null);
+  const [CommandPaletteDialog, setCommandPaletteDialog] = useState<typeof commandPaletteSurface.Component | null>(null);
   if (state.open && CommandPaletteDialog === null) {
     setCommandPaletteDialog(() => commandPaletteSurface.Component);
   }
@@ -151,17 +142,11 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
     return () => setCommandPaletteRequested(false);
   }, [state.open]);
 
-  useEffect(
-    () =>
-      preloadAfterComposer([
-        commandPaletteSurface.preload,
-        preloadTerminalDrawer,
-        () => router.preloadRoute({ to: "/settings/general" }),
-        diffPanelSurface.preload,
-        filePreviewSurface.preload,
-      ]),
-    [router],
-  );
+  useEffect(() => preloadAfterComposer([
+    commandPaletteSurface.preload,
+    preloadTerminalDrawer,
+    diffPanelSurface.preload,
+  ]), []);
   useEffect(() => {
     const onModifier = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Control" || event.key === "Meta") void commandPaletteSurface.preload();
@@ -343,35 +328,15 @@ export function CommandPaletteHost({ children }: { children: ReactNode }) {
           <RenderErrorBoundary
             fallback={<CommandPaletteUnavailable onUnavailable={closeUnavailablePalette} />}
           >
-            <CommandDialogPopup
-              aria-label={
-                state.mode === "files"
-                  ? "File picker"
-                  : state.mode === "content"
-                    ? "Search project contents"
-                    : "Command palette"
-              }
-              className={cn("overflow-hidden", state.mode === "content" && "h-105")}
-              id={COMMAND_PALETTE_ELEMENT_ID}
-              data-command-palette="true"
-              data-palette-mode={state.mode}
-              data-testid="command-palette"
-              finalFocus={() => {
-                composerHandleRef.current?.focusAtEnd();
-                return false;
-              }}
-              onBackdropPointerDown={() => setOpen(false)}
-            >
-              <Suspense fallback={null}>
-                <CommandPaletteDialog
-                  mode={state.mode}
-                  openIntent={state.openIntent}
-                  setOpen={setOpen}
-                  openOverlayMode={toggleMode}
-                  clearOpenIntent={clearOpenIntent}
-                />
-              </Suspense>
-            </CommandDialogPopup>
+            <Suspense fallback={null}>
+              <CommandPaletteDialog
+                mode={state.mode}
+                openIntent={state.openIntent}
+                setOpen={setOpen}
+                openOverlayMode={toggleMode}
+                clearOpenIntent={clearOpenIntent}
+              />
+            </Suspense>
           </RenderErrorBoundary>
         ) : null}
       </CommandDialog>

@@ -7,12 +7,12 @@ import {
   useEffect,
   useState,
   useSyncExternalStore,
+  type ComponentType,
   type CSSProperties,
   type ReactNode,
 } from "react";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 
-import { loadableComponent } from "../lib/loadableComponent";
 import { isElectron } from "../env";
 import { getLocalStorageItem, removeLocalStorageItem } from "../hooks/useLocalStorage";
 import {
@@ -74,11 +74,11 @@ const LegacyThreadSidebar = lazy(() =>
 );
 /** The settings route loads the nav alongside its own chunks instead of after its first paint. */
 export const loadSettingsSidebarNav = () => import("./settings/SettingsSidebarNav");
-const SettingsSidebarNav = loadableComponent<{ pathname: string }>(() =>
+const SettingsSidebarNav = lazy<ComponentType<{ pathname: string }>>(() =>
   loadSettingsSidebarNav()
     .then((module) => ({ default: module?.SettingsSidebarNav ?? renderNoSettingsNav }))
     .catch(() => ({ default: renderNoSettingsNav })),
-).Component;
+);
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
 

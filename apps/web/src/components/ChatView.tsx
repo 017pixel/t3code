@@ -180,7 +180,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import { assistantCitationFromLocation } from "../lib/assistantCitationNavigation";
 import { isMacPlatform } from "../lib/utils";
 import { queryShownElement } from "../lib/shownElement";
-import { diffPanelSurface, filePreviewSurface, terminalDrawerSurface } from "./lazySurfaces";
+import { diffPanelSurface, terminalDrawerSurface } from "./lazySurfaces";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -725,7 +725,7 @@ const selectAutoShowFloatingPreview = (settings: { browserAutoShowFloatingPrevie
 const DevicePanel = lazy(() =>
   import("./device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
-const FilePreviewPanel = filePreviewSurface.Component;
+const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 // Panels that only some threads open load on first use, keeping them out of the
 // chunks that must arrive before the composer can paint.
 const LazyPullRequestDetailPanel = lazy(() =>
