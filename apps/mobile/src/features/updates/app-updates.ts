@@ -1,4 +1,3 @@
-import * as Dialog from "../../components/Dialog";
 import * as Updates from "expo-updates";
 
 import {
@@ -447,7 +446,7 @@ async function applyDeferredAppUpdateInstall(
 }
 
 async function defaultConfirmInstallNow(): Promise<boolean> {
-  const { Alert } = await import("react-native");
+  const Dialog = await import("../../components/Dialog");
   return new Promise<boolean>((resolve) => {
     Dialog.alert(
       "Update ready",
