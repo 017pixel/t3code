@@ -173,6 +173,20 @@ const KEEP_WHEN_LABELS = {
   "tracked-changes": "Edited tracked files",
 } as const;
 
+/** One line for the last-run fold; identical results across machines collapse into one. */
+function lastRunSummary(
+  entries: readonly { readonly label: string; readonly counts: string }[],
+  machineCount: number,
+) {
+  const first = entries[0];
+  if (!first) return "";
+  if (machineCount <= 1) return first.counts;
+  if (entries.length === machineCount && entries.every((entry) => entry.counts === first.counts)) {
+    return `${first.counts} on every machine`;
+  }
+  return entries.map((entry) => `${entry.label}: ${entry.counts}`).join(" · ");
+}
+
 function CleanupResults({
   report,
   environmentLabel,
@@ -302,7 +316,7 @@ function CleanupSection() {
       report,
       counts: report
         ? `${report.counts.removed} removed, ${report.counts.kept} kept${report.counts.failed > 0 ? `, ${report.counts.failed} failed` : ""}`
-        : undefined,
+        : "",
       description: report
         ? multiple
           ? `${formatBytes(report.bytesFreed)} recovered · ${formatRelativeTimeLabel(report.finishedAt)}`
@@ -392,7 +406,10 @@ function CleanupSection() {
           id="storage-cleanup-last-run"
           title="Last run"
           headerPlacement="inside"
-          summary={multiple ? null : (summaries[0]?.counts ?? null)}
+          summary={lastRunSummary(
+            summaries.filter(({ report }) => report !== null),
+            connectedEnvironments.length,
+          )}
         >
           {summaries.map(
             ({ environment, label, report }) =>
