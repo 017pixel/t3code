@@ -1,4 +1,4 @@
-import { OpenCode, type OpenCodeClient } from "@opencode/client/effect";
+import type { OpenCodeClient } from "@opencode/client/effect";
 import { OpenCodeEvent } from "@opencode/protocol/groups/event";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -179,7 +179,8 @@ export const make = Effect.gen(function* () {
         httpClient,
         HttpClientRequest.setHeader("Authorization", basicAuthorization(password)),
       );
-      return OpenCode.make({ baseUrl }).pipe(
+      return Effect.promise(() => import("@opencode/client/effect")).pipe(
+        Effect.flatMap(({ OpenCode }) => OpenCode.make({ baseUrl })),
         Effect.provideService(HttpClient.HttpClient, authenticated),
         Effect.map((client) => ({
           client,
