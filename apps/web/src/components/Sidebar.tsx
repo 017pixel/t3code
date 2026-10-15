@@ -151,7 +151,7 @@ import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
-import { useMinuteValue } from "../hooks/useNowMinute";
+import { useNowMinute } from "../hooks/useNowMinute";
 import { Atom } from "effect/reactivity";
 import {
   useEnvironmentIdentities,
@@ -349,23 +349,17 @@ function compactSidebarTimeLabel(label: string): string {
   return label.endsWith(" ago") ? label.slice(0, -4) : label;
 }
 
-function SidebarTimeLabel(props: { thread: SidebarThreadSummary; settled?: boolean }) {
-  const timestamp = props.settled
-    ? resolveSettledThreadTimestamp(props.thread)
-    : (props.thread.latestUserMessageAt ?? props.thread.updatedAt);
-  const read = useCallback(
-    () => (timestamp === null ? "" : compactSidebarTimeLabel(formatRelativeTimeLabel(timestamp))),
-    [timestamp],
-  );
-  return useMinuteValue(read);
+function threadTimeLabel(thread: SidebarThreadSummary): string {
+  const timestamp = thread.latestUserMessageAt ?? thread.updatedAt;
+  return compactSidebarTimeLabel(formatRelativeTimeLabel(timestamp));
 }
 
-function SidebarWakeLabel(props: { until: string }) {
-  const read = useCallback(
-    () => snoozeWakeLabel(props.until, { now: new Date().toISOString() }),
-    [props.until],
-  );
-  return useMinuteValue(read);
+// Settled rows read "how long ago did this wrap up", matching their sort
+// key: both go through resolveSettledThreadTimestamp so label and order can't
+// disagree.
+function settledTimeLabel(thread: SidebarThreadSummary): string {
+  const timestamp = resolveSettledThreadTimestamp(thread);
+  return timestamp === null ? "" : compactSidebarTimeLabel(formatRelativeTimeLabel(timestamp));
 }
 
 // Floats at the row's right edge, vertically centered, while the jump
@@ -1198,7 +1192,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // The action this row will take when the sweep is released.
   sweepAction: SidebarSweepAction | null;
   // Compact wake countdown ("2h") for rows in the snoozed shelf.
-  snoozedUntil: string | null;
+  snoozeWakeLabelText: string | null;
   // When a snooze ended (timer or early wake); drives the Woke pill until
   // the user visits the thread.
   wokeAt: string | null;
@@ -1894,11 +1888,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     !isWoke && "group-any-hover/sidebar-row:opacity-0",
                   )}
                 >
-                  {variantAction === "unsnooze" && props.snoozedUntil !== null ? (
+                  {variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
                     // Snoozed rows show when they come BACK, not when they were
                     // last touched — the return ticket is the row's whole story.
                     <span className="text-xs text-info-foreground tabular-nums">
-                      <SidebarWakeLabel until={props.snoozedUntil} />
+                      {props.snoozeWakeLabelText}
                     </span>
                   ) : isWoke ? (
                     // A wake can land straight in the settled tail (e.g. PR
@@ -1921,7 +1915,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     </Tooltip>
                   ) : (
                     <span className="text-xs">
-                      <SidebarTimeLabel thread={thread} settled={variantAction === "unsettle"} />
+                      {variantAction === "unsettle"
+                        ? settledTimeLabel(thread)
+                        : threadTimeLabel(thread)}
                     </span>
                   )}
                 </span>
@@ -2105,7 +2101,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                         </span>
                       )
                     ) : (
-                      <SidebarTimeLabel thread={thread} />
+                      threadTimeLabel(thread)
                     )}
                   </span>
                   {props.settlementSupported || showSnoozeButton || hasUnsentDraft ? (
@@ -2406,7 +2402,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
                 />
               </span>
               <span className="w-8 shrink-0 text-right text-xs text-muted-foreground/55 tabular-nums">
-                {<SidebarTimeLabel thread={thread} />}
+                {threadTimeLabel(thread)}
               </span>
             </span>
             {props.searchMatch ? (
@@ -2602,6 +2598,7 @@ export default function Sidebar() {
     [projectGroups],
   );
 
+  const nowMinute = useNowMinute();
   // Snooze wake times are second-precise, so classifying with the quantized
   // minute would hold a woken thread on the shelf for up to a minute. The
   // tick is a plain counter bumped exactly at the next wake boundary (armed
@@ -2946,6 +2943,7 @@ export default function Sidebar() {
       snoozeNow: preciseNow,
     };
   }, [
+    nowMinute,
     optimisticDrop,
     scopedProjectKeys,
     serverConfigs,
@@ -5389,7 +5387,13 @@ export default function Sidebar() {
                             sweepAction={
                               actionSweep?.keys.has(threadKey) ? actionSweep.action : null
                             }
-                            snoozedUntil={section === "snoozed" ? thread.snoozedUntil : null}
+                            snoozeWakeLabelText={
+                              section === "snoozed" && thread.snoozedUntil != null
+                                ? snoozeWakeLabel(thread.snoozedUntil, {
+                                    now: new Date().toISOString(),
+                                  })
+                                : null
+                            }
                             // All sections: a woken thread can classify straight
                             // into the settled tail (PR merged while snoozed), and
                             // the wake signal must survive the trip. Still-snoozed
