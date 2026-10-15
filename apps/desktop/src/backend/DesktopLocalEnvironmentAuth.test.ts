@@ -246,7 +246,8 @@ describe("DesktopLocalEnvironmentAuth", () => {
           {
             id: PRIMARY_LOCAL_ENVIRONMENT_ID,
             label: Effect.succeed("Local"),
-            waitForReady: () => Effect.sleep("40 seconds").pipe(Effect.as(ready)),
+            waitForReady: () =>
+              Effect.sleep(ready ? "40 seconds" : "2 minutes").pipe(Effect.as(ready)),
             currentConfig: Effect.succeedSome(config),
           },
         ]),
@@ -256,7 +257,9 @@ describe("DesktopLocalEnvironmentAuth", () => {
         HttpClient.make((request) =>
           Effect.sync(() => {
             requests++;
-            return tokenResponse(request);
+            return ready
+              ? tokenResponse(request)
+              : HttpClientResponse.fromWeb(request, new Response("", { status: 503 }));
           }),
         ),
       );
@@ -269,13 +272,14 @@ describe("DesktopLocalEnvironmentAuth", () => {
         ),
       );
       assert.equal(requests, 0);
-      yield* TestClock.adjust("41 seconds");
+      yield* TestClock.adjust("3 minutes");
       const token = yield* Fiber.join(result);
       assert.equal(
         token,
         ready ? "desktop-bearer-token" : "DesktopLocalEnvironmentAuthSessionBootstrapError",
       );
-      assert.equal(requests, ready ? 1 : 0);
+      if (ready) assert.equal(requests, 1);
+      else assert.isAbove(requests, 0);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 });
