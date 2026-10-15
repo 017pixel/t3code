@@ -71,13 +71,9 @@ it.effect(
         const ownFd = fs.openSync('/dev/null', 'r');
         const readFileSync = fs.readFileSync;
         // A parent's POSIX lock metadata is absent from its inherited fd in the child.
-        fs.readFileSync = (path, ...args) => {
-          const value = readFileSync(path, ...args);
-          return path === '/proc/' + process.ppid + '/fdinfo/64'
-            ? value + 'lock:\\t1: POSIX ADVISORY WRITE parent 0 EOF\\n'
-            : value;
-        };
-        syncBuiltinESMExports();
+        fs.readFileSync = (path, ...args) => readFileSync(path, ...args) +
+        (path === '/proc/' + process.ppid + '/fdinfo/64' ? 'lock:\\t1: POSIX ADVISORY WRITE parent 0 EOF\\n' : '');
+      syncBuiltinESMExports();
         await Effect.runPromise(closeInheritedElectronDescriptors([3]).pipe(
           Effect.provideService(HostProcess.Platform, "linux"),
           Effect.provideService(HostProcess.Environment, { ELECTRON_RUN_AS_NODE: "1" }),

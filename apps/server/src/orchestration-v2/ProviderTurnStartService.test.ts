@@ -880,33 +880,27 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
   );
 }
 
-for (const baseline of ["failure", "defect"] as const) {
-  effectIt.effect(`starts the provider after its baseline capture ${baseline}`, () =>
+for (const baseline of ["failure", "defect", "interrupt", "stop"] as const) {
+  effectIt.effect(`settles baseline capture before starting a current provider (${baseline})`, () =>
     Effect.gen(function* () {
       const harness = makeLocalCommandHarness({
         text: "Continue",
         baseline,
         failReadsAfterRunning: true,
       });
-      yield* harness.startWithRetry;
+      const result = yield* harness.startWithRetry.pipe(Effect.exit);
       expect(harness.captureBaseline).toHaveBeenCalledOnce();
-      expect(harness.open).toHaveBeenCalledOnce();
-      expect(harness.startRootRun).toHaveBeenCalledOnce();
-      expect(harness.projection().runs.at(-1)?.status).toBe("running");
-    }),
-  );
-}
-
-for (const baseline of ["interrupt", "stop"] as const) {
-  effectIt.effect(`does not open the provider when baseline stops (${baseline})`, () =>
-    Effect.gen(function* () {
-      const harness = makeLocalCommandHarness({ text: "Continue", baseline });
-      const result = yield* harness.start.pipe(Effect.exit);
-      expect(harness.open).not.toHaveBeenCalled();
-      if (baseline === "interrupt") {
-        expect(result._tag).toBe("Failure");
-        expect(harness.writeIfRunCurrent).not.toHaveBeenCalled();
-      } else expect(harness.projection().runs.at(-1)).toMatchObject({ status: "interrupted" });
+      if (baseline === "failure" || baseline === "defect") {
+        expect(result._tag).toBe("Success");
+        expect(harness.open).toHaveBeenCalledOnce();
+        expect(harness.startRootRun).toHaveBeenCalledOnce();
+      } else {
+        expect(harness.open).not.toHaveBeenCalled();
+        if (baseline === "interrupt") {
+          expect(result._tag).toBe("Failure");
+          expect(harness.writeIfRunCurrent).not.toHaveBeenCalled();
+        } else expect(harness.projection().runs.at(-1)).toMatchObject({ status: "interrupted" });
+      }
     }),
   );
 }

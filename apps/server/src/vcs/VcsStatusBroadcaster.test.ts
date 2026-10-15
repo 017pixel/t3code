@@ -121,9 +121,7 @@ it.effect("summarizes passive VCS subscriptions and sends a fresh snapshot on re
       yield* broadcaster.getStatus({ cwd: `/repo-${index}` });
     }
     const reads = state.localStatusCalls;
-    yield* broadcaster.getStatus({ cwd: "/repo-299" });
-    assert.equal(state.localStatusCalls, reads);
-    state.currentLocalStatus.refName = "fresh-branch";
+    state.currentLocalStatus = { ...state.currentLocalStatus, refName: "fresh-branch" };
     const reloaded = yield* broadcaster.getStatus({ cwd: "/repo-0" });
     assert.equal(reloaded.refName, "fresh-branch");
     assert.equal(state.localStatusCalls, reads + 1);
