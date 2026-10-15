@@ -583,36 +583,8 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
   useEffect(() => {
     if (!element) return;
     const stopObserving = observeResize(element, measure);
-    let frame: number | null = null;
-    const schedule = () => {
-      if (frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        measure();
-      });
-    };
-    // Child labels and hosted controls may resize while the strip itself
-    // stays fixed. Observe those changes instead of measuring every render.
-    // Label text decides whether the strip compacts, so a text change commits
-    // its measurement before the next paint, the way resizes do. Waiting a
-    // frame would paint the new text overflowing or clipped first.
-    const mutations = new MutationObserver((records) => {
-      const labelTextChanged = records.some((record) => {
-        if (record.type === "attributes") return false;
-        const node = record.target;
-        const parent = node instanceof Element ? node : node.parentElement;
-        return parent?.closest(COMPOSER_CONTEXT_LABEL_SELECTOR) != null;
-      });
-      if (labelTextChanged) flushSync(measure);
-      else schedule();
-    });
-    mutations.observe(element, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ["class", "data-composer-label"],
-    });
+    const mutations = new MutationObserver(() => flushSync(measure));
+    mutations.observe(element, { subtree: true, childList: true, characterData: true });
     mutations.observe(element.ownerDocument.documentElement, {
       attributes: true,
       attributeFilter: ["style", "class"],
@@ -621,7 +593,6 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     return () => {
       stopObserving();
       mutations.disconnect();
-      if (frame !== null) cancelAnimationFrame(frame);
       document.fonts.removeEventListener("loadingdone", measure);
     };
   }, [element, measure]);
