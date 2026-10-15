@@ -17,6 +17,7 @@ import {
 import symbolsFontUrl from "./fonts/SymbolsNerdFontMono-Regular.woff2?url";
 import { isMonospaceFamily } from "../../appearanceFonts";
 import { observeResize } from "../../lib/observeResize";
+import { loadGhosttyRuntime } from "./runtime";
 
 export const DEFAULT_TERMINAL_FONT_SIZE = 12;
 const MIN_TERMINAL_FONT_SIZE = 6;
