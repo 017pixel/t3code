@@ -13,6 +13,7 @@ import type {
   OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
 import {
+  isUserFacingRun,
   latestRootProviderFailure,
   latestUnheldRun,
   threadErrorSummary,
@@ -602,6 +603,7 @@ function needsRecovery(
             task.childThreadId === projection.thread.id &&
             projection.runs.some(
               (run) =>
+                isUserFacingRun(run) &&
                 run.delegatedTaskId === task.id &&
                 ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
                   run.status,
@@ -1647,7 +1649,7 @@ function isActivityRunForShell(
 ): run is OrchestrationV2ThreadProjection["runs"][number] & {
   readonly status: ShellActivityRunStatus;
 } {
-  return isInterruptibleRunForShell(run) || run.status === "waiting";
+  return isUserFacingRun(run) && (isInterruptibleRunForShell(run) || run.status === "waiting");
 }
 
 type ShellThreadState = {
@@ -3707,6 +3709,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     JOIN orchestration_v2_projection_subagents AS task
                       ON task.subagent_id = json_extract(requested.payload_json, '$.delegatedTaskId')
                     WHERE requested.thread_id = child.thread_id
+                      AND json_extract(requested.payload_json, '$.idleCompactionOfRunId') IS NULL
                       AND requested.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
                       AND task.child_thread_id = child.thread_id
                       AND json_extract(task.payload_json, '$.origin') = 'app_owned'
@@ -3715,6 +3718,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     -- The original task still waits for the latest unheld work.
                     (SELECT status FROM orchestration_v2_projection_runs
                      WHERE thread_id = child.thread_id
+                       AND json_extract(payload_json, '$.idleCompactionOfRunId') IS NULL
                        AND NOT (status = 'queued' AND json_extract(payload_json, '$.queueHeld') IS 1)
                      ORDER BY ordinal DESC LIMIT 1
                     ) IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
@@ -5738,6 +5742,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs active
                 WHERE active.thread_id = t.thread_id
+                  AND json_extract(active.payload_json, '$.idleCompactionOfRunId') IS NULL
                   AND active.status IN ('preparing', 'starting', 'running', 'waiting')
               )
               AND NOT EXISTS (

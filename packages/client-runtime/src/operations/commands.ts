@@ -29,6 +29,7 @@ import {
 } from "@t3tools/contracts";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { isUserFacingRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -716,6 +717,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
 
   const serverResolvesCommandContext = yield* supportsServerResolvedCommandContext();
   const projection = serverResolvesCommandContext ? null : yield* getProjection(input.threadId);
+  // Physical activity: a message must queue behind a running idle compaction.
   const activeRun = projection?.runs.findLast(
     (run) =>
       run.status === "preparing" ||
@@ -802,13 +804,14 @@ export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThrea
     const projection = yield* getProjection(input.threadId);
     runId = projection.runs.findLast(
       (run) =>
-        run.status === "preparing" ||
-        run.status === "starting" ||
-        run.status === "running" ||
-        run.status === "waiting",
+        isUserFacingRun(run) &&
+        (run.status === "preparing" ||
+          run.status === "starting" ||
+          run.status === "running" ||
+          run.status === "waiting"),
     )?.id;
     if (runId === undefined) {
-      const latestRun = projection.runs.at(-1);
+      const latestRun = projection.runs.findLast(isUserFacingRun);
       if (
         derivePendingBackgroundWork({
           latestRun,

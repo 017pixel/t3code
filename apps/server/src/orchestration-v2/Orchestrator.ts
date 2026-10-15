@@ -4,6 +4,7 @@ import type {
   OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
 import {
+  isUserFacingRun,
   latestExecutedRun,
   latestRootProviderFailure,
   runRanAfter,
@@ -552,7 +553,9 @@ function isBlockingRun(run: OrchestrationV2Run): boolean {
  */
 function hasLiveRun(projection: Pick<OrchestrationV2ThreadProjection, "runs">): boolean {
   return projection.runs.some(
-    (run) => run.status === "preparing" || run.status === "starting" || run.status === "running",
+    (run) =>
+      isUserFacingRun(run) &&
+      (run.status === "preparing" || run.status === "starting" || run.status === "running"),
   );
 }
 
@@ -632,7 +635,9 @@ function latestStableRun(
 ): OrchestrationV2Run | null {
   return (
     projection.runs
-      .filter((run) => run.status === "completed" && run.checkpointId !== null)
+      .filter(
+        (run) => isUserFacingRun(run) && run.status === "completed" && run.checkpointId !== null,
+      )
       .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null
   );
 }
@@ -801,7 +806,10 @@ function rootProviderThreadsForProvider(
 // Failed and interrupted turns still contain conversation the next provider needs.
 // Queued, cancelled, and rolled-back runs must not be replayed as conversation.
 function isHandoffSourceRun(run: OrchestrationV2Run): boolean {
-  return run.status === "completed" || run.status === "failed" || run.status === "interrupted";
+  return (
+    isUserFacingRun(run) &&
+    (run.status === "completed" || run.status === "failed" || run.status === "interrupted")
+  );
 }
 
 function lastDeliveredRunForProviderThread(
@@ -1479,7 +1487,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
-      const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
+      const latestCompletedRun = projection.runs.findLast(
+        (run) => isUserFacingRun(run) && run.status === "completed",
+      );
       const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
       const targetLastCompletedRun = lastDeliveredRunForProviderThread(
         projection,
@@ -2665,7 +2675,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       // Includes a queue held after a Stop, which otherwise shows no activity.
       const queuedMessageExists = projection.runs.some(
-        (run) => run.status === "queued" && !automaticQueuedRuns.includes(run),
+        (run) =>
+          isUserFacingRun(run) && run.status === "queued" && !automaticQueuedRuns.includes(run),
       );
       const pendingRequests = projection.runtimeRequests.filter(
         (request) => request.status === "pending",
@@ -2816,7 +2827,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Thread ${command.threadId} has a pending approval or user-input request and cannot be snoozed.`,
         });
       }
-      const queuedRuns = projection.runs.filter((run) => run.status === "queued");
+      const queuedRuns = projection.runs.filter(
+        (run) => isUserFacingRun(run) && run.status === "queued",
+      );
       const queuedMessages =
         queuedRuns.length === 0
           ? []
@@ -2846,9 +2859,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (command.type === "thread.mark-unread") {
       const projection = yield* loadProjectionForCommand(command, ["runs"]);
       // Clients compare against the presented run, which never is idle maintenance.
-      const latestRunCompletedAt =
-        projection.runs.findLast((run) => run.idleCompactionOfRunId === undefined)?.completedAt ??
-        null;
+      const latestRunCompletedAt = projection.runs.findLast(isUserFacingRun)?.completedAt ?? null;
       if (latestRunCompletedAt === null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -4683,7 +4694,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           projection.thread.providerInstanceId !== source.providerInstanceId ||
           // Held queued runs never started; they wait behind the continuation.
           projection.runs.some(
-            (run) => run.id !== source.id && run.status !== "queued" && runRanAfter(run, source),
+            (run) =>
+              isUserFacingRun(run) &&
+              run.id !== source.id &&
+              run.status !== "queued" &&
+              runRanAfter(run, source),
           ) ||
           (yield* stopReachedRun(command, command.threadId, source.id))
         ) {
@@ -4882,7 +4897,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (id) => projection.subagents.find((task) => task.id === id)?.completionWake === "always",
         )
       ) {
-        const active = projection.runs.find((run) => run.status === "running");
+        const active = projection.runs.find(
+          (run) => isUserFacingRun(run) && run.status === "running",
+        );
         const providerThread = projection.providerThreads.find(
           (row) => row.id === active?.providerThreadId,
         );
@@ -5335,7 +5352,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       const ordinal = nextRunOrdinal(projection);
       const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
-      const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
+      const latestCompletedRun = projection.runs.findLast(
+        (run) => isUserFacingRun(run) && run.status === "completed",
+      );
       const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
       const legacyImportItems =
         projection.thread.historyOrigin === "v1_import"
@@ -6975,8 +6994,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // Before first publication, follow-ups remain part of the original task.
     if (original === undefined || original.result === null) return;
     const owner =
-      parent.runs.filter(isBlockingRun).toSorted((a, b) => b.ordinal - a.ordinal)[0] ??
-      latestExecutedRun(parent.runs);
+      parent.runs
+        .filter((run) => isUserFacingRun(run) && isBlockingRun(run))
+        .toSorted((a, b) => b.ordinal - a.ordinal)[0] ?? latestExecutedRun(parent.runs);
     if (owner === null || owner.rootNodeId === null) return;
     const now = message.createdAt;
     const adapter = yield* providerAdapters.get(run.providerInstanceId);
@@ -7574,7 +7594,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         } = yield* projectionStore
           .getRunningTurnContext(command.threadId)
           .pipe(mapDispatchError(command));
-        if (activeRun && activeProviderTurn && activeProviderThread?.providerSessionId) {
+        if (
+          activeRun &&
+          isUserFacingRun(activeRun) &&
+          activeProviderTurn &&
+          activeProviderThread?.providerSessionId
+        ) {
           const activeSession = yield* providerSessions
             .get(activeProviderThread.providerSessionId)
             .pipe(
@@ -9277,7 +9302,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? undefined
           : projection.providerThreads.find((candidate) => candidate.id === run?.providerThreadId);
       const hasBackgroundWork =
-        run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id &&
+        run?.id ===
+          projection.runs.findLast(
+            (candidate) => isUserFacingRun(candidate) && candidate.status !== "queued",
+          )?.id &&
         derivePendingBackgroundWork({
           latestRun: run,
           providerThreads: projection.providerThreads,
@@ -9649,11 +9677,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
       if (projection.thread.deletedAt !== null) return undefined;
       // Queued messages never started and cannot own background work.
-      const latestRun = projection.runs.findLast((run) => run.status !== "queued");
+      const latestRun = projection.runs.findLast(
+        (run) => isUserFacingRun(run) && run.status !== "queued",
+      );
       const target =
         projection.runs.findLast(
           (run) =>
-            run.status === "preparing" || run.status === "starting" || run.status === "running",
+            isUserFacingRun(run) &&
+            (run.status === "preparing" || run.status === "starting" || run.status === "running"),
         ) ??
         (derivePendingBackgroundWork({
           latestRun,

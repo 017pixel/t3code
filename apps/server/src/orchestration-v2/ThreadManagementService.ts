@@ -2,6 +2,7 @@ import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
 } from "@t3tools/contracts";
+import { isUserFacingRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import type {
   ProjectionRecordField,
   ProjectionRecordFilter,
@@ -480,9 +481,6 @@ export function isTerminalRunStatus(
   );
 }
 
-// Idle compaction is server maintenance, never a thread outcome agents read or wait on.
-const isUserFacingRun = (run: OrchestrationV2Run) => run.idleCompactionOfRunId === undefined;
-
 export function latestRun(
   projection: Pick<OrchestrationV2ThreadProjection, "runs">,
 ): OrchestrationV2Run | undefined {
@@ -519,6 +517,7 @@ function latestSteerableRun(
   return projection.runs
     .filter(
       (run) =>
+        isUserFacingRun(run) &&
         run.status === "running" &&
         run.activeAttemptId !== null &&
         projection.providerTurns.some(
@@ -853,7 +852,9 @@ const make = Effect.gen(function* () {
       const selectedRun =
         input.runId === undefined
           ? latestRun(target)
-          : target.runs.find((candidate) => candidate.id === input.runId);
+          : target.runs.find(
+              (candidate) => candidate.id === input.runId && isUserFacingRun(candidate),
+            );
       if (input.runId !== undefined && selectedRun === undefined) {
         return yield* new ThreadManagementRunNotFoundError({
           threadId: input.threadId,
@@ -974,7 +975,9 @@ const make = Effect.gen(function* () {
       const explicitRun =
         input.runId === undefined
           ? undefined
-          : target.runs.find((candidate) => candidate.id === input.runId);
+          : target.runs.find(
+              (candidate) => candidate.id === input.runId && isUserFacingRun(candidate),
+            );
       if (input.runId !== undefined && explicitRun === undefined) {
         return yield* new ThreadManagementRunNotFoundError({
           threadId: input.threadId,

@@ -503,7 +503,7 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
-  it.effect("Stop resolves a running idle compaction from the full projection", () =>
+  it.effect("only an explicit Stop targets idle compaction from the open chat", () =>
     Effect.gen(function* () {
       const runId = RunId.make("idle-compaction");
       const projection: OrchestrationV2ThreadProjection = {
@@ -532,6 +532,10 @@ describe("V2 environment commands", () => {
       const commands: OrchestrationV2Command[] = [];
       const supervisor = yield* makeSupervisor({ commands, projects: [], projection });
       yield* interruptThreadTurn({ threadId: v2ThreadId }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+      expect(commands).toEqual([]);
+      yield* interruptThreadTurn({ threadId: v2ThreadId, runId }).pipe(
         Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
       );
       expect(commands).toEqual([

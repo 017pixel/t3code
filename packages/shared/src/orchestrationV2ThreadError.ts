@@ -5,6 +5,11 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
+/** Idle compaction is maintenance, not a user-facing thread run. */
+export function isUserFacingRun(run: Pick<OrchestrationV2Run, "idleCompactionOfRunId">): boolean {
+  return run.idleCompactionOfRunId === undefined;
+}
+
 /** Only a failed root turn of the current run owns the thread's failure state. */
 export function latestRootProviderFailure(
   run: OrchestrationV2Run | null,
@@ -56,7 +61,7 @@ export function latestExecutedRun(
     // A failed idle compaction is invisible maintenance: it neither presents as
     // the outcome nor holds the queue. A queued message that then meets the same
     // usage limit fails as an ordinary run with the normal recovery controls.
-    if (run.idleCompactionOfRunId !== undefined) continue;
+    if (!isUserFacingRun(run)) continue;
     if (run.status === "queued") continue;
     if (run.status === "cancelled" && run.startedAt === null) continue;
     if (latest === null || runRanAfter(run, latest)) latest = run;
@@ -124,7 +129,7 @@ export function latestUnheldRun(
     if (run.status === "queued" && run.queueHeld === true) continue;
     // Idle maintenance remains in history, but its outcome cannot produce an
     // unread/completion alert or wake a snooze. SQL shell reads mirror this.
-    if (run.idleCompactionOfRunId !== undefined) continue;
+    if (!isUserFacingRun(run)) continue;
     if (latest === null || run.ordinal > latest.ordinal) latest = run;
   }
   return latest;
