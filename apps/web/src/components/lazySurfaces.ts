@@ -30,26 +30,19 @@ function loadableComponent<Props extends object>(
   const resolve = () => load().then((module) => (loaded = module.default));
 
   function Loadable(props: Props) {
-    const [component, setComponent] = useState(() => loaded);
-    const [failure, setFailure] = useState<{ error: unknown } | null>(null);
+    const [result, setResult] = useState<{ component: ComponentType<Props> } | { error: unknown } | null>(
+      () => loaded === null ? null : { component: loaded },
+    );
     useEffect(() => {
-      if (component !== null) return;
-      let active = true;
-      // A real use imports again, so a failed speculative load cannot claim it.
+      if (result !== null) return;
+      // Real use retries failed speculative imports.
       void resolve().then(
-        (value) => {
-          if (active) setComponent(() => value);
-        },
-        (error: unknown) => {
-          if (active) setFailure({ error });
-        },
+        (component) => setResult({ component }),
+        (error: unknown) => setResult({ error }),
       );
-      return () => {
-        active = false;
-      };
-    }, [component]);
-    if (failure !== null) throw failure.error;
-    return component === null ? null : createElement(component, props);
+    }, [result]);
+    if (result !== null && "error" in result) throw result.error;
+    return result === null ? null : createElement(result.component, props);
   }
 
   return { Component: Loadable, preload: () => preloadSpeculatively(resolve) };
