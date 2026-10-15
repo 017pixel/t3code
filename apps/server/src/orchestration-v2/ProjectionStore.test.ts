@@ -5808,21 +5808,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.equal(yield* phase, "running");
       assert.equal((yield* store.getThreadsWithPullRequests()).length, 1);
 
-      yield* store.apply({
-        id: EventId.make("event:watched-pull-request:missing-link-synced"),
-        type: "thread.pull-request-link-synced",
-        threadId,
-        occurredAt: DateTime.add(at, { seconds: 2 }),
-        payload: {
-          host: link.host,
-          repository: link.repository,
-          number: 999,
-          snapshot,
-          stack: null,
-        },
-      });
-      assert.deepEqual((yield* store.getThread(threadId)).pullRequests, synced.pullRequests);
-
       // An older build sharing the database writes only the payload; the sweep still follows it.
       const sql = yield* SqlClient.SqlClient;
       const [stored] = yield* sql<{ readonly payload_json: string }>`

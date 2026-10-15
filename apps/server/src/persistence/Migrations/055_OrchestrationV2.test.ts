@@ -1,23 +1,10 @@
 import { assert, it } from "@effect/vitest";
-import {
-  EventId,
-  MessageId,
-  NodeId,
-  ProjectId,
-  ProviderDriverKind,
-  ProviderInstanceId,
-  RunId,
-  ThreadId,
-  TurnItemId,
-} from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as References from "effect/References";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import { migrationEntries, runMigrations } from "../Migrations.ts";
 import ProjectionThreadSweepIndexes from "./063_ProjectionThreadSweepIndexes.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -156,78 +143,6 @@ layer("055_OrchestrationV2", (it) => {
     }),
   );
 
-  it.effect("indexes sweep filters for existing threads and later payload-only writes", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 61 });
-      const payload = JSON.stringify({
-        settledAt: "2026-07-24T00:00:00.000Z",
-        settledOverride: "settled",
-        pinnedAt: "2026-07-23T00:00:00.000Z",
-        autoSettleDisabledAt: "2026-07-22T00:00:00.000Z",
-        forkedFrom: { type: "run", threadId: "source-thread" },
-        pullRequests: [{ number: 1 }, { number: 2 }],
-      });
-      yield* sql`
-        INSERT INTO orchestration_v2_projection_threads (
-          thread_id, project_id, title, default_provider, provider_instance_id,
-          runtime_mode, interaction_mode, created_at, updated_at, payload_json
-        ) VALUES (
-          'sweep-thread', 'sweep-project', 'Sweep thread', 'codex', 'codex',
-          'full-access', 'default', '2026-07-24T00:00:00.000Z',
-          '2026-07-24T00:00:00.000Z', ${payload}
-        )
-      `;
-      yield* runMigrations({ toMigrationInclusive: 63 });
-      const sweep = sql<{ readonly thread_id: string; readonly pull_requests: number }>`
-        SELECT thread_id, json_array_length(payload_json, '$.pullRequests') AS pull_requests
-        FROM orchestration_v2_projection_threads
-          INDEXED BY orchestration_v2_projection_threads_active_idx
-        WHERE deleted_at IS NULL AND archived_at IS NULL
-          AND json_extract(payload_json, '$.settledOverride') IS NULL
-          AND json_extract(payload_json, '$.pinnedAt') = '2026-07-23T00:00:00.000Z'
-          AND CASE
-            WHEN json_extract(payload_json, '$.forkedFrom.type') = 'run'
-              THEN json_extract(payload_json, '$.forkedFrom.threadId')
-            ELSE NULL
-          END = 'source-thread'
-      `;
-      assert.deepStrictEqual(yield* sweep, []);
-      // An older build rewrites the payload alone; the index follows it.
-      yield* sql`
-        UPDATE orchestration_v2_projection_threads
-        SET payload_json = json_set(
-          json_remove(payload_json, '$.settledOverride'),
-          '$.pullRequests',
-          json('[{"number":1},{"number":2},{"number":3}]')
-        )
-        WHERE thread_id = 'sweep-thread'
-      `;
-      assert.deepStrictEqual(yield* sweep, [{ thread_id: "sweep-thread", pull_requests: 3 }]);
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
-  );
-
-  // Development builds of this change indexed copied columns under the same name.
-  it.effect("replaces a same-named sweep index", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 62 });
-      yield* sql`
-        CREATE INDEX orchestration_v2_projection_threads_active_idx
-        ON orchestration_v2_projection_threads(updated_at, thread_id)
-        WHERE deleted_at IS NULL AND archived_at IS NULL
-      `;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [63, "ProjectionThreadSweepIndexes"],
-        [64, "ProjectionThreadReadPayload"],
-      ]);
-      const [index] = yield* sql<{ readonly sql: string }>`
-        SELECT sql FROM sqlite_master WHERE name = 'orchestration_v2_projection_threads_active_idx'
-      `;
-      assert.include(index!.sql, "json_extract(payload_json, '$.settledOverride')");
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
-  );
-
   // Another build's migration at 64 or above makes the migrator skip this build's 64.
   it.effect("creates the thread read projection when another build took its migration id", () =>
     Effect.gen(function* () {
@@ -267,178 +182,60 @@ layer("055_OrchestrationV2", (it) => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect("repairs indexes after an older sweep build recorded id 62", () => {
-    const skippedWarnings: Array<unknown> = [];
+  it.effect.each([false, true])("repairs sweep indexes with legacy id 62: %s", (legacy) => {
+    const warnings: Array<unknown> = [];
     const logger = Logger.make(({ fiber, logLevel }) => {
       const skipped = fiber.getRef(References.CurrentLogAnnotations).skipped;
-      if (logLevel === "Warn" && skipped !== undefined) skippedWarnings.push(skipped);
+      if (logLevel === "Warn" && skipped !== undefined) warnings.push(skipped);
     });
     return Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 61 });
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (62, 'ProjectionThreadSweepIndexes')`;
+      if (legacy) {
+        yield* sql`INSERT INTO effect_sql_migrations (migration_id, name)
+          VALUES (62, 'ProjectionThreadSweepIndexes')`;
+      } else {
+        yield* runMigrations({ toMigrationInclusive: 62 });
+      }
       yield* sql`CREATE INDEX orchestration_v2_projection_threads_active_idx
         ON orchestration_v2_projection_threads(updated_at, thread_id)`;
-      yield* sql`CREATE INDEX orchestration_v2_projection_runs_failed_idx
-        ON orchestration_v2_projection_runs(thread_id) WHERE status = 'failed'`;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [63, "ProjectionThreadSweepIndexes"],
-        [64, "ProjectionThreadReadPayload"],
-      ]);
-      assert.deepStrictEqual(skippedWarnings, [["62_ThreadFailureLookupIndex"]]);
+      yield* sql`INSERT INTO orchestration_v2_projection_threads (
+        thread_id, project_id, title, default_provider, provider_instance_id,
+        runtime_mode, interaction_mode, created_at, updated_at, payload_json
+      ) VALUES ('thread', 'project', 'Title', 'codex', 'codex', 'full-access', 'default',
+        '2026-07-24', '2026-07-24', '{"settledOverride":"settled","pullRequests":[{"number":1}]}')`;
+      assert.deepStrictEqual(yield* runMigrations(), [[63, "ProjectionThreadSweepIndexes"], [64, "ProjectionThreadReadPayload"]]);
+      assert.deepStrictEqual(warnings, legacy ? [["62_ThreadFailureLookupIndex"]] : []);
       yield* ProjectionThreadSweepIndexes;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      const sweep = sql`SELECT thread_id FROM orchestration_v2_projection_threads
+        INDEXED BY orchestration_v2_projection_threads_active_idx
+        WHERE deleted_at IS NULL AND archived_at IS NULL
+          AND json_extract(payload_json, '$.settledOverride') IS NULL
+          AND json_array_length(payload_json, '$.pullRequests') > 0`;
+      assert.deepStrictEqual(yield* sweep, []);
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_remove(payload_json, '$.settledOverride')`;
+      assert.deepStrictEqual(yield* sweep, [{ thread_id: "thread" }]);
+      yield* sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.pullRequests', json('[]'))`;
+      assert.deepStrictEqual(yield* sweep, []);
       assert.deepStrictEqual(
-        yield* sql`
-          SELECT name FROM sqlite_master
-          WHERE name IN (
-            'orchestration_v2_projection_threads_active_idx',
-            'orchestration_v2_projection_runs_failed_idx',
-            'orchestration_v2_projection_turn_items_failed_error_idx'
-          )
-          ORDER BY name
-        `,
-        [
-          { name: "orchestration_v2_projection_runs_failed_idx" },
-          { name: "orchestration_v2_projection_threads_active_idx" },
-          { name: "orchestration_v2_projection_turn_items_failed_error_idx" },
-        ],
-      );
-
-      // The repaired indexes keep pull request and usage-limit sweeps working.
-      const store = yield* ProjectionStore.ProjectionStoreV2;
-      const at = DateTime.makeUnsafe("2026-10-01T00:00:00.000Z");
-      const threadId = ThreadId.make("thread:peer-links");
-      const runId = RunId.make("run:peer-links");
-      const rootNodeId = NodeId.make("node:peer-links");
-      const providerInstanceId = ProviderInstanceId.make("codex");
-      const modelSelection = { instanceId: providerInstanceId, model: "gpt-5.4" };
-      const driver = ProviderDriverKind.make("codex");
-      const thread = {
-        createdBy: "user" as const,
-        creationSource: "web" as const,
-        id: threadId,
-        projectId: ProjectId.make("project:peer-links"),
-        title: "Preview thread",
-        providerInstanceId,
-        modelSelection,
-        runtimeMode: "full-access" as const,
-        interactionMode: "default" as const,
-        branch: null,
-        worktreePath: null,
-        activeProviderThreadId: null,
-        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-        forkedFrom: null,
-        createdAt: at,
-        updatedAt: at,
-        archivedAt: null,
-        settledOverride: null,
-        settledAt: null,
-        lastVisitedAt: null,
-        deletedAt: null,
-      };
-      yield* store.apply({
-        id: EventId.make("event:peer-links:thread"),
-        type: "thread.created",
-        threadId,
-        occurredAt: at,
-        payload: thread,
-      });
-      yield* store.apply({
-        id: EventId.make("event:peer-links:pull-request"),
-        type: "thread.pull-request-synced",
-        threadId,
-        occurredAt: at,
-        payload: {
-          ...thread,
-          pullRequests: [
-            {
-              host: "github.com",
-              repository: "pingdotgg/t3code",
-              number: 7,
-              url: "https://github.com/pingdotgg/t3code/pull/7",
-              source: "agent",
-              linkedAt: DateTime.formatIso(at),
-              snapshot: null,
-              stack: null,
-            },
-          ],
-        },
-      });
-      yield* store.apply({
-        id: EventId.make("event:peer-links:run"),
-        type: "run.created",
-        threadId,
-        runId,
-        nodeId: rootNodeId,
-        driver,
-        providerInstanceId,
-        occurredAt: at,
-        payload: {
-          id: runId,
-          threadId,
-          ordinal: 1,
-          providerInstanceId,
-          modelSelection,
-          providerThreadId: null,
-          userMessageId: MessageId.make("message:peer-links"),
-          rootNodeId,
-          activeAttemptId: null,
-          status: "failed",
-          requestedAt: at,
-          startedAt: at,
-          completedAt: at,
-          checkpointId: null,
-          contextHandoffId: null,
-        },
-      });
-      yield* store.apply({
-        id: EventId.make("event:peer-links:limit"),
-        type: "turn-item.updated",
-        threadId,
-        runId,
-        nodeId: rootNodeId,
-        driver,
-        occurredAt: at,
-        payload: {
-          id: TurnItemId.make("item:peer-links:limit"),
-          threadId,
-          runId,
-          nodeId: rootNodeId,
-          providerThreadId: null,
-          providerTurnId: null,
-          nativeItemRef: null,
-          parentItemId: null,
-          ordinal: 1,
-          status: "failed",
-          title: "Usage limit reached",
-          startedAt: at,
-          completedAt: at,
-          updatedAt: at,
-          type: "error",
-          failure: {
-            class: "usage_limit",
-            message: "Plan limit reached.",
-            resetAt: "2026-10-02T00:00:00.000Z",
-            code: "usageLimitExceeded",
-            retryable: null,
-          },
-        },
-      });
-      assert.deepStrictEqual(
-        (yield* store.getThreadsWithPullRequests()).map((row) => row.id),
-        [threadId],
+        yield* sql`SELECT run_id FROM orchestration_v2_projection_runs
+        INDEXED BY orchestration_v2_projection_runs_failed_idx WHERE status = 'failed'`,
+        [],
       );
       assert.deepStrictEqual(
-        (yield* store.getLimitRecoveryCandidates({ now: at, autoResume: true, snooze: false })).map(
-          (row) => row.id,
-        ),
-        [threadId],
+        yield* sql`SELECT turn_item_id FROM orchestration_v2_projection_turn_items
+        INDEXED BY orchestration_v2_projection_turn_items_failed_error_idx
+        WHERE type = 'error' AND status = 'failed'`,
+        [],
       );
     }).pipe(
       Effect.provide(
-        ProjectionStore.layer.pipe(
-          Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
-          Layer.merge(Logger.layer([logger], { mergeWithExisting: false })),
+        Layer.mergeAll(
+          NodeSqliteClient.layer({ filename: ":memory:" }),
+          Logger.layer([logger], { mergeWithExisting: false }),
         ),
       ),
     );

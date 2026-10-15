@@ -1722,24 +1722,17 @@ export const OrchestrationV2RawProviderEvent = Schema.Struct({
 });
 export type OrchestrationV2RawProviderEvent = typeof OrchestrationV2RawProviderEvent.Type;
 
-/**
- * One linked pull request's fresh host snapshot. Every thread linked to a pull request takes
- * one of these when the host reports a change, so it names the link instead of carrying the
- * thread: a full-thread event repeated the thread's every other link per change.
- */
-export const OrchestrationV2ThreadPullRequestLinkSynced = Schema.Struct({
+/** A host refresh carries one link snapshot. */
+const OrchestrationV2ThreadPullRequestLinkSynced = Schema.Struct({
   ...ThreadPullRequestKey.fields,
   snapshot: ThreadPullRequestSnapshot,
   stack: Schema.NullOr(ThreadPullRequestStack),
 });
-export type OrchestrationV2ThreadPullRequestLinkSynced =
-  typeof OrchestrationV2ThreadPullRequestLinkSynced.Type;
 
 /** The thread's read watermark after a visit, the only field a visit changes. */
-export const OrchestrationV2ThreadVisitRecorded = Schema.Struct({
+const OrchestrationV2ThreadVisitRecorded = Schema.Struct({
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
-export type OrchestrationV2ThreadVisitRecorded = typeof OrchestrationV2ThreadVisitRecorded.Type;
 
 const OrchestrationV2EventBase = Schema.Struct({
   id: EventId,
@@ -3430,11 +3423,6 @@ export const OrchestrationV2SubscribeThreadInput = Schema.Struct({
    * that repeat local visible rows. See `turnItemsOmitLocalVisible`.
    */
   acceptCompactTurnItems: Schema.optionalKey(Schema.Boolean),
-  /**
-   * Allows bounded snapshot fallbacks to send checkpoint turn items without the
-   * file list their checkpoint already carries. See `checkpointFilesOmittedItemIds`.
-   */
-  acceptCompactCheckpointItems: Schema.optionalKey(Schema.Boolean),
   /** Accepts compact read-watermark and pull-request-link events. */
   acceptThreadFieldEvents: Schema.optionalKey(Schema.Boolean),
 });
@@ -3482,13 +3470,6 @@ export const OrchestrationV2ThreadBoundedSnapshot = Schema.Struct({
    * with `boundedSnapshotProjection` before using the projection.
    */
   turnItemsOmitLocalVisible: Schema.optionalKey(Schema.Literal(true)),
-  /**
-   * Set only for clients that opted in: these checkpoint turn items are sent
-   * with empty `files`, which equal their checkpoint's `files` in
-   * `projection.checkpoints`. Clients must restore them with
-   * `boundedSnapshotProjection` before using the projection.
-   */
-  checkpointFilesOmittedItemIds: Schema.optionalKey(Schema.Array(TurnItemId)),
 });
 export type OrchestrationV2ThreadBoundedSnapshot = typeof OrchestrationV2ThreadBoundedSnapshot.Type;
 
@@ -3576,8 +3557,6 @@ export const OrchestrationV2ThreadStreamItem = Schema.Union([
     payloadBudgetExceeded: Schema.optionalKey(Schema.Boolean),
     /** Same meaning as on `OrchestrationV2ThreadBoundedSnapshot`. */
     turnItemsOmitLocalVisible: Schema.optionalKey(Schema.Literal(true)),
-    /** Same meaning as on `OrchestrationV2ThreadBoundedSnapshot`. */
-    checkpointFilesOmittedItemIds: Schema.optionalKey(Schema.Array(TurnItemId)),
   }),
   Schema.Struct({
     kind: Schema.Literal("event"),

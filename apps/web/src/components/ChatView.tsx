@@ -472,8 +472,7 @@ import {
   RightPanelMaximizeControl,
 } from "./chat/PanelLayoutControls";
 import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
-import type { ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
-import { ThreadDetailsCard } from "./chat/ThreadDetailsCard";
+import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import {
   type EnvironmentOption,
@@ -759,27 +758,6 @@ const ThreadPreviewMiniPlayer = lazy(() =>
     default: module.ThreadPreviewMiniPlayer,
   })),
 );
-const ThreadDetailsPanelContent = lazy(() =>
-  import("./chat/ThreadDetailsPanel").then((module) => ({
-    default: module.ThreadDetailsPanelContent,
-  })),
-);
-function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
-  return (
-    <ThreadDetailsCard
-      threadRef={{ environmentId: props.environmentId, threadId: props.threadId }}
-      anchor={props.anchor}
-      handle={props.handle}
-      onPresentationChange={props.onPresentationChange}
-    >
-      {(density) => (
-        <Suspense fallback={null}>
-          <ThreadDetailsPanelContent {...props} density={density} />
-        </Suspense>
-      )}
-    </ThreadDetailsCard>
-  );
-}
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",

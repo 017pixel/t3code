@@ -239,9 +239,9 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
     }
   });
 
-  // peek, request and getAvailable are cache reads called per project and per
-  // thread on every sweep. Spans live on the lanes that do the actual work.
-  const peek = Effect.fnUntraced(function* (workspaceRoot: string) {
+  const peek: ProjectEnrichmentService["Service"]["peek"] = Effect.fn(
+    "ProjectEnrichmentService.peek",
+  )(function* (workspaceRoot) {
     const [repositoryIdentity, faviconPath] = yield* Effect.all(
       [
         Cache.getSuccess(repositoryIdentityCache, workspaceRoot),
@@ -256,7 +256,9 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
     };
   });
 
-  const request = Effect.fnUntraced(function* (workspaceRoot: string) {
+  const request: ProjectEnrichmentService["Service"]["request"] = Effect.fn(
+    "ProjectEnrichmentService.request",
+  )(function* (workspaceRoot) {
     const [hasRepositoryIdentity, hasFaviconPath] = yield* Effect.all(
       [Cache.has(repositoryIdentityCache, workspaceRoot), Cache.has(faviconCache, workspaceRoot)],
       { concurrency: "unbounded" },
@@ -272,7 +274,9 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
     );
   });
 
-  const getAvailable = Effect.fnUntraced(function* (workspaceRoot: string) {
+  const getAvailable: ProjectEnrichmentService["Service"]["getAvailable"] = Effect.fn(
+    "ProjectEnrichmentService.getAvailable",
+  )(function* (workspaceRoot) {
     const available = yield* peek(workspaceRoot);
     yield* request(workspaceRoot);
     return available;

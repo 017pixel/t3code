@@ -27,7 +27,12 @@ vi.mock("./ThreadAutomationsPanel", () => ({
 vi.mock("./ThreadRelationshipsControl", () => ({
   ThreadRelationshipsPanel: () => null,
 }));
-import { ThreadDetailsPanelContent, type ThreadDetailsPanelProps } from "./ThreadDetailsPanel";
+vi.mock("./ThreadDetailsCard", () => ({
+  ThreadDetailsCard: ({ children }: { children: (density: "full") => React.ReactNode }) =>
+    children("full"),
+}));
+
+import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./ThreadDetailsPanel";
 
 describe("ThreadDetailsPanel", () => {
   beforeEach(() => {
@@ -75,7 +80,7 @@ describe("ThreadDetailsPanel", () => {
       onDeleteProjectScript: vi.fn() as ThreadDetailsPanelProps["onDeleteProjectScript"],
     };
 
-    renderToStaticMarkup(<ThreadDetailsPanelContent {...props} density="full" />);
+    renderToStaticMarkup(<ThreadDetailsPanel {...props} />);
 
     expect(testState.useT3ProjectFileScripts).toHaveBeenCalledWith(environmentId, gitCwd);
     expect(testState.projectScriptsControl).toHaveBeenCalledWith(
