@@ -7,9 +7,8 @@ import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  defaultWorkflowPhaseIndex,
-  UNPHASED_WORKFLOW_PHASE_INDEX,
-  workflowPhaseStatus,
+  workflowAnswerPreview,
+  workflowPhaseSummary,
   workflowRunCounts,
   workflowRunPhases,
 } from "./WorkflowRunView.logic";
@@ -42,32 +41,39 @@ function phasesOf(
 const PLAN = [
   { index: 0, title: "Plan" },
   { index: 1, title: "Build" },
-  { index: 2, title: "Verify" },
 ];
 
-describe("workflow run view phases", () => {
-  it("opens on the running phase and counts settled and failed agents", () => {
+describe("workflow run view", () => {
+  it("summarizes a live phase and counts settled agents", () => {
     const phases = phasesOf({
       phases: PLAN,
       agents: [
         { index: 0, label: "plan", state: "completed", phaseIndex: 0 },
         { index: 1, label: "build:a", state: "failed", phaseIndex: 1 },
         { index: 2, label: "build:b", state: "running", phaseIndex: 1 },
+        { index: 3, label: "build:c", state: "completed", phaseIndex: 1 },
       ],
     });
-    expect(defaultWorkflowPhaseIndex(phases)).toBe(1);
-    expect(workflowRunCounts(phases)).toEqual({ total: 3, settled: 2, failed: 1 });
+    expect(workflowPhaseSummary(phases[1]!.members)).toEqual({
+      text: "1 running · 1 done · 1 failed",
+      active: true,
+      failed: true,
+    });
+    expect(workflowRunCounts(phases)).toEqual({ total: 4, settled: 3 });
   });
 
-  it("opens on the latest started phase once nothing runs", () => {
-    const phases = phasesOf({
-      phases: PLAN,
-      agents: [
-        { index: 0, label: "plan", state: "completed", phaseIndex: 0 },
-        { index: 1, label: "build:a", state: "completed", phaseIndex: 1 },
-      ],
-    });
-    expect(defaultWorkflowPhaseIndex(phases)).toBe(1);
+  it("names stopped agents when the workflow was stopped", () => {
+    const phases = phasesOf(
+      {
+        phases: PLAN,
+        agents: [
+          { index: 0, label: "build:a", state: "completed", phaseIndex: 1 },
+          { index: 1, label: "build:b", state: "running", phaseIndex: 1 },
+        ],
+      },
+      "cancelled",
+    );
+    expect(workflowPhaseSummary(phases[1]!.members).text).toBe("1 done · 1 stopped");
   });
 
   it("lists agents without a phase under Other", () => {
@@ -75,22 +81,16 @@ describe("workflow run view phases", () => {
       phases: [],
       agents: [{ index: 0, label: "loose", state: "running" }],
     });
-    expect(phases.map((phase) => phase.title)).toEqual(["Other"]);
-    expect(defaultWorkflowPhaseIndex(phases)).toBe(UNPHASED_WORKFLOW_PHASE_INDEX);
+    expect(phases.map((phase) => [phase.title, phase.state])).toEqual([["Other", "running"]]);
   });
 
-  it("marks a phase stopped, not done, when the workflow was stopped", () => {
-    const phases = phasesOf(
-      {
-        phases: PLAN,
-        agents: [
-          { index: 0, label: "plan", state: "completed", phaseIndex: 0 },
-          { index: 1, label: "build:a", state: "completed", phaseIndex: 1 },
-          { index: 2, label: "build:b", state: "running", phaseIndex: 1 },
-        ],
-      },
-      "cancelled",
+  it("previews a structured answer by its first field", () => {
+    expect(workflowAnswerPreview('{"summary":"Built the physics stream","files":[')).toBe(
+      "Built the physics stream",
     );
-    expect(phases.map(workflowPhaseStatus)).toEqual(["completed", "cancelled", "pending"]);
+    expect(workflowAnswerPreview("\nAll tests pass.\nDetails follow")).toBe("All tests pass.");
+    expect(workflowAnswerPreview('{"summary":"Added \\"trucks\\"\\nThen tests')).toBe(
+      'Added "trucks"',
+    );
   });
 });

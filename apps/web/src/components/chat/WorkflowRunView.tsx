@@ -5,184 +5,213 @@ import {
   isActiveSubagentStatus,
   projectedSubagentsToRuntime,
   type RuntimeSubagent,
-  type RuntimeSubagentStatus,
   type SubagentWorkflowGroup,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { resolveSubagentMetadata } from "@t3tools/client-runtime/state/subagent-display";
-import { NodeId, ThreadId, type EnvironmentId, type ServerProvider } from "@t3tools/contracts";
+import {
+  NodeId,
+  ThreadId,
+  type EnvironmentId,
+  type ScopedThreadRef,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import { formatTokens } from "@t3tools/shared/usageFormat";
-import { CheckIcon, LoaderCircleIcon, MinusIcon, SquareIcon, XIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  FileCodeIcon,
+  LoaderCircleIcon,
+  SquareIcon,
+} from "lucide-react";
+import * as Option from "effect/Option";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { cn } from "../../lib/utils";
-import { useThreadProjection } from "../../state/entities";
 import { orchestrationEnvironment } from "../../state/orchestration";
+import { useEnvironmentThread } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
+import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
-import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { AgentElapsed } from "./AgentElapsed";
-import { threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
+import { phaseElapsed } from "./ThreadLineageWorkflowRow";
+import { SubagentAvatar } from "./V2LifecycleRow";
 import {
-  defaultWorkflowPhaseIndex,
-  workflowPhaseStatus,
+  workflowAnswerPreview,
+  workflowPhaseSummary,
   workflowRunCounts,
   workflowRunPhases,
+  type WorkflowRunPhase,
 } from "./WorkflowRunView.logic";
 
-export type WorkflowRunTab = "agents" | "script";
-
-/** Switches a workflow thread between its run view and the raw script chat. */
-function WorkflowRunTabs(props: {
-  readonly value: WorkflowRunTab;
-  readonly onChange: (tab: WorkflowRunTab) => void;
-}) {
-  return (
-    <ToggleGroup
-      aria-label="Workflow view"
-      value={[props.value]}
-      onValueChange={(value) => {
-        const next = value[0];
-        if (next === "agents" || next === "script") props.onChange(next);
-      }}
-    >
-      <Toggle value="agents">Agents</Toggle>
-      <Toggle value="script">Script</Toggle>
-    </ToggleGroup>
-  );
-}
-
-/** Static glyph for an agent or phase state. Nothing here animates. */
-function StatusGlyph({ status }: { readonly status: RuntimeSubagentStatus }) {
-  const label = threadRelationshipStatusLabel(status);
-  const glyph =
-    status === "completed" ? (
-      <CheckIcon className="size-3.5 text-success" />
-    ) : status === "failed" ? (
-      <XIcon className="size-3.5 text-destructive" />
-    ) : status === "cancelled" || status === "interrupted" ? (
-      <MinusIcon className="size-3.5 text-muted-foreground" />
-    ) : status === "running" || status === "waiting" ? (
-      <span className="size-2 rounded-full bg-info" />
-    ) : (
-      <span className="size-2 rounded-full border-2 border-muted-foreground/70" />
-    );
-  return (
-    <span
-      role="img"
-      aria-label={label}
-      className="inline-flex size-4 shrink-0 items-center justify-center"
-    >
-      {glyph}
-    </span>
-  );
-}
-
-const ROW_GRID =
-  "grid grid-cols-[1rem_minmax(0,1fr)_3.5rem_4rem] items-center gap-2 sm:grid-cols-[1rem_minmax(0,1fr)_8rem_3.5rem_3rem_4rem]";
-
+/** One member, drawn like a subagent row in the chat timeline. */
 function AgentRow(props: {
   readonly member: RuntimeSubagent;
   readonly provider: ServerProvider | undefined;
-  readonly expanded: boolean;
-  readonly onToggle: () => void;
   readonly onOpenThread: (threadId: ThreadId) => void;
 }) {
   const { member } = props;
-  const model =
-    member.model === null
-      ? "–"
-      : resolveSubagentMetadata({ model: member.model, provider: props.provider }).modelLabel;
-  const retried = (member.attempt ?? 1) > 1;
+  const failed = member.status === "failed";
+  const live = isActiveSubagentStatus(member.status);
+  // Members share one brief, so a live row says Working instead of its prompt.
+  const detail = failed
+    ? workflowAnswerPreview(member.error)
+    : live
+      ? null
+      : workflowAnswerPreview(member.result);
+  const threadId = member.childThreadId;
   return (
-    <li className={cn("rounded-md", props.expanded && "bg-accent/60")}>
-      <button
-        type="button"
-        aria-expanded={props.expanded}
-        onClick={props.onToggle}
-        className={cn(
-          ROW_GRID,
-          "w-full rounded-md px-1.5 py-1 text-left text-sm hover:bg-accent/60",
-        )}
-      >
-        <StatusGlyph status={member.status} />
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate">{member.title}</span>
-          {retried ? (
-            <span className="shrink-0 text-2xs text-muted-foreground">
+    <button
+      type="button"
+      disabled={threadId === null}
+      aria-label={`Open ${member.title}`}
+      onClick={() => threadId !== null && props.onOpenThread(ThreadId.make(threadId))}
+      className="group/subagent flex w-full min-w-0 items-center gap-2.5 rounded-md px-2 py-1.5 text-left hover:bg-accent/50"
+    >
+      <SubagentAvatar
+        driver={props.provider?.driver}
+        provider={props.provider}
+        status={member.status}
+      />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-baseline gap-2">
+          <span className="min-w-0 truncate text-xs font-medium text-foreground">
+            {member.title}
+          </span>
+          {failed ? <span className="shrink-0 text-3xs text-destructive">Failed</span> : null}
+          {(member.attempt ?? 1) > 1 ? (
+            <span className="shrink-0 text-3xs text-muted-foreground">
               attempt {member.attempt}
             </span>
           ) : null}
         </span>
-        <span className="hidden truncate text-right text-muted-foreground sm:block">{model}</span>
-        <span className="text-right tabular-nums">
-          {member.usage ? formatTokens(member.usage.totalTokens) : "–"}
-        </span>
-        <span className="hidden text-right tabular-nums text-muted-foreground sm:block">
-          {member.usage?.toolUses ?? "–"}
-        </span>
         <span
           className={cn(
-            "text-right tabular-nums",
-            member.status !== "running" && "text-muted-foreground",
+            "block truncate text-2xs leading-relaxed",
+            failed ? "text-destructive" : "text-muted-foreground",
           )}
         >
-          <AgentElapsed agent={member} />
+          {detail ?? (live ? "Working" : "Done")}
         </span>
+      </span>
+      <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
+        {member.usage ? formatTokens(member.usage.totalTokens) : null}
+      </span>
+      <span className="w-14 shrink-0 text-right text-xs text-muted-foreground tabular-nums">
+        <AgentElapsed agent={member} />
+      </span>
+      <ChevronRightIcon
+        aria-hidden
+        className="size-3.5 shrink-0 text-muted-foreground/60 group-hover/subagent:text-foreground"
+      />
+    </button>
+  );
+}
+
+/** A phase, drawn like the chat timeline's "N subagents" group. */
+function PhaseGroup(props: {
+  readonly phase: WorkflowRunPhase;
+  readonly provider: ServerProvider | undefined;
+  readonly onOpenThread: (threadId: ThreadId) => void;
+}) {
+  const { phase } = props;
+  // The running phase opens itself until the user picks a side for it.
+  const [open, setOpen] = useState<boolean | null>(null);
+  const expanded = open ?? phase.state === "running";
+  const summary = workflowPhaseSummary(phase.members);
+  const pending = phase.members.length === 0;
+  return (
+    <div className="pb-1">
+      <button
+        type="button"
+        disabled={pending}
+        aria-expanded={pending ? undefined : expanded}
+        onClick={() => setOpen(!expanded)}
+        className={cn(
+          "flex w-full min-w-0 items-center gap-3 py-2 text-left",
+          expanded || summary.active ? "text-foreground" : "text-muted-foreground",
+          pending && "opacity-55",
+        )}
+      >
+        <span className="flex shrink-0 items-center -space-x-1.5" aria-hidden>
+          {pending ? (
+            <span className="inline-flex size-6 rounded-full border border-dashed border-border ring-2 ring-background" />
+          ) : (
+            phase.members
+              .slice(0, 3)
+              .map((member) => (
+                <SubagentAvatar
+                  key={member.id}
+                  driver={props.provider?.driver}
+                  provider={props.provider}
+                />
+              ))
+          )}
+          {phase.members.length > 3 ? (
+            <span className="inline-flex size-6 items-center justify-center rounded-full bg-muted text-3xs font-medium text-muted-foreground ring-2 ring-background">
+              +{phase.members.length - 3}
+            </span>
+          ) : null}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-xs font-semibold">
+            {phase.title}
+            {pending ? null : (
+              <span className="ms-1.5 font-normal text-muted-foreground">
+                {phase.members.length} {phase.members.length === 1 ? "agent" : "agents"}
+              </span>
+            )}
+          </span>
+          <span
+            className={cn(
+              "block truncate text-3xs text-muted-foreground",
+              summary.active ? "text-info" : summary.failed && "text-destructive",
+            )}
+          >
+            {pending ? "Not started" : summary.text}
+          </span>
+        </span>
+        <span className="shrink-0 text-xs text-muted-foreground tabular-nums empty:hidden">
+          <AgentElapsed agent={phaseElapsed(phase)} />
+        </span>
+        {pending ? null : (
+          <ChevronDownIcon
+            aria-hidden
+            className={cn(
+              "size-3.5 shrink-0 text-muted-foreground transition-transform",
+              expanded && "rotate-180",
+            )}
+          />
+        )}
       </button>
-      {!props.expanded && member.error ? (
-        <p className="truncate ps-8 pe-1.5 pb-1 text-xs text-muted-foreground">{member.error}</p>
-      ) : null}
-      {props.expanded ? (
-        <div className="grid gap-2 ps-8 pe-3 pt-0.5 pb-2.5 text-xs">
-          {member.progress ? (
-            <div>
-              <div className="text-2xs text-muted-foreground">Prompt</div>
-              <p className="line-clamp-6 whitespace-pre-wrap break-words">{member.progress}</p>
-            </div>
-          ) : null}
-          {member.error || member.result ? (
-            <div>
-              <div
-                className={cn(
-                  "text-2xs",
-                  member.error ? "text-destructive" : "text-muted-foreground",
-                )}
-              >
-                {member.error ? "Error" : "Result"}
-              </div>
-              <p className="line-clamp-6 whitespace-pre-wrap break-words">
-                {member.error ?? member.result}
-              </p>
-            </div>
-          ) : null}
-          {member.childThreadId ? (
-            <div>
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() => props.onOpenThread(ThreadId.make(member.childThreadId!))}
-              >
-                Open chat
-              </Button>
-            </div>
-          ) : null}
+      {expanded ? (
+        <div className="mt-1 mb-1 rounded-lg border border-border/60 bg-card/30 p-1">
+          {phase.members.map((member) => (
+            <AgentRow
+              key={member.id}
+              member={member}
+              provider={props.provider}
+              onOpenThread={props.onOpenThread}
+            />
+          ))}
         </div>
       ) : null}
-    </li>
+    </div>
   );
 }
 
 /**
- * The run view a workflow coordinator's thread opens to: totals, a phase rail,
- * and one row per agent. It renders the coordinator's progress snapshot, so it
- * shows the same data as the Lineage panel at a size that fits a full run.
+ * The run a workflow coordinator's thread opens to. It reads like a chat turn:
+ * the script it ran, one subagent group per phase, then the coordinator's
+ * answer and a status line.
  */
 function WorkflowRunView(props: {
   readonly group: SubagentWorkflowGroup;
   readonly provider: ServerProvider | undefined;
-  readonly tab: WorkflowRunTab;
-  readonly onTabChange: (tab: WorkflowRunTab) => void;
+  readonly script: string;
+  readonly result: string | null;
+  /** Resolves file links and images in the coordinator's answer, as in its chat. */
+  readonly threadRef: ScopedThreadRef;
+  readonly markdownCwd: string | undefined;
   readonly onOpenThread: (threadId: ThreadId) => void;
   readonly onStop: (() => void) | undefined;
   readonly stopping: boolean;
@@ -191,161 +220,106 @@ function WorkflowRunView(props: {
 }) {
   const { workflow } = props.group;
   const phases = workflowRunPhases(props.group);
-  const [pickedPhase, setPickedPhase] = useState<number | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  // Follow the live phase until the user picks one.
-  const selectedIndex =
-    pickedPhase !== null && phases.some((phase) => phase.index === pickedPhase)
-      ? pickedPhase
-      : defaultWorkflowPhaseIndex(phases);
-  const selected = phases.find((phase) => phase.index === selectedIndex);
   const counts = workflowRunCounts(phases);
+  const [scriptOpen, setScriptOpen] = useState(false);
+  const live = isActiveSubagentStatus(workflow.status);
   const name = workflow.workflowName ?? workflow.title;
   const description = workflow.workflowName !== null ? workflow.title : null;
-  const usage = workflow.usage;
-
   return (
     <div
       className="workflow-run-lane min-h-0 flex-1 overflow-y-auto"
       style={{ paddingBottom: props.bottomInset }}
     >
-      <div className="chat-content-lane pt-3 sm:pt-4">
-        <header className="flex items-start gap-3 border-b border-border pb-3">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <StatusGlyph status={workflow.status} />
-              <h2 className="truncate text-base font-semibold">{name}</h2>
-              <span className="shrink-0 text-sm text-muted-foreground">
-                {threadRelationshipStatusLabel(workflow.status)}
-              </span>
-            </div>
-            {description && description !== name ? (
-              <p className="mt-0.5 truncate text-sm text-muted-foreground">{description}</p>
-            ) : null}
-            <div className="mt-1.5 flex flex-wrap gap-x-3.5 gap-y-1 text-xs text-muted-foreground tabular-nums">
-              <span>
-                <span className="font-semibold text-foreground">
-                  {counts.settled}/{counts.total}
-                </span>{" "}
-                agents
-              </span>
-              {counts.failed > 0 ? (
-                <span className="text-destructive">{counts.failed} failed</span>
-              ) : null}
-              {usage ? (
-                <span>
-                  <span className="font-semibold text-foreground">
-                    {formatTokens(usage.totalTokens)}
-                  </span>{" "}
-                  tokens
-                </span>
-              ) : null}
-              {usage?.toolUses !== undefined ? (
-                <span>
-                  <span className="font-semibold text-foreground">{usage.toolUses}</span> tools
-                </span>
-              ) : null}
-              <span className="font-semibold text-foreground empty:hidden">
-                <AgentElapsed agent={workflow} />
-              </span>
-            </div>
+      <div className="chat-content-lane pt-4 sm:pt-6">
+        <div className="pb-3">
+          <h2 className="truncate text-lg font-semibold">{name}</h2>
+          {description && description !== name ? (
+            <p className="text-sm text-muted-foreground">{description}</p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          aria-expanded={scriptOpen}
+          onClick={() => setScriptOpen(!scriptOpen)}
+          className="flex min-h-6 w-full items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-sm text-muted-foreground hover:text-foreground"
+        >
+          <span className="flex w-6 justify-center">
+            <FileCodeIcon className="size-3.5" />
+          </span>
+          <span className="min-w-0 flex-1 truncate">
+            Ran workflow script
+            <span className="text-muted-foreground/70">
+              {" "}
+              · {props.script.split("\n").length} lines
+            </span>
+          </span>
+          <ChevronDownIcon
+            className={cn("size-3.5 transition-transform", scriptOpen && "rotate-180")}
+          />
+        </button>
+        {scriptOpen ? (
+          <pre className="ms-7 mt-1 mb-2 max-h-96 overflow-auto rounded-lg border border-border/60 bg-card/30 p-3 font-mono text-xs leading-relaxed text-foreground">
+            {props.script}
+          </pre>
+        ) : null}
+        <div className="pt-2">
+          {phases.length === 0 ? (
+            <p className="py-2 text-sm text-muted-foreground">No agents yet</p>
+          ) : (
+            phases.map((phase) => (
+              <PhaseGroup
+                key={phase.index}
+                phase={phase}
+                provider={props.provider}
+                onOpenThread={props.onOpenThread}
+              />
+            ))
+          )}
+        </div>
+        {!live && props.result ? (
+          <div className="pt-3">
+            <ChatMarkdown text={props.result} cwd={props.markdownCwd} threadRef={props.threadRef} />
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {props.onStop ? (
-              <Button
-                size="xs"
-                variant="destructive-outline"
-                disabled={props.stopping}
-                onClick={props.onStop}
-              >
-                {props.stopping ? (
-                  <LoaderCircleIcon className="animate-spin" />
-                ) : (
-                  <SquareIcon className="fill-current" />
-                )}
-                Stop
-              </Button>
-            ) : null}
-            <WorkflowRunTabs value={props.tab} onChange={props.onTabChange} />
-          </div>
-        </header>
-
-        {phases.length === 0 ? (
-          <p className="py-6 text-sm text-muted-foreground">No agents yet</p>
-        ) : (
-          <div className="mt-3 grid gap-3 sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-0">
-            <nav
-              aria-label="Phases"
-              className="flex gap-0.5 overflow-x-auto sm:flex-col sm:border-e sm:border-border sm:pe-2.5"
+        ) : null}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-4 text-xs text-muted-foreground tabular-nums">
+          <span>
+            {live ? "Working for " : "Worked for "}
+            <AgentElapsed agent={workflow} />
+          </span>
+          <span aria-hidden>·</span>
+          <span>
+            {counts.settled}/{counts.total} agents
+          </span>
+          {workflow.usage ? (
+            <>
+              <span aria-hidden>·</span>
+              <span>{formatTokens(workflow.usage.totalTokens)} tokens</span>
+            </>
+          ) : null}
+          {props.onStop ? (
+            <Button
+              size="xs"
+              variant="ghost-destructive"
+              disabled={props.stopping}
+              onClick={props.onStop}
             >
-              {phases.map((phase) => (
-                <button
-                  key={phase.index}
-                  type="button"
-                  aria-pressed={phase.index === selectedIndex}
-                  onClick={() => {
-                    setPickedPhase(phase.index);
-                    setExpandedId(null);
-                  }}
-                  className={cn(
-                    "flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm hover:bg-accent/60",
-                    phase.index === selectedIndex && "bg-accent",
-                    phase.state === "pending" && "text-muted-foreground",
-                  )}
-                >
-                  <StatusGlyph status={workflowPhaseStatus(phase)} />
-                  <span className="min-w-0 flex-1 truncate">{phase.title}</span>
-                  <span className="text-xs tabular-nums text-muted-foreground">
-                    {phase.members.length === 0
-                      ? "–"
-                      : `${phase.settledCount}/${phase.members.length}`}
-                  </span>
-                </button>
-              ))}
-            </nav>
-            <div className="min-w-0 sm:ps-3">
-              <div
-                aria-hidden
-                className={cn(ROW_GRID, "px-1.5 pb-1.5 text-2xs text-muted-foreground")}
-              >
-                <span />
-                <span>Agent</span>
-                <span className="hidden text-right sm:block">Model</span>
-                <span className="text-right">Tokens</span>
-                <span className="hidden text-right sm:block">Tools</span>
-                <span className="text-right">Time</span>
-              </div>
-              {selected === undefined || selected.members.length === 0 ? (
-                <p className="px-1.5 py-2 text-sm text-muted-foreground">Not started</p>
+              {props.stopping ? (
+                <LoaderCircleIcon className="animate-spin" />
               ) : (
-                <ul className="m-0 grid list-none gap-px p-0">
-                  {selected.members.map((member) => (
-                    <AgentRow
-                      key={member.id}
-                      member={member}
-                      provider={props.provider}
-                      expanded={expandedId === member.id}
-                      onToggle={() =>
-                        setExpandedId((current) => (current === member.id ? null : member.id))
-                      }
-                      onOpenThread={props.onOpenThread}
-                    />
-                  ))}
-                </ul>
+                <SquareIcon className="fill-current" />
               )}
-            </div>
-          </div>
-        )}
+              Stop
+            </Button>
+          ) : null}
+        </div>
       </div>
     </div>
   );
 }
 
 /**
- * Wraps a provider subagent thread's timeline. When the thread is a workflow
- * coordinator, it opens to the run view and keeps the timeline (the script and
- * the coordinator's answer) one tab away; any other thread renders the
- * timeline unchanged.
+ * Wraps a provider subagent thread's timeline. A workflow coordinator's thread
+ * shows its run instead; any other thread renders the timeline unchanged.
  *
  * The workflow snapshot lives on the coordinator's subagent record in the
  * parent thread, so this reads the parent's projection. Pass a null parent to
@@ -356,13 +330,14 @@ export function WorkflowRunSurface(props: {
   readonly threadId: ThreadId;
   readonly parentThreadId: ThreadId | null;
   readonly provider: ServerProvider | undefined;
+  readonly markdownCwd: string | undefined;
   readonly onOpenThread: (threadId: ThreadId) => void;
   readonly bottomInset: number;
   readonly children: ReactNode;
 }) {
   const { environmentId, parentThreadId, threadId } = props;
-  const parentRef = parentThreadId === null ? null : scopeThreadRef(environmentId, parentThreadId);
-  const parentSubagents = useThreadProjection(parentRef)?.projection.subagents;
+  const parent = useEnvironmentThread(environmentId, parentThreadId);
+  const parentSubagents = Option.getOrUndefined(parent.data)?.subagents;
   const coordinator = parentSubagents?.find(
     (subagent) => subagent.childThreadId === threadId && subagent.workflow !== undefined,
   );
@@ -373,30 +348,25 @@ export function WorkflowRunSurface(props: {
         : deriveWorkflowGroups(projectedSubagentsToRuntime([coordinator]))[0],
     [coordinator],
   );
-  // ChatView reuses this surface across threads, so view state is keyed to
-  // the thread: a new workflow always opens on Agents.
-  const [tabState, setTabState] = useState<{ threadId: ThreadId; tab: WorkflowRunTab }>();
-  const tab = tabState?.threadId === threadId ? tabState.tab : "agents";
-  const setTab = (next: WorkflowRunTab) => setTabState({ threadId, tab: next });
+  // ChatView reuses this surface across threads, so the pending stop is keyed
+  // to the thread it was sent for.
   const [stoppingThreadId, setStoppingThreadId] = useState<ThreadId | null>(null);
   const stopping = stoppingThreadId === threadId;
   const stopWorkflow = useAtomCommand(orchestrationEnvironment.stopWorkflow);
   const canStop = useAtomValue(orchestrationEnvironment.stopWorkflow.permissionAtom(environmentId));
 
+  // Hold the slot until the parent loads, so a workflow does not flash its
+  // script chat first. A failed or deleted parent shows the chat instead.
+  if (
+    parentThreadId !== null &&
+    parentSubagents === undefined &&
+    Option.isNone(parent.error) &&
+    parent.status !== "deleted"
+  ) {
+    return null;
+  }
   if (group === undefined || coordinator === undefined || parentThreadId === null) {
     return props.children;
-  }
-  if (tab === "script") {
-    return (
-      <>
-        <div className="workflow-run-lane">
-          <div className="chat-content-lane flex justify-end pt-2">
-            <WorkflowRunTabs value={tab} onChange={setTab} />
-          </div>
-        </div>
-        {props.children}
-      </>
-    );
   }
 
   const stop = async () => {
@@ -417,8 +387,10 @@ export function WorkflowRunSurface(props: {
       key={threadId}
       group={group}
       provider={props.provider}
-      tab={tab}
-      onTabChange={setTab}
+      script={coordinator.prompt}
+      result={coordinator.result}
+      threadRef={scopeThreadRef(environmentId, threadId)}
+      markdownCwd={props.markdownCwd}
       onOpenThread={props.onOpenThread}
       onStop={
         canStop && isActiveSubagentStatus(group.workflow.status) ? () => void stop() : undefined

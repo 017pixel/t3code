@@ -11561,6 +11561,7 @@ export default function ChatView(props: ChatViewProps) {
                 provider={providerStatuses.find(
                   (status) => status.instanceId === activeThread.providerInstanceId,
                 )}
+                markdownCwd={gitCwd ?? undefined}
                 onOpenThread={onOpenRelatedThread}
                 bottomInset={composerTimelineInset}
               >
