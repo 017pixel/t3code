@@ -758,6 +758,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
     readonly requestCompletionMarker?: boolean;
     readonly acceptBoundedSnapshot?: boolean;
     readonly acceptCompactTurnItems?: boolean;
+    readonly acceptCompactCheckpointItems?: boolean;
     readonly acceptThreadFieldEvents?: boolean;
   }) {
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -885,6 +886,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
         ? buildBoundedThreadStreamSnapshot({
             ...snapshot,
             compactTurnItems: input.acceptCompactTurnItems === true,
+            compactCheckpointItems: input.acceptCompactCheckpointItems === true,
           })
         : {
             kind: "snapshot" as const,
