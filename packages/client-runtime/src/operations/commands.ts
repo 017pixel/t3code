@@ -906,14 +906,23 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
       });
     }
     const projection = yield* getProjection(input.threadId);
+    // Idle compaction leaves files unchanged and may have no rollback cursor, so
+    // rewinding to it means rewinding to the user turn before it.
+    let turnCount = input.turnCount;
+    while (
+      turnCount !== undefined &&
+      turnCount > 0 &&
+      projection.runs.some((run) => run.ordinal === turnCount && !isUserFacingRun(run))
+    )
+      turnCount -= 1;
     const checkpoint =
       projection.checkpoints.find(
         (candidate) => candidate.id === input.checkpointId && candidate.scopeId === input.scopeId,
       ) ??
       projection.checkpoints.findLast((candidate) =>
-        input.turnCount === 0
+        turnCount === 0
           ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
-          : candidate.appRunOrdinal === input.turnCount,
+          : candidate.appRunOrdinal === turnCount,
       );
     if (checkpoint === undefined || checkpoint.status !== "ready") {
       const target =
