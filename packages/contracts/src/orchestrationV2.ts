@@ -3421,11 +3421,6 @@ export const OrchestrationV2SubscribeThreadInput = Schema.Struct({
    * that repeat local visible rows. See `turnItemsOmitLocalVisible`.
    */
   acceptCompactTurnItems: Schema.optionalKey(Schema.Boolean),
-  /**
-   * Allows bounded snapshot fallbacks to send checkpoint turn items without the
-   * file list their checkpoint already carries. See `checkpointFilesOmittedItemIds`.
-   */
-  acceptCompactCheckpointItems: Schema.optionalKey(Schema.Boolean),
   /** Accepts compact read-watermark and pull-request-link events. */
   acceptThreadFieldEvents: Schema.optionalKey(Schema.Boolean),
 });
@@ -3473,13 +3468,6 @@ export const OrchestrationV2ThreadBoundedSnapshot = Schema.Struct({
    * with `boundedSnapshotProjection` before using the projection.
    */
   turnItemsOmitLocalVisible: Schema.optionalKey(Schema.Literal(true)),
-  /**
-   * Set only for clients that opted in: these checkpoint turn items are sent
-   * with empty `files`, which equal their checkpoint's `files` in
-   * `projection.checkpoints`. Clients must restore them with
-   * `boundedSnapshotProjection` before using the projection.
-   */
-  checkpointFilesOmittedItemIds: Schema.optionalKey(Schema.Array(TurnItemId)),
 });
 export type OrchestrationV2ThreadBoundedSnapshot = typeof OrchestrationV2ThreadBoundedSnapshot.Type;
 
@@ -3567,8 +3555,6 @@ export const OrchestrationV2ThreadStreamItem = Schema.Union([
     payloadBudgetExceeded: Schema.optionalKey(Schema.Boolean),
     /** Same meaning as on `OrchestrationV2ThreadBoundedSnapshot`. */
     turnItemsOmitLocalVisible: Schema.optionalKey(Schema.Literal(true)),
-    /** Same meaning as on `OrchestrationV2ThreadBoundedSnapshot`. */
-    checkpointFilesOmittedItemIds: Schema.optionalKey(Schema.Array(TurnItemId)),
   }),
   Schema.Struct({
     kind: Schema.Literal("event"),

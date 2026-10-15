@@ -194,7 +194,6 @@ export const layer = HttpApiBuilder.group(
             ...boundedSnapshotResponseFields({
               bounded,
               compactTurnItems: args.query.compactTurnItems === "1",
-              compactCheckpointItems: args.query.compactCheckpointItems === "1",
             }),
           };
         }),

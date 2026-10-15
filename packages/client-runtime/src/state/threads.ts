@@ -889,11 +889,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           ...(canResume ? { afterSequence: sequence } : {}),
           ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
           ...(acceptBoundedSnapshot
-            ? {
-                acceptBoundedSnapshot: true as const,
-                acceptCompactTurnItems: true as const,
-                acceptCompactCheckpointItems: true as const,
-              }
+            ? { acceptBoundedSnapshot: true as const, acceptCompactTurnItems: true as const }
             : {}),
         };
       }),
