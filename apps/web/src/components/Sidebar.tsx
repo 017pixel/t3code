@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "./ThreadHoverCard";
