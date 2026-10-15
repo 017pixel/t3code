@@ -22,9 +22,7 @@ import {
   isSpeculativeLoadPending,
   reloadOnceForChunkLoadError,
 } from "./lib/chunkReloadGuard";
-import { restoreStackTraces } from "./lib/bootStackTraces";
 
-restoreStackTraces();
 prepareProviderAuthDelivery();
 if (readBootSnapshot() !== null) {
   // Hydrate the first-run gate and icons in their own task before snapshot rendering.
