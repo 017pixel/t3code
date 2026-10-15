@@ -206,12 +206,7 @@ export function isUrlTargetSidebarTextKey(event: KeyboardEvent): boolean {
   return threadKey !== undefined && urlRouteTargetKey === `server:${threadKey}`;
 }
 
-/**
- * Revealing a kept thread follows the click in a transition, so for a moment
- * the view the user left is still shown and gets their keys. Text it would
- * type into its own composer is held for the view the URL names instead.
- * Returns whether the text was held.
- */
+/** Holds typing for the URL destination while the previous view finishes its transition. */
 export function holdTextForUrlRouteTarget(viewTargetKey: string, text: string): boolean {
   const targetKey = urlRouteTargetKey;
   if (targetKey === null || targetKey === viewTargetKey) return false;
