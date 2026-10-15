@@ -2,11 +2,11 @@ import { NativeThemeHost } from "./NativeThemeHost.android";
 import { HorizontalFloatingToolbar, RNHostView } from "@expo/ui/jetpack-compose";
 import type { ToolbarProps } from "./Toolbar.types";
 
-import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
+import { useControlTheme } from "./useControlTheme";
 
 /** Native toolbar surface; hosted RN controls retain their existing menus and accessibility. */
 export function Toolbar(props: ToolbarProps) {
-  const { themeVariables: colors } = useAppearancePreferences();
+  const { colors } = useControlTheme();
   return (
     <NativeThemeHost
       matchContents
