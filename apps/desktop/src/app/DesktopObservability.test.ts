@@ -454,18 +454,14 @@ describe("DesktopObservability", () => {
         T3CODE_OTLP_EXPORT_INTERVAL_MS: "1000",
       });
 
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Effect.logInfo("before the stall");
-          for (let second = 0; second < 15; second += 1) yield* TestClock.adjust("1 second");
-          yield* Effect.logInfo("after the stall");
-          for (let second = 0; second < 5; second += 1) yield* TestClock.adjust("1 second");
-          // Checked before shutdown, whose own flush would send the record.
-          assert.isTrue(requests.some((request) => request.body.includes("after the stall")));
-        }).pipe(
-          Effect.provide(DesktopObservability.layer.pipe(Layer.provideMerge(layerEnvironment))),
-        ),
-      );
+      yield* Effect.gen(function* () {
+        yield* Effect.logInfo("before the stall");
+        for (let second = 0; second < 15; second += 1) yield* TestClock.adjust("1 second");
+        yield* Effect.logInfo("after the stall");
+        for (let second = 0; second < 5; second += 1) yield* TestClock.adjust("1 second");
+        // Before shutdown, whose own flush could hide a stuck exporter.
+        assert.isTrue(requests.some((request) => request.body.includes("after the stall")));
+      }).pipe(Effect.provide(DesktopObservability.layer.pipe(Layer.provideMerge(layerEnvironment))));
     }).pipe(
       Effect.scoped,
       Effect.provide(

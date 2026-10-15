@@ -129,15 +129,11 @@ it("keeps the real desktop chunks from requiring the application entry", async (
       onSuccess: undefined,
       logLevel: "silent",
     });
-    const requirers = [];
     for (const filename of await NodeFSP.readdir(directory)) {
       if (!filename.endsWith(".cjs") || filename === "main.cjs") continue;
       const source = await NodeFSP.readFile(NodePath.join(directory, filename), "utf8");
-      if (/require\(["'`]\.\/(?:application|main)\.cjs["'`]\)/.test(source)) {
-        requirers.push(filename);
-      }
+      assert.doesNotMatch(source, /require\(["'`]\.\/(?:application|main)\.cjs["'`]\)/, filename);
     }
-    assert.deepEqual(requirers, []);
   } finally {
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
