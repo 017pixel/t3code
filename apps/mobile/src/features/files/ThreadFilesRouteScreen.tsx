@@ -50,7 +50,7 @@ import { preloadWorkspaceFileContents } from "./preload-workspace-file";
 import { SourceFileSurface } from "./SourceFileSurface";
 import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
 import { ThreadFileNavigatorPane } from "./thread-file-navigator-pane";
-import { ScreenHeader } from "../../components/ScreenHeader";
+import { AppBar } from "../../components/AppBar";
 import { WorkspaceFileImagePreview } from "./WorkspaceFileImagePreview";
 import { WorkspaceFilePreviewError } from "./WorkspaceFilePreviewError";
 import { WorkspaceFileVideoPreview } from "./WorkspaceFileVideoPreview";
@@ -73,7 +73,7 @@ function FilesBrowserHeader(props: {
   readonly onBack: () => void;
 }) {
   return (
-    <ScreenHeader
+    <AppBar
       title="Files"
       subtitle={props.projectName}
       onBack={props.onBack}
@@ -120,7 +120,7 @@ function FileHeader(props: {
   const { panes, toggleAuxiliaryPane } = useAdaptiveWorkspaceLayout();
   const modes = props.actions.filter(({ inline }) => inline);
   return (
-    <ScreenHeader
+    <AppBar
       title={props.title}
       subtitle={props.subtitle}
       onBack={props.onBack}

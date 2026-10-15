@@ -13,7 +13,7 @@ import type { MenuAction } from "@react-native-menu/menu";
 
 import { AndroidHeaderIconButton } from "../../components/AndroidScreenHeader";
 import { CompactBrandTitle } from "../../components/CompactBrandTitle";
-import { MaterialFloatingActionButton } from "../../components/MaterialFloatingActionButton";
+import { FloatingActionButton } from "../../components/FloatingActionButton";
 import { AndroidAnchoredMenu } from "../../components/AndroidAnchoredMenu";
 import { Menu } from "../../components/Menu";
 import { SearchField } from "../../components/SearchField";
@@ -152,11 +152,7 @@ export function MaterialThreadListToolbar(props: {
         >
           <AndroidAnchoredMenu actions={props.filterActions} onPressAction={props.onFilterAction}>
             {(open) => (
-              <MaterialFloatingActionButton
-                label="Filter threads"
-                icon={filterIcon}
-                onPress={open}
-              />
+              <FloatingActionButton label="Filter threads" icon={filterIcon} onPress={open} />
             )}
           </AndroidAnchoredMenu>
         </View>

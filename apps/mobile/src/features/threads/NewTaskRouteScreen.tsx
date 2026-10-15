@@ -1,6 +1,6 @@
 import { AppActivityIndicator } from "../../components/AppActivityIndicator";
 import { MaterialListRow } from "../../components/MaterialListRow";
-import { ScreenHeader } from "../../components/ScreenHeader";
+import { AppBar } from "../../components/AppBar";
 import {
   StackActions,
   useIsFocused,
@@ -111,7 +111,7 @@ function NewTaskHeader(props: {
   const navigation = useNavigation();
   const { layout } = useAdaptiveWorkspaceLayout();
   return (
-    <ScreenHeader
+    <AppBar
       title={props.title}
       subtitle={props.subtitle ?? undefined}
       sidebar={false}

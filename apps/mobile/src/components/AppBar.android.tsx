@@ -17,10 +17,10 @@ import { SymbolView } from "./AppSymbol";
 import { Menu } from "./Menu";
 import { SearchField } from "./SearchField";
 import { androidHeaderMenuActions, findHeaderMenuAction } from "./headerMenu.android";
-import type { ScreenHeaderProps } from "./ScreenHeader.types";
+import type { AppBarProps } from "./AppBar.types";
 import { useAndroidControlSizing } from "./useAndroidControlSizing";
 
-export function ScreenHeader(props: ScreenHeaderProps) {
+export function AppBar(props: AppBarProps) {
   const { search } = props;
   const { paddingTop, paddingBottom } = useMaterialToolbarLayout();
   const { scale, buttonSize, iconSize, smallIconSize } = useAndroidControlSizing();

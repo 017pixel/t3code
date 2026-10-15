@@ -31,7 +31,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { cn } from "../../lib/cn";
 import { EmptyState } from "../../components/EmptyState";
-import { MaterialFloatingActionButton } from "../../components/MaterialFloatingActionButton";
+import { FloatingActionButton } from "../../components/FloatingActionButton";
 import type { WorkspaceEnvironment, WorkspaceState } from "../../state/workspaceModel";
 import type { SavedRemoteConnection } from "../../lib/connection";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
@@ -956,7 +956,7 @@ export function HomeScreen(props: HomeScreenProps) {
               onAction={!props.catalogState.hasReadyEnvironment ? props.onAddConnection : undefined}
               action={
                 Platform.OS === "android" && !props.catalogState.hasReadyEnvironment ? (
-                  <MaterialFloatingActionButton
+                  <FloatingActionButton
                     label="Add environment"
                     icon="plus"
                     variant="extended"

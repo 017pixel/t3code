@@ -6,7 +6,7 @@ import {
   type NativeSyntheticEvent,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { MaterialNewThreadButton } from "../../components/MaterialNewThreadButton";
+import { NewThreadButton } from "../../components/NewThreadButton";
 import type { AndroidHomeFabLayout as SharedAndroidHomeFabLayout } from "./AndroidHomeFab.shared";
 import { useWorkspaceState } from "../../state/workspace";
 import { MaterialFabScrollContext } from "./MaterialFabScrollContext";
@@ -37,7 +37,7 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
     <View className="flex-1" onLayout={(event) => setLayoutWidth(event.nativeEvent.layout.width)}>
       <MaterialFabScrollContext value={onScroll}>{props.children}</MaterialFabScrollContext>
       {!props.disabled && state.hasConnections && layoutWidth !== null ? (
-        <MaterialNewThreadButton
+        <NewThreadButton
           key={`${appearance.baseFontSize}:${fontScale}:${layoutWidth}`}
           extended
           expanded={expanded}

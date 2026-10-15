@@ -3,8 +3,8 @@ import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { AppActivityIndicator } from "../../components/AppActivityIndicator";
 import { nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
-import { ScreenHeader } from "../../components/ScreenHeader";
-import type { ScreenHeaderMenuItem } from "../../components/ScreenHeader.types";
+import { AppBar } from "../../components/AppBar";
+import type { AppBarMenuItem } from "../../components/AppBar.types";
 import type { ReviewSectionItem } from "./reviewModel";
 import { useReviewHeaderPresentation } from "./useReviewHeaderPresentation";
 import { Screen, ScreenStack, ScreenStackHeaderConfig } from "react-native-screens";
@@ -82,10 +82,7 @@ function ReviewHeader(
 ) {
   const { panes, toggleAuxiliaryPane } = useAdaptiveWorkspaceLayout();
   const presentation = useReviewHeaderPresentation(props);
-  const sectionAction = (
-    section: ReviewSectionItem | null,
-    title: string,
-  ): ScreenHeaderMenuItem => ({
+  const sectionAction = (section: ReviewSectionItem | null, title: string): AppBarMenuItem => ({
     id: section ? `section:${section.id}` : `unavailable:${title}`,
     title,
     disabled: section === null,
@@ -95,7 +92,7 @@ function ReviewHeader(
     },
   });
   return (
-    <ScreenHeader
+    <AppBar
       title={presentation.title}
       subtitle={presentation.subtitle}
       onBack={props.onReturnToThread}

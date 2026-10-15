@@ -8,7 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { type KnownTerminalSession } from "@t3tools/client-runtime/state/terminal";
 import { SymbolView } from "../../components/AppSymbol";
-import { ScreenHeader } from "../../components/ScreenHeader";
+import { AppBar } from "../../components/AppBar";
 import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -109,7 +109,7 @@ function TerminalHeader(props: {
   readonly onSelectTerminal: (terminalId: string) => void;
 }) {
   return (
-    <ScreenHeader
+    <AppBar
       title="Terminal"
       subtitle={props.subtitle}
       onBack={props.onCloseTerminal}
