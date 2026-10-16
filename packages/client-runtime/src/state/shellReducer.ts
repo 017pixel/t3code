@@ -11,7 +11,6 @@ const sameThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
 const sameProjectShell = Schema.toEquivalence(OrchestrationProjectShell);
 const sameLinks = Schema.toEquivalence(Schema.UndefinedOr(Schema.Array(ThreadPullRequestLink)));
 
-/** Whether two rows' pull request links are equal, including both absent. */
 export function sameThreadPullRequests(
   left: OrchestrationV2ThreadShell["pullRequests"],
   right: OrchestrationV2ThreadShell["pullRequests"],
@@ -20,9 +19,8 @@ export function sameThreadPullRequests(
 }
 
 /**
- * Keep the previous object for each row a full snapshot left unchanged, so the list only
- * re-renders rows that changed. Links are compared apart from the rest of the row because a
- * deferred snapshot arrives without them; such a row keeps its links until they fill in.
+ * Links are compared apart from the rest of the row because a deferred snapshot arrives without
+ * them; such a row keeps its links until they fill in.
  */
 export function reuseUnchangedThreadShells(
   previous: OrchestrationV2ShellSnapshot | null,
@@ -77,17 +75,6 @@ export interface MergeShellSnapshotOptions {
   readonly resolvedRepositoryIdentityRoots: ReadonlyArray<string>;
 }
 
-/**
- * Merge an incoming full shell snapshot into prior client state.
- *
- * Authoritative snapshots (no options) replace structure and sequence even when
- * lower than cache, while retaining a prior non-null identity when the candidate
- * is still unresolved/null for the same root.
- *
- * Enrichment snapshots (options present) only patch repository identity for
- * matching current projects. They never replace projects, threads, archives,
- * or sequence, regardless of the incoming snapshot sequence.
- */
 export function mergeShellSnapshotProjects(
   previous: OrchestrationV2ShellSnapshot | null | undefined,
   next: OrchestrationV2ShellSnapshot,
@@ -136,7 +123,6 @@ export function mergeShellSnapshotProjects(
   };
 }
 
-/** Applies one committed V2 shell delta while preserving active/archive exclusivity. */
 export function applyShellStreamEvent(
   snapshot: OrchestrationV2ShellSnapshot,
   event: Exclude<
@@ -167,8 +153,6 @@ export function applyShellStreamEvent(
         snapshotSequence: event.sequence,
       };
     case "thread.updated": {
-      // An unchanged shell keeps its object and the list, so subscribers that
-      // compare by reference skip the update. Only the cursor moves.
       const existing =
         event.location === "active"
           ? snapshot.threads.find((thread) => thread.id === event.thread.id)

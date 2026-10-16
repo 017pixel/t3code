@@ -19,7 +19,7 @@ const STARTUP_SAMPLES = 30;
 const SLEEP_CHECK_MS = 5000;
 const STALL_LOG_MAX_BYTES = 256 * 1024;
 
-/** One sample interval as Node reports it. Delay in ns, active time in ms, CPU in µs. */
+/** Delay in ns, active time in ms, CPU in µs. */
 export interface EventLoopReadings {
   readonly delayMaxNs: number;
   /** Timer drift also covers startup and the histogram's first gap after reset. */
@@ -38,9 +38,7 @@ export interface EventLoopReadings {
   readonly steady?: boolean;
 }
 
-// Enables the delay histogram for the layer's lifetime. Each read returns the
-// readings since the previous read and resets the histogram. Node skips the first
-// gap after a reset, so a stall right at a sample boundary can be missed.
+// Node skips the first gap after a reset, so a stall right at a sample boundary can be missed.
 const makeNodeSampler = Effect.gen(function* () {
   const monitor = (resolution: number) => {
     const histogram = NodePerfHooks.monitorEventLoopDelay({ resolution });
@@ -128,7 +126,6 @@ export interface StallLogOptions {
   readonly maxBytes: number;
 }
 
-/** Records stalls in diagnostics and the capped local log. */
 export const layerWith = (
   makeSampler: Effect.Effect<Effect.Effect<EventLoopReadings>, never, Scope.Scope>,
   stallLog: StallLogOptions,
@@ -136,7 +133,6 @@ export const layerWith = (
   Layer.effectDiscard(
     Effect.gen(function* () {
       const sample = yield* makeSampler;
-      // A log that cannot open must not stop the monitor; the span still records stalls.
       const stallSink = yield* Effect.try(
         () =>
           new RotatingFileSink({
@@ -167,8 +163,6 @@ export const layerWith = (
           involuntaryContextSwitches: usage.involuntaryContextSwitches,
           rssMb: Math.round(rssBytes / 1024 / 1024),
         };
-        // Root, as the stall has no caller to attach to. Warn level keeps it when
-        // T3CODE_TRACE_MIN_LEVEL is raised to cut trace noise.
         yield* Effect.logWarning(`event loop stalled for ${delayMaxMs} ms`).pipe(
           Effect.withSpan("server.eventLoop.stall", { root: true, level: "Warn", attributes }),
         );
@@ -195,7 +189,6 @@ export const layerWith = (
     }),
   );
 
-/** Writes the stall log next to the server trace file, as `event-loop-stalls.ndjson`. */
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const { serverTracePath } = yield* ServerConfig.ServerConfig;

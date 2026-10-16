@@ -158,8 +158,6 @@ describe("environment shell synchronization", () => {
         clearVcsRefs: () => Effect.void,
         clear: () => Effect.void,
       });
-      // Cold cache with no HTTP snapshot available → falls back to the
-      // socket-embedded snapshot.
       const snapshotLoader = ShellSnapshotLoader.ShellSnapshotLoader.of({
         load: () => Effect.succeedNone,
       });
@@ -297,7 +295,6 @@ describe("environment shell synchronization", () => {
         Stream.runHead,
       );
 
-      // Observe before publishing so no batch can arrive before the subscription.
       const observed = yield* SubscriptionRef.changes(shellState).pipe(
         Stream.drop(1),
         Stream.takeUntil(
@@ -389,7 +386,6 @@ describe("environment shell synchronization", () => {
         Effect.provideService(ShellSnapshotLoader.ShellSnapshotLoader, snapshotLoader),
       );
 
-      // Wait until the subscription is established from the warm cache.
       yield* SubscriptionRef.changes(capturedAfterSequence).pipe(
         Stream.filter((value) => value !== undefined),
         Stream.runHead,
@@ -472,7 +468,6 @@ describe("environment shell synchronization", () => {
         ),
       );
 
-      // A new session starts from an authoritative HTTP snapshot.
       for (let attempt = 0; attempt < 100; attempt += 1) {
         if ((yield* Ref.get(capturedAfterSequences)).length >= 1) break;
         yield* Effect.yieldNow;
@@ -484,7 +479,6 @@ describe("environment shell synchronization", () => {
         Stream.runHead,
       );
 
-      // A newer snapshot arrives on the stream and advances the cursor.
       yield* Queue.offer(events, {
         kind: "snapshot",
         snapshot: { ...LIVE_SHELL_SNAPSHOT, snapshotSequence: 40 },
@@ -518,7 +512,6 @@ describe("environment shell synchronization", () => {
       expect((yield* Ref.get(capturedAfterSequences)).length).toBe(3);
       expect(yield* Ref.get(loaderCalls)).toBe(1);
 
-      // Replacing the session performs another authoritative refresh.
       yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
       for (let attempt = 0; attempt < 100; attempt += 1) {
         if ((yield* Ref.get(capturedAfterSequences)).length >= 4) break;
@@ -605,7 +598,6 @@ describe("environment shell synchronization", () => {
         Stream.filter((state) => state.status === "cached"),
         Stream.runHead,
       );
-      // The disconnect flush runs independently from the connection-state update.
       yield* TestClock.adjust("0 millis");
       expect((yield* Ref.get(saved)).map((snapshot) => snapshot.snapshotSequence)).toEqual([
         1, 10, 11,
@@ -839,8 +831,6 @@ describe("environment shell synchronization", () => {
       });
       yield* Deferred.await(unenrichedSaveStarted);
 
-      // Same sequence, different content. Session stays open so the stream can
-      // still apply enrichment while the older save is in flight.
       yield* Queue.offer(events, {
         kind: "snapshot",
         snapshot: enrichedSnapshot,
@@ -854,7 +844,6 @@ describe("environment shell synchronization", () => {
         Stream.runHead,
       );
 
-      // Completing the older same-sequence save must re-persist the latest object.
       yield* Deferred.succeed(releaseUnenrichedSave, undefined);
       for (let index = 0; index < 100; index += 1) {
         const values = yield* Ref.get(saved);
@@ -947,8 +936,6 @@ describe("environment shell synchronization", () => {
         Stream.runHead,
       );
 
-      // Close scope so the finalizer flush blocks on save. Workers must be
-      // interrupted before that flush; late stream events must not extend it.
       const closeFiber = yield* Effect.forkChild(Scope.close(scope, Exit.void));
       yield* Deferred.await(saveStarted);
       yield* Queue.offer(events, {
@@ -1089,7 +1076,6 @@ describe("environment shell synchronization", () => {
         clearVcsRefs: () => Effect.void,
         clear: () => Effect.void,
       });
-      // No HTTP snapshot, so the cached rows stay until the socket sends deltas.
       const snapshotLoader = ShellSnapshotLoader.ShellSnapshotLoader.of({
         load: () => Effect.succeedNone,
       });
@@ -1104,7 +1090,6 @@ describe("environment shell synchronization", () => {
       }) => Option.getOrThrow(state.snapshot).threads;
       expect(threadsOf(yield* SubscriptionRef.get(shellState))).toEqual(cachedSnapshot.threads);
 
-      // The server updates one row before the cached links finish decoding.
       const serverRow = { ...v2ThreadShell, title: "From server", pullRequests: [link(9)] };
       yield* Queue.offer(events, {
         kind: "thread.updated",
@@ -1205,7 +1190,6 @@ describe("environment shell synchronization", () => {
       );
       expect(filled?.pullRequests).toEqual([link]);
 
-      // The cache must end up with the links: the last save carries them.
       yield* TestClock.adjust("30 seconds");
       const saves = yield* Queue.takeAll(saved);
       expect(saves.at(-1)?.threads[0]?.pullRequests).toEqual([link]);
@@ -1256,7 +1240,6 @@ describe("environment shell synchronization", () => {
           Effect.succeedSome({
             ...v2ShellSnapshot,
             snapshotSequence: 3,
-            // Links never finish decoding before the shell closes.
             loadPullRequests: Effect.never.pipe(Effect.as(new Map([[v2ThreadShell.id, [link]]]))),
           }),
       });
@@ -1272,7 +1255,6 @@ describe("environment shell synchronization", () => {
         Stream.runHead,
       );
 
-      // Neither the throttled worker nor the closing flush may save the rows without links.
       yield* TestClock.adjust("30 seconds");
       yield* Scope.close(scope, Exit.void);
       expect(yield* Ref.get(saved)).toEqual([]);
@@ -1293,7 +1275,6 @@ describe("environment shell synchronization", () => {
       });
       const firstLinks = yield* Deferred.make<void>();
       const secondLinks = yield* Deferred.make<void>();
-      // Set once each snapshot's links start decoding, i.e. once its rows are applied.
       const firstFillStarted = yield* Deferred.make<void>();
       const loads = yield* Ref.make(0);
       const subscriptions = yield* Ref.make(0);
@@ -1327,7 +1308,6 @@ describe("environment shell synchronization", () => {
         clearVcsRefs: () => Effect.void,
         clear: () => Effect.void,
       });
-      // Both snapshots carry the same row; only its pull request links differ.
       const snapshotLoader = ShellSnapshotLoader.ShellSnapshotLoader.of({
         load: () =>
           Ref.updateAndGet(loads, (n) => n + 1).pipe(
@@ -1352,7 +1332,6 @@ describe("environment shell synchronization", () => {
       );
       yield* Deferred.await(firstFillStarted);
 
-      // A new session loads a second snapshot that reuses the bare row.
       yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
       yield* SubscriptionRef.changes(shellState).pipe(
         Stream.filter(
@@ -1361,7 +1340,6 @@ describe("environment shell synchronization", () => {
         Stream.runHead,
       );
 
-      // The superseded first fill finishes first, then the second.
       yield* Deferred.succeed(firstLinks, undefined);
       yield* Deferred.succeed(secondLinks, undefined);
       const filled = yield* SubscriptionRef.changes(shellState).pipe(
