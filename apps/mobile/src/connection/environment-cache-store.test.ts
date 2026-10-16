@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import {
   ORCHESTRATION_CACHE_SCHEMA_VERSION,
   ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,

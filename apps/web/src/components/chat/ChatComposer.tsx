@@ -1428,10 +1428,6 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   );
 });
 
-// --------------------------------------------------------------------------
-// Handle exposed to ChatView
-// --------------------------------------------------------------------------
-
 // Local transactions have already painted in ProseMirror, so typing does not render this.
 // `promptVersion` moves on every rewrite from outside the editor (recall, chips, stash, send,
 // reload). It re-renders this memo, and the editor applies the value even when it equals the
@@ -1862,9 +1858,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const activeTasksProgress = shownSyncPhase === null ? props.activeTasksProgress : null;
   const activeTaskSteps = shownSyncPhase === null ? props.activeTaskSteps : null;
   const isEditingQueuedMessage = editingQueuedAttachments !== null;
-  // ------------------------------------------------------------------
-  // Store subscriptions (prompt / images / terminal contexts)
-  // ------------------------------------------------------------------
   // Text belongs to the editor. The frame observes only changes to its presentation.
   const composerDraft = useComposerThreadDraftSelector(
     composerDraftTarget,
@@ -2461,9 +2454,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       : null,
   });
 
-  // ------------------------------------------------------------------
-  // Composer-local state
-  // ------------------------------------------------------------------
   const [composerCursor, updateComposerCursor] = useState(() => {
     const value = isLiteralPendingAnswer ? (activePendingProgress?.customAnswer ?? prompt) : prompt;
     return collapseExpandedComposerCursor(value, value.length, isLiteralPendingAnswer);
@@ -4373,9 +4363,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     replacePromptFromHistory,
   ]);
 
-  // ------------------------------------------------------------------
-  // Callbacks: command key
-  // ------------------------------------------------------------------
   const onComposerCommandKey = (key: string, event: KeyboardEvent, isTaskItem = false) => {
     const submissionIntent = composerSubmissionIntentForKey({
       event,
