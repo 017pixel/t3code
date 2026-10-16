@@ -508,6 +508,11 @@ describe("approvalCommandDisplayText", () => {
     ["bash --rcfile /tmp/init.sh -ic 'git status'", "bash --rcfile /tmp/init.sh -ic 'git status'"],
     ["zsh -lc 'echo $1' name value", "zsh -lc 'echo $1' name value"],
     ["zsh -lc 'pwd'; rm -rf build", "zsh -lc 'pwd'; rm -rf build"],
+    ["/bin/bash>/tmp/bash -c 'pwd'", "/bin/bash>/tmp/bash -c 'pwd'"],
+    [`bash -c 'printf hi'>"/tmp/output file"`, `bash -c 'printf hi'>"/tmp/output file"`],
+    [`/bin/bash -lc "rg -g '*.ts' TODO"`, "rg -g '*.ts' TODO"],
+    [`bash -lc "echo $HOME"`, `bash -lc "echo $HOME"`],
+    ["/bin/bash -lc pwd", "pwd"],
     ["git status", "git status"],
   ])("unwraps only a bare shell wrapper: %s", (input, expected) => {
     expect(approvalCommandDisplayText(input)).toBe(expected);

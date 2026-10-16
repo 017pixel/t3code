@@ -1382,21 +1382,18 @@ export function commandDisplayText(command: string): string {
   return withVisibleControlCharacters(withoutShellWrapper(command));
 }
 
-/**
- * The command an approval asks about. Only a bare `<shell> -c` or `-lc`
- * wrapper is removed, so no shell option that changes what runs is hidden.
- */
+// `<shell> -c` or `-lc` with one literal script: single-quoted, double-quoted
+// without expansions or escapes, or a plain word. Anything else around it,
+// such as options or redirects, keeps the whole invocation visible.
+const BARE_SHELL_WRAPPER =
+  /^(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|dash|ash|ksh|fish) -l?c (?:'([^']*)'|"([^"\\$`]*)"|([^\s'"\\$`;&|<>()]+))$/u;
+
+/** The command an approval asks about, unwrapped only when nothing else can run. */
 export function approvalCommandDisplayText(command: string): string {
   const trimmed = command.trim();
-  const tokens = tokenizeShellCommand(trimmed);
-  const program = tokens?.[0]?.split(/[\\/]/u).at(-1);
-  const bare =
-    tokens?.length === 3 &&
-    program !== undefined &&
-    SHELL_PROGRAMS.has(program) &&
-    /^-l?c$/u.test(tokens[1]!) &&
-    splitFirstShellCommand(trimmed).remainingCommand === null;
-  return withVisibleControlCharacters(bare ? tokens[2]!.trim() || trimmed : trimmed);
+  const match = BARE_SHELL_WRAPPER.exec(trimmed);
+  const script = (match?.[1] ?? match?.[2] ?? match?.[3])?.trim();
+  return withVisibleControlCharacters(script || trimmed);
 }
 
 /** Replaces each control character with its control picture; the length does not change. */
