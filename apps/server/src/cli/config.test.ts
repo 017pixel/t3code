@@ -142,6 +142,38 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  it.effect("does not treat this process's pid as a server that is already running", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-preflight-self-" });
+      const baseDir = path.join(root, "home");
+      const cwd = path.join(root, "project");
+      yield* fs.makeDirectory(path.join(baseDir, "userdata"), { recursive: true });
+      yield* fs.writeFileString(
+        path.join(baseDir, "userdata", "server-runtime.json"),
+        yield* encodeUnknownJson({
+          version: 1,
+          pid: process.pid,
+          port: 3773,
+          origin: "http://127.0.0.1:3773",
+          startedAt: "2099-01-01T00:00:00.000Z",
+        }),
+      );
+      const config = yield* resolveServerConfig(
+        { ...minimalWebFlags(baseDir), cwd: Option.some(cwd) },
+        Option.none(),
+        { rejectRunningServer: true },
+      ).pipe(
+        Effect.provide(
+          Layer.merge(NetService.layer, ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+        ),
+      );
+      expect(config.cwd).toBe(cwd);
+      expect(yield* fs.exists(cwd)).toBe(true);
+    }),
+  );
+
   it.effect("enables a trimmed reusable auth token only for web dev mode", () =>
     Effect.gen(function* () {
       const baseDir = yield* FileSystem.FileSystem.pipe(

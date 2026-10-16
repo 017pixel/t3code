@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - Linux procfs is a direct read. The startup preflight cannot shell out: a container that reused this pid often has no `ps`, and a failed lookup must not decide that this process is another server.
+import * as NodeFS from "node:fs";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -122,6 +124,90 @@ export const isProcessAlive = (pid: number): boolean => {
   } catch (error) {
     return error instanceof Error && "code" in error && error.code === "EPERM";
   }
+};
+
+// Linux reports starttime in USER_HZ ticks. That clock is 100 Hz on every architecture.
+const LINUX_USER_HZ = 100;
+
+const SERVER_PROCESS_NAMES = new Set([
+  "node",
+  "nodejs",
+  "bun",
+  "deno",
+  "t3",
+  "t3.exe",
+  "t3.mjs",
+  "bin.mjs",
+  "bin.ts",
+]);
+
+const processBaseName = (value: string) => {
+  const normalized = value.replaceAll("\\", "/");
+  const slash = normalized.lastIndexOf("/");
+  return (slash < 0 ? normalized : normalized.slice(slash + 1)).toLowerCase();
+};
+
+const readProc = (path: string) => {
+  try {
+    return NodeFS.readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+};
+
+/** Wall-clock start from `/proc/<pid>/stat` field 22. Undefined off Linux or when the record cannot be read. */
+const linuxProcessStartMs = (pid: number, platform: NodeJS.Platform): number | undefined => {
+  if (platform !== "linux") return undefined;
+  const stat = readProc(`/proc/${pid}/stat`);
+  const procStat = readProc("/proc/stat");
+  if (stat === undefined || procStat === undefined) return undefined;
+  const commEnd = stat.lastIndexOf(")");
+  const btime = /^btime\s+(\d+)/m.exec(procStat);
+  if (commEnd < 0 || btime === null) return undefined;
+  const startTicks = Number(
+    stat
+      .slice(commEnd + 2)
+      .trim()
+      .split(/\s+/)[19],
+  );
+  const bootSec = Number(btime[1]);
+  if (!Number.isFinite(startTicks) || !Number.isFinite(bootSec)) return undefined;
+  return bootSec * 1_000 + (startTicks * 1_000) / LINUX_USER_HZ;
+};
+
+/**
+ * True when the command line cannot be a T3 server. An unreadable command line
+ * stays false so an uninspected process is still treated as a possible server.
+ * `node` and `bun` stay possible servers even for an unrecognized script.
+ */
+const linuxCmdlineCannotBeServer = (pid: number, platform: NodeJS.Platform): boolean => {
+  if (platform !== "linux") return false;
+  const cmdline = readProc(`/proc/${pid}/cmdline`);
+  if (cmdline === undefined) return false;
+  const args = cmdline.split("\0").filter((arg) => arg.length > 0);
+  if (args.length === 0) return false;
+  return args.every((arg) => !SERVER_PROCESS_NAMES.has(processBaseName(arg)));
+};
+
+/**
+ * The manual startup preflight blocks only for a different process that could
+ * still be the server that wrote this record. This process is never that
+ * server: after an unclean container restart it is often the same pid. A later
+ * start time means the pid was reused. A command line that is not a server
+ * host is a different program that inherited the pid.
+ */
+export const recordedServerBlocksStartup = (
+  state: Pick<PersistedServerRuntimeState, "pid" | "startedAt">,
+  platform: NodeJS.Platform,
+): boolean => {
+  if (state.pid === process.pid || !isProcessAlive(state.pid)) return false;
+  const startedMs = linuxProcessStartMs(state.pid, platform);
+  const recordedAt = Date.parse(state.startedAt);
+  if (startedMs !== undefined && Number.isFinite(recordedAt) && startedMs > recordedAt + 1_000) {
+    return false;
+  }
+  if (linuxCmdlineCannotBeServer(state.pid, platform)) return false;
+  return true;
 };
 
 export const readPersistedServerRuntimeState = (path: string) =>

@@ -1,4 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - These cases hold real processes so the preflight can read their identity.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -8,6 +10,8 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
+
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ProcessRunner from "./processRunner.ts";
 import * as ServerOwnership from "./serverOwnership.ts";
@@ -298,5 +302,97 @@ describe("serverRuntimeState", () => {
         assert.deepInclude(error.cause, { _tag: "PlatformError" });
       }
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  const holdProcess = (command: string, args: ReadonlyArray<string>) =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        const child = NodeChildProcess.spawn(command, args, { stdio: "ignore" });
+        const pid = child.pid;
+        if (pid === undefined) {
+          throw new Error(`spawn did not return a pid for ${command}`);
+        }
+        return { pid, kill: () => child.kill("SIGKILL") };
+      }),
+      (child) => Effect.sync(() => child.kill()),
+    );
+
+  // A record dated after the process started is what a live server writes.
+  const liveRecord = "2099-01-01T00:00:00.000Z";
+
+  it.effect("does not treat this process as a server that is already running", () =>
+    Effect.gen(function* () {
+      const platform = yield* HostProcess.Platform;
+      assert.isFalse(
+        ServerRuntimeState.recordedServerBlocksStartup(
+          {
+            pid: process.pid,
+            startedAt: liveRecord,
+          },
+          platform,
+        ),
+      );
+      assert.isFalse(
+        ServerRuntimeState.recordedServerBlocksStartup(
+          {
+            pid: 2_147_483_647,
+            startedAt: liveRecord,
+          },
+          platform,
+        ),
+      );
+    }),
+  );
+
+  it.effect("still blocks when another process could be the server that wrote the record", () =>
+    Effect.gen(function* () {
+      const platform = yield* HostProcess.Platform;
+      const child = yield* holdProcess(process.execPath, ["-e", "setInterval(() => {}, 1e9)"]);
+      assert.isTrue(
+        ServerRuntimeState.recordedServerBlocksStartup(
+          {
+            pid: child.pid,
+            startedAt: liveRecord,
+          },
+          platform,
+        ),
+      );
+      assert.isTrue(
+        ServerRuntimeState.recordedServerBlocksStartup(
+          {
+            pid: child.pid,
+            startedAt: "not-a-date",
+          },
+          platform,
+        ),
+      );
+    }),
+  );
+
+  it.effect("ignores a reused pid and a process that is not a server", () =>
+    Effect.gen(function* () {
+      const platform = yield* HostProcess.Platform;
+      if (platform !== "linux") return;
+      const node = yield* holdProcess(process.execPath, ["-e", "setInterval(() => {}, 1e9)"]);
+      const sleep = yield* holdProcess("/bin/sleep", ["30"]);
+      assert.isFalse(
+        ServerRuntimeState.recordedServerBlocksStartup(
+          {
+            pid: node.pid,
+            startedAt: "2020-01-01T00:00:00.000Z",
+          },
+          platform,
+        ),
+      );
+      assert.isFalse(
+        ServerRuntimeState.recordedServerBlocksStartup(
+          {
+            pid: sleep.pid,
+            startedAt: liveRecord,
+          },
+          platform,
+        ),
+      );
+    }),
   );
 });

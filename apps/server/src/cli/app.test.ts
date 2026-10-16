@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- The integration fixture binds the same platform socket or named pipe as the CLI.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
@@ -162,15 +163,30 @@ describe("t3 server command safety", () => {
   it.effect("refuses manual startup over a live server before creating directories", () =>
     withTempDirectory("t3-cli-running-", (root) =>
       Effect.gen(function* () {
+        const server = yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            NodeChildProcess.spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], {
+              stdio: "ignore",
+            }),
+          ),
+          (child) =>
+            Effect.sync(() => {
+              child.kill("SIGKILL");
+            }),
+        );
+        if (server.pid === undefined) {
+          return yield* Effect.die("spawn did not return a pid");
+        }
         const baseDir = NodePath.join(root, "home");
         const stateDir = NodePath.join(baseDir, "userdata");
         const statePath = NodePath.join(stateDir, "server-runtime.json");
+        // Dated after the process started, which is when a live server writes the record.
         const record = yield* encodeRuntimeState({
           version: 1,
-          pid: process.pid,
+          pid: server.pid,
           port: 3773,
           origin: "http://127.0.0.1:3773",
-          startedAt: "2026-10-01T00:00:00.000Z",
+          startedAt: "2099-01-01T00:00:00.000Z",
           serviceManaged: true,
         });
         yield* Effect.promise(() => NodeFSP.mkdir(stateDir, { recursive: true }));
