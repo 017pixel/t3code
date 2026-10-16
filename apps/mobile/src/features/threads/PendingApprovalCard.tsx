@@ -49,7 +49,12 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
       {props.approval.detail ? (
         props.approval.requestKind === "command" ? (
           // Long commands scroll inside the card so its buttons stay on screen.
-          <ScrollView className="max-h-40" nestedScrollEnabled showsVerticalScrollIndicator>
+          <ScrollView
+            className="max-h-40 rounded-xl border border-border bg-subtle"
+            contentContainerClassName="px-3 py-2"
+            nestedScrollEnabled
+            showsVerticalScrollIndicator
+          >
             <Text className="font-mono text-sm leading-normal text-foreground" selectable>
               {approvalCommandDisplayText(props.approval.detail)}
             </Text>
