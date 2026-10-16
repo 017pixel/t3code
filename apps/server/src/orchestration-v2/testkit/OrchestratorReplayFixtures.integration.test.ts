@@ -307,7 +307,6 @@ function runFixtureProviderWithRegisteredHarness(input: {
         harness: AcpRegistryOrchestratorReplayHarness,
       }).pipe(Effect.mapError(normalizeTestError), Effect.scoped);
     case "opencode":
-      // One driver, two runtimes: the transcript's protocol says which one recorded it.
       return readTranscript(input.driver.transcriptFile).pipe(
         Effect.flatMap((transcript) =>
           transcript.protocol === OPENCODE2_HTTP_PROTOCOL
@@ -402,9 +401,6 @@ describe("orchestrator replay fixtures", () => {
     }),
   );
 
-  // A later OpenCode may change an execution start's shape; the client then
-  // reads it as `unreadable.execution.started`. A subagent's turn and a
-  // background follow-up must still start from it.
   it.effect.each(
     (
       [
@@ -438,10 +434,6 @@ describe("orchestrator replay fixtures", () => {
       }),
   );
 
-  // A background subagent opens a WebFetch or Write, then stops without
-  // returning its result. The continuation that drains the stop must leave the
-  // child's tool row and node terminal, whether the call opened before the
-  // root settled or while it was idle.
   const afterRootFixture = ORCHESTRATOR_REPLAY_FIXTURES.find(
     (candidate) => candidate.name === "claude_background_subagent_after_root",
   );
@@ -561,7 +553,6 @@ describe("orchestrator replay fixtures", () => {
                 (item) => item.type === (tool === "WebFetch" ? "web_search" : "file_change"),
               );
               assert.lengthOf(fetches, 1, `the ${tool} reached the child thread`);
-              // The stored tool row and every child node end terminal.
               assert.deepEqual(
                 {
                   openTool: fetches.map((item) => item.status),
@@ -588,7 +579,6 @@ describe("orchestrator replay fixtures", () => {
               transcript.entries.flatMap((entry): ReadonlyArray<ProviderReplayEntry> => {
                 if (entry.type !== "emit_inbound") return [entry];
                 const frame = entry.frame as Record<string, any>;
-                // The subagent's second step becomes a call that never returns.
                 if (
                   frame.type === "assistant" &&
                   frame.message?.content?.[0]?.id === OPEN_TOOL_ID
@@ -615,7 +605,6 @@ describe("orchestrator replay fixtures", () => {
                     },
                   ];
                 }
-                // Drop the Bash background task, the tool result, and the final report.
                 if (
                   (frame.type === "system" &&
                     (frame.subtype === "task_started" || frame.subtype === "task_notification") &&
@@ -658,7 +647,6 @@ describe("orchestrator replay fixtures", () => {
   }
 });
 
-/** The same event with an envelope this build cannot decode, as a newer OpenCode may send. */
 function undecodableEvent(entry: ProviderReplayEntry): ProviderReplayEntry {
   if (entry.type !== "emit_inbound") return entry;
   const frame = entry.frame as { readonly event: Record<string, unknown> };
