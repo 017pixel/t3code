@@ -202,6 +202,25 @@ export function resolveProactiveTurnDiffAction(input: {
   return input.checkpoint.files.length >= 3 || changedLines >= 50 ? "open" : "ignore";
 }
 
+export interface DiffGitScopeShow {
+  readonly threadKey: string | null;
+  readonly diffSurfacePresent: boolean;
+}
+
+export function shouldResetDiffGitScope(
+  previous: DiffGitScopeShow,
+  next: DiffGitScopeShow & {
+    readonly diffOpen: boolean;
+    readonly explicitTurnOpen: boolean;
+  },
+): boolean {
+  if (!next.diffOpen || next.explicitTurnOpen) return false;
+  // Switching threads opens that thread's diff fresh. Coming back to a diff
+  // tab that never left the panel is not an open: diffOpen flips for any tab.
+  if (previous.threadKey !== next.threadKey) return true;
+  return !previous.diffSurfacePresent;
+}
+
 export function codexArtifactTemplatePromptToAppend(
   currentDraft: string,
   template: CodexArtifactTemplate,

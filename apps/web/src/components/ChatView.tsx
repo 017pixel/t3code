@@ -539,6 +539,7 @@ import {
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
   shouldOpenProactiveTurnDiff,
+  shouldResetDiffGitScope,
   shouldReleaseTimelineAnchorForToolActivity,
   shouldRenderPreviewMiniPlayer,
   getStartedThreadModelChangeBlockReason,
@@ -2337,16 +2338,31 @@ export default function ChatView(props: ChatViewProps) {
   );
   const diffOpen = activeRightPanelKind === "diff";
   const explicitDiffOpenRef = useRef<ScopedThreadRef | null>(null);
-  useLayoutEffect(() => {
-    const explicitThreadRef = explicitDiffOpenRef.current;
-    explicitDiffOpenRef.current = null;
-    if (diffOpen && activeThreadRef && explicitThreadRef !== activeThreadRef) {
-      useDiffPanelStore.getState().selectGitScope(activeThreadRef, "branch");
-    }
-  }, [activeThreadRef, diffOpen]);
+  const diffShowRef = useRef<{ threadKey: string | null; diffSurfacePresent: boolean }>({
+    threadKey: null,
+    diffSurfacePresent: false,
+  });
   const rightPanelState = useRightPanelStore((state) =>
     selectThreadRightPanelState(state.byThreadKey, activeThreadRef),
   );
+  const diffSurfacePresent = rightPanelState.surfaces.some((surface) => surface.kind === "diff");
+  useLayoutEffect(() => {
+    const explicitThreadRef = explicitDiffOpenRef.current;
+    explicitDiffOpenRef.current = null;
+    const previous = diffShowRef.current;
+    const next = { threadKey: activeThreadKey, diffSurfacePresent };
+    diffShowRef.current = next;
+    if (
+      activeThreadRef &&
+      shouldResetDiffGitScope(previous, {
+        ...next,
+        diffOpen,
+        explicitTurnOpen: explicitThreadRef === activeThreadRef,
+      })
+    ) {
+      useDiffPanelStore.getState().selectGitScope(activeThreadRef, "branch");
+    }
+  }, [activeThreadKey, activeThreadRef, diffOpen, diffSurfacePresent]);
   const activeRightPanelSurface = useRightPanelStore((state) =>
     selectActiveRightPanelSurface(state.byThreadKey, activeThreadRef),
   );

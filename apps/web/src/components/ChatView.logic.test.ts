@@ -27,11 +27,13 @@ import {
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { Atom, AsyncResult } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
 
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { selectThreadDiffPanelSelection, useDiffPanelStore } from "../diffPanelStore";
 import type { Thread, TurnDiffSummary } from "../types";
 import { makeThreadFixture, makeThreadProjectionFixture } from "../test-fixtures";
 import {
@@ -61,6 +63,7 @@ import {
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
   shouldOpenProactiveTurnDiff,
+  shouldResetDiffGitScope,
   shouldRenderPreviewMiniPlayer,
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
@@ -1802,6 +1805,136 @@ describe("proactive completed diff guard", () => {
         activeSurfaceKind: "diff",
       }),
     ).toBe("ignore");
+  });
+});
+
+describe("diff scope across right-panel tabs", () => {
+  const threadRef = scopeThreadRef(EnvironmentId.make("environment-1"), ThreadId.make("thread-1"));
+  const otherThreadRef = scopeThreadRef(
+    EnvironmentId.make("environment-1"),
+    ThreadId.make("thread-2"),
+  );
+  const threadKey = `${threadRef.environmentId}:${threadRef.threadId}`;
+
+  function showDiff(input: {
+    readonly previousThreadKey: string | null;
+    readonly previousDiffSurfacePresent: boolean;
+    readonly threadKey: string | null;
+    readonly diffOpen: boolean;
+    readonly diffSurfacePresent: boolean;
+    readonly explicitTurnOpen?: boolean;
+  }) {
+    return shouldResetDiffGitScope(
+      {
+        threadKey: input.previousThreadKey,
+        diffSurfacePresent: input.previousDiffSurfacePresent,
+      },
+      {
+        threadKey: input.threadKey,
+        diffSurfacePresent: input.diffSurfacePresent,
+        diffOpen: input.diffOpen,
+        explicitTurnOpen: input.explicitTurnOpen ?? false,
+      },
+    );
+  }
+
+  beforeEach(() => {
+    useDiffPanelStore.setState({ byThreadKey: {}, branchBaseRefByThreadKey: {} });
+  });
+
+  it("keeps Uncommitted when the same thread selects the diff tab again", () => {
+    useDiffPanelStore.getState().selectBranchBaseRef(threadRef, "origin/release");
+    useDiffPanelStore.getState().selectGitScope(threadRef, "unstaged");
+    useDiffPanelStore.getState().selectBranchBaseRef(otherThreadRef, "origin/main");
+
+    const reset = showDiff({
+      previousThreadKey: threadKey,
+      previousDiffSurfacePresent: true,
+      threadKey,
+      diffOpen: true,
+      diffSurfacePresent: true,
+    });
+
+    expect(reset).toBe(false);
+    const { byThreadKey } = useDiffPanelStore.getState();
+    expect(selectThreadDiffPanelSelection(byThreadKey, threadRef)).toEqual({ kind: "unstaged" });
+    expect(selectThreadDiffPanelSelection(byThreadKey, otherThreadRef)).toEqual({
+      kind: "branch",
+      baseRef: "origin/main",
+    });
+  });
+
+  it("keeps a chosen turn when the diff tab was already in the panel", () => {
+    const turnId = RunId.make("turn-1");
+    useDiffPanelStore.getState().selectTurn(threadRef, turnId, "src/app.ts");
+
+    expect(
+      showDiff({
+        previousThreadKey: threadKey,
+        previousDiffSurfacePresent: true,
+        threadKey,
+        diffOpen: true,
+        diffSurfacePresent: true,
+      }),
+    ).toBe(false);
+    expect(
+      selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, threadRef),
+    ).toEqual({ kind: "turn", turnId, filePath: "src/app.ts", revealRequestId: 1 });
+  });
+
+  it("selects Changes when a diff surface is added, and keeps the saved base", () => {
+    useDiffPanelStore.getState().selectBranchBaseRef(threadRef, "origin/release");
+    useDiffPanelStore.getState().selectGitScope(threadRef, "unstaged");
+
+    const reset = showDiff({
+      previousThreadKey: threadKey,
+      previousDiffSurfacePresent: false,
+      threadKey,
+      diffOpen: true,
+      diffSurfacePresent: true,
+    });
+
+    expect(reset).toBe(true);
+    useDiffPanelStore.getState().selectGitScope(threadRef, "branch");
+    expect(
+      selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, threadRef),
+    ).toEqual({ kind: "branch", baseRef: "origin/release" });
+  });
+
+  it("selects Changes when the open diff belongs to a different thread", () => {
+    useDiffPanelStore.getState().selectGitScope(threadRef, "unstaged");
+
+    expect(
+      showDiff({
+        previousThreadKey: "environment-1:thread-other",
+        previousDiffSurfacePresent: true,
+        threadKey,
+        diffOpen: true,
+        diffSurfacePresent: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not reset while another tab is active or a timeline turn is opening", () => {
+    expect(
+      showDiff({
+        previousThreadKey: threadKey,
+        previousDiffSurfacePresent: true,
+        threadKey,
+        diffOpen: false,
+        diffSurfacePresent: true,
+      }),
+    ).toBe(false);
+    expect(
+      showDiff({
+        previousThreadKey: threadKey,
+        previousDiffSurfacePresent: false,
+        threadKey,
+        diffOpen: true,
+        diffSurfacePresent: true,
+        explicitTurnOpen: true,
+      }),
+    ).toBe(false);
   });
 });
 
