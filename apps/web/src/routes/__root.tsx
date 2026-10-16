@@ -54,7 +54,6 @@ import {
 import { isElectron } from "../env";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
-import { NightlyMobileBetaNotice } from "../components/NightlyMobileBeta";
 import { cn } from "../lib/utils";
 import { applyAppearanceFontVariables } from "~/appearanceFonts";
 import { applyAppearanceContrast } from "~/appearanceContrast";
