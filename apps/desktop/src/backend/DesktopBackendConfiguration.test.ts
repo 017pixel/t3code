@@ -41,6 +41,7 @@ const isDesktopBackendObservabilitySettingsReadError = Schema.is(
 const layerShellEnvironment = (prepared = true) =>
   Layer.succeed(DesktopShellEnvironment.DesktopShellEnvironment, {
     installIntoProcess: Effect.succeed(prepared),
+    secretStorageReady: Effect.void,
   });
 
 const layerBackendConfiguration = (prepared = true) =>
