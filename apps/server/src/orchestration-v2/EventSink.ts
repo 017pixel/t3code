@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
+  type ProviderTurnId,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
@@ -396,12 +397,33 @@ const layerBase: Layer.Layer<
           status === "failed" ||
           status === "cancelled" ||
           status === "interrupted";
-        const messageIds = new Map<ThreadId, Array<MessageId>>();
+        // Only the rows the settlement names are read, so a long thread's
+        // history stays out of the write transaction.
+        const ids = new Map<
+          ThreadId,
+          {
+            readonly messageIds: Array<MessageId>;
+            readonly nodeIds: Array<NodeId>;
+            readonly subagentIds: Array<NodeId>;
+            readonly providerTurnIds: Array<ProviderTurnId>;
+          }
+        >();
+        const idsFor = (threadId: ThreadId) => {
+          const known = ids.get(threadId);
+          if (known !== undefined) return known;
+          const created = { messageIds: [], nodeIds: [], subagentIds: [], providerTurnIds: [] };
+          ids.set(threadId, created);
+          return created;
+        };
         for (const event of events) {
-          if (event.type !== "message.updated") continue;
-          const ids = messageIds.get(event.payload.threadId) ?? [];
-          ids.push(event.payload.id);
-          messageIds.set(event.payload.threadId, ids);
+          if (event.type === "message.updated")
+            idsFor(event.payload.threadId).messageIds.push(event.payload.id);
+          else if (event.type === "node.updated")
+            idsFor(event.payload.threadId).nodeIds.push(event.payload.id);
+          else if (event.type === "subagent.updated")
+            idsFor(event.payload.threadId).subagentIds.push(event.payload.id);
+          else if (event.type === "provider-turn.updated")
+            idsFor(event.threadId).providerTurnIds.push(event.payload.id);
         }
         const threads = new Map<
           ThreadId,
@@ -412,9 +434,11 @@ const layerBase: Layer.Layer<
           Effect.gen(function* () {
             if (threads.has(threadId)) return threads.get(threadId);
             const read = yield* projectionStore
-              .getThreadRecords(threadId, ["nodes", "subagents", "providerTurns", "messages"], {
-                messageIds: messageIds.get(threadId) ?? [],
-              })
+              .getThreadRecords(
+                threadId,
+                ["nodes", "subagents", "providerTurns", "messages"],
+                idsFor(threadId),
+              )
               .pipe(
                 Effect.catchTags({
                   ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined),
