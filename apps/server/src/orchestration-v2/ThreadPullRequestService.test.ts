@@ -176,7 +176,6 @@ describe("ThreadPullRequestServiceV2 reads", () => {
         const other = threadShell("other-thread");
         const activation = yield* Deferred.make<void>();
         const events = yield* PubSub.unbounded<OrchestrationV2DomainEvent>();
-        // Each read: the thread id for a one-thread read, or the full read's options.
         const reads = yield* Queue.unbounded<
           ThreadId | { readonly location?: string; readonly unsettledOnly?: boolean }
         >();
@@ -285,7 +284,6 @@ describe("ThreadPullRequestServiceV2 reads", () => {
                 Effect.as({
                   schemaVersion: 2,
                   snapshotSequence: 1,
-                  // The fake honors unsettledOnly like the store does.
                   threads: options?.unsettledOnly ? [] : [settled],
                   archivedThreads: [],
                 }),
@@ -319,7 +317,6 @@ describe("ThreadPullRequestServiceV2 reads", () => {
             unsettledOnly: false,
           });
           yield* service.drain;
-          // Its project is gone, so backfill finishes it on the first pass.
           yield* TestClock.adjust("1 minute");
           expect(yield* Queue.take(reads)).toEqual({
             location: "active",
