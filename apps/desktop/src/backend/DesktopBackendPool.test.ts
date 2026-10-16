@@ -87,7 +87,7 @@ function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.De
         } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]),
         DesktopAppSettings.layerTest(),
         Layer.succeed(DesktopShellEnvironment.DesktopShellEnvironment, {
-          installIntoProcess: Effect.void,
+          installIntoProcess: Effect.succeed(true),
           secretStorageReady: Effect.void,
         }),
         DesktopWslEnvironment.layerTest(),
