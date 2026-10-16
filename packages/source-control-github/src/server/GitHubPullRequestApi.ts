@@ -2068,8 +2068,12 @@ export const make = Effect.gen(function* () {
                 covered: total !== undefined && (total === 0 || result.search.issueCount > 0),
               };
             }),
-            // A repository GitHub cannot find is not one search can be trusted about.
-            Effect.catchIf(isNotFoundOnly, () => Effect.succeed({ repository, covered: false })),
+            // A repository GitHub cannot find or will not show (a SAML-gated org, a disabled
+            // repository) is not one search can be trusted about. Only its own alias says so, so
+            // the rest of the batch still answers.
+            Effect.catchIf(isGraphQlClientError, () =>
+              Effect.succeed({ repository, covered: false }),
+            ),
           );
         },
         { concurrency: "unbounded" },

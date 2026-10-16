@@ -1790,7 +1790,8 @@ layer("GitHubPullRequestApi.layer", (it) => {
   it.effect("asks whether search covers several repositories in one request", () =>
     Effect.gen(function* () {
       // `acme/web` has pull requests search finds, `acme/empty` has none, `acme/skipped` has some
-      // search does not find, and `acme/gone` does not exist.
+      // search does not find, `acme/gone` does not exist, and `acme/gated` is refused. Neither
+      // refusal takes the rest of the batch down with it.
       const answers: Record<string, unknown> = {
         "acme/web": { search: { issueCount: 3 }, repository: { pullRequests: { totalCount: 4 } } },
         "acme/empty": {
@@ -1802,6 +1803,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
           repository: { pullRequests: { totalCount: 7 } },
         },
         "acme/gone": { search: { issueCount: 0 }, repository: null },
+        "acme/gated": { search: { issueCount: 0 }, repository: null },
       };
       mockedExecute.mockImplementation((call) => {
         const variables = call.kind === "graphql" ? (call.variables ?? {}) : {};
@@ -1817,7 +1819,12 @@ layer("GitHubPullRequestApi.layer", (it) => {
           data[`${prefix}search`] = answer.search;
           data[`${prefix}repository`] = answer.repository;
           if (answer.repository === null) {
-            errors.push({ type: "NOT_FOUND", path: [`${prefix}repository`], message: "gone" });
+            // A SAML-gated organisation refuses its repository rather than hiding it.
+            const type =
+              owner === "acme" && variables[`${prefix}name`] === "gated"
+                ? "FORBIDDEN"
+                : "NOT_FOUND";
+            errors.push({ type, path: [`${prefix}repository`], message: "refused" });
           }
         }
         return Effect.succeed(output(encodeJson({ data, errors })));
@@ -1836,6 +1843,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
         { repository: "acme/empty", covered: true },
         { repository: "acme/skipped", covered: false },
         { repository: "acme/gone", covered: false },
+        { repository: "acme/gated", covered: false },
       ]);
       expect(varsAt(0)).toMatchObject({ _0_q: "is:pr repo:acme/web" });
     }),
