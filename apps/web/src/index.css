@@ -341,7 +341,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
       from var(--warning) srgb-linear
         clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1)
         clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1)
-        clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1)
+        clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1) / 1
     );
   }
 }
