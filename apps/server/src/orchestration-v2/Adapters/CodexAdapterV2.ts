@@ -1795,6 +1795,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
+  // Luna Reserve: like the Codex TUI, re-read usage after a usage-limit stop
+  // (tui/src/chatwidget/turn_runtime.rs:460-463) and while Reserve is active,
+  // so the next turn enters or leaves it. Ordinary sessions never pay for the read.
+  // An instance is one Codex home and so one account, and a weekly limit can
+  // outlast many sessions, so the state lives here and survives an idle release.
+  const lunaReserve = yield* Ref.make<CodexLunaReserve | null>(null);
+  const lunaReserveReadArmed = yield* Ref.make(false);
+  // Sessions start turns concurrently; one read at a time keeps a stale
+  // response from overwriting a newer one.
+  const lunaReservePermit = yield* Semaphore.make(1);
+  // A slow usage endpoint would otherwise cost every turn start the full timeout.
+  const lunaReserveReadPausedUntil = yield* Ref.make(0);
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
@@ -1912,16 +1924,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const rateLimitSnapshot = yield* Ref.make<CodexRateLimitSnapshot | undefined>(undefined);
-        // Luna Reserve: like the Codex TUI, re-read usage after a usage-limit stop
-        // (tui/src/chatwidget/turn_runtime.rs:460-463) and while Reserve is active,
-        // so the next turn enters or leaves it. Ordinary sessions never pay for the read.
-        const lunaReserve = yield* Ref.make<CodexLunaReserve | null>(null);
-        const lunaReserveReadArmed = yield* Ref.make(false);
-        // Threads on this app-server start turns concurrently; one read at a
-        // time keeps a stale response from overwriting a newer one.
-        const lunaReservePermit = yield* Semaphore.make(1);
-        // A slow usage endpoint would otherwise cost every turn start the full timeout.
-        const lunaReserveReadPausedUntil = yield* Ref.make(0);
+        // The read goes through this session's app-server; the state it updates is the adapter's.
         const refreshLunaReserve = Effect.gen(function* () {
           if (!(yield* Ref.get(lunaReserveReadArmed)) && (yield* Ref.get(lunaReserve)) === null) {
             return;

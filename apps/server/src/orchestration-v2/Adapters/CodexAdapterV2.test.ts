@@ -1976,9 +1976,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const serverConfig = yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie);
       const continuationRequests: Array<ProviderContinuationRequests.ProviderContinuationRequest> =
         [];
+      // Later sessions on this adapter replay these in order, then `transcript` again.
+      const laterSessionTranscripts: Array<CodexReplay.CodexAppServerReplayTranscript> = [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
-        open: (openInput) =>
-          Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+        open: (openInput) => {
+          const sessionTranscript = laterSessionTranscripts.shift() ?? transcript;
+          return Layer.build(CodexReplay.layerReplay(sessionTranscript)).pipe(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -1990,7 +1993,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             Effect.flatMap((context) =>
               Effect.service(CodexClient.CodexAppServerClient).pipe(
                 Effect.map((client) =>
-                  withCodexReplayChildMetadata(client, transcript, readChildMetadata),
+                  withCodexReplayChildMetadata(client, sessionTranscript, readChildMetadata),
                 ),
                 Effect.map(
                   (client) =>
@@ -2005,7 +2008,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 Effect.provide(context),
               ),
             ),
-          ),
+          );
+        },
       };
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
@@ -2083,6 +2087,21 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         subagentUpdates,
         hasPendingBackgroundWork,
         firstTerminal: Deferred.await(firstTerminal),
+        /** Opens another session on the same adapter, as after an idle release. */
+        openLaterSession: (
+          laterTranscript: CodexReplay.CodexAppServerReplayTranscript,
+          laterThreadId: ThreadId,
+        ) =>
+          Effect.sync(() => laterSessionTranscripts.push(laterTranscript)).pipe(
+            Effect.andThen(
+              adapter.openSession({
+                threadId: laterThreadId,
+                providerSessionId: ProviderSessionId.make(`provider-session-${laterThreadId}`),
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+                runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+              }),
+            ),
+          ),
       };
     });
 
@@ -8675,6 +8694,92 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.turnInput({ ordinal: 4, text: "after-backoff-turn" }),
         );
         yield* harness.nextTerminal;
+        assert.equal(harness.usageReads(), 2);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("keeps Luna Reserve for a session opened after Reserve became active", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const firstThread = "native-codex-luna-before-release";
+        const laterThread = "native-codex-luna-after-release";
+        const harness = yield* openLunaReplay(
+          makeCodexReplayTranscript({
+            scenario: "codex-luna-reserve-before-release",
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: firstThread,
+                nativeTurnId: "limit-turn",
+                prompt: "Use up the ordinary quota.",
+              }),
+              usageLimitedTurnCompleted(firstThread, "limit-turn"),
+              ...lunaUsageRead(4, "reserve"),
+              ...lunaTurn({
+                id: 5,
+                nativeThreadId: firstThread,
+                nativeTurnId: "reserve-turn",
+                text: "Reserve turn",
+                model: "gpt-reserve",
+              }),
+            ],
+          }),
+        );
+        yield* harness.runtime.startTurn(
+          harness.turnInput({ ordinal: 1, text: "Use up the ordinary quota." }),
+        );
+        yield* harness.nextTerminal;
+        yield* harness.runtime.startTurn(harness.turnInput({ ordinal: 2, text: "Reserve turn" }));
+        yield* harness.nextTerminal;
+        assert.equal(harness.usageReads(), 1);
+
+        // A fresh app-server, as after an idle release, still reads before its first turn.
+        const laterThreadId = ThreadId.make("thread-luna-after-release");
+        const later = yield* harness.openLaterSession(
+          makeCodexReplayTranscript({
+            scenario: "codex-luna-reserve-after-release",
+            entries: [
+              // initialize, initialized, and thread/start.
+              ...codexReplayPreamble({
+                nativeThreadId: laterThread,
+                nativeTurnId: "",
+                prompt: "",
+              }).slice(0, 5),
+              ...lunaUsageRead(3, "reserve"),
+              ...lunaTurn({
+                id: 4,
+                nativeThreadId: laterThread,
+                nativeTurnId: "later-reserve-turn",
+                text: "Later turn",
+                model: "gpt-reserve",
+              }),
+            ],
+          }),
+          laterThreadId,
+        );
+        const laterTerminal = yield* later.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+          Effect.forkScoped,
+        );
+        const laterProviderThread = yield* later.ensureThread({
+          threadId: laterThreadId,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        });
+        yield* later.startTurn(
+          harness.turnInput({
+            threadId: laterThreadId,
+            providerThread: laterProviderThread,
+            ordinal: 1,
+            text: "Later turn",
+          }),
+        );
+        yield* Fiber.join(laterTerminal);
         assert.equal(harness.usageReads(), 2);
       }).pipe(
         Effect.provide(
