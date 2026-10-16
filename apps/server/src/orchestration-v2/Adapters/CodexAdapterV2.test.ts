@@ -520,6 +520,60 @@ describe("CodexAdapterV2 runtime policy", () => {
     }),
   );
 
+  // With collaborationMode present Codex takes its model from there
+  // (core/src/session/step_settings.rs:265 at rust-v0.156.1).
+  it.effect("sends the Luna Reserve wire model in collaborationMode with the T3 MCP server", () =>
+    Effect.gen(function* () {
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "native-luna-reserve-t3-mcp",
+        codexInput: [{ type: "text", text: "keep going" }],
+        runtimePolicy: { runtimeMode: "full-access", interactionMode: "default", cwd: null },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6-luna" },
+        wireModel: "gpt-reserve",
+        hasT3Mcp: true,
+      });
+
+      assert.equal(params.model, "gpt-reserve");
+      assert.equal(params.collaborationMode?.settings.model, "gpt-reserve");
+    }),
+  );
+
+  describe("Luna Reserve usage reads", () => {
+    const snapshot = { limitId: "codex", primary: { usedPercent: 100 } };
+    const banner = { banner_type: "luna_reserve", presentation: "dismissible" };
+
+    it("leaves the state unchanged without a banner while ordinary usage is blocked", () => {
+      assert.isUndefined(
+        CodexAdapterV2.codexLunaReserveFromRead({
+          ordinaryUsageAllowed: false,
+          rateLimits: snapshot,
+          rateLimitUpsell: null,
+        }),
+      );
+    });
+
+    it("does not end Reserve when the account match withholds ordinaryUsageAllowed", () => {
+      // account_processor.rs:1184-1201 drops both fields for a mismatched account.
+      assert.isUndefined(
+        CodexAdapterV2.codexLunaReserveFromRead({
+          ordinaryUsageAllowed: null,
+          rateLimits: { ...snapshot, primary: { usedPercent: 0 } },
+          rateLimitUpsell: null,
+        }),
+      );
+    });
+
+    it("applies Reserve only to the model its banner blocks", () => {
+      const reserve = CodexAdapterV2.codexLunaReserveFromRead({
+        ordinaryUsageAllowed: false,
+        rateLimits: snapshot,
+        rateLimitUpsell: { ...banner, blocked_model_slug: "gpt-6-sol" },
+      });
+      assert.deepEqual(reserve, { normalModel: "gpt-6-luna", blockedModel: "gpt-6-sol" });
+      assert.isFalse(CodexAdapterV2.codexLunaReserveApplies(reserve ?? null, "gpt-6-luna"));
+    });
+  });
+
   it.effect("omits default-mode collaboration settings without the T3 MCP server", () =>
     Effect.gen(function* () {
       const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
@@ -7970,7 +8024,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             frame: {
               id: 6,
               method: "account/rateLimits/read",
-              params: { supportsLunaReserve: true },
+              params: { supportsLunaReserve: true, excludeResetCreditDetails: true },
             },
           },
           {
@@ -8112,7 +8166,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               frame: {
                 id: 4,
                 method: "account/rateLimits/read",
-                params: { supportsLunaReserve: true },
+                params: { supportsLunaReserve: true, excludeResetCreditDetails: true },
               },
             },
             {
@@ -8304,7 +8358,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     {
       type: "expect_outbound",
       label: `account/rateLimits/read/${id}`,
-      frame: { id, method: "account/rateLimits/read", params: { supportsLunaReserve: true } },
+      frame: {
+        id,
+        method: "account/rateLimits/read",
+        params: { supportsLunaReserve: true, excludeResetCreditDetails: true },
+      },
     },
     ...(result === "unanswered"
       ? []

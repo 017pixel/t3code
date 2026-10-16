@@ -703,7 +703,7 @@ interface CodexLunaReserve {
  * `luna_reserve` banner starts it (lines 143-154). Reserve borrows the normal
  * Luna model's presentation (tui/src/chatwidget/luna_reserve_model.rs:14-21).
  */
-function codexLunaReserveFromRead(
+export function codexLunaReserveFromRead(
   response: CodexSchema.V2GetAccountRateLimitsResponse,
 ): CodexLunaReserve | null | undefined {
   const credits = response.rateLimits.credits;
@@ -731,7 +731,7 @@ function codexLunaReserveFromRead(
 }
 
 /** Reserve replaces only the model it stands in for, so the visible Luna label stays true. */
-function codexLunaReserveApplies(reserve: CodexLunaReserve | null, selectedModel: string) {
+export function codexLunaReserveApplies(reserve: CodexLunaReserve | null, selectedModel: string) {
   return (
     reserve !== null &&
     reserve.normalModel === selectedModel &&
@@ -1934,7 +1934,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             return;
           }
           const response = yield* client
-            .request("account/rateLimits/read", { supportsLunaReserve: true })
+            .request("account/rateLimits/read", {
+              supportsLunaReserve: true,
+              // T3 never shows reset-credit details; skipping them saves a backend call.
+              excludeResetCreditDetails: true,
+            })
             .pipe(Effect.timeout(CODEX_LUNA_RESERVE_READ_TIMEOUT), Effect.result);
           if (Result.isFailure(response)) {
             yield* Ref.set(

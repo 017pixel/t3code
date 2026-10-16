@@ -10,7 +10,8 @@ import type { OrchestratorFixtureInput } from "../shared.ts";
  *   app-server/src/bespoke_event_handling.rs:1030-1052, 1501-1520, 1572-1624,
  *   message text protocol/src/error.rs:725-728, code error.rs:449-451.
  * - account/rateLimits/read: request per tui/src/app/background_requests.rs:788-795
- *   and app-server-protocol/src/protocol/v2/account.rs:311-324; response per
+ *   and app-server-protocol/src/protocol/v2/account.rs:311-324, plus
+ *   `excludeResetCreditDetails` (skips account_processor.rs:1139-1145); response per
  *   app-server/src/request_processors/account_processor.rs:1197-1211 with the
  *   Reserve bucket from backend-client/src/client/rate_limit_resets.rs:45-57 and
  *   the banner from tui/src/app/tests/luna_reserve_recovery_tests.rs:10-25.
