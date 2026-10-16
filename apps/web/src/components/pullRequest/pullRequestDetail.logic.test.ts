@@ -10,6 +10,7 @@ import {
   type PullRequestDetailView,
   type PullRequestRef,
   type PullRequestReviewThread,
+  type PullRequestState,
   type RepositoryIdentity,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
@@ -19,6 +20,7 @@ import { buildMessageContext, reviewCommentContextReference } from "~/lib/compos
 
 import {
   buildAddSelectionToAgentHandoff,
+  buildAskAboutGuideStopHandoff,
   classifyPullRequestChecks,
   groupPullRequestChecks,
   describePullRequestChecks,
@@ -27,6 +29,7 @@ import {
   buildExplainPullRequestHandoff,
   buildPullRequestReferenceContext,
   buildFixFindingHandoff,
+  canDeletePullRequestBranch,
   buildFixFindingsHandoff,
   groupPullRequestTimelineConversations,
   handoffPrompt,
@@ -1222,6 +1225,54 @@ describe("asking about a change rather than working on it", () => {
   });
 });
 
+describe("buildAskAboutGuideStopHandoff", () => {
+  const base = {
+    number: 42,
+    title: "Add search",
+    url: "https://github.com/acme/web/pull/42",
+    headBranch: "feat/search",
+    baseBranch: "main",
+    state: "open" as const,
+    isDraft: false,
+  };
+  const stop = {
+    index: 1,
+    title: "The index is built on write",
+    summary: "Writes now update the index.",
+    attention: "A tradeoff: writes get slower.",
+    excerpts: [
+      { path: "src/index.ts", side: "new" as const, start: 10, end: 20 },
+      { path: "src/old.ts", side: "old" as const, start: 3, end: 5 },
+    ],
+  };
+
+  it("carries the stop beside the pull request and asks only for an answer", () => {
+    const handoff = buildAskAboutGuideStopHandoff({ ...base, stop, question: "Why on write?" });
+    expect(handoff.prompt).toBe("Why on write?");
+    expect(handoff.reviewComments.map((entry) => entry.filePath)).toEqual([
+      "PR #42",
+      "Guide stop 2",
+    ]);
+    expect(handoff.reviewComments[0]?.text).toContain("Do not change any code");
+    const chip = handoff.reviewComments[1]?.text ?? "";
+    expect(chip).toContain("Writes now update the index.");
+    expect(chip).toContain("A tradeoff: writes get slower.");
+    expect(chip).toContain("- src/index.ts lines 10-20\n");
+    expect(chip).toContain("- src/old.ts lines 3-5 (removed; numbered as in the base branch)");
+  });
+
+  it("leaves the question to the reader when none was suggested", () => {
+    const handoff = buildAskAboutGuideStopHandoff({
+      ...base,
+      stop: { ...stop, attention: null, excerpts: [] },
+      question: "",
+    });
+    expect(handoff.prompt).toBe("");
+    expect(handoff.reviewComments[1]?.text).not.toContain("judge");
+    expect(handoff.reviewComments[1]?.text).not.toContain("lines it showed");
+  });
+});
+
 describe("a second ask into the same composer", () => {
   const chip = (id: string): ReviewCommentContext => ({
     id,
@@ -1605,9 +1656,37 @@ describe("which actions need the host read again after they run", () => {
       "disable-auto-merge",
       "merge",
       "revert",
+      "delete-branch",
     ] as const) {
       expect(pullRequestActionNeedsHostRefresh(action)).toBe(false);
     }
+  });
+});
+
+describe("when the source branch can be deleted", () => {
+  const branchDetail = (
+    state: PullRequestState,
+    overrides: { deleteBranch?: boolean; allowed?: boolean } = {},
+  ) => ({
+    state,
+    capabilities: {
+      deleteBranch: overrides.deleteBranch ?? true,
+      actions: ["delete-branch" as const],
+    },
+    viewerPermissions: {
+      actions: overrides.allowed === false ? [] : (["delete-branch"] as const),
+    },
+  });
+
+  it("offers it only after the pull request is merged or closed", () => {
+    expect(canDeletePullRequestBranch(branchDetail("merged"))).toBe(true);
+    expect(canDeletePullRequestBranch(branchDetail("closed"))).toBe(true);
+    expect(canDeletePullRequestBranch(branchDetail("open"))).toBe(false);
+  });
+
+  it("needs both the host capability and the viewer's permission", () => {
+    expect(canDeletePullRequestBranch(branchDetail("merged", { deleteBranch: false }))).toBe(false);
+    expect(canDeletePullRequestBranch(branchDetail("merged", { allowed: false }))).toBe(false);
   });
 });
 
