@@ -54,6 +54,16 @@ it.layer(NetService.layer)("NetService", (it) => {
       }),
     );
 
+    it.effect("canListenOnHost reports a free port available on ::1, even without IPv6", () =>
+      Effect.gen(function* () {
+        const net = yield* NetService.NetService;
+        const port = yield* net.reserveLoopbackPort();
+
+        const available = yield* net.canListenOnHost(port, "::1");
+        assert.equal(available, true);
+      }),
+    );
+
     it.effect("isPortAvailableOnLoopback reports false for an occupied port", () =>
       Effect.acquireUseRelease(
         openServer("127.0.0.1"),
