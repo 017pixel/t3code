@@ -128,7 +128,6 @@ function DiffWorkerReady({ children }: { children?: ReactNode }) {
     const finish = () => {
       if (mounted) setReadyPool(workerPool);
     };
-    // Failed pools use Pierre's existing main-thread highlighter.
     void workerPool.initialize().then(finish, finish);
     return () => {
       mounted = false;
