@@ -148,8 +148,6 @@ const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
 
 export const stopAllPoolInstances = Effect.fn("desktop.app.stopAllPoolInstances")(
   function* (): Effect.fn.Return<void, never, DesktopBackendPool.DesktopBackendPool> {
-    // Stop every backend in the pool with a timeout to guarantee the quit
-    // path makes progress even if a backend hangs during teardown.
     const pool = yield* DesktopBackendPool.DesktopBackendPool;
     const instances = yield* pool.list;
     yield* Effect.forEach(
@@ -177,8 +175,6 @@ const bootstrap = Effect.gen(function* () {
   yield* logBootstrapInfo("bootstrap start");
 
   const settings = yield* desktopSettings.get;
-  // The renderer is served from the bundled client (or Vite in development)
-  // rather than through the local backend, so the window can open without one.
   const electronProtocol = yield* ElectronProtocol.ElectronProtocol;
   yield* electronProtocol.registerDesktopProtocol({
     scheme: ElectronProtocol.getDesktopScheme(environment.isDevelopment),
@@ -281,10 +277,6 @@ const bootstrap = Effect.gen(function* () {
       Effect.tap(() => logBootstrapInfo("desktop app control socket ready")),
       Effect.catch((error) => logStartupError("desktop app control socket unavailable", { error })),
     );
-    // Bring up the WSL backend if the user previously enabled it. The
-    // primary is already starting; reconcile fires off the WSL register
-    // in parallel rather than blocking primary readiness on a possibly
-    // slow first wsl.exe spawn.
     yield* Effect.forkScoped(wslBackend.reconcile);
   }
 }).pipe(Effect.withSpan("desktop.bootstrap"));
