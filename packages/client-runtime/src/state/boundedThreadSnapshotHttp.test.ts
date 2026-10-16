@@ -159,7 +159,6 @@ describe("boundedThreadSnapshotLoader", () => {
     const fetchFn = ((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes(`/api/orchestration/threads/${THREAD_ID}/bounded`)) {
-        // Generic HTML/route 404: not a structured thread_not_found payload.
         return Promise.resolve(
           new Response("Not Found", {
             status: 404,

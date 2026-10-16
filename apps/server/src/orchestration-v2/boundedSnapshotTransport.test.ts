@@ -280,7 +280,6 @@ const seed = Effect.gen(function* () {
     ...forkCheckpoint(at),
     threadCreated(LONG, at),
     runCreated(LONG, longRun, at),
-    // The request sits far outside the recent window; its result is inside it.
     itemUpdated(LONG, longRun, "request", 1, at, "run_interrupt_request"),
     ...Array.from({ length: 90 }, (_, index) =>
       itemUpdated(LONG, longRun, `tool-${index}`, index + 2, at),
@@ -290,8 +289,6 @@ const seed = Effect.gen(function* () {
   for (const event of events) yield* projections.apply(event);
 });
 
-// Bounded subscriptions without afterSequence never read the event store, and
-// thread routes never touch projects.
 const TestLayer = Layer.mergeAll(
   management,
   Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
@@ -337,7 +334,6 @@ const firstSnapshot = (input: Parameters<typeof subscribeOrchestrationV2Thread>[
     Effect.flatMap((stream) => Stream.runHead(stream)),
     Effect.map((head) => {
       if (head._tag !== "Some" || head.value.kind !== "snapshot") throw new Error("No snapshot");
-      // Through the wire codec, as a client receives it.
       const decoded = decodeStreamItem(JSON.parse(JSON.stringify(encodeStreamItem(head.value))));
       if (decoded.kind !== "snapshot") throw new Error("No snapshot");
       return { raw: head.value, decoded };
@@ -409,7 +405,6 @@ it.layer(TestLayer)("compact bounded snapshot transport", (it) => {
         assert.strictEqual(compactResponse.status, 200);
         const compactBody = await compactResponse.text();
 
-        // Requests without the exact opt-in get the unchanged representation.
         assert.notInclude(legacyBody, "turnItemsOmitLocalVisible");
         assert.strictEqual(ignoredBody, legacyBody);
         assert.isBelow(compactBody.length, legacyBody.length);
@@ -455,7 +450,6 @@ it.layer(TestLayer)("compact bounded snapshot transport", (it) => {
             } else {
               const ids = itemIds(legacy.projection);
               assert.isTrue(legacy.hasMoreHistory);
-              // Window rows first, then the retained request outside the window.
               assert.strictEqual(ids.at(-1), `turn-item:${LONG}:request`);
               assert.isFalse(
                 legacy.projection.visibleTurnItems.some((row) => row.sourceItemId === ids.at(-1)),
@@ -474,7 +468,6 @@ it.layer(TestLayer)("compact bounded snapshot transport", (it) => {
           acceptBoundedSnapshot: true,
           acceptCompactTurnItems: true,
         });
-        // Full snapshots ignore the compact opt-in entirely.
         const full = yield* firstSnapshot({ threadId, acceptCompactTurnItems: true });
 
         assert.isUndefined(legacy.decoded.turnItemsOmitLocalVisible);
