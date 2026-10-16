@@ -398,10 +398,8 @@ interface PendingPiPrompt {
   readonly turnItem: OrchestrationV2TurnItem;
 }
 
-const PI_TOOL_GATE_TITLE = /^Allow (\S+)\?$/;
-
 function piApprovalRequestKind(title: string): "command" | "file-change" {
-  const toolName = PI_TOOL_GATE_TITLE.exec(title)?.[1];
+  const toolName = /^Allow (\S+)\?$/.exec(title)?.[1];
   return toolName !== undefined &&
     (PI_FILE_CHANGE_TOOLS as ReadonlyArray<string>).includes(toolName)
     ? "file-change"
@@ -1326,8 +1324,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           method === "confirm"
             ? {
                 ...itemBase,
-                // The tool gate's "Allow bash?" restates the card; other confirms keep their question.
-                title: PI_TOOL_GATE_TITLE.test(title) ? null : title,
+                // The bash gate's prompt is the command itself; other tools need their name.
+                title: title === "Allow bash?" ? null : title,
                 type: "approval_request",
                 requestId,
                 requestKind: piApprovalRequestKind(title),
