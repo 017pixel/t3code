@@ -8,6 +8,19 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
+const APPROVAL_REQUEST_LABELS: Record<ProviderRequestKind, string> = {
+  command: "Command approval",
+  "file-read": "File read approval",
+  "file-change": "File change approval",
+  "mcp-elicitation": "App access approval",
+  permission: "App permission approval",
+};
+
+/** Names an approval card by what it asks for; web and mobile show the same words. */
+export function approvalRequestLabel(requestKind: ProviderRequestKind): string {
+  return APPROVAL_REQUEST_LABELS[requestKind];
+}
+
 export interface ThreadPendingApproval {
   readonly requestId: RuntimeRequestId;
   readonly requestKind: ProviderRequestKind;

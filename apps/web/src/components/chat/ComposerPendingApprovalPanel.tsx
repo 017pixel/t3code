@@ -1,3 +1,4 @@
+import { approvalRequestLabel } from "@t3tools/client-runtime/state/thread-requests";
 import { approvalCommandDisplayText } from "@t3tools/client-runtime/work-log/command-label";
 import { memo } from "react";
 import { type PendingApproval } from "../../session-logic";
@@ -15,16 +16,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   className,
 }: ComposerPendingApprovalPanelProps) {
   const Detail = approval.requestKind === "mcp-elicitation" ? "span" : "code";
-  const fallbackLabel =
-    approval.requestKind === "mcp-elicitation"
-      ? "App access approval"
-      : approval.requestKind === "command"
-        ? "Command approval"
-        : approval.requestKind === "file-read"
-          ? "File read approval"
-          : approval.requestKind === "permission"
-            ? "App permission approval"
-            : "File change approval";
+  const fallbackLabel = approvalRequestLabel(approval.requestKind);
   const detailAriaLabel =
     approval.requestKind === "mcp-elicitation"
       ? "App access request"
