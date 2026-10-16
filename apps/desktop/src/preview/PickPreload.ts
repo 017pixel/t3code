@@ -127,6 +127,8 @@ interface SelectedElement {
 }
 
 interface AnnotationSession {
+  readonly host: HTMLElement;
+  readonly onOverlayKeyDown: (event: KeyboardEvent) => void;
   teardown: (notifyMain: boolean) => void;
   applyTheme: (theme: DesktopPreviewAnnotationTheme) => void;
   setSendEnabled: (enabled: boolean) => void;
@@ -186,6 +188,24 @@ const reportHumanKeyInput = (event: KeyboardEvent): void => {
 
 window.addEventListener("pointerdown", reportHumanPointerInput, true);
 window.addEventListener("keydown", reportHumanKeyInput, true);
+
+// A page capture listener on window runs before any listener added when
+// annotation starts, and the closed shadow retargets the key to the host, so
+// the page cannot tell it was typed into the comment box. Registered while
+// the preload evaluates, this runs before those page listeners. The shadow
+// tree then never sees the event, so the session handles Escape and comment
+// submission itself. Skipping preventDefault leaves typing, caret movement,
+// and Shift+Enter to the browser.
+const isolateOverlayKeyEvent = (event: KeyboardEvent): void => {
+  const session = activeSession;
+  if (session === null || event.target !== session.host) return;
+  event.stopImmediatePropagation();
+  if (event.type === "keydown") session.onOverlayKeyDown(event);
+};
+
+window.addEventListener("keydown", isolateOverlayKeyEvent, true);
+window.addEventListener("keyup", isolateOverlayKeyEvent, true);
+window.addEventListener("keypress", isolateOverlayKeyEvent, true);
 
 const MOUSE_BUTTON_BACK = 3;
 const MOUSE_BUTTON_FORWARD = 4;
@@ -1451,16 +1471,18 @@ function startAnnotation(sendEnabled: boolean): void {
       });
   };
   submit.addEventListener("click", () => submitAnnotation("attach"));
-  root.addEventListener("keydown", (event) => {
-    const submission =
-      event.target === comment ? resolveAnnotationSubmission(event, sendEnabled) : null;
-    // Keep this in the bubble phase so editor inputs receive the event before
-    // it is isolated from listeners installed by the inspected page.
-    event.stopImmediatePropagation();
-    if (!submission) return;
+  const onOverlayKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      teardown(true);
+      return;
+    }
+    if (shadowRoot.activeElement !== comment) return;
+    const submission = resolveAnnotationSubmission(event, sendEnabled);
+    if (submission === null) return;
     event.preventDefault();
     submitAnnotation(submission);
-  });
+  };
 
   window.addEventListener("pointermove", onPointerMove, { capture: true, passive: false });
   window.addEventListener("pointerdown", onPointerDown, { capture: true, passive: false });
@@ -1473,11 +1495,9 @@ function startAnnotation(sendEnabled: boolean): void {
   window.addEventListener("resize", repaint, { passive: true });
   ipcRenderer.on(CANCEL_PICK_CHANNEL, onCancel);
   ipcRenderer.on(ANNOTATION_CAPTURED_CHANNEL, onCaptured);
-  document.documentElement.appendChild(host);
-  rootResizeObserver.observe(document.documentElement);
-  refreshToolButtons();
-  updateStatus();
   activeSession = {
+    host,
+    onOverlayKeyDown,
     teardown,
     applyTheme: (theme) => applyAnnotationTheme(host, theme),
     setSendEnabled: (enabled) => {
@@ -1485,6 +1505,10 @@ function startAnnotation(sendEnabled: boolean): void {
       updateSendHint();
     },
   };
+  document.documentElement.appendChild(host);
+  rootResizeObserver.observe(document.documentElement);
+  refreshToolButtons();
+  updateStatus();
 }
 
 ipcRenderer.on(
