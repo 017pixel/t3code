@@ -104,6 +104,8 @@ import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
 import { defaultUrlTransform } from "react-markdown";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
+import { parseNativeAppMention } from "@t3tools/shared/nativeAppMentions";
+import { NativeAppChip } from "./NativeAppChip";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
 import { MarkdownThreadLink } from "./chat/MarkdownThreadLink";
@@ -2366,7 +2368,7 @@ function useChatMarkdownState({
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
     >();
     for (const href of extractMarkdownLinkHrefs(renderCodexInlineDirectivesAsMarkdown(text))) {
-      if (parseComposerContextHref(href)) continue;
+      if (parseComposerContextHref(href) || parseNativeAppMention(href)) continue;
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
       const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, imageBaseDir ?? cwd);
@@ -2396,7 +2398,7 @@ function useChatMarkdownState({
   }, [inlineCodeFileLinkMetaByText, markdownFileLinkMetaByHref]);
   const markdownUrlTransform = useCallback((href: string) => {
     if (parseAssistantCitationHref(href)) return href;
-    if (parseComposerContextHref(href)) return href;
+    if (parseComposerContextHref(href) || parseNativeAppMention(href)) return href;
     if (parseThreadLinkHref(href)) return href;
     if (isWindowsDrivePathHref(href)) return href;
     return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
@@ -2848,6 +2850,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
       text,
     } = use(ChatMarkdownRendererContext);
     const citation = href ? parseAssistantCitationHref(href) : null;
+    const application = href ? parseNativeAppMention(href) : null;
+    if (application) return <NativeAppChip {...application} />;
     if (citation) return <AssistantCitationChip citation={citation} />;
     const linkedThreadId = href ? parseThreadLinkHref(href) : null;
     if (linkedThreadId) {

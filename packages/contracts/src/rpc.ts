@@ -292,6 +292,8 @@ import {
   BrowserTabsError,
   BrowserTabsStatus,
   CuaHostStatus,
+  CuaApplication,
+  CuaApplicationsError,
   CuaWindowPreviewState,
   CuaWindowPreviewSubscribeInput,
 } from "./cua.ts";
@@ -473,6 +475,7 @@ export const WS_METHODS = {
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
   serverCheckComputerUse: "server.checkComputerUse",
+  serverListApplications: "server.listApplications",
   serverCheckBrowserTabs: "server.checkBrowserTabs",
   serverRunBrowserTabsAction: "server.runBrowserTabsAction",
   serverRefreshProviders: "server.refreshProviders",
@@ -606,6 +609,12 @@ const WsServerCheckComputerUseRpc = Rpc.make(WS_METHODS.serverCheckComputerUse, 
   payload: Schema.Struct({}),
   success: CuaHostStatus,
   error: EnvironmentAuthorizationError,
+});
+
+const WsServerListApplicationsRpc = Rpc.make(WS_METHODS.serverListApplications, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(CuaApplication),
+  error: Schema.Union([CuaApplicationsError, EnvironmentAuthorizationError]),
 });
 
 const WsServerCheckBrowserTabsRpc = Rpc.make(WS_METHODS.serverCheckBrowserTabs, {
@@ -1890,6 +1899,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerCheckComputerUseRpc,
+  WsServerListApplicationsRpc,
   WsServerCheckBrowserTabsRpc,
   WsServerRunBrowserTabsActionRpc,
   WsServerRefreshProvidersRpc,
