@@ -101,6 +101,7 @@ export function assertGrokBackgroundSubagentOutput(
       event.payload.id === queuedRun?.id &&
       event.payload.status === "running",
   );
+  assert.isAtLeast(queuedStartedAt, 0);
   assert.isBelow(
     queuedStartedAt,
     subagentCompletedAt,
