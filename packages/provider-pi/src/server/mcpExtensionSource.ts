@@ -73,10 +73,10 @@ function runtimeMode(): RuntimeMode {
 }
 
 function toolInputSummary(toolName: string, input: unknown): string {
-  // The bash tool's approval shows the command itself, not its JSON arguments.
+  // The bash tool's approval shows the whole command, never a truncated one.
   const command = (input as { command?: unknown } | null)?.command;
   if (toolName === "bash" && typeof command === "string" && command.trim().length > 0) {
-    return command.slice(0, 4_000);
+    return command;
   }
   try {
     return JSON.stringify(input, null, 2).slice(0, 4_000);
