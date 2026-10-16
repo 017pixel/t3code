@@ -39,7 +39,10 @@ import { useAtomValue } from "@effect/atom-react";
 import { environmentThreadDetails } from "../../state/threads";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
-import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  canForkProjectedAssistantItem,
+  forkCutTurnItemId,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-execution";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import {
@@ -179,7 +182,7 @@ import { HtmlRenderFrame } from "./HtmlRenderFrame";
 import { McpAppFrame } from "./McpAppFrame";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { useFileContextMenuHandler } from "../../fileContextMenu";
-import { useProject, useThreadShell } from "../../state/entities";
+import { readThreadShell, useProject, useThreadShell } from "../../state/entities";
 import {
   CHAT_TIMELINE_ANCHOR_OFFSET,
   readTimelinePosition,
@@ -2962,11 +2965,25 @@ function AssistantForkButton({
             disabled={busy}
             onClick={() => {
               setBusy(true);
+              const threadRef = ctx.threadRef;
+              const turnItemId =
+                threadRef === null
+                  ? midRun
+                    ? projectedItem.item.id
+                    : undefined
+                  : forkCutTurnItemId({
+                      projectedItem,
+                      midRun,
+                      threadId: threadRef.threadId,
+                      readForkedFrom: (threadId) =>
+                        readThreadShell(scopeThreadRef(threadRef.environmentId, threadId))
+                          ?.forkedFrom,
+                    });
               void ctx
                 .onForkFromRun({
                   sourceThreadId: projectedItem.sourceThreadId,
                   runId,
-                  ...(midRun ? { turnItemId: projectedItem.item.id } : {}),
+                  ...(turnItemId === undefined ? {} : { turnItemId }),
                 })
                 .finally(() => setBusy(false));
             }}

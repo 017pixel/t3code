@@ -18,7 +18,10 @@ import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
-import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  canForkProjectedAssistantItem,
+  forkCutTurnItemId,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import {
   type OrchestrationMessageContext,
   ThreadId,
@@ -369,6 +372,8 @@ function UserMessageCopyButton(props: {
 
 function AssistantForkButton(props: {
   readonly environmentId: EnvironmentId;
+  /** The thread the response shows in, which may be a fork of its source. */
+  readonly threadId: ThreadId;
   readonly iconColor: ColorValue;
   readonly projectedItem: OrchestrationV2ProjectedTurnItem;
   /** A later response in the run follows, so the fork cuts at this item. */
@@ -398,6 +403,17 @@ function AssistantForkButton(props: {
       disabled={busy}
       onPress={() => {
         const targetThreadId = ThreadId.make(uuidv4());
+        const turnItemId = forkCutTurnItemId({
+          projectedItem: props.projectedItem,
+          midRun: props.midRun,
+          threadId: props.threadId,
+          readForkedFrom: (threadId) =>
+            appAtomRegistry.get(
+              environmentThreadShells.threadShellAtom(
+                scopeThreadRef(props.environmentId, threadId),
+              ),
+            )?.forkedFrom,
+        });
         setBusy(true);
         void Haptics.selectionAsync();
         void forkFromRun({
@@ -406,7 +422,7 @@ function AssistantForkButton(props: {
             sourceThreadId: props.projectedItem.sourceThreadId,
             targetThreadId,
             runId,
-            ...(props.midRun ? { turnItemId: props.projectedItem.item.id } : {}),
+            ...(turnItemId === undefined ? {} : { turnItemId }),
             title: `${props.sourceTitle} fork`,
             creationSource: "mobile",
           },
@@ -1454,6 +1470,7 @@ function renderFeedEntry(
             {message.projectedItem ? (
               <AssistantForkButton
                 environmentId={props.environmentId}
+                threadId={props.threadId}
                 iconColor={iconSubtleColor}
                 projectedItem={message.projectedItem}
                 midRun={props.terminalAssistantMessageIds.midRunIds.has(message.id)}
