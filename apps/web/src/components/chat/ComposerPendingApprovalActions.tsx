@@ -51,7 +51,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
           <Button
             key={option.decision}
             size="xs"
-            variant={option.decision === "accept" ? "warning" : "warning-outline"}
+            variant={option.decision === "accept" ? "warning-outline" : "ghost-warning"}
             disabled={disabled || isResponding || !canRespond}
             aria-description={option.warning}
             onClick={() => {
@@ -78,7 +78,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
           <MenuTrigger
             disabled={disabled || isResponding}
             render={
-              <Button size="icon-xs" variant="warning-outline" aria-label="More approval options" />
+              <Button size="icon-xs" variant="ghost-warning" aria-label="More approval options" />
             }
           >
             <EllipsisIcon />

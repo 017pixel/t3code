@@ -331,24 +331,6 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
-/* An opaque warning fill with black or white text, whichever has more contrast. A custom
-   theme's warning can be any color, even translucent; 0.179 is the luminance where both tie. */
-@utility warning-solid {
-  background-color: var(--warning);
-  color: black;
-
-  @supports (color: color(from red srgb-linear r g b)) {
-    --warning-opaque: oklch(from var(--warning) l c h / 1);
-    background-color: var(--warning-opaque);
-    color: color(
-      from var(--warning-opaque) srgb-linear
-        clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1)
-        clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1)
-        clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1) / 1
-    );
-  }
-}
-
 @utility surface-glass {
   background: color-mix(in srgb, var(--background) var(--glass-opacity), transparent);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
