@@ -1382,6 +1382,23 @@ export function commandDisplayText(command: string): string {
   return withVisibleControlCharacters(withoutShellWrapper(command));
 }
 
+/**
+ * The command an approval asks about. Only a bare `<shell> -c` or `-lc`
+ * wrapper is removed, so no shell option that changes what runs is hidden.
+ */
+export function approvalCommandDisplayText(command: string): string {
+  const trimmed = command.trim();
+  const tokens = tokenizeShellCommand(trimmed);
+  const program = tokens?.[0]?.split(/[\\/]/u).at(-1);
+  const bare =
+    tokens?.length === 3 &&
+    program !== undefined &&
+    SHELL_PROGRAMS.has(program) &&
+    /^-l?c$/u.test(tokens[1]!) &&
+    splitFirstShellCommand(trimmed).remainingCommand === null;
+  return withVisibleControlCharacters(bare ? tokens[2]!.trim() || trimmed : trimmed);
+}
+
 /** Replaces each control character with its control picture; the length does not change. */
 export function withVisibleControlCharacters(text: string): string {
   return text.replace(CONTROL_CHARACTERS, (character) =>

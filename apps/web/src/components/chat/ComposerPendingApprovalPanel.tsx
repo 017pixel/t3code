@@ -1,4 +1,4 @@
-import { commandDisplayText } from "@t3tools/client-runtime/work-log/command-label";
+import { approvalCommandDisplayText } from "@t3tools/client-runtime/work-log/command-label";
 import { memo } from "react";
 import { type PendingApproval } from "../../session-logic";
 import { cn } from "~/lib/utils";
@@ -66,7 +66,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           ? "Provider process is gone — interrupt or restart the run to respond."
           : approval.detail
             ? approval.requestKind === "command"
-              ? commandDisplayText(approval.detail)
+              ? approvalCommandDisplayText(approval.detail)
               : approval.detail
             : fallbackLabel}
       </Detail>

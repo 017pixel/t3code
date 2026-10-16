@@ -72,10 +72,12 @@ function runtimeMode(): RuntimeMode {
     : "full-access";
 }
 
-function toolInputSummary(input: unknown): string {
-  // A shell tool's approval shows the command itself, not its JSON arguments.
+function toolInputSummary(toolName: string, input: unknown): string {
+  // The bash tool's approval shows the command itself, not its JSON arguments.
   const command = (input as { command?: unknown } | null)?.command;
-  if (typeof command === "string" && command.trim().length > 0) return command.slice(0, 4_000);
+  if (toolName === "bash" && typeof command === "string" && command.trim().length > 0) {
+    return command.slice(0, 4_000);
+  }
   try {
     return JSON.stringify(input, null, 2).slice(0, 4_000);
   } catch {
@@ -335,7 +337,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     }
     const approved = await ctx.ui.confirm(
       \`Allow \${event.toolName}?\`,
-      toolInputSummary(event.input),
+      toolInputSummary(event.toolName, event.input),
       { signal: ctx.signal },
     );
     if (!approved) {

@@ -5163,8 +5163,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeItemId: payload.itemId,
               nativeRequestId,
               requestKind: "command",
-              ...(payload.command === undefined ? {} : { prompt: payload.command }),
-              title: payload.reason,
+              // Without a command, the reason is all there is to show.
+              ...(payload.command
+                ? { prompt: payload.command, title: payload.reason }
+                : { prompt: payload.reason ?? null }),
             });
             const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
             yield* Ref.update(pendingRuntimeRequests, (current) => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  approvalCommandDisplayText,
   commandDisplayText,
   commandHighlightLanguage,
   commandProgramName,
@@ -495,6 +496,21 @@ describe("commandDisplayText", () => {
     ["zsh -lc 'unterminated", "zsh -lc 'unterminated"],
   ])("shows the script without hiding meaningful outer commands: %s", (input, expected) => {
     expect(commandDisplayText(input)).toBe(expected);
+  });
+});
+
+describe("approvalCommandDisplayText", () => {
+  it.each([
+    [
+      "/bin/bash -lc 'curl -sI https://example.com | head -n 1'",
+      "curl -sI https://example.com | head -n 1",
+    ],
+    ["bash --rcfile /tmp/init.sh -ic 'git status'", "bash --rcfile /tmp/init.sh -ic 'git status'"],
+    ["zsh -lc 'echo $1' name value", "zsh -lc 'echo $1' name value"],
+    ["zsh -lc 'pwd'; rm -rf build", "zsh -lc 'pwd'; rm -rf build"],
+    ["git status", "git status"],
+  ])("unwraps only a bare shell wrapper: %s", (input, expected) => {
+    expect(approvalCommandDisplayText(input)).toBe(expected);
   });
 });
 
