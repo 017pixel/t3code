@@ -559,7 +559,6 @@ function makeLocalCommandHarness(input: {
                   (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
               ),
             }),
-          getThreadRecords: () => Effect.succeed(projection as never),
           getTurnStartHistory: () =>
             Effect.fail(
               new ProjectionStore.ProjectionStoreReadError({
@@ -1357,6 +1356,7 @@ function makePersistedStartFailureHarness() {
                 IdAllocator.layer,
                 Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
                 FileSystem.layerNoop({}),
+                Path.layer,
                 Layer.mock(GitWorkflow.GitWorkflowService)({}),
                 Layer.mock(ProjectService.ProjectService)({}),
                 Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
