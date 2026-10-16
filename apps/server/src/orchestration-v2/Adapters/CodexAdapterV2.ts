@@ -5058,10 +5058,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeItemId: payload.itemId,
               nativeRequestId,
               requestKind: "command",
-              // Without a command, the reason is all there is to show.
+              // A network approval names its host; with neither, the reason is all there is.
               ...(payload.command
                 ? { prompt: payload.command, title: payload.reason }
-                : { prompt: payload.reason ?? null }),
+                : payload.networkApprovalContext
+                  ? {
+                      prompt: `${payload.networkApprovalContext.protocol} ${payload.networkApprovalContext.host}`,
+                      title: payload.reason,
+                    }
+                  : { prompt: payload.reason ?? null }),
             });
             const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
             yield* Ref.update(pendingRuntimeRequests, (current) => {
