@@ -331,6 +331,21 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+/* Black or white text on a solid warning fill, whichever has more contrast. A custom
+   theme's warning can be any color; 0.179 is the relative luminance where both tie. */
+@utility text-on-warning {
+  color: black;
+
+  @supports (color: color(from red srgb-linear r g b)) {
+    color: color(
+      from var(--warning) srgb-linear
+        clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1)
+        clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1)
+        clamp(0, (0.179 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * 1e9, 1)
+    );
+  }
+}
+
 @utility surface-glass {
   background: color-mix(in srgb, var(--background) var(--glass-opacity), transparent);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));

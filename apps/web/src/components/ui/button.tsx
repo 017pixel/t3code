@@ -64,7 +64,7 @@ const buttonVariants = cva(
         secondary:
           "border-transparent bg-secondary text-secondary-foreground [:active,[data-pressed]]:bg-secondary/80 [:hover,[data-pressed]]:bg-secondary/90",
         warning:
-          "not-disabled:inset-shadow-[0_1px_--theme(--color-white/24%)] border-warning bg-warning text-black supports-[color:oklch(from_red_l_c_h)]:text-[oklch(from_var(--warning)_clamp(0,(0.57_-_l)_*_1000,1)_0_0)] shadow-warning/24 shadow-xs [:active,[data-pressed]]:inset-shadow-[0_1px_--theme(--color-black/8%)] [:disabled,:active,[data-pressed]]:shadow-none [:hover,[data-pressed]]:bg-warning/90",
+          "not-disabled:inset-shadow-[0_1px_--theme(--color-white/24%)] border-warning bg-warning text-on-warning shadow-warning/24 shadow-xs [:active,[data-pressed]]:inset-shadow-[0_1px_--theme(--color-black/8%)] [:disabled,:active,[data-pressed]]:shadow-none [:hover,[data-pressed]]:bg-warning/90",
         "warning-outline":
           "border-warning/32 bg-warning-surface text-warning-foreground shadow-xs/5 [:disabled,:active,[data-pressed]]:shadow-none [:hover,[data-pressed]]:border-warning/40 [:hover,[data-pressed]]:bg-warning/16 dark:[:hover,[data-pressed]]:bg-warning/24",
       },
