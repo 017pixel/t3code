@@ -24,6 +24,7 @@ import {
   stageCuaDriverExecutable,
   resolveCuaDriverAsset,
   stageCuaDriverBundle,
+  stageCuaDriverSdkOverride,
   BundleNotSelfContainedError,
   BuildCommandFailedError,
   parseWslRuntimeArchiveMembers,
@@ -271,6 +272,53 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it.effect.each([
+    { arch: "x64", nested: false },
+    { arch: "arm64", nested: false },
+    { arch: "x64", nested: true },
+    { arch: "arm64", nested: true },
+  ] as const)(
+    "stages the patched CUA SDK for $arch (nested: $nested) and rejects mismatched binaries",
+    ({ arch, nested }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cua-sdk-" });
+          const sdkPackagePath = path.join(root, "node_modules/@trycua/cua-driver/package.json");
+          yield* fs.makeDirectory(path.dirname(sdkPackagePath), { recursive: true });
+          yield* fs.writeFileString(sdkPackagePath, "{}");
+          const destination = path.join(
+            root,
+            ...(nested ? ["node_modules/@trycua/cua-driver"] : []),
+            `node_modules/@trycua/cua-driver-win32-${arch}-msvc/cua_driver_sdk.dll`,
+          );
+          yield* fs.makeDirectory(path.dirname(destination), { recursive: true });
+          yield* fs.writeFileString(path.join(path.dirname(destination), "package.json"), "{}");
+          yield* fs.writeFileString(destination, "original");
+          const libraryPath = path.join(root, "patched.dll");
+          const bytes = new Uint8Array(128);
+          const view = new DataView(bytes.buffer);
+          view.setUint16(0, 0x5a4d, true);
+          view.setUint32(0x3c, 64, true);
+          view.setUint32(64, 0x4550, true);
+          view.setUint16(68, arch === "x64" ? 0x8664 : 0xaa64, true);
+          yield* fs.writeFile(libraryPath, bytes);
+          const error = yield* Effect.flip(
+            stageCuaDriverSdkOverride({
+              libraryPath,
+              stageDir: root,
+              arch: arch === "x64" ? "arm64" : "x64",
+            }),
+          );
+          assert.match(error.message, /must be a Windows/);
+          assert.equal(yield* fs.readFileString(destination), "original");
+          yield* stageCuaDriverSdkOverride({ libraryPath, stageDir: root, arch });
+          assert.deepStrictEqual(yield* fs.readFile(destination), bytes);
+        }),
+      ),
+  );
+
   it.effect("rejects corrupt release downloads before extraction or staging", () =>
     Effect.scoped(
       Effect.gen(function* () {

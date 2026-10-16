@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { ProviderRuntimeEvent } from "./providerRuntime.ts";
+import { ProviderRuntimeEvent, ToolActivityNativeAppReference } from "./providerRuntime.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
+
+describe("ToolActivityNativeAppReference", () => {
+  it("accepts Windows packaged app IDs alongside bundle IDs", () => {
+    const decode = Schema.decodeUnknownSync(ToolActivityNativeAppReference);
+    for (const appId of ["com.apple.Safari", "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]) {
+      expect(decode({ _tag: "app-id", appId })).toEqual({ _tag: "app-id", appId });
+    }
+    for (const appId of [
+      "package!",
+      "!App",
+      "package!App!Other",
+      "../Calculator",
+      "C:\\calc.exe",
+    ]) {
+      expect(() => decode({ _tag: "app-id", appId })).toThrow();
+    }
+  });
+});
 
 describe("ProviderRuntimeEvent", () => {
   it("requires input and output totals for complete turn usage", () => {

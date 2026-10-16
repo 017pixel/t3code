@@ -2967,6 +2967,56 @@ export const stageCuaDriverBundle = Effect.fn("stageCuaDriverBundle")(function* 
   }
 });
 
+export class CuaDriverSdkOverrideError extends Schema.TaggedError<CuaDriverSdkOverrideError>()(
+  "CuaDriverSdkOverrideError",
+  { libraryPath: Schema.String, arch: Schema.String },
+) {
+  override get message(): string {
+    return `CUA SDK override must be a Windows ${this.arch} library: ${this.libraryPath}`;
+  }
+}
+
+/** Temporary native SDK override while the Windows console fix awaits an upstream release. */
+export const stageCuaDriverSdkOverride = Effect.fn("stageCuaDriverSdkOverride")(function* (input: {
+  readonly libraryPath: string;
+  readonly stageDir: string;
+  readonly arch: typeof BuildArch.Type;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const library = yield* fs.readFile(input.libraryPath);
+  const view = new DataView(library.buffer, library.byteOffset, library.byteLength);
+  const peOffset = library.length >= 64 ? view.getUint32(0x3c, true) : 0;
+  const expectedMachine = input.arch === "x64" ? 0x8664 : input.arch === "arm64" ? 0xaa64 : 0;
+  if (
+    expectedMachine === 0 ||
+    library.length < 64 ||
+    view.getUint16(0, true) !== 0x5a4d ||
+    peOffset < 64 ||
+    peOffset + 6 > library.length ||
+    view.getUint32(peOffset, true) !== 0x4550 ||
+    view.getUint16(peOffset + 4, true) !== expectedMachine
+  ) {
+    return yield* new CuaDriverSdkOverrideError({
+      libraryPath: input.libraryPath,
+      arch: input.arch,
+    });
+  }
+  const sdkPackagePath = yield* fs.realPath(
+    path.join(input.stageDir, "node_modules/@trycua/cua-driver/package.json"),
+  );
+  const packagePath = yield* Effect.try(() =>
+    NodeModule.createRequire(sdkPackagePath).resolve(
+      `@trycua/cua-driver-win32-${input.arch}-msvc/package.json`,
+    ),
+  );
+  const destination = path.join(path.dirname(packagePath), "cua_driver_sdk.dll");
+  // Unlink the staged file before replacing it: pnpm may hardlink it to its store.
+  yield* fs.remove(destination);
+  yield* fs.copyFile(input.libraryPath, destination);
+  yield* Effect.log(`[desktop-artifact] Staged Cua Driver SDK override (${input.arch}).`);
+});
+
 export const stageCuaDriverExecutable = Effect.fn("stageCuaDriverExecutable")(function* (input: {
   readonly platform: typeof BuildPlatform.Type;
   readonly arch: typeof BuildArch.Type;
@@ -3228,6 +3278,14 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
     }),
     { label: "vp install --prod (server sidecar)", verbose: input.verbose },
   );
+
+  if (process.env.T3CODE_CUA_DRIVER_SDK_LIBRARY) {
+    yield* stageCuaDriverSdkOverride({
+      libraryPath: process.env.T3CODE_CUA_DRIVER_SDK_LIBRARY,
+      stageDir: serverStageDir,
+      arch: input.arch,
+    });
+  }
 
   yield* Effect.log("[desktop-artifact] Packing server.asar...");
   yield* fs.makeDirectory(path.dirname(input.asarPath), { recursive: true });
@@ -3975,6 +4033,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   );
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
   yield* stageKeyringNativeBinaries(stageAppDir, options.platform, options.arch);
+
+  if (options.platform === "win" && process.env.T3CODE_CUA_DRIVER_SDK_LIBRARY) {
+    yield* stageCuaDriverSdkOverride({
+      libraryPath: process.env.T3CODE_CUA_DRIVER_SDK_LIBRARY,
+      stageDir: stageAppDir,
+      arch: options.arch,
+    });
+  }
 
   if (options.platform === "win" && windowsServerAsarPath) {
     yield* stageWindowsServerSidecar({

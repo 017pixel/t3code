@@ -1,0 +1,72 @@
+Temporary Cua Driver 0.34.1 Windows console fix.
+Upstream base: trycua/cua@0c69d9a2c8abbb5051a2df4a23f0fa166d5385dc
+
+Apply with git apply in an upstream checkout, then build:
+  cargo build --locked --release --manifest-path libs/cua-driver/rust/Cargo.toml -p cua-driver-sdk
+  cargo test --locked --release --manifest-path libs/cua-driver/rust/Cargo.toml -p cua-driver-sdk embedded::tests::embedded_child_has_no_console
+
+For a Windows desktop test artifact, set T3CODE_CUA_DRIVER_SDK_LIBRARY to the
+absolute path of target/release/cua_driver_sdk.dll under libs/cua-driver/rust,
+then run the normal desktop artifact builder. Both the Electron host and
+server sidecar receive the override. Build separately for each architecture.
+Remove this patch and the packaging override when an upstream release fixes it.
+
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/embedded.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/embedded.rs
+index d599610..5612943 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/embedded.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/embedded.rs
+@@ -24,6 +24,15 @@ const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 10_000;
+ const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 2_000;
+ const HANDSHAKE_ATTEMPT_TIMEOUT_MS: u64 = 500;
+ 
++fn configure_background_command(command: &mut Command) {
++    // Embedded hosts run inside GUI apps, which must not open a console for
++    // their background daemon. Keep stdin piped for parent-liveness checks.
++    #[cfg(windows)]
++    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
++    #[cfg(not(windows))]
++    let _ = command;
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+ pub enum EmbeddedPermissionMode {
+     Standard,
+@@ -430,6 +439,7 @@ impl EmbeddedCuaDriverHost {
+         prepare_endpoint(&socket_path)?;
+ 
+         let mut command = Command::new(&self.options.binary_path);
++        configure_background_command(&mut command);
+         command
+             .args(self.serve_args(&socket_path))
+             .env_clear()
+@@ -1143,6 +1153,30 @@ async fn terminate_startup_child(child: &mut Child, liveness: &mut ChildStdin) {
+ mod tests {
+     use super::*;
+ 
++    #[cfg(windows)]
++    #[tokio::test]
++    async fn embedded_child_has_no_console() {
++        const PROBE: &str = "CUA_TEST_CONSOLE_PROBE";
++        if std::env::var_os(PROBE).is_some() {
++            #[link(name = "kernel32")]
++            extern "system" {
++                fn GetConsoleWindow() -> *mut std::ffi::c_void;
++            }
++            assert!(unsafe { GetConsoleWindow() }.is_null());
++            return;
++        }
++        let mut command = Command::new(std::env::current_exe().unwrap());
++        command.args(["--exact", "embedded::tests::embedded_child_has_no_console"]);
++        command.env(PROBE, "1");
++        configure_background_command(&mut command);
++        let output = command.output().await.unwrap();
++        assert!(
++            output.status.success(),
++            "{}",
++            String::from_utf8_lossy(&output.stderr)
++        );
++    }
++
+     fn options(mode: EmbeddedPermissionMode) -> EmbeddedDriverHostOptions {
+         EmbeddedDriverHostOptions {
+             binary_path: std::env::current_dir()
