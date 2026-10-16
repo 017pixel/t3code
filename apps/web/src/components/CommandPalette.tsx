@@ -1758,7 +1758,9 @@ function OpenCommandPaletteDialog(props: {
       searchTerms: ["continue on", "move", "hand off", "handoff", "environment", "machine"],
       title: "Continue on…",
       description: "Move this thread and its work to a linked environment",
-      disabled: !threadRuntimeCanArchive(thread.runtime),
+      disabled:
+        !threadRuntimeCanArchive(thread.runtime) ||
+        !readEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope),
       icon: <MonitorUpIcon className={ITEM_ICON_CLASS} />,
       keepOpen: true,
       run: async () => {
