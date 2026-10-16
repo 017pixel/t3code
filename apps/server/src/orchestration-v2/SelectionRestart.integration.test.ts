@@ -122,6 +122,7 @@ function openTurnWork(
   const grandchildThreadId = providerNativeChildThreadId(childThreadId);
   const childApprovalNodeId = NodeId.make(`node:child-approval:${input.attemptId}`);
   const childRequestId = RuntimeRequestId.make(`request:child-approval:${input.attemptId}`);
+  const childSearchNodeId = NodeId.make(`node:child-search:${input.attemptId}`);
   const nestedRunningSubagentId = NodeId.make(`node:nested-running-subagent:${input.attemptId}`);
   const nestedSettledItemSubagentId = NodeId.make(
     `node:nested-settled-item-subagent:${input.attemptId}`,
@@ -325,6 +326,45 @@ function openTurnWork(
         streaming: true,
         createdAt: now,
         updatedAt: now,
+      },
+    },
+    // A search on its own node, as adapters report each item. The recovery
+    // read leaves out both: neither is a command, tool or subagent, and the
+    // node is not a runless root.
+    {
+      type: "node.updated",
+      driver,
+      node: {
+        id: childSearchNodeId,
+        threadId: childThreadId,
+        runId: null,
+        parentNodeId: null,
+        rootNodeId: childSearchNodeId,
+        kind: "tool_call",
+        status: "running",
+        countsForRun: false,
+        providerThreadId: input.providerThread.id,
+        providerTurnId,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      },
+    },
+    {
+      type: "turn_item.updated",
+      driver,
+      turnItem: {
+        ...base,
+        id: TurnItemId.make(`turn-item:child-search:${input.attemptId}`),
+        threadId: childThreadId,
+        runId: null,
+        nodeId: childSearchNodeId,
+        ordinal: 6,
+        status: "running",
+        type: "web_search",
+        patterns: ["effect schema"],
       },
     },
     // The subagent's own subagent already reported done, but its thread is
@@ -1013,6 +1053,8 @@ it.live("settles the work a restarted run inherited when its replacement never o
         projection,
         nativeChildItems,
         nativeChildStreaming,
+        nativeChildSearch,
+        nativeChildToolNodes,
         nativeChildRequests,
         nativeChildSubagents,
         nativeChildProviderTurns,
@@ -1180,6 +1222,12 @@ it.live("settles the work a restarted run inherited when its replacement never o
           nativeChildStreaming: (yield* orchestrator.getThreadProjection(
             providerNativeChildThreadId(threadId),
           )).messages.some((message) => message.streaming),
+          nativeChildSearch: (yield* orchestrator.getThreadProjection(
+            providerNativeChildThreadId(threadId),
+          )).turnItems.flatMap((item) => (item.type === "web_search" ? [item.status] : [])),
+          nativeChildToolNodes: (yield* orchestrator.getThreadProjection(
+            providerNativeChildThreadId(threadId),
+          )).nodes.flatMap((node) => (node.kind === "tool_call" ? [node.status] : [])),
           nativeChildRequests: (yield* orchestrator.getThreadProjection(
             providerNativeChildThreadId(threadId),
           )).runtimeRequests.map((request) => request.status),
@@ -1231,6 +1279,9 @@ it.live("settles the work a restarted run inherited when its replacement never o
         ["command_execution", "failed"],
       ]);
       assert.isFalse(nativeChildStreaming);
+      // Its other open items end too, with the node each one has.
+      assert.deepEqual(nativeChildSearch, ["failed"]);
+      assert.deepEqual(nativeChildToolNodes, ["failed"]);
       assert.deepEqual(nativeChildRequests, ["cancelled"]);
       // Subagents the provider-native subagent launched end with it, including
       // one whose item already reported done.

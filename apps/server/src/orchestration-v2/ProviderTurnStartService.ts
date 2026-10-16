@@ -229,21 +229,15 @@ export const layer: Layer.Layer<
         linkedChildThreadIds.add(threadId);
         // A child thread has no runs, so the recovery read leaves out its
         // streaming replies, provider turns, subagents whose item already
-        // settled, and its pending requests' nodes and items; read them by
-        // thread instead.
+        // settled, and its open items and nodes other than commands, tools
+        // and subagents; read them by thread instead.
         const records = yield* projectionStore.getThreadRecords(
           threadId,
           ["messages", "nodes", "turnItems", "providerTurns", "subagents"],
           {
             messageRoles: ["assistant"],
-            turnItemTypes: ["approval_request", "user_input_request"],
             turnItemStatuses: ["pending", "running", "waiting"],
           },
-        );
-        const requestNodeIds = new Set(
-          child.value.runtimeRequests.flatMap((request) =>
-            request.status === "pending" ? [request.nodeId] : [],
-          ),
         );
         const knownNodeIds = new Set(child.value.nodes.map((node) => node.id));
         const knownItemIds = new Set(child.value.turnItems.map((item) => item.id));
@@ -253,9 +247,7 @@ export const layer: Layer.Layer<
           subagents: records.subagents,
           nodes: [
             ...child.value.nodes,
-            ...records.nodes.filter(
-              (node) => requestNodeIds.has(node.id) && !knownNodeIds.has(node.id),
-            ),
+            ...records.nodes.filter((node) => !knownNodeIds.has(node.id)),
           ],
           turnItems: [
             ...child.value.turnItems,
