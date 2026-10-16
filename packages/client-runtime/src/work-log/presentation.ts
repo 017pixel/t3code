@@ -118,8 +118,8 @@ function workEntryToolName(
 ): string | undefined {
   const item = entry.structuredPayload;
   if (item?.type === "dynamic_tool" && item.toolName) return item.toolName;
-  // A command approval's label is the agent's free-text reason, never a tool name.
-  if (item?.type === "approval_request" && item.requestKind === "command") return undefined;
+  // An approval's label is the agent's free-text explanation, never a tool name.
+  if (item?.type === "approval_request") return undefined;
   const data = asRecord(entry.toolData);
   if (typeof data?.server === "string" && typeof data.tool === "string") {
     return `${data.server}.${data.tool}`;

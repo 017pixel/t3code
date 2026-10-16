@@ -7832,17 +7832,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           const requestKind = providerRequestKindFromClaudeTool(toolName);
-          const explanation =
-            callbackOptions.title ?? callbackOptions.description ?? callbackOptions.decisionReason;
-          // The user approves the command itself; Claude's description only explains it.
+          const explanation = (
+            callbackOptions.title ??
+            callbackOptions.description ??
+            callbackOptions.decisionReason
+          )?.trim();
+          // The user approves the operation itself; Claude's text only explains it.
           const command = firstStringInputField(nativeToolInput, ["command", "cmd", "script"]);
           const artifacts = yield* buildApprovalRequestArtifacts({
             context,
             nativeItemId: nativeRequestId,
             nativeRequestId,
             requestKind,
-            prompt: command ?? explanation ?? summarizeClaudeToolRequest(toolName, nativeToolInput),
-            ...(command !== undefined && explanation?.trim() ? { title: explanation.trim() } : {}),
+            prompt: command ?? summarizeClaudeToolRequest(toolName, nativeToolInput),
+            ...(explanation ? { title: explanation } : {}),
           });
           const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
           yield* Ref.update(pendingRuntimeRequests, (current) => {
