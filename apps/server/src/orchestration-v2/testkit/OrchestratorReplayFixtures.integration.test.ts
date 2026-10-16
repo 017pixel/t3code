@@ -183,6 +183,14 @@ function assertRequestArtifactsSettled(result: OrchestratorV2ScenarioResult) {
       ],
       [],
     );
+    for (const item of projection.turnItems) {
+      if (item.type !== "user_input_request") continue;
+      const request = projection.runtimeRequests.find(
+        (candidate) => candidate.id === item.requestId,
+      );
+      if (request?.answers === undefined) continue;
+      assert.deepEqual(item.questionAnswer?.answers, request.answers);
+    }
   }
 }
 
@@ -377,14 +385,15 @@ describe("orchestrator replay fixtures", () => {
         ["opencode2_question", "opencode"],
         ["muse_permission", "muse"],
       ] as const
-    ).flatMap(([fixtureName, driver]) => {
+    ).map(([fixtureName, driver]) => {
       const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find(
         (candidate) => candidate.name === fixtureName,
       );
       const provider = fixture?.providers.find((candidate) => candidate.driver === driver);
-      return fixture === undefined || provider === undefined
-        ? []
-        : [[fixtureName, driver, fixture, provider] as const];
+      if (fixture === undefined || provider === undefined) {
+        throw new Error(`Replay fixture ${fixtureName} has no ${driver} provider.`);
+      }
+      return [fixtureName, driver, fixture, provider] as const;
     }),
   )("settles %s/%s request cards answered before they arrive", ([, , fixture, provider]) =>
     runFixtureProviderWithRegisteredHarness({

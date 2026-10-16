@@ -321,7 +321,7 @@ const layerBase: Layer.Layer<
     // settles the node and card its handler read. A node or card that arrives
     // after its request settled is stored settled to match. A card stored after
     // the handler read, while the request was still pending, is settled by the
-    // write that settles the request and its node.
+    // write that settles the request.
     const settleAfterAnsweredRequests = Effect.fnUntraced(function* (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
     ) {
@@ -393,38 +393,13 @@ const layerBase: Layer.Layer<
       const normalized: Array<OrchestrationV2DomainEvent> = [];
       for (const event of events) {
         if (event.type === "runtime-request.updated") {
-          requests.set(event.payload.id, event.payload);
-        } else if (
-          event.type === "node.updated" &&
-          (event.payload.kind === "approval_request" ||
-            event.payload.kind === "user_input_request") &&
-          event.payload.runtimeRequestId !== null &&
-          OPEN_REQUEST_STATUSES.has(event.payload.status)
-        ) {
-          const resolution = settled(
-            yield* requestFor(event.threadId, event.payload.runtimeRequestId),
-          );
-          if (resolution !== undefined) {
-            normalized.push({
-              ...event,
-              payload: { ...event.payload, status: resolution.status, completedAt: resolution.at },
-            });
-            continue;
-          }
-        } else if (
-          event.type === "node.updated" &&
-          (event.payload.kind === "approval_request" ||
-            event.payload.kind === "user_input_request") &&
-          event.payload.runtimeRequestId !== null &&
-          !writtenCardRequestIds.has(event.payload.runtimeRequestId)
-        ) {
-          const requestId = event.payload.runtimeRequestId;
-          const request = requests.get(requestId);
-          const resolution = settled(request ?? null);
+          const request = event.payload;
+          requests.set(request.id, request);
           normalized.push(event);
-          if (request === undefined || resolution === undefined) continue;
+          const resolution = settled(request);
+          if (resolution === undefined || writtenCardRequestIds.has(request.id)) continue;
           const card = yield* projectionStore
-            .getRuntimeResponseContext(event.threadId, requestId)
+            .getRuntimeResponseContext(event.threadId, request.id)
             .pipe(
               Effect.map((context) => context.item),
               Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.undefined }),
@@ -454,6 +429,23 @@ const layerBase: Layer.Layer<
             },
           });
           continue;
+        } else if (
+          event.type === "node.updated" &&
+          (event.payload.kind === "approval_request" ||
+            event.payload.kind === "user_input_request") &&
+          event.payload.runtimeRequestId !== null &&
+          OPEN_REQUEST_STATUSES.has(event.payload.status)
+        ) {
+          const resolution = settled(
+            yield* requestFor(event.threadId, event.payload.runtimeRequestId),
+          );
+          if (resolution !== undefined) {
+            normalized.push({
+              ...event,
+              payload: { ...event.payload, status: resolution.status, completedAt: resolution.at },
+            });
+            continue;
+          }
         } else if (
           event.type === "turn-item.updated" &&
           (event.payload.type === "approval_request" ||

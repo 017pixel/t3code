@@ -3492,10 +3492,12 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       });
 
       // The answer's handler read the request with no card, the adapter then
-      // stored the card, and the answer's write settles the request and node.
-      for (const [name, decision, expected] of [
-        ["accepted", "accept", "completed"],
-        ["declined", "decline", "cancelled"],
+      // stored the card, and the answer's write settles the request, with its
+      // node or (when the handler found no node either) on its own.
+      for (const [name, decision, expected, withNode] of [
+        ["accepted", "accept", "completed", true],
+        ["declined", "decline", "cancelled", true],
+        ["request-only", "accept", "completed", false],
       ] as const) {
         const requestId = RuntimeRequestId.make(`request:foundation-card-during-answer:${name}`);
         const node = requestNode(requestId);
@@ -3542,16 +3544,20 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
                 decision,
               },
             }),
-            event(`${name}:node-settled`, {
-              type: "node.updated",
-              threadId,
-              nodeId: node.id,
-              payload: { ...node, status: expected, completedAt: now },
-            }),
+            ...(withNode
+              ? [
+                  event(`${name}:node-settled`, {
+                    type: "node.updated",
+                    threadId,
+                    nodeId: node.id,
+                    payload: { ...node, status: expected, completedAt: now },
+                  }),
+                ]
+              : []),
           ],
         });
         const settled = yield* projectionStore.getRuntimeResponseContext(threadId, requestId);
-        assert.equal(settled.node?.status, expected);
+        if (withNode) assert.equal(settled.node?.status, expected);
         assert.equal(settled.item?.status, expected);
       }
 
