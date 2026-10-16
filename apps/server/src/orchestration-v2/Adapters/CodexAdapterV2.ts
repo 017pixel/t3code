@@ -87,6 +87,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -1934,23 +1935,30 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }
           const response = yield* client
             .request("account/rateLimits/read", { supportsLunaReserve: true })
-            .pipe(Effect.timeoutOption(CODEX_LUNA_RESERVE_READ_TIMEOUT));
-          if (Option.isNone(response)) {
+            .pipe(Effect.timeout(CODEX_LUNA_RESERVE_READ_TIMEOUT), Effect.result);
+          if (Result.isFailure(response)) {
             yield* Ref.set(
               lunaReserveReadPausedUntil,
               (yield* Clock.currentTimeMillis) + CODEX_LUNA_RESERVE_READ_BACKOFF_MS,
             );
-            return;
+            // Without ChatGPT auth no read can succeed and Reserve cannot apply
+            // (app-server request_processors/account_processor.rs:1111-1120 at rust-v0.156.1).
+            if (
+              response.failure._tag === "CodexAppServerRequestError" &&
+              response.failure.code === -32600 &&
+              response.failure.errorMessage.includes("authentication required")
+            ) {
+              yield* Ref.set(lunaReserveReadArmed, false);
+              yield* Ref.set(lunaReserve, null);
+            }
+            return yield* Effect.logDebug("Codex Luna Reserve usage read failed.", {
+              cause: response.failure,
+            });
           }
           yield* Ref.set(lunaReserveReadArmed, false);
-          const next = codexLunaReserveFromRead(response.value);
+          const next = codexLunaReserveFromRead(response.success);
           if (next !== undefined) yield* Ref.set(lunaReserve, next);
-        }).pipe(
-          lunaReservePermit.withPermit,
-          Effect.catch((cause) =>
-            Effect.logDebug("Codex Luna Reserve usage read failed.", { cause }),
-          ),
-        );
+        }).pipe(lunaReservePermit.withPermit);
         const limitedTurnItems = yield* Ref.make(
           new Map<ProviderThreadId, Extract<OrchestrationV2TurnItem, { type: "error" }>>(),
         );

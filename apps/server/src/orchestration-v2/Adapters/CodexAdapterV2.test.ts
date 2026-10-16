@@ -8703,6 +8703,82 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  // The app-server's answers at rust-v0.156.1: a failed backend fetch is
+  // `internal_error` (account_processor.rs:1147-1148), and auth that is not
+  // ChatGPT is `invalid_request` (account_processor.rs:1117-1120).
+  it.effect.each([
+    { name: "a backend failure", code: -32603, message: "failed to fetch codex rate limits: 502" },
+    {
+      name: "API-key auth",
+      code: -32600,
+      message: "chatgpt authentication required to read rate limits",
+    },
+  ] as const)("backs off the usage read after $name", ({ code, message }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = "native-codex-luna-read-error";
+        const turn = (id: number, nativeTurnId: string) =>
+          lunaTurn({
+            id,
+            nativeThreadId: thread,
+            nativeTurnId,
+            text: nativeTurnId,
+            model: CODEX_TEST_MODEL_SELECTION.model,
+          });
+        const stillArmed = code !== -32600;
+        const harness = yield* openLunaReplay(
+          makeCodexReplayTranscript({
+            scenario: `codex-luna-usage-read-error-${-code}`,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: thread,
+                nativeTurnId: "limit-turn",
+                prompt: "Use up the ordinary quota.",
+              }),
+              usageLimitedTurnCompleted(thread, "limit-turn"),
+              ...lunaUsageRead(4, "unanswered"),
+              {
+                type: "emit_inbound",
+                label: "account/rateLimits/read/4",
+                frame: { id: 4, error: { code, message } },
+              },
+              ...turn(5, "failed-read-turn"),
+              ...turn(6, "backoff-turn"),
+              ...(stillArmed ? lunaUsageRead(7, "recovered") : []),
+              ...turn(stillArmed ? 8 : 7, "after-backoff-turn"),
+            ],
+          }),
+        );
+        yield* harness.runtime.startTurn(
+          harness.turnInput({ ordinal: 1, text: "Use up the ordinary quota." }),
+        );
+        yield* harness.nextTerminal;
+        yield* harness.runtime.startTurn(
+          harness.turnInput({ ordinal: 2, text: "failed-read-turn" }),
+        );
+        yield* harness.nextTerminal;
+        assert.equal(harness.usageReads(), 1);
+
+        // Within the backoff the start goes straight to `turn/start`.
+        yield* harness.runtime.startTurn(harness.turnInput({ ordinal: 3, text: "backoff-turn" }));
+        yield* harness.nextTerminal;
+        assert.equal(harness.usageReads(), 1);
+
+        // A backend failure stays armed; without ChatGPT auth no read can succeed.
+        yield* TestClock.adjust("30 seconds");
+        yield* harness.runtime.startTurn(
+          harness.turnInput({ ordinal: 4, text: "after-backoff-turn" }),
+        );
+        yield* harness.nextTerminal;
+        assert.equal(harness.usageReads(), stillArmed ? 2 : 1);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("keeps Luna Reserve for a session opened after Reserve became active", () =>
     Effect.scoped(
       Effect.gen(function* () {
