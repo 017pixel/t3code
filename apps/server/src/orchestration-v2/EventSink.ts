@@ -457,7 +457,10 @@ const layerBase: Layer.Layer<
                   payload:
                     "streaming" in current
                       ? { ...current, ...settled, streaming: false }
-                      : { ...current, ...settled },
+                      : // A secret card still open also closes its form.
+                        current.type === "secret_request" && current.secretStatus === "pending"
+                        ? { ...current, ...settled, secretStatus: "cancelled" }
+                        : { ...current, ...settled },
                 });
               }
               break;

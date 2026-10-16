@@ -338,6 +338,10 @@ export function cascadeTerminalizeRunOwnedSubagents(input: {
         payload: {
           ...turnItem,
           ...("streaming" in turnItem ? { streaming: false } : {}),
+          // A secret card also closes its form, as restart recovery does.
+          ...(turnItem.type === "secret_request" && turnItem.secretStatus === "pending"
+            ? { secretStatus: "cancelled" as const }
+            : {}),
           status: input.status,
           completedAt: input.completedAt,
           updatedAt: input.completedAt,

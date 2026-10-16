@@ -1767,3 +1767,56 @@ effectIt.effect(
       );
     }),
 );
+
+// The cascade closes the form, and so does the write's recheck when it
+// rebuilds the card from its current row.
+const secretCardRechecks: ReadonlyArray<
+  readonly [
+    string,
+    ((store: ProjectionStore.ProjectionStoreV2Shape) => ProjectionStore.ProjectionStoreV2Shape)?,
+  ]
+> = [
+  ["", undefined],
+  [
+    " when the write keeps the cascade's card",
+    (store) => ({ ...store, getTurnItem: () => Effect.succeed(null) }),
+  ],
+];
+for (const [variant, sinkProjectionStore] of secretCardRechecks) {
+  effectIt.effect(`closes the form of a secret card a failed start inherited${variant}`, () =>
+    Effect.gen(function* () {
+      const harness = makePersistedStartFailureHarness();
+      const secretItem: OrchestrationV2TurnItem = {
+        ...harness.approvalItem,
+        id: TurnItemId.make("item-secret-start-failure"),
+        nodeId: harness.rootNodeId,
+        ordinal: 2,
+        title: "GitHub token",
+        type: "secret_request",
+        label: "GitHub token",
+        reason: "To open the pull request",
+        secretStatus: "pending",
+      };
+      const projection = yield* harness.run({
+        seed: [
+          {
+            id: EventId.make("event-secret-requested"),
+            type: "turn-item.updated",
+            threadId: harness.threadId,
+            runId: harness.runId,
+            nodeId: harness.rootNodeId,
+            occurredAt: harness.now,
+            payload: secretItem,
+          },
+        ],
+        ...(sinkProjectionStore === undefined ? {} : { sinkProjectionStore }),
+      });
+
+      expect(projection.runs.map((run) => run.status)).toEqual(["failed"]);
+      expect(projection.turnItems.find((item) => item.id === secretItem.id)).toMatchObject({
+        status: "failed",
+        secretStatus: "cancelled",
+      });
+    }),
+  );
+}
