@@ -1,7 +1,9 @@
 import {
   CommandId,
+  EventId,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2TurnItem,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
@@ -333,13 +335,23 @@ const layerBase: Layer.Layer<
       });
 
     // Adapters write a request, its node, and its card (turn item) as separate
-    // events, and the request is answerable once it is stored. An answer that
-    // lands before the node or card settles only what exists, so a node or card
-    // that arrives after its request settled is stored settled to match.
+    // events, and the request is answerable once it is stored. An answer only
+    // settles the node and card its handler read. A node or card that arrives
+    // after its request settled is stored settled to match. A card stored after
+    // the handler read, while the request was still pending, is settled by the
+    // write that settles the request and its node.
     const settleAfterAnsweredRequests = Effect.fnUntraced(function* (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
     ) {
       const requests = new Map<RuntimeRequestId, OrchestrationV2RuntimeRequest>();
+      const writtenCardRequestIds = new Set(
+        events.flatMap((event) =>
+          event.type === "turn-item.updated" &&
+          (event.payload.type === "approval_request" || event.payload.type === "user_input_request")
+            ? [event.payload.requestId]
+            : [],
+        ),
+      );
       const requestFor = (
         threadId: ThreadId,
         requestId: RuntimeRequestId,
@@ -359,9 +371,33 @@ const layerBase: Layer.Layer<
                 }),
               );
         });
-      // An expired request is left alone: a resumed provider may ask it again.
+      // A question card answered without it carries the request's answers. The
+      // answer's attachments are not on the request, but an answer with
+      // attachments comes from a client that already showed the card.
+      const answeredQuestion = (
+        item: Extract<
+          OrchestrationV2TurnItem,
+          { readonly type: "approval_request" | "user_input_request" }
+        >,
+        request: OrchestrationV2RuntimeRequest,
+      ) =>
+        item.type !== "user_input_request" ||
+        item.questionAnswer !== undefined ||
+        request.answers === undefined
+          ? {}
+          : {
+              questionAnswer: {
+                requestId: item.requestId,
+                answers: request.answers,
+                attachmentsByQuestionId: {},
+                questionTextById: Object.fromEntries(
+                  item.questions.map((question) => [question.id, question.question]),
+                ),
+              },
+            };
+      // A request never reopens: a provider that asks again gets a new request id.
       const settled = (request: OrchestrationV2RuntimeRequest | null) =>
-        request?.status !== "resolved" && request?.status !== "cancelled"
+        request === null || request.status === "pending"
           ? undefined
           : {
               status:
@@ -394,6 +430,49 @@ const layerBase: Layer.Layer<
             continue;
           }
         } else if (
+          event.type === "node.updated" &&
+          (event.payload.kind === "approval_request" ||
+            event.payload.kind === "user_input_request") &&
+          event.payload.runtimeRequestId !== null &&
+          !writtenCardRequestIds.has(event.payload.runtimeRequestId)
+        ) {
+          const requestId = event.payload.runtimeRequestId;
+          const request = requests.get(requestId);
+          const resolution = settled(request ?? null);
+          normalized.push(event);
+          if (request === undefined || resolution === undefined) continue;
+          const card = yield* projectionStore
+            .getRuntimeResponseContext(event.threadId, requestId)
+            .pipe(
+              Effect.map((context) => context.item),
+              Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.undefined }),
+            );
+          if (
+            (card?.type !== "approval_request" && card?.type !== "user_input_request") ||
+            !OPEN_REQUEST_STATUSES.has(card.status)
+          )
+            continue;
+          normalized.push({
+            id: EventId.make(`${event.id}:card`),
+            type: "turn-item.updated",
+            threadId: event.threadId,
+            ...(card.runId === null ? {} : { runId: card.runId }),
+            ...(card.nodeId === null ? {} : { nodeId: card.nodeId }),
+            ...(event.driver === undefined ? {} : { driver: event.driver }),
+            ...(event.providerInstanceId === undefined
+              ? {}
+              : { providerInstanceId: event.providerInstanceId }),
+            occurredAt: event.occurredAt,
+            payload: {
+              ...card,
+              ...answeredQuestion(card, request),
+              status: resolution.status,
+              completedAt: resolution.at,
+              updatedAt: resolution.at,
+            },
+          });
+          continue;
+        } else if (
           event.type === "turn-item.updated" &&
           (event.payload.type === "approval_request" ||
             event.payload.type === "user_input_request") &&
@@ -407,20 +486,7 @@ const layerBase: Layer.Layer<
               ...event,
               payload: {
                 ...item,
-                ...(item.type === "user_input_request" &&
-                item.questionAnswer === undefined &&
-                request?.answers !== undefined
-                  ? {
-                      questionAnswer: {
-                        requestId: item.requestId,
-                        answers: request.answers,
-                        attachmentsByQuestionId: {},
-                        questionTextById: Object.fromEntries(
-                          item.questions.map((question) => [question.id, question.question]),
-                        ),
-                      },
-                    }
-                  : {}),
+                ...(request === null ? {} : answeredQuestion(item, request)),
                 status: resolution.status,
                 completedAt: resolution.at,
                 updatedAt: resolution.at,
