@@ -514,6 +514,8 @@ describe("approvalCommandDisplayText", () => {
     [`bash -lc "echo $HOME"`, `bash -lc "echo $HOME"`],
     ["/bin/bash -lc pwd", "pwd"],
     ["/tmp/delete.sh -c 'pwd'", "/tmp/delete.sh -c 'pwd'"],
+    ["/tmp/bash -c 'echo safe'", "/tmp/bash -c 'echo safe'"],
+    ["/usr/local/bin/zsh -lc 'git status'", "git status"],
     ["bash -c {echo,MARKER}", "bash -c {echo,MARKER}"],
     ["bash -c *.sh", "bash -c *.sh"],
     ["bash -c ~", "bash -c ~"],
