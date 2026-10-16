@@ -1773,10 +1773,10 @@ effectIt.effect(
 const secretCardRechecks: ReadonlyArray<
   readonly [
     string,
-    ((store: ProjectionStore.ProjectionStoreV2Shape) => ProjectionStore.ProjectionStoreV2Shape)?,
+    (store: ProjectionStore.ProjectionStoreV2Shape) => ProjectionStore.ProjectionStoreV2Shape,
   ]
 > = [
-  ["", undefined],
+  ["", (store) => store],
   [
     " when the write keeps the cascade's card",
     (store) => ({ ...store, getTurnItem: () => Effect.succeed(null) }),
@@ -1809,7 +1809,7 @@ for (const [variant, sinkProjectionStore] of secretCardRechecks) {
             payload: secretItem,
           },
         ],
-        ...(sinkProjectionStore === undefined ? {} : { sinkProjectionStore }),
+        sinkProjectionStore,
       });
 
       expect(projection.runs.map((run) => run.status)).toEqual(["failed"]);
