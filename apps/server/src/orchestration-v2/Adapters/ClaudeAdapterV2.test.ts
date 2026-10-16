@@ -2392,6 +2392,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly subagentLaunchToolUseId?: string;
     readonly nativeSessionId?: string;
     readonly settings?: ClaudeSettings;
+    readonly forkSession?: ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerShape["forkSession"];
     // A CLI process opened after the first streams from its own queue, so the
     // first one can exit (Queue.shutdown) and a later turn can start another.
     readonly freshQueueOnReopen?: boolean;
@@ -2515,7 +2516,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 close: options?.close?.(sdkMessages) ?? Effect.void,
               };
             }),
-          forkSession: () => Effect.die("unused forkSession"),
+          forkSession: options?.forkSession ?? (() => Effect.die("unused forkSession")),
           subagentLaunchToolUseId: () => Effect.succeed(options?.subagentLaunchToolUseId ?? null),
           assertComplete: Effect.void,
         },
@@ -2992,6 +2993,72 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
         ),
       ),
+  );
+
+  // The update reuses the Thought's item id, which is no SDK message uuid; a
+  // fork cut at it must still pass forkSession a uuid from the transcript.
+  it.effect("forks at a thinking update through the snapshot that held it", () =>
+    Effect.gen(function* () {
+      const forkCalls: Array<unknown> = [];
+      const harness = yield* makeWakeHarnessWithOptions({
+        // Forking closes the live CLI process first.
+        close: (sdkMessages) => Queue.shutdown(sdkMessages),
+        forkSession: (input) =>
+          Effect.sync(() => {
+            forkCalls.push(input.options);
+            return { sessionId: "forked-thinking-session" };
+          }),
+      });
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("thinking-update-fork-attempt"),
+          text: "Check the memory file",
+          attachments: [],
+        }),
+      );
+      const snapshot = (uuid: string, content: ReadonlyArray<unknown>) =>
+        claudeSdkFrame({
+          type: "assistant",
+          uuid,
+          session_id: WAKE_NATIVE_SESSION,
+          parent_tool_use_id: null,
+          message: { id: "reply-message", model: "claude-opus-5-5", content },
+        });
+      for (const frame of [
+        snapshot("thinking-snapshot-0", [{ type: "thinking", thinking: plan, signature: "sig" }]),
+        snapshot("thinking-snapshot-1", [{ type: "thinking", thinking: update, signature: "sig" }]),
+        snapshot("tool-snapshot", [
+          { type: "tool_use", id: "tool-1", name: "Bash", input: { command: "ls" } },
+        ]),
+        makeResultFrame({ uuid: "thinking-update-fork-result", result: "" }),
+      ]) {
+        yield* Queue.offer(harness.sdkMessages, frame);
+      }
+      yield* Queue.take(harness.terminalReceipts);
+      const updateItem = harness.events.findLast(
+        (event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
+      );
+      assert(updateItem?.type === "turn_item.updated");
+      assert.equal(updateItem.turnItem.text, update);
+      assert.equal(updateItem.turnItem.nativeItemRef?.nativeId, "thinking-snapshot-1");
+
+      yield* harness.runtime.forkThread({
+        sourceProviderThread: harness.providerThread,
+        sourceProviderTurns: [],
+        throughTurnItem: updateItem.turnItem,
+        targetThreadId: ThreadId.make("thread-claude-thinking-update-fork"),
+      });
+      assert.deepEqual(forkCalls, [{ dir: "/workspace", upToMessageId: "thinking-snapshot-1" }]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
   );
 
   it.effect.each(["cancelled", "denied", "permission_denied", undefined])(

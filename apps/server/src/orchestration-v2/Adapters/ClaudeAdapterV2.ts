@@ -2922,6 +2922,8 @@ function buildAssistantArtifacts(input: {
   readonly turnInput: ProviderAdapter.ProviderAdapterV2TurnInput;
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly nativeItemId: string;
+  /** The SDK message uuid, when the item id is derived from something else. */
+  readonly nativeMessageUuid?: string | undefined;
   readonly text: string;
   readonly ordinal: number;
   readonly startedAt: DateTime.Utc;
@@ -2943,9 +2945,11 @@ function buildAssistantArtifacts(input: {
     driver: CLAUDE_PROVIDER,
     nativeItemId: input.nativeItemId,
   });
+  // A fork cut at this item passes the native id to forkSession as
+  // upToMessageId, so it must be an SDK message uuid.
   const nativeItemRef = {
     driver: CLAUDE_PROVIDER,
-    nativeId: input.nativeItemId,
+    nativeId: input.nativeMessageUuid ?? input.nativeItemId,
     strength: "strong" as const,
   };
 
@@ -3080,6 +3084,8 @@ interface ActiveClaudeTurnContext {
     lastThinking: {
       readonly messageId: string;
       readonly itemId: string;
+      // The SDK snapshot that held the block, a valid forkSession cut.
+      readonly snapshotUuid: string;
       readonly text: string;
       readonly followsThinking: boolean;
     } | null;
@@ -6230,6 +6236,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const emitAssistantTextArtifacts = Effect.fnUntraced(function* (input: {
           readonly context: ActiveClaudeTurnContext;
           readonly nativeItemId: string;
+          readonly nativeMessageUuid?: string;
           readonly text: string;
         }) {
           if (input.context.assistant.emittedNativeItemIds.has(input.nativeItemId)) {
@@ -6243,6 +6250,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             turnInput: input.context.input,
             providerTurnId: input.context.providerTurnId,
             nativeItemId: input.nativeItemId,
+            nativeMessageUuid: input.nativeMessageUuid,
             text: input.text,
             ordinal,
             startedAt: now,
@@ -7066,9 +7074,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   claudeWritesUpdatesAsThinking(message.message.model)
                 ) {
                   // Same item ID, so the update replaces the Thought in place.
+                  // Cutting a fork at its snapshot keeps the thinking and drops
+                  // the tool call, which has no result yet.
                   yield* emitAssistantTextArtifacts({
                     context,
                     nativeItemId: update.itemId,
+                    nativeMessageUuid: update.snapshotUuid,
                     text: update.text,
                   });
                 }
@@ -7090,6 +7101,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 ? {
                     messageId: message.message.id,
                     itemId,
+                    snapshotUuid: message.uuid,
                     text: completedText,
                     followsThinking: previous !== null && previous.messageId === message.message.id,
                   }
