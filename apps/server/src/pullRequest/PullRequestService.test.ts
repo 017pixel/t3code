@@ -4375,6 +4375,48 @@ it.effect("explicit and turn invalidations make the next listing ask the host ag
   }),
 );
 
+it.effect("turns re-read the listings at most once per cache window", () =>
+  Effect.gen(function* () {
+    let hostCalls = 0;
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          listChangeRequests: () => {
+            hostCalls += 1;
+            return Effect.succeed({ items: [], truncated: false, continues: false });
+          },
+        }),
+      ],
+    });
+    const turn = (projectId: string) =>
+      service.refreshAfterTurn(projectId as ProjectId).pipe(Effect.andThen(Effect.yieldNow));
+
+    yield* service.list({ state: "open" });
+    // The first turn moves the listings at once.
+    yield* turn("p1");
+    yield* service.list({ state: "open" });
+    assert.strictEqual(hostCalls, 2);
+
+    // A burst of turns in other projects inside the window shares one later refresh.
+    yield* turn("p2");
+    yield* turn("p3");
+    yield* service.list({ state: "open" });
+    assert.strictEqual(hostCalls, 2);
+
+    const refreshed = yield* service.subscribeRefreshes.pipe(
+      Stream.drop(1),
+      Stream.take(1),
+      Stream.runDrain,
+      Effect.forkChild({ startImmediately: true }),
+    );
+    yield* TestClock.adjust("30 seconds");
+    yield* Fiber.join(refreshed);
+    yield* service.list({ state: "open" });
+    assert.strictEqual(hostCalls, 3);
+  }),
+);
+
 it.effect("close and reopen notify subscribed readers after invalidating their cached state", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -4713,6 +4755,50 @@ it.effect("asks on its own for a repository a search answered nothing for", () =
       result.entries.map((entry) => entry.number),
       [1],
     );
+  }),
+);
+it.effect("asks once whether search covers the repositories it was silent about", () =>
+  Effect.gen(function* () {
+    const separately: string[] = [];
+    const coverageAsks: Array<ReadonlyArray<string>> = [];
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        project({ id: "p2", title: "docs", workspaceRoot: "/b", repository: "acme/docs" }),
+        project({ id: "p3", title: "old", workspaceRoot: "/c", repository: "acme/old" }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          listChangeRequests: ({ repository }) => {
+            separately.push(repository);
+            return Effect.succeed({ items: [], truncated: false, continues: true });
+          },
+          // A full slice: the page says there is more, which used to send every silent
+          // repository to its own read.
+          listChangeRequestsAcross: () =>
+            Effect.succeed({
+              items: [batchedChangeRequest(1, "acme/web", "2026-07-03T00:00:00Z")],
+              truncated: true,
+            }),
+          searchCoverage: ({ repositories }) =>
+            Effect.sync(() => {
+              coverageAsks.push(repositories);
+              return repositories.map((repository) => ({
+                repository,
+                covered: repository !== "acme/old",
+              }));
+            }),
+        }),
+      ],
+    });
+
+    yield* service.list({ state: "open", involvement: "all" });
+    yield* service.list({ state: "open", involvement: "authored" });
+
+    // `acme/docs` is covered, so its silence is believed, and the answer is held: the second
+    // listing does not ask about it again. `acme/old` is not covered, so it is read on its own.
+    assert.deepStrictEqual(coverageAsks, [["acme/docs", "acme/old"], ["acme/old"]]);
+    assert.deepStrictEqual(separately, ["acme/old", "acme/old"]);
   }),
 );
 it.effect("reads the repositories one at a time when the search itself fails", () =>
