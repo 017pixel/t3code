@@ -1820,3 +1820,86 @@ for (const [variant, sinkProjectionStore] of secretCardRechecks) {
     }),
   );
 }
+
+effectIt.effect("keeps what a running subagent reported while a failed start is written", () =>
+  Effect.gen(function* () {
+    const harness = makePersistedStartFailureHarness();
+    const subagentNode: OrchestrationV2ExecutionNode = {
+      ...harness.approvalNode,
+      id: NodeId.make("node-workflow-start-failure"),
+      kind: "subagent",
+      status: "running",
+      providerTurnId: null,
+      runtimeRequestId: null,
+    };
+    const subagent: OrchestrationV2Subagent = {
+      id: subagentNode.id,
+      threadId: harness.threadId,
+      runId: harness.runId,
+      parentNodeId: harness.rootNodeId,
+      origin: "provider_native",
+      createdBy: "agent",
+      driver: harness.driver,
+      providerInstanceId: harness.instanceId,
+      providerThreadId: null,
+      childThreadId: null,
+      nativeTaskRef: null,
+      prompt: "Review the change",
+      title: "Review",
+      model: null,
+      status: "running",
+      result: null,
+      startedAt: harness.now,
+      completedAt: null,
+      updatedAt: harness.now,
+    };
+    const base = { threadId: harness.threadId, runId: harness.runId, occurredAt: harness.now };
+    const update = (
+      label: string,
+      reported: Partial<OrchestrationV2Subagent>,
+      node: Partial<OrchestrationV2ExecutionNode>,
+    ): ReadonlyArray<OrchestrationV2DomainEvent> => [
+      {
+        ...base,
+        id: EventId.make(`event-workflow-node-${label}`),
+        type: "node.updated",
+        nodeId: subagentNode.id,
+        payload: { ...subagentNode, ...node },
+      },
+      {
+        ...base,
+        id: EventId.make(`event-workflow-${label}`),
+        type: "subagent.updated",
+        nodeId: subagent.id,
+        payload: { ...subagent, ...reported },
+      },
+    ];
+    const projection = yield* harness.run({
+      seed: update("started", {}, {}),
+      // The earlier attempt's session still reports on the subagent after the
+      // failure read it: it made progress and opened its provider thread.
+      beforeFailureWrite: Effect.gen(function* () {
+        yield* (yield* EventSink.EventSinkV2).write({
+          events: update(
+            "progressed",
+            { progress: "Reading the diff", providerThreadId: harness.providerThreadId },
+            { providerTurnId: ProviderTurnId.make("provider-turn-workflow") },
+          ),
+        });
+      }),
+    });
+
+    expect(projection.runs.map((run) => run.status)).toEqual(["failed"]);
+    expect(projection.subagents).toMatchObject([
+      {
+        status: "failed",
+        progress: "Reading the diff",
+        providerThreadId: harness.providerThreadId,
+      },
+    ]);
+    expect(projection.nodes.find((node) => node.id === subagentNode.id)).toMatchObject({
+      status: "failed",
+      providerTurnId: "provider-turn-workflow",
+    });
+  }),
+);

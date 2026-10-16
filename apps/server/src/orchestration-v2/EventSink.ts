@@ -430,14 +430,35 @@ const layerBase: Layer.Layer<
               const current = (yield* records(event.payload.threadId))?.subagents.find(
                 (row) => row.id === event.payload.id,
               );
-              if (current === undefined || !ended(current.status)) kept.push(event);
+              if (current === undefined) kept.push(event);
+              else if (!ended(current.status)) {
+                kept.push({
+                  ...event,
+                  payload: {
+                    ...current,
+                    status: event.payload.status,
+                    completedAt: event.payload.completedAt,
+                    updatedAt: event.payload.updatedAt,
+                  },
+                });
+              }
               break;
             }
             case "node.updated": {
               const current = (yield* records(event.payload.threadId))?.nodes.find(
                 (row) => row.id === event.payload.id,
               );
-              if (current === undefined || !ended(current.status)) kept.push(event);
+              if (current === undefined) kept.push(event);
+              else if (!ended(current.status)) {
+                kept.push({
+                  ...event,
+                  payload: {
+                    ...current,
+                    status: event.payload.status,
+                    completedAt: event.payload.completedAt,
+                  },
+                });
+              }
               break;
             }
             case "turn-item.updated": {
