@@ -3042,7 +3042,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         (event) =>
           event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
       );
-      assert(updateItem?.type === "turn_item.updated");
+      assert(
+        updateItem?.type === "turn_item.updated" &&
+          updateItem.turnItem.type === "assistant_message",
+      );
       assert.equal(updateItem.turnItem.text, update);
       assert.equal(updateItem.turnItem.nativeItemRef?.nativeId, "thinking-snapshot-1");
 
