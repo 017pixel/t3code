@@ -513,6 +513,10 @@ describe("approvalCommandDisplayText", () => {
     [`/bin/bash -lc "rg -g '*.ts' TODO"`, "rg -g '*.ts' TODO"],
     [`bash -lc "echo $HOME"`, `bash -lc "echo $HOME"`],
     ["/bin/bash -lc pwd", "pwd"],
+    ["/tmp/delete.sh -c 'pwd'", "/tmp/delete.sh -c 'pwd'"],
+    ["bash -c {echo,MARKER}", "bash -c {echo,MARKER}"],
+    ["bash -c *.sh", "bash -c *.sh"],
+    ["bash -c ~", "bash -c ~"],
     ["git status", "git status"],
   ])("unwraps only a bare shell wrapper: %s", (input, expected) => {
     expect(approvalCommandDisplayText(input)).toBe(expected);

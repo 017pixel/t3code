@@ -1383,10 +1383,10 @@ export function commandDisplayText(command: string): string {
 }
 
 // `<shell> -c` or `-lc` with one literal script: single-quoted, double-quoted
-// without expansions or escapes, or a plain word. Anything else around it,
+// without expansions or escapes, or a word with nothing to expand. Anything else,
 // such as options or redirects, keeps the whole invocation visible.
 const BARE_SHELL_WRAPPER =
-  /^(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|dash|ash|ksh|fish) -l?c (?:'([^']*)'|"([^"\\$`]*)"|([^\s'"\\$`;&|<>()]+))$/u;
+  /^(?:(?:\/[\w.-]+)*\/)?(?:sh|bash|zsh|dash|ash|ksh|fish) -l?c (?:'([^']*)'|"([^"\\$`]*)"|([\w./:@=+%,-]+))$/u;
 
 /** The command an approval asks about, unwrapped only when nothing else can run. */
 export function approvalCommandDisplayText(command: string): string {
