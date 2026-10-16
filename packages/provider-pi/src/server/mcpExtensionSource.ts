@@ -73,6 +73,9 @@ function runtimeMode(): RuntimeMode {
 }
 
 function toolInputSummary(input: unknown): string {
+  // A shell tool's approval shows the command itself, not its JSON arguments.
+  const command = (input as { command?: unknown } | null)?.command;
+  if (typeof command === "string" && command.trim().length > 0) return command.slice(0, 4_000);
   try {
     return JSON.stringify(input, null, 2).slice(0, 4_000);
   } catch {

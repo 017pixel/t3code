@@ -4121,6 +4121,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           readonly nativeRequestId: string;
           readonly requestKind: ProviderRequestKind;
           readonly prompt?: string | null;
+          /** Provider's explanation, kept apart so it cannot replace the prompt. */
+          readonly title?: string | null | undefined;
           readonly appName?: string;
           readonly options?: ReadonlyArray<ProviderApprovalOption>;
         }) =>
@@ -4197,7 +4199,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               parentItemId: null,
               ordinal,
               status: "waiting",
-              title: null,
+              title: input.title?.trim() || null,
               startedAt: createdAt,
               completedAt: null,
               updatedAt: createdAt,
@@ -5156,9 +5158,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeItemId: payload.itemId,
               nativeRequestId,
               requestKind: "command",
-              ...((payload.reason ?? payload.command) === undefined
-                ? {}
-                : { prompt: payload.reason ?? payload.command }),
+              ...(payload.command === undefined ? {} : { prompt: payload.command }),
+              title: payload.reason,
             });
             const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
             yield* Ref.update(pendingRuntimeRequests, (current) => {
@@ -5441,7 +5442,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeItemId: payload.callId,
               nativeRequestId,
               requestKind: "command",
-              prompt: payload.reason ?? payload.command.join(" "),
+              prompt: payload.command.join(" "),
+              title: payload.reason,
             });
             const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
             yield* Ref.update(pendingRuntimeRequests, (current) => {

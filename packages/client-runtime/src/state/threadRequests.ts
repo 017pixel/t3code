@@ -13,6 +13,8 @@ export interface ThreadPendingApproval {
   readonly requestKind: ProviderRequestKind;
   readonly createdAt: string;
   readonly detail?: string;
+  /** Provider's explanation of the request, shown beside the detail, never instead of it. */
+  readonly title?: string;
   /** App requesting access for mcp-elicitation approvals (#8058). */
   readonly appName?: string;
   /** Approval choices advertised by the provider (#8058); defaults apply when absent. */
@@ -103,6 +105,7 @@ export function derivePendingThreadRequests(
       requestKind: request.kind,
       createdAt: DateTime.formatIso(request.createdAt),
       ...(item?.type === "approval_request" && item.prompt ? { detail: item.prompt } : {}),
+      ...(item?.type === "approval_request" && item.title ? { title: item.title } : {}),
       ...(item?.type === "approval_request" && item.appName ? { appName: item.appName } : {}),
       ...(item?.type === "approval_request" && item.options !== undefined
         ? { options: item.options }

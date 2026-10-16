@@ -1,3 +1,4 @@
+import { commandDisplayText } from "@t3tools/client-runtime/work-log/command-label";
 import { memo } from "react";
 import { type PendingApproval } from "../../session-logic";
 import { cn } from "~/lib/utils";
@@ -43,7 +44,9 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
     >
       <span className="flex w-full min-w-0 items-center gap-2 text-2xs text-muted-foreground">
         <span className="shrink-0 font-medium text-warning">{fallbackLabel}</span>
-        {approval.appName ? <span className="min-w-0 truncate">{approval.appName}</span> : null}
+        {approval.appName || approval.title ? (
+          <span className="min-w-0 truncate">{approval.appName ?? approval.title}</span>
+        ) : null}
         {pendingCount > 1 ? (
           <span className="ml-auto shrink-0 tabular-nums">1/{pendingCount}</span>
         ) : null}
@@ -61,7 +64,11 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       >
         {approval.responseCapability === "not_resumable"
           ? "Provider process is gone — interrupt or restart the run to respond."
-          : approval.detail || fallbackLabel}
+          : approval.detail
+            ? approval.requestKind === "command"
+              ? commandDisplayText(approval.detail)
+              : approval.detail
+            : fallbackLabel}
       </Detail>
     </span>
   );

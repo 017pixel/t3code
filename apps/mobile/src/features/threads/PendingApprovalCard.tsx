@@ -1,4 +1,5 @@
 import { RequestActionButton } from "./RequestActionButton";
+import { commandDisplayText } from "@t3tools/client-runtime/work-log/command-label";
 import type {
   ProviderApprovalDecision,
   ProviderApprovalOption,
@@ -41,10 +42,21 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
       <Text className="font-t3-bold text-lg text-foreground">
         {props.approval.appName ?? props.approval.requestKind}
       </Text>
-      {props.approval.detail ? (
+      {props.approval.title && !props.approval.appName ? (
         <Text className="font-sans text-sm leading-normal text-foreground-secondary">
-          {props.approval.detail}
+          {props.approval.title}
         </Text>
+      ) : null}
+      {props.approval.detail ? (
+        props.approval.requestKind === "command" ? (
+          <Text className="font-mono text-sm leading-normal text-foreground" selectable>
+            {commandDisplayText(props.approval.detail)}
+          </Text>
+        ) : (
+          <Text className="font-sans text-sm leading-normal text-foreground-secondary">
+            {props.approval.detail}
+          </Text>
+        )
       ) : null}
       {!canRespond ? (
         <Text className="font-sans text-sm leading-5 text-foreground-muted">

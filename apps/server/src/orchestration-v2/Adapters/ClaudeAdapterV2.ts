@@ -5720,6 +5720,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly nativeRequestId: string;
           readonly requestKind: OrchestrationV2RuntimeRequest["kind"];
           readonly prompt?: string;
+          /** Claude's description of the request, kept apart so it cannot replace the prompt. */
+          readonly title?: string;
           readonly questions?: ReadonlyArray<OrchestrationV2UserInputQuestion>;
         }) {
           const createdAt = yield* DateTime.now;
@@ -5794,7 +5796,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             parentItemId: null,
             ordinal,
             status: "waiting",
-            title: null,
+            title: input.title ?? null,
             startedAt: createdAt,
             completedAt: null,
             updatedAt: createdAt,
@@ -8349,17 +8351,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           const requestKind = providerRequestKindFromClaudeTool(toolName);
-          const prompt =
-            callbackOptions.title ??
-            callbackOptions.description ??
-            callbackOptions.decisionReason ??
-            summarizeClaudeToolRequest(toolName, nativeToolInput);
+          const explanation =
+            callbackOptions.title ?? callbackOptions.description ?? callbackOptions.decisionReason;
+          // The user approves the command itself; Claude's description only explains it.
+          const command = firstStringInputField(nativeToolInput, ["command", "cmd", "script"]);
           const artifacts = yield* buildApprovalRequestArtifacts({
             context,
             nativeItemId: nativeRequestId,
             nativeRequestId,
             requestKind,
-            prompt,
+            prompt: command ?? explanation ?? summarizeClaudeToolRequest(toolName, nativeToolInput),
+            ...(command !== undefined && explanation?.trim() ? { title: explanation.trim() } : {}),
           });
           const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
           yield* Ref.update(pendingRuntimeRequests, (current) => {
