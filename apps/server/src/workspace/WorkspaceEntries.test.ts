@@ -134,6 +134,30 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
       }),
     );
 
+    it.effect("lists a host folder and its parent, each from its own root", () =>
+      // Folder links outside the workspace browse by passing the host folder as
+      // `cwd`; walking up passes the parent. Each stays bounded by its own root.
+      Effect.gen(function* () {
+        const parent = yield* makeTempDir();
+        const path = yield* Path.Path;
+        yield* writeTextFile(parent, "linked/notes.md");
+        yield* writeTextFile(parent, "sibling/readme.md");
+        const linked = path.join(parent, "linked");
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        expect(yield* workspaceEntries.list({ cwd: linked, directoryPath: "" })).toEqual({
+          entries: [{ path: "notes.md", kind: "file" }],
+          truncated: false,
+        });
+        const up = yield* workspaceEntries.list({ cwd: parent, directoryPath: "" });
+        expect(up.entries.map((entry) => entry.path).toSorted()).toEqual(["linked", "sibling"]);
+        const escape = yield* workspaceEntries
+          .list({ cwd: linked, directoryPath: "../sibling" })
+          .pipe(Effect.flip);
+        expect(escape._tag).toBe("WorkspaceEntriesReadDirectoryError");
+      }),
+    );
+
     it.effect(
       "rejects directory traversal, git internals, and symlinks outside the workspace",
       () =>
@@ -190,6 +214,42 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
           }
         }),
       60_000,
+    );
+
+    it.effect("includes images and other binary files in non-git workspace indexes", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir();
+        const imagePaths = ["photo.png", "photo.jpg", "photo.jpeg"];
+        const binaryPaths = [...imagePaths, "document.pdf", "archive.zip", "data.bin"];
+        for (const filePath of binaryPaths) {
+          yield* writeTextFile(cwd, filePath, "\0binary contents\n");
+        }
+        yield* writeTextFile(cwd, "notes.txt", "plain text\n");
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const expectedPaths = [...binaryPaths, "notes.txt"].toSorted();
+        const listed = yield* workspaceEntries.list({ cwd });
+        expect(listed.entries.map((entry) => entry.path).toSorted()).toEqual(expectedPaths);
+        expect(listed.truncated).toBe(false);
+
+        const searched = yield* workspaceEntries.search({
+          cwd,
+          query: "",
+          limit: 100,
+          kind: "file",
+        });
+        expect(searched.entries.map((entry) => entry.path).toSorted()).toEqual(expectedPaths);
+        expect(searched.truncated).toBe(false);
+
+        const images = yield* workspaceEntries.search({
+          cwd,
+          query: "",
+          limit: 100,
+          imageOnly: true,
+        });
+        expect(images.entries.map((entry) => entry.path).toSorted()).toEqual(imagePaths.toSorted());
+        expect(images.truncated).toBe(false);
+      }),
     );
 
     it.effect("returns the complete cached workspace index", () =>
