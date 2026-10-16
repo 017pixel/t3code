@@ -5,7 +5,6 @@ export const GROK_BACKGROUND_SUBAGENT_PROMPT =
 export const GROK_BACKGROUND_SUBAGENT_QUEUED_PROMPT = "Reply exactly QUEUED_DONE.";
 export const GROK_BACKGROUND_SUBAGENT_STEER_PROMPT = "Reply exactly STEER_DONE.";
 
-/** Grok's own reply once the subagent finished (its `subagent-completed-<id>` wake turn). */
 const GROK_SUBAGENT_WAKE_LABEL =
   "notification:session/update:agent_message_chunk:subagent-completed-00000000-0000-4000-8000-000000000002";
 

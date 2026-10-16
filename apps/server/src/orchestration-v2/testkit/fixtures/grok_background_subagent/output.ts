@@ -135,7 +135,6 @@ export function assertGrokBackgroundSubagentOutput(
     assert.notInclude(runAssistantTexts(projection, run.id), "SUBAGENT_DONE");
   }
 
-  // The timeline says which subagent finished, and opens its thread.
   assert.deepEqual(backgroundNotifications(projection), [
     {
       summary: 'Subagent "Sleep then reply done" finished',
@@ -144,7 +143,6 @@ export function assertGrokBackgroundSubagentOutput(
     },
   ]);
 
-  // Grok's reply to the finished subagent is a provider continuation.
   const wakeMessage = projection.messages.find((message) => message.id === wakeRun?.userMessageId);
   assert.equal(`${wakeMessage?.createdBy}:${wakeMessage?.creationSource}`, "agent:provider");
   assert.isNotEmpty(
