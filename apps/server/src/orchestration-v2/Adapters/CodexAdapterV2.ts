@@ -153,6 +153,11 @@ const CODEX_PROVIDER = ProviderDriverKind.make("codex");
 export const CODEX_DRIVER_KIND = CODEX_PROVIDER;
 export const CODEX_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CODEX_DRIVER_KIND);
 
+// Legacy approvals send argv; quoting keeps argument boundaries visible.
+function codexShellWord(word: string): string {
+  return /^[\w./:@=-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
+}
+
 /** Describe approval scope even when Codex omits or blanks the optional reason. */
 export function codexFileChangeApprovalPrompt(input: {
   readonly reason?: string | null;
@@ -5442,7 +5447,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeItemId: payload.callId,
               nativeRequestId,
               requestKind: "command",
-              prompt: payload.command.join(" "),
+              prompt: payload.command.map(codexShellWord).join(" "),
               title: payload.reason,
             });
             const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
