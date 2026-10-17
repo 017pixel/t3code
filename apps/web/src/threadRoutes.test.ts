@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   eraseHeldText,
   holdTextForUrlRouteTarget,
   isUrlTargetSidebarTextKey,
   setUrlRouteTargetKey,
-  takeHeldText,
+  insertHeldText,
 } from "./components/keptView";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId } from "@t3tools/contracts";
@@ -26,6 +26,14 @@ import {
 } from "./threadRoutes";
 
 describe("sidebar typing during a kept thread navigation", () => {
+  const takeHeldText = (key: string) => {
+    let taken: string | null = null;
+    insertHeldText(key, (text) => {
+      taken = text;
+      return true;
+    });
+    return taken;
+  };
   const previous = "server:env-1:previous";
   const destination = "server:env-1:destination";
   const item = document.createElement("li");
@@ -37,6 +45,23 @@ describe("sidebar typing during a kept thread navigation", () => {
   afterEach(() => {
     takeHeldText(destination);
     setUrlRouteTargetKey(null);
+    vi.restoreAllMocks();
+  });
+
+  it("keeps destination text until its composer accepts it, even after a long connection", () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    setUrlRouteTargetKey(destination);
+    holdTextForUrlRouteTarget(previous, "draft");
+    const insert = vi.fn().mockReturnValue(false);
+    insertHeldText(destination, insert);
+    clock.mockReturnValue(5_000);
+    insertHeldText(destination, insert);
+    expect(insert.mock.calls).toEqual([["draft"], ["draft"]]);
+    expect(takeHeldText(previous)).toBeNull();
+    insert.mockReturnValue(true);
+    insertHeldText(destination, insert);
+    expect(takeHeldText(destination)).toBeNull();
+    expect(insert).toHaveBeenCalledTimes(3);
   });
 
   it("holds destination row typing without giving any text to the previous draft", () => {
