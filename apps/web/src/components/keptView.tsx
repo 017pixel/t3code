@@ -220,8 +220,12 @@ export function KeptViewFrame({
 
 /** The route target (`threadRouteTargetKey`) the URL names, as of its last commit. */
 let urlRouteTargetKey: string | null = null;
-let heldText: { readonly targetKey: string; readonly text: string; readonly at: number } | null =
-  null;
+let heldText: {
+  readonly targetKey: string;
+  readonly text: string;
+  readonly at: number;
+  readonly pending?: boolean;
+} | null = null;
 const HELD_TEXT_MAX_AGE_MS = 2_000;
 
 export function setUrlRouteTargetKey(key: string | null): void {
@@ -252,10 +256,15 @@ export function holdTextForUrlRouteTarget(viewTargetKey: string, text: string): 
   const earlier =
     heldText !== null &&
     heldText.targetKey === targetKey &&
-    now - heldText.at < HELD_TEXT_MAX_AGE_MS
+    (heldText.pending || now - heldText.at < HELD_TEXT_MAX_AGE_MS)
       ? heldText.text
       : "";
-  heldText = { targetKey, text: earlier + text, at: now };
+  heldText = {
+    targetKey,
+    text: earlier + text,
+    at: now,
+    pending: heldText?.targetKey === targetKey && heldText.pending === true,
+  };
   return true;
 }
 
@@ -268,11 +277,15 @@ export function eraseHeldText(viewTargetKey: string): boolean {
 }
 
 /** Text typed for this view while the view the user left was still shown. */
-export function takeHeldText(viewTargetKey: string): string | null {
+export function insertHeldText(viewTargetKey: string, insert: (text: string) => boolean): void {
   const held = heldText;
-  if (held === null || held.targetKey !== viewTargetKey) return null;
-  heldText = null;
-  return performance.now() - held.at < HELD_TEXT_MAX_AGE_MS ? held.text : null;
+  if (held === null || held.targetKey !== viewTargetKey) return;
+  if (!held.pending && performance.now() - held.at >= HELD_TEXT_MAX_AGE_MS) {
+    heldText = null;
+    return;
+  }
+  // Once the destination arrives, readiness can take longer than the navigation grace period.
+  heldText = insert(held.text) || held.text.length === 0 ? null : { ...held, pending: true };
 }
 
 /** Whether the URL names another route target than this view's. */
