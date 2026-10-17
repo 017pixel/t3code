@@ -1,6 +1,6 @@
 import { requireNativeView } from "expo";
-import { CommonActions, useNavigation } from "@react-navigation/native";
-import { androidWorkspaceNavigationState } from "../../lib/android-workspace-navigation";
+import { useNavigation } from "@react-navigation/native";
+import { resetAndroidWorkspace } from "../../lib/android-workspace-navigation";
 import {
   Keyboard,
   processColor,
@@ -81,9 +81,7 @@ export function AndroidWorkspaceNavigation(props: {
           const tab = event.nativeEvent.tab;
           if (tab !== workspace.state.selectedTab) {
             workspace.dispatch({ type: "select", tab });
-            navigation.dispatch((state) =>
-              CommonActions.reset(androidWorkspaceNavigationState(state)),
-            );
+            resetAndroidWorkspace(navigation);
           }
           props.onSelect?.();
         }}
