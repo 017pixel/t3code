@@ -29,22 +29,6 @@ struct NativeIntegrationModernizationTests {
     }
 
     @Test
-    func cancellingV1StillSendsTheLatestTurnID() async throws {
-        try await withClient(version: 1) { client, transport in
-            let snapshot = try await client.backgroundSnapshot()
-            let thread = try #require(snapshot.threads.first)
-
-            try await client.cancelTurn(threadID: thread.id)
-
-            let commands = await transport.commands
-            #expect(commands.count == 1)
-            #expect(commands.first?["type"] == .string("thread.turn.interrupt"))
-            #expect(commands.first?["threadId"] == .string("thread-fixture"))
-            #expect(commands.first?["turnId"] == .string("completed-run"))
-        }
-    }
-
-    @Test
     func goalUpdatesAndClearsInNativeShellAndDetailMapping() async throws {
         try await withClient { client, transport in
             let active: JSONValue = .object([
@@ -111,21 +95,15 @@ private actor ModernizationTransport: HTTPTransport {
 
     init(version: Int) throws {
         self.version = version
-        let original = try V2Fixture.load(version == 2 ? "v2-shell-snapshot" : "shell-snapshot")
+        let original = try V2Fixture.load("v2-shell-snapshot")
         let originalThread = try #require(original["threads"]?.v2Array?.first)
         let watched = V2Fixture.watchedPullRequest()
-        let shellThread = V2Fixture.patch(originalThread, version == 2 ? [
+        let shellThread = V2Fixture.patch(originalThread, [
             "latestRunId": .string("completed-run"), "status": .string("completed"),
             "latestRunCompletedAt": .string(V2Fixture.now),
             "activeRunId": .null, "activityRunStatus": .null, "activityRunStartedAt": .null,
             "activeProviderThreadId": .null, "pendingRuntimeRequest": .null,
             "pendingBackgroundTasks": .array([]), "pullRequests": .array([watched]),
-        ] : [
-            "latestTurn": .object([
-                "turnId": .string("completed-run"), "state": .string("completed"),
-                "requestedAt": .string(V2Fixture.now), "startedAt": .string(V2Fixture.now),
-                "completedAt": .string(V2Fixture.now), "assistantMessageId": .null,
-            ]),
         ])
         shell = V2Fixture.patch(original, ["threads": .array([shellThread])])
         // Keep the completed run in both reads: forwarding its shell ID would

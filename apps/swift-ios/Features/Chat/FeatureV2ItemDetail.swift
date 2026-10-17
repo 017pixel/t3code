@@ -135,6 +135,11 @@ enum FeatureV2ItemDetail {
         [call(raw), output(raw), body(raw), exitLabel(raw)].compactMap(nonempty).joined(separator: "\n\n")
     }
 
+    static func copyText(formatted: FeatureV2FormattedItem?, commandOutput: String?) -> String {
+        [formatted?.call, commandOutput, formatted?.body, formatted?.exitLabel]
+            .compactMap(nonempty).joined(separator: "\n\n")
+    }
+
     static func exitLabel(_ raw: JSONValue) -> String? {
         raw["type"]?.stringValue == "secret_request" ? nil : raw["exitCode"]?.v2Int.flatMap { $0 == 0 ? nil : "Exit code: \($0)" }
     }

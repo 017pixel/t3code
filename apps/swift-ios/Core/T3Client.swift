@@ -1,6 +1,10 @@
 import Foundation
 
 enum MobileClientMetadata {
+    static func deviceType(for model: String) -> String {
+        model.hasPrefix("iPad") ? "tablet" : "phone"
+    }
+
     static var osMajorVersion: Int {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion
     }
@@ -27,9 +31,6 @@ public actor T3Client {
     let rpc: WebSocketRPCClient
     private let orchestrationConnection: OrchestrationConnection
     private let orchestrationV2: OrchestrationV2Client
-    private var orchestrationGeneration: Int?
-    private var shellProtocolVersion: OrchestrationProtocolVersion?
-    private var threadProtocolVersions: [String: OrchestrationProtocolVersion] = [:]
     private let configSnapshotWaitTimeout: Duration
     private var latestServerEnvironment: EnvironmentDescriptor?
     private var serverConfigCache: ServerConfigSnapshot?
@@ -44,7 +45,8 @@ public actor T3Client {
         httpTransport: any HTTPTransport = URLSessionHTTPTransport(),
         webSocketConnector: any WebSocketConnecting = URLSessionWebSocketConnector(),
         managedAuthorization: (any ManagedEnvironmentAuthorizing)? = nil,
-        rpcConnectionWaitTimeout: Duration = .seconds(4)
+        rpcConnectionWaitTimeout: Duration = .seconds(4),
+        configSnapshotWaitTimeout: Duration = .seconds(75)
     ) {
         self.environment = environment
         let api = EnvironmentAPI(
@@ -55,12 +57,12 @@ public actor T3Client {
         self.api = api
         let orchestrationConnection = OrchestrationConnection(environment: environment, api: api)
         self.orchestrationConnection = orchestrationConnection
-        self.configSnapshotWaitTimeout = rpcConnectionWaitTimeout
+        self.configSnapshotWaitTimeout = configSnapshotWaitTimeout
         let rpc = WebSocketRPCClient(
             connector: webSocketConnector,
             connectionWaitTimeout: rpcConnectionWaitTimeout
         ) {
-            let selection = try await orchestrationConnection.selection(refresh: true)
+            _ = try await orchestrationConnection.descriptor(refresh: true)
             let ticket = try await api.webSocketTicket(for: environment)
             var components = URLComponents(
                 url: environment.webSocketBaseURL,
@@ -77,10 +79,12 @@ public actor T3Client {
                     || $0.name == "clientOs"
                     || $0.name == "clientOsMajorVersion"
                     || $0.name == "clientDeviceModel"
+                    || $0.name == "clientDeviceType"
+                    || $0.name == "connectionMethod"
                     || $0.name == "orchestrationProtocol"
             }
             query.append(URLQueryItem(name: "wsTicket", value: ticket.ticket))
-            query.append(URLQueryItem(name: "orchestrationProtocol", value: String(selection.version.rawValue)))
+            query.append(URLQueryItem(name: "orchestrationProtocol", value: "2"))
             query.append(URLQueryItem(name: "clientSurface", value: "mobile"))
             query.append(URLQueryItem(name: "clientOs", value: "iOS"))
             query.append(URLQueryItem(
@@ -88,6 +92,8 @@ public actor T3Client {
                 value: String(MobileClientMetadata.osMajorVersion)
             ))
             let deviceModel = MobileClientMetadata.deviceModel
+            query.append(URLQueryItem(name: "clientDeviceType", value: MobileClientMetadata.deviceType(for: deviceModel)))
+            query.append(URLQueryItem(name: "connectionMethod", value: environment.kind == .managedDPoP ? "relay" : "direct"))
             if !deviceModel.isEmpty {
                 query.append(URLQueryItem(name: "clientDeviceModel", value: deviceModel))
             }
@@ -97,7 +103,7 @@ public actor T3Client {
             }
             components.queryItems = query
             guard let url = components.url else { throw PairingURLError.invalidURL }
-            try await orchestrationConnection.bindSocket(to: selection)
+            try Task.checkCancellation()
             return url
         }
         self.rpc = rpc
@@ -105,26 +111,16 @@ public actor T3Client {
     }
 
     public func orchestrationVersion() async throws -> OrchestrationProtocolVersion {
-        try await selectedOrchestration().version
+        _ = try await validatedEnvironment()
+        return .v2
     }
 
-    private func selectedOrchestration(
+    private func validatedEnvironment(
         refresh: Bool = false, maximumAge: Duration? = nil
-    ) async throws -> OrchestrationConnection.Selection {
-        let selection = try await orchestrationConnection.selection(refresh: refresh, maximumAge: maximumAge)
-        if let previous = orchestrationGeneration, previous != selection.generation {
-            // A live socket is bound to its handshake protocol. HTTP discovery
-            // can notice an upgrade before that old socket has closed.
-            orchestrationGeneration = selection.generation
-            await orchestrationV2.reset()
-            serverConfigCache = nil
-            threadProtocolVersions.removeAll()
-            if await orchestrationConnection.socketGeneration != selection.generation,
-               await rpc.isConnected() { await rpc.reconnect() }
-        }
-        orchestrationGeneration = selection.generation
-        latestServerEnvironment = selection.descriptor
-        return selection
+    ) async throws -> EnvironmentDescriptor {
+        let descriptor = try await orchestrationConnection.descriptor(refresh: refresh, maximumAge: maximumAge)
+        latestServerEnvironment = descriptor
+        return descriptor
     }
 
     public func connect() async {
@@ -155,87 +151,58 @@ public actor T3Client {
     public func shellSnapshot(
         timeoutInterval: TimeInterval? = nil
     ) async throws -> OrchestrationShellSnapshot {
-        var selection = try await selectedOrchestration(maximumAge: .seconds(60))
-        let snapshot: OrchestrationShellSnapshot
+        _ = try await validatedEnvironment(maximumAge: .seconds(60))
         do {
-            snapshot = try await readShellSnapshot(version: selection.version, timeoutInterval: timeoutInterval)
+            let snapshot = try await orchestrationV2.shellSnapshot(timeoutInterval: timeoutInterval)
+            _ = try await validatedEnvironment()
+            return snapshot
         } catch {
-            let mayHaveChangedProtocol: Bool
+            let needsDescriptorRefresh: Bool
             if case let HTTPError.status(status, _, _) = error {
-                mayHaveChangedProtocol = status == 400 || status == 426
+                needsDescriptorRefresh = status == 400 || status == 426
+            } else {
+                needsDescriptorRefresh = error is DecodingError
             }
-            else { mayHaveChangedProtocol = error is DecodingError }
-            guard mayHaveChangedProtocol else { throw error }
-            let fresh = try await selectedOrchestration(refresh: true)
-            guard fresh.version != selection.version else { throw error }
-            selection = fresh
-            snapshot = try await readShellSnapshot(version: selection.version, timeoutInterval: timeoutInterval)
+            // A changed host must show the update error instead of a stale
+            // HTTP or decoding error from its former protocol.
+            if needsDescriptorRefresh { _ = try await validatedEnvironment(refresh: true) }
+            throw error
         }
-        guard try await selectedOrchestration().generation == selection.generation else { throw RPCError.disconnected }
-        shellProtocolVersion = selection.version
-        return snapshot
-    }
-
-    private func readShellSnapshot(
-        version: OrchestrationProtocolVersion, timeoutInterval: TimeInterval?
-    ) async throws -> OrchestrationShellSnapshot {
-        if version == .v2 {
-            return try await orchestrationV2.shellSnapshot(timeoutInterval: timeoutInterval)
-        }
-        return try await api.shellSnapshot(for: environment, timeoutInterval: timeoutInterval)
     }
 
     public func readModel() async throws -> OrchestrationReadModel {
-        if try await selectedOrchestration().version == .v2 {
-            return try await orchestrationV2.readModel()
-        }
-        return try await api.readModel(for: environment)
+        _ = try await validatedEnvironment()
+        return try await orchestrationV2.readModel()
     }
 
     public func archivedShellSnapshot() async throws -> OrchestrationShellSnapshot {
-        if try await selectedOrchestration().version == .v2 {
-            return try await orchestrationV2.archivedShellSnapshot()
-        }
-        return try await rpc.request(
-            RPCMethod.getArchivedShellSnapshot.rawValue,
-            as: OrchestrationShellSnapshot.self
-        )
+        _ = try await validatedEnvironment()
+        return try await orchestrationV2.archivedShellSnapshot()
     }
 
     public func searchThreadContent(query: String) async throws -> ThreadContentSearchResult {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (2...200).contains(query.utf16.count) else { return .init(matches: []) }
-        let selection = try await selectedOrchestration()
-        guard selection.version == .v2 else { return .init(matches: []) }
+        _ = try await validatedEnvironment()
         let result = try await rpc.request(
             "orchestration.searchThreads",
             payload: .object(["query": .string(query), "limit": .number(50)]),
             as: ThreadContentSearchResult.self
         )
-        guard try await selectedOrchestration().generation == selection.generation else {
-            throw RPCError.disconnected
-        }
+        _ = try await validatedEnvironment()
         return result
     }
 
     public func threadSnapshot(
         id: String,
-        turnLimit: Int? = nil,
         beforeCursor: String? = nil,
         timeoutInterval: TimeInterval? = nil
     ) async throws -> OrchestrationThreadDetailSnapshot {
-        let selection = try await selectedOrchestration()
-        threadProtocolVersions[id] = selection.version
-        let snapshot: OrchestrationThreadDetailSnapshot
-        if selection.version == .v2 {
-            snapshot = try await orchestrationV2.threadSnapshot(id: id, beforeCursor: beforeCursor, timeoutInterval: timeoutInterval)
-        } else {
-            snapshot = try await api.threadSnapshot(
-                id: id, environment: environment, turnLimit: turnLimit,
-                beforeCursor: beforeCursor, timeoutInterval: timeoutInterval
-            )
-        }
-        guard try await selectedOrchestration().generation == selection.generation else { throw RPCError.disconnected }
+        _ = try await validatedEnvironment()
+        let snapshot = try await orchestrationV2.threadSnapshot(
+            id: id, beforeCursor: beforeCursor, timeoutInterval: timeoutInterval
+        )
+        _ = try await validatedEnvironment()
         return snapshot
     }
 
@@ -243,27 +210,18 @@ public actor T3Client {
     public func fullThreadSnapshot(
         id: String, timeoutInterval: TimeInterval? = nil
     ) async throws -> OrchestrationThreadDetailSnapshot {
-        let selection = try await selectedOrchestration()
-        threadProtocolVersions[id] = selection.version
-        let snapshot: OrchestrationThreadDetailSnapshot
-        if selection.version == .v2 {
-            snapshot = try await orchestrationV2.fullThreadSnapshot(id: id, timeoutInterval: timeoutInterval)
-        } else {
-            snapshot = try await api.threadSnapshot(id: id, environment: environment, timeoutInterval: timeoutInterval)
-        }
-        guard try await selectedOrchestration().generation == selection.generation else { throw RPCError.disconnected }
+        _ = try await validatedEnvironment()
+        let snapshot = try await orchestrationV2.fullThreadSnapshot(id: id, timeoutInterval: timeoutInterval)
+        _ = try await validatedEnvironment()
         return snapshot
     }
 
     public func orchestrationTurnItem(
         threadID: String, itemID: String, revision: String? = nil
     ) async throws -> OrchestrationV2TurnItem? {
-        let selection = try await selectedOrchestration()
-        guard selection.version == .v2 else {
-            throw RPCError.protocolViolation("This server does not support V2 tool details.")
-        }
+        _ = try await validatedEnvironment()
         let item = try await orchestrationV2.turnItem(threadID: threadID, itemID: itemID, revision: revision)
-        guard try await selectedOrchestration().generation == selection.generation else { throw RPCError.disconnected }
+        _ = try await validatedEnvironment()
         return item
     }
 
@@ -715,79 +673,29 @@ public actor T3Client {
 
     public func shellEventBatches(
         after sequence: Int? = nil,
-        protocolVersion: Int? = nil,
         reconnect: Bool = true
     ) async -> AsyncThrowingStream<[ShellStreamItem], Error> {
         do {
             _ = try await rpc.waitForConnection(after: nil)
-            let selection = try await selectedOrchestration()
-            let resumeVersion = protocolVersion ?? shellProtocolVersion?.rawValue
-            let resumeSequence = resumeVersion == selection.version.rawValue ? sequence : nil
-            shellProtocolVersion = selection.version
-            if selection.version == .v2 {
-                return await orchestrationV2.shellEventBatches(after: resumeSequence, reconnect: reconnect)
-            }
-            return await legacyShellEventBatches(after: resumeSequence, reconnect: reconnect)
+            _ = try await validatedEnvironment()
+            return await orchestrationV2.shellEventBatches(after: sequence, reconnect: reconnect)
         } catch {
             return AsyncThrowingStream { $0.finish(throwing: error) }
         }
     }
 
-    private func legacyShellEventBatches(
-        after sequence: Int?, reconnect: Bool
-    ) async -> AsyncThrowingStream<[ShellStreamItem], Error> {
-        var payload: [String: JSONValue] = ["requestCompletionMarker": .bool(true)]
-        if let sequence { payload["afterSequence"] = .number(Double(sequence)) }
-        return await rpc.subscribeBatches(
-            RPCMethod.subscribeShell.rawValue,
-            payload: .object(payload),
-            reconnect: reconnect,
-            as: ShellStreamItem.self
-        )
-    }
-
     public func threadEventBatches(
         threadID: String,
-        after sequence: Int? = nil,
-        turnLimit: Int? = nil
+        after sequence: Int? = nil
     ) async throws -> (events: AsyncThrowingStream<[ThreadStreamItem], Error>, connectionID: UUID) {
         _ = try await rpc.waitForConnection(after: nil)
-        let selection = try await selectedOrchestration()
-        let resumeSequence = threadProtocolVersions[threadID] == selection.version ? sequence : nil
-        threadProtocolVersions[threadID] = selection.version
-        if selection.version == .v2 {
-            return try await orchestrationV2.threadEventBatches(threadID: threadID, after: sequence)
-        }
-        var payload: [String: JSONValue] = [
-            "threadId": .string(threadID),
-            "requestCompletionMarker": .bool(true),
-        ]
-        if let resumeSequence { payload["afterSequence"] = .number(Double(resumeSequence)) }
-        if let turnLimit { payload["turnLimit"] = .number(Double(turnLimit)) }
-        return try await rpc.subscribeBatchesOnCurrentConnection(
-            RPCMethod.subscribeThread.rawValue,
-            payload: .object(payload),
-            as: ThreadStreamItem.self
-        )
+        _ = try await validatedEnvironment()
+        return try await orchestrationV2.threadEventBatches(threadID: threadID, after: sequence)
     }
 
     @discardableResult
     public func dispatch(_ command: JSONValue) async throws -> DispatchResult {
-        let selection = try await selectedOrchestration()
-        if selection.version == .v2 {
-            return try await orchestrationV2.dispatch(command,
-                serverResolvedCommandContext: selection.descriptor.capabilities.serverResolvedCommandContext == true)
-        }
-        guard await rpc.isConnected() else {
-            return try await api.dispatch(command, environment: environment)
-        }
-        do {
-            return try await dispatchOverWebSocket(command)
-        } catch RPCError.connectionUnavailable {
-            // The request provably never crossed the socket, so HTTP is a safe
-            // fallback without risking duplicate side effects.
-            return try await api.dispatch(command, environment: environment)
-        }
+        try await dispatchOverWebSocket(command)
     }
 
     @discardableResult
@@ -822,8 +730,7 @@ public actor T3Client {
             messageID: messageID,
             createdAt: createdAt
         )
-        if try await selectedOrchestration().version == .v2,
-           case var .object(fields) = command {
+        if case var .object(fields) = command {
             fields["dispatchMode"] = .string(delivery.rawValue)
             return try await dispatch(.object(fields))
         }
@@ -907,16 +814,10 @@ public actor T3Client {
         _ command: JSONValue,
         responseDeadline: WebSocketRPCClient.ResponseDeadline = .standard
     ) async throws -> DispatchResult {
-        let selection = try await selectedOrchestration()
-        if selection.version == .v2 {
-            return try await orchestrationV2.dispatch(command, responseDeadline: responseDeadline,
-                serverResolvedCommandContext: selection.descriptor.capabilities.serverResolvedCommandContext == true)
-        }
-        return try await rpc.request(
-            RPCMethod.dispatchCommand.rawValue,
-            payload: command,
-            responseDeadline: responseDeadline,
-            as: DispatchResult.self
+        let descriptor = try await validatedEnvironment()
+        return try await orchestrationV2.dispatch(
+            command, responseDeadline: responseDeadline,
+            serverResolvedCommandContext: descriptor.capabilities.serverResolvedCommandContext == true
         )
     }
 
@@ -1117,7 +1018,7 @@ public actor T3Client {
         )
     }
 
-    // MARK: Scheduled tasks (shared by V1 and V2)
+    // MARK: Scheduled tasks
 
     public func listScheduledTasks() async throws -> ScheduledTaskListResult {
         try await rpc.request("scheduledTasks.list", as: ScheduledTaskListResult.self)
@@ -1270,6 +1171,20 @@ public actor T3Client {
         supportsContext: Bool
     ) -> (text: String, context: OrchestrationMessageContext?) {
         var records = ComposerContextReferences.referenced(context, text: text)?.records ?? []
+        let attachmentsByID = Dictionary(attachments.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { first, _ in first })
+        records = records.map { record in
+            guard let binding = record.attachment,
+                  let attachment = attachmentsByID[binding.attachmentId] else { return record }
+            var updated = record
+            let normalized = ComposerContextRecord.Attachment(
+                attachmentId: binding.attachmentId,
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                sizeBytes: attachment.sizeBytes
+            )
+            updated.payload = record.kind == "image" ? .image(normalized) : .file(normalized)
+            return updated
+        }
         var prompt = text
         if supportsContext {
             for attachment in attachments where records.count < 200 {
@@ -1290,6 +1205,11 @@ public actor T3Client {
             uploaded["id"]?.stringValue.map { (attachment.id.uuidString, $0) }
         }, uniquingKeysWith: { first, _ in first })
         let rebound = ComposerContextReferences.rebind(records.isEmpty ? nil : OrchestrationMessageContext(records: records), attachmentIDs: ids)
+        let references = ComposerContextReferences.collect(prompt)
+        if !references.isEmpty, references.allSatisfy({ $0.kind == "image" }),
+           ComposerContextReferences.replace(prompt, with: { _ in "" }).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            prompt = "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]"
+        }
         return supportsContext
             ? (prompt, rebound)
             : (ComposerContextReferences.providerProjection(prompt, context: rebound), nil)
@@ -1666,17 +1586,15 @@ public actor T3Client {
 
     // MARK: Review
 
-    /// V1 and V2 use the same diff RPC names, routed by the negotiated socket
-    /// protocol. Retain that selection for the whole query and reject stale replies.
     public func reviewCheckpointDiff(
         threadID: String, fromTurnCount: Int?, toTurnCount: Int
     ) async throws -> ReviewCheckpointDiff {
         let query = try ReviewCheckpointDiffQuery(
             threadID: threadID, fromTurnCount: fromTurnCount, toTurnCount: toTurnCount
         )
-        let selection = try await selectedOrchestration()
+        _ = try await validatedEnvironment()
         let result = try await rpc.request(query.method, payload: query.payload, as: ReviewCheckpointDiff.self)
-        guard try await selectedOrchestration().generation == selection.generation else { throw RPCError.disconnected }
+        _ = try await validatedEnvironment()
         try query.validate(result)
         return result
     }
@@ -1684,8 +1602,6 @@ public actor T3Client {
     public func updateSourceControlWorkspace(
         threadID: String, branch: String?, worktreePath: String?
     ) async throws {
-        // `dispatch` translates this legacy metadata command for V2 and retains
-        // V1's command shape on hosts using the older protocol.
         _ = try await dispatch(SourceControlWorkspaceCommand.make(
             threadID: threadID, branch: branch, worktreePath: worktreePath
         ))
@@ -2028,6 +1944,33 @@ public actor EnvironmentRuntime {
         return try await api.descriptor(at: httpBaseURL)
     }
 
+    private func hostUpdateService() -> OutdatedHostUpdate {
+        OutdatedHostUpdate(
+            api: EnvironmentAPI(
+                transport: httpTransport,
+                credentials: credentialStore,
+                managedAuthorization: managedAuthorization
+            ),
+            transport: httpTransport,
+            connector: webSocketConnector
+        )
+    }
+
+    public func hostUpdateDescriptor(environmentID: String) async throws -> EnvironmentDescriptor {
+        guard let environment = try await selectedEnvironment(id: environmentID) else {
+            throw EnvironmentRouteError.missingEnvironment
+        }
+        return try await hostUpdateService().descriptor(for: environment)
+    }
+
+    @discardableResult
+    public func updateOutdatedHost(environmentID: String, targetVersion: String) async throws -> EnvironmentDescriptor {
+        guard let environment = try await selectedEnvironment(id: environmentID) else {
+            throw EnvironmentRouteError.missingEnvironment
+        }
+        return try await hostUpdateService().update(environment: environment, targetVersion: targetVersion)
+    }
+
     /// Adds a validated relay route without replacing independent pairings.
     /// The managed credential has its own owner when other routes already exist.
     @discardableResult
@@ -2352,7 +2295,6 @@ public actor EnvironmentRuntime {
 
     private static func sameTransport(_ lhs: Environment, _ rhs: Environment) -> Bool {
         lhs.id == rhs.id && lhs.selectedRoute == rhs.selectedRoute
-            && lhs.orchestrationProtocolPreference == rhs.orchestrationProtocolPreference
     }
 
     /// Creates an uncached client for bounded one-shot WebSocket RPCs. Passive

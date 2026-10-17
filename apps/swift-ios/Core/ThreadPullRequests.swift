@@ -1,5 +1,19 @@
 import Foundation
 
+public struct PullRequestReportStateInput: Encodable, Equatable, Sendable {
+    public let reference: PullRequestRef
+    public let state: PullRequestState
+
+    public init(reference: PullRequestRef, state: PullRequestState) {
+        // The origin needs its own project reference, without routed account or cache guards.
+        self.reference = PullRequestRef(
+            projectId: reference.projectId, repository: reference.repository, number: reference.number,
+            host: reference.host
+        )
+        self.state = state
+    }
+}
+
 public struct ThreadPullRequestKey: Codable, Hashable, Sendable {
     public let host: String
     public let repository: String

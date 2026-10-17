@@ -1,7 +1,7 @@
 import Foundation
 
 /// Shell facts used by the Working beta. Preserve the authored field's presence:
-/// an explicit null means no user send, while an absent field needs the old-server fallback.
+/// an explicit null means no user send, while an absent field uses the run request time.
 public struct FeatureThreadInboxFacts: Sendable, Equatable, Hashable, Codable {
     public var runtimeStatus: String?
     public var activeRunID: String?
@@ -13,7 +13,6 @@ public struct FeatureThreadInboxFacts: Sendable, Equatable, Hashable, Codable {
     public var latestUserAuthoredMessageAt: Date?
     public var latestUserAuthoredMessageAtIsPresent: Bool
     // Optional additions keep snapshots written before lifecycle parity decodable.
-    public var orchestrationVersion: Int?
     public var runtimeUpdatedAt: Date?
     public var latestRunStartedAt: Date?
     public var latestRunHasInvalidTimestamp: Bool?
@@ -32,7 +31,6 @@ public struct FeatureThreadInboxFacts: Sendable, Equatable, Hashable, Codable {
         hasActionableProposedPlan: Bool = false,
         latestUserAuthoredMessageAt: Date? = nil,
         latestUserAuthoredMessageAtIsPresent: Bool = false,
-        orchestrationVersion: Int? = nil,
         runtimeUpdatedAt: Date? = nil,
         latestRunStartedAt: Date? = nil,
         latestRunHasInvalidTimestamp: Bool? = nil,
@@ -50,7 +48,6 @@ public struct FeatureThreadInboxFacts: Sendable, Equatable, Hashable, Codable {
         self.hasActionableProposedPlan = hasActionableProposedPlan
         self.latestUserAuthoredMessageAt = latestUserAuthoredMessageAt
         self.latestUserAuthoredMessageAtIsPresent = latestUserAuthoredMessageAtIsPresent
-        self.orchestrationVersion = orchestrationVersion
         self.runtimeUpdatedAt = runtimeUpdatedAt
         self.latestRunStartedAt = latestRunStartedAt
         self.latestRunHasInvalidTimestamp = latestRunHasInvalidTimestamp
@@ -61,13 +58,14 @@ public struct FeatureThreadInboxFacts: Sendable, Equatable, Hashable, Codable {
     }
 }
 
-/// Mirrors client-runtime/threadInbox.ts for both legacy and V2 environments.
+/// Mirrors client-runtime/threadInbox.ts.
 enum FeatureInboxPolicy {
     private static let activeStatuses: Set<String> = [
         "preparing", "queued", "starting", "running", "waiting",
     ]
 
     static func isWorking(_ thread: FeatureThread) -> Bool {
+        if thread.pendingSubagentRequest != nil { return false }
         if thread.settlementFacts?.hasPendingApprovals == true
             || thread.settlementFacts?.hasPendingUserInput == true { return false }
         switch thread.state {
@@ -75,7 +73,7 @@ enum FeatureInboxPolicy {
         default: break
         }
         guard let facts = thread.inboxFacts else {
-            // Older persisted feature snapshots only have the presentation state.
+            // Local optimistic rows can lack shell facts.
             return [.queued, .working, .monitoring].contains(thread.state)
         }
         guard let status = facts.runtimeStatus,
@@ -109,12 +107,12 @@ enum FeatureInboxPolicy {
 
     private static func requestedAt(_ thread: FeatureThread) -> Date? {
         if let facts = thread.inboxFacts { return facts.latestRunRequestedAt }
-        return thread.settlementFacts?.latestTurn?.requestedAt
+        return thread.settlementFacts?.latestUserMessageAt
     }
 
     private static func completedAt(_ thread: FeatureThread) -> Date? {
         if let facts = thread.inboxFacts { return facts.latestRunCompletedAt }
-        return thread.settlementFacts?.latestTurn?.completedAt ?? thread.latestTurnCompletedAt
+        return thread.latestTurnCompletedAt
     }
 
     private static func newestFirst(

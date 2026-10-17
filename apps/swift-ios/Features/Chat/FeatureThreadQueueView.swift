@@ -5,6 +5,7 @@ struct FeatureThreadQueueView: View {
     let execution: FeatureThreadExecution
     let controlsAvailable: Bool
     let isUpdating: Bool
+    let isCompacting: Bool
     let error: String?
     let performAction: @MainActor (FeatureThreadQueueAction) async -> Bool
 
@@ -13,11 +14,13 @@ struct FeatureThreadQueueView: View {
     init(
         execution: FeatureThreadExecution, controlsAvailable: Bool, isUpdating: Bool, error: String?,
         performAction: @escaping @MainActor (FeatureThreadQueueAction) async -> Bool,
-        onEdit: (@MainActor (FeatureThreadExecution.QueuedEntry) async -> Void)? = nil
+        onEdit: (@MainActor (FeatureThreadExecution.QueuedEntry) async -> Void)? = nil,
+        isCompacting: Bool = false
     ) {
         self.execution = execution
         self.controlsAvailable = controlsAvailable
         self.isUpdating = isUpdating
+        self.isCompacting = isCompacting
         self.error = error
         self.performAction = performAction
         self.onEdit = onEdit
@@ -104,7 +107,7 @@ struct FeatureThreadQueueView: View {
                     Button("Send now") {
                         submit(.promoteToSteer(queuedRunID: entry.id, targetRunID: activeRun.id))
                     }
-                    .disabled(controlsDisabled || !entry.hasMessage)
+                    .disabled(controlsDisabled || isCompacting || !entry.hasMessage)
                     .accessibilityHint("Sends this message into the current run")
                 }
 

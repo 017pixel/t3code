@@ -113,8 +113,8 @@ struct TerminalPermissionTests {
         await fixture.client.disconnect()
     }
 
-    @Test(arguments: [1, 2])
-    func observeUsesTheSelectedRemoteTransportOnBothProtocols(version: Int) async throws {
+    @Test(arguments: [2])
+    func observeUsesTheSelectedRemoteTransportOnV2(version: Int) async throws {
         let server = TerminalPermissionServer(version: version)
         let environment = Environment(id: "two", label: "Remote", httpBaseURL: URL(string: "https://two.example")!,
                                       webSocketBaseURL: URL(string: "wss://two.example/relay/ws")!)
@@ -183,7 +183,7 @@ private actor TerminalPermissionServer: HTTPTransport {
     private let version: Int
     private var observationRejected = false
 
-    init(version: Int = 1) { self.version = version }
+    init(version: Int = 2) { self.version = version }
     func setPermissions(_ values: [String], host: String) { permissions[host] = values }
     func connected(_ url: URL) { connectedURLs.append(url) }
     func rejectObservation() { observationRejected = true }
@@ -201,7 +201,7 @@ private actor TerminalPermissionServer: HTTPTransport {
                 auth: .init(serverUpdateScope: "environment:maintain")))
         case "/api/auth/websocket-ticket":
             value = .object(["ticket": .string("fixture"), "expiresAt": .string("2026-10-07T12:00:00.000Z")])
-        case "/api/orchestration/shell": value = try JSONValue.encode(shell)
+        case "/api/orchestration/shell": value = try v2ShellFixture(shell)
         default: throw URLError(.unsupportedURL)
         }
         return (try JSONEncoder.t3.encode(value), try #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)))
@@ -232,7 +232,7 @@ private actor TerminalPermissionServer: HTTPTransport {
                 "auth": .object(["serverUpdateScope": .string("environment:maintain")]),
             ])]))
         case RPCMethod.getArchivedShellSnapshot.rawValue:
-            value = try JSONValue.encode(OrchestrationShellSnapshot(snapshotSequence: 1, projects: [], threads: [], updatedAt: "2026-10-07T12:00:00.000Z"))
+            value = try v2ShellFixture(OrchestrationShellSnapshot(snapshotSequence: 1, projects: [], threads: [], updatedAt: "2026-10-07T12:00:00.000Z"))
         default: return nil
         }
         return .object(["_tag": .string("Exit"), "requestId": .number(id),

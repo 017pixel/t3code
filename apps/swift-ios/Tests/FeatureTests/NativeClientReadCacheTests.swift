@@ -110,7 +110,7 @@ struct NativeClientReadCacheTests {
         #expect(await disk.history(threadID: "thread", lease: nextLease) == nil)
     }
 
-    @Test func environmentProtocolAndEndpointScopesCannotResurrectOldReads() async throws {
+    @Test func environmentAndEndpointScopesCannotResurrectOldReads() async throws {
         let fixture = try await OfflineCacheFixture.make()
         defer { fixture.cleanUp() }
         var second = fixture.environment
@@ -135,30 +135,33 @@ struct NativeClientReadCacheTests {
         await fixture.cache.record(shell: fixture.shell, lease: two)
         #expect(await fixture.cache.shell(for: endpointLease) == nil)
         await fixture.cache.record(shell: fixture.shell, lease: endpointLease)
-        changed.orchestrationProtocolPreference = .v2
-        let protocolLease = try await fixture.cache.activate(.init(changed))
-        #expect(await fixture.cache.shell(for: protocolLease) == nil)
-        await fixture.cache.record(history: fixture.detail, lease: endpointLease)
-        #expect(await fixture.cache.history(threadID: "thread", lease: protocolLease) == nil)
         try await fixture.cache.retainEnvironments([])
         #expect(await fixture.cache.summary().isEmpty)
     }
 
-    @Test func protocolUpgradeDropsOldHistoryButPreservesNewProtocolReads() async throws {
+    @Test func nonV2ShellsCannotReplaceCurrentReadsOrLoadFromDisk() async throws {
         let fixture = try await OfflineCacheFixture.make()
         defer { fixture.cleanUp() }
         let lease = try await fixture.cache.activate(.init(fixture.environment))
         await fixture.cache.record(shell: fixture.shell, lease: lease)
         await fixture.cache.record(history: fixture.detail, lease: lease)
-        var shell = fixture.shell
-        shell.orchestrationProtocolVersion = 2
-        await fixture.cache.record(shell: shell, lease: lease)
-        await fixture.cache.record(history: fixture.detail, lease: lease)
-        #expect(await fixture.cache.history(threadID: "thread", lease: lease) == nil)
-        var next = fixture.detail
-        next.orchestrationProtocolVersion = 2
-        await fixture.cache.record(history: next, lease: lease)
-        #expect(await fixture.cache.history(threadID: "thread", lease: lease) == next)
+        try await fixture.cache.flush()
+        let directory = await fixture.cache.directoryURL
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let file = try #require(files.first { $0.pathExtension == "json" })
+        let saved = try JSONDecoder.t3.decode(JSONValue.self, from: Data(contentsOf: file))
+        for version in [nil, 1, 3] as [Int?] {
+            var old = fixture.shell
+            old.orchestrationProtocolVersion = version
+            await fixture.cache.record(shell: old, lease: lease)
+            #expect(await fixture.cache.shell(for: lease) == fixture.shell)
+            let oldShell = V2Fixture.patch(try JSONValue.encode(old), ["orchestrationProtocolVersion": version.map { .number(Double($0)) } ?? .null])
+            try JSONEncoder.t3.encode(V2Fixture.patch(saved, ["shell": oldShell])).write(to: file)
+            let restarted = ClientReadCache(directoryURL: directory)
+            let restartedLease = try await restarted.activate(.init(fixture.environment))
+            #expect(await restarted.shell(for: restartedLease) == nil)
+            #expect(await restarted.history(threadID: "thread", lease: restartedLease) == nil)
+        }
     }
 
     @Test func clearRejectsPendingWritesAndLateHTTPReadThenAcceptsLaterRefresh() async throws {
@@ -239,7 +242,9 @@ struct NativeClientReadCacheTests {
         #expect(!ClientReadCache.isEligible(.init(snapshotSequence: 2, thread: thread)))
         thread.messages = [OrchestrationMessage(id: "large", role: "assistant", text: String(repeating: "x", count: ClientReadCache.maximumHistoryBytes), attachments: nil, turnId: nil, streaming: false, createdAt: V2Fixture.now, updatedAt: V2Fixture.now)]
         thread.orchestrationV2Control = nil
-        await fixture.cache.record(history: .init(snapshotSequence: 2, thread: thread), lease: lease)
+        var oversized = OrchestrationThreadDetailSnapshot(snapshotSequence: 2, thread: thread)
+        oversized.orchestrationProtocolVersion = 2
+        await fixture.cache.record(history: oversized, lease: lease)
         #expect(await fixture.cache.history(threadID: "thread", lease: lease) == nil)
     }
 
@@ -269,7 +274,9 @@ struct NativeClientReadCacheTests {
         var running = fixture.detail.thread
         running.orchestrationV2Control = .object(["runs": .array([V2Fixture.run(status: "running")])])
         running.messages = []
-        await fixture.cache.record(history: .init(snapshotSequence: 999, thread: running), lease: lease)
+        var active = OrchestrationThreadDetailSnapshot(snapshotSequence: 999, thread: running)
+        active.orchestrationProtocolVersion = 2
+        await fixture.cache.record(history: active, lease: lease)
         try await fixture.cache.flush()
 
         let restarted = ClientReadCache(directoryURL: await fixture.cache.directoryURL)
@@ -346,7 +353,13 @@ private struct OfflineCacheFixture {
 
     static func make() async throws -> Self {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("native-read-cache-\(UUID())")
-        let environment = Environment(id: "one", label: "One", httpBaseURL: URL(string: "https://one.example")!, webSocketBaseURL: URL(string: "wss://one.example")!)
+        var environment = Environment(
+            id: "one", label: "One", httpBaseURL: URL(string: "https://one.example")!,
+            webSocketBaseURL: URL(string: "wss://one.example")!
+        )
+        environment.descriptor = try JSONDecoder.t3.decode(
+            EnvironmentDescriptor.self, from: v2EnvironmentDescriptorData(for: environment)
+        )
         let environments = EnvironmentStore(fileURL: directory.appendingPathComponent("environments.json"))
         try await environments.save([environment])
         let shell = multiEnvironmentShell(projectID: "project", threadID: "thread", title: "Project")
@@ -418,16 +431,23 @@ private actor OfflineCacheHTTPTransport: HTTPTransport {
         let url = request.url!
         let data: Data
         switch url.path {
-        case "/.well-known/t3/environment": data = try legacyEnvironmentDescriptorData(for: environment)
+        case "/.well-known/t3/environment": data = try v2EnvironmentDescriptorData(for: environment)
+        case "/api/auth/session":
+            data = try JSONEncoder.t3.encode(AuthSessionState(
+                authenticated: true, scopes: ["orchestration:read"],
+                sessionMethod: "bearer-access-token", permissions: ["orchestration:read"]
+            ))
+        case "/api/auth/websocket-ticket":
+            data = Data(#"{"ticket":"fixture-ticket","expiresAt":"2099-01-01T00:00:00.000Z"}"#.utf8)
         case "/api/orchestration/shell":
-            data = try JSONEncoder.t3.encode(shell)
+            data = try JSONEncoder.t3.encode(v2ShellFixture(shell))
             if holdShell {
                 holdShell = false
                 await held.open()
                 await release.wait()
             }
         case let path where path.hasPrefix("/api/orchestration/threads/"):
-            data = try JSONEncoder.t3.encode(detail)
+            data = try JSONEncoder.t3.encode(v2ThreadFixture(detail))
         case "/api/orchestration/dispatch":
             dispatchCount += 1
             throw URLError(.unsupportedURL)
@@ -438,5 +458,42 @@ private actor OfflineCacheHTTPTransport: HTTPTransport {
 }
 
 private struct OfflineCacheConnector: WebSocketConnecting {
-    func connect(to url: URL) async throws -> any WebSocketConnection { throw URLError(.cannotConnectToHost) }
+    func connect(to url: URL) async throws -> any WebSocketConnection { OfflineCacheSocket() }
+}
+
+private actor OfflineCacheSocket: WebSocketConnection {
+    private var responses: [Data] = []
+    private var receiver: CheckedContinuation<Data, Error>?
+    private var closed = false
+
+    func send(_ data: Data) throws {
+        guard !closed else { throw URLError(.notConnectedToInternet) }
+        let request = try JSONDecoder.t3.decode(JSONValue.self, from: data)
+        guard request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue,
+              let id = request["id"] else { return }
+        let response = try JSONEncoder.t3.encode(JSONValue.object([
+            "_tag": .string("Chunk"), "requestId": id,
+            "values": .array([.object([
+                "type": .string("snapshot"), "config": .object(["providers": .array([])]),
+            ])]),
+        ]))
+        if let receiver {
+            self.receiver = nil
+            receiver.resume(returning: response)
+        } else {
+            responses.append(response)
+        }
+    }
+
+    func receive() async throws -> Data {
+        guard !closed else { throw URLError(.notConnectedToInternet) }
+        if !responses.isEmpty { return responses.removeFirst() }
+        return try await withCheckedThrowingContinuation { receiver = $0 }
+    }
+
+    func close() {
+        closed = true
+        receiver?.resume(throwing: URLError(.notConnectedToInternet))
+        receiver = nil
+    }
 }

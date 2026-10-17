@@ -79,10 +79,26 @@ public struct ServerProviderModelSnapshot: Codable, Identifiable, Equatable, Sen
     public let name: String
     public let shortName: String?
     public let subProvider: String?
+    public var aliases: [String]? = nil
     public let isCustom: Bool
     public let isDefault: Bool?
     public let isLegacy: Bool?
     public let capabilities: ServerModelCapabilities?
+}
+
+public struct ServerProviderUpdateRequiredModel: Codable, Identifiable, Hashable, Sendable {
+    public var id: String { slug }
+    public let slug: String
+    public let name: String
+    public let badge: String?
+    public let minVersion: String
+
+    public init(slug: String, name: String, badge: String? = nil, minVersion: String) {
+        self.slug = slug
+        self.name = name
+        self.badge = badge
+        self.minVersion = minVersion
+    }
 }
 
 public struct ServerProviderSlashCommandSnapshot: Codable, Equatable, Sendable {
@@ -115,6 +131,10 @@ public struct ServerProviderWorkspaceSnapshot: Codable, Equatable, Sendable {
     public var slashCommandsPending: Bool? = nil
 }
 
+public struct ServerProviderContinuation: Codable, Equatable, Sendable {
+    public let groupKey: String
+}
+
 public struct ServerProviderSnapshot: Codable, Identifiable, Equatable, Sendable {
     public var id: String { instanceId }
 
@@ -135,6 +155,8 @@ public struct ServerProviderSnapshot: Codable, Identifiable, Equatable, Sendable
     public let availability: String?
     public let unavailableReason: String?
     public let models: [ServerProviderModelSnapshot]
+    public var updateRequiredModels: [ServerProviderUpdateRequiredModel]? = nil
+    public var continuation: ServerProviderContinuation? = nil
     public let slashCommands: [ServerProviderSlashCommandSnapshot]?
     public let skills: [ServerProviderSkillSnapshot]?
     public var workspaceSnapshots: [ServerProviderWorkspaceSnapshot]? = nil
@@ -187,13 +209,28 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
     /// Missing on servers that do not support the current streaming setting.
     public var responseStreamingMode: ResponseStreamingMode? = nil
     public var projectSettingsOverrides: [String: [String: JSONValue]] = [:]
+    public var providerInstances: [String: JSONValue] = [:]
+    public var favorites: [ServerModelFavorite]? = nil
+    public var providerModelPreferences: [String: ServerProviderModelPreferences]? = nil
+    private var supportsModelPreferences = false
+    public var modelPreferences: ServerModelPreferencesSnapshot? {
+        guard supportsModelPreferences || favorites != nil || providerModelPreferences != nil else { return nil }
+        return ServerModelPreferencesSnapshot(favorites: favorites, providerModelPreferences: providerModelPreferences)
+    }
     public var projectSettingsFolded = false
     public var environmentIcon: String? = nil
     public var sourceControlWritingStyle: JSONValue? = nil
     public var worktreesDirectory: String? = nil
     public var previousWorktreesDirectories: [String]? = nil
     public var removeAgentCreditsOnMerge: Bool? = nil
-    public var github: ServerGitHubSettings? = nil
+    public var sourceControlHosts: [String: [String: JSONValue]]? = nil
+
+    public var github: ServerGitHubSettings? {
+        guard let sourceControlHosts else { return nil }
+        guard let fields = sourceControlHosts["github"] else { return ServerGitHubSettings() }
+        // Never build a replacement token map from defaults when saved settings are malformed.
+        return try? JSONValue.object(fields).decode(ServerGitHubSettings.self)
+    }
 
     /// Optional fields indicate support on older servers. Do not send a newer
     /// preference to an environment that has not advertised it.
@@ -202,7 +239,7 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
         if !supportsDefaultRuntimeMode { keys.insert("defaultRuntimeMode") }
         if worktreesDirectory == nil { keys.insert("worktreesDirectory") }
         if removeAgentCreditsOnMerge == nil { keys.insert("removeAgentCreditsOnMerge") }
-        if github == nil { keys.insert("github") }
+        if sourceControlHosts == nil { keys.insert("sourceControlHosts") }
         if branchNamingMode == nil { keys.insert("branchNamingMode") }
         if branchNamePrefix == nil { keys.insert("branchNamePrefix") }
         if branchNameInstructions == nil { keys.insert("branchNameInstructions") }
@@ -272,9 +309,10 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
         case continueThreadsAfterServerUpdate
         case environmentIcon
         case sourceControlWritingStyle
-        case worktreesDirectory, previousWorktreesDirectories, removeAgentCreditsOnMerge, github
+        case worktreesDirectory, previousWorktreesDirectories, removeAgentCreditsOnMerge, sourceControlHosts
         case worktreeSubmodules, storageCleanup, worktreeCleanup
-        case defaultAutoPull, responseStreamingMode, projectSettingsOverrides, projectSettingsFolded
+        case defaultAutoPull, responseStreamingMode, projectSettingsOverrides, projectSettingsFolded, providerInstances
+        case favorites, providerModelPreferences
         case defaultProjectScripts, projectScriptOverrides
         case branchNamingMode, branchNamePrefix, branchNameInstructions
         case enableAgentBrowserAccess, enableProviderUpdateChecks, autoResumeLimitedThreads, snoozeLimitedThreads
@@ -299,7 +337,7 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
         worktreesDirectory = try container.decodeIfPresent(String.self, forKey: .worktreesDirectory)
         previousWorktreesDirectories = try container.decodeIfPresent([String].self, forKey: .previousWorktreesDirectories)
         removeAgentCreditsOnMerge = try container.decodeIfPresent(Bool.self, forKey: .removeAgentCreditsOnMerge)
-        github = try container.decodeIfPresent(ServerGitHubSettings.self, forKey: .github)
+        sourceControlHosts = try container.decodeIfPresent([String: [String: JSONValue]].self, forKey: .sourceControlHosts)
         storageCleanup = try container.decodeIfPresent([String: JSONValue].self, forKey: .storageCleanup)
         worktreeCleanup = try container.decodeIfPresent(JSONValue.self, forKey: .worktreeCleanup)
         worktreeSubmodules = try? container.decodeIfPresent(WorktreeSubmodules.self, forKey: .worktreeSubmodules)
@@ -307,6 +345,12 @@ public struct ServerSettingsSnapshot: Codable, Equatable, Sendable {
         defaultAutoPull = try container.decodeIfPresent(Bool.self, forKey: .defaultAutoPull) ?? false
         responseStreamingMode = try container.decodeIfPresent(ResponseStreamingMode.self, forKey: .responseStreamingMode)
         projectSettingsOverrides = try container.decodeIfPresent([String: [String: JSONValue]].self, forKey: .projectSettingsOverrides) ?? [:]
+        providerInstances = try container.decodeIfPresent([String: JSONValue].self, forKey: .providerInstances) ?? [:]
+        supportsModelPreferences = container.contains(.favorites) || container.contains(.providerModelPreferences)
+        favorites = try container.decodeIfPresent([ServerModelFavorite].self, forKey: .favorites)
+        providerModelPreferences = try container.decodeIfPresent(
+            [String: ServerProviderModelPreferences].self, forKey: .providerModelPreferences
+        )
         projectSettingsFolded = try container.decodeIfPresent(Bool.self, forKey: .projectSettingsFolded) ?? false
         continueThreadsAfterServerUpdate = try container.decodeIfPresent(
             Bool.self,
@@ -565,8 +609,16 @@ public struct ServerGitHubSettings: Codable, Equatable, Sendable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        hosts = try container.decodeIfPresent([String: ServerGitHubHostSettings].self, forKey: .hosts) ?? [:]
-        tokens = try container.decodeIfPresent([String: String].self, forKey: .tokens) ?? [:]
+        if container.contains(.hosts) {
+            hosts = try container.decode([String: ServerGitHubHostSettings].self, forKey: .hosts)
+        } else {
+            hosts = [:]
+        }
+        if container.contains(.tokens) {
+            tokens = try container.decode([String: String].self, forKey: .tokens)
+        } else {
+            tokens = [:]
+        }
     }
 }
 

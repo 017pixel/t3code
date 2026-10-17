@@ -23,9 +23,6 @@ extension NativeFeatureClient: FeatureThreadWorkflowClient {
         }
         let targetID = UUID().uuidString
         try Task.checkCancellation()
-        guard try await context.client.orchestrationVersion() == .v2 else {
-            throw FeatureThreadWorkflowError.unavailable
-        }
         _ = try await context.client.dispatch(OrchestrationV2Commands.fork(
             sourceThreadID: source.threadID, targetThreadID: targetID,
             runID: source.runID, title: "\(displayed.thread.title) fork"
@@ -40,9 +37,6 @@ extension NativeFeatureClient: FeatureThreadWorkflowClient {
             throw FeatureThreadWorkflowError.mergeBackUnavailable
         }
         try Task.checkCancellation()
-        guard try await context.client.orchestrationVersion() == .v2 else {
-            throw FeatureThreadWorkflowError.unavailable
-        }
         _ = try await context.client.dispatch(OrchestrationV2Commands.mergeBack(
             sourceThreadID: context.wireID, targetThreadID: targetID, runID: run.id
         ))
@@ -68,7 +62,7 @@ public enum FeatureThreadWorkflowError: LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .unavailable: "Thread workflows require a V2 connection."
+        case .unavailable: "Refresh this thread to load its workflow controls."
         case .responseUnavailable: "This response can no longer be forked. Refresh the thread and try again."
         case .mergeBackUnavailable: "Finish this fork's current run before sending its context back to the source thread."
         }

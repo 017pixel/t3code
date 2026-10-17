@@ -56,7 +56,7 @@ struct GitHubSettingsView: View {
                                 .foregroundStyle(T3Colors.textSecondary)
                         }
                         if host.hasSavedToken {
-                            LabeledContent("Token", value: "Saved on environment")
+                            LabeledContent("Token", value: "Saved on environment (hidden)")
                             Button("Remove token", role: .destructive) {
                                 save(.token(host: host.host, token: ""))
                             }

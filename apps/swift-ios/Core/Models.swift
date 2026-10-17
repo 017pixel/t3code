@@ -51,7 +51,6 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
     public var isEnabled: Bool
     public var routes: [EnvironmentRoute]
     public var activeRouteID: String?
-    public var orchestrationProtocolPreference: OrchestrationProtocolPreference
 
     public init(
         id: String,
@@ -61,7 +60,6 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
         kind: EnvironmentKind = .bearer,
         descriptor: EnvironmentDescriptor? = nil,
         isEnabled: Bool = true,
-        orchestrationProtocolPreference: OrchestrationProtocolPreference = .auto,
         routes: [EnvironmentRoute]? = nil, activeRouteID: String? = nil
     ) {
         self.id = id
@@ -71,7 +69,6 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
         self.kind = kind
         self.descriptor = descriptor
         self.isEnabled = isEnabled
-        self.orchestrationProtocolPreference = orchestrationProtocolPreference
         self.routes = routes ?? []
         self.activeRouteID = activeRouteID
         if self.routes.isEmpty { self.routes = [legacyRoute] }
@@ -91,7 +88,6 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
         case kind
         case descriptor
         case isEnabled
-        case orchestrationProtocolPreference
     }
 
     public init(from decoder: any Decoder) throws {
@@ -103,10 +99,6 @@ public struct Environment: Codable, Identifiable, Equatable, Sendable {
         kind = try container.decodeIfPresent(EnvironmentKind.self, forKey: .kind) ?? .bearer
         descriptor = try container.decodeIfPresent(EnvironmentDescriptor.self, forKey: .descriptor)
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
-        orchestrationProtocolPreference = try container.decodeIfPresent(
-            OrchestrationProtocolPreference.self,
-            forKey: .orchestrationProtocolPreference
-        ) ?? .auto
         routes = try container.decodeIfPresent([EnvironmentRoute].self, forKey: .routes) ?? []
         activeRouteID = try container.decodeIfPresent(String.self, forKey: .activeRouteID)
         if routes.isEmpty { routes = [legacyRoute] }
@@ -160,6 +152,10 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
         public var projectCloneTracking: Bool? = nil
         public var worktreesDirectory: Bool? = nil
         public var serverBrowser: Bool? = nil
+        public var commandOutputStreaming: Bool? = nil
+        public var projectProviderInstanceOverrides: Bool? = nil
+        public var storageCleanupRun: Bool? = nil
+        public var databaseStorage: Bool? = nil
 
         private enum CodingKeys: String, CodingKey {
             case repositoryIdentity
@@ -189,6 +185,7 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
             case inlineMessageContext
             case projectCloneTracking, worktreesDirectory, serverBrowser
             case serverResolvedCommandContext
+            case commandOutputStreaming, projectProviderInstanceOverrides, storageCleanupRun, databaseStorage
         }
 
         public init(from decoder: any Decoder) throws {
@@ -200,6 +197,10 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
             inlineMessageContext = try container.decodeIfPresent(Bool.self, forKey: .inlineMessageContext)
             worktreesDirectory = try container.decodeIfPresent(Bool.self, forKey: .worktreesDirectory)
             serverBrowser = try container.decodeIfPresent(Bool.self, forKey: .serverBrowser)
+            commandOutputStreaming = try container.decodeIfPresent(Bool.self, forKey: .commandOutputStreaming)
+            projectProviderInstanceOverrides = try container.decodeIfPresent(Bool.self, forKey: .projectProviderInstanceOverrides)
+            storageCleanupRun = try container.decodeIfPresent(Bool.self, forKey: .storageCleanupRun)
+            databaseStorage = try container.decodeIfPresent(Bool.self, forKey: .databaseStorage)
             projectCloneTracking = try container.decodeIfPresent(Bool.self, forKey: .projectCloneTracking)
             serverResolvedCommandContext = try container.decodeIfPresent(Bool.self, forKey: .serverResolvedCommandContext)
             repositoryIdentity =
@@ -570,6 +571,7 @@ public struct ThreadTitleRegeneration: Codable, Equatable, Sendable {
 }
 
 public struct OrchestrationThreadShell: Codable, Identifiable, Equatable, Sendable {
+    public var v2SubagentRequestSource: OrchestrationV2SubagentRequestSource? = nil
     public var relationshipToParent: String? = nil
     public let id: String
     public let projectId: String

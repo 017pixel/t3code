@@ -81,7 +81,7 @@ public enum OrchestrationV2Presentation {
                 completedAt: shell.latestRunCompletedAt, assistantMessageId: nil
             )
         }
-        return OrchestrationThreadShell(
+        var presented = OrchestrationThreadShell(
             relationshipToParent: t.lineage.relationshipToParent,
             id: t.id, projectId: t.projectId, title: t.title, modelSelection: t.modelSelection,
             runtimeMode: t.runtimeMode, interactionMode: t.interactionMode, branch: t.branch,
@@ -104,6 +104,8 @@ public enum OrchestrationV2Presentation {
             latestUserAuthoredMessageAtIsPresent: shell.raw["latestUserAuthoredMessageAt"] != nil,
             v2Lifecycle: OrchestrationV2ThreadLifecycle(shell: shell)
         )
+        presented.v2SubagentRequestSource = OrchestrationV2SubagentRequestSource(shell: shell)
+        return presented
     }
 
     static func detailSnapshot(
@@ -241,6 +243,7 @@ public enum OrchestrationV2Presentation {
             "messages": .array(p.messages.map(\.raw)), "nodes": .array(p.nodes.map(\.raw)),
             "attempts": .array(p.attempts.map(\.raw)), "providerThreads": .array(p.providerThreads.map(\.raw)),
             "subagents": .array(p.subagents.map(\.raw)), "visibleTurnItems": .array(assistantItems),
+            "hasVisibleTurnItems": .bool(!p.visibleTurnItems.isEmpty),
             "providerTurns": .array(p.providerTurns.map(\.raw)), "providerSessions": .array(p.providerSessions.map(\.raw)),
             "backgroundTurnItems": .array(p.turnItems.compactMap { backgroundControlItem($0.raw) }),
         ])

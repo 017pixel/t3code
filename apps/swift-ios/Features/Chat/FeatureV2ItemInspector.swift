@@ -206,9 +206,6 @@ struct FeatureV2ItemInspector: View {
             }
             if expanded {
                 FeatureV2ExpandedItem(item: item, context: context, imageContext: imageContext, attachmentContext: attachmentContext)
-                    .task(id: FeatureV2TimelineState.Key(threadID: context.threadID, source: item.source)) {
-                        await state.load(item, context: context)
-                    }
             }
         }
         .font(T3Typography.tool)
@@ -244,6 +241,13 @@ private struct FeatureV2ExpandedItem: View {
     @ObservedObject private var state: FeatureV2TimelineState
     @State private var fullText: String?
     @State private var formatted: FeatureV2FormattedItem?
+    @StateObject private var commandOutput = FeatureCommandOutputState()
+    @State private var outputRetry = 0
+
+    private struct OutputTaskKey: Equatable {
+        let item: FeatureV2TimelineState.Key
+        let retry: Int
+    }
 
     init(item: FeatureV2WorkItem, context: FeatureV2ItemInspectionContext,
          imageContext: MarkdownImageContext?, attachmentContext: FeatureAttachmentContext?) {
@@ -263,6 +267,16 @@ private struct FeatureV2ExpandedItem: View {
     }
     private var complete: Bool { !FeatureV2ItemDetail.needsFetch(shown) }
     private var outputImages: [FeatureToolOutputImage] { FeatureToolOutputImages.images(shown) }
+    private var usesCommandStream: Bool {
+        item.source.itemType == "command_execution" && context.client is any FeatureCommandOutputStreaming
+            && commandOutput.phase != .unsupported
+    }
+    private var copyText: String {
+        if usesCommandStream {
+            return FeatureV2ItemDetail.copyText(formatted: formatted, commandOutput: commandOutput.output?.text)
+        }
+        return formatted?.copyText ?? ""
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -272,20 +286,22 @@ private struct FeatureV2ExpandedItem: View {
                     MarkdownMessageView(body, isStreaming: item.source.visibility == "local" && item.source.status == "running", imageContext: imageContext)
                 } else { textBlock(body, label: nil) }
             }
-            if let output = formatted?.output { textBlock(output, label: "Output") }
+            if usesCommandStream {
+                FeatureCommandOutputView(state: commandOutput) { outputRetry += 1 }
+            } else if let output = formatted?.output { textBlock(output, label: "Output") }
             FeatureToolOutputImagesView(images: outputImages, source: item.source, context: context.toolImages)
             if let exit = formatted?.exitLabel { Text(exit).foregroundStyle(T3Colors.danger) }
             if item.raw["responseCapability"]?["type"]?.stringValue == "not_resumable" {
                 Text(item.raw["responseCapability"]?["reason"]?.stringValue ?? "This request can no longer receive a response.")
             }
-            if !complete {
+            if !usesCommandStream && !complete {
                 switch detailState {
                 case nil, .loading: Text("Loading output…")
                 case .missing: retryLabel("Output is no longer available.")
                 case let .failed(message): retryLabel("Could not load output: \(message)")
                 case .loaded: retryLabel("The server still reports omitted content.")
                 }
-            } else if ["command_execution", "dynamic_tool"].contains(item.source.itemType), formatted != nil, formatted?.output == nil, outputImages.isEmpty {
+            } else if !usesCommandStream, ["command_execution", "dynamic_tool"].contains(item.source.itemType), formatted != nil, formatted?.output == nil, outputImages.isEmpty {
                 Text("No output.")
             }
             if let path = shown["viewedImagePath"]?.stringValue {
@@ -296,11 +312,11 @@ private struct FeatureV2ExpandedItem: View {
                 FeatureMessageAttachmentsView(attachments: answer.attachments, context: attachmentContext)
             }
             Button("Copy expanded details") {
-                UIPasteboard.general.string = (formatted?.copyText ?? "")
+                UIPasteboard.general.string = copyText
                     + answerMessages.map { "\n\n\($0.text)" }.joined()
             }
             .buttonStyle(.plain)
-            .disabled(!complete || formatted == nil)
+            .disabled(formatted == nil || (usesCommandStream ? commandOutput.output?.running != false : !complete))
         }
         .foregroundStyle(T3Colors.textSecondary)
         .textSelection(.enabled)
@@ -312,6 +328,15 @@ private struct FeatureV2ExpandedItem: View {
             guard !Task.isCancelled else { return }
             formatted = next
         }
+        .task(id: OutputTaskKey(item: .init(threadID: context.threadID, source: item.source), retry: outputRetry)) {
+            if item.source.itemType == "command_execution", let client = context.client as? any FeatureCommandOutputStreaming {
+                let handled = await commandOutput.observe(client: client, threadID: context.threadID, source: item.source)
+                if handled { return }
+            }
+            guard !Task.isCancelled else { return }
+            await state.load(item, context: context)
+        }
+        .onDisappear { commandOutput.reset() }
         .onChange(of: fullText != nil) { _, presented in
             if presented { presentationDismissal.onPresentationChange(presentationID, true) }
         }

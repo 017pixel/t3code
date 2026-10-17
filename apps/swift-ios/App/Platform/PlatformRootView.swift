@@ -6,6 +6,8 @@ struct PlatformRootView: View {
 
     @State private var navigationRequest: FeatureWorkspaceNavigationRequest?
     @State private var pendingRoute: PlatformRoute?
+    @State private var missingPromptRepository: PlatformNewThreadLink?
+    @State private var missingPromptEnvironmentID: String?
     @State private var previousThreadMembership: [PlatformRecentThreadChangeKey] = []
     @State private var previousThreadStates: [String: FeatureThreadState]?
     @State private var lastNotificationPreference: Bool?
@@ -88,6 +90,7 @@ struct PlatformRootView: View {
         }
         .onChange(of: model.homePresentationRevision) { _, _ in
             processThreadChanges()
+            consumePendingRouteIfPossible()
         }
         .onChange(of: model.threadRowRevision) { _, _ in
             processThreadChanges()
@@ -124,6 +127,27 @@ struct PlatformRootView: View {
                 onCancel: incomingShareCoordinator.dismissDestination,
                 onSelect: importIncomingShare(into:)
             )
+        }
+        .confirmationDialog("Repository not found", isPresented: Binding(
+            get: { missingPromptRepository != nil },
+            set: { if !$0 { missingPromptRepository = nil } }
+        ), titleVisibility: .visible, presenting: missingPromptRepository) { link in
+            Button("Clone repository") {
+                let environmentID = missingPromptEnvironmentID
+                missingPromptRepository = nil
+                Task { await openPromptClone(link, environmentID: environmentID) }
+            }
+            if let prompt = link.prompt {
+                Button("Use without project") {
+                    let environmentID = missingPromptEnvironmentID
+                    missingPromptRepository = nil
+                    handle(.newPrompt(environmentID: environmentID, projectID: nil,
+                                      link: .new(prompt: prompt, repository: nil, provider: nil, model: nil)))
+                }
+            }
+            Button("Cancel", role: .cancel) { missingPromptRepository = nil }
+        } message: { link in
+            Text("Clone \(link.repository?.fullName ?? "this repository") into an environment to use this link.")
         }
         .alert("Create a project to continue", isPresented: $incomingShareNeedsProject) {
             Button("Not now", role: .cancel) {}
@@ -209,7 +233,13 @@ struct PlatformRootView: View {
     }
 
     private func handle(_ route: PlatformRoute) {
-        guard !model.isLoading else {
+        let waitingForPromptCatalog: Bool
+        if case .newPrompt = route {
+            waitingForPromptCatalog = model.snapshot.environments.contains {
+                $0.isEnabled && $0.connectionState == .connecting
+            }
+        } else { waitingForPromptCatalog = false }
+        guard !model.isLoading, !waitingForPromptCatalog else {
             pendingRoute = route
             return
         }
@@ -304,6 +334,16 @@ struct PlatformRootView: View {
     @MainActor
     private func consume(_ route: PlatformRoute) async {
         switch route {
+        case let .newPrompt(environmentID, projectID, link):
+            guard await enableEnvironmentIfNeeded(environmentID) else { return }
+            await openPromptLink(link, environmentID: environmentID, projectID: projectID)
+        case let .threadPrompt(environmentID, threadID, prompt):
+            guard await enableEnvironmentIfNeeded(environmentID),
+                  let thread = await resolveRoutedThread(environmentID: environmentID, id: threadID) else {
+                if model.errorMessage == nil { model.errorMessage = "That thread is not available on this device." }
+                return
+            }
+            navigationRequest = .init(destination: .threadPrompt(id: thread.id, request: .init(prompt: prompt)))
         case .usageLimits:
             navigationRequest = FeatureWorkspaceNavigationRequest(destination: .usageLimits)
         case let .connection(endpoint, token):
@@ -377,6 +417,52 @@ struct PlatformRootView: View {
                 enabled: model.snapshot.settings.hapticsEnabled
             )
         }
+    }
+
+    @MainActor
+    private func openPromptLink(_ link: PlatformNewThreadLink, environmentID: String?, projectID: String?) async {
+        switch PlatformPromptLinkResolver.destination(for: link, in: model.snapshot,
+                                                      environmentID: environmentID, projectID: projectID) {
+        case let .thread(thread):
+            guard await enableEnvironmentIfNeeded(thread.environmentID) else { return }
+            if let prompt = link.prompt {
+                navigationRequest = .init(destination: .threadPrompt(id: thread.id, request: .init(prompt: prompt)))
+            } else {
+                navigationRequest = .init(destination: .thread(id: thread.id))
+            }
+        case let .project(project):
+            guard await enableEnvironmentIfNeeded(project.environmentID) else { return }
+            navigationRequest = .init(destination: .newPrompt(projectID: project.id, link: link))
+        case let .scratch(environmentID):
+            do {
+                let id = try await model.client.ensureScratchProject(environmentID: environmentID)
+                await model.reloadAfterConnection()
+                guard let project = PlatformRouteResolver.project(in: model.snapshot, environmentID: environmentID, id: id) else {
+                    model.errorMessage = "The scratch workspace is not available. Open the link again."
+                    return
+                }
+                navigationRequest = .init(destination: .newPrompt(projectID: project.id, link: link))
+            } catch { model.errorMessage = error.localizedDescription }
+        case .missingRepository:
+            missingPromptEnvironmentID = environmentID
+            missingPromptRepository = link
+        case let .unavailable(message):
+            model.errorMessage = message
+        }
+    }
+
+    @MainActor
+    private func openPromptClone(_ link: PlatformNewThreadLink, environmentID: String?) async {
+        guard link.repository != nil, await enableEnvironmentIfNeeded(environmentID) else { return }
+        let environment = model.snapshot.environments.first {
+            $0.isEnabled && $0.connectionState == .connected
+                && (environmentID == nil || $0.id == environmentID)
+        }
+        guard let environment else {
+            model.errorMessage = "Connect an environment before cloning this repository."
+            return
+        }
+        navigationRequest = .init(destination: .clonePrompt(environmentID: environment.id, link: link))
     }
 
     @MainActor

@@ -15,7 +15,7 @@ struct FeatureThreadLifecyclePolicyTests {
             inboxFacts: .init(
                 runtimeStatus: runtime, latestRunID: "run", latestRunStatus: run,
                 latestRunRequestedAt: now, latestRunCompletedAt: now,
-                orchestrationVersion: 2, runtimeUpdatedAt: now,
+                runtimeUpdatedAt: now,
                 lastVisitedAt: now.addingTimeInterval(-1).ISO8601Format(), lastVisitedAtIsPresent: true
             )
         )
@@ -37,7 +37,7 @@ struct FeatureThreadLifecyclePolicyTests {
             value.inboxFacts?.runtimeStatus = status
             #expect(value.canArchive)
         }
-        value.inboxFacts?.orchestrationVersion = nil
+        value.inboxFacts = nil
         #expect(!value.canArchive)
     }
 
@@ -49,9 +49,10 @@ struct FeatureThreadLifecyclePolicyTests {
         #expect(FeatureThreadLifecyclePolicy.canSettle(value, at: now))
         value.inboxFacts?.runtimeStatus = "queued"
         #expect(FeatureThreadLifecyclePolicy.canSettle(value, at: now))
-        value.inboxFacts?.orchestrationVersion = nil
+        let loadedFacts = value.inboxFacts
+        value.inboxFacts = nil
         #expect(!FeatureThreadLifecyclePolicy.canSettle(value, at: now))
-        value.inboxFacts?.orchestrationVersion = 2
+        value.inboxFacts = loadedFacts
         value.supportsSettlement = false
         #expect(!FeatureThreadLifecyclePolicy.canSettle(value, at: now))
     }
@@ -65,16 +66,15 @@ struct FeatureThreadLifecyclePolicyTests {
     }
 
     @Test
-    func legacyQueuedStartKeepsTheBoundedClockSkewAndAdoptionRules() {
+    func queuedStartKeepsTheBoundedClockSkewAndRunAdoptionRules() {
         var value = thread(runtime: "running", run: "running")
-        value.inboxFacts?.orchestrationVersion = nil
-        value.settlementFacts?.sessionStatus = "ready"
         #expect(value.canSnoozeNow(at: now))
-        value.settlementFacts?.latestTurn = nil
+        value.inboxFacts?.latestRunRequestedAt = nil
+        value.inboxFacts?.latestRunCompletedAt = nil
         #expect(!value.canSnoozeNow(at: now))
         #expect(value.canSnoozeNow(at: now.addingTimeInterval(121)))
         #expect(value.canSnoozeNow(at: now.addingTimeInterval(-121)))
-        value.settlementFacts?.sessionStatus = "error"
+        value.inboxFacts?.latestRunStartedAt = now
         #expect(value.canSnoozeNow(at: now))
     }
 
@@ -184,12 +184,12 @@ struct FeatureThreadLifecyclePolicyTests {
     @Test
     func olderCachedInboxFactsAndThreadsRemainDecodable() throws {
         var fields = try JSONValue.encode(thread().inboxFacts).v2Object
-        for key in ["orchestrationVersion", "runtimeUpdatedAt", "latestRunStartedAt", "latestRunHasInvalidTimestamp",
+        for key in ["runtimeUpdatedAt", "latestRunStartedAt", "latestRunHasInvalidTimestamp",
                     "lastErrorClass", "usageLimitResetAt", "lastVisitedAt", "lastVisitedAtIsPresent"] {
             fields.removeValue(forKey: key)
         }
         let facts = try JSONValue.object(fields).decode(FeatureThreadInboxFacts.self)
-        #expect(facts.orchestrationVersion == nil)
+        #expect(facts.runtimeUpdatedAt == nil)
         #expect(facts.latestRunStatus == "completed")
         let cached = try JSONValue.encode(thread()).decode(FeatureThread.self)
         #expect(cached.hasPendingLocalMessages == nil)

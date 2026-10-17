@@ -38,17 +38,20 @@ public struct FeatureComposerWorkspaceDraft: Sendable, Equatable {
     public var branch: String?
     public var worktreePath: String?
     public var startFromOrigin: Bool
+    public var pullRequestReference: String?
 
     public init(
         mode: FeatureWorkspaceMode,
         branch: String?,
         worktreePath: String?,
-        startFromOrigin: Bool
+        startFromOrigin: Bool,
+        pullRequestReference: String? = nil
     ) {
         self.mode = mode
         self.branch = branch
         self.worktreePath = worktreePath
         self.startFromOrigin = startFromOrigin
+        self.pullRequestReference = mode == .worktree ? pullRequestReference : nil
     }
 }
 
@@ -146,12 +149,14 @@ public actor FeatureComposerDraftStore {
         var branch: String?
         var worktreePath: String?
         var startFromOrigin: Bool
+        var pullRequestReference: String?
 
         init(_ workspace: FeatureComposerWorkspaceDraft) {
             mode = workspace.mode
             branch = workspace.branch
             worktreePath = workspace.worktreePath
             startFromOrigin = workspace.startFromOrigin
+            pullRequestReference = workspace.pullRequestReference
         }
 
         var featureValue: FeatureComposerWorkspaceDraft {
@@ -159,7 +164,8 @@ public actor FeatureComposerDraftStore {
                 mode: mode,
                 branch: branch,
                 worktreePath: worktreePath,
-                startFromOrigin: startFromOrigin
+                startFromOrigin: startFromOrigin,
+                pullRequestReference: pullRequestReference
             )
         }
     }

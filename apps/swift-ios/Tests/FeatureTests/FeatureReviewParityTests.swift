@@ -53,7 +53,7 @@ struct FeatureReviewParityTests {
     }
 
     @Test func checkpointChoicesUseReadyCompletedV2RunsAndScopeIdentity() throws {
-        var thread = try V2Fixture.load("thread-detail-snapshot").decode(OrchestrationThreadDetailSnapshot.self).thread
+        var thread = try OrchestrationV2ThreadState(snapshot: V2Fixture.load("v2-thread-bounded-snapshot")).normalizedSnapshot().thread
         func checkpoint(_ id: String, run: String, count: Int, status: String = "ready") -> JSONValue {
             .object(["id": .string(id), "scopeId": .string("scope"), "runId": .string(run), "status": .string(status), "appRunOrdinal": .number(Double(count))])
         }
@@ -75,18 +75,6 @@ struct FeatureReviewParityTests {
         #expect(sources[0].target == .turn(checkpointID: "checkpoint:scope:latest", fromTurnCount: 6, toTurnCount: 7))
         #expect(sources[1].title == "Turn 2")
         #expect(sources[2].target == .fullThread(toTurnCount: 7))
-    }
-
-    @Test func legacyCheckpointChoicesDoNotRequireV2Projection() throws {
-        var thread = try V2Fixture.load("thread-detail-snapshot").decode(OrchestrationThreadDetailSnapshot.self).thread
-        thread.orchestrationV2Control = nil
-        thread.checkpoints = [
-            .init(turnId: "old-turn", checkpointTurnCount: 2, checkpointRef: "refs/checkpoints/2", status: "ready", files: [], assistantMessageId: nil, completedAt: "now"),
-            .init(turnId: "missing-turn", checkpointTurnCount: 3, checkpointRef: "refs/checkpoints/3", status: "missing", files: [], assistantMessageId: nil, completedAt: "now"),
-        ]
-        let sources = NativeReviewSources.checkpoints(thread)
-        #expect(sources.count == 2)
-        #expect(sources[0].target == .turn(checkpointID: "turn:old-turn:refs/checkpoints/2", fromTurnCount: 1, toTurnCount: 2))
     }
 
     @Test func reverseRangeKeepsItsSideAndRenderedIndices() throws {

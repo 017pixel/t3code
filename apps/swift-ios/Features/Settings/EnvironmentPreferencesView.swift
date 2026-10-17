@@ -33,6 +33,7 @@ struct EnvironmentPreferencesView: View {
                 Text("Enable both environments to share PR data through the same GitHub account. Write access permits PR changes. Credentials stay on each environment.")
             }
             CloudWebhookPreferencesView(model: model, environmentID: environmentID)
+            FeatureStorageMaintenanceView(model: model, environmentID: environmentID, settings: settings)
             if let settings {
                 if settings.github != nil {
                     Section {

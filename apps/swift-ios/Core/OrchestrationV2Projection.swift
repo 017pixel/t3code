@@ -328,7 +328,16 @@ public struct OrchestrationV2ThreadState: Sendable {
     }
 
     private func shouldDropMissing(_ item: OrchestrationV2TurnItem) -> Bool {
-        if visibleIndices[item.id] != nil { return false }
+        if projection.visibleTurnItems.contains(where: { $0.sourceItemId == item.id }) { return false }
+        if let runID = item.runId {
+            // A queued run keeps its ordinal when a newer steer raises the watermark.
+            if projection.runs.contains(where: {
+                $0.id == runID && ["preparing", "queued", "starting", "running", "waiting"].contains($0.status)
+            }) { return false }
+            if projection.visibleTurnItems.contains(where: {
+                $0.isLocal && $0.item.runId == runID && $0.item.ordinal <= item.ordinal
+            }) { return false }
+        }
         if let latestLocalTurnOrdinal, item.ordinal <= latestLocalTurnOrdinal { return true }
         let oldest = projection.visibleTurnItems.lazy.filter(\.isLocal).map(\.item.ordinal).min()
         return oldest.map { item.ordinal < $0 } ?? false

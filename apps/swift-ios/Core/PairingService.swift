@@ -65,10 +65,8 @@ public actor PairingService {
         }
         let previousEnvironment = try await environmentStore.load()
             .first { $0.id == descriptor.environmentId }
-        let preference = previousEnvironment?.orchestrationProtocolPreference ?? .auto
-        // Validate before consuming the one-time pairing token. Re-pairing
-        // renews authorization without resetting the server's saved preference.
-        _ = try OrchestrationProtocolSelection(descriptor: descriptor, preference: preference)
+        // Reject unsupported hosts before consuming the one-time pairing token.
+        _ = try OrchestrationProtocolSelection(descriptor: descriptor)
         let access = try await exchange(target: target, clientLabel: clientLabel)
         guard access.tokenType == "Bearer" else {
             throw HTTPError.status(

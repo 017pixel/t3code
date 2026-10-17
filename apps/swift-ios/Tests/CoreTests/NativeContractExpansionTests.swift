@@ -152,7 +152,7 @@ final class NativeContractExpansionTests: XCTestCase {
                   "environmentId": "environment-1",
                   "label": "Studio",
                   "platform": {"os": "darwin", "arch": "arm64"},
-                  "serverVersion": "1.0.0",
+                  "serverVersion": "1.0.0", "orchestrationProtocolVersion": 2,
                   "capabilities": {
                     "repositoryIdentity": true,
                     "attachmentUploads": true,
@@ -178,7 +178,7 @@ final class NativeContractExpansionTests: XCTestCase {
                   "environmentId": "environment-1",
                   "label": "Studio",
                   "platform": {"os": "darwin", "arch": "arm64"},
-                  "serverVersion": "1.0.0",
+                  "serverVersion": "1.0.0", "orchestrationProtocolVersion": 2,
                   "capabilities": {
                     "repositoryIdentity": true,
                     "threadPinning": true,
@@ -202,7 +202,7 @@ final class NativeContractExpansionTests: XCTestCase {
                   "environmentId": "environment-2",
                   "label": "Legacy",
                   "platform": {"os": "darwin", "arch": "arm64"},
-                  "serverVersion": "0.9.0",
+                  "serverVersion": "0.9.0", "orchestrationProtocolVersion": 2,
                   "capabilities": {"repositoryIdentity": true}
                 }
                 """.utf8

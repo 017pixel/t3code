@@ -45,6 +45,11 @@ extension NativeFeatureClient: FeatureScheduledTaskManaging {
     func upsertScheduledTask(environmentID: String, input: ScheduledTaskUpsertInput) async throws -> ScheduledTask {
         let client = try await environmentServiceClient(environmentID: environmentID)
         try await requireScope("orchestration:operate", client: client)
+        var config = try await client.serverConfig()
+        config.settings = try await client.serverSettings()
+        guard ServerProviderModelAvailability.canSelect(input.modelSelection, in: config, projectID: input.projectId) else {
+            throw ServerProviderModelSelectionError.unavailable
+        }
         return try await client.upsertScheduledTask(input)
     }
 

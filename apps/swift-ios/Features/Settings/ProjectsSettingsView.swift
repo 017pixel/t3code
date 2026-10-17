@@ -145,7 +145,7 @@ struct ProjectPreferencesView: View {
                 projectSetting(.defaultModelSelection) {
                     Menu {
                         Button("No default model") { save(.defaultModelSelection, value: .null) }
-                        ForEach(providers.filter(\.isAvailable)) { provider in
+                        ForEach(ProjectProviderModelPolicy.selectableProviders(providers).filter(\.isAvailable)) { provider in
                             Section(provider.name) {
                                 ForEach(provider.models) { model in
                                     Button(model.name) {
@@ -158,6 +158,9 @@ struct ProjectPreferencesView: View {
                         LabeledContent("Default model", value: modelLabel(effective.defaultModelSelection))
                     }
                     .accessibilityIdentifier("project-default-model")
+                }
+                if project?.supportsProjectProviderInstanceOverrides == true {
+                    projectProviders
                 }
                 if settings?.supportsDefaultRuntimeMode == true {
                     projectSetting(.defaultRuntimeMode) {
@@ -345,6 +348,40 @@ struct ProjectPreferencesView: View {
         .listRowBackground(T3Colors.background)
     }
 
+    private var projectProviders: some View {
+        Section("Providers") {
+            ForEach(providers) { provider in
+                projectProviderRow(provider)
+            }
+        }
+        .disabled(!canWriteSettings)
+        .listRowBackground(T3Colors.background)
+    }
+
+    private func projectProviderRow(_ provider: FeatureProvider) -> some View {
+        Picker(provider.name, selection: providerOverrideBinding(providerID: provider.id)) {
+            Text("Use environment setting").tag("inherit")
+            Text("Enabled").tag("enabled")
+            Text("Disabled").tag("disabled")
+        }
+        .accessibilityIdentifier("project-provider-\(provider.id)")
+    }
+
+    private func providerOverrideBinding(providerID: String) -> Binding<String> {
+        Binding(
+            get: {
+                let overrides = settings?.providerInstanceOverrides(projectID: wireID) ?? [:]
+                guard let enabled = overrides[providerID] else { return "inherit" }
+                return enabled ? "enabled" : "disabled"
+            },
+            set: { value in
+                let enabled: Bool? = value == "inherit" ? nil : value == "enabled"
+                let change = ServerProjectSettingChange(providerInstanceID: providerID, enabled: enabled)
+                save(change)
+            }
+        )
+    }
+
     private func booleanBinding(_ key: ServerProjectSettingKey, value: Bool) -> Binding<Bool> {
         Binding(get: { value }, set: { save(key, value: .bool($0)) })
     }
@@ -360,6 +397,7 @@ struct ProjectPreferencesView: View {
     }
 
     private func setDefaultModel(providerID: String, modelID: String) {
+        guard ProjectProviderModelPolicy.canSelect(.init(providerID: providerID, modelID: modelID), in: providers) else { return }
         do {
             let selection = ModelSelection(instanceId: providerID, model: modelID)
             save(.defaultModelSelection, value: try JSONValue.encode(selection))
@@ -375,13 +413,18 @@ struct ProjectPreferencesView: View {
     }
 
     private func save(_ key: ServerProjectSettingKey, value: JSONValue?) {
+        save(.init(key: key, value: value))
+    }
+
+    private func save(_ change: ServerProjectSettingChange) {
         guard !busy, canWriteSettings else { return }
+        if change.key == .providerInstances, project?.supportsProjectProviderInstanceOverrides != true { return }
         busy = true
         Task {
             defer { busy = false }
             do {
                 try await model.client.updateProjectPreferences(
-                    projectID: projectID, change: .init(key: key, value: value)
+                    projectID: projectID, change: change
                 )
                 await load()
             } catch { errorMessage = error.localizedDescription }

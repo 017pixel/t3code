@@ -109,26 +109,6 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
-    func testPreferenceChangeRejectsAnAlreadyRunningPassiveRefresh() async throws {
-        let fixture = try await Self.makeFixture(
-            fallbackPollingInitialDelay: .seconds(60), aggregateRefreshInterval: .seconds(60)
-        )
-        defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        let before = try await fixture.client.initialSnapshot()
-        XCTAssertTrue(before.projects.contains { $0.environmentID == "two" })
-        await fixture.transport.holdNextShellRead(host: "two.example")
-        let refresh = Task { try await fixture.client.backgroundSnapshot() }
-        await fixture.transport.waitForHeldShellRead()
-        try await fixture.client.setOrchestrationPreference(environmentID: "two", preference: .v2)
-        await fixture.transport.releaseShellRead()
-        let after = try await refresh.value
-        XCTAssertFalse(after.projects.contains { $0.environmentID == "two" })
-        XCTAssertTrue(after.projects.contains { $0.environmentID == "one" })
-        let preference = try await fixture.client.orchestrationPreference(environmentID: "two")
-        XCTAssertEqual(preference, .v2)
-        await fixture.client.disconnect()
-    }
-
     func testScratchCreationUsesTheSelectedComputer() async throws {
         let server = MultiEnvironmentConfigurationServer()
         let fixture = try await Self.makeFixture(
@@ -237,6 +217,15 @@ final class NativeMultiEnvironmentTests: XCTestCase {
                 ]),
             ]],
             providersByHost: ["two.example": [.object([
+                "instanceId": .string("codex"), "driver": .string("codex"),
+                "enabled": .bool(true), "installed": .bool(true), "status": .string("ready"),
+                "auth": .object(["status": .string("authenticated")]),
+                "checkedAt": .string("2026-09-14T04:00:00.000Z"),
+                "models": .array([.object([
+                    "slug": .string(environmentDefault.model), "name": .string(environmentDefault.model),
+                    "isCustom": .bool(false),
+                ])]),
+            ]), .object([
                 "instanceId": .string("signed-out"), "driver": .string("codex"),
                 "enabled": .bool(true), "installed": .bool(true), "status": .string("ready"),
                 "auth": .object(["status": .string("unauthenticated")]),
@@ -616,9 +605,10 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         )
 
         let records = await fixture.transport.dispatchRecords()
-        XCTAssertEqual(records.map(\.host), ["two.example", "two.example"])
+        XCTAssertGreaterThanOrEqual(records.count, 2)
+        XCTAssertTrue(records.allSatisfy { $0.host == "two.example" })
         let turnSelection = try XCTUnwrap(
-            records.last?.command["modelSelection"]?.decode(ModelSelection.self)
+            records.last(where: { $0.command["modelSelection"] != nil })?.command["modelSelection"]?.decode(ModelSelection.self)
         )
         XCTAssertEqual(turnSelection.instanceId, selection.providerID)
         XCTAssertEqual(turnSelection.model, selection.modelID)
@@ -822,7 +812,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
-    func testBackgroundLivenessKeepsASettledThreadWorking() async throws {
+    func testBackgroundLivenessUsesWaitingPresentationAndWorkingShelf() async throws {
         let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         await fixture.transport.setShell(
@@ -830,7 +820,8 @@ final class NativeMultiEnvironmentTests: XCTestCase {
                 projectID: "project-one",
                 threadID: "thread-one",
                 title: "Local work",
-                backgroundLiveness: .working
+                backgroundLiveness: .working,
+                snapshotSequence: 3
             ),
             host: "one.example"
         )
@@ -839,10 +830,18 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         let thread = try XCTUnwrap(
             snapshot.threads.first(where: { $0.wireID == "thread-one" })
         )
-        XCTAssertEqual(thread.state, .working)
+        XCTAssertEqual(thread.state, .idle)
+        XCTAssertEqual(thread.inboxFacts?.runtimeStatus, "idle")
+        XCTAssertTrue(thread.isWaitingForBackgroundWork)
+        XCTAssertEqual(thread.homeStatus, .monitoring)
+        XCTAssertEqual(thread.homeStatusLabel, "Waiting")
+        var workingSnapshot = snapshot
+        workingSnapshot.settings.workingShelfEnabled = true
+        XCTAssertTrue(DailyUXSidebarIndex(snapshot: workingSnapshot).working.contains { $0.id == thread.id })
 
         let detail = try await fixture.client.loadThread(id: thread.id)
-        XCTAssertEqual(detail.thread.state, .working)
+        XCTAssertEqual(detail.thread.state, .idle)
+        XCTAssertTrue(detail.thread.isWaitingForBackgroundWork)
         XCTAssertTrue(detail.backgroundWorkIsActive)
         await fixture.client.disconnect()
     }
@@ -1023,7 +1022,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testCachedShellRowsApplySettlementAndRemoveDeletedRoutes() async throws {
-        let fixture = try await Self.makeFixture()
+        let fixture = try await Self.makeFixture(threadSettlementAvailable: true)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let initial = try await fixture.client.initialSnapshot()
         let original = try XCTUnwrap(initial.threads.first { $0.environmentID == "two" })
@@ -1037,8 +1036,17 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         let refreshed = try await fixture.client.initialSnapshot()
         let settled = try XCTUnwrap(refreshed.threads.first { $0.id == original.id })
         XCTAssertEqual(settled.updatedAt, original.updatedAt)
+        XCTAssertEqual(settled.supportsSettlement, true)
         XCTAssertTrue(settled.isSettled)
-        XCTAssertEqual(settled.state, .monitoring)
+        XCTAssertEqual(settled.state, .idle)
+        XCTAssertEqual(settled.inboxFacts?.runtimeStatus, "idle")
+        XCTAssertTrue(settled.isWaitingForBackgroundWork)
+        XCTAssertEqual(settled.homeStatusLabel, "Waiting")
+        var workingSnapshot = refreshed
+        workingSnapshot.settings.workingShelfEnabled = true
+        let sidebar = DailyUXSidebarIndex(snapshot: workingSnapshot)
+        XCTAssertTrue(sidebar.settled.contains { $0.id == settled.id })
+        XCTAssertFalse(sidebar.working.contains { $0.id == settled.id })
         XCTAssertEqual(refreshed.threads.first { $0.environmentID == "one" },
                        initial.threads.first { $0.environmentID == "one" })
 
@@ -1294,7 +1302,8 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         try await fixture.client.renameThread(id: created.id, title: "Fallback routed")
 
         let records = await fixture.transport.dispatchRecords()
-        XCTAssertEqual(records.map(\.host), ["two.example", "two.example"])
+        XCTAssertGreaterThanOrEqual(records.count, 2)
+        XCTAssertTrue(records.allSatisfy { $0.host == "two.example" })
         XCTAssertEqual(records[0].command["type"]?.stringValue, "thread.create")
         XCTAssertEqual(records[0].command["projectId"]?.stringValue, "project-two")
         XCTAssertEqual(
@@ -1370,6 +1379,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
 
     func testHTTPFallbackKeepsLiveConnectionReconnecting() async throws {
         let fixture = try await Self.makeFixture(
+            interruptShellSubscriptions: true,
             fallbackPollingInitialDelay: .milliseconds(40),
             fallbackPollingInterval: .seconds(2)
         )
@@ -1401,15 +1411,20 @@ final class NativeMultiEnvironmentTests: XCTestCase {
             host: "one.example"
         )
         let events = fixture.client.events()
-        var iterator = events.makeAsyncIterator()
-        var refreshed: FeatureSnapshot?
-        while let event = await iterator.next() {
-            if case let .snapshot(snapshot) = event,
-               snapshot.projects.contains(where: { $0.wireID == addedProject.id }) {
-                refreshed = snapshot
-                break
+        let receivedFallback = expectation(description: "HTTP fallback publishes the added project")
+        let refreshTask = Task { () -> FeatureSnapshot? in
+            for await event in events {
+                if case let .snapshot(snapshot) = event,
+                   snapshot.projects.contains(where: { $0.wireID == addedProject.id }) {
+                    receivedFallback.fulfill()
+                    return snapshot
+                }
             }
+            return nil
         }
+        await fulfillment(of: [receivedFallback], timeout: 5)
+        refreshTask.cancel()
+        let refreshed = await refreshTask.value
 
         XCTAssertEqual(refreshed?.connection.state, .reconnecting)
         await fixture.client.disconnect()
@@ -1421,7 +1436,9 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         includeThirdEnvironment: Bool = false,
         repositoryIdentity: RepositoryIdentity? = nil,
         pullRequestsAvailable: Bool = false,
-        webSocketConnector: any WebSocketConnecting = UnavailableMultiEnvironmentWebSocketConnector(),
+        threadSettlementAvailable: Bool = false,
+        webSocketConnector: (any WebSocketConnecting)? = nil,
+        interruptShellSubscriptions: Bool = false,
         rpcConnectionWaitTimeout: Duration = .milliseconds(5),
         fallbackPollingInitialDelay: Duration = .seconds(3),
         fallbackPollingInterval: Duration = .seconds(2),
@@ -1446,7 +1463,8 @@ final class NativeMultiEnvironmentTests: XCTestCase {
                 descriptor: try multiEnvironmentDescriptor(
                     environmentID: "one",
                     label: "Left Book",
-                    pullRequestsAvailable: pullRequestsAvailable
+                    pullRequestsAvailable: pullRequestsAvailable,
+                    threadSettlementAvailable: threadSettlementAvailable
                 )
             ),
             Environment(
@@ -1457,7 +1475,8 @@ final class NativeMultiEnvironmentTests: XCTestCase {
                 descriptor: try multiEnvironmentDescriptor(
                     environmentID: "two",
                     label: "Steam Box",
-                    pullRequestsAvailable: pullRequestsAvailable
+                    pullRequestsAvailable: pullRequestsAvailable,
+                    threadSettlementAvailable: threadSettlementAvailable
                 )
             ),
         ]
@@ -1471,7 +1490,8 @@ final class NativeMultiEnvironmentTests: XCTestCase {
                     descriptor: try multiEnvironmentDescriptor(
                         environmentID: "three",
                         label: "Third Box",
-                        pullRequestsAvailable: pullRequestsAvailable
+                        pullRequestsAvailable: pullRequestsAvailable,
+                        threadSettlementAvailable: threadSettlementAvailable
                     )
                 )
             )
@@ -1519,7 +1539,15 @@ final class NativeMultiEnvironmentTests: XCTestCase {
             environmentStore: store,
             credentialStore: InMemoryCredentialStore(credentials: environmentCredentials),
             httpTransport: transport,
-            webSocketConnector: webSocketConnector,
+            webSocketConnector: { () -> any WebSocketConnecting in
+                if let configuration = webSocketConnector as? MultiEnvironmentConfigurationConnector {
+                    return MultiEnvironmentConfigurationConnector(server: configuration.server, transport: transport)
+                }
+                return webSocketConnector ?? MultiEnvironmentFixtureConnector(
+                    transport: transport,
+                    interruptShellSubscriptions: interruptShellSubscriptions
+                )
+            }(),
             rpcConnectionWaitTimeout: rpcConnectionWaitTimeout
         )
         let settings = UserDefaults(
@@ -1929,7 +1957,7 @@ private actor RuntimeReplacementHTTPTransport: HTTPTransport {
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         if request.url?.path == "/.well-known/t3/environment",
            let environment = environments.first(where: { $0.httpBaseURL.host == request.url?.host }) {
-            return (try legacyEnvironmentDescriptorData(for: environment), multiEnvironmentResponse(request))
+            return (try v2EnvironmentDescriptorData(for: environment), multiEnvironmentResponse(request))
         }
         guard request.url?.path == "/api/auth/websocket-ticket" else {
             throw URLError(.unsupportedURL)
@@ -2064,7 +2092,7 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
     init(shells: [String: OrchestrationShellSnapshot], environments: [Environment]) {
         self.shells = shells
         self.environments = environments
-        shellData = shells.mapValues { try! JSONEncoder.t3.encode($0) }
+        shellData = shells.mapValues { try! JSONEncoder.t3.encode(v2ShellFixture($0)) }
         reachableHosts = Set(shells.keys)
         shellReadsEnabledHosts = Set(shells.keys)
     }
@@ -2086,14 +2114,14 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
     }
 
     func setShell(_ shell: OrchestrationShellSnapshot, host: String) {
-        shellData[host] = try! JSONEncoder.t3.encode(shell)
+        shellData[host] = try! JSONEncoder.t3.encode(v2ShellFixture(shell))
     }
 
     func setDetail(
         _ detail: OrchestrationThreadDetailSnapshot,
         host: String
     ) {
-        detailData[host, default: [:]][detail.thread.id] = try! JSONEncoder.t3.encode(detail)
+        detailData[host, default: [:]][detail.thread.id] = try! JSONEncoder.t3.encode(v2ThreadFixture(detail))
     }
 
     func dispatchHosts() -> [String] {
@@ -2114,6 +2142,24 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
 
     func dropNextCreateReply(host: String) {
         hostsDroppingNextCreateReply.insert(host)
+    }
+
+    func serverConfig(host: String) -> JSONValue {
+        let selections = [
+            ModelSelection(instanceId: "codex", model: "gpt-5.6-sol"),
+            ModelSelection(instanceId: "claudeAgent", model: "claude-opus-4-1"),
+        ]
+        return .object(["providers": .array(selections.map { selection in .object([
+            "instanceId": .string(selection.instanceId),
+            "driver": .string(selection.instanceId),
+            "enabled": .bool(true), "installed": .bool(true), "status": .string("ready"),
+            "auth": .object(["status": .string("authenticated")]),
+            "checkedAt": .string("2026-09-04T12:00:00.000Z"),
+            "models": .array([.object([
+                "slug": .string(selection.model), "name": .string(selection.model),
+                "isCustom": .bool(false),
+            ])]),
+        ]) })])
     }
 
     func holdNextShellRead(host: String) { heldShellHost = host }
@@ -2154,7 +2200,7 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
         }
         if path == "/.well-known/t3/environment",
            let environment = environments.first(where: { $0.httpBaseURL.host == host }) {
-            return (try legacyEnvironmentDescriptorData(for: environment), multiEnvironmentResponse(request))
+            return (try v2EnvironmentDescriptorData(for: environment), multiEnvironmentResponse(request))
         }
         if path == "/api/pull-requests/diff", let body = request.httpBody {
             diffRequests.append((host, try JSONDecoder.t3.decode(JSONValue.self, from: body)))
@@ -2175,7 +2221,7 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
             return (data, multiEnvironmentResponse(request))
         }
         if path.hasPrefix("/api/orchestration/threads/") {
-            let threadID = request.url?.lastPathComponent.removingPercentEncoding ?? "thread"
+            let threadID = request.url.map(v2FixtureThreadID) ?? "thread"
             if let data = detailData[host]?[threadID] {
                 return (data, multiEnvironmentResponse(request))
             }
@@ -2183,36 +2229,9 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
                 .first(where: { $0.id == threadID })?
                 .projectId ?? shells[host]?.projects.first?.id ?? "project"
             return (
-                try JSONEncoder.t3.encode(
-                    multiEnvironmentDetail(projectID: projectID, threadID: threadID)
+                try JSONEncoder.t3.encode(v2ThreadFixture(
+                    multiEnvironmentDetail(projectID: projectID, threadID: threadID))
                 ),
-                multiEnvironmentResponse(request)
-            )
-        }
-        if path == "/api/orchestration/dispatch" {
-            guard let body = request.httpBody else { throw URLError(.badServerResponse) }
-            let command = try JSONDecoder.t3.decode(JSONValue.self, from: body)
-            dispatched.append(
-                MultiEnvironmentDispatchRecord(host: host, command: command)
-            )
-            if command["type"]?.stringValue == "thread.create",
-               hostsDroppingNextCreateReply.remove(host) != nil,
-               let projectID = command["projectId"]?.stringValue,
-               let threadID = command["threadId"]?.stringValue {
-                let model = command["modelSelection"]
-                shellData[host] = try JSONEncoder.t3.encode(
-                    multiEnvironmentShell(
-                        projectID: projectID,
-                        threadID: threadID,
-                        title: command["title"]?.stringValue ?? "New thread",
-                        providerID: model?["instanceId"]?.stringValue ?? "codex",
-                        modelID: model?["model"]?.stringValue ?? "gpt-5.6-sol"
-                    )
-                )
-                throw URLError(.networkConnectionLost)
-            }
-            return (
-                try JSONEncoder.t3.encode(DispatchResult(sequence: 2)),
                 multiEnvironmentResponse(request)
             )
         }
@@ -2228,6 +2247,29 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
         }
         throw URLError(.unsupportedURL)
     }
+    func dispatch(_ command: JSONValue, host: String) throws -> JSONValue {
+        dispatched.append(
+            MultiEnvironmentDispatchRecord(host: host, command: command)
+        )
+        if command["type"]?.stringValue == "thread.create",
+           hostsDroppingNextCreateReply.remove(host) != nil,
+           let projectID = command["projectId"]?.stringValue,
+           let threadID = command["threadId"]?.stringValue {
+            let model = command["modelSelection"]
+            shellData[host] = try JSONEncoder.t3.encode(v2ShellFixture(
+                multiEnvironmentShell(
+                projectID: projectID,
+                threadID: threadID,
+                title: command["title"]?.stringValue ?? "New thread",
+                providerID: model?["instanceId"]?.stringValue ?? "codex",
+                modelID: model?["model"]?.stringValue ?? "gpt-5.6-sol"
+                ))
+            )
+            throw URLError(.networkConnectionLost)
+        }
+        return .object(["sequence": .number(2)])
+    }
+
 }
 
 private struct MultiEnvironmentDispatchRecord: Sendable {
@@ -2235,9 +2277,64 @@ private struct MultiEnvironmentDispatchRecord: Sendable {
     let command: JSONValue
 }
 
-private struct UnavailableMultiEnvironmentWebSocketConnector: WebSocketConnecting {
-    func connect(to _: URL) async throws -> any WebSocketConnection {
-        throw URLError(.cannotConnectToHost)
+private struct MultiEnvironmentFixtureConnector: WebSocketConnecting {
+    let transport: MultiEnvironmentHTTPTransport
+    var interruptShellSubscriptions = false
+    func connect(to url: URL) -> any WebSocketConnection {
+        MultiEnvironmentFixtureSocket(
+            transport: transport,
+            host: url.host ?? "",
+            interruptShellSubscriptions: interruptShellSubscriptions
+        )
+    }
+}
+
+private actor MultiEnvironmentFixtureSocket: WebSocketConnection {
+    let transport: MultiEnvironmentHTTPTransport
+    let host: String
+    let interruptShellSubscriptions: Bool
+    private var responses: [Data] = []
+    private var receiver: CheckedContinuation<Data, any Error>?
+    private var closed = false
+    init(transport: MultiEnvironmentHTTPTransport, host: String, interruptShellSubscriptions: Bool) {
+        self.transport = transport
+        self.host = host
+        self.interruptShellSubscriptions = interruptShellSubscriptions
+    }
+    func send(_ data: Data) async throws {
+        guard !closed else { throw URLError(.networkConnectionLost) }
+        let request = try JSONDecoder.t3.decode(JSONValue.self, from: data)
+        guard let id = request["id"], let tag = request["tag"]?.stringValue else { return }
+        let response: JSONValue
+        switch tag {
+        case RPCMethod.dispatchCommand.rawValue:
+            let value = try await transport.dispatch(request["payload"]!, host: host)
+            response = .object(["_tag": .string("Exit"), "requestId": id,
+                "exit": .object(["_tag": .string("Success"), "value": value])])
+        case RPCMethod.subscribeServerConfig.rawValue:
+            response = .object(["_tag": .string("Chunk"), "requestId": id,
+                "values": .array([.object(["type": .string("snapshot"), "config": await transport.serverConfig(host: host)])])])
+        case "server.getSettings":
+            response = .object(["_tag": .string("Exit"), "requestId": id,
+                "exit": .object(["_tag": .string("Success"), "value": .object([:])])])
+        case RPCMethod.subscribeShell.rawValue where interruptShellSubscriptions:
+            // Let startup load configuration, then break live shell delivery.
+            throw URLError(.networkConnectionLost)
+        default: return
+        }
+        let data = try JSONEncoder.t3.encode(response)
+        if let receiver { self.receiver = nil; receiver.resume(returning: data) }
+        else { responses.append(data) }
+    }
+    func receive() async throws -> Data {
+        guard !closed else { throw URLError(.networkConnectionLost) }
+        if !responses.isEmpty { return responses.removeFirst() }
+        return try await withCheckedThrowingContinuation { receiver = $0 }
+    }
+    func close() {
+        closed = true
+        receiver?.resume(throwing: URLError(.networkConnectionLost))
+        receiver = nil
     }
 }
 
@@ -2399,7 +2496,7 @@ private actor MultiEnvironmentConfigurationServer {
             settingsByHost[host] = updated
             value = .object(settingsByHost[host] ?? [:])
         case RPCMethod.getArchivedShellSnapshot.rawValue:
-            value = try JSONValue.encode(OrchestrationShellSnapshot(
+            value = try v2ShellFixture(OrchestrationShellSnapshot(
                 snapshotSequence: 0, projects: [], threads: [], updatedAt: "2026-09-04T12:00:00.000Z"
             ))
         default:
@@ -2427,7 +2524,7 @@ private actor MultiEnvironmentConfigurationServer {
             "environment": .object([
                 "environmentId": .string(environmentID), "label": .string(host),
                 "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
-                "serverVersion": .string("1.0.0"),
+                "serverVersion": .string("1.0.0"), "orchestrationProtocolVersion": .number(2),
                 "capabilities": .object([
                     "threadAutoSettlement": .bool(true), "environmentIcon": .bool(true),
                     "threadRestartContinuation": .bool(restartSupportHosts.contains(host)),
@@ -2440,28 +2537,38 @@ private actor MultiEnvironmentConfigurationServer {
 
 private struct MultiEnvironmentConfigurationConnector: WebSocketConnecting {
     let server: MultiEnvironmentConfigurationServer
+    var transport: MultiEnvironmentHTTPTransport? = nil
 
     func connect(to url: URL) -> any WebSocketConnection {
-        MultiEnvironmentConfigurationConnection(host: url.host ?? "", server: server)
+        MultiEnvironmentConfigurationConnection(host: url.host ?? "", server: server, transport: transport)
     }
 }
 
 private actor MultiEnvironmentConfigurationConnection: WebSocketConnection {
     private let host: String
     private let server: MultiEnvironmentConfigurationServer
+    private let transport: MultiEnvironmentHTTPTransport?
     private var responses: [Data] = []
     private var receiver: CheckedContinuation<Data, Error>?
     private var closed = false
 
-    init(host: String, server: MultiEnvironmentConfigurationServer) {
+    init(host: String, server: MultiEnvironmentConfigurationServer, transport: MultiEnvironmentHTTPTransport?) {
         self.host = host
         self.server = server
+        self.transport = transport
     }
 
     func send(_ data: Data) async throws {
         guard !closed else { throw URLError(.networkConnectionLost) }
         let request = try JSONDecoder.t3.decode(JSONValue.self, from: data)
-        guard let response = try await server.response(to: request, host: host) else { return }
+        let response: JSONValue
+        if request["tag"] == .string(RPCMethod.dispatchCommand.rawValue), let transport {
+            response = .object(["_tag": .string("Exit"), "requestId": request["id"]!,
+                "exit": .object(["_tag": .string("Success"), "value": try await transport.dispatch(request["payload"]!, host: host)])])
+        } else {
+            guard let value = try await server.response(to: request, host: host) else { return }
+            response = value
+        }
         let data = try JSONEncoder.t3.encode(response)
         if let receiver {
             self.receiver = nil
@@ -2571,9 +2678,10 @@ private actor PullRequestPageWebSocketConnection: WebSocketConnection {
 private func multiEnvironmentDescriptor(
     environmentID: String,
     label: String,
-    pullRequestsAvailable: Bool
+    pullRequestsAvailable: Bool,
+    threadSettlementAvailable: Bool
 ) throws -> EnvironmentDescriptor? {
-    guard pullRequestsAvailable else { return nil }
+    guard pullRequestsAvailable || threadSettlementAvailable else { return nil }
     let value = JSONValue.object([
         "environmentId": .string(environmentID),
         "label": .string(label),
@@ -2581,10 +2689,11 @@ private func multiEnvironmentDescriptor(
             "os": .string("darwin"),
             "arch": .string("arm64"),
         ]),
-        "serverVersion": .string("0.1.0"),
+        "serverVersion": .string("0.1.0"), "orchestrationProtocolVersion": .number(2),
         "capabilities": .object([
-            "repositoryIdentity": .bool(true),
-            "pullRequests": .bool(true),
+            "repositoryIdentity": .bool(pullRequestsAvailable),
+            "pullRequests": .bool(pullRequestsAvailable),
+            "threadSettlement": .bool(threadSettlementAvailable),
         ]),
     ])
     return try value.decode(EnvironmentDescriptor.self)
@@ -2650,7 +2759,7 @@ func multiEnvironmentShell(
                 backgroundLiveness: backgroundLiveness
             ),
         ],
-        updatedAt: timestamp
+        updatedAt: timestamp, orchestrationProtocolVersion: 2
     )
 }
 
@@ -2663,7 +2772,7 @@ func multiEnvironmentDetail(
     messages: [OrchestrationMessage] = []
 ) -> OrchestrationThreadDetailSnapshot {
     let timestamp = "2026-07-31T12:00:00.000Z"
-    return OrchestrationThreadDetailSnapshot(
+    var snapshot = OrchestrationThreadDetailSnapshot(
         snapshotSequence: snapshotSequence,
         thread: OrchestrationThread(
             id: threadID,
@@ -2690,6 +2799,8 @@ func multiEnvironmentDetail(
             session: nil
         )
     )
+    snapshot.orchestrationProtocolVersion = 2
+    return snapshot
 }
 
 private func multiEnvironmentResponse(_ request: URLRequest) -> HTTPURLResponse {

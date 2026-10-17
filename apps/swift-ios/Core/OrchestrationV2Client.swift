@@ -5,15 +5,13 @@ enum OrchestrationV2SynchronizationError: LocalizedError {
     var errorDescription: String? { "Refreshing the thread after an interrupted update." }
 }
 
-/// Owns V2 state and wire requests. The legacy transport never reads these
-/// projections or uses their resume cursors.
+/// Owns orchestration state, wire requests, and resume cursors.
 actor OrchestrationV2Client {
     private let environment: Environment
     private let api: EnvironmentAPI
     private let rpc: WebSocketRPCClient
     private var states: [String: OrchestrationV2ThreadState] = [:]
     private var recency: [String] = []
-    private var generation = 0
     private var presentationRevision = 0
     private var commandPlans: [String: OrchestrationV2Commands.Plan] = [:]
     private var commandTasks: [String: Task<DispatchResult, Error>] = [:]
@@ -26,24 +24,11 @@ actor OrchestrationV2Client {
         self.rpc = rpc
     }
 
-    func reset() {
-        generation &+= 1
-        states.removeAll()
-        recency.removeAll()
-        commandTasks.values.forEach { $0.cancel() }
-        commandTasks.removeAll()
-        commandPlans.removeAll()
-        commandResults.removeAll()
-        completedCommandIDs.removeAll()
-    }
-
     func shellSnapshot(timeoutInterval: TimeInterval? = nil) async throws -> OrchestrationShellSnapshot {
-        let epoch = generation
         let snapshot = try await api.orchestrationV2Snapshot(
             path: "/api/orchestration/shell", environment: environment,
             timeoutInterval: timeoutInterval, as: OrchestrationV2ShellSnapshot.self
         )
-        guard generation == epoch else { throw RPCError.disconnected }
         return try OrchestrationV2Presentation.shellSnapshot(snapshot)
     }
 
@@ -55,11 +40,9 @@ actor OrchestrationV2Client {
     /// Tool output can be withheld from timeline snapshots. Fetch one item only
     /// when its inspector opens, without replacing the loaded transcript.
     func turnItem(threadID: String, itemID: String, revision: String?) async throws -> OrchestrationV2TurnItem? {
-        let epoch = generation
         var payload: [String: JSONValue] = ["threadId": .string(threadID), "itemId": .string(itemID)]
         if let revision { payload["revision"] = .string(revision) }
         let result = try await rpc.request("orchestration.getTurnItem", payload: .object(payload), as: JSONValue.self)
-        guard generation == epoch else { throw RPCError.disconnected }
         guard let raw = result["item"], raw != .null else { return nil }
         let item = try OrchestrationV2TurnItem(json: raw)
         guard item.threadId == threadID, item.id == itemID else {
@@ -83,7 +66,6 @@ actor OrchestrationV2Client {
     func threadSnapshot(
         id: String, beforeCursor: String? = nil, timeoutInterval: TimeInterval? = nil
     ) async throws -> OrchestrationThreadDetailSnapshot {
-        let epoch = generation
         let path = try threadPath(id)
         if let beforeCursor {
             guard states[id] != nil else {
@@ -94,7 +76,7 @@ actor OrchestrationV2Client {
                 queryItems: [URLQueryItem(name: "cursor", value: beforeCursor)],
                 timeoutInterval: timeoutInterval, as: OrchestrationV2ThreadHistoryPage.self
             )
-            guard generation == epoch, var current = states[id] else { throw RPCError.disconnected }
+            guard var current = states[id] else { throw RPCError.disconnected }
             _ = try current.appendHistory(page, beforeCursor: beforeCursor)
             retain(current, id: id)
             return displaySnapshot(current)
@@ -103,7 +85,6 @@ actor OrchestrationV2Client {
             path: path + "/bounded", environment: environment, timeoutInterval: timeoutInterval,
             as: OrchestrationV2ThreadSnapshot.self
         )
-        guard generation == epoch else { throw RPCError.disconnected }
         let state = try OrchestrationV2ThreadState(decoded: snapshot)
         guard state.projection.thread.id == id else { throw OrchestrationV2StateError.wrongThread }
         if let current = states[id], current.snapshotSequence > state.snapshotSequence {
@@ -118,12 +99,10 @@ actor OrchestrationV2Client {
     func fullThreadSnapshot(
         id: String, timeoutInterval: TimeInterval? = nil
     ) async throws -> OrchestrationThreadDetailSnapshot {
-        let epoch = generation
         let full = try await api.orchestrationV2Snapshot(
             path: try threadPath(id), environment: environment, timeoutInterval: timeoutInterval,
             as: OrchestrationV2ThreadSnapshot.self
         )
-        guard generation == epoch else { throw RPCError.disconnected }
         let state = try OrchestrationV2ThreadState(decoded: full)
         guard state.projection.thread.id == id else { throw OrchestrationV2StateError.wrongThread }
         let normalized = state.normalizedSnapshot()
@@ -176,20 +155,19 @@ actor OrchestrationV2Client {
             "threadId": .string(threadID), "requestCompletionMarker": .bool(true),
             "acceptBoundedSnapshot": .bool(true),
         ]
-        // The V2 projection, not a caller's legacy cursor, owns replay.
+        // The retained projection owns replay; display caches never provide a cursor.
         if let state = states[threadID], sequence != nil {
             payload["afterSequence"] = .number(Double(state.snapshotSequence))
         }
         let source = try await rpc.subscribeBatchesOnCurrentConnection(
             "orchestration.subscribeThread", payload: .object(payload), as: JSONValue.self
         )
-        let epoch = generation
         let events = AsyncThrowingStream<[ThreadStreamItem], Error>(bufferingPolicy: .bufferingOldest(32)) { continuation in
             let task = Task {
                 do {
                     for try await batch in source.events {
                         try Task.checkCancellation()
-                        let updates = try self.consume(batch, threadID: threadID, epoch: epoch)
+                        let updates = try self.consume(batch, threadID: threadID)
                         guard !updates.isEmpty else { continue }
                         switch continuation.yield(updates) {
                         case .enqueued: break
@@ -208,8 +186,7 @@ actor OrchestrationV2Client {
         return (events, source.connectionID)
     }
 
-    private func consume(_ batch: [JSONValue], threadID: String, epoch: Int) throws -> [ThreadStreamItem] {
-        guard generation == epoch else { throw RPCError.disconnected }
+    private func consume(_ batch: [JSONValue], threadID: String) throws -> [ThreadStreamItem] {
         var remaining = batch
         if states[threadID] == nil {
             guard let index = batch.firstIndex(where: { $0["kind"]?.stringValue == "snapshot" }) else {
@@ -242,14 +219,12 @@ actor OrchestrationV2Client {
         }
         if let result = commandResults[id] { return result }
         if let pending = commandTasks[id] { return try await pending.value }
-        let epoch = generation
         let task = Task { try await self.executeCommand(command, id: id, responseDeadline: responseDeadline,
                                                        serverResolvedCommandContext: serverResolvedCommandContext) }
         commandTasks[id] = task
         do {
             let result = try await task.value
             try Task.checkCancellation()
-            guard generation == epoch else { throw RPCError.disconnected }
             commandTasks[id] = nil
             commandPlans[id] = nil
             commandResults[id] = result

@@ -284,27 +284,6 @@ struct NativeMessageDeliveryTests {
         await fixture.client.disconnect()
     }
 
-    @Test
-    func v1SendKeepsItsOriginalWireCommand() async throws {
-        let fixture = try await DeliveryFixture.make(version: 1)
-        defer { fixture.removeFiles() }
-        let initial = try await fixture.client.initialSnapshot()
-        let thread = try #require(initial.threads.first)
-        let identity = FeatureSubmissionIdentity(threadID: "thread-fixture", createdAt: Date(timeIntervalSince1970: 42))
-        try await fixture.client.sendMessage(
-            threadID: thread.id, text: "Legacy follow up", selection: nil, runtimeMode: .fullAccess,
-            attachments: [], identity: identity
-        )
-        let command = try #require(await fixture.connection.commands.last)
-        let expected = try OrchestrationCommands.sendTurn(
-            threadID: identity.threadID, text: "Legacy follow up", runtimeMode: .fullAccess,
-            commandID: identity.commandID, messageID: identity.messageID,
-            createdAt: "1970-01-01T00:00:42.000Z"
-        )
-        #expect(command == expected)
-        #expect(command["dispatchMode"] == nil)
-        await fixture.client.disconnect()
-    }
 }
 
 @MainActor
@@ -403,13 +382,13 @@ private struct DeliveryHTTPTransport: HTTPTransport {
         if let shellSnapshot { shell = try JSONEncoder.t3.encode(shellSnapshot) }
         else {
             shell = try Data(contentsOf: fixtures.appendingPathComponent(
-                version == 2 ? "v2-shell-snapshot.json" : "shell-snapshot.json"
+                "v2-shell-snapshot.json"
             ))
         }
         if let snapshot { detail = try JSONEncoder.t3.encode(snapshot) }
         else {
             detail = try Data(contentsOf: fixtures.appendingPathComponent(
-                version == 2 ? "v2-thread-bounded-snapshot.json" : "thread-detail-snapshot.json"
+                "v2-thread-bounded-snapshot.json"
             ))
         }
     }
@@ -460,6 +439,18 @@ private actor DeliveryWebSocketConnection: WebSocketConnection {
     func send(_ data: Data) throws {
         let request = try JSONDecoder.t3.decode(JSONValue.self, from: data)
         guard let id = request["id"], let tag = request["tag"]?.stringValue else { return }
+        let config: JSONValue = .object([
+            "providers": .array([.object([
+                "instanceId": .string("codex"), "driver": .string("codex"),
+                "enabled": .bool(true), "installed": .bool(true), "status": .string("ready"),
+                "auth": .object(["status": .string("authenticated")]),
+                "checkedAt": .string("2026-09-04T12:00:00.000Z"),
+                "models": .array([.object([
+                    "slug": .string("gpt-5.4"), "name": .string("GPT-5.4"), "isCustom": .bool(false),
+                ])]),
+            ])]),
+            "threadResumeCompletionMarker": .bool(true),
+        ])
         let value: JSONValue
         switch tag {
         case RPCMethod.subscribeThread.rawValue:
@@ -471,14 +462,14 @@ private actor DeliveryWebSocketConnection: WebSocketConnection {
             if failDispatch { throw URLError(.networkConnectionLost) }
             value = .object(["sequence": .number(101)])
         case RPCMethod.serverGetConfig.rawValue:
-            value = .object(["providers": .array([]), "threadResumeCompletionMarker": .bool(true)])
+            value = config
+        case "server.getSettings":
+            value = .object([:])
         case RPCMethod.subscribeServerConfig.rawValue:
             try enqueue(.object([
                 "_tag": .string("Chunk"), "requestId": id,
                 "values": .array([.object([
-                    "type": .string("snapshot"), "config": .object([
-                        "providers": .array([]), "threadResumeCompletionMarker": .bool(true),
-                    ]),
+                    "type": .string("snapshot"), "config": config,
                 ])]),
             ]))
             return

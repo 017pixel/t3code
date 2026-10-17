@@ -7,6 +7,7 @@ extension NativeFeatureClient {
     ) async throws {
         let client = try await projectCreationClient(environmentID: environmentID)
         try await requireScope("settings:write", client: client)
+        // Read the destination directly: subscribed settings can miss another client's token save.
         guard let current = try await client.serverSettings().github else {
             throw FeatureCapabilityUnavailable("GitHub settings")
         }

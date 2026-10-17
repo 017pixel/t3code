@@ -60,7 +60,8 @@ struct ScheduledTaskEditorView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(saving ? "Saving…" : "Save") { Task { await save() } }
-                        .disabled(saving || taskMissing || environmentUnavailable || !canManage)
+                        .disabled(saving || taskMissing || environmentUnavailable || !canManage
+                            || !ProjectProviderModelPolicy.canSelect(draft.selection, in: providers))
                         .accessibilityIdentifier("scheduled-task-save")
                 }
             }
@@ -123,6 +124,11 @@ struct ScheduledTaskEditorView: View {
                 onRefresh: { _ = await root.refreshProviders(environmentID: environmentID) },
                 onPresentationChange: { isPickingModel = $0 }
             )
+            .environment(\.providerSetupContext, ProviderSetupContext(model: root, environmentID: environmentID))
+            if let selection = draft.selection, !ProjectProviderModelPolicy.canSelect(selection, in: providers) {
+                Text("This model is unavailable for this project. Choose another model or enable its provider.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             if let selection = draft.selection,
                !providers.contains(where: { provider in
                    provider.id == selection.providerID && provider.models.contains { $0.id == selection.modelID }
@@ -255,8 +261,11 @@ struct ScheduledTaskEditorView: View {
     private var projects: [FeatureProject] { root.snapshot.projects.filter { $0.environmentID == environmentID } }
     private var selectedProject: FeatureProject? { projects.first { $0.id == draft.projectID } }
     private var providers: [FeatureProvider] {
-        root.snapshot.providersByEnvironment?[environmentID]
-            ?? DailyUXCreationContext.providers(for: selectedProject, in: root.snapshot)
+        ProjectProviderModelPolicy.providers(
+            root.snapshot.providersByEnvironment?[environmentID]
+                ?? DailyUXCreationContext.providers(for: selectedProject, in: root.snapshot),
+            for: selectedProject
+        )
     }
     private var environment: FeatureEnvironment? { root.snapshot.environments.first { $0.id == environmentID } }
     private var canManage: Bool {
@@ -276,6 +285,10 @@ struct ScheduledTaskEditorView: View {
 
     private func save() async {
         guard !saving, !taskMissing, !environmentUnavailable, canManage else { return }
+        guard ProjectProviderModelPolicy.canSelect(draft.selection, in: providers) else {
+            saveError = ServerProviderModelSelectionError.unavailable.localizedDescription
+            return
+        }
         saving = true
         do {
             let input = try draft.input(projects: projects, latestTask: liveTask)

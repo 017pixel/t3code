@@ -176,6 +176,7 @@ enum FeatureComposerTriggerKind: Sendable, Equatable {
     case model
     case skill
     case path
+    case pullRequest
 }
 
 struct FeatureComposerTrigger: Sendable, Equatable {
@@ -249,6 +250,13 @@ enum FeatureComposerTriggerParser {
         let token = String(text[tokenStartIndex..<cursorIndex])
         let tokenStart = text.distance(from: text.startIndex, to: tokenStartIndex)
 
+        if token.range(of: #"^#(?:[\p{L}\p{N}][\p{L}\p{N}_-]*)?$"#, options: .regularExpression) != nil {
+            return FeatureComposerTrigger(
+                kind: .pullRequest,
+                query: String(token.dropFirst()),
+                range: tokenStart..<cursor
+            )
+        }
         if token.first == "$" {
             return FeatureComposerTrigger(
                 kind: .skill,
@@ -308,6 +316,7 @@ enum FeatureComposerMenuItem: Identifiable, Sendable, Equatable {
     case providerCommand(FeatureProviderSlashCommand)
     case skill(FeatureProviderSkill)
     case path(FeatureComposerPathEntry)
+    case pullRequest(FeatureComposerPullRequestSuggestion)
 
     var id: String {
         switch self {
@@ -317,6 +326,7 @@ enum FeatureComposerMenuItem: Identifiable, Sendable, Equatable {
         case let .providerCommand(command): "command:\(command.id)"
         case let .skill(skill): "skill:\(skill.id)"
         case let .path(entry): "path:\(entry.path)"
+        case let .pullRequest(entry): "pr:\(entry.link.id.host):\(entry.link.id.repository):\(entry.link.number)"
         }
     }
 
@@ -328,6 +338,7 @@ enum FeatureComposerMenuItem: Identifiable, Sendable, Equatable {
         case let .providerCommand(command): "/\(command.name)"
         case let .skill(skill): skill.displayName ?? skill.name
         case let .path(entry): entry.name
+        case let .pullRequest(entry): "#\(entry.link.number)"
         }
     }
 
@@ -341,6 +352,7 @@ enum FeatureComposerMenuItem: Identifiable, Sendable, Equatable {
         case let .skill(skill):
             skill.shortDescription ?? skill.description ?? skill.scope ?? ""
         case let .path(entry): entry.parentPath
+        case let .pullRequest(entry): entry.description
         }
     }
 }
@@ -368,7 +380,9 @@ enum FeatureComposerMenuBuilder {
         powerFeatures: FeatureComposerPowerFeatures,
         pathEntries: [FeatureComposerPathEntry],
         allowProviderSwitch: Bool = false,
-        allowInteractionMode: Bool = false
+        allowInteractionMode: Bool = false,
+        linkedPullRequests: [ThreadPullRequestLink] = [],
+        repository: String? = nil
     ) -> [FeatureComposerMenuItem] {
         switch trigger.kind {
         case .slashCommand:
@@ -467,6 +481,11 @@ enum FeatureComposerMenuBuilder {
                 .uniquedByPath()
                 .prefix(20)
                 .map(FeatureComposerMenuItem.path)
+
+        case .pullRequest:
+            return FeatureComposerPullRequests.suggestions(
+                links: linkedPullRequests, repository: repository, query: trigger.query
+            ).map(FeatureComposerMenuItem.pullRequest)
         }
     }
 }

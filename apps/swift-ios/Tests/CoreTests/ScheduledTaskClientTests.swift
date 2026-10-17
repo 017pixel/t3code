@@ -30,8 +30,8 @@ final class ScheduledTaskClientTests: XCTestCase {
         }
     }
 
-    func testWebhookStreamAndRotationWorkOnBothProtocolsWithFutureRows() async throws {
-        for version in [1, 2] {
+    func testWebhookStreamAndRotationWorkOnV2WithFutureRows() async throws {
+        for version in [2] {
             let connection = ScheduledTaskTestConnection(
                 task: ScheduledWebhookFixtures.row(url: "https://hooks.example/old"),
                 extraTasks: [ScheduledTaskTestFixtures.taskJSON,
@@ -55,8 +55,8 @@ final class ScheduledTaskClientTests: XCTestCase {
         }
     }
 
-    func testSharedServicesAndLiveListWorkWithBothOrchestrationVersions() async throws {
-        for version in [1, 2] {
+    func testSharedServicesAndLiveListWorkWithV2() async throws {
+        for version in [2] {
             let connection = ScheduledTaskTestConnection()
             let client = T3Client(environment: Self.environment, credentialStore: Self.credentials(),
                 httpTransport: ScheduledTaskTicketTransport(version: version),
@@ -110,7 +110,7 @@ final class ScheduledTaskClientTests: XCTestCase {
             try await store.upsert(Self.environment)
             let connection = ScheduledTaskTestConnection(subscriptionFailure: message)
             let runtime = EnvironmentRuntime(environmentStore: store, credentialStore: Self.credentials(),
-                httpTransport: ScheduledTaskTicketTransport(version: 1),
+                httpTransport: ScheduledTaskTicketTransport(version: 2),
                 webSocketConnector: ScheduledTaskTestConnector(connection: connection))
             let native = NativeFeatureClient(runtime: runtime)
             var iterator = native.scheduledTaskUpdates(environmentID: Self.environment.id).makeAsyncIterator()

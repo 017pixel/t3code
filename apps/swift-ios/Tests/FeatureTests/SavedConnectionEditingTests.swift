@@ -5,15 +5,12 @@ import Testing
 @MainActor
 @Suite("Saved connection editing")
 struct SavedConnectionEditingTests {
-    @Test(arguments: [OrchestrationProtocolPreference.v1, .v2])
-    func renameWhileOfflineKeepsTheCachedClientAndStoredConnection(
-        preference: OrchestrationProtocolPreference
-    ) async throws {
+    @Test
+    func renameWhileOfflineKeepsTheCachedClientAndStoredConnection() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = EnvironmentStore(fileURL: directory.appendingPathComponent("environments.json"))
         var original = environment()
-        original.orchestrationProtocolPreference = preference
         original.descriptor = try JSONDecoder.t3.decode(
             EnvironmentDescriptor.self, from: ConnectionEditTransport.descriptor(original.id)
         )
@@ -74,7 +71,6 @@ struct SavedConnectionEditingTests {
         let store = EnvironmentStore(fileURL: directory.appendingPathComponent("environments.json"))
         var original = environment()
         original.isEnabled = false
-        original.orchestrationProtocolPreference = .v1
         try await store.save([original])
         try await store.setActiveEnvironment(id: original.id)
         let credential = EnvironmentCredential(accessToken: "saved-secret")
@@ -93,7 +89,6 @@ struct SavedConnectionEditingTests {
         #expect(updated.httpBaseURL.absoluteString == "https://new.example:8443/")
         #expect(updated.webSocketBaseURL.absoluteString == "wss://new.example:8443/")
         #expect(!updated.isEnabled)
-        #expect(updated.orchestrationProtocolPreference == .v1)
         #expect(try await store.activeEnvironmentID() == original.id)
         #expect(await credentials.credential(for: original.id) == credential)
         let requests = await transport.requests
@@ -129,14 +124,12 @@ struct SavedConnectionEditingTests {
         let original = environment()
         try await store.save([original])
         try await store.setEnabled(id: original.id, enabled: false)
-        try await store.setOrchestrationProtocolPreference(id: original.id, preference: .v2)
         let descriptor = try JSONDecoder.t3.decode(EnvironmentDescriptor.self, from: ConnectionEditTransport.descriptor(original.id))
         let updated = try await store.editSavedConnection(
             expected: original, label: "Renamed", httpBaseURL: original.httpBaseURL,
             webSocketBaseURL: original.webSocketBaseURL, descriptor: descriptor
         )
         #expect(!updated.isEnabled)
-        #expect(updated.orchestrationProtocolPreference == .v2)
         try await store.remove(id: original.id)
         await #expect(throws: SavedConnectionEditError.changedConnection) {
             try await store.editSavedConnection(expected: updated, label: "Returned", httpBaseURL: updated.httpBaseURL,
@@ -153,10 +146,8 @@ struct SavedConnectionEditingTests {
         let original = environment()
         try await store.save([original])
         try await store.setEnabled(id: original.id, enabled: false)
-        try await store.setOrchestrationProtocolPreference(id: original.id, preference: .v2)
         let renamed = try await store.renameSavedConnection(expected: original, label: "First edit")
         #expect(!renamed.isEnabled)
-        #expect(renamed.orchestrationProtocolPreference == .v2)
         await #expect(throws: SavedConnectionEditError.changedConnection) {
             try await store.renameSavedConnection(expected: original, label: "Stale edit")
         }
@@ -210,7 +201,7 @@ private actor ConnectionEditTransport: HTTPTransport {
     static func descriptor(_ id: String) -> Data {
         Data("""
         {"environmentId":"\(id)","label":"Server","platform":{"os":"darwin","arch":"arm64"},
-         "serverVersion":"1.0","capabilities":{"repositoryIdentity":true}}
+         "serverVersion":"1.0", "orchestrationProtocolVersion": 2,"capabilities":{"repositoryIdentity":true}}
         """.utf8)
     }
 

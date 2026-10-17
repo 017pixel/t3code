@@ -22,64 +22,6 @@ struct NativeThreadMetadataTests {
         }
     }
 
-    @Test func autoSettleOptOutSurvivesSettlementAndCanBeEnabledAgain() throws {
-        let disabled = NativeThreadDetailReducer.apply(event(type: "thread.auto-settle-set",
-            payload: ["autoSettleDisabledAt": .string("2026-09-30T20:00:00Z")]), to: thread())
-        guard case let .updated(withOptOut) = disabled.result else {
-            Issue.record("Expected an auto-settle update"); return
-        }
-        let settled = NativeThreadDetailReducer.apply(event(type: "thread.settled",
-            payload: ["settledAt": .string("2026-09-30T21:00:00Z"), "reason": .string("user")]), to: withOptOut)
-        guard case let .updated(parked) = settled.result else {
-            Issue.record("Expected settlement"); return
-        }
-        #expect(parked.autoSettleDisabledAt == withOptOut.autoSettleDisabledAt)
-        let enabled = NativeThreadDetailReducer.apply(event(type: "thread.auto-settle-set",
-            payload: ["autoSettleDisabledAt": .null]), to: parked)
-        guard case let .updated(restored) = enabled.result else {
-            Issue.record("Expected an auto-settle update"); return
-        }
-        #expect(restored.autoSettleDisabledAt == nil)
-    }
-
-    @Test
-    func multiplePRLinksUpdateWithoutReloadAndHideDismissedStackMembers() throws {
-        let link = ThreadPullRequestLink(host: "github.com", repository: "test/repo", number: 2,
-            url: "https://github.com/test/repo/pull/2", source: "manual",
-            linkedAt: "2026-09-06T20:00:00Z", snapshot: nil, stack: nil)
-        let linked = NativeThreadDetailReducer.apply(event(type: "thread.pull-request-linked",
-            payload: ["link": try JSONValue.encode(link)]), to: thread())
-        guard case let .updated(withLink) = linked.result else {
-            Issue.record("Expected a local PR link update")
-            return
-        }
-        #expect(withLink.pullRequests == [link])
-        let state = ThreadPullRequestSnapshot(state: .merged, title: "Finished PR", headBranch: "task",
-            baseBranch: "main", isDraft: false, updatedAt: nil, syncedAt: "2026-09-06T20:00:00Z")
-        let key: [String: JSONValue] = ["host": .string("GITHUB.COM"), "repository": .string("TEST/REPO"), "number": .number(2)]
-        let synced = NativeThreadDetailReducer.apply(event(type: "thread.pull-request-synced",
-            payload: key.merging(["snapshot": try JSONValue.encode(state), "stack": .null]) { _, next in next }), to: withLink)
-        guard case let .updated(withState) = synced.result else {
-            Issue.record("Expected a local PR state update")
-            return
-        }
-        #expect(withState.pullRequests?.first?.snapshot?.state == .merged)
-        #expect(HomeThreadPullRequestPresentation.resolve(links: withState.pullRequests ?? [])?.state == .merged)
-        let removed = NativeThreadDetailReducer.apply(event(type: "thread.pull-request-unlinked", payload: key), to: withState)
-        guard case let .updated(withoutLink) = removed.result else {
-            Issue.record("Expected a local PR unlink")
-            return
-        }
-        #expect(withoutLink.pullRequests == [])
-
-        var dismissed = link
-        dismissed.source = "stack-dismissed"
-        let feature = FeatureThread(id: "thread", projectID: "project", title: "Task", pullRequests: [dismissed])
-        #expect(feature.effectivePullRequest == nil)
-        #expect(ThreadPullRequestDestination.resolve(thread: feature, branchPullRequest: nil) == nil)
-        #expect(HomeThreadPullRequestPresentation.resolve(links: [dismissed]) == nil)
-    }
-
     @Test
     func multiplePRSnapshotsReachThreadSearchAndExternalLinks() {
         let link = ThreadPullRequestLink(host: "github.example.com", repository: "test/other", number: 24,
@@ -129,102 +71,6 @@ struct NativeThreadMetadataTests {
     }
 
     @Test
-    func branchPRAndActiveOrderUpdatesDoNotReloadTheThread() throws {
-        let branchUpdate = try reduce(
-            ["branchPullRequest": JSONValue.encode(reference())],
-            thread: thread()
-        )
-        #expect(branchUpdate.branchPullRequest == reference())
-        #expect(branchUpdate.linkedPullRequest == nil)
-
-        let reordered = try reduce(["activeOrderKey": .string("nm")], thread: branchUpdate)
-        #expect(reordered.branchPullRequest == reference())
-        #expect(reordered.activeOrderKey == "nm")
-
-        let cleared = try reduce([
-            "branchPullRequest": .null,
-            "activeOrderKey": .null,
-        ], thread: reordered)
-        #expect(cleared.branchPullRequest == nil)
-        #expect(cleared.activeOrderKey == nil)
-    }
-
-    @Test
-    func settlingClearsManualOrderButKeepsPRMetadata() throws {
-        var source = thread()
-        source.branchPullRequest = reference()
-        source.activeOrderKey = "nm"
-        let result = NativeThreadDetailReducer.apply(event(
-            type: "thread.settled",
-            payload: ["settledAt": .string("2026-09-06T20:00:00Z")]
-        ), to: source)
-        guard case let .updated(settled) = result.result else {
-            Issue.record("Expected settlement without a reload")
-            return
-        }
-        #expect(settled.activeOrderKey == nil)
-        #expect(settled.branchPullRequest == reference())
-    }
-
-    @Test
-    func settlingAndMetadataUpdatesKeepAnActiveTitleRegeneration() throws {
-        var source = thread()
-        source.titleRegeneration = ThreadTitleRegeneration(
-            requestId: "command-regenerate", startedAt: "2026-09-06T19:30:00Z"
-        )
-        let settled = NativeThreadDetailReducer.apply(event(
-            type: "thread.settled",
-            payload: ["settledAt": .string("2026-09-06T20:00:00Z")]
-        ), to: source)
-        guard case let .updated(afterSettle) = settled.result else {
-            Issue.record("Expected settlement without a reload")
-            return
-        }
-        #expect(afterSettle.titleRegeneration == source.titleRegeneration)
-
-        let reordered = try reduce(["activeOrderKey": .string("nm")], thread: afterSettle)
-        #expect(reordered.titleRegeneration == source.titleRegeneration)
-    }
-
-    @Test
-    func ordinaryThreadEventsPreservePRAndManualOrder() throws {
-        var source = thread()
-        source.branchPullRequest = reference()
-        source.activeOrderKey = "nm"
-        let result = NativeThreadDetailReducer.apply(event(
-            type: "thread.message-sent",
-            payload: [
-                "messageId": .string("message"),
-                "role": .string("assistant"),
-                "text": .string("Complete"),
-                "streaming": .bool(false),
-                "createdAt": .string("2026-09-06T20:00:00Z"),
-            ]
-        ), to: source)
-        guard case let .updated(updated) = result.result else {
-            Issue.record("Expected the message to update without a reload")
-            return
-        }
-        #expect(updated.branchPullRequest == reference())
-        #expect(updated.activeOrderKey == "nm")
-        #expect(updated.messages.last?.text == "Complete")
-    }
-
-    @Test
-    func invalidMetadataStillRequestsAnAuthoritativeSnapshot() {
-        let payloads: [[String: JSONValue]] = [
-            ["branchPullRequest": .string("invalid")],
-            ["activeOrderKey": .number(10)],
-            ["activeOrderKey": .string(" ")],
-            ["branchPullRequest": .null, "title": .string("Renamed")],
-        ]
-        for payload in payloads {
-            let result = NativeThreadDetailReducer.apply(event(payload: payload), to: thread())
-            #expect(result.result == .refresh)
-        }
-    }
-
-    @Test
     func serverPRLinksOpenDirectlyAndExplicitLinksTakePriority() throws {
         var source = FeatureThread(
             id: "thread", projectID: "project", title: "Task",
@@ -247,31 +93,54 @@ struct NativeThreadMetadataTests {
         #expect(linkedDestination.number == 2)
     }
 
-    private func reduce(
-        _ payload: [String: JSONValue],
-        thread: OrchestrationThread
-    ) throws -> OrchestrationThread {
-        let reduction = NativeThreadDetailReducer.apply(event(payload: payload), to: thread)
-        #expect(reduction.renderMutation == .metadata)
-        guard case let .updated(updated) = reduction.result else {
-            throw MetadataTestError.expectedLocalUpdate
-        }
-        return updated
+    @Test func v2MetadataUpdatesPreserveMessagesAndCarrySettlementAndPullRequests() throws {
+        let link = try JSONValue.encode(reference())
+        let regeneration = try JSONValue.encode(ThreadTitleRegeneration(requestId: "title", startedAt: V2Fixture.now))
+        var state = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(
+            items: [V2Fixture.assistant("answer", ordinal: 1)], fields: ["thread": V2Fixture.patch(V2Fixture.thread, [
+                "autoSettleDisabledAt": .string(V2Fixture.now), "titleRegeneration": regeneration,
+            ])]))
+        let settled = V2Fixture.patch(state.projection.thread.raw, [
+            "settledOverride": .string("settled"), "settledAt": .string(V2Fixture.now),
+            "activeOrderKey": .null, "branchPullRequest": link,
+        ])
+        #expect(!state.apply([V2Fixture.event("thread.settled", payload: settled, sequence: 11)]).refreshRequired)
+        var detail = state.normalizedSnapshot().thread
+        #expect(detail.autoSettleDisabledAt == V2Fixture.now)
+        #expect(detail.branchPullRequest == reference())
+        #expect(detail.activeOrderKey == nil)
+        #expect(detail.titleRegeneration?.requestId == "title")
+        #expect(detail.messages.first?.text == "Answer")
+
+        let reopened = V2Fixture.patch(settled, [
+            "settledOverride": .string("active"), "settledAt": .null,
+            "unsettledAt": .string(V2Fixture.now), "autoSettleDisabledAt": .null,
+            "activeOrderKey": .string("nm"), "branchPullRequest": .null,
+        ])
+        #expect(!state.apply([V2Fixture.event("thread.unsettled", payload: reopened, sequence: 12)]).refreshRequired)
+        detail = state.normalizedSnapshot().thread
+        #expect(detail.unsettledAt == V2Fixture.now)
+        #expect(detail.autoSettleDisabledAt == nil)
+        #expect(detail.activeOrderKey == "nm")
+        #expect(detail.branchPullRequest == nil)
+        #expect(detail.titleRegeneration?.requestId == "title")
     }
 
-    private func event(
-        type: String = "thread.meta-updated",
-        payload: [String: JSONValue]
-    ) -> JSONValue {
-        .object([
-            "type": .string(type),
-            "sequence": .number(2),
-            "occurredAt": .string("2026-09-06T20:00:00Z"),
-            "payload": .object(payload.merging([
-                "threadId": .string("thread"),
-                "updatedAt": .string("2026-09-06T20:00:00Z"),
-            ]) { _, value in value }),
-        ])
+    @Test func malformedV2MetadataRequiresARefresh() throws {
+        var state = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot())
+        let invalid = V2Fixture.patch(V2Fixture.thread, ["activeOrderKey": .number(10)])
+        #expect(state.apply([V2Fixture.event("thread.metadata-updated", payload: invalid, sequence: 11)]).refreshRequired)
+        #expect(state.snapshotSequence == 10)
+    }
+
+    @Test func dismissedPullRequestStackMembersStayHidden() {
+        let link = ThreadPullRequestLink(host: "github.com", repository: "test/repo", number: 2,
+            url: "https://github.com/test/repo/pull/2", source: "stack-dismissed",
+            linkedAt: V2Fixture.now, snapshot: nil, stack: nil)
+        let feature = FeatureThread(id: "thread", projectID: "project", title: "Task", pullRequests: [link])
+        #expect(feature.effectivePullRequest == nil)
+        #expect(ThreadPullRequestDestination.resolve(thread: feature, branchPullRequest: nil) == nil)
+        #expect(HomeThreadPullRequestPresentation.resolve(links: [link]) == nil)
     }
 
     private func reference(number: Int = 1) -> ThreadLinkedPullRequest {
@@ -293,8 +162,4 @@ struct NativeThreadMetadataTests {
             messages: [], activities: [], checkpoints: [], session: nil
         )
     }
-}
-
-private enum MetadataTestError: Error {
-    case expectedLocalUpdate
 }

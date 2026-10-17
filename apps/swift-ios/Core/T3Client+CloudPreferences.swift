@@ -8,6 +8,7 @@ extension T3Client {
     public func setHoldWebhooksWhileOffline(_ enabled: Bool) async throws -> EnvironmentCloudLinkState {
         // Read at execution so changing webhook delivery preserves the current activity preference.
         let current = try await api.cloudLinkState(for: environment)
+        guard current.isLinked else { throw EnvironmentCloudPreferencesError.notLinked }
         guard current.holdWebhooksWhileOffline != nil else {
             throw EnvironmentCloudPreferencesError.unsupported
         }

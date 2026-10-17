@@ -4,7 +4,7 @@ import Testing
 
 @Suite("Orchestration descriptor identity")
 struct OrchestrationConnectionIdentityTests {
-    @Test(arguments: [1, 2])
+    @Test(arguments: [2])
     func mismatchedDescriptorRejectsShellReadBeforeCredentialAccess(version: Int) async throws {
         let transport = IdentityDescriptorTransport(environmentID: "another-environment", version: version)
         let credentials = IdentityCredentialSpy()
@@ -28,22 +28,21 @@ struct OrchestrationConnectionIdentityTests {
             environment: environment,
             api: EnvironmentAPI(transport: transport, credentials: credentials)
         )
-        let accepted = try await connection.selection()
-        #expect(accepted.version == .v2)
+        let accepted = try await connection.descriptor()
+        #expect(accepted.orchestrationProtocolVersion == 2)
 
         await transport.setEnvironmentID("another-environment")
         await #expect(throws: EnvironmentRouteError.identityMismatch) {
-            _ = try await connection.selection(refresh: true)
+            _ = try await connection.descriptor(refresh: true)
         }
         await #expect(throws: EnvironmentRouteError.identityMismatch) {
-            _ = try await connection.selection()
+            _ = try await connection.descriptor()
         }
 
         await transport.setEnvironmentID(environment.id)
-        let recovered = try await connection.selection()
-        #expect(recovered.descriptor.environmentId == environment.id)
-        #expect(recovered.version == accepted.version)
-        #expect(recovered.generation == accepted.generation)
+        let recovered = try await connection.descriptor()
+        #expect(recovered.environmentId == environment.id)
+        #expect(recovered.orchestrationProtocolVersion == accepted.orchestrationProtocolVersion)
         #expect(await transport.requests.count == 4)
         #expect(await credentials.reads == [])
     }

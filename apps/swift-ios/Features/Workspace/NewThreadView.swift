@@ -13,6 +13,10 @@ public struct NewThreadView: View {
     private let initialManagedClone: FeatureProjectCloneIdentity?
     private let initialWorkspaceThread: FeatureThread?
     private let initialRecoveryID: String?
+    private let initialPromptLink: PlatformNewThreadLink?
+    @State private var hasAppliedInitialPromptLink = false
+    @State private var isApplyingPromptLink = false
+    @State private var linkedPromptNotice: String?
 
     @State private var pendingRecoveryID: String?
     @State private var isRecoveringSubmission = false
@@ -35,6 +39,7 @@ public struct NewThreadView: View {
     @State private var composerContext: OrchestrationMessageContext?
     @State private var workspaceMode: FeatureWorkspaceMode = .local
     @State private var workspaceSelectionIsExplicit = false
+    @State private var pullRequestReference: String?
     @State private var branches: [FeatureWorkspaceBranch] = []
     @State private var selectedBranch: FeatureWorkspaceBranch?
     @State private var startFromOrigin = true
@@ -69,6 +74,7 @@ public struct NewThreadView: View {
         initialManagedClone: FeatureProjectCloneIdentity? = nil,
         initialWorkspaceThread: FeatureThread? = nil,
         initialRecoveryID: String? = nil,
+        initialPromptLink: PlatformNewThreadLink? = nil,
         draftStore: FeatureComposerDraftStore = .shared
     ) {
         self.model = model
@@ -80,6 +86,7 @@ public struct NewThreadView: View {
         self.initialManagedClone = initialManagedClone
         self.initialWorkspaceThread = initialWorkspaceThread
         self.initialRecoveryID = initialRecoveryID
+        self.initialPromptLink = initialPromptLink
         _pendingRecoveryID = State(initialValue: initialRecoveryID)
         self.draftStore = draftStore
     }
@@ -147,12 +154,16 @@ public struct NewThreadView: View {
                 )
             }
         }
-        .interactiveDismissDisabled(isSubmitting || isRecoveringSubmission || isSwitchingBranch)
+        .alert("Prompt from a link", isPresented: Binding(
+            get: { linkedPromptNotice != nil }, set: { if !$0 { linkedPromptNotice = nil } }
+        )) { Button("OK") { linkedPromptNotice = nil } }
+        message: { Text(linkedPromptNotice ?? "") }
+        .interactiveDismissDisabled(isSubmitting || isRecoveringSubmission || isSwitchingBranch || isApplyingPromptLink)
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 
-    private var observedContent: some View {
+    private var projectObservedContent: some View {
         content
         .onAppear {
             if projectID.isEmpty {
@@ -160,7 +171,7 @@ public struct NewThreadView: View {
                     in: model.snapshot
                 ).first?.project
                 let initialID = requestedInitialProjectID
-                projectSelectionIsExplicit = initialWorkspaceThread != nil || initialRecoveryID != nil
+                projectSelectionIsExplicit = initialWorkspaceThread != nil || initialRecoveryID != nil || initialPromptLink != nil
                 isAwaitingRecentProject = initialProjectID == nil && recentProject == nil
                     && !projectSelectionIsExplicit
                 selectInitialProject(initialID)
@@ -183,6 +194,10 @@ public struct NewThreadView: View {
                 ? NewTaskWorkspaceDefaults.localBranch(in: branches)
                 : NewTaskWorkspaceDefaults.worktreeBase(in: branches)
         }
+    }
+
+    private var catalogObservedContent: some View {
+        projectObservedContent
         .onChange(of: creationProjectIDs) { _, ids in
             guard !ids.contains(projectID) else { return }
             // Explicit branch/recovery destinations must not jump to another computer.
@@ -212,13 +227,22 @@ public struct NewThreadView: View {
         .onChange(of: model.homePresentationRevision) { _, _ in
             refreshAutomaticProjectIfNeeded()
         }
+    }
+
+    private var draftObservedContent: some View {
+        catalogObservedContent
         .onChange(of: prompt) { scheduleDraftSave() }
         .onChange(of: selection) { scheduleDraftSave() }
         .onChange(of: draftRuntimeMode) { scheduleDraftSave() }
         .onChange(of: draftInteractionMode) { scheduleDraftSave() }
         .onChange(of: workspaceMode) { scheduleDraftSave() }
+        .onChange(of: pullRequestReference) { scheduleDraftSave() }
         .onChange(of: selectedBranch) { scheduleDraftSave() }
         .onChange(of: startFromOrigin) { scheduleDraftSave() }
+    }
+
+    private var observedContent: some View {
+        draftObservedContent
         .onChange(of: submissionValidationMessage) { _, _ in
             submissionValidationError = nil
         }
@@ -718,15 +742,18 @@ public struct NewThreadView: View {
         prompt = restored.text
         attachments = NewTaskDraftRestoreContext.content(from: restored, forEnvironment: project.environmentID).attachments
         composerContext = restored.context
-        selection = DailyUXModelOptions.validated(restored.selection, in: creationProviders) ?? initialSelection
+        selection = NewTaskDraftRestoreContext.modelSelection(
+            restoring: restored.selection, in: creationProviders, fallback: initialSelection
+        )
         selectionIsExplicit = restored.selection != nil
-        if selectionIsExplicit { preferredSelection = selection }
+        if let restoredSelection = restored.selection { preferredSelection = restoredSelection }
         draftRuntimeMode = restored.runtimeMode
         draftInteractionMode = restored.interactionMode
         if let workspace = restored.workspace {
             workspaceMode = workspace.mode
             selectedBranch = workspace.branch.map { FeatureWorkspaceBranch(name: $0, worktreePath: workspace.worktreePath) }
             startFromOrigin = workspace.startFromOrigin
+            pullRequestReference = workspace.pullRequestReference
             workspaceSelectionIsExplicit = true
         }
         missingFileRecoverySnapshot = nil
@@ -799,10 +826,11 @@ public struct NewThreadView: View {
                     .accessibilityLabel(workspaceMode == .local ? "Branch" : "Base branch")
                     .accessibilityValue(selectedBranch?.name ?? "Not selected")
 
-                if workspaceMode == .worktree {
+                if workspaceMode == .worktree && pullRequestReference == nil {
                     Button {
                         workspaceSelectionIsExplicit = true
                         missingFileRecoverySnapshot = nil
+                        pullRequestReference = nil
                         startFromOrigin.toggle()
                     } label: {
                         Label(
@@ -1093,6 +1121,7 @@ public struct NewThreadView: View {
     }
 
     private var submissionValidationMessage: String? {
+        if isApplyingPromptLink { return "Preparing linked prompt." }
         if pendingRecoveryID != nil { return recoveryError ?? "Restore the saved task before sending." }
         if needsInitialBranchCheckout { return initialBranchCheckoutMessage }
         if let project = selectedProject, cloneController.state(for: project, awaitingClone: initialManagedClone).blocksStart {
@@ -1201,7 +1230,8 @@ public struct NewThreadView: View {
                 environmentID: project.environmentID,
                 attachments: attachments
             ),
-            context: composerContext
+            context: composerContext,
+            pullRequestReference: pullRequestReference
         )
 
         Task { @MainActor in
@@ -1331,6 +1361,7 @@ public struct NewThreadView: View {
         draftInteractionMode = nil
         selectionIsExplicit = false
         workspaceSelectionIsExplicit = false
+        pullRequestReference = nil
         branches = []
         selectedBranch = nil
         branchLoadFailed = false
@@ -1358,7 +1389,9 @@ public struct NewThreadView: View {
             ),
             in: providers
         )
-        selectionIsExplicit = carriedSelection != nil
+        selectionIsExplicit = carriedSelection != nil || preferredSelection.map {
+            ProjectProviderModelPolicy.preservesUnavailableSelection($0, in: providers)
+        } == true
         let preferences = DailyUXCreationContext.environmentPreferences(
             for: project,
             in: model.snapshot
@@ -1383,6 +1416,7 @@ public struct NewThreadView: View {
     }
 
     private func setWorkspaceMode(_ mode: FeatureWorkspaceMode) {
+        pullRequestReference = nil
         needsInitialBranchCheckout = false
         branchSelectionError = nil
         missingFileRecoverySnapshot = nil
@@ -1411,6 +1445,7 @@ public struct NewThreadView: View {
             guard projectID == requestedProjectID, workspaceMode == requestedMode else { return }
             missingFileRecoverySnapshot = nil
             workspaceSelectionIsExplicit = true
+            pullRequestReference = nil
             selectedBranch = selected
             needsInitialBranchCheckout = false
             // A checkout can change a remote ref into a local one.
@@ -1482,7 +1517,12 @@ public struct NewThreadView: View {
               draftRestoreContext?.projectID == requestedProjectID else {
             return
         }
-        let saved = try? await draftStore.draft(for: key)
+        let saved: FeatureComposerDraft?
+        do { saved = try await draftStore.draft(for: key) }
+        catch {
+            draftSaveError = "Could not restore draft. \(error.localizedDescription)"
+            return
+        }
         guard !Task.isCancelled,
               projectID == requestedProjectID,
               draftRestoreContext?.projectID == requestedProjectID else {
@@ -1516,11 +1556,12 @@ public struct NewThreadView: View {
         composerContext = restored.context
         draftRuntimeMode = restored.runtimeMode
         draftInteractionMode = restored.interactionMode
-        selection = DailyUXModelOptions.validated(restored.selection, in: creationProviders)
-            ?? initialSelection
+        selection = NewTaskDraftRestoreContext.modelSelection(
+            restoring: restored.selection, in: creationProviders, fallback: initialSelection
+        )
         selectionIsExplicit = liveSelectionIsExplicit || saved?.selection != nil
-        if selectionIsExplicit, let selection {
-            preferredSelection = selection
+        if selectionIsExplicit, let restoredSelection = restored.selection ?? saved?.selection {
+            preferredSelection = restoredSelection
         }
         if let workspace = restored.workspace {
             workspaceMode = workspace.mode
@@ -1531,6 +1572,7 @@ public struct NewThreadView: View {
                 )
             }
             startFromOrigin = workspace.startFromOrigin
+            pullRequestReference = workspace.pullRequestReference
         }
         workspaceSelectionIsExplicit = liveWorkspaceSelectionIsExplicit
             || saved?.workspace != nil
@@ -1550,9 +1592,71 @@ public struct NewThreadView: View {
                 attachments: restored.attachments
             )
         }
+        await applyInitialPromptLinkIfNeeded()
         refreshAutomaticProjectIfNeeded()
         guard projectID == requestedProjectID else { return }
         await loadBranches()
+    }
+
+    @MainActor
+    private func applyInitialPromptLinkIfNeeded() async {
+        guard !hasAppliedInitialPromptLink, let link = initialPromptLink,
+              let project = selectedProject, project.id == initialProjectID,
+              restoredDraftProjectID == project.id else { return }
+        guard missingFileRecoverySnapshot == nil else {
+            linkedPromptNotice = "Resolve the draft’s missing files, then open this link again. Your saved draft is unchanged."
+            hasAppliedInitialPromptLink = true
+            return
+        }
+        hasAppliedInitialPromptLink = true
+        isApplyingPromptLink = true
+        defer { isApplyingPromptLink = false }
+        if let linkedPrompt = link.prompt {
+            prompt = linkedPrompt.appending(to: composerDraft).text
+            linkedPromptNotice = linkedPrompt.notice()
+        }
+        var modelUnavailable = false
+        var pullRequestUnavailable: Int?
+        if case let .new(_, _, provider?, modelID) = link {
+            _ = await model.refreshProviders(environmentID: project.environmentID)
+            guard !Task.isCancelled, projectID == project.id else { return }
+            let resolution = PlatformPromptLinkResolver.modelSelection(
+                in: model.snapshot, environmentID: project.environmentID, provider: provider, model: modelID
+            )
+            if !selectionIsExplicit, let resolution {
+                selection = resolution.selection
+                preferredSelection = resolution.selection
+                selectionIsExplicit = true
+            }
+            modelUnavailable = resolution?.exact != true
+        }
+        if case let .pullRequest(pr, _) = link, !workspaceSelectionIsExplicit {
+            do {
+                let target = FeaturePullRequestTarget(
+                    environmentID: project.environmentID,
+                    environmentName: model.snapshot.environments.first { $0.id == project.environmentID }?.name ?? "",
+                    reference: .init(projectId: project.id, repository: pr.repository.fullName, number: pr.number)
+                )
+                let detail = try await model.client.pullRequestDetail(target)
+                guard !Task.isCancelled, projectID == project.id else { return }
+                // The branch is a display seed. Submission fetches and prepares the PR itself.
+                workspaceMode = .worktree
+                selectedBranch = .init(name: detail.headBranch)
+                pullRequestReference = pr.url
+                startFromOrigin = false
+                workspaceSelectionIsExplicit = true
+            } catch is CancellationError { return }
+            catch { pullRequestUnavailable = pr.number }
+        }
+        guard projectID == project.id else { return }
+        if let linkedPrompt = link.prompt {
+            linkedPromptNotice = linkedPrompt.notice(modelUnavailable: modelUnavailable,
+                                                    pullRequestUnavailable: pullRequestUnavailable)
+        } else if let number = pullRequestUnavailable {
+            linkedPromptNotice = "Pull request #\(number) could not be loaded. This task uses your default branch."
+        }
+        persistCurrentDraftImmediately()
+        promptFocused = true
     }
 
     private var currentDraftKey: String? {
@@ -1591,7 +1695,8 @@ public struct NewThreadView: View {
                 ? NewTaskWorkspaceDefaults.normalizedWorktreePath(
                     for: selectedBranch, projectPath: selectedProject?.path ?? ""
                 ) : nil,
-            startFromOrigin: startFromOrigin
+            startFromOrigin: startFromOrigin,
+            pullRequestReference: pullRequestReference
         )
     }
 
@@ -1766,6 +1871,15 @@ struct NewTaskDraftRestoreContext: Equatable {
     let projectID: String
     let baseline: FeatureComposerDraft
     var environmentID: String? = nil
+
+    static func modelSelection(
+        restoring selection: FeatureSelection?, in providers: [FeatureProvider], fallback: FeatureSelection?
+    ) -> FeatureSelection? {
+        selection.flatMap {
+            ProjectProviderModelPolicy.preservesUnavailableSelection($0, in: providers)
+                ? $0 : DailyUXModelOptions.validated($0, in: providers)
+        } ?? fallback
+    }
 
     static func content(
         from draft: FeatureComposerDraft,

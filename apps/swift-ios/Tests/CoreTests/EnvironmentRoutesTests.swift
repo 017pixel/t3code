@@ -5,7 +5,7 @@ import Testing
 @Suite("Environment routes")
 @MainActor
 struct EnvironmentRoutesTests {
-    @Test func legacyCatalogRetainsCredentialAndPreferences() async throws {
+    @Test func legacyCatalogIgnoresProtocolPreferenceAndRetainsRouteAndCredential() async throws {
         let folder = routeTestDirectory()
         defer { try? FileManager.default.removeItem(at: folder) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -14,7 +14,7 @@ struct EnvironmentRoutesTests {
         {"version":1,"activeEnvironmentID":"one","environments":[{
           "id":"one","label":"My computer","httpBaseURL":"https://one.example/",
           "webSocketBaseURL":"wss://one.example/ws","kind":"bearer","isEnabled":false,
-          "orchestrationProtocolPreference":"v2"
+          "orchestrationProtocolPreference":"v1"
         }]}
         """
         try Data(legacy.utf8).write(to: url)
@@ -23,9 +23,10 @@ struct EnvironmentRoutesTests {
         let credentials = InMemoryCredentialStore(credentials: ["one": credential])
         let saved = try #require(try await store.load().first)
         #expect(saved.routes.count == 1)
+        #expect(saved.httpBaseURL.absoluteString == "https://one.example/")
+        #expect(saved.webSocketBaseURL.absoluteString == "wss://one.example/ws")
         #expect(saved.credentialID == "one")
         #expect(!saved.isEnabled)
-        #expect(saved.orchestrationProtocolPreference == .v2)
         #expect(saved.label == "My computer")
         #expect(try await credentials.credential(for: saved.credentialID) == credential)
         try await store.upsert(saved)
@@ -34,6 +35,7 @@ struct EnvironmentRoutesTests {
         #expect(try await restarted.activeEnvironmentID() == "one")
         let document = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
         #expect(document["version"] == .number(2))
+        #expect(document["environments"]?.v2Array?.first?["orchestrationProtocolPreference"] == nil)
     }
 
     @Test func pairingSecondOriginPreservesBothCredentialOwnersAndLocalMetadata() async throws {
@@ -46,15 +48,13 @@ struct EnvironmentRoutesTests {
         var first = try await pairing.pair(url: "https://first.example/#token=first")
         first.label = "Custom name"
         first.isEnabled = false
-        first.orchestrationProtocolPreference = .v1
         try await store.upsert(first)
         let second = try await pairing.pair(url: "https://second.example/#token=second", expectedEnvironmentID: "one")
         #expect(second.routes.count == 2)
         #expect(second.routes.first == first.selectedRoute)
         #expect(second.credentialID != first.credentialID)
         #expect(second.label == "Custom name")
-        #expect(!second.isEnabled)
-        #expect(second.orchestrationProtocolPreference == .v1)
+        #expect(second.isEnabled)
         #expect(try await credentials.credential(for: first.credentialID)?.accessToken == "first.example-token")
         #expect(try await credentials.credential(for: second.credentialID)?.accessToken == "second.example-token")
         let repaired = try await pairing.pair(url: "https://second.example/#token=again", expectedEnvironmentID: "one")
@@ -176,6 +176,24 @@ struct EnvironmentRoutesTests {
         } catch { #expect(error is T3ConnectNetworkError) }
     }
 
+    @Test(arguments: [1, 3], [false, true])
+    func protocolFailureOutranksOfflineRoute(version: Int, networkFirst: Bool) async throws {
+        let transport = RouteTestHTTP(failures: ["offline.example"], versions: ["host.example": version])
+        let resolver = EnvironmentRouteResolver(transport: transport)
+        let hosts = networkFirst ? ["offline.example", "host.example"] : ["host.example", "offline.example"]
+        let fixture = routeFixture(hosts: hosts)
+        let attempts = RouteAuthenticationAttempts()
+        let expected: OrchestrationProtocolError = version < 2 ? .hostUpdateRequired : .unsupportedServerVersion(version)
+        await #expect(throws: expected) {
+            try await resolver.connect(environment: fixture) { candidate in
+                await attempts.record(candidate.selectedRoute.id)
+                return candidate.id
+            }
+        }
+        #expect(await attempts.ids.isEmpty)
+        #expect(await transport.requests.compactMap { $0.url?.host } == hosts)
+    }
+
     @Test func passiveFallbackUsesSelectedHTTPAndDoesNotOpenSocket() async throws {
         let folder = routeTestDirectory()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -202,10 +220,10 @@ func routeTestDirectory() -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent("t3-routes-\(UUID().uuidString)", isDirectory: true)
 }
 
-func routeDescriptor(_ id: String = "one") throws -> EnvironmentDescriptor {
+func routeDescriptor(_ id: String = "one", version: Int = 2) throws -> EnvironmentDescriptor {
     try JSONDecoder.t3.decode(EnvironmentDescriptor.self, from: Data("""
     {"environmentId":"\(id)","label":"Computer","platform":{"os":"darwin","arch":"arm64"},
-     "serverVersion":"1.0.0","capabilities":{"repositoryIdentity":true}}
+     "serverVersion":"1.0.0", "orchestrationProtocolVersion": \(version),"capabilities":{"repositoryIdentity":true}}
     """.utf8))
 }
 
@@ -227,9 +245,11 @@ actor RouteTestHTTP: HTTPTransport {
     var requests: [URLRequest] = []
     let identities: [String: String]
     let failures: Set<String>
-    init(identities: [String: String] = [:], failures: Set<String> = []) {
+    let versions: [String: Int]
+    init(identities: [String: String] = [:], failures: Set<String> = [], versions: [String: Int] = [:]) {
         self.identities = identities
         self.failures = failures
+        self.versions = versions
     }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requests.append(request)
@@ -237,7 +257,10 @@ actor RouteTestHTTP: HTTPTransport {
         if failures.contains(url.host ?? "") { throw URLError(.timedOut) }
         let body: Data
         switch url.path {
-        case "/.well-known/t3/environment": body = try JSONEncoder.t3.encode(routeDescriptor(identities[url.host ?? ""] ?? "one"))
+        case "/.well-known/t3/environment":
+            body = try JSONEncoder.t3.encode(routeDescriptor(
+                identities[url.host ?? ""] ?? "one", version: versions[url.host ?? ""] ?? 2
+            ))
         case "/oauth/token": body = Data("""
             {"access_token":"\(url.host!)-token","issued_token_type":"urn:ietf:params:oauth:token-type:access_token",
              "token_type":"Bearer","expires_in":3600,"scope":"orchestration:read"}

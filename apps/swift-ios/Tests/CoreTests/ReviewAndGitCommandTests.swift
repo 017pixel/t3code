@@ -28,7 +28,7 @@ struct ReviewAndGitCommandTests {
         #expect(throws: RPCError.self) { try ReviewCheckpointDiffQuery(threadID: "thread", fromTurnCount: -1, toTurnCount: 2) }
     }
 
-    @Test func workspaceMetadataPreservesNullAndV1V2Dispatch() throws {
+    @Test func workspaceMetadataPreservesNullThroughV2Dispatch() throws {
         let command = SourceControlWorkspaceCommand.make(threadID: "wire-thread", branch: "feature/fix", worktreePath: "/repo/worktree", commandID: "command")
         #expect(command["type"] == .string("thread.meta.update"))
         #expect(command["threadId"] == .string("wire-thread"))

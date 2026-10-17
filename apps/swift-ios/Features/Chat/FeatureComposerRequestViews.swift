@@ -217,7 +217,10 @@ struct FeatureComposerUserInputPanel: View {
                             }
                         }
 
-                        Text(question.question)
+                        Text((try? AttributedString(
+                            markdown: question.question,
+                            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+                        )) ?? AttributedString(question.question))
                             .font(T3Typography.navigationTitle)
                             .foregroundStyle(T3Colors.textPrimary)
                             .fixedSize(horizontal: false, vertical: true)

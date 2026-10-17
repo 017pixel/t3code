@@ -98,6 +98,7 @@ extension EnvironmentStore {
             kind: route.kind, descriptor: descriptor, routes: [route]
         )
         environment.descriptor = descriptor
+        environment.isEnabled = true
         environment = environment.mergingRoute(route, select: true)
         try upsert(environment)
         return environment

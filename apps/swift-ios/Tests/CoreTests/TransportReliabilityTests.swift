@@ -6,6 +6,9 @@ final class TransportReliabilityTests: XCTestCase {
     func testMobileClientMetadataIncludesOSVersionAndDeviceModel() {
         XCTAssertGreaterThan(MobileClientMetadata.osMajorVersion, 0)
         XCTAssertFalse(MobileClientMetadata.deviceModel.isEmpty)
+        XCTAssertEqual(MobileClientMetadata.deviceType(for: "iPad16,6"), "tablet")
+        XCTAssertEqual(MobileClientMetadata.deviceType(for: "iPhone17,1"), "phone")
+        XCTAssertEqual(MobileClientMetadata.deviceType(for: "arm64"), "phone")
     }
 
     func testHTTPPolicyOffersGzipWithoutOverwritingCallerPreference() {
@@ -28,7 +31,7 @@ final class TransportReliabilityTests: XCTestCase {
               "environmentId": "environment-1",
               "label": "Studio",
               "platform": {"os": "darwin", "arch": "arm64"},
-              "serverVersion": "1.0.0",
+              "serverVersion": "1.0.0", "orchestrationProtocolVersion": 2,
               "capabilities": {"repositoryIdentity": true}
             }
             """
@@ -72,64 +75,43 @@ final class TransportReliabilityTests: XCTestCase {
             ]
         )
         let transport = RecordingHTTPTransport { request in
-            let body = #"{"snapshotSequence":0,"projects":[],"threads":[],"updatedAt":"2026-08-05T12:00:00.000Z"}"#
+            let body = #"{"schemaVersion":1,"snapshotSequence":0,"projects":[],"threads":[],"archivedThreads":[]}"#
             return (Data(body.utf8), transportResponse(request))
         }
         let api = EnvironmentAPI(transport: transport, credentials: credentials)
 
-        _ = try await api.shellSnapshot(for: environment, timeoutInterval: 6)
+        _ = try await api.orchestrationV2Snapshot(path: "/api/orchestration/shell", environment: environment, timeoutInterval: 6, as: OrchestrationV2ShellSnapshot.self)
 
         let requests = await transport.requests
         let request = try XCTUnwrap(requests.first)
         XCTAssertEqual(request.timeoutInterval, 6)
     }
 
-    func testThreadSnapshotSendsPaginationWindowAndDecodesCursor() async throws {
-        let environment = Environment(
-            id: "environment-1",
-            label: "Studio",
-            httpBaseURL: URL(string: "https://studio.example")!,
-            webSocketBaseURL: URL(string: "wss://studio.example")!
-        )
-        let credentials = InMemoryCredentialStore(credentials: [
-            environment.id: EnvironmentCredential(accessToken: "access-token"),
-        ])
-        let body = try JSONEncoder.t3.encode(
-            OrchestrationThreadDetailSnapshot(
-                snapshotSequence: 42,
-                thread: paginationThreadFixture(),
-                page: OrchestrationThreadDetailPage(
-                    beforeCursor: "next-cursor",
-                    hasMore: true,
-                    snapshotSequence: 42,
-                    threadSequence: 40
-                )
-            )
-        )
-        let transport = RecordingHTTPTransport { request in
-            (body, transportResponse(request))
+    func testTypedProtocolUpgradeResponseKeepsCompatibilityError() async throws {
+        let environment = Environment(id: "environment-1", label: "Host",
+            httpBaseURL: URL(string: "https://studio.example")!, webSocketBaseURL: URL(string: "wss://studio.example/ws")!)
+        for version in [nil, 1, 2, 3] as [Int?] {
+            let transport = RecordingHTTPTransport { request in
+                let versionField = version.map { ",\"orchestrationProtocolVersion\":\($0)" } ?? ""
+                let body = "{\"code\":\"orchestration_protocol_incompatible\"\(versionField)}"
+                return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 426, httpVersion: nil, headerFields: nil)!)
+            }
+            let api = EnvironmentAPI(transport: transport, credentials: InMemoryCredentialStore(credentials: [
+                environment.id: .init(accessToken: "test-token"),
+            ]))
+            do {
+                _ = try await api.orchestrationV2Snapshot(path: "/api/orchestration/shell", environment: environment, as: JSONValue.self)
+                XCTFail("An incompatible protocol response must be rejected")
+            } catch let error as OrchestrationProtocolError {
+                let expected: OrchestrationProtocolError
+                if let version, version >= 2 {
+                    expected = .unsupportedServerVersion(version)
+                } else {
+                    expected = .hostUpdateRequired
+                }
+                XCTAssertEqual(error, expected)
+            }
         }
-        let api = EnvironmentAPI(transport: transport, credentials: credentials)
-
-        let snapshot = try await api.threadSnapshot(
-            id: "thread-1",
-            environment: environment,
-            turnLimit: 20,
-            beforeCursor: "current-cursor"
-        )
-
-        XCTAssertEqual(snapshot.page?.beforeCursor, "next-cursor")
-        XCTAssertEqual(snapshot.page?.threadSequence, 40)
-        let requests = await transport.requests
-        let request = try XCTUnwrap(requests.first)
-        let query = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
-            .queryItems
-        XCTAssertEqual(
-            Dictionary(uniqueKeysWithValues: (query ?? []).compactMap { item in
-                item.value.map { (item.name, $0) }
-            }),
-            ["turnLimit": "20", "beforeCursor": "current-cursor"]
-        )
     }
 
     func testWebSocketHandshakeOffersPerMessageDeflate() {
@@ -147,12 +129,12 @@ final class TransportReliabilityTests: XCTestCase {
         )
     }
 
-    func testBootstrapUsesCanonicalWebSocketRPCDispatch() async throws {
+    func testBootstrapUsesCanonicalV2LaunchRPC() async throws {
         let environment = Environment(
             id: "environment-1",
             label: "Studio",
             httpBaseURL: URL(string: "https://studio.example")!,
-            webSocketBaseURL: URL(string: "wss://studio.example")!
+            webSocketBaseURL: URL(string: "wss://studio.example/ws?clientDeviceType=desktop&connectionMethod=stale&orchestrationProtocol=1&custom=kept")!
         )
         let credentials = InMemoryCredentialStore(
             credentials: [
@@ -189,17 +171,17 @@ final class TransportReliabilityTests: XCTestCase {
         )
         await client.disconnect()
 
-        XCTAssertEqual(result.sequence, 42)
+        XCTAssertEqual(result.sequence, 0)
         let requests = await connection.requests()
         XCTAssertEqual(requests.count, 1)
-        XCTAssertEqual(requests.first?["tag"]?.stringValue, "orchestration.dispatchCommand")
+        XCTAssertEqual(requests.first?["tag"]?.stringValue, "orchestration.launchThread")
         XCTAssertEqual(
-            requests.first?["payload"]?["bootstrap"]?["createThread"]?["projectId"]?.stringValue,
+            requests.first?["payload"]?["projectId"]?.stringValue,
             "project-1"
         )
         XCTAssertEqual(requests.first?["payload"]?["commandId"]?.stringValue, "stable-command")
         XCTAssertEqual(
-            requests.first?["payload"]?["message"]?["messageId"]?.stringValue,
+            requests.first?["payload"]?["initialMessage"]?["messageId"]?.stringValue,
             "stable-message"
         )
 
@@ -214,7 +196,11 @@ final class TransportReliabilityTests: XCTestCase {
                     item.value.map { (item.name, $0) }
                 }
         )
+        XCTAssertEqual(metadata["custom"], "kept")
         XCTAssertEqual(metadata["clientSurface"], "mobile")
+        XCTAssertEqual(metadata["clientDeviceType"], MobileClientMetadata.deviceType(for: MobileClientMetadata.deviceModel))
+        XCTAssertEqual(metadata["connectionMethod"], "direct")
+        XCTAssertEqual(metadata["orchestrationProtocol"], "2")
         XCTAssertEqual(metadata["clientOs"], "iOS")
         XCTAssertEqual(metadata["clientOsMajorVersion"], String(MobileClientMetadata.osMajorVersion))
         XCTAssertEqual(metadata["clientDeviceModel"], MobileClientMetadata.deviceModel)
@@ -229,7 +215,7 @@ final class TransportReliabilityTests: XCTestCase {
                   "environmentId": "environment-1",
                   "label": "Studio",
                   "platform": {"os": "darwin", "arch": "arm64"},
-                  "serverVersion": "1.0.0",
+                  "serverVersion": "1.0.0", "orchestrationProtocolVersion": 2,
                   "capabilities": {"attachmentUploads": true}
                 }
                 """.utf8
@@ -281,13 +267,13 @@ final class TransportReliabilityTests: XCTestCase {
         let socketRequests = await connection.requests()
         XCTAssertEqual(socketRequests.map { $0["tag"]?.stringValue }, [
             "attachments.createUploadUrl",
-            "orchestration.dispatchCommand",
+            "orchestration.launchThread",
         ])
         XCTAssertEqual(
             socketRequests[0]["payload"]?["sizeBytes"],
             .number(4)
         )
-        guard case let .array(attachments)? = socketRequests[1]["payload"]?["message"]?["attachments"],
+        guard case let .array(attachments)? = socketRequests[1]["payload"]?["initialMessage"]?["attachments"],
               let attachment = attachments.first else {
             return XCTFail("Expected an uploaded attachment")
         }
@@ -303,7 +289,7 @@ final class TransportReliabilityTests: XCTestCase {
         XCTAssertNil(httpRequests[1].value(forHTTPHeaderField: "Authorization"))
     }
 
-    func testOlderServersKeepInlineImageAttachments() async throws {
+    func testV2PersistsInlineImageBeforeLaunchingThread() async throws {
         let environment = Environment(
             id: "environment-1",
             label: "Studio",
@@ -344,11 +330,11 @@ final class TransportReliabilityTests: XCTestCase {
         await client.disconnect()
 
         let requests = await connection.requests()
-        XCTAssertEqual(requests.map { $0["tag"]?.stringValue }, ["orchestration.dispatchCommand"])
-        guard case let .array(attachments)? = requests[0]["payload"]?["message"]?["attachments"] else {
-            return XCTFail("Expected an inline image")
-        }
-        XCTAssertEqual(attachments.first?["dataUrl"]?.stringValue, "data:image/png;base64,iVBORw==")
+        XCTAssertEqual(requests.map { $0["tag"]?.stringValue }, ["assets.persistChatAttachments", "orchestration.launchThread"])
+        XCTAssertEqual(requests[0]["payload"]?["attachments"]?.v2Array?.first?["dataUrl"], .string("data:image/png;base64,iVBORw=="))
+        let attachment = try XCTUnwrap(requests[1]["payload"]?["initialMessage"]?["attachments"]?.v2Array?.first)
+        XCTAssertEqual(attachment["id"], .string("persisted-image"))
+        XCTAssertNil(attachment["dataUrl"])
     }
 
     func testExpiredSavedAttachmentIsUploadedAgain() async throws {
@@ -557,7 +543,7 @@ final class TransportReliabilityTests: XCTestCase {
 
         let socketRequests = await connection.requests()
         XCTAssertEqual(socketRequests[0]["payload"]?["type"]?.stringValue, "file")
-        guard case let .array(sent)? = socketRequests[1]["payload"]?["message"]?["attachments"] else {
+        guard case let .array(sent)? = socketRequests[1]["payload"]?["initialMessage"]?["attachments"] else {
             return XCTFail("Expected an uploaded file reference")
         }
         XCTAssertEqual(sent.first?["type"]?.stringValue, "file")
@@ -693,7 +679,7 @@ final class TransportReliabilityTests: XCTestCase {
         XCTAssertNil(requests[1]["payload"]?["reason"])
     }
 
-    func testUnsentCommandsFallBackToHTTPButBootstrapDoesNot() async throws {
+    func testDisconnectedV2CommandsDoNotFallBackToLegacyHTTP() async throws {
         let environment = Environment(
             id: "environment-1",
             label: "Studio",
@@ -728,36 +714,23 @@ final class TransportReliabilityTests: XCTestCase {
             rpcConnectionWaitTimeout: .milliseconds(30)
         )
 
-        let rename = try await client.rename(threadID: "thread-1", title: "Renamed")
-        XCTAssertEqual(rename.sequence, 9)
-
         do {
-            _ = try await client.createThreadAndSend(
-                threadID: "thread-first-send",
-                projectID: "project-1",
-                title: "Native first send",
-                text: "Start from this message",
-                model: ModelSelection(instanceId: "codex", model: "gpt-5.4"),
-                runtimeMode: .fullAccess
-            )
-            XCTFail("Bootstrap must not use the HTTP endpoint that cannot expand it.")
+            _ = try await client.rename(threadID: "thread-1", title: "Renamed")
+            XCTFail("A disconnected V2 command must fail")
         } catch let error as RPCError {
-            guard case .connectionUnavailable = error else {
-                return XCTFail("Unexpected RPC error: \(error)")
-            }
+            guard case .connectionUnavailable = error else { return XCTFail("Unexpected RPC error: \(error)") }
+        }
+        do {
+            _ = try await client.createThreadAndSend(threadID: "thread-first-send", projectID: "project-1",
+                title: "Native first send", text: "Start from this message",
+                model: ModelSelection(instanceId: "codex", model: "gpt-5.4"), runtimeMode: .fullAccess)
+            XCTFail("A disconnected V2 launch must fail")
+        } catch let error as RPCError {
+            guard case .connectionUnavailable = error else { return XCTFail("Unexpected RPC error: \(error)") }
         }
         await client.disconnect()
-
         let requests = await transport.requests
-        let dispatchRequests = requests.filter {
-            $0.url?.path == "/api/orchestration/dispatch"
-        }
-        XCTAssertEqual(dispatchRequests.count, 1)
-        let command = try JSONDecoder.t3.decode(
-            JSONValue.self,
-            from: try XCTUnwrap(dispatchRequests.first?.httpBody)
-        )
-        XCTAssertEqual(command["type"]?.stringValue, "thread.meta.update")
+        XCTAssertFalse(requests.contains { $0.url?.path == "/api/orchestration/dispatch" })
     }
 
     /// Set `T3_SWIFT_WS_DEFLATE_ECHO_URL` to a WebSocket endpoint that rejects
@@ -891,7 +864,7 @@ final class TransportReliabilityTests: XCTestCase {
               "environmentId": "environment-1",
               "label": "Studio",
               "platform": {"os": "darwin", "arch": "arm64"},
-              "serverVersion": "1.0.0",
+              "serverVersion": "1.0.0", "orchestrationProtocolVersion": 2,
               "capabilities": {}
             }
             """
@@ -965,7 +938,7 @@ private actor RecordingHTTPTransport: HTTPTransport {
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         // Client discovery must not change the recorded upload and dispatch requests.
         if let environment, request.url?.path == "/.well-known/t3/environment" {
-            return (try legacyEnvironmentDescriptorData(for: environment), transportResponse(request))
+            return (try v2EnvironmentDescriptorData(for: environment), transportResponse(request))
         }
         requests.append(request)
         return try handler(request)
@@ -981,7 +954,7 @@ private func attachmentDescriptor(_ capabilities: String) throws -> EnvironmentD
               "environmentId": "environment-1",
               "label": "Studio",
               "platform": {"os": "darwin", "arch": "arm64"},
-              "serverVersion": "1.0.0",
+              "serverVersion": "1.0.0", "orchestrationProtocolVersion": 2,
               "capabilities": \(capabilities)
             }
             """.utf8
@@ -1046,6 +1019,13 @@ private actor RecordingWebSocketConnection: WebSocketConnection {
         }
         let value: JSONValue
         switch request["tag"]?.stringValue {
+        case "assets.persistChatAttachments":
+            value = .object(["attachments": .array([.object([
+                "type": .string("image"), "id": .string("persisted-image"),
+                "name": .string("screenshot.png"), "mimeType": .string("image/png"), "sizeBytes": .number(4),
+            ])])])
+        case "orchestration.launchThread":
+            value = v2LaunchFixture(request["payload"]!)
         case "attachments.createUploadUrl":
             value = .object([
                 "attachmentId": .string("uploaded-attachment-1"),

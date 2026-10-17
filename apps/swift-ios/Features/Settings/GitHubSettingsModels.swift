@@ -5,7 +5,7 @@ public enum FeatureGitHubHostChange: Sendable, Equatable {
     case account(String?)
 }
 
-/// Apply host changes to fresh settings. The server replaces hosts, but merges tokens.
+/// Apply changes to fresh destination settings. Each patched field replaces its whole map.
 public enum FeatureGitHubSettingsChange: Sendable, Equatable {
     case host(String, FeatureGitHubHostChange)
     case token(host: String, token: String)
@@ -35,11 +35,12 @@ public enum FeatureGitHubSettingsChange: Sendable, Equatable {
                 return .object(fields)
             })])
         case let .token(_, token):
-            github = .object(["tokens": .object([
-                host: .string(token.trimmingCharacters(in: .whitespacesAndNewlines)),
-            ])])
+            // Redaction markers preserve the other secrets in this environment's secret store.
+            var tokens = current.tokens
+            tokens[host] = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            github = .object(["tokens": .object(tokens.mapValues(JSONValue.string))])
         }
-        return .object(["github": github])
+        return .object(["sourceControlHosts": .object(["github": github])])
     }
 }
 

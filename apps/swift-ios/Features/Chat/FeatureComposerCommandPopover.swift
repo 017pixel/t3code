@@ -58,6 +58,7 @@ struct FeatureComposerCommandPopover: View {
         case .model: return "Models"
         case .skill: return "Skills"
         case .path: return "Files"
+        case .pullRequest: return "Pull requests"
         }
     }
 
@@ -70,6 +71,7 @@ struct FeatureComposerCommandPopover: View {
         case .skill: return "No matching skills"
         case .path where !pathSearchAvailable: return "File search unavailable"
         case .path: return "Type a file name"
+        case .pullRequest: return "No matching pull requests"
         }
     }
 
@@ -129,6 +131,7 @@ private struct FeatureComposerCommandRow: View {
         case .providerCommand: return "terminal"
         case let .skill(skill): return skill.source.systemImage
         case let .path(entry): return entry.kind == .directory ? "folder" : "doc"
+        case .pullRequest: return "arrow.triangle.pull"
         }
     }
 

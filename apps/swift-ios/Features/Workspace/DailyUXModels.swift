@@ -74,6 +74,7 @@ public struct NewTaskRequest: Sendable, Equatable {
     public var branch: String?
     public var worktreePath: String?
     public var startFromOrigin: Bool
+    public var pullRequestReference: String?
     public var attachments: [FeatureDraftAttachment]
 
     public init(
@@ -87,7 +88,8 @@ public struct NewTaskRequest: Sendable, Equatable {
         worktreePath: String? = nil,
         startFromOrigin: Bool = true,
         attachments: [FeatureDraftAttachment] = [],
-        context: OrchestrationMessageContext? = nil
+        context: OrchestrationMessageContext? = nil,
+        pullRequestReference: String? = nil
     ) {
         self.projectID = projectID
         self.prompt = prompt
@@ -100,6 +102,7 @@ public struct NewTaskRequest: Sendable, Equatable {
         self.startFromOrigin = workspaceMode == .worktree && startFromOrigin
         self.attachments = attachments
         self.context = context
+        self.pullRequestReference = workspaceMode == .worktree ? Self.nonEmpty(pullRequestReference) : nil
     }
 
     public var trimmedPrompt: String {
@@ -513,11 +516,11 @@ enum DailyUXCreationContext {
     ) -> [FeatureProvider] {
         if let project,
            let providers = snapshot.providersByEnvironment?[project.environmentID] {
-            return providers
+            return ProjectProviderModelPolicy.providers(providers, for: project)
         }
         guard let project else { return [] }
         guard let selection = project.defaultSelection else { return [] }
-        return [
+        let fallback = [
             FeatureProvider(
                 id: selection.providerID,
                 name: selection.providerID,
@@ -531,13 +534,14 @@ enum DailyUXCreationContext {
                 ]
             ),
         ]
+        return ProjectProviderModelPolicy.providers(fallback, for: project)
     }
 
     static func initialSelection(
         for project: FeatureProject?,
         in snapshot: FeatureSnapshot
     ) -> FeatureSelection? {
-        let providers = providers(for: project, in: snapshot)
+        let providers = ProjectProviderModelPolicy.selectableProviders(providers(for: project, in: snapshot))
         return DailyUXModelOptions.validated(project?.defaultSelection, in: providers)
             ?? DailyUXModelOptions.preferredSelection(in: providers)
     }
@@ -548,6 +552,10 @@ enum DailyUXCreationContext {
         in snapshot: FeatureSnapshot
     ) -> FeatureSelection? {
         let providers = providers(for: project, in: snapshot)
+        if let preferredSelection,
+           ProjectProviderModelPolicy.preservesUnavailableSelection(preferredSelection, in: providers) {
+            return preferredSelection
+        }
         return DailyUXModelOptions.validated(preferredSelection, in: providers)
             ?? initialSelection(for: project, in: snapshot)
     }
@@ -953,9 +961,8 @@ struct DailyUXSidebarIndex {
 
 /// Every thread field the sidebar index reads to pick a shelf or an order.
 /// `FeatureRootModel` bumps the Home presentation revision only when one of
-/// these changes, so a streaming turn (which touches `updatedAt`, `preview`,
-/// and `settlementFacts.latestTurn` several times a second) reconfigures its
-/// own row without re-sorting the whole list.
+/// these changes, so a streaming turn (which touches `updatedAt` and `preview`
+/// several times a second) reconfigures its own row without re-sorting the whole list.
 struct HomeOrderKey: Equatable {
     let projectID: String
     let environmentID: String?
@@ -975,10 +982,9 @@ struct HomeOrderKey: Equatable {
     let supportsSettlement: Bool?
     let settlementOverride: FeatureThreadSettlementOverride?
     let latestUserMessageAt: Date?
-    let sessionStatus: String?
-    let latestTurn: FeatureThreadSettlementFacts.LatestTurn?
     let hasPendingApprovals: Bool
     let hasPendingUserInput: Bool
+    let pendingSubagentRequest: OrchestrationV2PendingSubagentRequest?
     private let inboxFacts: InboxOrderFacts?
     let hasPendingLocalMessages: Bool
     let interactionMode: FeatureInteractionMode
@@ -1010,12 +1016,11 @@ struct HomeOrderKey: Equatable {
         supportsSettlement = thread.supportsSettlement
         settlementOverride = thread.settlementFacts?.settlementOverride
         latestUserMessageAt = thread.settlementFacts?.latestUserMessageAt
-        sessionStatus = thread.settlementFacts?.sessionStatus
-        latestTurn = thread.settlementFacts?.latestTurn
         hasPendingApprovals = thread.settlementFacts?.hasPendingApprovals == true
         hasPendingUserInput = thread.settlementFacts?.hasPendingUserInput == true
+        pendingSubagentRequest = thread.pendingSubagentRequest
         inboxFacts = thread.inboxFacts.map { facts in
-            InboxOrderFacts(facts, snoozedUntil: thread.snoozedUntil, state: thread.state)
+            InboxOrderFacts(facts, snoozedUntil: thread.snoozedUntil)
         }
         hasPendingLocalMessages = thread.hasPendingLocalMessages == true
         interactionMode = thread.interactionMode
@@ -1029,33 +1034,34 @@ struct HomeOrderKey: Equatable {
 
     /// Read state and streaming timestamps refresh a row without sorting every thread.
     private struct InboxOrderFacts: Equatable {
-        let orchestrationVersion: Int?
         let runtimeStatus: String?
         let activeRunID: String?
         let latestRunID: String?
         let latestRunStatus: String?
         let latestRunRequestedAt: Date?
+        let latestRunStartedAt: Date?
         let latestRunCompletedAt: Date?
+        let latestRunHasInvalidTimestamp: Bool?
         let hasActionableProposedPlan: Bool
         let latestUserAuthoredMessageAt: Date?
         let latestUserAuthoredMessageAtIsPresent: Bool
         let lastErrorClass: String?
         let snoozedFailureUpdatedAt: Date?
 
-        init(_ facts: FeatureThreadInboxFacts, snoozedUntil: Date?, state: FeatureThreadState) {
-            orchestrationVersion = facts.orchestrationVersion
+        init(_ facts: FeatureThreadInboxFacts, snoozedUntil: Date?) {
             runtimeStatus = facts.runtimeStatus
             activeRunID = facts.activeRunID
             latestRunID = facts.latestRunID
             latestRunStatus = facts.latestRunStatus
             latestRunRequestedAt = facts.latestRunRequestedAt
+            latestRunStartedAt = facts.latestRunStartedAt
             latestRunCompletedAt = facts.latestRunCompletedAt
+            latestRunHasInvalidTimestamp = facts.latestRunHasInvalidTimestamp
             hasActionableProposedPlan = facts.hasActionableProposedPlan
             latestUserAuthoredMessageAt = facts.latestUserAuthoredMessageAt
             latestUserAuthoredMessageAtIsPresent = facts.latestUserAuthoredMessageAtIsPresent
             lastErrorClass = facts.lastErrorClass
-            let failed = facts.orchestrationVersion == 2 ? facts.runtimeStatus == "failed" : state == .failed
-            snoozedFailureUpdatedAt = failed && snoozedUntil != nil ? facts.runtimeUpdatedAt : nil
+            snoozedFailureUpdatedAt = facts.runtimeStatus == "failed" && snoozedUntil != nil ? facts.runtimeUpdatedAt : nil
         }
     }
 }
@@ -1211,7 +1217,11 @@ enum HomeDoneDuration {
 
 extension FeatureThread {
     var homeStatus: HomeThreadStatus {
-        if state != .waitingForApproval && state != .waitingForInput && isWaitingForBackgroundWork {
+        if state == .waitingForApproval || settlementFacts?.hasPendingApprovals == true { return .approval }
+        if state == .waitingForInput || settlementFacts?.hasPendingUserInput == true { return .input }
+        if pendingSubagentRequest == .approval { return .approval }
+        if pendingSubagentRequest != nil { return .input }
+        if isWaitingForBackgroundWork {
             return .monitoring
         }
         return switch state {
@@ -1226,9 +1236,9 @@ extension FeatureThread {
         case .failed:
             .failed
         case .completed:
-            inboxFacts?.orchestrationVersion == 2 && !hasUnseenCompletion ? .ready : .done
+            inboxFacts != nil && !hasUnseenCompletion ? .ready : .done
         case .idle:
-            inboxFacts?.orchestrationVersion == 2 && hasUnseenCompletion ? .done : .ready
+            hasUnseenCompletion ? .done : .ready
         }
     }
 

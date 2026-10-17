@@ -250,18 +250,25 @@ public actor T3ConnectManagedEnvironmentAuthorizer {
         }
         guard (200..<300).contains(response.statusCode) else {
             let body = try? JSONDecoder.t3.decode(EnvironmentErrorBody.self, from: data)
+            let traceID = body?.traceId ?? T3ConnectRelayErrorPresentation.traceID(from: response)
             if response.statusCode == 403, let requiredScope = body?.requiredScope {
                 throw EnvironmentPermissionDeniedError(
                     message: body?.message,
                     requiredScope: requiredScope,
                     requiredPermission: body?.requiredPermission,
-                    traceID: body?.traceId
+                    traceID: traceID
+                )
+            }
+            if response.statusCode == 504 || (body?.message == nil && body?.reason == nil) {
+                throw T3ConnectRelayError.unexpectedResponse(
+                    status: response.statusCode,
+                    traceID: T3ConnectRelayErrorPresentation.traceID(from: response)
                 )
             }
             throw T3ConnectRelayError.response(
                 status: response.statusCode,
                 message: body?.message ?? body?.reason ?? "Environment authorization failed.",
-                traceID: body?.traceId
+                traceID: traceID
             )
         }
         do {

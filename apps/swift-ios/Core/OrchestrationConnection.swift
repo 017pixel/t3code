@@ -1,20 +1,13 @@
 import Foundation
 
-/// Resolves the wire protocol for one environment. A saved descriptor is only
+/// Validates the host for one environment. A saved descriptor is only
 /// a display cache: each new socket checks the running server again.
 actor OrchestrationConnection {
-    struct Selection: Sendable {
-        let descriptor: EnvironmentDescriptor
-        let version: OrchestrationProtocolVersion
-        let generation: Int
-    }
-
     private let environment: Environment
     private let api: EnvironmentAPI
-    private var selected: Selection?
-    private var selectionIsCurrent = false
+    private var validatedDescriptor: EnvironmentDescriptor?
+    private var descriptorIsCurrent = false
     private var validatedAt: ContinuousClock.Instant?
-    private(set) var socketGeneration: Int?
     private var pending: (id: UUID, task: Task<EnvironmentDescriptor, Error>)?
 
     init(environment: Environment, api: EnvironmentAPI) {
@@ -22,16 +15,18 @@ actor OrchestrationConnection {
         self.api = api
     }
 
-    func selection(refresh: Bool = false, maximumAge: Duration? = nil) async throws -> Selection {
+    func descriptor(refresh: Bool = false, maximumAge: Duration? = nil) async throws -> EnvironmentDescriptor {
         let withinAge = maximumAge.map { limit in
             validatedAt.map { $0.duration(to: .now) < limit } ?? false
         } ?? true
-        if !refresh, withinAge, selectionIsCurrent, let selected, pending == nil { return selected }
+        if !refresh, withinAge, descriptorIsCurrent, let validatedDescriptor, pending == nil {
+            return validatedDescriptor
+        }
         let read: (id: UUID, task: Task<EnvironmentDescriptor, Error>)
         if let pending {
             read = pending
         } else {
-            selectionIsCurrent = false
+            descriptorIsCurrent = false
             let api = api
             let url = environment.httpBaseURL
             read = (UUID(), Task { try await api.descriptor(at: url) })
@@ -46,30 +41,17 @@ actor OrchestrationConnection {
             guard pending?.id == read.id else {
                 // Another waiter already accepted this response. A newer
                 // discovery, if present, must retain ownership of its result.
-                return try await selection()
+                return try await self.descriptor()
             }
-            let resolved = try OrchestrationProtocolSelection(
-                descriptor: descriptor,
-                preference: environment.orchestrationProtocolPreference,
-                previousVersion: selected?.version
-            )
-            let generation = (selected?.generation ?? 0) + (resolved.requiresStateReset ? 1 : 0)
-            let selection = Selection(descriptor: descriptor, version: resolved.version, generation: generation)
-            selected = selection
-            selectionIsCurrent = true
+            _ = try OrchestrationProtocolSelection(descriptor: descriptor)
+            validatedDescriptor = descriptor
+            descriptorIsCurrent = true
             validatedAt = .now
             pending = nil
-            return selection
+            return descriptor
         } catch {
             if pending?.id == read.id { pending = nil }
-            // A network or authorization failure is never evidence of V1.
             throw error
         }
-    }
-
-    /// Record the protocol of the socket being opened, not the latest HTTP read.
-    func bindSocket(to selection: Selection) throws {
-        try Task.checkCancellation()
-        socketGeneration = selection.generation
     }
 }

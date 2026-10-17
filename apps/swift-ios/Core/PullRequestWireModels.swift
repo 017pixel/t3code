@@ -43,9 +43,12 @@ public enum PullRequestAction: String, Codable, CaseIterable, Sendable {
     case draft
     case close
     case reopen
+    case deleteBranch = "delete-branch"
     case updateBranch = "update-branch"
     case enableAutoMerge = "enable-auto-merge"
     case disableAutoMerge = "disable-auto-merge"
+    case revert
+    case approveWorkflows = "approve-workflows"
 }
 
 public enum PullRequestMergeMethod: String, Codable, CaseIterable, Sendable {
@@ -130,6 +133,7 @@ public struct PullRequestComment: Codable, Equatable, Sendable, Identifiable {
     public let path: String?
     public let reviewState: String?
     public let reactions: [PullRequestReaction]?
+    public var canEdit: Bool? = nil
 }
 
 public enum PullRequestDiffSide: String, Codable, Sendable {
@@ -151,6 +155,7 @@ public struct PullRequestThreadComment: Codable, Equatable, Sendable, Identifiab
     public var editedAt: String? = nil
     public let url: String?
     public let reactions: [PullRequestReaction]?
+    public var canEdit: Bool? = nil
 }
 
 public struct PullRequestReviewThread: Codable, Equatable, Sendable, Identifiable {
@@ -163,6 +168,7 @@ public struct PullRequestReviewThread: Codable, Equatable, Sendable, Identifiabl
     public let comments: [PullRequestThreadComment]
     public let commentCount: Int?
     public let nextCommentsCursor: String?
+    public var canResolve: Bool? = nil
 }
 
 public struct PullRequestCommit: Codable, Equatable, Sendable, Identifiable {
@@ -203,6 +209,7 @@ public struct PullRequestCapabilities: Codable, Equatable, Sendable {
     public let review: PullRequestReviewCapabilities
     public let reviewers: PullRequestReviewerCapabilities
     public let edit: PullRequestEditCapabilities?
+    public var deleteBranch: Bool? = nil
 }
 
 public struct PullRequestViewerPermissions: Codable, Equatable, Sendable {
@@ -212,6 +219,7 @@ public struct PullRequestViewerPermissions: Codable, Equatable, Sendable {
     public let verdicts: [PullRequestReviewVerdict]
     public let requestReviewers: Bool
     public let updateMethods: [PullRequestUpdateMethod]?
+    public var editChangeRequest: Bool? = nil
 }
 
 public struct PullRequestMergeCapabilities: Codable, Equatable, Sendable {
@@ -312,6 +320,7 @@ public struct PullRequestProviderSummary: Codable, Equatable, Sendable {
     public let projectCount: Int
     public let configured: Bool
     public let detail: String?
+    public var actions: [PullRequestAction]? = nil
 }
 
 public struct PullRequestListProjectError: Codable, Equatable, Sendable, Identifiable {
@@ -419,6 +428,69 @@ public struct PullRequestDetail: Codable, Equatable, Sendable {
     public let baseComparison: PullRequestBaseComparison?
     public let behindBy: Int?
     public let autoMergeEnabled: Bool?
+    public var workflowApprovalsRequired: Int? = nil
+
+    public var availableMergeMethods: [PullRequestMergeMethod] {
+        capabilities.mergeMethods.filter {
+            switch $0 {
+            case .merge: mergeCapabilities.merge
+            case .squash: mergeCapabilities.squash
+            case .rebase: mergeCapabilities.rebase
+            }
+        }
+    }
+
+    public var availableUpdateMethods: [PullRequestUpdateMethod] {
+        (capabilities.updateMethods ?? []).filter { viewerPermissions.updateMethods?.contains($0) == true }
+    }
+
+    public func canPerform(_ action: PullRequestAction) -> Bool {
+        guard capabilities.actions.contains(action), viewerPermissions.actions.contains(action) else { return false }
+        switch action {
+        case .deleteBranch: return state != .open && capabilities.deleteBranch == true
+        case .reopen: return state == .closed
+        case .revert: return state == .merged
+        default: break
+        }
+        guard state == .open else { return false }
+        switch action {
+        case .merge: return !isDraft && mergeability != .conflicting && !availableMergeMethods.isEmpty
+        case .ready: return isDraft
+        case .draft: return !isDraft
+        case .updateBranch: return !availableUpdateMethods.isEmpty
+        case .enableAutoMerge: return !isDraft && autoMergeEnabled == false && !availableMergeMethods.isEmpty
+        case .disableAutoMerge: return autoMergeEnabled == true
+        case .approveWorkflows: return (workflowApprovalsRequired ?? 0) > 0
+        default: return true
+        }
+    }
+
+    public var canEditChangeRequest: Bool {
+        guard capabilities.edit?.changeRequest == true else { return false }
+        // Older V2 hosts omit the per-PR flag. Match the shared client's author/maintainer fallback.
+        return viewerPermissions.editChangeRequest
+            ?? (sameLogin(viewer, author?.login) || viewerPermissions.actions.contains(.merge))
+    }
+
+    public func canEditComment(_ comment: PullRequestComment) -> Bool {
+        guard capabilities.edit?.comment == true, comment.kind != .review else { return false }
+        return comment.canEdit ?? sameLogin(viewer, comment.author?.login)
+    }
+
+    public func canEditComment(_ comment: PullRequestThreadComment) -> Bool {
+        guard capabilities.edit?.comment == true else { return false }
+        return comment.canEdit ?? sameLogin(viewer, comment.author?.login)
+    }
+
+    public func canResolveThread(_ thread: PullRequestReviewThread) -> Bool {
+        capabilities.review.resolve && viewerPermissions.resolve && thread.canResolve != false
+    }
+
+    private func sameLogin(_ one: String?, _ other: String?) -> Bool {
+        guard let one, let other else { return false }
+        return one.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            == other.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
 }
 
 public struct PullRequestActivity: Codable, Equatable, Sendable {

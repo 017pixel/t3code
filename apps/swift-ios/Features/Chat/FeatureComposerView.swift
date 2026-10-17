@@ -139,6 +139,9 @@ struct FeatureComposerView: View {
     private let pendingUserInputs: [FeatureUserInput]
     private let resolvingRequestIDs: Set<String>
     private let powerFeatures: FeatureComposerPowerFeatures
+    private let linkedPullRequests: [ThreadPullRequestLink]
+    private let repository: String?
+    private let handoffSource: FeatureComposerHandoffSource?
     private let onSend: () -> Void
     private let messageDeliveries: [FeatureMessageDelivery]
     private let onSendWithDelivery: ((FeatureMessageDelivery) -> Void)?
@@ -196,6 +199,9 @@ struct FeatureComposerView: View {
         retainedAttachmentCount: Int = 0,
         submitLabel: String? = nil,
         isModelSelectionEnabled: Bool = true,
+        linkedPullRequests: [ThreadPullRequestLink] = [],
+        repository: String? = nil,
+        handoffSource: FeatureComposerHandoffSource? = nil,
         onCommandMenuUse: @escaping () -> Void = {}
     ) {
         _text = text
@@ -238,6 +244,9 @@ struct FeatureComposerView: View {
         self.pendingUserInputs = pendingUserInputs
         self.resolvingRequestIDs = resolvingRequestIDs
         self.powerFeatures = powerFeatures
+        self.linkedPullRequests = linkedPullRequests
+        self.repository = repository
+        self.handoffSource = handoffSource
         self.showsKeyboardDismissControl = showsKeyboardDismissControl
         self.onDismissKeyboard = onDismissKeyboard
         self.onApprovalDecision = onApprovalDecision
@@ -392,10 +401,13 @@ struct FeatureComposerView: View {
             }
     }
 
-    private var composerSurface: some View {
-        composerSurfaceContent
+    private var composerSurface: AnyView {
+        AnyView(VStack(spacing: 0) {
+            FeatureComposerHandoffPreview(source: handoffSource, selection: resolvedSelection, providers: providers)
+            composerSurfaceContent
+        }
             .frame(maxWidth: T3Metrics.readingWidth)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity))
     }
 
     private var composerSurfaceContent: some View {
@@ -1116,7 +1128,9 @@ struct FeatureComposerView: View {
             powerFeatures: powerFeatures,
             pathEntries: pathEntries,
             allowProviderSwitch: allowProviderSwitch,
-            allowInteractionMode: allowsInteractionMode
+            allowInteractionMode: allowsInteractionMode,
+            linkedPullRequests: linkedPullRequests,
+            repository: repository
         ).filter { item in
             if isModelSelectionEnabled { return true }
             switch item {
@@ -1209,6 +1223,11 @@ struct FeatureComposerView: View {
                 }
             case let .path(entry):
                 replacement = try contextReference(label: entry.name, payload: .mention(.init(path: entry.path)))
+            case let .pullRequest(entry):
+                guard trigger.kind == .pullRequest,
+                      commandMenuItems.contains(where: { $0.id == item.id }),
+                      let reviewComment = entry.reviewComment else { return }
+                replacement = try contextReference(label: "#\(entry.link.number)", payload: .reviewComment(reviewComment))
             }
         } catch {
             pathSearchError = error.localizedDescription

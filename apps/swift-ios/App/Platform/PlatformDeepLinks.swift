@@ -1,5 +1,197 @@
 import Foundation
 
+public struct PlatformLinkedPrompt: Codable, Hashable, Sendable {
+    public let text: String
+    public let hiddenCharacters: Int
+
+    enum DraftAction: Equatable { case fill, keep, ask }
+
+    func draftAction(currentText: String) -> DraftAction {
+        if currentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .fill }
+        return currentText == text ? .keep : .ask
+    }
+
+    func applying(to draft: FeatureComposerDraft, replaceExisting: Bool = false) -> FeatureComposerDraft? {
+        guard replaceExisting || draftAction(currentText: draft.text) != .ask else { return nil }
+        var result = draft
+        result.text = text
+        return result
+    }
+
+    /// Keep local edits and all non-text fields. Reopening the same link does not add it twice.
+    func appending(to draft: FeatureComposerDraft) -> FeatureComposerDraft {
+        var result = draft
+        guard draft.text != text, !draft.text.hasSuffix("\n" + text) else { return result }
+        result.text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? text : draft.text + "\n\n" + text
+        return result
+    }
+
+    func notice(modelUnavailable: Bool = false, pullRequestUnavailable: Int? = nil) -> String {
+        var lines = [hiddenCharacters > 0
+            ? "This prompt had hidden characters, it may be malicious. They were removed. Read it before you send."
+            : "This prompt came from a link. Read it before you send."]
+        if modelUnavailable { lines.append("The requested model is not available, so your default is used.") }
+        if let number = pullRequestUnavailable {
+            lines.append("Pull request #\(number) could not be loaded, so this task starts from your default branch.")
+        }
+        return lines.joined(separator: "\n\n")
+    }
+}
+
+public struct PlatformPromptRepository: Codable, Hashable, Sendable {
+    let owner: String
+    let name: String
+    var fullName: String { "\(owner)/\(name)" }
+    var key: String { "github.com/\(fullName)".lowercased() }
+}
+
+public struct PlatformPromptPullRequest: Codable, Hashable, Sendable {
+    let repository: PlatformPromptRepository
+    let number: Int
+    var url: String { "https://github.com/\(repository.fullName)/pull/\(number)" }
+    var key: ThreadPullRequestKey {
+        .init(host: "github.com", repository: repository.fullName, number: number)
+    }
+}
+
+public enum PlatformNewThreadLink: Codable, Hashable, Sendable {
+    case new(prompt: PlatformLinkedPrompt, repository: PlatformPromptRepository?, provider: String?, model: String?)
+    case pullRequest(PlatformPromptPullRequest, prompt: PlatformLinkedPrompt?)
+
+    var prompt: PlatformLinkedPrompt? {
+        switch self {
+        case let .new(prompt, _, _, _), let .pullRequest(_, prompt?): prompt
+        case .pullRequest(_, nil): nil
+        }
+    }
+
+    var repository: PlatformPromptRepository? {
+        switch self {
+        case let .new(_, repository, _, _): repository
+        case let .pullRequest(pr, _): pr.repository
+        }
+    }
+
+    var queryItems: [URLQueryItem] {
+        switch self {
+        case let .new(prompt, repository, provider, model):
+            [URLQueryItem(name: "prompt", value: prompt.text),
+             repository.map { URLQueryItem(name: "repo", value: $0.fullName) },
+             provider.map { URLQueryItem(name: "provider", value: $0) },
+             model.map { URLQueryItem(name: "model", value: $0) }].compactMap { $0 }
+        case let .pullRequest(pr, prompt):
+            [URLQueryItem(name: "pr", value: "\(pr.repository.fullName)#\(pr.number)"),
+             prompt.map { URLQueryItem(name: "prompt", value: $0.text) }].compactMap { $0 }
+        }
+    }
+}
+
+enum PlatformPromptLinkParser {
+    static let maximumPromptLength = 8_000
+
+    static func newThread(_ query: [String: String]) throws -> PlatformNewThreadLink {
+        let linkedPrompt = try prompt(query["prompt"])
+        if let value = query["pr"] {
+            guard let pr = pullRequest(value) else {
+                throw PlatformDeepLinkError.invalidPrompt("This link names a pull request T3 Code cannot read.")
+            }
+            return .pullRequest(pr, prompt: linkedPrompt)
+        }
+        guard let linkedPrompt else { throw PlatformDeepLinkError.invalidPrompt("This link has no prompt.") }
+        let parsedRepository = query["repo"].flatMap(repository)
+        if query["repo"] != nil, parsedRepository == nil {
+            throw PlatformDeepLinkError.invalidPrompt("This link names a repository T3 Code cannot read.")
+        }
+        func optional(_ key: String) -> String? {
+            guard let value = query[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+            return value
+        }
+        return .new(prompt: linkedPrompt, repository: parsedRepository,
+                    provider: optional("provider")?.lowercased(), model: optional("model"))
+    }
+
+    static func prompt(_ raw: String?) throws -> PlatformLinkedPrompt? {
+        guard let raw else { return nil }
+        // JavaScript counts UTF-16 units, including both halves of supplementary characters.
+        guard raw.utf16.count <= maximumPromptLength else {
+            throw PlatformDeepLinkError.invalidPrompt("This prompt is longer than 8,000 characters, so T3 Code did not open it.")
+        }
+        let value = sanitize(raw)
+        if value.text.isEmpty, value.hiddenCharacters > 0 {
+            throw PlatformDeepLinkError.invalidPrompt("This prompt had only hidden characters, so it may be malicious. T3 Code did not open it.")
+        }
+        return value.text.isEmpty ? nil : value
+    }
+
+    static func sanitize(_ raw: String) -> PlatformLinkedPrompt {
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
+        var removed = 0
+        let visible = Array(normalized.unicodeScalars).filter { scalar in
+            let hidden = hiddenRanges.contains { $0.contains(scalar.value) }
+            if hidden { removed += 1 }
+            return !hidden
+        }
+        let scalars = visible.enumerated().compactMap { index, scalar -> Unicode.Scalar? in
+            guard scalar.value == 0x200D else { return scalar }
+            if index > 0, index + 1 < visible.count,
+               isEmojiPart(visible[index - 1].value), isEmojiPart(visible[index + 1].value) { return scalar }
+            removed += 1
+            return nil
+        }
+        return PlatformLinkedPrompt(text: String(String.UnicodeScalarView(scalars))
+            .trimmingCharacters(in: .whitespacesAndNewlines), hiddenCharacters: removed)
+    }
+
+    static func repository(_ value: String) -> PlatformPromptRepository? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parts = captures(#"(?i)^https?://(?:www\.)?github\.com/([^/?#]+)/([^/?#]+)/?$"#, value)
+                ?? captures(#"^([^/\s]+)/([^/\s]+)$"#, value) else { return nil }
+        return repository(owner: parts[0], name: parts[1])
+    }
+
+    static func pullRequest(_ value: String) -> PlatformPromptPullRequest? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parts = captures(#"(?i)^https?://(?:www\.)?github\.com/([^/?#]+)/([^/?#]+)/pull/([0-9]+)(?:[/?#].*)?$"#, value)
+                ?? captures(#"^([^/\s#]+)/([^/\s#]+)(?:/|#)([0-9]+)$"#, value),
+              let repository = repository(owner: parts[0], name: parts[1]),
+              let number = Int(parts[2]), number > 0, number <= 9_007_199_254_740_991 else { return nil }
+        return PlatformPromptPullRequest(repository: repository, number: number)
+    }
+
+    private static func repository(owner: String, name: String) -> PlatformPromptRepository? {
+        let name = name.replacingOccurrences(of: #"(?i)\.git$"#, with: "", options: .regularExpression)
+        guard owner.range(of: #"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$"#, options: .regularExpression) != nil,
+              name.range(of: #"^[A-Za-z0-9._-]{1,100}$"#, options: .regularExpression) != nil,
+              name.contains(where: { $0 != "." }) else { return nil }
+        return PlatformPromptRepository(owner: owner, name: name)
+    }
+
+    private static func captures(_ pattern: String, _ value: String) -> [String]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else { return nil }
+        return (1..<match.numberOfRanges).compactMap { index in
+            Range(match.range(at: index), in: value).map { String(value[$0]) }
+        }
+    }
+
+    private static func isEmojiPart(_ value: UInt32) -> Bool {
+        (0x1F000...0x1FAFF).contains(value) || (0x2190...0x2BFF).contains(value) || value == 0xFE0F
+    }
+
+    private static let hiddenRanges: [ClosedRange<UInt32>] = [
+        0x0000...0x0008, 0x000B...0x000C, 0x000E...0x001F, 0x007F...0x009F,
+        0x00AD...0x00AD, 0x034F...0x034F, 0x061C...0x061C, 0x115F...0x1160,
+        0x17B4...0x17B5, 0x180B...0x180F, 0x200B...0x200C, 0x200E...0x200F,
+        0x202A...0x202E, 0x2060...0x206F, 0x3164...0x3164, 0xFE00...0xFE0D,
+        0xFEFF...0xFEFF, 0xFFA0...0xFFA0, 0xFFF0...0xFFFB, 0x1BCA0...0x1BCA3,
+        0x1D173...0x1D17A, 0xE0000...0xE0FFF,
+    ]
+}
+
 enum PlatformRoute: Codable, Hashable, Identifiable, Sendable {
     #if DEBUG
     static let nativeScheme = "t3code-swiftui-dev"
@@ -13,6 +205,8 @@ enum PlatformRoute: Codable, Hashable, Identifiable, Sendable {
     case thread(environmentID: String?, threadID: String)
     case threadDestination(environmentID: String?, threadID: String, destination: FeatureThreadDestination)
     case newTask(environmentID: String?, projectID: String?)
+    case newPrompt(environmentID: String?, projectID: String?, link: PlatformNewThreadLink)
+    case threadPrompt(environmentID: String?, threadID: String, prompt: PlatformLinkedPrompt)
     case usageLimits
 
     var id: String {
@@ -29,6 +223,8 @@ enum PlatformRoute: Codable, Hashable, Identifiable, Sendable {
             "thread:\(environmentID ?? ""):\(threadID)"
         case let .threadDestination(environmentID, threadID, destination):
             "thread:\(environmentID ?? ""):\(threadID):\(destination)"
+        case .newPrompt, .threadPrompt:
+            "prompt:\(url?.absoluteString ?? "")"
         case let .newTask(environmentID, projectID):
             "new-task:\(environmentID ?? ""):\(projectID ?? "")"
         }
@@ -76,7 +272,22 @@ enum PlatformRoute: Codable, Hashable, Identifiable, Sendable {
                 environmentID.map { URLQueryItem(name: "environment", value: $0) },
                 projectID.map { URLQueryItem(name: "project", value: $0) },
             ].compactMap { $0 }
+        case let .newPrompt(environmentID, projectID, link):
+            components.host = "new"
+            components.queryItems = [
+                environmentID.map { URLQueryItem(name: "environment", value: $0) },
+                projectID.map { URLQueryItem(name: "project", value: $0) },
+            ].compactMap { $0 } + link.queryItems
+        case let .threadPrompt(environmentID, threadID, prompt):
+            components.host = "threads"
+            components.queryItems = [
+                environmentID.map { URLQueryItem(name: "environment", value: $0) },
+                URLQueryItem(name: "thread", value: threadID),
+                URLQueryItem(name: "prompt", value: prompt.text),
+            ].compactMap { $0 }
         }
+        // Form query parsing treats a literal plus as a space.
+        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         return components.url
     }
 }
@@ -85,6 +296,7 @@ enum PlatformDeepLinkError: LocalizedError, Equatable {
     case unsupportedURL
     case missingIdentifier
     case invalidIdentifier
+    case invalidPrompt(String)
 
     var errorDescription: String? {
         switch self {
@@ -94,6 +306,8 @@ enum PlatformDeepLinkError: LocalizedError, Equatable {
             "That T3 Code link is missing its destination."
         case .invalidIdentifier:
             "That T3 Code link contains an invalid destination."
+        case let .invalidPrompt(message):
+            message
         }
     }
 }
@@ -121,12 +335,26 @@ enum PlatformDeepLinkParser {
         }
 
         let query = queryValues(components.queryItems ?? [])
-        if ["t3", "t3code", "t3code-swiftui", "t3code-swiftui-dev"].contains(scheme) {
+        let promptQuery = promptQueryValues(components)
+        let hasPromptParameters = ["prompt", "repo", "pr", "provider", "model"].contains { promptQuery[$0] != nil }
+        if hasPromptParameters {
+            guard components.user == nil, components.password == nil,
+                  components.port == nil || (scheme == "https" && components.port == 443) else {
+                throw PlatformDeepLinkError.unsupportedURL
+            }
+            if ["http", "https"].contains(scheme) {
+                guard scheme == "https", components.host?.lowercased() == "app.t3.codes" else {
+                    throw PlatformDeepLinkError.unsupportedURL
+                }
+            }
+        }
+        if ["t3", "t3code", "t3code-dev", "t3code-swiftui", "t3code-swiftui-dev"].contains(scheme) {
             let segments = customSchemeSegments(components)
-            if isConnectionRoute(segments: segments, query: query) {
+            if isConnectionRoute(segments: segments, query: query),
+               !isPromptNavigation(segments, query: promptQuery) {
                 return try connectionRoute(url)
             }
-            return try navigationRoute(segments: segments, query: query)
+            return try navigationRoute(segments: segments, query: query, promptQuery: promptQuery)
         }
 
         guard ["http", "https"].contains(scheme) else {
@@ -138,14 +366,15 @@ enum PlatformDeepLinkParser {
         }
 
         let segments = pathSegments(components.percentEncodedPath)
-        if isConnectionRoute(segments: segments, query: query) {
+        if isConnectionRoute(segments: segments, query: query),
+           !isPromptNavigation(segments, query: promptQuery) {
             return try connectionRoute(url)
         }
 
         let routeHeads = ["usage", "thread", "threads", "project", "projects", "environment",
                           "environments", "server", "servers", "new", "new-task", "compose"]
         if routeHeads.contains(segments.first?.lowercased() ?? "") || query["thread"] != nil {
-            return try navigationRoute(segments: segments, query: query)
+            return try navigationRoute(segments: segments, query: query, promptQuery: promptQuery)
         }
 
         // Web thread routes use /:environmentID/:threadID.
@@ -153,7 +382,7 @@ enum PlatformDeepLinkParser {
             return try threadRoute(
                 environmentID: validatedIdentifier(segments[0]),
                 threadID: validatedIdentifier(segments[1]),
-                suffix: Array(segments.dropFirst(2)), query: query
+                suffix: Array(segments.dropFirst(2)), query: query, promptQuery: promptQuery
             )
         }
         throw PlatformDeepLinkError.unsupportedURL
@@ -229,7 +458,8 @@ enum PlatformDeepLinkParser {
 
     private static func navigationRoute(
         segments: [String],
-        query: [String: String]
+        query: [String: String],
+        promptQuery: [String: String]
     ) throws -> PlatformRoute {
         let head = segments.first?.lowercased() ?? ""
         let tail = Array(segments.dropFirst())
@@ -249,7 +479,7 @@ enum PlatformDeepLinkParser {
             let consumed = queryThread != nil ? 0 : (queryEnvironment != nil ? 1 : (tail.count >= 2 ? 2 : 1))
             return try threadRoute(
                 environmentID: values.environmentID, threadID: values.destinationID,
-                suffix: Array(tail.dropFirst(consumed)), query: query
+                suffix: Array(tail.dropFirst(consumed)), query: query, promptQuery: promptQuery
             )
         case "project", "projects":
             let values = try routeIdentifiers(
@@ -264,15 +494,24 @@ enum PlatformDeepLinkParser {
             }
             return .environment(id: try validatedIdentifier(rawID))
         case "new", "new-task", "compose":
+            if isPromptNavigation(segments, query: promptQuery) {
+                guard tail.isEmpty else { throw PlatformDeepLinkError.unsupportedURL }
+                return .newPrompt(
+                    environmentID: try queryEnvironment.map(validatedIdentifier),
+                    projectID: try queryProject.map(validatedIdentifier),
+                    link: try PlatformPromptLinkParser.newThread(promptQuery)
+                )
+            }
             return .newTask(
                 environmentID: try queryEnvironment.map(validatedIdentifier),
                 projectID: try queryProject.map(validatedIdentifier)
             )
         default:
             if let queryThread {
-                return .thread(
-                    environmentID: try queryEnvironment.map(validatedIdentifier),
-                    threadID: try validatedIdentifier(queryThread)
+                return try threadRoute(
+                    environmentID: queryEnvironment.map(validatedIdentifier),
+                    threadID: validatedIdentifier(queryThread),
+                    suffix: [], query: query, promptQuery: promptQuery
                 )
             }
             if let queryProject {
@@ -286,9 +525,13 @@ enum PlatformDeepLinkParser {
     }
 
     private static func threadRoute(
-        environmentID: String?, threadID: String, suffix: [String], query: [String: String]
+        environmentID: String?, threadID: String, suffix: [String], query: [String: String],
+        promptQuery: [String: String]
     ) throws -> PlatformRoute {
         guard let head = suffix.first else {
+            if let prompt = try PlatformPromptLinkParser.prompt(promptQuery["prompt"]) {
+                return .threadPrompt(environmentID: environmentID, threadID: threadID, prompt: prompt)
+            }
             return .thread(environmentID: environmentID, threadID: threadID)
         }
         let destination: FeatureThreadDestination
@@ -387,6 +630,26 @@ enum PlatformDeepLinkParser {
         percentEncodedPath
             .split(separator: "/", omittingEmptySubsequences: true)
             .map { String($0).removingPercentEncoding ?? String($0) }
+    }
+
+    private static func isPromptNavigation(_ segments: [String], query: [String: String]) -> Bool {
+        guard let head = segments.first?.lowercased(), ["new", "new-task", "compose", "thread", "threads"].contains(head) else {
+            return false
+        }
+        return ["prompt", "repo", "pr", "provider", "model"].contains { query[$0] != nil }
+    }
+
+    private static func promptQueryValues(_ components: URLComponents) -> [String: String] {
+        (components.percentEncodedQuery ?? "").split(separator: "&").reduce(into: [:]) { result, pair in
+            let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            func decode(_ value: Substring) -> String {
+                let value = value.replacingOccurrences(of: "+", with: " ")
+                return value.removingPercentEncoding ?? value
+            }
+            let name = decode(parts[0])
+            // URLSearchParams and React Navigation use the first value, including an empty value.
+            if result[name] == nil { result[name] = parts.count == 2 ? decode(parts[1]) : "" }
+        }
     }
 
     private static func queryValues(_ items: [URLQueryItem]) -> [String: String] {

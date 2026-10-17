@@ -579,7 +579,7 @@ private struct FeatureAttachmentThumbnail: View {
 }
 
 enum FeatureImageProcessor {
-    private static let maximumDimension: CGFloat = 2_048
+    private static let maximumDimension: CGFloat = 2_000
     private static let maximumEncodedBytes = 10 * 1_024 * 1_024
 
     static func thumbnail(fileURL: URL) -> Data? {

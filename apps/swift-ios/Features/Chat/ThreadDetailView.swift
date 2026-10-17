@@ -17,6 +17,11 @@ public struct ThreadDetailView: View {
     let onNewTaskFromThread: (FeatureThread) -> Void
     let initialDestination: FeatureThreadDestination?
     let initialDestinationID: UUID?
+    let linkedPromptRequest: PlatformThreadPromptRequest?
+    let onLinkedPromptConsumed: (UUID) -> Void
+    @State private var consumedLinkedPromptID: UUID?
+    @State private var linkedPromptNotice: String?
+    @State private var isApplyingLinkedPrompt = false
     let onToolDestinationChange: (FeatureThreadDestination?) -> Void
     let isPresentedThread: Bool
     let rootNavigationDismissalID: UUID?
@@ -93,6 +98,8 @@ public struct ThreadDetailView: View {
         onNewTaskFromThread: @escaping (FeatureThread) -> Void = { _ in },
         initialDestination: FeatureThreadDestination? = nil,
         initialDestinationID: UUID? = nil,
+        linkedPromptRequest: PlatformThreadPromptRequest? = nil,
+        onLinkedPromptConsumed: @escaping (UUID) -> Void = { _ in },
         onToolDestinationChange: @escaping (FeatureThreadDestination?) -> Void = { _ in },
         rootNavigationDismissalID: UUID? = nil,
         onRootNavigationDismissed: @escaping (UUID) -> Void = { _ in },
@@ -108,6 +115,8 @@ public struct ThreadDetailView: View {
         self.onNewTaskFromThread = onNewTaskFromThread
         self.initialDestination = initialDestination
         self.initialDestinationID = initialDestinationID
+        self.linkedPromptRequest = linkedPromptRequest
+        self.onLinkedPromptConsumed = onLinkedPromptConsumed
         self.onToolDestinationChange = onToolDestinationChange
         self.rootNavigationDismissalID = rootNavigationDismissalID
         self.onRootNavigationDismissed = onRootNavigationDismissed
@@ -306,6 +315,9 @@ public struct ThreadDetailView: View {
     private var observedThreadContent: AnyView {
         let content = loadedThreadContent
         .onChange(of: thread.id) { v2TimelineState.reset() }
+        .onChange(of: linkedPromptApplicationKey, initial: true) { _, _ in
+            applyLinkedPromptIfPossible()
+        }
         // A child observes the text so keystrokes do not re-run this body.
         .background(FeatureDraftTextObserver(text: $draft, onChange: scheduleDraftSave))
         .onChange(of: selection) { scheduleDraftSave() }
@@ -481,6 +493,10 @@ public struct ThreadDetailView: View {
         )) {
             Button("OK") { pullRequestError = nil }
         } message: { Text(pullRequestError ?? "") }
+        .alert("Prompt from a link", isPresented: Binding(
+            get: { linkedPromptNotice != nil }, set: { if !$0 { linkedPromptNotice = nil } }
+        )) { Button("OK") { linkedPromptNotice = nil } }
+        message: { Text(linkedPromptNotice ?? "") }
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(false)
         .t3NavigationChrome()
@@ -519,7 +535,11 @@ public struct ThreadDetailView: View {
         }
         .sheet(isPresented: $showsAgents, onDismiss: threadPresentationDidDismiss) {
             NavigationStack {
-                FeatureThreadAgentsView(roster: detail?.workflows?.agentRoster, onOpenThread: openRelatedThread)
+                FeatureThreadAgentsView(roster: detail?.workflows?.agentRoster, onOpenThread: openRelatedThread,
+                    stopContext: (model.client as? any FeatureSubagentStopping).map {
+                        FeatureSubagentStopContext(threadID: thread.id, client: $0,
+                            canOperate: model.client.permissions(forThreadID: thread.id)?.grants("orchestration:operate") == true)
+                    })
                     .onAppear { rootNavigationDismissal.presentationDidAppear() }
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
@@ -546,7 +566,8 @@ public struct ThreadDetailView: View {
                         isUpdating: isUpdatingQueue,
                         error: queueActionError,
                         performAction: updateThreadQueue,
-                        onEdit: beginQueuedEdit
+                        onEdit: beginQueuedEdit,
+                        isCompacting: isCompacting
                     )
                     .onAppear { rootNavigationDismissal.presentationDidAppear() }
                     .toolbar {
@@ -1103,8 +1124,8 @@ public struct ThreadDetailView: View {
               let execution = detail?.execution,
               execution.canManageQueue, execution.activeRun != nil else { return [] }
         var deliveries: [FeatureMessageDelivery] = [.queue]
-        if execution.canSteer { deliveries.append(.steer) }
-        if execution.canRestart { deliveries.append(.restart) }
+        if execution.canSteer && !isCompacting { deliveries.append(.steer) }
+        if execution.canRestart && !isCompacting { deliveries.append(.restart) }
         return deliveries
     }
 
@@ -1113,6 +1134,10 @@ public struct ThreadDetailView: View {
         guard !isUpdatingQueue, queueControlsAvailable,
               let client = model.client as? any FeatureThreadQueueManaging,
               let execution = detail?.execution else { return false }
+        if case .promoteToSteer = action, isCompacting {
+            queueActionError = "Wait for context compaction to finish before sending this message now."
+            return false
+        }
         guard execution.allows(action) else {
             queueActionError = "The queue changed. Check the current messages and try again."
             return false
@@ -1345,6 +1370,9 @@ public struct ThreadDetailView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 refreshStatus
+                if refreshPresentation == nil, detail.approvals.isEmpty, detail.userInputs.isEmpty {
+                    FeatureSubagentRequestBanner(children: currentThread.childThreadInputs ?? [], onOpenThread: openRelatedThread)
+                }
                 providerGoalStatus
                 threadQueueControls
                 submissionRecoveryControls
@@ -1472,6 +1500,9 @@ public struct ThreadDetailView: View {
                         retainedAttachmentCount: queuedEdit?.existingAttachments.count ?? 0,
                         submitLabel: queuedEdit == nil ? nil : "Save message",
                         isModelSelectionEnabled: queuedEdit == nil,
+                        linkedPullRequests: currentThread.pullRequests ?? [],
+                        repository: composerRepository,
+                        handoffSource: detail.composerHandoffSource,
                         onCommandMenuUse: {
                             Task {
                                 if let environmentID = currentThread.environmentID,
@@ -1487,6 +1518,12 @@ public struct ThreadDetailView: View {
             }
             .background(T3Colors.background)
         }
+    }
+
+    private var composerRepository: String? {
+        guard let key = model.snapshot.projects.first(where: { $0.id == currentThread.projectID })?.repositoryIdentity?.groupingKey,
+              let slash = key.firstIndex(of: "/") else { return nil }
+        return String(key[key.index(after: slash)...])
     }
 
     private var composerPowerFeatures: FeatureComposerPowerFeatures {
@@ -1774,7 +1811,7 @@ public struct ThreadDetailView: View {
         }
         let delivery = requestedDelivery ?? (model.client is any FeatureMessageDeliveryManaging
             ? FeatureComposerSendPresentation.resolve(
-                isWorking: detail?.execution?.activeRun != nil || currentThread.state == .working,
+                isWorking: detail?.execution?.activeRun != nil || currentThread.state == .working || isCompacting,
                 canSteer: messageDeliveries.contains(.steer),
                 followUpBehavior: model.snapshot.settings.followUpBehavior,
                 supportsExplicitDelivery: messageDeliveries.contains(.queue)
@@ -1957,6 +1994,57 @@ public struct ThreadDetailView: View {
         guard let index = feedbackMessages.firstIndex(where: { $0.id == id }) else { return }
         feedbackMessages[index].text = text
         feedbackRevision &+= 1
+    }
+
+    private var linkedPromptApplicationKey: String {
+        let ready = didRestoreDraft && didRestoreQueuedEdit && !isSending && !isRewinding
+            && !isPreparingInput && !isUpdatingQueue && !isTransferringDraft && !isApplyingLinkedPrompt
+        return "\(linkedPromptRequest?.id.uuidString ?? ""):" + String(ready)
+    }
+
+    private func applyLinkedPromptIfPossible() {
+        guard let request = linkedPromptRequest, consumedLinkedPromptID != request.id,
+              didRestoreDraft, didRestoreQueuedEdit, !isSending, !isRewinding,
+              !isPreparingInput, !isUpdatingQueue, !isTransferringDraft, !isApplyingLinkedPrompt else { return }
+        guard missingFileRecoverySnapshot == nil else {
+            linkedPromptNotice = "Resolve the draft’s missing files, then open this link again. Your saved draft is unchanged."
+            consumedLinkedPromptID = request.id
+            onLinkedPromptConsumed(request.id)
+            return
+        }
+        if queuedEdit != nil {
+            // A queued edit has its own storage. Put untrusted linked text only in the ordinary draft.
+            guard let normal = ordinaryDraftBeforeQueueEdit else { return }
+            let updated = request.prompt.appending(to: normal)
+            let edit = currentQueuedEdit
+            let pendingSave = draftSaveTask
+            pendingSave?.cancel()
+            draftSaveTask = nil
+            isApplyingLinkedPrompt = true
+            isTransferringDraft = true
+            Task { @MainActor in
+                defer { isTransferringDraft = false; isApplyingLinkedPrompt = false }
+                await pendingSave?.value
+                do {
+                    if let edit { try await draftStore.saveQueuedRunEdit(edit, for: draftKey) }
+                    try await draftStore.setDraft(updated, for: draftKey)
+                    ordinaryDraftBeforeQueueEdit = updated
+                    linkedPromptNotice = request.prompt.notice()
+                        + "\n\nThe prompt was added to your ordinary draft. Finish or cancel the queued edit to see it."
+                } catch {
+                    linkedPromptNotice = "Could not add the linked prompt. \(error.localizedDescription) Open the link again to retry."
+                }
+                consumedLinkedPromptID = request.id
+                onLinkedPromptConsumed(request.id)
+            }
+        } else {
+            draft = request.prompt.appending(to: composerDraft).text
+            consumedLinkedPromptID = request.id
+            onLinkedPromptConsumed(request.id)
+            persistDraftImmediately()
+            linkedPromptNotice = request.prompt.notice()
+            composerFocused = true
+        }
     }
 
     private var activeDraftKey: String {

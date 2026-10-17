@@ -79,7 +79,8 @@ public struct FeatureSubmissionRecoveryDraft: Identifiable, Sendable, Equatable,
             workspace: submission.creation.map {
                 FeatureComposerWorkspaceDraft(
                     mode: $0.workspaceMode, branch: $0.branch,
-                    worktreePath: $0.worktreePath, startFromOrigin: $0.startFromOrigin
+                    worktreePath: $0.worktreePath, startFromOrigin: $0.startFromOrigin,
+                    pullRequestReference: $0.pullRequestReference
                 )
             },
             context: submission.context,

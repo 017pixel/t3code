@@ -790,6 +790,13 @@ final class T3ConnectRuntimeTests: XCTestCase {
         let urls = await connector.urls
         XCTAssertEqual(urls.prefix(2).map { ticket(in: $0) }, ["ticket-1", "ticket-2"])
         XCTAssertFalse(urls.prefix(2).contains(environment.webSocketBaseURL))
+        for url in urls.prefix(2) {
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            XCTAssertEqual(query.filter { $0.name == "connectionMethod" }.map(\.value), ["relay"])
+            XCTAssertEqual(query.filter { $0.name == "clientDeviceType" }.map(\.value),
+                           [MobileClientMetadata.deviceType(for: MobileClientMetadata.deviceModel)])
+            XCTAssertEqual(query.filter { $0.name == "orchestrationProtocol" }.map(\.value), ["2"])
+        }
         XCTAssertFalse(urls.prefix(2).contains { $0.absoluteString.contains("socket-token") })
         let requests = await transport.requests
         XCTAssertGreaterThanOrEqual(requests.count, 2)
@@ -1665,7 +1672,7 @@ private actor T3ConnectScriptedHTTPTransport: HTTPTransport {
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         // Opt in for T3Client without changing the scripted ticket ordinals.
         if let discoveryEnvironment, request.url?.path == "/.well-known/t3/environment" {
-            return (try legacyEnvironmentDescriptorData(for: discoveryEnvironment), response(request, status: 200))
+            return (try v2EnvironmentDescriptorData(for: discoveryEnvironment), response(request, status: 200))
         }
         requests.append(request)
         let (data, status) = try handler(request, requests.count)
@@ -1746,7 +1753,7 @@ private extension Data {
               "environmentId": "\(environmentID)",
               "label": "Managed Studio",
               "platform": {"os": "darwin", "arch": "arm64"},
-              "serverVersion": "1.0.0",
+              "serverVersion": "1.0.0", "orchestrationProtocolVersion": 2,
               "capabilities": {"repositoryIdentity": true}
             }
             """.utf8

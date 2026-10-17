@@ -165,10 +165,10 @@ extension ServerSettingsParityTests {
 
     func testGitHubSettingsAndNewScriptFlagsSurviveSettingsRoundTrip() throws {
         let settings = try JSONValue.object([
-            "github": .object([
+            "sourceControlHosts": .object(["github": .object([
                 "hosts": .object(["github.com": .object(["account": .string("theo")])]),
                 "tokens": .object(["github.example.com": .string("<redacted>")]),
-            ]),
+            ])]),
             "defaultProjectScripts": .array([.object([
                 "id": .string("cleanup"), "name": .string("Clean"), "command": .string("cleanup"),
                 "icon": .string("play"), "runOnWorktreeCreate": .bool(false),
@@ -176,12 +176,13 @@ extension ServerSettingsParityTests {
             ])]),
         ]).decode(ServerSettingsSnapshot.self)
         let decoded = try JSONValue.encode(settings).decode(ServerSettingsSnapshot.self)
+        XCTAssertEqual(decoded.sourceControlHosts, settings.sourceControlHosts)
         XCTAssertEqual(decoded.github, settings.github)
         XCTAssertEqual(decoded.github?.hosts["github.com"]?.enabled, true)
         XCTAssertEqual(decoded.github?.tokens["github.example.com"], "<redacted>")
         XCTAssertEqual(decoded.defaultProjectScripts.first?.runOnSettle, true)
         XCTAssertEqual(decoded.defaultProjectScripts.first?.async, true)
-        XCTAssertNil(ServerSettingsChange.defaultAutoPull(true).jsonValue["github"])
+        XCTAssertNil(ServerSettingsChange.defaultAutoPull(true).jsonValue["sourceControlHosts"])
         XCTAssertEqual(try JSONValue.object([:]).decode(ServerGitHubSettings.self), ServerGitHubSettings())
     }
 

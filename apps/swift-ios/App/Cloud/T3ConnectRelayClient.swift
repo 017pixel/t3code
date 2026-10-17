@@ -4,21 +4,44 @@ public enum T3ConnectRelayError: LocalizedError, Sendable {
     case invalidConfiguration(String)
     case invalidResponse
     case response(status: Int, message: String, traceID: String?)
+    case unexpectedResponse(status: Int, traceID: String?)
+    case connectionNotAuthorized(reason: String?, traceID: String?)
     case unexpectedScope(requested: [String], granted: String)
     case environmentMismatch
+
+    /// Tunnel allocation can change on the host without any change to the
+    /// client's credentials. Let the existing connection loop retry it.
+    public var isTransient: Bool {
+        switch self {
+        case let .connectionNotAuthorized(reason, _):
+            reason == "managed_endpoint_allocation_not_ready"
+        case .unexpectedResponse:
+            true
+        case let .response(status, _, _):
+            status >= 500 || status == 408 || status == 429
+        default:
+            false
+        }
+    }
 
     public var errorDescription: String? {
         switch self {
         case let .invalidConfiguration(message):
-            message
+            return message
         case .invalidResponse:
-            "T3 Connect returned an invalid response."
+            return "T3 Connect returned an invalid response."
         case let .response(status, message, traceID):
-            traceID.map { "\(message) (trace \($0))" } ?? "\(message) (HTTP \(status))"
+            return traceID.map { "\(message) (trace \($0))" } ?? "\(message) (HTTP \(status))"
+        case let .unexpectedResponse(status, traceID):
+            let message = T3ConnectRelayErrorPresentation.unexpectedResponseMessage(status: status)
+            return traceID.map { "\(message) (trace \($0))" } ?? message
+        case let .connectionNotAuthorized(reason, traceID):
+            let message = T3ConnectRelayErrorPresentation.connectionNotAuthorizedMessage(reason: reason)
+            return traceID.map { "\(message) (trace \($0))" } ?? message
         case let .unexpectedScope(requested, granted):
-            "T3 Connect granted \(granted) instead of \(requested.joined(separator: " "))."
+            return "T3 Connect granted \(granted) instead of \(requested.joined(separator: " "))."
         case .environmentMismatch:
-            "T3 Connect returned credentials for a different environment."
+            return "T3 Connect returned credentials for a different environment."
         }
     }
 }
@@ -33,6 +56,35 @@ struct T3ConnectRelayErrorBody: Decodable, Sendable {
 }
 
 enum T3ConnectRelayErrorPresentation {
+    static let gatewayTimeoutMessage =
+        "Relay timed out before it finished the request (HTTP 504). Try again in a few minutes. If it keeps failing, copy the trace ID when you report it."
+
+    static func unexpectedResponseMessage(status: Int) -> String {
+        status == 504 ? gatewayTimeoutMessage : "Relay returned an unexpected HTTP \(status)."
+    }
+
+    static func traceID(from response: HTTPURLResponse) -> String? {
+        guard let traceparent = response.value(forHTTPHeaderField: "traceparent"),
+              traceparent.range(
+                  of: #"\A[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\z"#,
+                  options: [.regularExpression, .caseInsensitive]
+              ) != nil else { return nil }
+        return String(traceparent.split(separator: "-")[1])
+    }
+
+    static func connectionNotAuthorizedMessage(reason: String?) -> String {
+        if reason == "managed_endpoint_allocation_not_ready" {
+            return "The environment's T3 Connect tunnel is still being set up."
+        }
+        if reason == "environment_link_not_found" {
+            return "Relay has no active link for this environment. The environment server may not have re-established its link yet."
+        }
+        if let reason {
+            return "Relay rejected the environment connection request (\(reason))."
+        }
+        return "Relay rejected the environment connection request."
+    }
+
     static func message(
         for error: T3ConnectRelayErrorBody,
         requestUsesDPoP: Bool
@@ -59,13 +111,7 @@ enum T3ConnectRelayErrorPresentation {
                 return "Relay rejected the environment link proof (\(reason))."
             }
         case "environment_connect_not_authorized":
-            if error.reason == "environment_link_not_found" {
-                return "Relay has no active link for this environment. The environment server may not have re-established its link yet."
-            }
-            if let reason = error.reason {
-                return "Relay rejected the environment connection request (\(reason))."
-            }
-            return "Relay rejected the environment connection request."
+            return connectionNotAuthorizedMessage(reason: error.reason)
         case "environment_endpoint_unavailable":
             if let reason = error.reason {
                 return "Relay could not reach the environment endpoint (\(reason))."
@@ -464,16 +510,22 @@ public actor T3ConnectRelayClient {
         }
         guard (200..<300).contains(response.statusCode) else {
             let body = try? JSONDecoder.t3.decode(T3ConnectRelayErrorBody.self, from: data)
+            guard let body, let code = body.code, Self.protectedErrorCodes.contains(code) else {
+                throw T3ConnectRelayError.unexpectedResponse(
+                    status: response.statusCode,
+                    traceID: T3ConnectRelayErrorPresentation.traceID(from: response)
+                )
+            }
+            if code == "environment_connect_not_authorized" {
+                throw T3ConnectRelayError.connectionNotAuthorized(reason: body.reason, traceID: body.traceId)
+            }
             throw T3ConnectRelayError.response(
                 status: response.statusCode,
-                message: body.map {
-                    T3ConnectRelayErrorPresentation.message(
-                        for: $0,
-                        requestUsesDPoP: request.value(forHTTPHeaderField: "DPoP") != nil
-                    )
-                }
-                    ?? "T3 Connect request failed.",
-                traceID: body?.traceId
+                message: T3ConnectRelayErrorPresentation.message(
+                    for: body,
+                    requestUsesDPoP: request.value(forHTTPHeaderField: "DPoP") != nil
+                ),
+                traceID: body.traceId
             )
         }
         do {
@@ -482,6 +534,14 @@ public actor T3ConnectRelayClient {
             throw T3ConnectRelayError.invalidResponse
         }
     }
+
+    private static let protectedErrorCodes: Set<String> = [
+        "auth_invalid", "environment_link_proof_expired", "environment_link_proof_invalid",
+        "environment_connect_not_authorized", "environment_endpoint_unavailable",
+        "environment_endpoint_timed_out", "environment_link_failed", "environment_link_unavailable",
+        "environment_link_limit_exceeded", "agent_activity_publish_proof_expired",
+        "agent_activity_publish_proof_invalid", "internal_error",
+    ]
 
     private func tokenCacheKey(
         _ scopes: [T3ConnectRelayScope],
@@ -531,7 +591,11 @@ public actor T3ConnectRelayClient {
 
 private extension T3ConnectRelayError {
     var isRejectedAuthorization: Bool {
-        guard case let .response(status, _, _) = self else { return false }
-        return status == 401
+        switch self {
+        case let .response(status, _, _), let .unexpectedResponse(status, _):
+            status == 401
+        default:
+            false
+        }
     }
 }

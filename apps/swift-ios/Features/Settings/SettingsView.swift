@@ -179,6 +179,15 @@ public struct SettingsView: View {
                 .buttonStyle(.plain)
                 .accessibilityHint("Notifications and Live Activities")
                 .accessibilityIdentifier("settings-notifications")
+                settingsDivider
+                NavigationLink {
+                    SettingsMicrophoneView()
+                } label: {
+                    SettingsNavigationRow(title: "Microphone", systemImage: "mic")
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Choose the preferred microphone order")
+                .accessibilityIdentifier("settings-microphone")
                 if let storage = model.client as? any FeatureClientStorageManaging {
                     settingsDivider
                     NavigationLink {

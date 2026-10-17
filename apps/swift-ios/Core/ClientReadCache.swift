@@ -19,15 +19,15 @@ actor ClientReadCache {
         stores[url] = WeakStore(store)
         return store
     }
+    // Old documents may contain a protocol preference. Ignore that key so
+    // removing the setting does not discard their cached shell or history.
     struct Scope: Codable, Equatable, Sendable {
         let environmentID: String
         let endpointFingerprint: String
-        let preference: OrchestrationProtocolPreference
         private var legacyEndpointFingerprints: Set<String>?
 
         init(_ environment: Environment) {
             environmentID = environment.id
-            preference = environment.orchestrationProtocolPreference
             let selected = environment.selectedRoute
             let verifiedCatalog = environment.descriptor?.environmentId == environment.id
                 && selected.httpBaseURL == environment.httpBaseURL
@@ -47,12 +47,12 @@ actor ClientReadCache {
         }
 
         static func == (lhs: Scope, rhs: Scope) -> Bool {
-            lhs.environmentID == rhs.environmentID && lhs.preference == rhs.preference
+            lhs.environmentID == rhs.environmentID
                 && lhs.endpointFingerprint == rhs.endpointFingerprint
         }
 
         func acceptsLegacy(_ saved: Scope) -> Bool {
-            environmentID == saved.environmentID && preference == saved.preference
+            environmentID == saved.environmentID
                 && legacyEndpointFingerprints?.contains(saved.endpointFingerprint) == true
         }
 
@@ -140,7 +140,7 @@ actor ClientReadCache {
     }
 
     func record(shell: OrchestrationShellSnapshot, lease: Lease) {
-        guard isCurrent(lease), (1...2).contains(shell.orchestrationProtocolVersion ?? 1) else { return }
+        guard isCurrent(lease), shell.orchestrationProtocolVersion == 2 else { return }
         let id = lease.scope.environmentID
         var shell = shell
         applyDeletions(to: &shell, environmentID: id)
@@ -355,7 +355,7 @@ actor ClientReadCache {
               size <= Self.maximumEnvironmentBytes,
               let data = try? Data(contentsOf: url),
               let document = try? JSONDecoder.t3.decode(Document.self, from: data), document.version == 1,
-              document.shell.map({ (1...2).contains($0.orchestrationProtocolVersion ?? 1) }) ?? true else { return nil }
+              document.shell.map({ $0.orchestrationProtocolVersion == 2 }) ?? true else { return nil }
         return document
     }
 

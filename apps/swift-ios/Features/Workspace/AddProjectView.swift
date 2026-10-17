@@ -60,9 +60,17 @@ public struct AddProjectView: View {
     @State private var cloneRequestID: UUID?
     @FocusState private var focusedField: Field?
 
-    public init(model: FeatureRootModel, onNewProjectCreated: @escaping @MainActor (String, FeatureProjectCloneIdentity?) -> Void = { _, _ in }) {
+    public init(
+        model: FeatureRootModel,
+        onNewProjectCreated: @escaping @MainActor (String, FeatureProjectCloneIdentity?) -> Void = { _, _ in },
+        initialEnvironmentID: String? = nil,
+        initialRemoteURL: String? = nil
+    ) {
         self.model = model
         self.onNewProjectCreated = onNewProjectCreated
+        _selectedEnvironmentID = State(initialValue: initialEnvironmentID)
+        _mode = State(initialValue: initialRemoteURL == nil ? .newProject : .repository)
+        _repositoryInput = State(initialValue: initialRemoteURL ?? "")
     }
 
     public var body: some View {

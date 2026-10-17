@@ -169,6 +169,8 @@ public struct FeatureProject: Identifiable, Sendable, Equatable, Hashable, Codab
     public var defaultRuntimeMode: FeatureRuntimeMode? = nil
     public var newWorktreesStartFromOrigin: Bool? = nil
     public var supportsProjectSettingsOverrides: Bool? = nil
+    public var supportsProjectProviderInstanceOverrides: Bool? = nil
+    public var providerInstanceOverrides: [String: Bool]? = nil
 
     public init(
         id: String,
@@ -288,6 +290,8 @@ public struct FeatureThreadSettlementFacts: Sendable, Equatable, Hashable, Codab
 }
 
 public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codable {
+    public var pendingSubagentRequest: OrchestrationV2PendingSubagentRequest? = nil
+    public var childThreadInputs: [OrchestrationV2SubagentRequestTarget]? = nil
     public var relationshipToParent: String? = nil
     public var isSubagent: Bool { relationshipToParent == "subagent" }
     public let id: String
@@ -496,7 +500,7 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
     }
 
     public var supportsVisitTracking: Bool {
-        inboxFacts?.orchestrationVersion == 2 && inboxFacts?.lastVisitedAtIsPresent == true
+        inboxFacts?.lastVisitedAtIsPresent == true
     }
 
     public var lastVisitedAt: Date? {
@@ -509,12 +513,12 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
 
     /// Display distinctions share existing state cases and do not imply active provider work.
     public var isWaitingForBackgroundWork: Bool {
-        inboxFacts?.orchestrationVersion == 2 && inboxFacts?.runtimeStatus == "idle"
+        inboxFacts?.runtimeStatus == "idle"
             && !FeatureThreadLifecyclePolicy.hasPendingRequest(self)
     }
 
     public var isUsageLimited: Bool {
-        inboxFacts?.orchestrationVersion == 2 && inboxFacts?.runtimeStatus == "failed"
+        inboxFacts?.runtimeStatus == "failed"
             && inboxFacts?.lastErrorClass == "usage_limit"
             && !FeatureThreadLifecyclePolicy.hasPendingRequest(self)
     }
@@ -940,6 +944,7 @@ enum FeatureScopedID {
 }
 
 public struct FeatureThreadDetail: Sendable, Equatable, Codable {
+    public var composerHandoffSource: FeatureComposerHandoffSource? = nil
     public var thread: FeatureThread
     public var messages: [FeatureMessage]
     public var approvals: [FeatureApproval]
@@ -1044,6 +1049,8 @@ public struct FeatureModel: Identifiable, Sendable, Equatable, Hashable, Codable
     public var supportsReasoning: Bool
     public var isDefault: Bool
     public var isLegacy: Bool?
+    public var isCustom: Bool? = nil
+    public var aliases: [String]? = nil
     public var options: [FeatureModelOptionDescriptor]
 
     public init(
@@ -1173,6 +1180,7 @@ public struct FeatureProviderWorkspace: Sendable, Equatable, Hashable, Codable {
 }
 
 public struct FeatureProvider: Identifiable, Sendable, Equatable, Hashable, Codable {
+    public var continuationGroupKey: String? = nil
     public let id: String
     public var name: String
     public var isAvailable: Bool
@@ -1187,6 +1195,7 @@ public struct FeatureProvider: Identifiable, Sendable, Equatable, Hashable, Coda
     public var versionAdvisory: ProviderVersionAdvisory? = nil
     public var compatibilityAdvisory: ProviderCompatibilityAdvisory? = nil
     public var updateState: ProviderUpdateState? = nil
+    public var updateRequiredModels: [ServerProviderUpdateRequiredModel]? = nil
 
     public var canUpdate: Bool {
         isInstalled == true && versionAdvisory?.status == "behind_latest"
@@ -1198,6 +1207,7 @@ public struct FeatureProvider: Identifiable, Sendable, Equatable, Hashable, Coda
     public var isEnabled: Bool? = nil
     public var isInstalled: Bool? = nil
     public var authStatus: String? = nil
+    public var status: String? = nil
     public var canLogout: Bool? = nil
     public var statusMessage: String? = nil
     public var accentColor: String? = nil

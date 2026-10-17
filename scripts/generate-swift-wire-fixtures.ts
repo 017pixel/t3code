@@ -1,4 +1,3 @@
-import * as Crypto from "effect/Crypto";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { applyOrchestrationV2ProjectionEvent } from "@t3tools/client-runtime/state/orchestration-v2-projection";
@@ -50,7 +49,7 @@ addFixture("hub-reset-credits", ServerProviderResetCredits, {
 });
 
 // Match orchestrationV2TestFixtures.ts's minimal projection, then populate linked
-// control state and timeline rows. V1 samples are frozen separately below.
+// control state and timeline rows.
 const modelSelection = { instanceId: "codex", model: "gpt-5.4" };
 const project = {
   id: "project-v2",
@@ -378,7 +377,7 @@ const providerSession = {
   cwd: project.workspaceRoot,
   model: modelSelection.model,
   // An explicit capability snapshot also catches native decoders that mistake
-  // provider sessions for V1 thread sessions.
+  // provider sessions for the native session display.
   capabilities: {
     sessions: {
       supportsMultipleProviderThreadsPerSession: true,
@@ -926,17 +925,12 @@ for (const [name, command] of commands) {
   });
 }
 
-const FrozenV1Manifest = Schema.Struct({
-  baseline: Schema.String,
-  sha256: Schema.Record(Schema.String, Schema.String),
-});
-const decodeFrozenV1Manifest = Schema.decodeUnknownEffect(Schema.fromJsonString(FrozenV1Manifest));
 class StaleWireFixturesError extends Schema.TaggedError<StaleWireFixturesError>()(
   "StaleWireFixturesError",
   { staleFixtures: Schema.Array(Schema.String) },
 ) {
   override get message(): string {
-    return "Regenerate current fixtures with `node scripts/generate-swift-wire-fixtures.ts`. Restore frozen V1 samples from the manifest baseline; do not regenerate them with V2 contracts.";
+    return "Regenerate fixtures with `node scripts/generate-swift-wire-fixtures.ts`.";
   }
 }
 const generateSwiftWireFixtures = Effect.gen(function* () {
@@ -947,31 +941,7 @@ const generateSwiftWireFixtures = Effect.gen(function* () {
     "../apps/swift-ios/Tests/Fixtures/Wire",
   );
 
-  // The V1 contracts were removed from main. Keep the exact shipped wire bytes
-  // as compatibility samples instead of copying the old orchestration schema.
-  const manifest = yield* decodeFrozenV1Manifest(
-    yield* fs.readFileString(path.resolve(outputDirectory, "frozen-v1-manifest.json")),
-  );
-  const crypto = yield* Crypto.Crypto;
   const staleFixtures: string[] = [];
-  for (const [name, digest] of Object.entries(manifest.sha256)) {
-    const contents = yield* fs
-      .readFileString(path.resolve(outputDirectory, name))
-      .pipe(Effect.orElseSucceed(() => undefined));
-    if (
-      contents === undefined ||
-      Array.from(yield* crypto.digest("SHA-256", new TextEncoder().encode(contents)), (byte) =>
-        byte.toString(16).padStart(2, "0"),
-      ).join("") !== digest
-    ) {
-      yield* Effect.logError(
-        `[swift-wire-fixtures] frozen V1 sample changed: ${name} (restore from ${manifest.baseline})`,
-      );
-      staleFixtures.push(name);
-    }
-  }
-  if (staleFixtures.length > 0) return yield* new StaleWireFixturesError({ staleFixtures });
-
   for (const [name, contents] of fixtures) {
     const filePath = path.resolve(outputDirectory, name);
     if (check) {

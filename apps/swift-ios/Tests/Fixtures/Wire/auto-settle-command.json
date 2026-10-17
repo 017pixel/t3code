@@ -1,6 +1,0 @@
-{
-  "type": "thread.auto-settle.set",
-  "commandId": "command-fixture",
-  "threadId": "thread-fixture",
-  "enabled": false
-}

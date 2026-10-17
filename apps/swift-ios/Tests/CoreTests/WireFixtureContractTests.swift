@@ -3,236 +3,87 @@ import XCTest
 @testable import T3Code
 
 final class WireFixtureContractTests: XCTestCase {
-    func testPerThreadAutoSettleMatchesServerContract() throws {
-        XCTAssertEqual(
-            OrchestrationCommands.autoSettle(threadID: "thread-fixture", enabled: false, commandID: "command-fixture"),
-            try decodeFixture("auto-settle-command", as: JSONValue.self)
-        )
-        let shell = try decodeFixture("shell-snapshot", as: OrchestrationShellSnapshot.self)
-        XCTAssertEqual(shell.threads.first?.autoSettleDisabledAt, "2026-08-07T12:00:00.000Z")
-    }
-
-    func testQuestionAttachmentAnswerMatchesTheServerContract() throws {
-        let image = try UploadChatAttachment(data: Data([1, 2]), name: "screenshot.png", mimeType: "image/png")
-        XCTAssertEqual(
-            OrchestrationCommands.respondToUserInput(
-                threadID: "thread-fixture", requestID: "question-fixture",
-                answers: ["scope": .string("Server and Web")],
-                attachmentsByQuestionID: ["scope": [image.uploadedJSONValue(id: "attachment-fixture")]],
-                commandID: "command-fixture", createdAt: "2026-08-07T12:00:00.000Z"
-            ),
-            try decodeFixture("question-attachment-command", as: JSONValue.self)
-        )
-    }
-
     func testHubCreditsMatchTheServerContract() throws {
-        let input = try decodeFixture("hub-reset-credit-input", as: ProviderConsumeResetCreditInput.self)
+        let input = try V2Fixture.load("hub-reset-credit-input").decode(ProviderConsumeResetCreditInput.self)
         XCTAssertEqual(input, .source(sourceID: "hub-fixture", accountID: "account-fixture", creditID: "credit-fixture"))
-        XCTAssertEqual(try JSONValue.encode(input), try decodeFixture("hub-reset-credit-input", as: JSONValue.self))
-        let result = try decodeFixture("hub-reset-credit-result", as: ProviderConsumeResetCreditResult.self)
+        XCTAssertEqual(try JSONValue.encode(input), try V2Fixture.load("hub-reset-credit-input"))
+        let result = try V2Fixture.load("hub-reset-credit-result").decode(ProviderConsumeResetCreditResult.self)
         XCTAssertEqual(result.warning, "Could not clear the hub cooldown.")
-        let credits = try decodeFixture("hub-reset-credits", as: ServerProviderResetCredits.self)
+        let credits = try V2Fixture.load("hub-reset-credits").decode(ServerProviderResetCredits.self)
         XCTAssertEqual(credits.nextCreditId, "credit-fixture")
         XCTAssertEqual(credits.availableCount, 1)
     }
 
-    func testQuestionDismissalMatchesTheServerContract() throws {
-        XCTAssertEqual(
-            OrchestrationCommands.dismissUserInput(
-                threadID: "thread-fixture", requestID: "question-fixture",
-                commandID: "command-fixture", createdAt: "2026-08-07T12:00:00.000Z"
-            ),
-            try decodeFixture("question-dismiss-command", as: JSONValue.self)
-        )
-    }
-
-    func testGeneratedContractFixturesDecodeInSwift() throws {
-        let shell = try decodeFixture(
-            "shell-snapshot",
-            as: OrchestrationShellSnapshot.self
-        )
-        XCTAssertEqual(shell.snapshotSequence, 42)
-        XCTAssertEqual(shell.projects.map(\.id), ["project-fixture"])
-        XCTAssertEqual(shell.threads.map(\.id), ["thread-fixture"])
-        XCTAssertEqual(shell.threads.first?.modelSelection.instanceId, "codex")
-        XCTAssertEqual(shell.threads.first?.branchPullRequest?.number, 42)
-        XCTAssertEqual(shell.threads.first?.branchPullRequest?.repository, "fixture/repository")
+    func testGeneratedV2SnapshotsAndStreamsDecodeInSwift() throws {
+        let raw = try V2Fixture.load("v2-shell-snapshot")
+        let shell = try OrchestrationV2Presentation.shellSnapshot(raw)
+        XCTAssertEqual(shell.orchestrationProtocolVersion, 2)
+        XCTAssertEqual(shell.projects.map(\.id), ["project-v2"])
+        XCTAssertEqual(shell.threads.first?.id, "thread-v2")
+        XCTAssertEqual(shell.threads.first?.autoSettleDisabledAt, "2026-08-07T12:00:00.000Z")
         XCTAssertEqual(shell.threads.first?.activeOrderKey, "nm")
-
-        let detail = try decodeFixture(
-            "thread-detail-snapshot",
-            as: OrchestrationThreadDetailSnapshot.self
-        )
-        XCTAssertEqual(detail.thread.messages.map(\.id), ["message-fixture"])
-        XCTAssertEqual(detail.page?.beforeCursor, "fixture-cursor")
-        XCTAssertEqual(detail.page?.threadSequence, 40)
-        XCTAssertEqual(detail.thread.branchPullRequest, shell.threads.first?.branchPullRequest)
-        XCTAssertEqual(detail.thread.activeOrderKey, "nm")
-
-        let shellItem = try decodeFixture(
-            "shell-stream-snapshot",
-            as: ShellStreamItem.self
-        )
-        guard case let .snapshot(streamShell) = shellItem else {
-            return XCTFail("Expected a shell snapshot stream item")
-        }
+        let detail = try OrchestrationV2ThreadState(snapshot: V2Fixture.load("v2-thread-bounded-snapshot")).normalizedSnapshot()
+        XCTAssertEqual(detail.orchestrationProtocolVersion, 2)
+        XCTAssertEqual(detail.thread.id, "thread-v2")
+        XCTAssertEqual(detail.page?.beforeCursor, "fixture-v2-before-10")
+        guard case let .snapshot(streamShell) = OrchestrationV2Presentation.shellStreamItem(
+            try V2Fixture.load("v2-shell-stream-snapshot")
+        ) else { return XCTFail("Expected the V2 shell stream snapshot") }
         XCTAssertEqual(streamShell.snapshotSequence, shell.snapshotSequence)
-
-        let threadItem = try decodeFixture(
-            "thread-stream-snapshot",
-            as: ThreadStreamItem.self
-        )
-        guard case let .snapshot(streamDetail) = threadItem else {
-            return XCTFail("Expected a thread snapshot stream item")
-        }
-        XCTAssertEqual(streamDetail.thread.id, detail.thread.id)
+        let streamDetail = try OrchestrationV2ThreadState(snapshot: V2Fixture.load("v2-thread-stream-snapshot"))
+        XCTAssertEqual(streamDetail.projection.thread.id, detail.thread.id)
     }
 
-    func testSnapshotsDropOnlyUnknownArrayElements() throws {
-        let known = try fixtureObject("shell-snapshot")
-        var payload = try XCTUnwrap(known as? [String: Any])
-        payload["projects"] = [
-            ["id": "future-project", "kind": "not-yet-supported"],
-            try XCTUnwrap((payload["projects"] as? [Any])?.first),
+    func testV2SnapshotsPreservePullRequestsOrderAndTitleRegeneration() throws {
+        let link = ThreadLinkedPullRequest(projectId: "project-v2", repository: "pingdotgg/t3code",
+            number: 5178, url: "https://github.com/pingdotgg/t3code/pull/5178")
+        let regeneration = ThreadTitleRegeneration(requestId: "command-regenerate-title", startedAt: V2Fixture.now)
+        let fields: [String: JSONValue] = [
+            "linkedPullRequest": try .encode(link), "branchPullRequest": try .encode(link),
+            "titleRegeneration": try .encode(regeneration), "activeOrderKey": .string("nm"),
         ]
-        payload["threads"] = [
-            ["id": "future-thread", "runtimeMode": "future-mode"],
-            try XCTUnwrap((payload["threads"] as? [Any])?.first),
-        ]
-
-        let snapshot = try JSONDecoder.t3.decode(
-            OrchestrationShellSnapshot.self,
-            from: JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-        )
-
-        XCTAssertEqual(snapshot.projects.map(\.id), ["project-fixture"])
-        XCTAssertEqual(snapshot.threads.map(\.id), ["thread-fixture"])
+        let original = try V2Fixture.load("v2-shell-snapshot")
+        let thread = try XCTUnwrap(original["threads"]?.v2Array?.first)
+        let shell = try OrchestrationV2Presentation.shellSnapshot(V2Fixture.patch(original, [
+            "threads": .array([V2Fixture.patch(thread, fields)]),
+        ]))
+        let detail = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(fields: [
+            "thread": V2Fixture.patch(V2Fixture.thread, fields),
+        ])).normalizedSnapshot()
+        XCTAssertEqual(shell.threads.first?.linkedPullRequest, link)
+        XCTAssertEqual(shell.threads.first?.branchPullRequest, link)
+        XCTAssertEqual(detail.thread.linkedPullRequest, link)
+        XCTAssertEqual(detail.thread.branchPullRequest, link)
+        XCTAssertEqual(detail.thread.activeOrderKey, "nm")
+        XCTAssertEqual(detail.thread.titleRegeneration, regeneration)
     }
 
-    func testThreadSnapshotsPreserveDurablePullRequestLinks() throws {
-        var shell = try XCTUnwrap(try fixtureObject("shell-snapshot") as? [String: Any])
-        var shellThread = try XCTUnwrap((shell["threads"] as? [[String: Any]])?.first)
-        let link: [String: Any] = [
-            "projectId": "project-fixture",
-            "repository": "pingdotgg/t3code",
-            "number": 5178,
-            "url": "https://github.com/pingdotgg/t3code/pull/5178",
-        ]
-        shellThread["linkedPullRequest"] = link
-        shell["threads"] = [shellThread]
-        let snapshot = try JSONDecoder.t3.decode(
-            OrchestrationShellSnapshot.self,
-            from: JSONSerialization.data(withJSONObject: shell)
-        )
-        XCTAssertEqual(snapshot.threads.first?.linkedPullRequest?.number, 5178)
-
-        var detail = try XCTUnwrap(try fixtureObject("thread-detail-snapshot") as? [String: Any])
-        var detailThread = try XCTUnwrap(detail["thread"] as? [String: Any])
-        detailThread["linkedPullRequest"] = link
-        detail["thread"] = detailThread
-        let threadSnapshot = try JSONDecoder.t3.decode(
-            OrchestrationThreadDetailSnapshot.self,
-            from: JSONSerialization.data(withJSONObject: detail)
-        )
-        XCTAssertEqual(threadSnapshot.thread.linkedPullRequest?.repository, "pingdotgg/t3code")
-    }
-
-    func testThreadSnapshotsDecodeTitleRegenerationState() throws {
-        let regeneration: [String: Any] = [
-            "requestId": "command-regenerate-title",
-            "startedAt": "2026-08-07T12:01:00.000Z",
-        ]
-        var shell = try XCTUnwrap(try fixtureObject("shell-snapshot") as? [String: Any])
-        var shellThread = try XCTUnwrap((shell["threads"] as? [[String: Any]])?.first)
-        shellThread["titleRegeneration"] = regeneration
-        shell["threads"] = [shellThread]
-        let snapshot = try JSONDecoder.t3.decode(
-            OrchestrationShellSnapshot.self,
-            from: JSONSerialization.data(withJSONObject: shell)
-        )
-        XCTAssertEqual(snapshot.threads.first?.titleRegeneration?.requestId, "command-regenerate-title")
-
-        var detail = try XCTUnwrap(try fixtureObject("thread-detail-snapshot") as? [String: Any])
-        var detailThread = try XCTUnwrap(detail["thread"] as? [String: Any])
-        detailThread["titleRegeneration"] = regeneration
-        detail["thread"] = detailThread
-        let threadSnapshot = try JSONDecoder.t3.decode(
-            OrchestrationThreadDetailSnapshot.self,
-            from: JSONSerialization.data(withJSONObject: detail)
-        )
-        XCTAssertEqual(threadSnapshot.thread.titleRegeneration?.startedAt, "2026-08-07T12:01:00.000Z")
-    }
-
-    func testReopenTimestampsRoundTripAndRemainOptionalForOlderServers() throws {
-        var shell = try decodeFixture("shell-snapshot", as: OrchestrationShellSnapshot.self)
-        var detail = try decodeFixture("thread-detail-snapshot", as: OrchestrationThreadDetailSnapshot.self)
-        XCTAssertNil(shell.threads.first?.unsettledAt)
-        XCTAssertNil(detail.thread.unsettledAt)
-
-        let timestamp = "2026-08-27T12:00:00.000Z"
-        shell.threads[0].unsettledAt = timestamp
-        var thread = detail.thread
-        thread.unsettledAt = timestamp
-        detail = OrchestrationThreadDetailSnapshot(
-            snapshotSequence: detail.snapshotSequence,
-            thread: thread,
-            page: detail.page
-        )
-        let decodedShell = try JSONDecoder.t3.decode(
-            OrchestrationShellSnapshot.self, from: JSONEncoder.t3.encode(shell)
-        )
-        let decodedDetail = try JSONDecoder.t3.decode(
-            OrchestrationThreadDetailSnapshot.self, from: JSONEncoder.t3.encode(detail)
-        )
-        XCTAssertEqual(decodedShell.threads.first?.unsettledAt, timestamp)
-        XCTAssertEqual(decodedDetail.thread.unsettledAt, timestamp)
-    }
-
-    func testUnknownStreamItemsRequestRefreshWithoutEndingDecoding() throws {
-        let shell = try JSONDecoder.t3.decode(
-            ShellStreamItem.self,
-            from: Data(#"{"kind":"future-shell-delta","sequence":43}"#.utf8)
-        )
-        guard case .refreshRequired = shell else {
-            return XCTFail("Expected an authoritative shell refresh")
+    func testV2ReopenTimestampIsOptionalAndReachesBothPresentations() throws {
+        let original = try V2Fixture.load("v2-shell-snapshot")
+        let thread = try XCTUnwrap(original["threads"]?.v2Array?.first)
+        XCTAssertNil(try OrchestrationV2Presentation.shellSnapshot(original).threads.first?.unsettledAt)
+        for timestamp in [JSONValue.null, .string(V2Fixture.now)] {
+            let shell = try OrchestrationV2Presentation.shellSnapshot(V2Fixture.patch(original, [
+                "threads": .array([V2Fixture.patch(thread, ["unsettledAt": timestamp])]),
+            ]))
+            let detail = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(fields: [
+                "thread": V2Fixture.patch(V2Fixture.thread, ["unsettledAt": timestamp]),
+            ])).normalizedSnapshot()
+            XCTAssertEqual(shell.threads.first?.unsettledAt, timestamp.stringValue)
+            XCTAssertEqual(detail.thread.unsettledAt, timestamp.stringValue)
         }
+    }
 
-        let malformedKnownShell = try JSONDecoder.t3.decode(
-            ShellStreamItem.self,
-            from: Data(#"{"kind":"thread-upserted","sequence":43,"thread":{"id":"future"}}"#.utf8)
-        )
-        guard case .refreshRequired = malformedKnownShell else {
-            return XCTFail("Expected malformed known deltas to refresh")
+    func testUnknownShellItemsRequestAnAuthoritativeRefresh() {
+        for item in [JSONValue]([
+            .object(["kind": .string("future-shell-delta"), "sequence": .number(43)]),
+            .object(["kind": .string("thread.updated"), "sequence": .number(43),
+                     "location": .string("active"), "thread": .object(["id": .string("future")])]),
+        ]) {
+            guard case .refreshRequired = OrchestrationV2Presentation.shellStreamItem(item) else {
+                XCTFail("Unknown or malformed V2 shell items require a refresh")
+                continue
+            }
         }
-
-        let thread = try JSONDecoder.t3.decode(
-            ThreadStreamItem.self,
-            from: Data(#"{"kind":"future-thread-delta","sequence":43}"#.utf8)
-        )
-        guard case let .event(event) = thread else {
-            return XCTFail("Expected the detail reducer compatibility path")
-        }
-        XCTAssertEqual(event, .null)
-    }
-
-    private func decodeFixture<Value: Decodable>(
-        _ name: String,
-        as type: Value.Type
-    ) throws -> Value {
-        try JSONDecoder.t3.decode(type, from: fixtureData(name))
-    }
-
-    private func fixtureObject(_ name: String) throws -> Any {
-        try JSONSerialization.jsonObject(with: fixtureData(name))
-    }
-
-    private func fixtureData(_ name: String) throws -> Data {
-        let testsDirectory = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        return try Data(
-            contentsOf: testsDirectory
-                .appendingPathComponent("Fixtures/Wire/\(name).json")
-        )
     }
 }

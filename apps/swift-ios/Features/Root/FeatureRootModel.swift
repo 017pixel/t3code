@@ -456,7 +456,8 @@ public final class FeatureRootModel {
                 branch: request.branch,
                 worktreePath: request.worktreePath,
                 startFromOrigin: request.startFromOrigin,
-                draftKey: FeatureComposerDraftStore.newTaskKey(project: project, in: snapshot)
+                draftKey: FeatureComposerDraftStore.newTaskKey(project: project, in: snapshot),
+                pullRequestReference: request.pullRequestReference
             ),
             context: request.context
         )
@@ -478,7 +479,8 @@ public final class FeatureRootModel {
                 startFromOrigin: request.startFromOrigin,
                 attachments: uploads,
                 identity: identity,
-                context: request.context
+                context: request.context,
+                pullRequestReference: request.pullRequestReference
             )
             if !(await completeQueuedSubmission(queued)) {
                 scheduleOutboxRetry()
@@ -2230,7 +2232,8 @@ public final class FeatureRootModel {
                             startFromOrigin: creation.startFromOrigin,
                             attachments: uploads,
                             identity: submission.identity,
-                            context: submission.context
+                            context: submission.context,
+                            pullRequestReference: creation.pullRequestReference
                         )
                         guard !Task.isCancelled,
                               outboxGeneration == generation else { return false }
@@ -2295,7 +2298,7 @@ public final class FeatureRootModel {
         environmentID: String,
         snapshot: FeatureSnapshot
     ) -> Bool {
-        if error is EnvironmentPermissionDeniedError { return false }
+        if error is EnvironmentPermissionDeniedError || error is OrchestrationProtocolError { return false }
         if error is CancellationError || error is URLError { return true }
         if let rpcError = error as? RPCError {
             switch rpcError {

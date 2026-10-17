@@ -62,6 +62,8 @@ enum CodexMarkdownDirectives {
     private static let artifactPrefix = "::artifact-template{"
     private static let fileCitationPrefix = ":codex-file-citation{"
     private static let fileCitationCharacters = Array(fileCitationPrefix)
+    private static let followUpPrefix = ":codex-followup["
+    private static let followUpCharacters = Array(followUpPrefix)
 
     static func artifactTemplate(from line: String) -> CodexArtifactTemplate? {
         guard line.prefix(while: { $0 == " " }).count < 4, line.first != "\t" else {
@@ -95,9 +97,9 @@ enum CodexMarkdownDirectives {
     }
 
     static func replacingFileCitations(in source: String) -> String {
-        // Most messages have no citations. Keep them out of the character-by-character
+        // Most messages have no Codex directives. Keep them out of the character-by-character
         // link and code scanner, including incomplete Markdown arriving in a stream.
-        guard source.contains(fileCitationPrefix) else { return source }
+        guard source.contains(fileCitationPrefix) || source.contains(followUpPrefix) else { return source }
         let lines = source.components(separatedBy: "\n")
         var fence: Character?
         var fenceCount = 0
@@ -113,14 +115,17 @@ enum CodexMarkdownDirectives {
             }
             let leadingSpaces = line.prefix(while: { $0 == " " }).count
             guard fence == nil, leadingSpaces < 4, line.first != "\t",
-                  line.contains(fileCitationPrefix) else {
+                  line.contains(fileCitationPrefix) || line.contains(followUpPrefix) else {
                 return line
             }
-            return replacingCitationsInInlineMarkdown(line)
+            return replacingInlineDirectives(line)
         }.joined(separator: "\n")
     }
 
-    private static func replacingCitationsInInlineMarkdown(_ line: String) -> String {
+    private static func replacingInlineDirectives(
+        _ line: String,
+        allowsCitations: Bool = true
+    ) -> String {
         let characters = Array(line)
         var result = ""
         var cursor = 0
@@ -128,7 +133,16 @@ enum CodexMarkdownDirectives {
         while cursor < characters.count {
             if characters[cursor] == "[", !isEscaped(at: cursor, in: characters),
                let end = markdownLinkEnd(in: characters, from: cursor) {
-                result += String(characters[cursor..<end])
+                if line.contains(followUpPrefix),
+                   let labelEnd = closingBracket(in: characters, from: cursor) {
+                    let label = replacingInlineDirectives(
+                        String(characters[(cursor + 1)..<labelEnd]),
+                        allowsCitations: false
+                    )
+                    result += "[" + label + String(characters[labelEnd..<end])
+                } else {
+                    result += String(characters[cursor..<end])
+                }
                 cursor = end
                 continue
             }
@@ -146,8 +160,15 @@ enum CodexMarkdownDirectives {
                 }
             }
             if characters[cursor] == ":", !isEscaped(at: cursor, in: characters),
+               characters[cursor...].starts(with: followUpCharacters),
+               let followUp = followUp(in: characters, from: cursor) {
+                result += replacingInlineDirectives(followUp.label, allowsCitations: allowsCitations)
+                cursor = followUp.end + 1
+                continue
+            }
+            if allowsCitations, characters[cursor] == ":", !isEscaped(at: cursor, in: characters),
                characters[cursor...].starts(with: fileCitationCharacters),
-               let closing = directiveEnd(in: characters, from: cursor) {
+               let closing = directiveEnd(in: characters, after: cursor + fileCitationCharacters.count) {
                 let directive = String(characters[cursor...closing])
                 if let replacement = fileCitation(from: directive) {
                     result += replacement
@@ -158,6 +179,22 @@ enum CodexMarkdownDirectives {
             result.append(characters[cursor]); cursor += 1
         }
         return result
+    }
+
+    private static func followUp(in chars: [Character], from start: Int) -> (label: String, end: Int)? {
+        let opening = start + followUpCharacters.count - 1
+        guard let labelEnd = closingBracket(in: chars, from: opening),
+              labelEnd + 1 < chars.count, chars[labelEnd + 1] == "{",
+              let end = directiveEnd(in: chars, after: labelEnd + 2),
+              let values = attributes(in: String(chars[(labelEnd + 2)..<end])),
+              let prompt = values["prompt"],
+              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let label = String(chars[(opening + 1)..<labelEnd])
+        guard let parsed = try? AttributedString(
+            markdown: label,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ), !String(parsed.characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (label, end)
     }
 
     static func fileCitation(from directive: String) -> String? {
@@ -286,8 +323,8 @@ enum CodexMarkdownDirectives {
         return nil
     }
 
-    private static func directiveEnd(in chars: [Character], from start: Int) -> Int? {
-        var cursor = start + fileCitationCharacters.count
+    private static func directiveEnd(in chars: [Character], after start: Int) -> Int? {
+        var cursor = start
         var quote: Character?
         while cursor < chars.count {
             let character = chars[cursor]

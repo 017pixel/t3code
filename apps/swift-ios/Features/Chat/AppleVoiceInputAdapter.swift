@@ -39,6 +39,7 @@ private struct AppleVoiceAudioSessionConfiguration {
     let category: AVAudioSession.Category
     let mode: AVAudioSession.Mode
     let options: AVAudioSession.CategoryOptions
+    let preferredInput: AVAudioSessionPortDescription?
 }
 
 @available(iOS 26.0, *)
@@ -53,6 +54,7 @@ private final class AppleVoiceInputAdapter: FeatureVoiceInputAdapter {
     private var ownedRecordingURLs = Set<URL>()
     private var previousAudioSessionConfiguration: AppleVoiceAudioSessionConfiguration?
     private var audioSessionWasConfigured = false
+    private var preferredInputWasTouched = false
     private var previousIdleTimerDisabled: Bool?
 
     var isSupported: Bool { SpeechTranscriber.isAvailable }
@@ -95,12 +97,14 @@ private final class AppleVoiceInputAdapter: FeatureVoiceInputAdapter {
         previousAudioSessionConfiguration = AppleVoiceAudioSessionConfiguration(
             category: audioSession.category,
             mode: audioSession.mode,
-            options: audioSession.categoryOptions
+            options: audioSession.categoryOptions,
+            preferredInput: audioSession.preferredInput
         )
         do {
-            try audioSession.setCategory(.record, mode: .measurement)
+            try audioSession.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
             audioSessionWasConfigured = true
             try audioSession.setActive(true)
+            selectPreferredMicrophone()
             let recorder = try AVAudioRecorder(url: url, settings: [
                 AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
                 AVSampleRateKey: 44_100,
@@ -188,6 +192,10 @@ private final class AppleVoiceInputAdapter: FeatureVoiceInputAdapter {
             self.previousAudioSessionConfiguration = nil
             return
         }
+        if preferredInputWasTouched {
+            try? audioSession.setPreferredInput(previousAudioSessionConfiguration.preferredInput)
+            preferredInputWasTouched = false
+        }
         try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
         try? audioSession.setCategory(
             previousAudioSessionConfiguration.category,
@@ -196,5 +204,21 @@ private final class AppleVoiceInputAdapter: FeatureVoiceInputAdapter {
         )
         self.previousAudioSessionConfiguration = nil
         audioSessionWasConfigured = false
+    }
+
+    private func selectPreferredMicrophone() {
+        // iOS only exposes connected inputs after the recording session is configured.
+        let ports = audioSession.availableInputs ?? []
+        let inputs = ports.map {
+            FeatureMicrophoneInput(uid: $0.uid, name: $0.portName, portType: $0.portType.rawValue)
+        }
+        let preferences = FeatureMicrophonePreferences.shared
+        preferences.remember(inputs)
+        guard let preferred = FeatureMicrophonePriority.preferredInput(inputs, order: preferences.entries),
+              let port = ports.first(where: { $0.uid == preferred.uid }),
+              port.uid != audioSession.preferredInput?.uid else { return }
+        preferredInputWasTouched = true
+        // A route can disappear between enumeration and selection. Keep the iOS route in that case.
+        try? audioSession.setPreferredInput(port)
     }
 }

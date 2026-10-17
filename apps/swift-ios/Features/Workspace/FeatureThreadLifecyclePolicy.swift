@@ -1,9 +1,9 @@
 import Foundation
 
-/// Shared by list classification and lifecycle actions. V1 retains its conservative guards.
+/// Shared by list classification and lifecycle actions.
 enum FeatureThreadLifecyclePolicy {
     static func canArchive(_ thread: FeatureThread) -> Bool {
-        if let facts = thread.inboxFacts, facts.orchestrationVersion == 2 {
+        if let facts = thread.inboxFacts {
             if facts.runtimeStatus == "queued" { return facts.activeRunID == nil }
             return !["preparing", "starting", "running"].contains(facts.runtimeStatus ?? "")
         }
@@ -15,27 +15,28 @@ enum FeatureThreadLifecyclePolicy {
     }
 
     static func hasSettlementActivityBlock(_ thread: FeatureThread, at now: Date) -> Bool {
+        if thread.pendingSubagentRequest != nil { return true }
         // V2 validates all runs and request response capabilities at dispatch.
         // Its shell cannot distinguish a dismissible async question or an automatic queued run.
-        if thread.inboxFacts?.orchestrationVersion == 2 { return false }
+        if thread.inboxFacts != nil { return false }
         return hasHardSettlementActivityBlock(thread) || hasQueuedTurnStart(thread, at: now)
     }
 
     static func hasHardSettlementActivityBlock(_ thread: FeatureThread) -> Bool {
-        if thread.inboxFacts?.orchestrationVersion == 2 { return false }
-        guard let facts = thread.settlementFacts else {
-            return [.queued, .working, .monitoring, .waitingForApproval, .waitingForInput].contains(thread.state)
-        }
-        return facts.hasPendingApprovals || facts.hasPendingUserInput
-            || facts.sessionStatus == "starting" || facts.sessionStatus == "running"
+        if thread.pendingSubagentRequest != nil { return true }
+        guard thread.inboxFacts == nil else { return false }
+        return hasPendingRequest(thread)
+            || [.queued, .working, .monitoring].contains(thread.state)
     }
 
     static func isSettled(_ thread: FeatureThread) -> Bool {
-        thread.hasPendingLocalMessages != true && thread.effectiveSettlementOverride == .settled
+        thread.pendingSubagentRequest == nil
+            && thread.hasPendingLocalMessages != true && thread.effectiveSettlementOverride == .settled
     }
 
     static func hasPendingRequest(_ thread: FeatureThread) -> Bool {
-        thread.settlementFacts?.hasPendingApprovals == true
+        thread.pendingSubagentRequest != nil
+            || thread.settlementFacts?.hasPendingApprovals == true
             || thread.settlementFacts?.hasPendingUserInput == true
             || thread.state == .waitingForApproval || thread.state == .waitingForInput
     }
@@ -46,28 +47,18 @@ enum FeatureThreadLifecyclePolicy {
 
     static func hasQueuedTurnStart(_ thread: FeatureThread, at now: Date) -> Bool {
         let inbox = thread.inboxFacts
-        if inbox?.orchestrationVersion == 2,
-           ["preparing", "queued", "starting"].contains(inbox?.runtimeStatus ?? "") { return true }
-        guard let facts = thread.settlementFacts,
-              inbox?.orchestrationVersion == 2 || facts.sessionStatus != "error",
-              let messageAt = facts.latestUserMessageAt,
+        if ["preparing", "queued", "starting"].contains(inbox?.runtimeStatus ?? "") { return true }
+        guard let messageAt = thread.settlementFacts?.latestUserMessageAt,
               abs(now.timeIntervalSince(messageAt)) <= 120 else { return false }
-        if let inbox, inbox.orchestrationVersion == 2 {
-            guard inbox.latestRunID != nil else { return true }
-            if inbox.latestRunHasInvalidTimestamp == true { return false }
-            return [inbox.latestRunRequestedAt, inbox.latestRunStartedAt, inbox.latestRunCompletedAt]
-                .allSatisfy { $0.map { $0 < messageAt } ?? true }
-        }
-        guard let turn = facts.latestTurn else { return true }
-        if turn.requestedAtIsInvalid || turn.startedAtIsInvalid || turn.completedAtIsInvalid { return false }
-        return [turn.requestedAt, turn.startedAt, turn.completedAt]
+        guard let inbox, inbox.latestRunID != nil else { return true }
+        if inbox.latestRunHasInvalidTimestamp == true { return false }
+        return [inbox.latestRunRequestedAt, inbox.latestRunStartedAt, inbox.latestRunCompletedAt]
             .allSatisfy { $0.map { $0 < messageAt } ?? true }
     }
 
     static func queuedSettlementBoundary(_ thread: FeatureThread, after now: Date) -> Date? {
         // These states clear on the next shell update, not after a timestamp grace period.
-        if thread.inboxFacts?.orchestrationVersion == 2,
-           ["preparing", "queued", "starting"].contains(thread.inboxFacts?.runtimeStatus ?? "") { return nil }
+        if ["preparing", "queued", "starting"].contains(thread.inboxFacts?.runtimeStatus ?? "") { return nil }
         guard hasQueuedTurnStart(thread, at: now), let messageAt = thread.settlementFacts?.latestUserMessageAt else {
             return nil
         }
@@ -79,8 +70,7 @@ enum FeatureThreadLifecyclePolicy {
         guard let until = thread.snoozedUntil, until > now else { return false }
         if hasPendingRequest(thread) { return false }
         let facts = thread.inboxFacts
-        let failed = facts?.orchestrationVersion == 2
-            ? facts?.runtimeStatus == "failed" : thread.state == .failed
+        let failed = facts.map { $0.runtimeStatus == "failed" } ?? (thread.state == .failed)
         if failed {
             guard let snoozedAt = thread.snoozedAt else { return false }
             let failureAt = facts?.runtimeUpdatedAt ?? thread.attentionAt
@@ -93,7 +83,7 @@ enum FeatureThreadLifecyclePolicy {
     }
 
     static func hasUnseenCompletion(_ thread: FeatureThread) -> Bool {
-        guard let facts = thread.inboxFacts, facts.orchestrationVersion == 2,
+        guard let facts = thread.inboxFacts,
               let completedAt = facts.latestRunCompletedAt,
               let visitedAt = facts.lastVisitedAt, !visitedAt.isEmpty else { return false }
         guard let visitedAt = date(visitedAt) else { return true }

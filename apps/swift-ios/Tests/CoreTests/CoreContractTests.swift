@@ -106,14 +106,14 @@ final class CoreContractTests: XCTestCase {
         let config = try JSONDecoder.t3.decode(
             ServerConfigSnapshot.self,
             from: Data(
-                #"{"providers":[],"environment":{"environmentId":"wire-environment","label":"Studio","platform":{"os":"darwin","arch":"arm64"},"serverVersion":"1.0.0","capabilities":{"repositoryIdentity":true,"threadAutoSettlement":true}}}"#.utf8
+                #"{"providers":[],"environment":{"environmentId":"wire-environment","label":"Studio","platform":{"os":"darwin","arch":"arm64"},"serverVersion":"1.0.0", "orchestrationProtocolVersion": 2,"capabilities":{"repositoryIdentity":true,"threadAutoSettlement":true}}}"#.utf8
             )
         )
         let supported = try XCTUnwrap(config.environment)
         let absent = try JSONDecoder.t3.decode(
             EnvironmentDescriptor.self,
             from: Data(
-                #"{"environmentId":"older-server","label":"Old","platform":{"os":"darwin","arch":"arm64"},"serverVersion":"0.9.0","capabilities":{"repositoryIdentity":true}}"#.utf8
+                #"{"environmentId":"older-server","label":"Old","platform":{"os":"darwin","arch":"arm64"},"serverVersion":"0.9.0", "orchestrationProtocolVersion": 2,"capabilities":{"repositoryIdentity":true}}"#.utf8
             )
         )
 

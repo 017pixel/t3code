@@ -442,7 +442,7 @@ private actor T3ConnectNativeHTTPTransport: HTTPTransport {
                   "environmentId": "\(descriptorEnvironmentID)",
                   "label": "Managed Studio",
                   "platform": {"os": "darwin", "arch": "arm64"},
-                  "serverVersion": "1.0.0",
+                  "serverVersion": "1.0.0", "orchestrationProtocolVersion": 2,
                   "capabilities": {"repositoryIdentity": true}
                 }
                 """.utf8
@@ -461,7 +461,7 @@ private actor T3ConnectNativeHTTPTransport: HTTPTransport {
             )
         case "/api/orchestration/shell":
             body = Data(
-                #"{"snapshotSequence":1,"projects":[],"threads":[],"updatedAt":"2026-08-01T12:00:00.000Z"}"#.utf8
+                #"{"schemaVersion":1,"snapshotSequence":1,"projects":[],"threads":[],"archivedThreads":[]}"#.utf8
             )
         case "/api/auth/websocket-ticket":
             body = Data(

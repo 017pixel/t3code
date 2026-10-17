@@ -24,8 +24,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         subsystem: "codes.t3.swift-ios",
         category: "T3Connect"
     )
-    private static let initialThreadUserTurnLimit = 10
-    private static let olderThreadPageUserTurnLimit = 20
     private static let projectFaviconFallbackMarker = "project-favicon-missing"
     private static let sourceControlStatusStreamTimeoutSeconds: TimeInterval = 30
 
@@ -65,10 +63,10 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     private var client: T3Client?
     private var latestShell: OrchestrationShellSnapshot?
     private var environmentClients: [String: T3Client] = [:]
-    private var orchestrationVersions: [String: Int] = [:]
-    private var orchestrationPreferenceGenerations: [String: Int] = [:]
+    private var environmentLoadGenerations: [String: Int] = [:]
     private var shellsByEnvironmentID: [String: OrchestrationShellSnapshot] = [:]
     private var shellProjectionCache: [String: NativeShellProjection] = [:]
+    private var subagentRequestIndexes: [String: (sequence: Int, sources: [OrchestrationV2SubagentRequestSource], index: OrchestrationV2SubagentRequests)] = [:]
     private var indexedShellMembership: [NativeShellMembership]?
     private var indexedProvisionalRoutes: [String: ProvisionalThreadRoute] = [:]
     private var archivedThreadsByEnvironmentID: [String: [FeatureThread]] = [:]
@@ -147,8 +145,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     private var activeThreadSequence: Int?
     private var activeThreadPage: FeatureThreadPage?
     private var threadHistoryEpoch = 0
-    private var detailSnapshotRequiredAfterEpoch: Int?
-    private var pendingOlderThreadPage: PendingOlderThreadPage?
 
     nonisolated static let defaultAggregateRefreshInterval: Duration = .seconds(5)
     nonisolated static let defaultAggregateIdleRefreshInterval: Duration = .seconds(10)
@@ -247,7 +243,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     func initialSnapshot() async throws -> FeatureSnapshot {
         routeSnapshotLoads += 1
         defer { routeSnapshotLoads -= 1 }
-        let preferenceGenerations = orchestrationPreferenceGenerations
+        let loadGenerations = environmentLoadGenerations
         let environments = try await runtime.environments()
         guard let activeClient = try await runtime.activeClient() else {
             await clearActiveEnvironment()
@@ -278,7 +274,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 guard let self else { return }
                 self.routeSnapshotLoads += 1
                 defer { self.routeSnapshotLoads -= 1 }
-                let loads = await self.loadEnvironmentShells(environments.filter(\.isEnabled), preferenceGenerations: preferenceGenerations)
+                let loads = await self.loadEnvironmentShells(environments.filter(\.isEnabled), loadGenerations: loadGenerations)
                 guard !Task.isCancelled, self.isCurrentSession(client: activeClient, generation: generation) else { return }
                 self.reconcileEnvironmentLoads(loads, savedEnvironments: environments)
                 self.latestShell = self.shellsByEnvironmentID[environment.id]
@@ -293,7 +289,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             }
             return snapshot
         }
-        let loads = await loadEnvironmentShells(environments.filter(\.isEnabled), preferenceGenerations: preferenceGenerations)
+        let loads = await loadEnvironmentShells(environments.filter(\.isEnabled), loadGenerations: loadGenerations)
         guard isCurrentSession(client: activeClient, generation: generation) else {
             throw CancellationError()
         }
@@ -359,7 +355,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     func backgroundSnapshot() async throws -> FeatureSnapshot {
         routeSnapshotLoads += 1
         defer { routeSnapshotLoads -= 1 }
-        let preferenceGenerations = orchestrationPreferenceGenerations
+        let loadGenerations = environmentLoadGenerations
         let environments = try await runtime.environments()
         guard let activeClient = try await runtime.activeClient() else {
             return disconnectedSnapshot(environments: environments)
@@ -367,7 +363,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         var environment = activeClient.environment
         environment.label = environments.first(where: { $0.id == environment.id })?.label ?? environment.label
         let generation = environmentGeneration
-        let loads = await loadEnvironmentShells(environments.filter(\.isEnabled), preferenceGenerations: preferenceGenerations)
+        let loads = await loadEnvironmentShells(environments.filter(\.isEnabled), loadGenerations: loadGenerations)
         guard let currentClient = try await runtime.activeClient(),
               currentClient === activeClient,
               generation == environmentGeneration else {
@@ -447,9 +443,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             throw T3ConnectRelayError.environmentMismatch
         }
 
-        let previousPreference = try await runtime.environments()
-            .first { $0.id == descriptor.environmentId }?.orchestrationProtocolPreference ?? .auto
-        _ = try OrchestrationProtocolSelection(descriptor: descriptor, preference: previousPreference)
+        _ = try OrchestrationProtocolSelection(descriptor: descriptor)
         var environment = Environment(
             id: descriptor.environmentId,
             label: descriptor.label,
@@ -458,7 +452,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             kind: .managedDPoP,
             descriptor: descriptor
         )
-        environment.orchestrationProtocolPreference = previousPreference
         let savedCredential = EnvironmentCredential.managedDPoP(
             accessToken: authorization.accessToken,
             expiresAt: authorization.expiresAt,
@@ -508,6 +501,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             environmentClients[id] = nil
             shellsByEnvironmentID[id] = nil
             shellProjectionCache[id] = nil
+            subagentRequestIndexes[id] = nil
             serverConfigsByEnvironmentID[id] = nil
             providerCatalogCache[id] = nil
             archivedThreadsByEnvironmentID[id] = nil
@@ -515,20 +509,10 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         }
     }
 
-    func orchestrationPreference(environmentID: String) async throws -> OrchestrationProtocolPreference {
-        guard let environment = try await runtime.environments().first(where: { $0.id == environmentID }) else {
-            throw RPCError.remote("This environment is no longer saved.")
-        }
-        return environment.orchestrationProtocolPreference
-    }
-
     func updateThreadQueue(threadID: String, action: FeatureThreadQueueAction) async throws {
         let route = try threadRoute(for: threadID)
         guard !restoredDetailIDs.contains(route.uiID) else {
             throw FeatureCapabilityUnavailable("Queue controls require live thread data")
-        }
-        guard try await route.client.orchestrationVersion() == .v2 else {
-            throw FeatureCapabilityUnavailable("Queue controls")
         }
         let threadID = route.wireID
         let command: JSONValue
@@ -602,36 +586,11 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         }
     }
 
-    func setOrchestrationPreference(
-        environmentID: String, preference: OrchestrationProtocolPreference
-    ) async throws {
-        _ = try await runtime.environmentStore.setOrchestrationProtocolPreference(
-            id: environmentID, preference: preference
-        )
-        orchestrationPreferenceGenerations[environmentID, default: 0] &+= 1
-        try await clearClientStorage(environmentID: environmentID)
-        if activeEnvironment?.id == environmentID { await clearActiveEnvironment() }
-        if let oldClient = environmentClients.removeValue(forKey: environmentID) {
-            await oldClient.disconnect()
-        }
-        shellsByEnvironmentID[environmentID] = nil
-        shellProjectionCache[environmentID] = nil
-        serverConfigsByEnvironmentID[environmentID] = nil
-        archivedThreadsByEnvironmentID[environmentID] = nil
-        archivedShellThreadsByEnvironmentID[environmentID] = nil
-        let threadIDs = threadEnvironmentIDs.filter { $0.value == environmentID }.map(\.key)
-        for id in threadIDs {
-            threadResumeStates[id] = nil
-            latestDetails[id] = nil
-            detailRenderCaches[id] = nil
-        }
-    }
-
     func removeEnvironment(id: String) async throws {
         let removesActiveEnvironment = activeEnvironment?.id == id
         try await runtime.remove(id: id)
         revokedCacheEnvironmentIDs.insert(id)
-        orchestrationPreferenceGenerations[id, default: 0] &+= 1
+        environmentLoadGenerations[id, default: 0] &+= 1
         try await clearClientStorage(environmentID: id)
         readCacheLeases[id] = nil
         discardRestoredEnvironment(id)
@@ -901,8 +860,9 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     }
 
     /// Only verified GitHub accounts can route. A dispatched write is never retried elsewhere.
-    private func withPullRequestRoute<Result>(
+    func withPullRequestRoute<Result>(
         _ target: FeaturePullRequestTarget, write: Bool = false, allowStaleFallback: Bool = false,
+        writeScope: String = "source-control:write",
         operation: (T3Client, PullRequestRef, PullRequestRoutingIdentity?) async throws -> Result
     ) async throws -> Result {
         let client = try await projectCreationClient(environmentID: target.environmentID)
@@ -921,7 +881,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
               let identity = try? await client.pullRequestRouting(target.reference),
               identity.provider == .github else {
             try Task.checkCancellation()
-            if write { try await requireScope("source-control:write", client: client) }
+            if write { try await requireScope(writeScope, client: client) }
             return try await operation(client, target.reference, nil)
         }
         let reference = PullRequestRef(projectId: target.reference.projectId,
@@ -938,7 +898,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                   account.host.caseInsensitiveCompare(identity.host) == .orderedSame,
                   await routingAllowed(origin: origin, destination: environment, write: write) else { continue }
             do {
-                if write { try await requireScope("source-control:write", client: alternate) }
+                if write { try await requireScope(writeScope, client: alternate) }
                 let result = try await operation(alternate, reference, identity)
                 if routedPullRequests.count >= 256 { routedPullRequests.removeAll(keepingCapacity: true) }
                 routedPullRequests[target, default: []].insert(environment.id)
@@ -950,7 +910,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         }
         try Task.checkCancellation()
         do {
-            if write { try await requireScope("source-control:write", client: client) }
+            if write { try await requireScope(writeScope, client: client) }
             let result = try await operation(client, reference, identity)
             if write { try? await invalidatePullRequests(target) }
             return result
@@ -964,6 +924,13 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     func pullRequestDetail(_ target: FeaturePullRequestTarget) async throws -> PullRequestDetail {
         try await withPullRequestRoute(target, allowStaleFallback: true) { client, reference, identity in
             var detail = try await client.pullRequestDetail(reference)
+            if client.environment.id != target.environmentID {
+                let observedState = detail.state
+                Task {
+                    guard let origin = try? await self.projectCreationClient(environmentID: target.environmentID) else { return }
+                    try? await origin.reportPullRequestState(reference, state: observedState)
+                }
+            }
             detail.projectId = target.reference.projectId
             if let title = identity?.projectTitle { detail.projectTitle = title }
             if let root = identity?.workspaceRoot { detail.workspaceRoot = root }
@@ -1198,6 +1165,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         environmentPermissions.removeAll()
             shellsByEnvironmentID.removeAll()
             shellProjectionCache.removeAll()
+            subagentRequestIndexes.removeAll()
             indexedShellMembership = nil
             indexedProvisionalRoutes.removeAll()
             serverConfigsByEnvironmentID.removeAll()
@@ -1219,7 +1187,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         activeThreadSequence = nil
         activeThreadPage = nil
         threadHistoryEpoch &+= 1
-        pendingOlderThreadPage = nil
         latestDetails.removeAll()
         threadResumeStates.removeAll()
         detailRenderCaches.removeAll()
@@ -1256,14 +1223,15 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     }
 
     func environmentDescriptor(environmentID: String) async throws -> EnvironmentDescriptor {
-        guard let environment = try await runtime.environments().first(where: { $0.id == environmentID }) else {
-            throw RPCError.remote("This environment is no longer saved.")
-        }
-        // Discovery must still work when a forced protocol choice blocks RPC.
-        return try await runtime.descriptor(at: environment.httpBaseURL)
+        try await runtime.hostUpdateDescriptor(environmentID: environmentID)
     }
 
     func updateEnvironment(environmentID: String, targetVersion: String) async throws {
+        let descriptor = try await runtime.hostUpdateDescriptor(environmentID: environmentID)
+        if OutdatedHostUpdate.requiresHostUpdate(descriptor) {
+            try await runtime.updateOutdatedHost(environmentID: environmentID, targetVersion: targetVersion)
+            return
+        }
         let client = try await projectCreationClient(environmentID: environmentID)
         try await requireScope("environment:maintain", client: client)
         let config = try await client.serverConfig()
@@ -1702,12 +1670,18 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         let client = route.client
         let environment = client.environment
         let generation = environmentGeneration
-        let model = modelSelection(
+        let config = try await modelValidationConfig(client: client)
+        guard isKnownClient(client, environmentID: environment.id, generation: generation) else { throw CancellationError() }
+        setServerConfig(config, environmentID: environment.id)
+        let model = try modelSelection(
             selection,
             projectID: route.wireID,
             environmentID: environment.id,
             shell: shellsByEnvironmentID[environment.id]
         )
+        guard ServerProviderModelAvailability.canSelect(model, in: config, projectID: route.wireID) else {
+            throw ServerProviderModelSelectionError.unavailable
+        }
         let resolvedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let threadTitle = resolvedTitle?.isEmpty == false ? resolvedTitle! : "New thread"
         let signature = ThreadCreationSignature(
@@ -1816,6 +1790,23 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         )
     }
 
+    func createThreadAndSend(
+        projectID: String, prompt: String, selection: FeatureSelection?,
+        runtimeMode: FeatureRuntimeMode, interactionMode: FeatureInteractionMode,
+        workspaceMode: FeatureWorkspaceMode, branch: String?, worktreePath: String?,
+        startFromOrigin: Bool, attachments: [FeatureUploadAttachment],
+        identity: FeatureSubmissionIdentity, context: OrchestrationMessageContext?,
+        pullRequestReference: String?
+    ) async throws -> FeatureThread {
+        try await createThreadAndSendResolved(
+            projectID: projectID, prompt: prompt, selection: selection,
+            runtimeMode: runtimeMode, interactionMode: interactionMode,
+            workspaceMode: workspaceMode, branch: branch, worktreePath: worktreePath,
+            startFromOrigin: startFromOrigin, attachments: attachments,
+            submissionIdentity: identity, context: context, pullRequestReference: pullRequestReference
+        )
+    }
+
     private func createThreadAndSendResolved(
         projectID: String,
         prompt: String,
@@ -1828,27 +1819,70 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         startFromOrigin: Bool,
         attachments: [FeatureUploadAttachment],
         submissionIdentity: FeatureSubmissionIdentity?,
-        context: OrchestrationMessageContext? = nil
+        context: OrchestrationMessageContext? = nil,
+        pullRequestReference: String? = nil
     ) async throws -> FeatureThread {
         let route = try projectRoute(for: projectID)
         let client = route.client
         let environment = client.environment
         let generation = environmentGeneration
         let routedProject = try project(for: route)
-        let branch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard workspaceMode != .worktree || branch?.isEmpty == false else {
+        var branch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard pullRequestReference == nil || workspaceMode == .worktree else {
+            throw FeatureThreadRecoveryError("Pull request workspaces require worktree mode.")
+        }
+        guard pullRequestReference != nil || workspaceMode != .worktree || branch?.isEmpty == false else {
             throw NativeFeatureClientError.branchRequired
         }
-        let worktreePath = workspaceMode == .local ? worktreePath : nil
-        let model = modelSelection(
+        var worktreePath = workspaceMode == .local ? worktreePath : nil
+        var effectiveWorkspaceMode = workspaceMode
+        let uploads = try await makeUploadAttachments(attachments)
+        let config = try await modelValidationConfig(client: client)
+        guard isKnownClient(client, environmentID: environment.id, generation: generation) else { throw CancellationError() }
+        setServerConfig(config, environmentID: environment.id)
+        let model = try modelSelection(
             selection,
             projectID: route.wireID,
             environmentID: environment.id,
             shell: shellsByEnvironmentID[environment.id]
         )
+        guard ServerProviderModelAvailability.canSelect(model, in: config, projectID: route.wireID) else {
+            throw ServerProviderModelSelectionError.unavailable
+        }
+        if let pullRequestReference {
+            try await requireWorkspaceScopes(
+                ["source-control:write", "orchestration:operate"], client: client, generation: generation
+            )
+            guard try project(for: route).workspaceRoot == routedProject.workspaceRoot else {
+                throw CancellationError()
+            }
+            // An ambiguous launch retry must reuse the prepared checkout without resetting it.
+            let existing = submissionIdentity.flatMap { identity in
+                pendingBootstrapSubmissions.first { $0.identity == commandIdentity(identity) }
+            }
+            if let existing, existing.signature.pullRequestReference == pullRequestReference {
+                branch = existing.signature.branch
+                worktreePath = existing.signature.worktreePath
+            } else {
+                let prepared = try await client.preparePromptPullRequestWorkspace(
+                    cwd: routedProject.workspaceRoot, reference: pullRequestReference
+                )
+                guard !Task.isCancelled,
+                      isKnownClient(client, environmentID: environment.id, generation: generation) else {
+                    throw CancellationError()
+                }
+                let workspace = try prepared.validatedWorkspace()
+                branch = workspace.branch
+                worktreePath = workspace.path
+            }
+            try await requireWorkspaceScopes(["orchestration:operate"], client: client, generation: generation)
+            guard try project(for: route).workspaceRoot == routedProject.workspaceRoot else {
+                throw CancellationError()
+            }
+            // A prepared PR uses existing_worktree, with no generic branch preparation.
+            effectiveWorkspaceMode = .local
+        }
         let title = Self.title(from: prompt, hasAttachments: !attachments.isEmpty)
-        let uploads = try await makeUploadAttachments(attachments)
-        if !uploads.isEmpty { _ = try await client.serverConfig() }
         let runtime = coreRuntimeMode(runtimeMode)
         let interaction = coreInteractionMode(interactionMode)
         let signature = BootstrapSubmissionSignature(
@@ -1857,12 +1891,13 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             model: model,
             runtimeMode: runtime,
             interactionMode: interaction,
-            workspaceMode: workspaceMode,
+            workspaceMode: effectiveWorkspaceMode,
             branch: branch,
             worktreePath: worktreePath,
             startFromOrigin: startFromOrigin,
             attachments: attachments,
-            context: context
+            context: context,
+            pullRequestReference: pullRequestReference
         )
         let pending: PendingBootstrapSubmission
         let explicitIdentity = submissionIdentity.map { commandIdentity($0) }
@@ -1881,7 +1916,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 signature: signature,
                 threadID: submissionIdentity?.threadID ?? UUID().uuidString,
                 identity: explicitIdentity ?? CommandIdentity(),
-                worktreeBranchName: workspaceMode == .worktree
+                worktreeBranchName: effectiveWorkspaceMode == .worktree
                     ? Self.temporaryWorktreeBranchName(
                         seed: submissionIdentity?.threadID
                     )
@@ -1974,7 +2009,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             environmentID: environment.id,
             environmentName: environment.label,
             title: title,
-            branch: workspaceMode == .worktree ? pending.worktreeBranchName : branch,
+            branch: effectiveWorkspaceMode == .worktree ? pending.worktreeBranchName : branch,
             worktreePath: worktreePath,
             providerID: model.instanceId,
             providerName: UsageLimitsPresentation.providerLabel(driver: model.instanceId),
@@ -2013,6 +2048,14 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             return false
         }
 
+        let config = try await modelValidationConfig(client: client)
+        guard ServerProviderModelAvailability.canSelect(model, in: config, projectID: projectID) else {
+            throw ServerProviderModelSelectionError.unavailable
+        }
+
+        // launchThread reserves the launch ID for thread.create and derives a
+        // separate receipt for the first message. Reuse that message receipt.
+        let messageCommandID = pending.identity.commandID + ":initial-message"
         do {
             _ = try await client.sendTurn(
                 threadID: pending.threadID,
@@ -2022,7 +2065,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 model: model,
                 attachments: attachments,
                 context: context,
-                commandID: pending.identity.commandID,
+                commandID: messageCommandID,
                 messageID: pending.identity.messageID,
                 createdAt: pending.identity.createdAt
             )
@@ -2061,7 +2104,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     }
 
     private static func isAmbiguousDispatchFailure(_ error: any Error) -> Bool {
-        if error is EnvironmentPermissionDeniedError { return false }
+        if error is EnvironmentPermissionDeniedError || error is OrchestrationProtocolError { return false }
         if let error = error as? RPCError {
             switch error {
             case .connectionUnavailable, .disconnected, .responseTimedOut, .remoteDefect:
@@ -2323,6 +2366,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 updatedAt: shell.updatedAt,
                 orchestrationProtocolVersion: shell.orchestrationProtocolVersion
             )
+            subagentRequestIndexes[route.environmentID] = nil
         }
         provisionalThreadRoutes[route.uiID] = nil
         if activeThreadID == route.uiID {
@@ -2374,19 +2418,11 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         activeThreadEnvironmentID = environment.id
         threadHistoryEpoch &+= 1
         let historyEpoch = threadHistoryEpoch
-        pendingOlderThreadPage = nil
         activeThreadPage = nil
         activeRawThread = nil
         activeThreadSequence = nil
-        let supportsPagination = serverConfigsByEnvironmentID[
-            environment.id
-        ]?.threadSnapshotPagination == true
-        let supportsResume = serverConfigsByEnvironmentID[
-            environment.id
-        ]?.threadResumeCompletionMarker == true
-        if !fresh, supportsResume,
+        if !fresh,
            let cached = threadResumeStates[route.uiID], cached.client === client,
-           cached.page == nil || supportsPagination,
            var detail = latestDetails[route.uiID],
            detailRenderCaches[route.uiID]?.isInitialized == true {
             let currentConnectionID = await client.currentConnectionID()
@@ -2410,7 +2446,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         if latestDetails[route.uiID] == nil || restoredDetailIDs.contains(route.uiID),
            let lease = cacheLease,
            let saved = await clientReadCache.history(threadID: route.wireID, lease: lease),
-           (saved.orchestrationProtocolVersion ?? 1) == (orchestrationVersions[environment.id] ?? 1),
+           saved.orchestrationProtocolVersion == 2,
            readCacheLeases[environment.id] == lease,
            isKnownClient(client, environmentID: environment.id, generation: generation),
            threadHistoryEpoch == historyEpoch, activeThreadID == route.uiID {
@@ -2438,7 +2474,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         do {
             snapshot = try await client.threadSnapshot(
                 id: route.wireID,
-                turnLimit: supportsPagination ? Self.initialThreadUserTurnLimit : nil,
                 timeoutInterval: threadSnapshotTimeoutInterval
             )
         } catch {
@@ -2471,7 +2506,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         activeThreadSequence = snapshot.snapshotSequence
         latestDetails[route.uiID] = detail
         startDetailStream(route)
-        if !supportsResume { markDetailSynchronized(route) }
         return detail
     }
 
@@ -2479,9 +2513,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         let route = try threadRoute(for: id)
         guard activeThreadID == route.uiID,
               activeThreadEnvironmentID == route.environmentID,
-              serverConfigsByEnvironmentID[
-                  route.environmentID
-              ]?.threadSnapshotPagination == true,
               var page = activeThreadPage,
               page.hasMore,
               !page.isLoading,
@@ -2500,7 +2531,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         do {
             let snapshot = try await route.client.threadSnapshot(
                 id: route.wireID,
-                turnLimit: Self.olderThreadPageUserTurnLimit,
                 beforeCursor: beforeCursor
             )
             guard isKnownClient(
@@ -2516,24 +2546,9 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 return latestDetails[route.uiID]
             }
 
-            if snapshot.orchestrationProtocolVersion == 2 {
-                consumeDetailStreamItem(.projection(snapshot), route: route,
-                                        subscriptionEpoch: epoch, synchronizeLegacy: false)
-                flushDetailPublish(route)
-                return latestDetails[route.uiID]
-            }
-
-            if let watermark = snapshot.page?.threadSequence,
-               watermark > (activeThreadSequence ?? 0) {
-                pendingOlderThreadPage = PendingOlderThreadPage(
-                    snapshot: snapshot,
-                    epoch: epoch,
-                    threadID: route.uiID,
-                    environmentID: route.environmentID
-                )
-                return latestDetails[route.uiID]
-            }
-            return mergeOlderThreadPage(snapshot, route: route)
+            consumeDetailStreamItem(.projection(snapshot), route: route)
+            flushDetailPublish(route)
+            return latestDetails[route.uiID]
         } catch {
             if activeThreadID == route.uiID, threadHistoryEpoch == epoch {
                 clearOlderThreadLoading(threadID: route.uiID)
@@ -2553,7 +2568,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         activeThreadSequence = nil
         activeThreadPage = nil
         threadHistoryEpoch &+= 1
-        pendingOlderThreadPage = nil
         continuation.yield(.threadSync(id: id, state: nil))
         markThreadCacheRecentlyUsed(id)
         evictOldThreadCachesIfNeeded()
@@ -2636,7 +2650,12 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         }
         let model = selection.map(coreModelSelection)
         let uploads = try await makeUploadAttachments(attachments)
-        if !uploads.isEmpty { _ = try await client.serverConfig() }
+        let config = try await modelValidationConfig(client: client)
+        guard isKnownClient(client, environmentID: environmentID, generation: generation) else { throw CancellationError() }
+        setServerConfig(config, environmentID: environmentID)
+        guard ServerProviderModelAvailability.canSelect(
+            model ?? shellThread.modelSelection, in: config, projectID: shellThread.projectId
+        ) else { throw ServerProviderModelSelectionError.unavailable }
         let runtimeMode = coreRuntimeMode(
             requestedRuntimeMode ?? mapRuntimeMode(shellThread.runtimeMode)
         )
@@ -2749,12 +2768,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     func cancelTurn(threadID: String) async throws {
         let route = try threadRoute(for: threadID)
         try await requireScope("orchestration:operate", client: route.client)
-        let version = try await route.client.orchestrationVersion()
-        let turnID = version == .v2 ? nil : shellsByEnvironmentID[route.environmentID]?.threads
-            .first(where: { $0.id == route.wireID })?
-            .latestTurn?
-            .turnId
-        _ = try await route.client.interrupt(threadID: route.wireID, turnID: turnID)
+        _ = try await route.client.interrupt(threadID: route.wireID)
         try? await refresh(client: route.client)
     }
 
@@ -2882,18 +2896,14 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 batches: buffered.stream,
                 threadID: route.wireID,
                 messageID: messageID,
-                turnCount: target.turnCount,
                 afterSequence: accepted.sequence,
-                previousFailureIDs: Set(snapshot.thread.activities.filter {
-                    $0.kind == "checkpoint.revert.failed"
-                }.map(\.id)),
                 rollbackRequestID: command["commandId"]?.stringValue,
                 rollbackRunID: target.runID
             )
             let current = try await route.client.fullThreadSnapshot(id: route.wireID)
             guard current.snapshotSequence >= receiptSequence,
                   NativeConversationRewind.isComplete(current.thread, messageID: messageID,
-                    turnCount: target.turnCount, rollbackRunID: target.runID) else {
+                    rollbackRunID: target.runID) else {
                 throw FeatureConversationRewindError(message: "Could not confirm the final rewind state. The prompt remains saved for recovery.")
             }
         } catch {
@@ -2903,7 +2913,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             guard let current = try? await route.client.fullThreadSnapshot(id: route.wireID),
                   current.snapshotSequence > snapshot.snapshotSequence,
                   NativeConversationRewind.isComplete(current.thread, messageID: messageID,
-                    turnCount: target.turnCount, rollbackRunID: target.runID) else {
+                    rollbackRunID: target.runID) else {
                 throw error
             }
         }
@@ -3051,7 +3061,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             key: key, checkedAt: workspace.flatMap { NativeTimestampParser.parse($0.checkedAt) },
             commandsPending: workspace?.slashCommandsPending == true, now: Date()
         ) else {
-            if let config { return mapConfigProviders(config.providers) }
+            if let config { return mapConfigProviders(config.providers, settings: config.settings) }
             return providerCatalogCache[environmentID] ?? []
         }
         do {
@@ -3077,7 +3087,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         }
         setServerConfig(config, environmentID: environmentID)
         if environmentID == activeEnvironment?.id { latestServerConfig = config }
-        let providers = mapConfigProviders(config.providers)
+        let providers = mapConfigProviders(config.providers, settings: config.settings)
         providerCatalogCache[environmentID] = providers
         if let shell = shellsByEnvironmentID[environmentID] {
             await emitSnapshot(shell, client: client, expectedGeneration: generation)
@@ -3143,13 +3153,14 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         let route = try projectRoute(for: projectID)
         let settings = try await serverPreferences(environmentID: route.environmentID)
         let project = try project(for: route)
-        let providers = serverConfigsByEnvironmentID[route.environmentID]?.providers ?? []
         return FeatureProjectPreferences(
             environment: settings,
             effective: settings.resolvingProject(
                 id: route.wireID, legacyModelSelection: project.defaultModelSelection,
                 legacyWorkspaceMode: project.defaultThreadEnvMode,
-                disabledProviderIDs: Set(providers.filter { !providerCanRun($0) }.map(\.instanceId))
+                disabledProviderIDs: serverConfigsByEnvironmentID[route.environmentID].map {
+                    ServerProviderModelAvailability.disabledProviderIDs(in: $0, projectID: route.wireID)
+                } ?? []
             )
         )
     }
@@ -3168,6 +3179,10 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             }
             guard config.environment?.capabilities.projectSettingsOverrides == true else {
                 throw FeatureCapabilityUnavailable("Project preferences")
+            }
+            if change.key == .providerInstances,
+               config.environment?.capabilities.projectProviderInstanceOverrides != true {
+                throw FeatureCapabilityUnavailable("Project provider overrides")
             }
             let settings = try await route.client.serverSettings()
             guard !settings.unsupportedPreferenceKeys.contains(change.key.rawValue) else {
@@ -4403,9 +4418,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             throw FeatureCapabilityUnavailable("Thread controls require live thread data")
         }
         await route.client.connect()
-        guard try await route.client.orchestrationVersion() == .v2 else {
-            throw FeatureCapabilityUnavailable("Orchestrator V2 controls")
-        }
+        _ = try await route.client.orchestrationVersion()
         guard environmentClients[route.environmentID] === route.client,
               threadEnvironmentIDs[threadID] == route.environmentID,
               threadWireIDs[threadID] == route.wireID else {
@@ -4481,6 +4494,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     updatedAt: shell.updatedAt,
                     orchestrationProtocolVersion: shell.orchestrationProtocolVersion
                 )
+                subagentRequestIndexes[route.environmentID] = nil
             } else if let previouslyArchivedShell {
                 var threads = shell.threads.filter { $0.id != route.wireID }
                 threads.append(Self.unarchived(previouslyArchivedShell))
@@ -4491,6 +4505,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     updatedAt: shell.updatedAt,
                     orchestrationProtocolVersion: shell.orchestrationProtocolVersion
                 )
+                subagentRequestIndexes[route.environmentID] = nil
             }
         }
         archivedShellThreadsByEnvironmentID[route.environmentID] = archivedShellThreads
@@ -4713,8 +4728,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                         ? nil : self?.latestShell?.snapshotSequence
                     let events = await activeClient.shellEventBatches(
                         after: sequence,
-                        protocolVersion: self?.latestShell?.orchestrationProtocolVersion ?? 1,
-                        reconnect: false
+                            reconnect: false
                     )
                     // Re-bind self per event instead of holding it strongly across
                     // the indefinite stream, so the client can deinit mid-stream.
@@ -4779,6 +4793,19 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     return
                 } catch {
                     if let self, await self.recoverEnvironmentRoute(environmentID: activeClient.environment.id) { return }
+                    if let error = error as? OrchestrationProtocolError,
+                       let self, self.isCurrentSession(client: activeClient, generation: generation) {
+                        self.stopActiveEnvironment(state: .disconnected, detail: error.localizedDescription)
+                        return
+                    }
+                    if let relayError = error as? T3ConnectRelayError,
+                       case .connectionNotAuthorized = relayError,
+                       !relayError.isTransient,
+                       let self,
+                       self.isCurrentSession(client: activeClient, generation: generation) {
+                        self.markActiveEnvironmentNeedsPairing(detail: relayError.localizedDescription)
+                        return
+                    }
                     if error.isRejectedAuthorization,
                        self?.routeRejectionIsFinal(environmentID: activeClient.environment.id) == true,
                        let self,
@@ -4857,6 +4884,16 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                             return
                         }
                         if await self.recoverEnvironmentRoute(environmentID: activeClient.environment.id) { return }
+                        if let error = error as? OrchestrationProtocolError {
+                            self.stopActiveEnvironment(state: .disconnected, detail: error.localizedDescription)
+                            return
+                        }
+                        if let relayError = error as? T3ConnectRelayError,
+                           case .connectionNotAuthorized = relayError,
+                           !relayError.isTransient {
+                            self.markActiveEnvironmentNeedsPairing(detail: relayError.localizedDescription)
+                            return
+                        }
                         if error.isRejectedAuthorization,
                            self.routeRejectionIsFinal(environmentID: activeClient.environment.id) {
                             self.markActiveEnvironmentNeedsPairing(detail: error.localizedDescription)
@@ -4864,7 +4901,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                         }
                         self.emitConnection(
                             .reconnecting,
-                            detail: "Server unreachable. Retrying automatically."
+                            detail: (error as? T3ConnectRelayError)?.localizedDescription
+                                ?? "Server unreachable. Retrying automatically."
                         )
                     }
                 }
@@ -4967,7 +5005,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     return
                 }
                 let environments: [Environment]
-                let preferenceGenerations = self.orchestrationPreferenceGenerations
+                let loadGenerations = self.environmentLoadGenerations
                 do {
                     environments = try await loadEnvironments(self.runtime)
                 } catch is CancellationError where Task.isCancelled {
@@ -5006,7 +5044,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     nextInterval = fastInterval
                     continue
                 }
-                let loads = await self.loadEnvironmentShells(refreshableEnvironments, preferenceGenerations: preferenceGenerations)
+                let loads = await self.loadEnvironmentShells(refreshableEnvironments, loadGenerations: loadGenerations)
                 guard !Task.isCancelled,
                       self.aggregateRefreshID == refreshID,
                       self.isCurrentSession(
@@ -5077,7 +5115,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         refreshActiveThread: Bool
     ) async {
         guard isCurrentSession(client: client, generation: generation) else { return }
-        adoptOrchestrationProtocol(shell, environmentID: client.environment.id)
+        replaceRestoredShell(environmentID: client.environment.id)
         guard !Task.isCancelled,
               isCurrentSession(client: client, generation: generation),
               shell.snapshotSequence >= (latestShell?.snapshotSequence ?? .min) else {
@@ -5104,7 +5142,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         generation: Int
     ) async {
         guard isCurrentSession(client: client, generation: generation) else { return }
-        adoptOrchestrationProtocol(shell, environmentID: client.environment.id)
+        replaceRestoredShell(environmentID: client.environment.id)
         guard isCurrentSession(client: client, generation: generation),
               shell.snapshotSequence >= (latestShell?.snapshotSequence ?? .min) else {
             return
@@ -5205,7 +5243,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     activeThreadSequence = nil
                     activeThreadPage = nil
                     threadHistoryEpoch &+= 1
-                    pendingOlderThreadPage = nil
                 }
             case .snapshot, .synchronized, .refreshRequired, .repositoryIdentitiesUpdated:
                 continue
@@ -5337,10 +5374,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 // The next connection resumes from applied state, not from
                 // the cursor captured when the user first opened the thread.
                 let sequence = self?.activeRawThread == nil ? nil : self?.activeThreadSequence
-                let supportsPagination = self?.serverConfigsByEnvironmentID[
-                    route.environmentID
-                ]?.threadSnapshotPagination == true
-                let subscriptionEpoch = self?.threadHistoryEpoch ?? 0
                 var failedConnectionID: UUID?
                 do {
                     guard !Task.isCancelled,
@@ -5348,8 +5381,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                           self?.environmentGeneration == sessionGeneration else { return }
                     let subscription = try await route.client.threadEventBatches(
                         threadID: route.wireID,
-                        after: sequence,
-                        turnLimit: supportsPagination ? Self.initialThreadUserTurnLimit : nil
+                        after: sequence
                     )
                     let subscriptionConnectionID = subscription.connectionID
                     failedConnectionID = subscriptionConnectionID
@@ -5382,7 +5414,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                             self.ensureDetailCatchUpFallback(route, generation: streamGeneration)
                         }
                         self.consumeDetailStreamBatch(
-                            items, route: route, subscriptionEpoch: subscriptionEpoch
+                            items, route: route
                         )
                     }
                     // A thread subscription stays open until its owner leaves.
@@ -5484,12 +5516,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                       self.isCurrentDetail(route, generation: generation),
                       self.activeRawThread != nil,
                       !self.detailRefreshPending else { return }
-                if self.serverConfigsByEnvironmentID[route.environmentID]?
-                    .threadResumeCompletionMarker == true {
-                    self.continuation.yield(.threadSync(id: route.uiID, state: .reconnecting))
-                } else {
-                    self.markDetailSynchronized(route)
-                }
+                self.continuation.yield(.threadSync(id: route.uiID, state: .reconnecting))
             } catch is CancellationError {
                 return
             } catch {
@@ -5513,8 +5540,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     }
 
     private func beginWarmReplayIfNeeded(_ route: NativeThreadRoute) {
-        guard detailWasSynchronized, !detailCompletionReceived,
-              serverConfigsByEnvironmentID[route.environmentID]?.threadResumeCompletionMarker == true else { return }
+        guard detailWasSynchronized, !detailCompletionReceived else { return }
         detailWasSynchronized = false
         continuation.yield(.threadSync(id: route.uiID, state: .catchingUp))
         ensureDetailCatchUpFallback(route, generation: detailStreamGeneration)
@@ -5522,59 +5548,27 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
 
     private func consumeDetailStreamBatch(
         _ items: [ThreadStreamItem],
-        route: NativeThreadRoute,
-        subscriptionEpoch: Int
+        route: NativeThreadRoute
     ) {
-        // Keep snapshot replacement and page-watermark merges at their event
-        // positions. Ordinary replay batches share one legacy sync publication.
-        let previousSequence = activeThreadSequence
-        let needsIndividualUpdates = items.count == 1 || activeRawThread == nil
-            || pendingOlderThreadPage != nil || items.contains { item in
-                switch item {
-                case .snapshot, .projection: true
-                case let .event(event):
-                    event["type"]?.stringValue == "thread.reverted"
-                        || event["type"]?.stringValue == "thread.deleted"
-                case .synchronized: false
-                }
-            }
-        for item in items {
-            consumeDetailStreamItem(
-                item, route: route, subscriptionEpoch: subscriptionEpoch,
-                synchronizeLegacy: needsIndividualUpdates
-            )
-        }
-        if !needsIndividualUpdates, activeThreadSequence != previousSequence,
-           serverConfigsByEnvironmentID[route.environmentID]?.threadResumeCompletionMarker != true {
-            markDetailSynchronized(route)
-        }
+        for item in items { consumeDetailStreamItem(item, route: route) }
     }
 
     private func consumeDetailStreamItem(
         _ item: ThreadStreamItem,
-        route: NativeThreadRoute,
-        subscriptionEpoch: Int,
-        synchronizeLegacy: Bool
+        route: NativeThreadRoute
     ) {
         switch item {
         case let .projection(snapshot):
             let previous = activeRawThread
             if let revision = snapshot.thread.orchestrationV2Revision,
                let displayed = previous?.orchestrationV2Revision, revision < displayed { return }
-            let changedProtocol = previous != nil && previous?.orchestrationV2Control == nil
-            guard changedProtocol || snapshot.snapshotSequence >= (activeThreadSequence ?? 0) else { return }
-            if changedProtocol {
-                threadHistoryEpoch &+= 1
-                pendingOlderThreadPage = nil
-                detailRenderCaches[route.uiID] = nil
-            }
+            guard snapshot.snapshotSequence >= (activeThreadSequence ?? 0) else { return }
             beginWarmReplayIfNeeded(route)
             resetDetailRefresh()
-            detailSnapshotRequiredAfterEpoch = nil
             activeThreadSequence = snapshot.snapshotSequence
             activeRawThread = snapshot.thread
             activeThreadPage = featurePage(snapshot.page)
-            if let previous, !changedProtocol,
+            if let previous,
                Set(previous.messages.map(\.id)).isSubset(of: Set(snapshot.thread.messages.map(\.id))),
                Set(previous.activities.map(\.id)).isSubset(of: Set(snapshot.thread.activities.map(\.id))) {
                 let messages = Dictionary(previous.messages.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
@@ -5595,79 +5589,15 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             guard activeRawThread != nil else { return }
             markDetailSynchronized(route)
             return
-        case let .snapshot(snapshot):
-            // A cursor-less event cannot prove that an already-requested
-            // snapshot includes it. Keep the post-event read until it does.
-            if let requiredEpoch = detailSnapshotRequiredAfterEpoch,
-               subscriptionEpoch < requiredEpoch { return }
-            guard snapshot.snapshotSequence >= (activeThreadSequence ?? 0),
-                  activeRawThread == nil || snapshot.snapshotSequence > (activeThreadSequence ?? 0) else { return }
-            beginWarmReplayIfNeeded(route)
-            resetDetailRefresh()
-            detailSnapshotRequiredAfterEpoch = nil
-            threadHistoryEpoch &+= 1
-            pendingOlderThreadPage = nil
-            activeThreadSequence = snapshot.snapshotSequence
-            activeRawThread = snapshot.thread
-            activeThreadPage = featurePage(snapshot.page)
-            scheduleRawDetailPublish(route: route, mutation: .full)
-            if detailCompletionReceived { markDetailSynchronized(route) }
-        case let .event(event):
-            guard let current = activeRawThread else {
-                // Do not apply later events to a snapshot that missed earlier
-                // ones. It must cover every event skipped while replacing it.
-                if case let .number(value) = event["sequence"],
-                   let sequence = Int(exactly: value), sequence >= 0 {
-                    activeThreadSequence = max(activeThreadSequence ?? 0, sequence)
-                } else {
-                    // An event without a cursor needs a read started after it.
-                    threadHistoryEpoch &+= 1
-                    detailSnapshotRequiredAfterEpoch = threadHistoryEpoch
-                    pendingOlderThreadPage = nil
-                }
-                scheduleDetailRefresh(threadID: route.uiID, client: route.client, force: true)
-                return
-            }
-            let reduction = NativeThreadDetailReducer.apply(
-                event, to: current, afterSequence: activeThreadSequence ?? 0
-            )
-            if reduction.sequence < 0 {
-                threadHistoryEpoch &+= 1
-                detailSnapshotRequiredAfterEpoch = threadHistoryEpoch
-                pendingOlderThreadPage = nil
-                activeRawThread = nil
-                discardPendingDetailPublish()
-                scheduleDetailRefresh(threadID: route.uiID, client: route.client, force: true)
-                return
-            }
-            guard reduction.sequence > (activeThreadSequence ?? 0) else { return }
-            beginWarmReplayIfNeeded(route)
-            switch reduction.result {
-            case let .updated(thread):
-                activeThreadSequence = reduction.sequence
-                activeRawThread = thread
-                scheduleRawDetailPublish(route: route, mutation: reduction.renderMutation)
-                tryMergePendingOlderThreadPage(route: route)
-            case .unchanged:
-                activeThreadSequence = reduction.sequence
-                tryMergePendingOlderThreadPage(route: route)
-            case .refresh:
-                threadHistoryEpoch &+= 1
-                pendingOlderThreadPage = nil
-                activeThreadSequence = reduction.sequence
-                activeRawThread = nil
-                discardPendingDetailPublish()
-                scheduleDetailRefresh(threadID: route.uiID, client: route.client, force: true)
-            }
+        case .snapshot, .event:
+            // Only V2 projections carry the authoritative run and item state.
+            scheduleDetailRefresh(threadID: route.uiID, client: route.client, force: true)
+            return
         }
         if let thread = activeRawThread, let sequence = activeThreadSequence {
             var saved = OrchestrationThreadDetailSnapshot(snapshotSequence: sequence, thread: thread)
-            saved.orchestrationProtocolVersion = thread.orchestrationV2Control == nil ? 1 : 2
+            saved.orchestrationProtocolVersion = 2
             saveReadHistory(saved, environmentID: route.environmentID, lease: readCacheLeases[route.environmentID])
-        }
-        if synchronizeLegacy,
-           serverConfigsByEnvironmentID[route.environmentID]?.threadResumeCompletionMarker != true {
-            markDetailSynchronized(route)
         }
     }
 
@@ -5749,7 +5679,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         detailCompletionReceived = false
         detailWasSynchronized = false
         activeDetailConnectionID = nil
-        detailSnapshotRequiredAfterEpoch = nil
         detailStreamTask?.cancel()
         detailStreamTask = nil
         detailCatchUpTask?.cancel()
@@ -5765,7 +5694,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     }
 
     private func loadEnvironmentShells(
-        _ environments: [Environment], preferenceGenerations: [String: Int]
+        _ environments: [Environment], loadGenerations: [String: Int]
     ) async -> [EnvironmentShellLoad] {
         await prepareReadCacheLeases(environments)
         let leases = readCacheLeases
@@ -5777,8 +5706,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         clients.reserveCapacity(environments.count)
         for environment in environments {
             guard !revokedCacheEnvironmentIDs.contains(environment.id),
-                  preferenceGenerations[environment.id, default: 0]
-                    == orchestrationPreferenceGenerations[environment.id, default: 0] else { continue }
+                  loadGenerations[environment.id, default: 0]
+                    == environmentLoadGenerations[environment.id, default: 0] else { continue }
             clients.append(
                 (environment, await runtime.client(for: environment))
             )
@@ -5805,7 +5734,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                             return EnvironmentShellLoad(
                                 environment: selectedEnvironment, client: selectedClient, shell: nil, config: nil,
                                 credentialRejected: error.isRejectedAuthorization, failureDetail: error.localizedDescription,
-                                preferenceGeneration: preferenceGenerations[pair.environment.id, default: 0]
+                                loadGeneration: loadGenerations[pair.environment.id, default: 0]
                             )
                         }
                     }
@@ -5836,7 +5765,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                         shell: shell,
                         config: config,
                         session: session,
-                        preferenceGeneration: preferenceGenerations[pair.environment.id, default: 0],
+                        loadGeneration: loadGenerations[pair.environment.id, default: 0],
                         cacheLease: leases[pair.environment.id]
                     )
                 }
@@ -5861,6 +5790,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         environmentPermissions = environmentPermissions.filter { savedIDs.contains($0.key) }
         shellsByEnvironmentID = shellsByEnvironmentID.filter { savedIDs.contains($0.key) }
         shellProjectionCache = shellProjectionCache.filter { savedIDs.contains($0.key) }
+        subagentRequestIndexes = subagentRequestIndexes.filter { savedIDs.contains($0.key) }
         serverConfigsByEnvironmentID = serverConfigsByEnvironmentID.filter {
             savedIDs.contains($0.key)
         }
@@ -5882,7 +5812,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
 
         for load in loads {
             guard !revokedCacheEnvironmentIDs.contains(load.environment.id),
-                  load.preferenceGeneration == orchestrationPreferenceGenerations[load.environment.id, default: 0] else {
+                  load.loadGeneration == environmentLoadGenerations[load.environment.id, default: 0] else {
                 continue
             }
             let routeChanged = environmentClients[load.environment.id].map { $0 !== load.client } ?? false
@@ -5906,7 +5836,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             environmentPermissions[load.environment.id] = load.shell == nil ? nil
                 : EnvironmentPermissionState(session: load.session, serverAuth: serverConfigsByEnvironmentID[load.environment.id]?.auth)
             if let shell = load.shell {
-                adoptOrchestrationProtocol(shell, environmentID: load.environment.id)
+                replaceRestoredShell(environmentID: load.environment.id)
                 if shell.snapshotSequence
                     >= (shellsByEnvironmentID[load.environment.id]?.snapshotSequence ?? .min) {
                     shellsByEnvironmentID[load.environment.id] = shell
@@ -5932,6 +5862,14 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     /// subscription and the HTTP fallback so the app is not minting tickets
     /// and polling a 401 every few seconds until the user pairs again.
     private func markActiveEnvironmentNeedsPairing(detail: String?) {
+        if activeEnvironment?.kind == .managedDPoP {
+            stopActiveEnvironment(state: .disconnected, detail: detail)
+        } else {
+            stopActiveEnvironment(state: .needsPairing, detail: Self.needsPairingDetail)
+        }
+    }
+
+    private func stopActiveEnvironment(state: FeatureConnection.State, detail: String?) {
         pollingTask?.cancel()
         fallbackPollingTask?.cancel()
         configurationTask?.cancel()
@@ -5939,11 +5877,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         fallbackPollingTask = nil
         configurationTask = nil
         lastShellEventAt = nil
-        if activeEnvironment?.kind == .managedDPoP {
-            emitConnection(.disconnected, detail: detail)
-        } else {
-            emitConnection(.needsPairing, detail: Self.needsPairingDetail)
-        }
+        emitConnection(state, detail: detail)
         if let client {
             Task { await client.disconnect() }
         }
@@ -5953,7 +5887,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         _ candidate: OrchestrationShellSnapshot,
         for environment: Environment
     ) -> OrchestrationShellSnapshot {
-        adoptOrchestrationProtocol(candidate, environmentID: environment.id)
+        replaceRestoredShell(environmentID: environment.id)
         let latest: OrchestrationShellSnapshot
         if let cached = shellsByEnvironmentID[environment.id],
            cached.snapshotSequence > candidate.snapshotSequence {
@@ -5968,41 +5902,13 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         return latest
     }
 
-    /// Server upgrades start a different event sequence. Discard versioned
-    /// state before comparing cursors, while preserving credentials and drafts.
-    private func adoptOrchestrationProtocol(_ shell: OrchestrationShellSnapshot, environmentID: String) {
-        // Saved cursors are display metadata, never synchronization authority.
-        if restoredShellEnvironmentIDs.remove(environmentID) != nil {
-            shellsByEnvironmentID[environmentID] = nil
-            shellProjectionCache[environmentID] = nil
-            if activeEnvironment?.id == environmentID { latestShell = nil }
-        }
-        let version = shell.orchestrationProtocolVersion ?? 1
-        let previous = orchestrationVersions.updateValue(version, forKey: environmentID)
-        guard let previous, previous != version else { return }
+    /// The first live shell replaces cached display data before cursors are compared.
+    private func replaceRestoredShell(environmentID: String) {
+        guard restoredShellEnvironmentIDs.remove(environmentID) != nil else { return }
         shellsByEnvironmentID[environmentID] = nil
         shellProjectionCache[environmentID] = nil
-        archivedThreadsByEnvironmentID[environmentID] = nil
-        archivedShellThreadsByEnvironmentID[environmentID] = nil
-        serverConfigsByEnvironmentID[environmentID] = nil
+        subagentRequestIndexes[environmentID] = nil
         if activeEnvironment?.id == environmentID { latestShell = nil }
-        for id in threadEnvironmentIDs.keys where threadEnvironmentIDs[id] == environmentID {
-            threadResumeStates[id] = nil
-            detailRenderCaches[id] = nil
-            latestDetails[id] = nil
-        }
-        if activeThreadEnvironmentID == environmentID, let id = activeThreadID,
-           let route = try? threadRoute(for: id) {
-            resetDetailRefresh()
-            resetDetailStream()
-            activeRawThread = nil
-            activeThreadSequence = nil
-            activeThreadPage = nil
-            threadHistoryEpoch &+= 1
-            pendingOlderThreadPage = nil
-            continuation.yield(.threadSync(id: id, state: .catchingUp))
-            startDetailStream(route)
-        }
     }
 
     private func rebuildEntityIndexes(_ environments: [Environment]) {
@@ -6116,7 +6022,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         guard isKnownClient(client, environmentID: environment.id, generation: generation) else {
             throw CancellationError()
         }
-        adoptOrchestrationProtocol(shell, environmentID: environment.id)
+        replaceRestoredShell(environmentID: environment.id)
         guard shell.snapshotSequence
             >= (shellsByEnvironmentID[environment.id]?.snapshotSequence ?? .min) else {
             return
@@ -6181,12 +6087,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         let generation = environmentGeneration
         let historyEpoch = threadHistoryEpoch
         let cacheLease = readCacheLeases[environment.id]
-        let supportsPagination = serverConfigsByEnvironmentID[
-            environment.id
-        ]?.threadSnapshotPagination == true
         let snapshot = try await client.threadSnapshot(
             id: route.wireID,
-            turnLimit: supportsPagination ? Self.initialThreadUserTurnLimit : nil,
             timeoutInterval: threadSnapshotTimeoutInterval
         )
         guard !Task.isCancelled,
@@ -6204,8 +6106,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     if !detailRefreshPending {
                         throw NativeFeatureClientError.threadSnapshotOutdated
                     }
-                } else if detailCompletionReceived
-                            || serverConfigsByEnvironmentID[environment.id]?.threadResumeCompletionMarker != true {
+                } else if detailCompletionReceived {
                     markDetailSynchronized(route)
                 }
                 return
@@ -6214,9 +6115,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             // This snapshot includes the skipped events, so their pending
             // request is satisfied without another HTTP read.
             detailRefreshPending = false
-            detailSnapshotRequiredAfterEpoch = nil
             threadHistoryEpoch &+= 1
-            pendingOlderThreadPage = nil
             activeRawThread = snapshot.thread
             activeThreadSequence = snapshot.snapshotSequence
             activeThreadPage = featurePage(snapshot.page)
@@ -6238,8 +6137,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             connectionID: nil
         )
         if activeThreadID == route.uiID,
-           detailCompletionReceived
-            || serverConfigsByEnvironmentID[environment.id]?.threadResumeCompletionMarker != true {
+           detailCompletionReceived {
             markDetailSynchronized(route)
         }
     }
@@ -6356,6 +6254,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         detail.activeSubagentCount = backgroundWorkIsActive || sessionIsLive
             ? detailRenderCaches[threadID]?.subagents.activeCount ?? 0
             : 0
+        detail.thread = applyingSubagentRequests(detail.thread, environmentID: environment.id)
         guard latestDetails[threadID] != detail else { return }
         publish(detail, threadID: threadID, renderCacheIsSource: true)
     }
@@ -6573,6 +6472,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         let enabledEnvironments = environments.filter(\.isEnabled)
         let enabledIDs = Set(enabledEnvironments.map(\.id))
         shellProjectionCache = shellProjectionCache.filter { enabledIDs.contains($0.key) }
+        subagentRequestIndexes = subagentRequestIndexes.filter { enabledIDs.contains($0.key) }
         var threads: [FeatureThread] = []
         var projects: [FeatureProject] = []
         for environment in enabledEnvironments {
@@ -6591,7 +6491,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             let live = projection.mapThreads(
                 shellsByEnvironmentID[environment.id]?.threads ?? [],
                 environment: environment,
-                providerNames: providerNames
+                providerNames: providerNames,
+                subagentSources: subagentRequests(for: environment.id).sources
             ) { mapThread($0, environment: environment) }
             let liveIDs = Set(live.map(\.id))
             let cached = (archivedThreadsByEnvironmentID[environment.id] ?? []).filter {
@@ -6606,16 +6507,20 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             let projectSettings = projectConfig?.settings ?? ServerSettingsSnapshot()
             let disabledProviderIDs = Set((projectConfig?.providers ?? []).filter { !providerCanRun($0) }.map(\.instanceId))
             let supportsProjectSettings = projectConfig?.environment?.capabilities.projectSettingsOverrides == true
+            let supportsProjectProviders = projectConfig?.environment?.capabilities.projectProviderInstanceOverrides == true
             let mappedProjects = projection.mapProjects(
                 shellsByEnvironmentID[environment.id]?.projects ?? [],
                 settings: projectSettings,
                 disabledProviderIDs: disabledProviderIDs,
-                supportsProjectSettings: supportsProjectSettings
+                supportsProjectSettings: supportsProjectSettings,
+                supportsProjectProviders: supportsProjectProviders
             ) { project in
                 let effective = projectSettings.resolvingProject(
                     id: project.id, legacyModelSelection: project.defaultModelSelection,
                     legacyWorkspaceMode: project.defaultThreadEnvMode,
-                    disabledProviderIDs: disabledProviderIDs
+                    disabledProviderIDs: projectConfig.map {
+                        ServerProviderModelAvailability.disabledProviderIDs(in: $0, projectID: project.id)
+                    } ?? []
                 )
                 let uiID = FeatureScopedID.project(
                     environmentID: environment.id,
@@ -6651,6 +6556,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 }
                 mapped.newWorktreesStartFromOrigin = effective.newWorktreesStartFromOrigin
                 mapped.supportsProjectSettingsOverrides = supportsProjectSettings
+                mapped.supportsProjectProviderInstanceOverrides = supportsProjectProviders
+                mapped.providerInstanceOverrides = projectSettings.providerInstanceOverrides(projectID: project.id)
                 return mapped
             }
             // These are server paths. `isDirectory` skips a useless local file system check.
@@ -6793,6 +6700,31 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             ?? environment.descriptor?.capabilities
     }
 
+    /// Index child requests once per shell revision; streaming detail renders reuse it.
+    private func subagentRequests(for environmentID: String) -> (sources: [OrchestrationV2SubagentRequestSource], index: OrchestrationV2SubagentRequests) {
+        guard !restoredShellEnvironmentIDs.contains(environmentID) else {
+            return ([], OrchestrationV2SubagentRequests(environmentID: environmentID, sources: []))
+        }
+        let shell = shellsByEnvironmentID[environmentID]
+        let sequence = shell?.snapshotSequence ?? -1
+        if let cached = subagentRequestIndexes[environmentID], cached.sequence == sequence {
+            return (cached.sources, cached.index)
+        }
+        let sources = (shell?.threads ?? []).compactMap(\.v2SubagentRequestSource)
+        let index = OrchestrationV2SubagentRequests(environmentID: environmentID, sources: sources)
+        subagentRequestIndexes[environmentID] = (sequence, sources, index)
+        return (sources, index)
+    }
+
+    private func applyingSubagentRequests(_ thread: FeatureThread, environmentID: String) -> FeatureThread {
+        var thread = thread
+        let requests = subagentRequests(for: environmentID).index
+        let wireID = thread.wireID ?? thread.id
+        thread.pendingSubagentRequest = requests.pendingRequest(for: wireID)
+        thread.childThreadInputs = requests.childInputs(for: wireID)
+        return thread
+    }
+
     private func mapThread(
         _ thread: OrchestrationThreadShell,
         environment: Environment
@@ -6800,7 +6732,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         let backgroundLiveness = thread.backgroundLiveness
         let backgroundWorkIsActive = backgroundLiveness == .working
         let capabilities = threadCapabilities(for: environment)
-        return FeatureThread(
+        return applyingSubagentRequests(FeatureThread(
             id: FeatureScopedID.thread(environmentID: environment.id, wireID: thread.id),
             wireID: thread.id,
             relationshipToParent: thread.relationshipToParent,
@@ -6885,7 +6817,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             runtimeMode: mapRuntimeMode(thread.runtimeMode),
             interactionMode: mapInteractionMode(thread.interactionMode),
             goal: thread.v2Lifecycle?.goal
-        )
+        ), environmentID: environment.id)
     }
 
     private func mapThread(
@@ -6919,7 +6851,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         let capabilities = threadCapabilities(for: environment)
         // mapDetail applies shell authority only after comparing snapshot sequences.
         let lifecycle = controlLifecycle ?? shell?.v2Lifecycle
-        return FeatureThread(
+        return applyingSubagentRequests(FeatureThread(
             id: FeatureScopedID.thread(environmentID: environment.id, wireID: thread.id),
             wireID: thread.id,
             relationshipToParent: thread.relationshipToParent,
@@ -7013,7 +6945,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             runtimeMode: mapRuntimeMode(thread.runtimeMode),
             interactionMode: mapInteractionMode(thread.interactionMode),
             goal: lifecycle?.goal
-        )
+        ), environmentID: environment.id)
     }
 
     private func mapDetail(
@@ -7149,7 +7081,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         if let shell, let shellThread, shell.snapshotSequence >= sourceSequence {
             applyShellMetadataAuthority(from: shellThread, to: &mappedThread)
         }
-        return FeatureThreadDetail(
+        var detail = FeatureThreadDetail(
             thread: mappedThread,
             messages: cache.mergedMessages,
             approvals: cache.approvals,
@@ -7169,6 +7101,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             allowsProviderSwitch: FeatureProviderHandoffPolicy.allowsProviderSwitch(projection: thread.orchestrationV2Control),
             recovery: FeatureThreadRecovery(thread: thread)
         )
+        detail.composerHandoffSource = thread.orchestrationV2Control.map { FeatureComposerHandoffSource(projection: $0) }
+        return detail
     }
 
     private func backgroundLiveness(
@@ -7231,148 +7165,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     }
 
     private func clearOlderThreadLoading(threadID: String) {
-        pendingOlderThreadPage = nil
         activeThreadPage?.isLoading = false
         publishActivePageState(threadID: threadID)
-    }
-
-    private func tryMergePendingOlderThreadPage(route: NativeThreadRoute) {
-        guard let pending = pendingOlderThreadPage,
-              pending.threadID == route.uiID,
-              pending.environmentID == route.environmentID else { return }
-        guard pending.epoch == threadHistoryEpoch else {
-            clearOlderThreadLoading(threadID: route.uiID)
-            return
-        }
-        if let watermark = pending.snapshot.page?.threadSequence,
-           watermark > (activeThreadSequence ?? 0) {
-            return
-        }
-        pendingOlderThreadPage = nil
-        _ = mergeOlderThreadPage(pending.snapshot, route: route)
-    }
-
-    @discardableResult
-    private func mergeOlderThreadPage(
-        _ snapshot: OrchestrationThreadDetailSnapshot,
-        route: NativeThreadRoute
-    ) -> FeatureThreadDetail? {
-        guard activeThreadID == route.uiID,
-              let loadedThread = activeRawThread,
-              let currentDetail = latestDetails[route.uiID] else {
-            clearOlderThreadLoading(threadID: route.uiID)
-            return latestDetails[route.uiID]
-        }
-
-        expandedHistoryIDs.insert(route.uiID)
-        let mergedThread = mergingOlderHistory(snapshot.thread, into: loadedThread)
-        let olderMessages = renderedHistoryMessages(
-            snapshot.thread,
-            environmentID: route.environmentID
-        )
-        let loadedMessageIDs = Set(currentDetail.messages.map(\.id))
-        let mergedMessages = (
-            olderMessages.filter { !loadedMessageIDs.contains($0.id) }
-                + currentDetail.messages
-        ).sorted { $0.createdAt < $1.createdAt }
-
-        activeRawThread = mergedThread
-        activeThreadPage = featurePage(snapshot.page)
-
-        if let cache = detailRenderCaches[route.uiID] {
-            for rawMessage in snapshot.thread.messages where cache.messagesByID[rawMessage.id] == nil {
-                cache.messagesByID[rawMessage.id] = mapMessage(
-                    rawMessage,
-                    environmentID: route.environmentID
-                )
-            }
-            cache.mergedMessages = mergedMessages
-            rebuildMergedIndexes(cache)
-        }
-
-        let detail = FeatureThreadDetail(
-            thread: currentDetail.thread,
-            messages: mergedMessages,
-            approvals: currentDetail.approvals,
-            userInputs: currentDetail.userInputs,
-            page: activeThreadPage,
-            activeSubagentCount: currentDetail.activeSubagentCount,
-            backgroundWorkIsActive: currentDetail.backgroundWorkIsActive,
-            isCompacting: currentDetail.isCompacting == true,
-            execution: currentDetail.execution,
-            workflows: currentDetail.workflows,
-            allowsProviderSwitch: currentDetail.allowsProviderSwitch,
-            recovery: currentDetail.recovery
-        )
-        publish(detail, threadID: route.uiID, renderCacheIsSource: true)
-        return detail
-    }
-
-    private func renderedHistoryMessages(
-        _ thread: OrchestrationThread,
-        environmentID: String
-    ) -> [FeatureMessage] {
-        let messages = thread.messages.map {
-            mapMessage($0, environmentID: environmentID)
-        }
-        let workIsLive = thread.session?.status == "starting"
-            || thread.session?.status == "running"
-            || backgroundLiveness(threadID: thread.id, environmentID: environmentID) == .working
-        let activities = thread.activities.compactMap {
-            NativeActivityNotice.message($0, createdAt: parseDate($0.createdAt))
-        }
-            + collapsedWorkLogs(thread.activities, sessionIsLive: workIsLive)
-        return (messages + activities).sorted { $0.createdAt < $1.createdAt }
-    }
-
-    private func mergingOlderHistory(
-        _ older: OrchestrationThread,
-        into loaded: OrchestrationThread
-    ) -> OrchestrationThread {
-        func prependByID<Element: Identifiable>(
-            _ olderRows: [Element],
-            _ loadedRows: [Element]
-        ) -> [Element] where Element.ID: Hashable {
-            let loadedIDs = Set(loadedRows.map(\.id))
-            return olderRows.filter { !loadedIDs.contains($0.id) } + loadedRows
-        }
-
-        let loadedCheckpointTurns = Set(loaded.checkpoints.map(\.turnId))
-        return OrchestrationThread(
-            relationshipToParent: loaded.relationshipToParent,
-            id: loaded.id,
-            projectId: loaded.projectId,
-            title: loaded.title,
-            modelSelection: loaded.modelSelection,
-            runtimeMode: loaded.runtimeMode,
-            interactionMode: loaded.interactionMode,
-            branch: loaded.branch,
-            worktreePath: loaded.worktreePath,
-            linkedPullRequest: loaded.linkedPullRequest,
-            pullRequests: loaded.pullRequests,
-            branchPullRequest: loaded.branchPullRequest,
-            latestTurn: loaded.latestTurn,
-            createdAt: loaded.createdAt,
-            updatedAt: loaded.updatedAt,
-            archivedAt: loaded.archivedAt,
-            settledOverride: loaded.settledOverride,
-            settledAt: loaded.settledAt,
-            unsettledAt: loaded.unsettledAt,
-            activeOrderKey: loaded.activeOrderKey,
-            autoSettleDisabledAt: loaded.autoSettleDisabledAt,
-            snoozedUntil: loaded.snoozedUntil,
-            snoozedAt: loaded.snoozedAt,
-            pinnedAt: loaded.pinnedAt,
-            pinOrderKey: loaded.pinOrderKey,
-            titleRegeneration: loaded.titleRegeneration,
-            deletedAt: loaded.deletedAt,
-            messages: prependByID(older.messages, loaded.messages),
-            activities: prependByID(older.activities, loaded.activities),
-            checkpoints: older.checkpoints.filter {
-                !loadedCheckpointTurns.contains($0.turnId)
-            } + loaded.checkpoints,
-            session: loaded.session
-        )
     }
 
     private func rebuildMergedIndexes(_ cache: NativeDetailRenderCache) {
@@ -7869,7 +7663,6 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             hasActionableProposedPlan: facts.hasActionableProposedPlan,
             latestUserAuthoredMessageAt: facts.latestUserAuthoredMessageAt.flatMap(parseValidDate),
             latestUserAuthoredMessageAtIsPresent: facts.latestUserAuthoredMessageAtIsPresent,
-            orchestrationVersion: 2,
             runtimeUpdatedAt: parseValidDate(facts.runtimeUpdatedAt),
             latestRunStartedAt: facts.latestRunStartedAt.flatMap(parseValidDate),
             latestRunHasInvalidTimestamp: [facts.latestRunRequestedAt, facts.latestRunStartedAt, facts.latestRunCompletedAt]
@@ -7979,7 +7772,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     }
 
     /// Reuse mapped models across shell and settings updates. The config
-    /// setter invalidates an entry only when its provider snapshots change.
+    /// setter invalidates an entry when its catalog or enablement settings change.
     private var providerCatalogCache: [String: [FeatureProvider]] = [:]
 
     /// Single write path for server configs so the provider catalog cache can
@@ -7988,8 +7781,10 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         if serverConfigsByEnvironmentID[environmentID]?.environment?.capabilities
             != config.environment?.capabilities {
             shellProjectionCache[environmentID] = nil
+            subagentRequestIndexes[environmentID] = nil
         }
-        if serverConfigsByEnvironmentID[environmentID]?.providers != config.providers {
+        if serverConfigsByEnvironmentID[environmentID]?.providers != config.providers
+            || serverConfigsByEnvironmentID[environmentID]?.settings?.providerInstances != config.settings?.providerInstances {
             providerCatalogCache[environmentID] = nil
         }
         let endpointsChanged = serverConfigsByEnvironmentID[environmentID]?.directEndpoints != config.directEndpoints
@@ -8011,7 +7806,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     ) -> [FeatureProvider] {
         if let providers = config?.providers, !providers.isEmpty {
             if let cached = providerCatalogCache[environmentID] { return cached }
-            let mapped = mapConfigProviders(providers)
+            let mapped = mapConfigProviders(providers, settings: config?.settings)
             providerCatalogCache[environmentID] = mapped
             return mapped
         }
@@ -8019,7 +7814,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     }
 
     private func mapConfigProviders(
-        _ providers: [ServerProviderSnapshot]
+        _ providers: [ServerProviderSnapshot], settings: ServerSettingsSnapshot?
     ) -> [FeatureProvider] {
         Self.normalizedProviders(providers.map { provider in
                 var mapped = FeatureProvider(
@@ -8055,6 +7850,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                             options: options
                         )
                         mappedModel.supportedRuntimeModes = model.capabilities?.supportedRuntimeModes?.map(mapRuntimeMode)
+                        mappedModel.isCustom = model.isCustom
+                        mappedModel.aliases = model.aliases
                         return mappedModel
                     },
                     slashCommands: (provider.slashCommands ?? []).map { command in
@@ -8071,10 +7868,13 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                 mapped.versionAdvisory = provider.versionAdvisory
                 mapped.compatibilityAdvisory = provider.compatibilityAdvisory
                 mapped.updateState = provider.updateState
+                mapped.updateRequiredModels = provider.updateRequiredModels
+                mapped.continuationGroupKey = provider.continuation?.groupKey
                 mapped.accentColor = ProviderInstanceDisplay.accentColor(provider.accentColor)
-                mapped.isEnabled = provider.enabled
+                mapped.isEnabled = settings?.providerInstanceEnabled(instanceID: provider.instanceId) ?? provider.enabled
                 mapped.isInstalled = provider.installed
                 mapped.authStatus = provider.auth.status
+                mapped.status = provider.status
                 mapped.canLogout = provider.auth.canLogout
                 mapped.statusMessage = provider.message
                 mapped.workspaceSnapshots = provider.workspaceSnapshots?.map { workspace in
@@ -8152,93 +7952,75 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         return normalized
     }
 
+    private func modelValidationConfig(client: T3Client) async throws -> ServerConfigSnapshot {
+        var config = try await client.serverConfig()
+        // serverConfig is a streamed cache. Read settings before dispatch so a
+        // project override changed on another device also blocks outbox retries.
+        config.settings = try await client.serverSettings()
+        return config
+    }
+
     private func modelSelection(
         _ selection: FeatureSelection?,
         projectID: String,
         environmentID: String,
         shell: OrchestrationShellSnapshot?
-    ) -> ModelSelection {
-        if let selection {
-            return coreModelSelection(selection)
-        }
+    ) throws -> ModelSelection {
+        if let selection { return coreModelSelection(selection) }
         let project = shell?.projects.first(where: { $0.id == projectID })
         let config = serverConfigsByEnvironmentID[environmentID]
         let settings = config?.settings ?? ServerSettingsSnapshot()
         let effective = settings.resolvingProject(
             id: projectID, legacyModelSelection: project?.defaultModelSelection,
             legacyWorkspaceMode: project?.defaultThreadEnvMode,
-            disabledProviderIDs: Set((config?.providers ?? []).filter { !providerCanRun($0) }.map(\.instanceId))
+            disabledProviderIDs: config.map {
+                ServerProviderModelAvailability.disabledProviderIDs(in: $0, projectID: projectID)
+            } ?? []
         )
-        if let projectDefault = effective.defaultModelSelection {
+        if let projectDefault = effective.defaultModelSelection, let config,
+           ServerProviderModelAvailability.canSelect(projectDefault, in: config, projectID: projectID) {
             return projectDefault
         }
-        return fallbackModelSelection(
-            environmentID: environmentID,
-            projectID: projectID,
-            shell: shell
-        )
+        guard let fallback = fallbackModelSelection(environmentID: environmentID, projectID: projectID, shell: shell) else {
+            throw ServerProviderModelSelectionError.noAvailableModels
+        }
+        return fallback
     }
 
-    /// Fallback selection is resolved against the target environment. This
-    /// matters when a passive machine exposes a different provider catalogue
-    /// than the currently active one.
+    /// Defaults must be usable in the destination project, including its provider overrides.
     private func fallbackModelSelection(
         environmentID: String,
         projectID: String?,
         shell: OrchestrationShellSnapshot?
-    ) -> ModelSelection {
-        let config = serverConfigsByEnvironmentID[environmentID]
-        let appSelection = loadSettings().defaultSelection
-        if let selection = appSelection, let config {
-            if configSupports(selection, config: config) {
-                return coreModelSelection(selection)
-            }
-        }
-        if let configuredDefault = defaultModelSelection(in: config) {
-            return configuredDefault
-        }
-        if let projectID,
-           let recentProjectSelection = shell?.threads
-            .first(where: { $0.projectId == projectID })?
-            .modelSelection {
-            return recentProjectSelection
-        }
-        if let knownSelection = shell?.projects.compactMap(\.defaultModelSelection).first
-            ?? shell?.threads.first?.modelSelection {
-            return knownSelection
-        }
-        if let selection = appSelection {
+    ) -> ModelSelection? {
+        guard let config = serverConfigsByEnvironmentID[environmentID] else { return nil }
+        if let selection = loadSettings().defaultSelection,
+           configSupports(selection, config: config, projectID: projectID) {
             return coreModelSelection(selection)
         }
-        return ModelSelection(instanceId: "codex", model: "gpt-5.6-sol")
+        if let configuredDefault = defaultModelSelection(in: config, projectID: projectID) {
+            return configuredDefault
+        }
+        let recent = shell?.threads.filter { projectID == nil || $0.projectId == projectID }.map(\.modelSelection) ?? []
+        let projectDefaults = shell?.projects.compactMap(\.defaultModelSelection) ?? []
+        return (recent + projectDefaults).first {
+            ServerProviderModelAvailability.canSelect($0, in: config, projectID: projectID)
+        }
     }
 
     private func configSupports(
         _ selection: FeatureSelection,
-        config: ServerConfigSnapshot
+        config: ServerConfigSnapshot,
+        projectID: String?
     ) -> Bool {
-        config.providers.contains { provider in
-            provider.instanceId == selection.providerID
-                && providerCanRun(provider)
-                && provider.models.contains { $0.slug == selection.modelID }
-        }
+        ServerProviderModelAvailability.canSelect(coreModelSelection(selection), in: config, projectID: projectID)
     }
 
     private func defaultModelSelection(
-        in config: ServerConfigSnapshot?
+        in config: ServerConfigSnapshot?,
+        projectID: String?
     ) -> ModelSelection? {
-        guard let providers = config?.providers else { return nil }
-        for provider in providers where providerCanRun(provider) {
-            if let model = provider.models.first(where: { $0.isDefault == true }) {
-                return ModelSelection(instanceId: provider.instanceId, model: model.slug)
-            }
-        }
-        for provider in providers where providerCanRun(provider) {
-            if let model = provider.models.first {
-                return ModelSelection(instanceId: provider.instanceId, model: model.slug)
-            }
-        }
-        return nil
+        config.flatMap { ServerProviderModelAvailability.defaultSelection(in: $0, projectID: projectID) }
     }
 
     private func providerCanRun(_ provider: ServerProviderSnapshot) -> Bool {
@@ -8502,39 +8284,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             throw NativeFeatureClientError.tooManyAttachments
         }
         let uploads = try await Task.detached(priority: .userInitiated) {
-            try attachments.map {
-                let reference = $0.uploadedReference.map {
-                    UploadedAttachmentReference(
-                        environmentID: $0.environmentID,
-                        attachmentID: $0.attachmentID
-                    )
-                }
-                if let ownedFile = $0.ownedFile {
-                    if $0.mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("image/") {
-                        return try UploadChatAttachment(
-                            id: $0.id, data: Data(contentsOf: ownedFile.url),
-                            name: $0.name, mimeType: $0.mimeType, uploadedReference: reference
-                        )
-                    }
-                    return try UploadChatAttachment(
-                        id: $0.id,
-                        fileURL: ownedFile.url,
-                        name: $0.name,
-                        mimeType: $0.mimeType,
-                        sizeBytes: ownedFile.byteCount,
-                        uploadedReference: reference,
-                        contextSource: $0.source
-                    )
-                }
-                return try UploadChatAttachment(
-                    id: $0.id,
-                    data: $0.data,
-                    name: $0.name,
-                    mimeType: $0.mimeType,
-                    uploadedReference: reference,
-                    contextSource: $0.source
-                )
-            }
+            try attachments.map(NativeUploadAttachmentPreparation.make)
         }.value
         try Task.checkCancellation()
         try UploadChatAttachment.validateBatch(uploads)
@@ -9055,567 +8805,6 @@ struct NativeWorkLogAccumulator {
     }
 }
 
-enum NativeThreadDetailReductionResult: Equatable {
-    case updated(OrchestrationThread)
-    case unchanged
-    case refresh
-}
-
-struct NativeThreadDetailReduction: Equatable {
-    let sequence: Int
-    let result: NativeThreadDetailReductionResult
-    let renderMutation: NativeDetailRenderMutation
-
-    init(
-        sequence: Int,
-        result: NativeThreadDetailReductionResult,
-        renderMutation: NativeDetailRenderMutation = .metadata
-    ) {
-        self.sequence = sequence
-        self.result = result
-        self.renderMutation = renderMutation
-    }
-}
-
-/// Swift counterpart to client-runtime's thread reducer for the detail event
-/// subset sent by `subscribeThread`. Destructive and forward-unknown events
-/// deliberately request an authoritative snapshot.
-enum NativeThreadDetailReducer {
-    static func apply(
-        _ event: JSONValue,
-        to thread: OrchestrationThread,
-        afterSequence: Int? = nil
-    ) -> NativeThreadDetailReduction {
-        guard case let .object(object) = event,
-              let type = object["type"]?.stringValue,
-              let occurredAt = object["occurredAt"]?.stringValue,
-              let sequence = intValue(object["sequence"]),
-              let payload = object["payload"],
-              payload["threadId"]?.stringValue == thread.id else {
-            return NativeThreadDetailReduction(
-                sequence: -1,
-                result: .refresh,
-                renderMutation: .full
-            )
-        }
-
-        // Validate ownership and the common envelope before skipping replayed events.
-        if let afterSequence, sequence >= 0, sequence <= afterSequence {
-            return NativeThreadDetailReduction(
-                sequence: sequence, result: .unchanged, renderMutation: .none
-            )
-        }
-
-        let result: NativeThreadDetailReductionResult
-        var renderMutation = NativeDetailRenderMutation.metadata
-        switch type {
-        case "thread.settled":
-            result = reduceSettled(payload: payload, thread: thread)
-        case "thread.unsettled":
-            result = reduceUnsettled(payload: payload, thread: thread)
-        case "thread.meta-updated":
-            result = reduceMetadata(payload: payload, occurredAt: occurredAt, thread: thread)
-        case "thread.auto-settle-set":
-            var updated = replacing(thread, updatedAt: payload["updatedAt"]?.stringValue ?? occurredAt)
-            updated.autoSettleDisabledAt = payload["autoSettleDisabledAt"]?.stringValue
-            result = .updated(updated)
-        case "thread.pin-reordered":
-            result = reducePinReordered(
-                payload: payload,
-                occurredAt: occurredAt,
-                thread: thread
-            )
-        case "thread.pull-request-linked", "thread.pull-request-unlinked", "thread.pull-request-synced":
-            result = reducePullRequest(type: type, payload: payload, thread: thread)
-        case "thread.message-sent":
-            result = reduceMessage(
-                payload: payload,
-                occurredAt: occurredAt,
-                thread: thread,
-                renderMutation: &renderMutation
-            )
-        case "thread.activity-appended":
-            result = reduceActivity(
-                payload: payload,
-                occurredAt: occurredAt,
-                thread: thread,
-                renderMutation: &renderMutation
-            )
-        case "thread.session-set":
-            result = reduceSession(payload: payload, occurredAt: occurredAt, thread: thread)
-        case "thread.turn-diff-completed":
-            result = reduceTurnDiff(payload: payload, occurredAt: occurredAt, thread: thread)
-        case "thread.proposed-plan-upserted":
-            // Proposed plans are not rendered by the native detail model yet.
-            result = .unchanged
-            renderMutation = .none
-        case "thread.reverted":
-            result = .refresh
-            renderMutation = .full
-        default:
-            result = .refresh
-            renderMutation = .full
-        }
-        return NativeThreadDetailReduction(
-            sequence: sequence,
-            result: result,
-            renderMutation: renderMutation
-        )
-    }
-
-    private static func reduceSettled(
-        payload: JSONValue,
-        thread: OrchestrationThread
-    ) -> NativeThreadDetailReductionResult {
-        guard let settledAt = payload["settledAt"]?.stringValue,
-              let updatedAt = payload["updatedAt"]?.stringValue else {
-            return .refresh
-        }
-        var updated = replacing(
-            thread,
-            settlement: SettlementReplacement(
-                override: "settled",
-                settledAt: settledAt,
-                unsettledAt: nil
-            ),
-            updatedAt: updatedAt
-        )
-        updated.activeOrderKey = nil
-        return .updated(updated)
-    }
-
-    private static func reduceUnsettled(
-        payload: JSONValue,
-        thread: OrchestrationThread
-    ) -> NativeThreadDetailReductionResult {
-        guard let reason = payload["reason"]?.stringValue,
-              let updatedAt = payload["updatedAt"]?.stringValue else {
-            return .refresh
-        }
-        return .updated(
-            replacing(
-                thread,
-                settlement: SettlementReplacement(
-                    override: reason == "user" ? "active" : nil,
-                    settledAt: nil,
-                    unsettledAt: thread.settledOverride == "active"
-                        ? thread.unsettledAt
-                        : updatedAt
-                ),
-                updatedAt: updatedAt
-            )
-        )
-    }
-
-    private static func reducePullRequest(
-        type: String, payload: JSONValue, thread: OrchestrationThread
-    ) -> NativeThreadDetailReductionResult {
-        guard let updatedAt = payload["updatedAt"]?.stringValue else { return .refresh }
-        var updated = replacing(thread, updatedAt: updatedAt)
-        var links = thread.pullRequests ?? []
-        if type == "thread.pull-request-linked" {
-            guard let link = try? payload["link"]?.decode(ThreadPullRequestLink.self) else { return .refresh }
-            if let index = links.firstIndex(where: { $0.id == link.id }) { links[index] = link }
-            else { links.append(link) }
-        } else {
-            guard let host = payload["host"]?.stringValue,
-                  let repository = payload["repository"]?.stringValue,
-                  let number = intValue(payload["number"]) else { return .refresh }
-            let key = ThreadPullRequestKey(host: host, repository: repository, number: number)
-            guard let index = links.firstIndex(where: { $0.id == key }) else { return .unchanged }
-            if type == "thread.pull-request-unlinked" {
-                links.remove(at: index)
-            } else {
-                guard let snapshot = try? payload["snapshot"]?.decode(ThreadPullRequestSnapshot.self),
-                      let stackValue = payload["stack"] else { return .refresh }
-                let stack: ThreadPullRequestStack?
-                if stackValue == .null { stack = nil }
-                else {
-                    guard let decoded = try? stackValue.decode(ThreadPullRequestStack.self) else { return .refresh }
-                    stack = decoded
-                }
-                links[index].snapshot = snapshot
-                links[index].stack = stack
-            }
-        }
-        updated.pullRequests = links
-        if let legacy = updated.linkedPullRequest,
-           !links.contains(where: { $0.isVisible && $0.number == legacy.number && $0.url == legacy.url }) {
-            updated.linkedPullRequest = nil
-        }
-        return .updated(updated)
-    }
-
-    private static func reduceMetadata(
-        payload: JSONValue,
-        occurredAt: String,
-        thread: OrchestrationThread
-    ) -> NativeThreadDetailReductionResult {
-        guard case let .object(values) = payload,
-              values["linkedPullRequest"] != nil
-                || values["branchPullRequest"] != nil
-                || values["activeOrderKey"] != nil else {
-            return .refresh
-        }
-        guard !["title", "modelSelection", "branch", "worktreePath"].contains(where: {
-            values[$0] != nil
-        }) else {
-            return .refresh
-        }
-        var updated = replacing(
-            thread,
-            updatedAt: payload["updatedAt"]?.stringValue ?? occurredAt
-        )
-        if let rawLink = values["linkedPullRequest"] {
-            if rawLink == .null {
-                updated.linkedPullRequest = nil
-            } else {
-                guard let decoded = try? rawLink.decode(ThreadLinkedPullRequest.self) else {
-                    return .refresh
-                }
-                updated.linkedPullRequest = decoded
-            }
-        }
-        if let rawBranchLink = values["branchPullRequest"] {
-            if rawBranchLink == .null {
-                updated.branchPullRequest = nil
-            } else {
-                guard let decoded = try? rawBranchLink.decode(ThreadLinkedPullRequest.self) else {
-                    return .refresh
-                }
-                updated.branchPullRequest = decoded
-            }
-        }
-        if let rawOrder = values["activeOrderKey"] {
-            if rawOrder == .null {
-                updated.activeOrderKey = nil
-            } else {
-                guard let order = rawOrder.stringValue,
-                      !order.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    return .refresh
-                }
-                updated.activeOrderKey = order
-            }
-        }
-        return .updated(updated)
-    }
-
-    private static func reducePinReordered(
-        payload: JSONValue,
-        occurredAt: String,
-        thread: OrchestrationThread
-    ) -> NativeThreadDetailReductionResult {
-        guard let orderKey = payload["orderKey"]?.stringValue,
-              !orderKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .refresh
-        }
-        var updated = replacing(
-            thread,
-            updatedAt: payload["updatedAt"]?.stringValue ?? occurredAt
-        )
-        updated.pinOrderKey = orderKey
-        return .updated(updated)
-    }
-
-    private static func reduceMessage(
-        payload: JSONValue,
-        occurredAt: String,
-        thread: OrchestrationThread,
-        renderMutation: inout NativeDetailRenderMutation
-    ) -> NativeThreadDetailReductionResult {
-        guard let id = payload["messageId"]?.stringValue,
-              let role = payload["role"]?.stringValue,
-              let text = payload["text"]?.stringValue,
-              let streaming = boolValue(payload["streaming"]),
-              let createdAt = payload["createdAt"]?.stringValue,
-              let updatedAt = payload["updatedAt"]?.stringValue else {
-            return .refresh
-        }
-        let turnID = payload["turnId"]?.stringValue
-        let context: OrchestrationMessageContext?
-        if let rawContext = payload["context"], rawContext != .null {
-            guard let decoded = try? rawContext.decode(OrchestrationMessageContext.self) else { return .refresh }
-            context = decoded
-        } else {
-            context = nil
-        }
-        let attachments: [ChatAttachment]?
-        if let rawAttachments = payload["attachments"], rawAttachments != .null {
-            guard let decoded = try? rawAttachments.decode([ChatAttachment].self) else {
-                return .refresh
-            }
-            attachments = decoded
-        } else {
-            attachments = nil
-        }
-
-        var messages = thread.messages
-        let existingIndex = messages.last?.id == id
-            ? messages.indices.last
-            : messages.firstIndex(where: { $0.id == id })
-        if let index = existingIndex {
-            let existing = messages[index]
-            messages[index] = OrchestrationMessage(
-                id: existing.id,
-                role: existing.role,
-                text: streaming ? existing.text + text : (text.isEmpty ? existing.text : text),
-                attachments: attachments ?? existing.attachments,
-                turnId: turnID,
-                streaming: streaming,
-                createdAt: existing.createdAt,
-                updatedAt: streaming ? existing.updatedAt : updatedAt,
-                context: context ?? existing.context
-            )
-            renderMutation = .message(messages[index])
-        } else {
-            let message = OrchestrationMessage(
-                id: id,
-                role: role,
-                text: text,
-                attachments: attachments,
-                turnId: turnID,
-                streaming: streaming,
-                createdAt: createdAt,
-                updatedAt: updatedAt,
-                context: context
-            )
-            messages.append(message)
-            renderMutation = .message(message)
-        }
-
-        var latestTurn = thread.latestTurn
-        var checkpoints = thread.checkpoints
-        if role == "assistant", let turnID,
-           latestTurn == nil || latestTurn?.turnId == turnID {
-            let turnStillRunning = thread.session?.status == "running"
-                && thread.session?.activeTurnId == turnID
-            let settlesTurn = !streaming && !turnStillRunning
-            let previous = latestTurn?.turnId == turnID ? latestTurn : nil
-            let state = settlesTurn
-                ? (previous?.state == "interrupted" || previous?.state == "error"
-                    ? previous!.state
-                    : "completed")
-                : "running"
-            latestTurn = OrchestrationLatestTurn(
-                turnId: turnID,
-                state: state,
-                requestedAt: previous?.requestedAt ?? createdAt,
-                startedAt: previous?.startedAt ?? createdAt,
-                completedAt: settlesTurn ? updatedAt : previous?.completedAt,
-                assistantMessageId: id
-            )
-            checkpoints = checkpoints.map { checkpoint in
-                guard checkpoint.turnId == turnID,
-                      checkpoint.assistantMessageId == nil else { return checkpoint }
-                return CheckpointSummary(
-                    turnId: checkpoint.turnId,
-                    checkpointTurnCount: checkpoint.checkpointTurnCount,
-                    checkpointRef: checkpoint.checkpointRef,
-                    status: checkpoint.status,
-                    files: checkpoint.files,
-                    assistantMessageId: id,
-                    completedAt: checkpoint.completedAt
-                )
-            }
-        }
-        return .updated(
-            replacing(
-                thread,
-                messages: messages,
-                checkpoints: checkpoints,
-                latestTurn: latestTurn,
-                updatedAt: occurredAt
-            )
-        )
-    }
-
-    private static func reduceActivity(
-        payload: JSONValue,
-        occurredAt: String,
-        thread: OrchestrationThread,
-        renderMutation: inout NativeDetailRenderMutation
-    ) -> NativeThreadDetailReductionResult {
-        guard let raw = payload["activity"],
-              let activity = try? raw.decode(OrchestrationActivity.self) else {
-            return .refresh
-        }
-        renderMutation = .activity(activity)
-        return .updated(
-            // The render cache owns the event tail. Keeping the authoritative
-            // snapshot array shared avoids copying tens of thousands of old
-            // activities for each append; a resnapshot rebuilds after recovery.
-            replacing(thread, updatedAt: occurredAt)
-        )
-    }
-
-    private static func reduceSession(
-        payload: JSONValue,
-        occurredAt: String,
-        thread: OrchestrationThread
-    ) -> NativeThreadDetailReductionResult {
-        guard let raw = payload["session"],
-              let session = try? raw.decode(OrchestrationSession.self) else {
-            return .refresh
-        }
-        var latestTurn = thread.latestTurn
-        if session.status == "running", let activeTurnID = session.activeTurnId {
-            let previous = latestTurn?.turnId == activeTurnID ? latestTurn : nil
-            latestTurn = OrchestrationLatestTurn(
-                turnId: activeTurnID,
-                state: "running",
-                requestedAt: previous?.requestedAt ?? session.updatedAt,
-                startedAt: previous?.startedAt ?? session.updatedAt,
-                completedAt: nil,
-                assistantMessageId: previous?.assistantMessageId
-            )
-        } else if latestTurn?.state == "running",
-                  let settledState = settledTurnState(session.status),
-                  let current = latestTurn {
-            latestTurn = OrchestrationLatestTurn(
-                turnId: current.turnId,
-                state: settledState,
-                requestedAt: current.requestedAt,
-                startedAt: current.startedAt,
-                completedAt: session.updatedAt,
-                assistantMessageId: current.assistantMessageId
-            )
-        }
-        return .updated(
-            replacing(
-                thread,
-                latestTurn: latestTurn,
-                session: session,
-                updatedAt: occurredAt
-            )
-        )
-    }
-
-    private static func reduceTurnDiff(
-        payload: JSONValue,
-        occurredAt: String,
-        thread: OrchestrationThread
-    ) -> NativeThreadDetailReductionResult {
-        guard let turnID = payload["turnId"]?.stringValue,
-              let turnCount = intValue(payload["checkpointTurnCount"]),
-              let checkpointRef = payload["checkpointRef"]?.stringValue,
-              let status = payload["status"]?.stringValue,
-              let completedAt = payload["completedAt"]?.stringValue,
-              let rawFiles = payload["files"],
-              let files = try? rawFiles.decode([CheckpointFile].self) else {
-            return .refresh
-        }
-        let assistantMessageID = payload["assistantMessageId"]?.stringValue
-        let checkpoint = CheckpointSummary(
-            turnId: turnID,
-            checkpointTurnCount: turnCount,
-            checkpointRef: checkpointRef,
-            status: status,
-            files: files,
-            assistantMessageId: assistantMessageID,
-            completedAt: completedAt
-        )
-        if let existing = thread.checkpoints.first(where: { $0.turnId == turnID }),
-           existing.status != "missing", status == "missing" {
-            return .unchanged
-        }
-        var checkpoints = thread.checkpoints.filter { $0.turnId != turnID }
-        checkpoints.append(checkpoint)
-        checkpoints.sort { $0.checkpointTurnCount < $1.checkpointTurnCount }
-
-        var latestTurn = thread.latestTurn
-        let stillRunning = thread.session?.status == "running"
-            && thread.session?.activeTurnId == turnID
-        if !stillRunning, latestTurn == nil || latestTurn?.turnId == turnID {
-            latestTurn = OrchestrationLatestTurn(
-                turnId: turnID,
-                state: status == "error" ? "error" : "completed",
-                requestedAt: latestTurn?.requestedAt ?? completedAt,
-                startedAt: latestTurn?.startedAt ?? completedAt,
-                completedAt: completedAt,
-                assistantMessageId: assistantMessageID
-            )
-        }
-        return .updated(
-            replacing(
-                thread,
-                checkpoints: checkpoints,
-                latestTurn: latestTurn,
-                updatedAt: occurredAt
-            )
-        )
-    }
-
-    private struct SettlementReplacement {
-        let override: String?
-        let settledAt: String?
-        let unsettledAt: String?
-    }
-
-    private static func replacing(
-        _ thread: OrchestrationThread,
-        messages: [OrchestrationMessage]? = nil,
-        activities: [OrchestrationActivity]? = nil,
-        checkpoints: [CheckpointSummary]? = nil,
-        latestTurn: OrchestrationLatestTurn? = nil,
-        session: OrchestrationSession? = nil,
-        settlement: SettlementReplacement? = nil,
-        updatedAt: String
-    ) -> OrchestrationThread {
-        OrchestrationThread(
-            relationshipToParent: thread.relationshipToParent,
-            id: thread.id,
-            projectId: thread.projectId,
-            title: thread.title,
-            modelSelection: thread.modelSelection,
-            runtimeMode: thread.runtimeMode,
-            interactionMode: thread.interactionMode,
-            branch: thread.branch,
-            worktreePath: thread.worktreePath,
-            linkedPullRequest: thread.linkedPullRequest,
-            pullRequests: thread.pullRequests,
-            branchPullRequest: thread.branchPullRequest,
-            latestTurn: latestTurn ?? thread.latestTurn,
-            createdAt: thread.createdAt,
-            updatedAt: updatedAt,
-            archivedAt: thread.archivedAt,
-            settledOverride: settlement == nil ? thread.settledOverride : settlement?.override,
-            settledAt: settlement == nil ? thread.settledAt : settlement?.settledAt,
-            unsettledAt: settlement == nil ? thread.unsettledAt : settlement?.unsettledAt,
-            activeOrderKey: thread.activeOrderKey,
-            autoSettleDisabledAt: thread.autoSettleDisabledAt,
-            snoozedUntil: thread.snoozedUntil,
-            snoozedAt: thread.snoozedAt,
-            pinnedAt: thread.pinnedAt,
-            pinOrderKey: thread.pinOrderKey,
-            titleRegeneration: thread.titleRegeneration,
-            deletedAt: thread.deletedAt,
-            messages: messages ?? thread.messages,
-            activities: activities ?? thread.activities,
-            checkpoints: checkpoints ?? thread.checkpoints,
-            session: session ?? thread.session
-        )
-    }
-
-    private static func settledTurnState(_ status: String) -> String? {
-        switch status {
-        case "idle", "ready": "completed"
-        case "error": "error"
-        case "interrupted", "stopped": "interrupted"
-        default: nil
-        }
-    }
-
-    private static func intValue(_ value: JSONValue?) -> Int? {
-        guard case let .number(number)? = value else { return nil }
-        return Int(exactly: number)
-    }
-
-    private static func boolValue(_ value: JSONValue?) -> Bool? {
-        guard case let .bool(boolean)? = value else { return nil }
-        return boolean
-    }
-}
-
 /// Shell metadata often changes for only one row. Keep the mapped values for
 /// equal source records, including across a fresh HTTP snapshot or a reorder.
 struct NativeShellRowProjection<Source: Identifiable & Equatable, Row> {
@@ -9651,6 +8840,7 @@ struct NativeShellProjection {
     private struct ThreadContext: Equatable {
         let environment: Environment
         let providerNames: [String: String]
+        let subagentSources: [OrchestrationV2SubagentRequestSource]
     }
 
     private var threadContext: ThreadContext?
@@ -9658,6 +8848,7 @@ struct NativeShellProjection {
     private var projectSettings: ServerSettingsSnapshot?
     private var disabledProjectProviderIDs: Set<String> = []
     private var supportsProjectSettings = false
+    private var supportsProjectProviders = false
     private var projects = NativeShellRowProjection<OrchestrationProject, FeatureProject>()
 
     mutating func mapProjects(
@@ -9665,14 +8856,17 @@ struct NativeShellProjection {
         settings: ServerSettingsSnapshot,
         disabledProviderIDs: Set<String> = [],
         supportsProjectSettings: Bool = false,
+        supportsProjectProviders: Bool = false,
         transform: (OrchestrationProject) -> FeatureProject
     ) -> [FeatureProject] {
         if projectSettings != settings
-            || disabledProjectProviderIDs != disabledProviderIDs || self.supportsProjectSettings != supportsProjectSettings {
+            || disabledProjectProviderIDs != disabledProviderIDs || self.supportsProjectSettings != supportsProjectSettings
+            || self.supportsProjectProviders != supportsProjectProviders {
             projects = NativeShellRowProjection()
             projectSettings = settings
             disabledProjectProviderIDs = disabledProviderIDs
             self.supportsProjectSettings = supportsProjectSettings
+            self.supportsProjectProviders = supportsProjectProviders
         }
         return projects.map(source, transform: transform)
     }
@@ -9681,9 +8875,10 @@ struct NativeShellProjection {
         _ source: [OrchestrationThreadShell],
         environment: Environment,
         providerNames: [String: String],
+        subagentSources: [OrchestrationV2SubagentRequestSource] = [],
         transform: (OrchestrationThreadShell) -> FeatureThread
     ) -> [FeatureThread] {
-        let context = ThreadContext(environment: environment, providerNames: providerNames)
+        let context = ThreadContext(environment: environment, providerNames: providerNames, subagentSources: subagentSources)
         if threadContext != context {
             threads = NativeShellRowProjection()
             threadContext = context
@@ -9718,7 +8913,7 @@ private struct EnvironmentShellLoad: Sendable {
     /// The server answered and refused the saved credential.
     var credentialRejected = false
     var failureDetail: String?
-    var preferenceGeneration = 0
+    var loadGeneration = 0
     var cacheLease: ClientReadCache.Lease?
 }
 
@@ -9732,13 +8927,6 @@ private struct NativeProjectRoute {
     let wireID: String
     let environmentID: String
     let client: T3Client
-}
-
-private struct PendingOlderThreadPage {
-    let snapshot: OrchestrationThreadDetailSnapshot
-    let epoch: Int
-    let threadID: String
-    let environmentID: String
 }
 
 struct NativeThreadRoute {
@@ -9809,6 +8997,7 @@ private struct BootstrapSubmissionSignature: Equatable {
     let startFromOrigin: Bool
     let attachments: [FeatureUploadAttachment]
     var context: OrchestrationMessageContext? = nil
+    var pullRequestReference: String? = nil
 }
 
 private struct PendingBootstrapSubmission {
@@ -9956,8 +9145,9 @@ extension NativeFeatureClient: FeatureSavedConnectionEditing {
         }
         shellsByEnvironmentID[environmentID] = nil
         shellProjectionCache[environmentID] = nil
+        subagentRequestIndexes[environmentID] = nil
         serverConfigsByEnvironmentID[environmentID] = nil
-        orchestrationPreferenceGenerations[environmentID, default: 0] &+= 1
+        environmentLoadGenerations[environmentID, default: 0] &+= 1
         try await clearClientStorage(environmentID: environmentID)
         discardRestoredEnvironment(environmentID)
         let replacement = await runtime.client(for: updated)
@@ -10022,7 +9212,6 @@ extension NativeFeatureClient {
             environmentClients[environment.id] = await runtime.client(for: environment)
             guard epoch == readCacheEpoch else { return }
             shellsByEnvironmentID[environment.id] = shell
-            orchestrationVersions[environment.id] = shell.orchestrationProtocolVersion ?? 1
             restoredShellEnvironmentIDs.insert(environment.id)
             environmentConnectionStates[environment.id] = .disconnected
             environmentConnectionDetails[environment.id] = "Offline. Showing saved lists and history."
@@ -10113,6 +9302,7 @@ extension NativeFeatureClient {
         inputRoutes = inputRoutes.filter { threadEnvironmentIDs[$0.value.threadID] != environmentID }
         shellsByEnvironmentID[environmentID] = nil
         shellProjectionCache[environmentID] = nil
+        subagentRequestIndexes[environmentID] = nil
         archivedThreadsByEnvironmentID[environmentID] = nil
         archivedShellThreadsByEnvironmentID[environmentID] = nil
         if activeEnvironment?.id == environmentID { latestShell = nil }
@@ -10143,7 +9333,7 @@ extension NativeFeatureClient: FeatureEnvironmentRoutesManaging {
                     _ = await installResolvedRoute(replacement)
                 } else {
                     revokedCacheEnvironmentIDs.insert(environment.id)
-                    orchestrationPreferenceGenerations[environment.id, default: 0] &+= 1
+                    environmentLoadGenerations[environment.id, default: 0] &+= 1
                     try? await clearClientStorage(environmentID: environment.id)
                     discardRestoredEnvironment(environment.id)
                     environmentClients[environment.id] = nil
@@ -10259,7 +9449,7 @@ extension NativeFeatureClient: FeatureEnvironmentRoutesManaging {
             lastShellEventAt = nil
         }
         environmentClients[id] = replacement
-        orchestrationPreferenceGenerations[id, default: 0] &+= 1
+        environmentLoadGenerations[id, default: 0] &+= 1
         environmentPermissions[id] = nil
         attachmentURLs.removeAll()
         terminalSnapshots.removeAll()
@@ -10282,5 +9472,32 @@ extension NativeFeatureClient: FeatureEnvironmentRoutesManaging {
             startDetailStream(route)
         }
         return true
+    }
+}
+
+struct PreparedPromptPullRequestWorkspace: Decodable, Sendable {
+    let branch: String
+    let worktreePath: String?
+    let isOnPullRequestHead: Bool?
+
+    func validatedWorkspace() throws -> (branch: String, path: String) {
+        guard isOnPullRequestHead != false,
+              let path = worktreePath, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FeatureThreadRecoveryError(
+                "The PR worktree has local changes and could not update to the PR head. Resolve them before trying again."
+            )
+        }
+        return (branch, path)
+    }
+}
+
+private extension T3Client {
+    func preparePromptPullRequestWorkspace(cwd: String, reference: String) async throws -> PreparedPromptPullRequestWorkspace {
+        try await rpc.request(
+            "git.preparePullRequestThread",
+            payload: .object(["cwd": .string(cwd), "reference": .string(reference), "mode": .string("worktree")]),
+            as: PreparedPromptPullRequestWorkspace.self
+        )
     }
 }

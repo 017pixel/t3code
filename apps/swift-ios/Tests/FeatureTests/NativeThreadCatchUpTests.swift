@@ -28,7 +28,7 @@ final class NativeThreadCatchUpTests: XCTestCase {
         let stream = try XCTUnwrap(shellRequest)
         let shell = multiEnvironmentShell(projectID: "project", threadID: "first", title: "First")
         try await stream.socket.chunk(id: stream.id, values: [.object([
-            "kind": .string("snapshot"), "snapshot": try .encode(shell),
+            "kind": .string("snapshot"), "snapshot": try v2ShellFixture(shell),
         ])])
         while let event = await events.next(isolation: #isolation) {
             switch event {
@@ -48,120 +48,9 @@ final class NativeThreadCatchUpTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
-    func testStaleDetailReplaySkipsReductionOnlyAfterEnvelopeValidation() throws {
-        let thread = multiEnvironmentDetail(
-            projectID: "project", threadID: "first", snapshotSequence: 2, messages: []
-        ).thread
-        let event = replayMessage(sequence: 2, text: "Duplicate")
-        let ordinary = NativeThreadDetailReducer.apply(event, to: thread)
-        guard case .updated = ordinary.result else {
-            return XCTFail("The control must exercise a real message reduction.")
-        }
-        let skipped = NativeThreadDetailReducer.apply(event, to: thread, afterSequence: 2)
-        XCTAssertEqual(skipped.sequence, 2)
-        guard case .unchanged = skipped.result, case .none = skipped.renderMutation else {
-            return XCTFail("A validated stale event must bypass message reduction.")
-        }
-        let newer = NativeThreadDetailReducer.apply(event, to: thread, afterSequence: 1)
-        guard case .updated = newer.result else { return XCTFail("New events must still reduce.") }
-    }
-
-    func testStaleDetailReplayPreservesNewerMessageAndExplicitMarker() async throws {
-        let fixture = try await CatchUpFixture.make(completionMarker: false)
-        defer { fixture.cleanUp() }
-        do {
-            var requests = fixture.requests.makeAsyncIterator()
-            var events = fixture.client.events().makeAsyncIterator()
-            _ = try await fixture.client.loadThread(id: fixture.firstID)
-            let stream = try await nextThreadRequest(&requests)
-            _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-            try await stream.synchronize()
-            _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-            var values = (0..<100).map { index in
-                JSONValue.object(["kind": .string("event"), "event": replayMessage(
-                    sequence: Double(index % 3), text: "Must not appear"
-                )])
-            }
-            // These valid envelopes were ignored by the existing post-reduction cursor guard.
-            for type in ["future.event", "thread.message-sent"] {
-                values.append(.object(["kind": .string("event"), "event": .object([
-                    "type": .string(type), "sequence": .number(2),
-                    "occurredAt": .string("2026-09-02T12:00:00Z"),
-                    "payload": .object(["threadId": .string("first")]),
-                ])]))
-            }
-            values.append(.object(["kind": .string("event"), "event": replayMessage(
-                sequence: 3, text: "New content"
-            )]))
-            values.append(.object(["kind": .string("synchronized")]))
-            try await stream.socket.chunk(id: stream.id, values: values)
-            let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-            XCTAssertEqual(messages, ["New content"])
-            let reads = await fixture.http.threadRequests.count
-            XCTAssertEqual(reads, 1)
-            await fixture.client.disconnect()
-        } catch {
-            await fixture.client.disconnect()
-            throw error
-        }
-    }
-
-    func testMalformedStaleLookingDetailEnvelopesStillRepair() async throws {
-        var malformed: [JSONValue] = [.null]
-        for field in ["type", "occurredAt"] {
-            var object = try replayMessage(sequence: 2, text: "Invalid").decode([String: JSONValue].self)
-            object.removeValue(forKey: field)
-            malformed.append(.object(object))
-        }
-        var wrongThread = try replayMessage(sequence: 2, text: "Invalid").decode([String: JSONValue].self)
-        wrongThread["payload"] = .object(["threadId": .string("another-thread")])
-        malformed.append(.object(wrongThread))
-        malformed.append(replayMessage(sequence: 1.5, text: "Invalid"))
-        malformed.append(replayMessage(sequence: -1, text: "Invalid"))
-        var items = malformed.map { JSONValue.object(["kind": .string("event"), "event": $0]) }
-        items.append(.object(["kind": .string("unknown")]))
-        for (index, item) in items.enumerated() {
-            let fixture = try await CatchUpFixture.make(completionMarker: false)
-            defer { fixture.cleanUp() }
-            do {
-                var requests = fixture.requests.makeAsyncIterator()
-                var events = fixture.client.events().makeAsyncIterator()
-                _ = try await fixture.client.loadThread(id: fixture.firstID)
-                let stream = try await nextThreadRequest(&requests)
-                _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-                try await stream.synchronize()
-                _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-                await fixture.http.setResponse(text: "Recovered \(index)", sequence: 10)
-                try await stream.socket.chunk(id: stream.id, values: [
-                    item, .object(["kind": .string("synchronized")]),
-                ])
-                let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-                XCTAssertEqual(messages, ["Recovered \(index)"], "Malformed case \(index) must repair.")
-                let reads = await fixture.http.threadRequests.count
-                XCTAssertEqual(reads, 2)
-                await fixture.client.disconnect()
-            } catch {
-                await fixture.client.disconnect()
-                throw error
-            }
-        }
-    }
-
-    private func replayMessage(sequence: Double, text: String) -> JSONValue {
-        .object([
-            "type": .string("thread.message-sent"), "sequence": .number(sequence),
-            "occurredAt": .string("2026-09-02T12:00:00Z"), "payload": .object([
-                "threadId": .string("first"), "messageId": .string("replay-message"),
-                "role": .string("assistant"), "text": .string(text), "streaming": .bool(false),
-                "createdAt": .string("2026-09-02T12:00:00Z"),
-                "updatedAt": .string("2026-09-02T12:00:00Z"),
-            ]),
-        ])
-    }
-
-    func testLegacyReplayPublishesOncePerReceivedBatchAndResumesAfterAppliedEvents() async throws {
+    func testV2ReplayPublishesPerBatchAndResumesAfterAppliedEvents() async throws {
         for batchSize in [1, 16, 500] {
-            let fixture = try await CatchUpFixture.make(completionMarker: false)
+            let fixture = try await CatchUpFixture.make()
             defer { fixture.cleanUp() }
             var requests = fixture.requests.makeAsyncIterator()
             var events = fixture.client.events().makeAsyncIterator()
@@ -173,7 +62,7 @@ final class NativeThreadCatchUpTests: XCTestCase {
             let expected = (0..<500).map { "\($0)," }.joined()
             let values = (0..<500).map { index in
                 stream.messageValue(
-                    text: index == 499 ? expected : "\(index),", sequence: index + 3,
+                    text: (0...index).map { "\($0)," }.joined(), sequence: index + 3,
                     streaming: index < 499
                 )
             }
@@ -206,7 +95,7 @@ final class NativeThreadCatchUpTests: XCTestCase {
             // Replayed sequences must not append their text a second time.
             try await stream.socket.chunk(id: stream.id, values: [
                 stream.messageValue(text: "duplicate", sequence: 502, streaming: true),
-                stream.messageValue(text: "next", sequence: 503, streaming: true),
+                stream.messageValue(text: expected + "next", sequence: 503, streaming: true),
             ])
             let replayed = await messagesBeforeLive(&events, threadID: fixture.firstID)
             XCTAssertEqual(replayed, [expected + "next"])
@@ -225,7 +114,7 @@ final class NativeThreadCatchUpTests: XCTestCase {
         _ = try await fixture.client.loadThread(id: fixture.firstID)
         let stream = try await nextThreadRequest(&requests)
         var values = (0..<500).map { index in
-            stream.messageValue(text: "\(index),", sequence: index + 3, streaming: true)
+            stream.messageValue(text: (0...index).map { "\($0)," }.joined(), sequence: index + 3, streaming: true)
         }
         values.append(.object(["kind": .string("synchronized")]))
         try await stream.socket.chunk(id: stream.id, values: values)
@@ -234,28 +123,7 @@ final class NativeThreadCatchUpTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
-    func testLegacyStaleBatchDoesNotPublishLiveBeforeNewMessages() async throws {
-        let fixture = try await CatchUpFixture.make(completionMarker: false)
-        defer { fixture.cleanUp() }
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let stream = try await nextThreadRequest(&requests)
-        // Legacy cold opens publish live when their HTTP snapshot arrives.
-        _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        try await stream.socket.chunk(id: stream.id, values: [
-            stream.messageValue(text: "Stale", sequence: 1),
-            stream.messageValue(text: "Stale", sequence: 2),
-        ])
-        try await stream.socket.chunk(id: stream.id, values: [
-            stream.messageValue(text: "New", sequence: 3),
-        ])
-        let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(messages, ["New"], "Stale batches must not emit an earlier live receipt.")
-        await fixture.client.disconnect()
-    }
-
-    func testBatchKeepsRevertSnapshotAndLaterDeltaInOrder() async throws {
+    func testBatchKeepsReplacementSnapshotAndLaterDeltaInOrder() async throws {
         let fixture = try await CatchUpFixture.make()
         defer { fixture.cleanUp() }
         var requests = fixture.requests.makeAsyncIterator()
@@ -268,13 +136,8 @@ final class NativeThreadCatchUpTests: XCTestCase {
         )
         try await stream.socket.chunk(id: stream.id, values: [
             stream.messageValue(text: "Discarded", sequence: 3),
-            .object(["kind": .string("event"), "event": .object([
-                "type": .string("thread.reverted"), "sequence": .number(4),
-                "occurredAt": .string("2026-09-02T12:00:00Z"),
-                "payload": .object(["threadId": .string("first")]),
-            ])]),
-            .object(["kind": .string("snapshot"), "snapshot": try .encode(snapshot)]),
-            stream.messageValue(text: " tail", sequence: 6, streaming: true),
+            V2Fixture.patch(try v2ThreadFixture(snapshot), ["kind": .string("snapshot")]),
+            stream.messageValue(text: "Replacement tail", sequence: 6, streaming: true),
             .object(["kind": .string("synchronized")]),
         ])
         let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
@@ -286,39 +149,6 @@ final class NativeThreadCatchUpTests: XCTestCase {
         XCTAssertEqual(reopened.messages.map(\.text), ["Replacement tail"])
         let resumed = try await nextThreadRequest(&requests)
         XCTAssertEqual(resumed.payload["afterSequence"], .number(6))
-        await fixture.client.disconnect()
-    }
-
-    func testBatchMergesPendingOlderPageBeforeItsLaterMessageDelta() async throws {
-        let fixture = try await CatchUpFixture.make()
-        defer { fixture.cleanUp() }
-        await fixture.http.setPage(.init(beforeCursor: "older", hasMore: true, snapshotSequence: 2))
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let stream = try await nextThreadRequest(&requests)
-        try await stream.synchronize()
-        _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-
-        await fixture.http.setResponse(text: "Older", sequence: 4)
-        await fixture.http.setPage(.init(
-            beforeCursor: nil, hasMore: false, snapshotSequence: 4, threadSequence: 4
-        ))
-        let pending = try await fixture.client.loadEarlierThreadTurns(id: fixture.firstID)
-        XCTAssertEqual(pending?.page?.isLoading, true)
-        try await stream.socket.chunk(id: stream.id, values: [
-            .object(["kind": .string("event"), "event": .object([
-                "type": .string("thread.proposed-plan-upserted"), "sequence": .number(4),
-                "occurredAt": .string("2026-09-02T12:00:00Z"),
-                "payload": .object(["threadId": .string("first")]),
-            ])]),
-            stream.messageValue(text: " tail", sequence: 5, streaming: true),
-            .object(["kind": .string("synchronized")]),
-        ])
-        let detail = try await requestsBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(detail.messages.map(\.text), ["Older tail"])
-        XCTAssertEqual(detail.page?.isLoading, false)
-        XCTAssertEqual(detail.page?.hasMore, false)
         await fixture.client.disconnect()
     }
 
@@ -453,95 +283,43 @@ final class NativeThreadCatchUpTests: XCTestCase {
         XCTAssertTrue(message.canDismiss)
     }
 
-    func testRequestSnapshotsKeepTerminalRequestsClosedAndOtherFailuresRetryable() async throws {
-        var activities: [OrchestrationActivity] = []
-        for kind in ["approval", "user-input"] {
-            activities += [
-                requestActivity("\(kind).resolved", id: "resolved-\(kind)"),
-                requestActivity("\(kind).requested", id: "resolved-\(kind)"),
-                requestActivity("\(kind).requested", id: "retry-\(kind)"),
-                requestActivity(
-                    "provider.\(kind).respond.failed", id: "retry-\(kind)",
-                    detail: "Unknown network failure with stale connection metadata"
-                ),
-            ]
-        }
-        let failures = [
-            "approval": [
-                "stale pending approval request", "unknown pending approval request",
-                "unknown pending permission request", "unknown pending codex approval request",
-            ],
-            "user-input": [
-                "stale pending user-input request", "unknown pending user-input request",
-                "unknown pending user input request", "unknown pending codex user input request",
-            ],
-        ]
-        for (kind, fragments) in failures {
-            for (index, fragment) in fragments.enumerated() {
-                let id = "stale-\(kind)-\(index)"
-                activities += [
-                    requestActivity("provider.\(kind).respond.failed", id: id, detail: fragment.uppercased()),
-                    requestActivity("\(kind).requested", id: id),
-                ]
-            }
-        }
-        activities += [
-            requestActivity("approval.requested", id: "legacy-file", requestType: "apply_patch_approval"),
-            requestActivity("approval.requested", id: "legacy-input", requestType: "tool_user_input"),
-            requestActivity("approval.requested", id: "legacy-auth", requestType: "auth_tokens_refresh"),
-        ]
-        let fixture = try await CatchUpFixture.make(activities: activities)
-        defer { fixture.cleanUp() }
-        let detail = try await fixture.client.loadThread(id: fixture.firstID)
-        XCTAssertEqual(Set(detail.approvals.compactMap(\.wireID)), ["retry-approval", "legacy-file"])
-        XCTAssertEqual(detail.approvals.first { $0.wireID == "legacy-file" }?.kind, .fileChange)
-        XCTAssertEqual(detail.userInputs.compactMap(\.wireID), ["retry-user-input"])
-        await fixture.client.disconnect()
-    }
-
-    func testLiveRequestsKeepTerminalStateAcrossBatchesAndResetWithSnapshots() async throws {
-        let resolved = ["approval", "user-input"].map {
-            requestActivity("\($0).resolved", id: "closed-\($0)")
-        }
-        let fixture = try await CatchUpFixture.make(activities: resolved)
+    func testV2RuntimeRequestStatusControlsVisibleActionsAcrossStreamAndSnapshot() async throws {
+        let approval = V2Fixture.item("approval", type: "approval_request", ordinal: 0, fields: [
+            "requestId": .string("approval"), "requestKind": .string("command"),
+        ])
+        let question = V2Fixture.item("question", type: "user_input_request", ordinal: 1, fields: [
+            "requestId": .string("question"), "questions": .array([.object([
+                "id": .string("answer"), "header": .string("Answer"),
+                "question": .string("What next?"), "options": .array([]),
+                "allowCustomAnswer": .bool(true),
+            ])]),
+        ])
+        let state = try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(items: [approval, question], fields: [
+            "runtimeRequests": .array([V2Fixture.request("approval"), V2Fixture.request("question", kind: "user_input")]),
+        ]))
+        let fixture = try await CatchUpFixture.make(activities: state.normalizedSnapshot().thread.activities)
         defer { fixture.cleanUp() }
         var requests = fixture.requests.makeAsyncIterator()
         var events = fixture.client.events().makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
+        let initial = try await fixture.client.loadThread(id: fixture.firstID)
+        XCTAssertEqual(initial.approvals.compactMap(\.wireID), ["approval"])
+        XCTAssertEqual(initial.userInputs.compactMap(\.wireID), ["question"])
         let stream = try await nextThreadRequest(&requests)
-
-        var activities: [OrchestrationActivity] = []
-        for kind in ["approval", "user-input"] {
-            activities += [
-                requestActivity("\(kind).requested", id: "closed-\(kind)"),
-                requestActivity("\(kind).resolved", id: "live-\(kind)"),
-                requestActivity("\(kind).requested", id: "retry-\(kind)"),
-                requestActivity(
-                    "provider.\(kind).respond.failed", id: "retry-\(kind)",
-                    detail: "Unknown transport error"
-                ),
-            ]
-        }
-        try await stream.sendActivities(activities, startingAt: 3)
-        try await stream.synchronize()
-        let first = try await requestsBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(first.approvals.compactMap(\.wireID), ["retry-approval"])
-        XCTAssertEqual(first.userInputs.compactMap(\.wireID), ["retry-user-input"])
-
-        let lateRequests = ["approval", "user-input"].map {
-            requestActivity("\($0).requested", id: "live-\($0)")
-        }
-        try await stream.sendActivities(lateRequests, startingAt: 20)
-        try await stream.synchronize()
-        let second = try await requestsBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(second.approvals.compactMap(\.wireID), ["retry-approval"])
-        XCTAssertEqual(second.userInputs.compactMap(\.wireID), ["retry-user-input"])
-
-        // A replacement snapshot is authoritative, including its request history.
-        await fixture.http.setActivities(lateRequests)
-        let replaced = try await fixture.client.loadThread(id: fixture.firstID, fresh: true)
-        XCTAssertEqual(replaced.approvals.compactMap(\.wireID), ["live-approval"])
-        XCTAssertEqual(replaced.userInputs.compactMap(\.wireID), ["live-user-input"])
+        try await stream.socket.chunk(id: stream.id, values: [
+            v2StreamEvent(threadID: "first", type: "runtime-request.updated", payload: V2Fixture.request("approval", status: "resolved"), sequence: 3),
+            v2StreamEvent(threadID: "first", type: "runtime-request.updated", payload: V2Fixture.request("question", kind: "user_input", status: "resolved"), sequence: 4),
+            .object(["kind": .string("synchronized")]),
+        ])
+        let closed = try await requestsBeforeLive(&events, threadID: fixture.firstID)
+        XCTAssertTrue(closed.approvals.isEmpty)
+        XCTAssertTrue(closed.userInputs.isEmpty)
+        let stale = try await fixture.client.loadThread(id: fixture.firstID, fresh: true)
+        XCTAssertTrue(stale.approvals.isEmpty)
+        XCTAssertTrue(stale.userInputs.isEmpty)
+        await fixture.http.setResponse(texts: [], sequence: 5)
+        let reopened = try await fixture.client.loadThread(id: fixture.firstID, fresh: true)
+        XCTAssertEqual(reopened.approvals.compactMap(\.wireID), ["approval"])
+        XCTAssertEqual(reopened.userInputs.compactMap(\.wireID), ["question"])
         await fixture.client.disconnect()
     }
 
@@ -625,7 +403,7 @@ final class NativeThreadCatchUpTests: XCTestCase {
     }
 
     func testTerminatedStreamsKeepBufferedTextAndRecoverOnConnectionOrForeground() async throws {
-        for failure in CatchUpStreamFailure.allCases {
+        for failure in [CatchUpStreamFailure.defect, .ended] {
             let fixture = try await CatchUpFixture.make()
             defer { fixture.cleanUp() }
             var requests = fixture.requests.makeAsyncIterator()
@@ -650,14 +428,10 @@ final class NativeThreadCatchUpTests: XCTestCase {
             }
             XCTAssertEqual(bufferedMessages, ["Received before the failure"])
 
-            if failure == .malformed {
-                await first.socket.close()
-            } else {
-                await fixture.client.resumeAfterBackground(reconnect: false)
-            }
+            await fixture.client.resumeAfterBackground(reconnect: false)
             let resumed = try await nextThreadRequest(&requests)
             XCTAssertEqual(resumed.payload["afterSequence"], .number(3))
-            XCTAssertEqual(resumed.socket === first.socket, failure != .malformed)
+            XCTAssertTrue(resumed.socket === first.socket)
             let resumedState = await nextSyncState(&events, threadID: fixture.firstID)
             XCTAssertEqual(resumedState, .catchingUp)
             try await resumed.sendMessage(text: "Recovered", sequence: 4)
@@ -731,7 +505,7 @@ final class NativeThreadCatchUpTests: XCTestCase {
         XCTAssertTrue(restored.messages.contains { $0.text == "Finished on the computer" })
         let resumed = try await nextThreadRequest(&requests)
         XCTAssertEqual(resumed.payload["afterSequence"], .number(3))
-        XCTAssertEqual(resumed.payload["turnLimit"], .number(10))
+        XCTAssertEqual(resumed.payload["acceptBoundedSnapshot"], .bool(true))
         XCTAssertEqual(resumed.payload["requestCompletionMarker"], .bool(true))
         let resumedState = await nextSyncState(&events, threadID: fixture.firstID)
         XCTAssertEqual(resumedState, .live, "A completed warm thread must not flash catch-up status.")
@@ -901,297 +675,74 @@ final class NativeThreadCatchUpTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
-    func testLegacyServerStillRevalidatesWarmThreadOverHTTP() async throws {
-        let fixture = try await CatchUpFixture.make(completionMarker: false)
-        defer { fixture.cleanUp() }
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        fixture.client.releaseThread(id: fixture.firstID)
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let reads = await fixture.http.threadRequests
-        XCTAssertEqual(reads.count, 2)
-        await fixture.client.disconnect()
-    }
-
-    func testCompletionMarkerWaitsForRequiredSnapshotReplacement() async throws {
-        let fixture = try await CatchUpFixture.make()
+    func testMalformedV2EventRequiresFreshSnapshotBeforeCompletion() async throws {
+        let retry = CatchUpRetryGate()
+        let fixture = try await CatchUpFixture.make(threadRetryDelay: { try await retry.wait($0) })
         defer { fixture.cleanUp() }
         var requests = fixture.requests.makeAsyncIterator()
         var events = fixture.client.events().makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let request = try await nextThreadRequest(&requests)
-        try await request.synchronize()
+        var attempts = retry.attempts.makeAsyncIterator()
+        await fixture.http.setResponse(text: "Cached answer", sequence: 2)
+        let initialDetail = try await fixture.client.loadThread(id: fixture.firstID)
+        let cachedMessages = initialDetail.messages.map(\.text)
+        let stream = try await nextThreadRequest(&requests)
+        try await stream.synchronize()
         _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        await fixture.http.setResponse(text: "Authoritative replacement", sequence: 20)
-        try await request.socket.chunk(id: request.id, values: [
-            .object(["kind": .string("event"), "event": .object([
-                "type": .string("thread.reverted"), "sequence": .number(19),
-                "occurredAt": .string("2026-09-02T12:00:00Z"),
-                "payload": .object(["threadId": .string("first")]),
-            ])]),
+        var visibleMessages = cachedMessages
+        try await stream.socket.chunk(id: stream.id, values: [
+            v2StreamEvent(threadID: "first", type: "turn-item.updated", payload: .object([:]), sequence: 3),
             .object(["kind": .string("synchronized")]),
         ])
-        let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertTrue(messages.contains("Authoritative replacement"))
-        await fixture.client.disconnect()
-    }
-
-    func testFailedRequiredSnapshotKeepsCachedTextAndOffersFreshRetry() async throws {
-        let fixture = try await CatchUpFixture.make()
-        defer { fixture.cleanUp() }
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        var reads = fixture.http.heldRequests.makeAsyncIterator()
-        await fixture.http.setResponse(text: "Cached answer", sequence: 2)
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let stream = try await nextThreadRequest(&requests)
-        try await stream.synchronize()
-        _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-
-        await fixture.http.holdThreadReads(true)
-        try await stream.invalidate(sequence: 10)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let read = try await nextHeldRead(&reads)
-        read.fail()
         while let event = await events.next(isolation: #isolation) {
-            if case .threadSync(fixture.firstID, .failed) = event { break }
-            if case .threadSync(fixture.firstID, .live) = event {
-                XCTFail("A failed snapshot must not mark cached content current.")
+            if case let .detail(detail) = event, detail.thread.id == fixture.firstID {
+                visibleMessages = detail.messages.map(\.text)
             }
+            if case let .detailDelta(detail, _) = event, detail.thread.id == fixture.firstID {
+                visibleMessages = detail.messages.map(\.text)
+            }
+            if case .threadSync(fixture.firstID, .failed) = event { break }
+            if case .threadSync(fixture.firstID, .live) = event { XCTFail("Malformed data must not mark the thread current") }
         }
-
-        await fixture.http.holdThreadReads(false)
-        await fixture.http.setResponse(text: "Fresh answer", sequence: 11)
-        let detail = try await fixture.client.loadThread(id: fixture.firstID, fresh: true)
-        XCTAssertEqual(detail.messages.map(\.text), ["Fresh answer"])
-        await fixture.client.disconnect()
-    }
-
-    func testRequiredSnapshotsCoverEveryEventReceivedDuringReplacement() async throws {
-        let fixture = try await CatchUpFixture.make()
-        defer { fixture.cleanUp() }
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        var reads = fixture.http.heldRequests.makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let stream = try await nextThreadRequest(&requests)
-        try await stream.synchronize()
-        _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        await fixture.http.holdThreadReads(true)
-
-        await fixture.http.setResponse(text: "Before new messages", sequence: 10)
-        try await stream.invalidate(sequence: 10)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let first = try await nextHeldRead(&reads)
-        try await stream.sendMessage(text: "Eleven", sequence: 11)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        await fixture.http.setResponse(text: "Eleven", sequence: 11)
-        first.succeed()
-
-        let second = try await nextHeldRead(&reads)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        try await stream.sendMessage(text: "Twelve", sequence: 12)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        await fixture.http.setResponse(texts: ["Eleven", "Twelve"], sequence: 12)
-        second.succeed()
-
-        let third = try await nextHeldRead(&reads)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        third.succeed()
-        let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(messages, ["Eleven", "Twelve"])
-        let count = await fixture.http.threadRequests.count
-        XCTAssertEqual(count, 4, "Each stale response needs one coalesced follow-up, not one read per event.")
-        await fixture.client.disconnect()
-    }
-
-    func testEventWithoutCursorNeedsSnapshotStartedAfterIt() async throws {
-        let fixture = try await CatchUpFixture.make()
-        defer { fixture.cleanUp() }
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        var reads = fixture.http.heldRequests.makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let stream = try await nextThreadRequest(&requests)
-        try await stream.synchronize()
-        _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        await fixture.http.holdThreadReads(true)
-        await fixture.http.setResponse(text: "Before unknown event", sequence: 10)
-        try await stream.invalidate(sequence: 10)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let first = try await nextHeldRead(&reads)
-        try await stream.socket.chunk(id: stream.id, values: [.object(["kind": .string("unknown")])])
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        await fixture.http.setResponse(text: "After unknown event", sequence: 11)
-        first.succeed()
-        let second = try await nextHeldRead(&reads)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        second.succeed()
-        let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(messages, ["After unknown event"])
-        await fixture.client.disconnect()
-    }
-
-    func testSocketSnapshotCancelsFailedHTTPReplacement() async throws {
-        let fixture = try await CatchUpFixture.make()
-        defer { fixture.cleanUp() }
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        var reads = fixture.http.heldRequests.makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let stream = try await nextThreadRequest(&requests)
-        try await stream.synchronize()
-        _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        await fixture.http.holdThreadReads(true)
-        try await stream.invalidate(sequence: 10)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let read = try await nextHeldRead(&reads)
-        try await stream.snapshot(texts: ["Recovered over the socket"], sequence: 11)
-        let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(messages, ["Recovered over the socket"])
-        read.fail()
-        let cancelled = await read.finished.first { _ in true }
-        XCTAssertEqual(cancelled, true, "The obsolete HTTP read must not replace live state with an error.")
-        await fixture.client.disconnect()
-    }
-
-    func testOldSocketSnapshotDoesNotCancelReadAfterCursorlessEvent() async throws {
-        let fixture = try await CatchUpFixture.make()
-        defer { fixture.cleanUp() }
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        var reads = fixture.http.heldRequests.makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let stream = try await nextThreadRequest(&requests)
-        try await stream.synchronize()
-        _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        await fixture.http.holdThreadReads(true)
-        await fixture.http.setResponse(text: "Fresh after unknown event", sequence: 20)
-        try await stream.socket.chunk(id: stream.id, values: [.object(["kind": .string("unknown")])])
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let read = try await nextHeldRead(&reads)
-
-        try await stream.snapshot(texts: ["Requested before unknown event"], sequence: 3)
-        try await stream.synchronize()
-        // This next event is a receipt that the old snapshot was handled first.
-        try await stream.sendMessage(text: "After old snapshot", sequence: 19)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        read.succeed()
-        let cancelled = await read.finished.first { _ in true }
-        XCTAssertEqual(cancelled, false, "The required post-event read must still run.")
-        guard cancelled == false else {
-            await fixture.client.disconnect()
-            return
-        }
-        let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(messages, ["Fresh after unknown event"])
-        await fixture.client.disconnect()
-    }
-
-    func testNewSubscriptionSnapshotCanRecoverAfterCursorlessEvent() async throws {
-        let fixture = try await CatchUpFixture.make()
-        defer { fixture.cleanUp() }
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        var reads = fixture.http.heldRequests.makeAsyncIterator()
-        _ = try await fixture.client.loadThread(id: fixture.firstID)
-        let stream = try await nextThreadRequest(&requests)
-        try await stream.synchronize()
-        _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        await fixture.http.holdThreadReads(true)
-        try await stream.socket.chunk(id: stream.id, values: [.object(["kind": .string("unknown")])])
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let read = try await nextHeldRead(&reads)
-
-        await stream.socket.close()
+        XCTAssertEqual(cachedMessages, ["Cached answer"])
+        XCTAssertEqual(visibleMessages, cachedMessages, "A failed refresh must retain the last readable text.")
+        _ = await attempts.next(isolation: #isolation)
+        await retry.release()
         let resumed = try await nextThreadRequest(&requests)
-        try await resumed.snapshot(texts: ["New socket snapshot"], sequence: 20)
+        XCTAssertNil(resumed.payload["afterSequence"])
+        try await resumed.snapshot(texts: ["Authoritative replacement"], sequence: 20)
         try await resumed.synchronize()
         let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(messages, ["New socket snapshot"])
-        read.fail()
-        let cancelled = await read.finished.first { _ in true }
-        XCTAssertEqual(cancelled, true, "The new subscription can replace the required HTTP read.")
+        XCTAssertEqual(messages, ["Authoritative replacement"])
         await fixture.client.disconnect()
     }
 
-    func testLeavingThreadCancelsHeldReplacementAndItsPendingFollowUp() async throws {
-        for disconnect in [false, true] {
-            let fixture = try await CatchUpFixture.make()
-            defer { fixture.cleanUp() }
-            var requests = fixture.requests.makeAsyncIterator()
-            var events = fixture.client.events().makeAsyncIterator()
-            var reads = fixture.http.heldRequests.makeAsyncIterator()
-            _ = try await fixture.client.loadThread(id: fixture.firstID)
-            let stream = try await nextThreadRequest(&requests)
-            try await stream.synchronize()
-            _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-            await fixture.http.holdThreadReads(true)
-            try await stream.invalidate(sequence: 10)
-            await nextCatchUp(&events, threadID: fixture.firstID)
-            let read = try await nextHeldRead(&reads)
-            try await stream.sendMessage(text: "Do not publish after leaving", sequence: 11)
-            await nextCatchUp(&events, threadID: fixture.firstID)
-
-            if disconnect {
-                await fixture.client.disconnect()
-            } else {
-                fixture.client.releaseThread(id: fixture.firstID)
-                await fixture.http.holdThreadReads(false)
-                await fixture.http.setResponse(text: "Second thread", sequence: 20)
-                let detail = try await fixture.client.loadThread(id: fixture.secondID)
-                XCTAssertEqual(detail.thread.id, fixture.secondID)
-                XCTAssertEqual(detail.messages.map(\.text), ["Second thread"])
-            }
-            read.succeed()
-            let cancelled = await read.finished.first { _ in true }
-            XCTAssertEqual(cancelled, true)
-            let count = await fixture.http.threadRequests.count
-            XCTAssertEqual(count, disconnect ? 2 : 3, "A closed thread must not start its pending read.")
-            await fixture.client.disconnect()
-        }
-    }
-
-    func testAttachmentLookupDoesNotBlockRequiredTextRefresh() async throws {
+    func testAttachmentLookupDoesNotBlockV2TextUpdates() async throws {
         let fixture = try await CatchUpFixture.make()
         defer { fixture.cleanUp() }
         var requests = fixture.requests.makeAsyncIterator()
         var events = fixture.client.events().makeAsyncIterator()
-        var reads = fixture.http.heldRequests.makeAsyncIterator()
         _ = try await fixture.client.loadThread(id: fixture.firstID)
         let stream = try await nextThreadRequest(&requests)
         try await stream.synchronize()
         _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        await fixture.http.holdThreadReads(true)
-        await fixture.http.setResponse(texts: ["Text ready"], sequence: 11, withImage: true)
-        try await stream.invalidate(sequence: 10)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let first = try await nextHeldRead(&reads)
-        try await stream.sendMessage(text: "Text ready", sequence: 11)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        first.succeed()
-        let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(messages, ["Text ready"])
         let resolving = Task {
-            try await fixture.client.attachmentAssetURL(
-                threadID: fixture.firstID,
-                attachment: .init(id: "image-0", name: "test.png", mimeType: "image/png", sizeBytes: 20)
-            )
+            try await fixture.client.attachmentAssetURL(threadID: fixture.firstID,
+                attachment: .init(id: "image-0", name: "test.png", mimeType: "image/png", sizeBytes: 20))
         }
         defer { resolving.cancel() }
         while let request = await requests.next(isolation: #isolation) {
             if request.tag == RPCMethod.assetsCreateURL.rawValue { break }
         }
-        let firstReadCount = await fixture.http.threadRequests.count
-        XCTAssertEqual(firstReadCount, 2, "The first snapshot already includes the skipped message.")
-
-        // Leave the asset RPC unanswered. A later text refresh must start anyway.
-        await fixture.http.setResponse(texts: ["New text ready"], sequence: 12, withImage: true)
-        try await stream.invalidate(sequence: 12)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let second = try await nextHeldRead(&reads)
-        second.succeed()
-        let updated = await messagesBeforeLive(&events, threadID: fixture.firstID)
-        XCTAssertEqual(updated, ["New text ready"])
+        try await stream.sendMessage(text: "Text ready", sequence: 3)
+        try await stream.synchronize()
+        let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
+        XCTAssertEqual(messages, ["Text ready"])
+        try await stream.sendMessage(text: "New text ready", sequence: 4)
+        try await stream.synchronize()
+        let updated = await messagesBeforeLive(
+            &events, threadID: fixture.firstID, matching: ["Text ready", "New text ready"]
+        )
+        XCTAssertEqual(updated, ["Text ready", "New text ready"])
         await fixture.client.disconnect()
     }
 
@@ -1206,12 +757,13 @@ final class NativeThreadCatchUpTests: XCTestCase {
             try await stream.synchronize()
             _ = await messagesBeforeLive(&events, threadID: fixture.firstID)
 
-            await fixture.http.setResponse(text: "File ready", sequence: 10, attachment: .init(
-                type: "file", id: "file", name: name, mimeType: mimeType, sizeBytes: 20
-            ))
-            try await stream.invalidate(sequence: 10)
-            await nextCatchUp(&events, threadID: fixture.firstID)
-            // Text must become current before the asset URL request completes.
+            let snapshot = multiEnvironmentDetail(projectID: "project", threadID: "first", snapshotSequence: 10,
+                messages: [catchUpMessage("File ready", index: 0, attachment: .init(
+                    type: "file", id: "file", name: name, mimeType: mimeType, sizeBytes: 20))])
+            try await stream.socket.chunk(id: stream.id, values: [
+                V2Fixture.patch(try v2ThreadFixture(snapshot), ["kind": .string("snapshot")]),
+                .object(["kind": .string("synchronized")]),
+            ])
             let messages = await messagesBeforeLive(&events, threadID: fixture.firstID)
             XCTAssertEqual(messages, ["File ready"])
 
@@ -1265,71 +817,6 @@ final class NativeThreadCatchUpTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
-    func testRequiredReadReplacesColdFallbackWithoutHidingItsOwnFailure() async throws {
-        let fixture = try await CatchUpFixture.make()
-        defer { fixture.cleanUp() }
-        var requests = fixture.requests.makeAsyncIterator()
-        var events = fixture.client.events().makeAsyncIterator()
-        var reads = fixture.http.heldRequests.makeAsyncIterator()
-        await fixture.http.holdThreadReads(true)
-
-        // Fail the cold open so catch-up starts without a base snapshot.
-        let opening = Task { try await fixture.client.loadThread(id: fixture.firstID) }
-        let initial = try await nextHeldRead(&reads)
-        initial.fail()
-        do {
-            _ = try await opening.value
-            XCTFail("The initial snapshot should fail.")
-        } catch {}
-        let stream = try await nextThreadRequest(&requests)
-        while let event = await events.next(isolation: #isolation) {
-            if case .threadSync(fixture.firstID, .failed) = event { break }
-        }
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        await fixture.delay.release()
-        let fallback = try await nextHeldRead(&reads)
-
-        // The event needs a newer snapshot than the fallback captured.
-        await fixture.http.setResponse(text: "New message", sequence: 3)
-        try await stream.sendMessage(text: "New message", sequence: 3)
-        await nextCatchUp(&events, threadID: fixture.firstID)
-        let replacement = try await nextHeldRead(&reads)
-        fallback.succeed()
-        let wasCancelled = await fallback.finished.first { _ in true }
-        XCTAssertEqual(wasCancelled, true, "The older fallback must stop when the required read takes over.")
-
-        replacement.fail()
-        var failure: String?
-        while let event = await events.next(isolation: #isolation) {
-            guard case let .threadSync(id, .failed(message)) = event,
-                  id == fixture.firstID else { continue }
-            failure = message
-            break
-        }
-        XCTAssertEqual(failure, URLError(.notConnectedToInternet).localizedDescription)
-        await fixture.client.disconnect()
-    }
-
-    private func nextHeldRead(
-        _ iterator: inout AsyncStream<CatchUpHTTPRead>.Iterator
-    ) async throws -> CatchUpHTTPRead {
-        let read = await iterator.next(isolation: #isolation)
-        return try XCTUnwrap(read)
-    }
-
-    private func nextCatchUp(
-        _ iterator: inout AsyncStream<FeatureEvent>.Iterator, threadID: String
-    ) async {
-        while let event = await iterator.next(isolation: #isolation) {
-            if case .threadSync(threadID, .catchingUp) = event { return }
-            if case .threadSync(threadID, .live) = event {
-                XCTFail("The thread became live before its required snapshot was complete.")
-                return
-            }
-        }
-        XCTFail("The thread did not report its pending refresh.")
-    }
-
     private func nextThreadRequest(
         _ iterator: inout AsyncStream<CatchUpRequest>.Iterator
     ) async throws -> CatchUpRequest {
@@ -1352,14 +839,16 @@ final class NativeThreadCatchUpTests: XCTestCase {
     }
 
     private func messagesBeforeLive(
-        _ iterator: inout AsyncStream<FeatureEvent>.Iterator, threadID: String
+        _ iterator: inout AsyncStream<FeatureEvent>.Iterator, threadID: String,
+        matching expectedMessages: [String]? = nil
     ) async -> [String] {
         var messages: [String] = []
         while let event = await iterator.next(isolation: #isolation) {
             switch event {
             case let .detail(detail), let .detailDelta(detail, _):
                 if detail.thread.id == threadID { messages = detail.messages.map(\.text) }
-            case .threadSync(threadID, .live): return messages
+            case .threadSync(threadID, .live) where expectedMessages == nil || messages == expectedMessages:
+                return messages
             case let .threadSync(id, .failed(error)) where id == threadID:
                 XCTFail("The thread failed synchronization: \(error)")
                 return messages
@@ -1428,18 +917,11 @@ private actor CatchUpHTTPTransport: HTTPTransport {
     private(set) var threadRequests: [URLRequest] = []
     private var messages: [OrchestrationMessage] = []
     private var activities: [OrchestrationActivity] = []
-    private var page: OrchestrationThreadDetailPage?
     private var sequence = 2
-    private var holdsThreadReads = false
-    private let heldReadContinuation: AsyncStream<CatchUpHTTPRead>.Continuation
-    nonisolated let heldRequests: AsyncStream<CatchUpHTTPRead>
     private let shellInitiallyUnavailable: Bool
 
     init(shellInitiallyUnavailable: Bool = false) {
         self.shellInitiallyUnavailable = shellInitiallyUnavailable
-        let reads = AsyncStream<CatchUpHTTPRead>.makeStream()
-        heldRequests = reads.stream
-        heldReadContinuation = reads.continuation
     }
 
     func setResponse(text: String, sequence: Int, attachment: ChatAttachment? = nil) {
@@ -1454,11 +936,7 @@ private actor CatchUpHTTPTransport: HTTPTransport {
         self.sequence = sequence
     }
 
-    func holdThreadReads(_ hold: Bool) { holdsThreadReads = hold }
-
     func setActivities(_ activities: [OrchestrationActivity]) { self.activities = activities }
-
-    func setPage(_ page: OrchestrationThreadDetailPage) { self.page = page }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let value: JSONValue
@@ -1472,7 +950,7 @@ private actor CatchUpHTTPTransport: HTTPTransport {
             value = .object([
                 "environmentId": .string("one"), "label": .string("Computer"),
                 "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
-                "serverVersion": .string("1.0.0"),
+                "serverVersion": .string("1.0.0"), "orchestrationProtocolVersion": .number(2),
                 "capabilities": .object(["repositoryIdentity": .bool(false)]),
             ])
         case "/api/auth/websocket-ticket":
@@ -1481,7 +959,7 @@ private actor CatchUpHTTPTransport: HTTPTransport {
             if shellInitiallyUnavailable { throw URLError(.notConnectedToInternet) }
             let first = multiEnvironmentShell(projectID: "project", threadID: "first", title: "First")
             let second = multiEnvironmentShell(projectID: "project", threadID: "second", title: "Second")
-            value = try .encode(OrchestrationShellSnapshot(
+            value = try v2ShellFixture(OrchestrationShellSnapshot(
                 snapshotSequence: 1, projects: first.projects,
                 threads: first.threads + second.threads, updatedAt: first.updatedAt
             ))
@@ -1491,40 +969,20 @@ private actor CatchUpHTTPTransport: HTTPTransport {
             }
             threadRequests.append(request)
             let snapshot = multiEnvironmentDetail(
-                projectID: "project", threadID: request.url!.lastPathComponent,
+                projectID: "project", threadID: v2FixtureThreadID(from: request.url!),
                 snapshotSequence: sequence, messages: messages
             )
             var thread = snapshot.thread
             thread.activities = activities
-            value = try .encode(OrchestrationThreadDetailSnapshot(
-                snapshotSequence: snapshot.snapshotSequence, thread: thread, page: page ?? snapshot.page
+            value = try v2ThreadFixture(OrchestrationThreadDetailSnapshot(
+                snapshotSequence: snapshot.snapshotSequence, thread: thread, page: snapshot.page
             ))
         }
         let response = (try JSONEncoder.t3.encode(value), HTTPURLResponse(
             url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
         )!)
-        if holdsThreadReads, request.url!.path.hasPrefix("/api/orchestration/threads/") {
-            let finished = AsyncStream<Bool>.makeStream()
-            defer {
-                finished.continuation.yield(Task.isCancelled)
-                finished.continuation.finish()
-            }
-            return try await withCheckedThrowingContinuation { continuation in
-                heldReadContinuation.yield(CatchUpHTTPRead(
-                    response: response, continuation: continuation, finished: finished.stream
-                ))
-            }
-        }
         return response
     }
-}
-
-private struct CatchUpHTTPRead: Sendable {
-    let response: (Data, HTTPURLResponse)
-    let continuation: CheckedContinuation<(Data, HTTPURLResponse), any Error>
-    let finished: AsyncStream<Bool>
-    func succeed() { continuation.resume(returning: response) }
-    func fail() { continuation.resume(throwing: URLError(.notConnectedToInternet)) }
 }
 
 private func catchUpMessage(
@@ -1559,17 +1017,12 @@ private struct CatchUpRequest: Sendable {
     let socket: CatchUpSocket
 
     func messageValue(text: String, sequence: Int, streaming: Bool = false) -> JSONValue {
-        .object([
-            "kind": .string("event"), "event": .object([
-                "type": .string("thread.message-sent"), "sequence": .number(Double(sequence)),
-                "occurredAt": .string("2026-09-02T12:00:00Z"), "payload": .object([
-                    "threadId": payload["threadId"]!, "messageId": .string("answer-0"),
-                    "role": .string("assistant"), "text": .string(text), "streaming": .bool(streaming),
-                    "createdAt": .string("2026-09-02T12:00:00Z"),
-                    "updatedAt": .string("2026-09-02T12:00:00Z"),
-                ]),
-            ]),
+        let threadID = payload["threadId"]!.stringValue!
+        let item = V2Fixture.patch(V2Fixture.assistant("answer-0", ordinal: 0, text: text), [
+            "threadId": .string(threadID), "messageId": .string("answer-0"), "runId": .null, "nodeId": .null,
+            "streaming": .bool(streaming), "status": .string(streaming ? "running" : "completed"),
         ])
+        return v2StreamEvent(threadID: threadID, type: "turn-item.updated", payload: item, sequence: sequence)
     }
 
     func terminate(_ failure: CatchUpStreamFailure) async throws {
@@ -1589,56 +1042,26 @@ private struct CatchUpRequest: Sendable {
         try await socket.chunk(id: id, values: [.object(["kind": .string("synchronized")])])
     }
 
-    func sendActivities(_ activities: [OrchestrationActivity], startingAt sequence: Int) async throws {
-        let values = try activities.enumerated().map { index, activity in
-            JSONValue.object([
-                "kind": .string("event"), "event": .object([
-                    "type": .string("thread.activity-appended"),
-                    "sequence": .number(Double(sequence + index)),
-                    "occurredAt": .string(activity.createdAt),
-                    "payload": .object([
-                        "threadId": payload["threadId"]!, "activity": try .encode(activity),
-                    ]),
-                ]),
-            ])
-        }
-        try await socket.chunk(id: id, values: values)
-    }
-
-    func invalidate(sequence: Int) async throws {
-        try await socket.chunk(id: id, values: [.object([
-            "kind": .string("event"), "event": .object([
-                "type": .string("thread.reverted"), "sequence": .number(Double(sequence)),
-                "occurredAt": .string("2026-09-02T12:00:00Z"),
-                "payload": .object(["threadId": payload["threadId"]!]),
-            ]),
-        ])])
-    }
-
     func snapshot(texts: [String], sequence: Int) async throws {
         let snapshot = multiEnvironmentDetail(
             projectID: "project", threadID: payload["threadId"]!.stringValue!,
             snapshotSequence: sequence,
             messages: texts.enumerated().map { catchUpMessage($0.element, index: $0.offset) }
         )
-        try await socket.chunk(id: id, values: [.object([
-            "kind": .string("snapshot"), "snapshot": try .encode(snapshot),
-        ])])
+        try await socket.chunk(id: id, values: [V2Fixture.patch(try v2ThreadFixture(snapshot), ["kind": .string("snapshot")])])
     }
 
     func sendMessage(text: String, sequence: Int) async throws {
-        try await socket.chunk(id: id, values: [.object([
-            "kind": .string("event"), "event": .object([
-                "type": .string("thread.message-sent"), "sequence": .number(Double(sequence)),
-                "occurredAt": .string("2026-09-02T12:00:00Z"), "payload": .object([
-                    "threadId": payload["threadId"]!, "messageId": .string("message-\(sequence)"),
-                    "role": .string("assistant"), "text": .string(text), "streaming": .bool(false),
-                    "createdAt": .string("2026-09-02T12:00:00Z"),
-                    "updatedAt": .string("2026-09-02T12:00:00Z"),
-                ]),
-            ]),
-        ])])
+        let threadID = payload["threadId"]!.stringValue!
+        let item = V2Fixture.patch(V2Fixture.assistant("message-\(sequence)", ordinal: sequence, text: text), [
+            "threadId": .string(threadID), "messageId": .string("message-\(sequence)"),
+            "runId": .null, "nodeId": .null, "streaming": .bool(false), "status": .string("completed"),
+        ])
+        try await socket.chunk(id: id, values: [
+            v2StreamEvent(threadID: threadID, type: "turn-item.updated", payload: item, sequence: sequence),
+        ])
     }
+
 }
 
 private actor CatchUpSocket: WebSocketConnection {

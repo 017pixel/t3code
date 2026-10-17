@@ -82,10 +82,10 @@ struct FeatureInboxPolicyTests {
         #expect(FeatureInboxPolicy.sortWorking([explicitNull, newer, absent]).map(\.id)
             == [absent.id, newer.id, explicitNull.id])
 
-        var legacy = thread("legacy")
-        legacy.inboxFacts = nil
-        legacy.settlementFacts = .init(latestTurn: .init(requestedAt: now))
-        #expect(FeatureInboxPolicy.sortWorking([newer, legacy]).first?.id == legacy.id)
+        var local = thread("local")
+        local.inboxFacts = nil
+        local.settlementFacts = .init(latestUserMessageAt: now)
+        #expect(FeatureInboxPolicy.sortWorking([newer, local]).first?.id == local.id)
     }
 
     @Test
@@ -255,7 +255,6 @@ struct FeatureInboxPolicyTests {
     @Test
     func v2StreamingAndVisitEchoesOnlyInvalidateTheirRows() {
         var original = thread("busy")
-        original.inboxFacts?.orchestrationVersion = 2
         original.inboxFacts?.runtimeUpdatedAt = now
         original.rawUpdatedAt = now.ISO8601Format()
         var changed = original
@@ -273,7 +272,6 @@ struct FeatureInboxPolicyTests {
     func failureTimestampsAffectOrderOnlyWhenTheyCanWakeASnoozedThread() {
         var original = thread("failed", runtime: "failed")
         original.state = .failed
-        original.inboxFacts?.orchestrationVersion = 2
         original.inboxFacts?.runtimeUpdatedAt = now
         var changed = original
         changed.inboxFacts?.runtimeUpdatedAt = now.addingTimeInterval(1)

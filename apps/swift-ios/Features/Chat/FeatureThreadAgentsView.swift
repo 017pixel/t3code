@@ -3,31 +3,108 @@ import SwiftUI
 struct FeatureThreadAgentsView: View {
     let roster: FeatureThreadAgentRoster?
     let onOpenThread: @MainActor (String) -> Void
+    var stopContext: FeatureSubagentStopContext? = nil
+    @State private var stoppableIDs: Set<String> = []
+    @State private var stopTargetsThreadID: String?
+    @State private var stoppingID: String?
+    @State private var stopError: String?
+    @State private var stopTask: Task<Void, Never>?
+
+    private struct LoadKey: Equatable {
+        struct Agent: Equatable {
+            let id: String
+            let runID: String?
+            let status: FeatureThreadAgent.Status
+        }
+        let agents: [Agent]
+        let threadID: String?
+        let canOperate: Bool
+    }
 
     var body: some View {
+        scrollContent
+            .background(Color.black)
+            .foregroundStyle(Color.white)
+            .tint(.white)
+            .buttonStyle(.plain)
+            .navigationTitle("Agents")
+            .navigationBarTitleDisplayMode(.inline)
+            .t3NavigationChrome()
+            .task(id: loadKey) { await loadStopTargets() }
+            .onDisappear { stopTask?.cancel(); stopTask = nil }
+    }
+
+    private var scrollContent: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                if let roster, !roster.agents.isEmpty {
-                    ForEach(roster.agents) { agent in
-                        FeatureThreadAgentRow(agent: agent, onOpenThread: onOpenThread)
-                        Divider().overlay(Color.white.opacity(0.18))
-                    }
-                } else {
-                    Text("No agents in this turn.")
-                        .font(T3Typography.supporting)
-                        .padding(.vertical, 16)
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 16)
+            agentList.padding(.horizontal, 18).padding(.bottom, 16)
         }
-        .background(Color.black)
-        .foregroundStyle(Color.white)
-        .tint(.white)
-        .buttonStyle(.plain)
-        .navigationTitle("Agents")
-        .navigationBarTitleDisplayMode(.inline)
-        .t3NavigationChrome()
+    }
+
+    private var agentList: some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            if let roster, !roster.agents.isEmpty {
+                ForEach(roster.agents) { agent in
+                    agentRow(agent)
+                    Divider().overlay(Color.white.opacity(0.18))
+                }
+            } else {
+                Text("No agents in this turn.").font(T3Typography.supporting).padding(.vertical, 16)
+            }
+            if let stopError {
+                Text(stopError).font(T3Typography.supporting).foregroundStyle(T3Colors.danger).padding(.vertical, 8)
+            }
+        }
+    }
+
+    private var loadKey: LoadKey {
+        LoadKey(agents: (roster?.agents ?? []).map { LoadKey.Agent(id: $0.id, runID: $0.runID, status: $0.status) },
+            threadID: stopContext?.threadID, canOperate: stopContext?.canOperate == true)
+    }
+
+    private func loadStopTargets() async {
+        guard let context = stopContext, context.canOperate else {
+            stoppableIDs = []
+            stopTargetsThreadID = nil
+            stopError = nil
+            return
+        }
+        if stopTargetsThreadID != context.threadID {
+            stoppableIDs = []
+            stopTargetsThreadID = context.threadID
+        }
+        do {
+            let ids = try await context.client.stoppableSubagentIDs(threadID: context.threadID)
+            guard !Task.isCancelled else { return }
+            stoppableIDs = ids
+            stopError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            stopError = error.localizedDescription
+        }
+    }
+
+    private func agentRow(_ agent: FeatureThreadAgent) -> FeatureThreadAgentRow {
+        let action: (@MainActor () -> Void)?
+        if stopContext?.canOperate == true && stopTargetsThreadID == stopContext?.threadID
+            && agent.status.isActive && stoppableIDs.contains(agent.id) {
+            action = { stop(agent.id) }
+        } else { action = nil }
+        return FeatureThreadAgentRow(agent: agent, onOpenThread: onOpenThread, onStop: action,
+            isStopping: stoppingID == agent.id, stopDisabled: stoppingID != nil)
+    }
+
+    private func stop(_ id: String) {
+        guard let context = stopContext, context.canOperate, stoppingID == nil else { return }
+        stoppingID = id
+        stopError = nil
+        stopTask = Task { @MainActor in
+            defer { stoppingID = nil; stopTask = nil }
+            do { try await context.client.stopSubagent(threadID: context.threadID, subagentID: id) }
+            catch {
+                guard !Task.isCancelled else { return }
+                stopError = error.localizedDescription
+            }
+        }
     }
 }
 
@@ -35,9 +112,12 @@ struct FeatureThreadAgentsView: View {
 struct FeatureThreadAgentRow: View {
     let agent: FeatureThreadAgent
     let onOpenThread: @MainActor (String) -> Void
+    var onStop: (@MainActor () -> Void)? = nil
+    var isStopping = false
+    var stopDisabled = false
 
     var body: some View {
-        Group {
+        HStack(spacing: 12) {
             if let childID = agent.childThreadID {
                 Button { onOpenThread(childID) } label: { content }
                     .buttonStyle(.plain)
@@ -47,6 +127,14 @@ struct FeatureThreadAgentRow: View {
                 content
                     .accessibilityElement(children: .combine)
                     .accessibilityHint("Provider-managed agent. Its work appears in the transcript.")
+            }
+            if let onStop {
+                Button(isStopping ? "Stopping…" : "Stop", role: .destructive, action: onStop)
+                    .font(T3Typography.control)
+                    .frame(minHeight: T3Metrics.minimumTapTarget)
+                    .disabled(stopDisabled)
+                    .accessibilityLabel(isStopping ? "Stopping \(agent.title)" : "Stop \(agent.title)")
+                    .accessibilityIdentifier("thread-agent-stop-\(agent.id)")
             }
         }
         .accessibilityIdentifier("thread-agent-\(agent.id)")

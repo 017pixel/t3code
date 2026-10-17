@@ -3,37 +3,29 @@ import XCTest
 
 @MainActor
 final class PairingServiceTests: XCTestCase {
-    func testRepairPreservesSavedProtocolPreference() async throws {
-        for (preference, version) in [(OrchestrationProtocolPreference.v1, 1), (.v2, 2)] {
-            let directory = FileManager.default.temporaryDirectory
-                .appendingPathComponent("t3-pairing-protocol-\(UUID().uuidString)", isDirectory: true)
-            defer { try? FileManager.default.removeItem(at: directory) }
-            let environments = EnvironmentStore(fileURL: directory.appendingPathComponent("environments.json"))
-            try await environments.upsert(Environment(
-                id: "environment-1",
-                label: "Studio",
-                httpBaseURL: URL(string: "https://old.example")!,
-                webSocketBaseURL: URL(string: "wss://old.example/ws")!,
-                orchestrationProtocolPreference: preference
-            ))
-            let service = PairingService(
-                transport: PairingHTTPTransport(protocolVersion: version),
-                environmentStore: environments,
-                credentialStore: InMemoryCredentialStore()
-            )
-
-            let repaired = try await service.pair(url: "https://studio.example/#token=pair-once")
-
-            XCTAssertEqual(repaired.orchestrationProtocolPreference, preference)
-            XCTAssertEqual(repaired.descriptor?.orchestrationProtocolVersion, version)
-            XCTAssertEqual(repaired.httpBaseURL.absoluteString, "https://studio.example/")
-            let stored = try await environments.load()
-            XCTAssertEqual(stored, [repaired])
-        }
+    func testRepairPreservesSavedConnectionMetadata() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("t3-pairing-repair-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let environments = EnvironmentStore(fileURL: directory.appendingPathComponent("environments.json"))
+        try await environments.upsert(Environment(
+            id: "environment-1", label: "Studio",
+            httpBaseURL: URL(string: "https://old.example")!,
+            webSocketBaseURL: URL(string: "wss://old.example/ws")!, isEnabled: false
+        ))
+        let service = PairingService(transport: PairingHTTPTransport(),
+            environmentStore: environments, credentialStore: InMemoryCredentialStore())
+        let repaired = try await service.pair(url: "https://studio.example/#token=pair-once")
+        XCTAssertEqual(repaired.label, "Studio")
+        XCTAssertTrue(repaired.isEnabled)
+        XCTAssertEqual(repaired.descriptor?.orchestrationProtocolVersion, 2)
+        XCTAssertEqual(repaired.httpBaseURL.absoluteString, "https://studio.example/")
+        let stored = try await environments.load()
+        XCTAssertEqual(stored, [repaired])
     }
 
     func testIncompatibleProtocolDoesNotConsumePairingTokenOrChangeSavedEnvironment() async throws {
-        for version in [2, 3] {
+        for version in [nil, 1, 3] as [Int?] {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("t3-pairing-incompatible-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: directory) }
@@ -42,8 +34,7 @@ final class PairingServiceTests: XCTestCase {
                 id: "environment-1",
                 label: "Studio",
                 httpBaseURL: URL(string: "https://old.example")!,
-                webSocketBaseURL: URL(string: "wss://old.example/ws")!,
-                orchestrationProtocolPreference: .v1
+                webSocketBaseURL: URL(string: "wss://old.example/ws")!
             )
             try await environments.upsert(saved)
             let credentials = InMemoryCredentialStore(credentials: [
@@ -60,9 +51,9 @@ final class PairingServiceTests: XCTestCase {
                 _ = try await service.pair(url: "https://studio.example/#token=pair-once")
                 XCTFail("An incompatible protocol must block pairing")
             } catch {
-                let expected: OrchestrationProtocolError = version == 2
-                    ? .preferenceMismatch(preference: .v1, serverVersion: .v2)
-                    : .unsupportedServerVersion(version)
+                let expected: OrchestrationProtocolError = (version ?? 0) < 2
+                    ? .hostUpdateRequired
+                    : .unsupportedServerVersion(version!)
                 XCTAssertEqual(error as? OrchestrationProtocolError, expected)
             }
 
@@ -75,7 +66,7 @@ final class PairingServiceTests: XCTestCase {
         }
     }
 
-    func testDescriptorFailureDoesNotFallBackToV1Pairing() async throws {
+    func testDescriptorFailureDoesNotConsumePairingToken() async throws {
         for status in [401, 503] {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("t3-pairing-discovery-\(UUID().uuidString)", isDirectory: true)
@@ -365,7 +356,7 @@ private actor PairingHTTPTransport: HTTPTransport {
     private let protocolVersion: Int?
     private let descriptorStatus: Int
 
-    init(protocolVersion: Int? = nil, descriptorStatus: Int = 200) {
+    init(protocolVersion: Int? = 2, descriptorStatus: Int = 200) {
         self.protocolVersion = protocolVersion
         self.descriptorStatus = descriptorStatus
     }

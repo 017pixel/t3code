@@ -149,7 +149,7 @@ private struct UsageStreamingHTTPTransport: HTTPTransport {
             let data = try JSONEncoder.t3.encode(JSONValue.object([
                 "environmentId": .string(id), "label": .string(id),
                 "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
-                "serverVersion": .string("1.0.0"),
+                "serverVersion": .string("1.0.0"), "orchestrationProtocolVersion": .number(2),
                 "capabilities": .object(["repositoryIdentity": .bool(false)]),
             ]))
             return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)

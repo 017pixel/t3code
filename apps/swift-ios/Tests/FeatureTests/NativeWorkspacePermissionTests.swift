@@ -89,6 +89,48 @@ struct NativeWorkspacePermissionTests {
         #expect(requests.first?.payload["terminalId"]?.stringValue?.hasPrefix("script-") == true)
         await fixture.client.disconnect()
     }
+
+    @Test(arguments: ["source-control:write", "orchestration:operate"])
+    func pullRequestPreparationRequiresBothGrants(revokedScope: String) async throws {
+        let fixture = try await WorkspacePermissionFixture.make()
+        defer { fixture.cleanUp() }
+        let snapshot = try await fixture.client.initialSnapshot()
+        let project = try #require(snapshot.projects.first { $0.environmentID == "two" })
+        let permissions = ["orchestration:read", "source-control:write", "orchestration:operate"]
+        await fixture.server.setPermissions(permissions.filter { $0 != revokedScope }, host: "two.example")
+        await #expect(throws: EnvironmentPermissionDeniedError.self) {
+            try await fixture.client.createThreadAndSend(
+                projectID: project.id, prompt: "Review this PR",
+                selection: .init(providerID: "codex", modelID: "fixture-model"),
+                runtimeMode: .fullAccess, interactionMode: .standard,
+                workspaceMode: .worktree, branch: "main", worktreePath: nil,
+                startFromOrigin: false, attachments: [], identity: .init(), context: nil,
+                pullRequestReference: "https://github.com/example/repo/pull/1"
+            )
+        }
+        #expect(await fixture.server.operationRequests.isEmpty)
+        await fixture.client.disconnect()
+    }
+
+    @Test func pullRequestPreparationRechecksOperateBeforeLaunch() async throws {
+        let fixture = try await WorkspacePermissionFixture.make()
+        defer { fixture.cleanUp() }
+        let snapshot = try await fixture.client.initialSnapshot()
+        let project = try #require(snapshot.projects.first { $0.environmentID == "two" })
+        await fixture.server.revoke("orchestration:operate", after: "git.preparePullRequestThread")
+        await #expect(throws: EnvironmentPermissionDeniedError.self) {
+            try await fixture.client.createThreadAndSend(
+                projectID: project.id, prompt: "Review this PR",
+                selection: .init(providerID: "codex", modelID: "fixture-model"),
+                runtimeMode: .fullAccess, interactionMode: .standard,
+                workspaceMode: .worktree, branch: "main", worktreePath: nil,
+                startFromOrigin: false, attachments: [], identity: .init(), context: nil,
+                pullRequestReference: "https://github.com/example/repo/pull/1"
+            )
+        }
+        #expect(await fixture.server.operationRequests.map(\.method) == ["git.preparePullRequestThread"])
+        await fixture.client.disconnect()
+    }
 }
 
 @MainActor
@@ -154,7 +196,7 @@ private actor WorkspacePermissionServer: HTTPTransport {
         case "/api/auth/websocket-ticket":
             value = .object(["ticket": .string("fixture"), "expiresAt": .string("2026-10-07T12:00:00.000Z")])
         case "/api/orchestration/shell":
-            value = try JSONValue.encode(multiEnvironmentShell(projectID: "project", threadID: "thread", title: "Workspace",
+            value = try v2ShellFixture(multiEnvironmentShell(projectID: "project", threadID: "thread", title: "Workspace",
                 modelID: "fixture-model", workspaceRoot: "/work/\(host.split(separator: ".")[0])"))
         default: throw URLError(.unsupportedURL)
         }
@@ -172,6 +214,10 @@ private actor WorkspacePermissionServer: HTTPTransport {
         }
         let value: JSONValue
         switch method {
+        case "server.getSettings": value = .object([:])
+        case "git.preparePullRequestThread":
+            value = .object(["branch": .string("pr-1"), "worktreePath": .string("/work/pr-1"),
+                             "isOnPullRequestHead": .bool(true)])
         case "projects.listEntries": value = .object(["entries": .array([]), "truncated": .bool(false)])
         case "assets.createUrl":
             value = .object(["relativeUrl": .string("/api/assets/fixture"),
@@ -192,7 +238,14 @@ private actor WorkspacePermissionServer: HTTPTransport {
         case RPCMethod.subscribeServerConfig.rawValue:
             return .object(["_tag": .string("Chunk"), "requestId": .number(id), "values": .array([
                 .object(["type": .string("snapshot"), "config": .object([
-                    "providers": .array([]), "environment": descriptor(host: host),
+                    "providers": .array([.object([
+                        "instanceId": .string("codex"), "driver": .string("codex"),
+                        "enabled": .bool(true), "installed": .bool(true), "status": .string("ready"),
+                        "auth": .object(["status": .string("authenticated")]),
+                        "checkedAt": .string("2026-10-07T12:00:00.000Z"),
+                        "models": .array([.object(["slug": .string("fixture-model"), "name": .string("Fixture"),
+                                                   "isCustom": .bool(false)])]),
+                    ])]), "environment": descriptor(host: host),
                     "auth": .object(["serverUpdateScope": .string("environment:maintain")]),
                     "settings": .object(["defaultProjectScripts": .array([.object([
                         "id": .string("test"), "name": .string("Test"), "command": .string("echo test"),
@@ -201,7 +254,7 @@ private actor WorkspacePermissionServer: HTTPTransport {
                 ])]),
             ])])
         case RPCMethod.getArchivedShellSnapshot.rawValue:
-            value = try JSONValue.encode(OrchestrationShellSnapshot(snapshotSequence: 1, projects: [], threads: [], updatedAt: "2026-10-07T12:00:00.000Z"))
+            value = try v2ShellFixture(OrchestrationShellSnapshot(snapshotSequence: 1, projects: [], threads: [], updatedAt: "2026-10-07T12:00:00.000Z"))
         default:
             guard operationRequests.last?.method == method else { return nil }
             return .object(["_tag": .string("Exit"), "requestId": .number(id), "exit": .object([
@@ -217,7 +270,7 @@ private actor WorkspacePermissionServer: HTTPTransport {
     private func descriptor(host: String) -> JSONValue {
         .object(["environmentId": .string(String(host.split(separator: ".")[0])), "label": .string(host),
             "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
-            "serverVersion": .string("fixture"), "capabilities": .object([:]), "orchestrationProtocolVersion": .number(1)])
+            "serverVersion": .string("fixture"), "capabilities": .object([:]), "orchestrationProtocolVersion": .number(2)])
     }
 }
 

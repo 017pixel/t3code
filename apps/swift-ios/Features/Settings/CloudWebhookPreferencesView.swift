@@ -37,7 +37,7 @@ final class FeatureCloudWebhookPreferencesModel {
     }
 
     func setEnabled(_ enabled: Bool) async {
-        guard !saving, state?.holdWebhooksWhileOffline != nil else { return }
+        guard !saving, state?.isLinked == true, state?.holdWebhooksWhileOffline != nil else { return }
         saving = true
         revision += 1
         defer { saving = false }
@@ -82,12 +82,19 @@ private struct CloudWebhookPreferencesSection: View {
     var body: some View {
         Section("Webhook delivery") {
             if let state = model.state {
-                if let enabled = state.holdWebhooksWhileOffline {
+                if state.linkRevoked == true {
+                    Label("Removed from T3 Connect", systemImage: "link.badge.minus")
+                    Text("Run `t3 connect link` on the host to link this environment again.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Button("Check link again") { Task { await model.load() } }
+                        .disabled(model.saving)
+                } else if let enabled = state.holdWebhooksWhileOffline {
                     Toggle("Hold webhooks while offline", isOn: Binding(
                         get: { enabled }, set: { value in Task { await model.setEnabled(value) } }
                     ))
-                    .disabled(model.saving || !canWrite || !state.linked)
-                    Text(state.linked
+                    .disabled(model.saving || !canWrite || !state.isLinked)
+                    Text(state.isLinked
                          ? "T3 Connect can hold requests for up to 24 hours. Each task can set a shorter age limit."
                          : "Link this environment to T3 Connect to hold requests while offline.")
                         .font(.footnote).foregroundStyle(.secondary)

@@ -58,14 +58,15 @@ final class NativeRetryIdentityTests: XCTestCase {
             }
             let commands = await connection.dispatchCommands() + transport.dispatchCommands()
             XCTAssertEqual(commands.count, committed ? 1 : 2)
-            XCTAssertTrue(commands.allSatisfy { $0["bootstrap"]?["prepareWorktree"] != nil })
             for command in commands {
+                XCTAssertEqual(command["workspaceStrategy"]?["type"]?.stringValue, "worktree")
+                XCTAssertEqual(command["workspaceStrategy"]?["baseRef"]?.stringValue, "main")
                 XCTAssertEqual(command["threadId"]?.stringValue, identity.threadID)
                 XCTAssertEqual(command["commandId"]?.stringValue, identity.commandID)
-                XCTAssertEqual(command["message"]?["messageId"]?.stringValue, identity.messageID)
+                XCTAssertEqual(retryWireMessage(command)["messageId"]?.stringValue, identity.messageID)
             }
             if let first = commands.first, let last = commands.last {
-                XCTAssertEqual(first["bootstrap"]?["prepareWorktree"], last["bootstrap"]?["prepareWorktree"])
+                XCTAssertEqual(first["workspaceStrategy"], last["workspaceStrategy"])
             }
             await client.disconnect()
         }
@@ -180,14 +181,14 @@ final class NativeRetryIdentityTests: XCTestCase {
         XCTAssertEqual(commands.count, 4)
         for prompt in ["First task", "Second task"] {
             let matching = commands.filter {
-                $0["message"]?["text"]?.stringValue == prompt
+                retryWireMessage($0)["text"]?.stringValue == prompt
             }
             XCTAssertEqual(matching.count, 2, "Expected an initial attempt and one retry.")
             XCTAssertEqual(matching.first?["threadId"], matching.last?["threadId"])
             XCTAssertEqual(matching.first?["commandId"], matching.last?["commandId"])
             XCTAssertEqual(
-                matching.first?["message"]?["messageId"],
-                matching.last?["message"]?["messageId"]
+                matching.first.map(retryWireMessage)?["messageId"],
+                matching.last.map(retryWireMessage)?["messageId"]
             )
         }
         await client.disconnect()
@@ -274,7 +275,7 @@ final class NativeRetryIdentityTests: XCTestCase {
             + transport.dispatchCommands()
         XCTAssertEqual(commands.count, 4)
         let turnCommands = commands.filter {
-            $0["message"]?["text"]?.stringValue == "Retry without duplicating"
+            retryWireMessage($0)["text"]?.stringValue == "Retry without duplicating"
         }
         XCTAssertEqual(turnCommands.count, 2)
         let initialTurn = try XCTUnwrap(turnCommands.first)
@@ -282,24 +283,25 @@ final class NativeRetryIdentityTests: XCTestCase {
         assertStableIdentity(initialTurn, retriedTurn, includesThreadID: false)
         XCTAssertEqual(initialTurn["commandId"]?.stringValue, turnIdentity.commandID)
         XCTAssertEqual(
-            initialTurn["message"]?["messageId"]?.stringValue,
+            retryWireMessage(initialTurn)["messageId"]?.stringValue,
             turnIdentity.messageID
         )
         let bootstrapCommands = commands.filter {
-            $0["message"]?["text"]?.stringValue == "Create exactly one task"
+            retryWireMessage($0)["text"]?.stringValue == "Create exactly one task"
         }
         XCTAssertEqual(bootstrapCommands.count, 2)
         let initialBootstrap = try XCTUnwrap(bootstrapCommands.first)
         let retriedBootstrap = try XCTUnwrap(bootstrapCommands.dropFirst().first)
         XCTAssertNotEqual(initialBootstrap["commandId"], retriedBootstrap["commandId"])
         XCTAssertNotEqual(
-            initialBootstrap["message"]?["messageId"],
-            retriedBootstrap["message"]?["messageId"]
+            retryWireMessage(initialBootstrap)["messageId"],
+            retryWireMessage(retriedBootstrap)["messageId"]
         )
         XCTAssertNotEqual(initialBootstrap["threadId"], retriedBootstrap["threadId"])
         for command in turnCommands {
-            XCTAssertEqual(command["runtimeMode"]?.stringValue, "approval-required")
-            XCTAssertEqual(command["interactionMode"]?.stringValue, "plan")
+            XCTAssertEqual(command["type"], .string("message.dispatch"))
+            XCTAssertNil(command["runtimeMode"])
+            XCTAssertNil(command["interactionMode"])
         }
         for command in bootstrapCommands {
             XCTAssertEqual(command["runtimeMode"]?.stringValue, "auto-accept-edits")
@@ -308,7 +310,7 @@ final class NativeRetryIdentityTests: XCTestCase {
         await client.disconnect()
     }
 
-    func testPartialBootstrapRecoversBySendingOnlyTheStableFinalTurn() async throws {
+    func testPartialBootstrapRecoversWithTheLaunchInitialMessageIdentity() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("t3-native-partial-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -367,13 +369,17 @@ final class NativeRetryIdentityTests: XCTestCase {
         let commands = await connection.dispatchCommands()
             + transport.dispatchCommands()
         XCTAssertEqual(commands.count, 2)
-        let bootstrap = try XCTUnwrap(commands.first { $0["bootstrap"] != nil })
-        let finalTurn = try XCTUnwrap(commands.first { $0["bootstrap"] == nil })
-        assertStableIdentity(bootstrap, finalTurn, includesThreadID: true)
+        let bootstrap = try XCTUnwrap(commands.first { $0["initialMessage"] != nil })
+        let finalTurn = try XCTUnwrap(commands.first { $0["initialMessage"] == nil })
+        XCTAssertEqual(finalTurn["type"]?.stringValue, "message.dispatch")
+        XCTAssertEqual(finalTurn["commandId"]?.stringValue, identity.commandID + ":initial-message")
+        XCTAssertEqual(finalTurn["threadId"]?.stringValue, identity.threadID)
+        XCTAssertEqual(retryWireMessage(finalTurn)["messageId"]?.stringValue, identity.messageID)
+        XCTAssertEqual(retryWireMessage(finalTurn)["text"], retryWireMessage(bootstrap)["text"])
         XCTAssertEqual(bootstrap["threadId"]?.stringValue, identity.threadID)
         XCTAssertEqual(bootstrap["commandId"]?.stringValue, identity.commandID)
         XCTAssertEqual(
-            bootstrap["message"]?["messageId"]?.stringValue,
+            retryWireMessage(bootstrap)["messageId"]?.stringValue,
             identity.messageID
         )
         let wireID = try XCTUnwrap(bootstrap["threadId"]?.stringValue)
@@ -391,8 +397,7 @@ final class NativeRetryIdentityTests: XCTestCase {
         includesThreadID: Bool
     ) {
         XCTAssertEqual(first["commandId"], second["commandId"])
-        XCTAssertEqual(first["message"]?["messageId"], second["message"]?["messageId"])
-        XCTAssertEqual(first["createdAt"], second["createdAt"])
+        XCTAssertEqual(retryWireMessage(first)["messageId"], retryWireMessage(second)["messageId"])
         if includesThreadID {
             XCTAssertEqual(first["threadId"], second["threadId"])
         }
@@ -448,12 +453,13 @@ private actor ConcurrentBootstrapWebSocketConnection: WebSocketConnection {
             connectionWaiters.removeAll()
         }
         if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue
-            || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue,
+            || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue
+            || request["tag"]?.stringValue == "server.getSettings",
            let response = try retryConfigResponse(for: request) {
             enqueue(response)
             return
         }
-        guard request["tag"]?.stringValue == RPCMethod.dispatchCommand.rawValue,
+        guard [RPCMethod.dispatchCommand.rawValue, "orchestration.launchThread"].contains(request["tag"]?.stringValue ?? ""),
               let payload = request["payload"] else {
             return
         }
@@ -536,7 +542,7 @@ private actor ConcurrentBootstrapHTTPTransport: HTTPTransport {
 
     init(environment: Environment, shell: OrchestrationShellSnapshot) {
         self.environment = environment
-        shellData = try! JSONEncoder.t3.encode(shell)
+        shellData = try! JSONEncoder.t3.encode(v2ShellFixture(shell))
     }
 
     func rejectShellReads() {
@@ -548,7 +554,7 @@ private actor ConcurrentBootstrapHTTPTransport: HTTPTransport {
         case "/api/auth/session":
             (try retryAuthSessionData(), retryHTTPResponse(request))
         case "/.well-known/t3/environment":
-            (try legacyEnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
+            (try v2EnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
         case "/api/orchestration/shell" where acceptsShellReads:
             (shellData, retryHTTPResponse(request))
         case "/api/auth/websocket-ticket":
@@ -620,7 +626,7 @@ private actor RetryIdentityHTTPTransport: HTTPTransport {
 
     init(environment: Environment, shell: OrchestrationShellSnapshot) {
         self.environment = environment
-        shellData = try! JSONEncoder.t3.encode(shell)
+        shellData = try! JSONEncoder.t3.encode(v2ShellFixture(shell))
     }
 
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
@@ -629,7 +635,7 @@ private actor RetryIdentityHTTPTransport: HTTPTransport {
             return (try retryAuthSessionData(), retryHTTPResponse(request))
         }
         if path == "/.well-known/t3/environment" {
-            return (try legacyEnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
+            return (try v2EnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
         }
         if path == "/api/orchestration/shell" {
             return (shellData, retryHTTPResponse(request))
@@ -648,7 +654,12 @@ private actor RetryIdentityHTTPTransport: HTTPTransport {
             )
         }
         if path.hasPrefix("/api/orchestration/threads/") {
-            throw URLError(.networkConnectionLost)
+            guard v2FixtureThreadID(from: request.url!) == "thread-existing" else { throw URLError(.networkConnectionLost) }
+            let detail = try v2ThreadFixture(retryEmptyThreadDetail(id: "thread-existing"))
+            let snapshot = V2Fixture.projectionPatch(detail, ["thread": V2Fixture.patch(detail["projection"]!["thread"]!, [
+                "runtimeMode": .string("approval-required"), "interactionMode": .string("plan"),
+            ])])
+            return (try JSONEncoder.t3.encode(snapshot), retryHTTPResponse(request))
         }
         if path == "/api/orchestration/dispatch" {
             commands.append(try retryDispatchCommand(from: request))
@@ -678,7 +689,7 @@ private actor PartialBootstrapHTTPTransport: HTTPTransport {
 
     init(environment: Environment, shell: OrchestrationShellSnapshot, committedMessages: [OrchestrationMessage] = []) {
         self.environment = environment
-        shellData = try! JSONEncoder.t3.encode(shell)
+        shellData = try! JSONEncoder.t3.encode(v2ShellFixture(shell))
         self.committedMessages = committedMessages
     }
 
@@ -688,7 +699,7 @@ private actor PartialBootstrapHTTPTransport: HTTPTransport {
             return (try retryAuthSessionData(), retryHTTPResponse(request))
         }
         if path == "/.well-known/t3/environment" {
-            return (try legacyEnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
+            return (try v2EnvironmentDescriptorData(for: environment), retryHTTPResponse(request))
         }
         if path == "/api/orchestration/shell" {
             return (shellData, retryHTTPResponse(request))
@@ -707,9 +718,9 @@ private actor PartialBootstrapHTTPTransport: HTTPTransport {
             )
         }
         if path.hasPrefix("/api/orchestration/threads/") {
-            let threadID = request.url?.lastPathComponent.removingPercentEncoding ?? "thread"
+            let threadID = request.url.map(v2FixtureThreadID) ?? "thread"
             let snapshot = retryEmptyThreadDetail(id: threadID, messages: committedMessages)
-            return (try JSONEncoder.t3.encode(snapshot), retryHTTPResponse(request))
+            return (try JSONEncoder.t3.encode(v2ThreadFixture(snapshot)), retryHTTPResponse(request))
         }
         if path == "/api/orchestration/dispatch" {
             commands.append(try retryDispatchCommand(from: request))
@@ -749,12 +760,13 @@ private actor AmbiguousDispatchWebSocketConnection: WebSocketConnection {
             connectionWaiters.removeAll()
         }
         if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue
-            || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue,
+            || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue
+            || request["tag"]?.stringValue == "server.getSettings",
            let response = try retryConfigResponse(for: request) {
             enqueue(response)
             return
         }
-        if request["tag"]?.stringValue == RPCMethod.dispatchCommand.rawValue,
+        if [RPCMethod.dispatchCommand.rawValue, "orchestration.launchThread"].contains(request["tag"]?.stringValue ?? ""),
            let payload = request["payload"] {
             commands.append(payload)
             throw URLError(.networkConnectionLost)
@@ -810,17 +822,18 @@ private actor PartialBootstrapWebSocketConnection: WebSocketConnection {
             connectionWaiters.forEach { $0.resume() }
             connectionWaiters.removeAll()
         }
-        guard request["tag"]?.stringValue == RPCMethod.dispatchCommand.rawValue,
+        guard [RPCMethod.dispatchCommand.rawValue, "orchestration.launchThread"].contains(request["tag"]?.stringValue ?? ""),
               let payload = request["payload"] else {
             if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue
-                || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue,
+                || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue
+                || request["tag"]?.stringValue == "server.getSettings",
                let response = try retryConfigResponse(for: request) {
                 enqueue(response)
             }
             return
         }
         commands.append(payload)
-        if payload["bootstrap"] != nil {
+        if request["tag"]?.stringValue == "orchestration.launchThread" {
             throw URLError(.networkConnectionLost)
         }
         guard case let .number(requestID) = request["id"] else { return }
@@ -872,7 +885,17 @@ private actor PartialBootstrapWebSocketConnection: WebSocketConnection {
 
 private func retryConfigResponse(for request: JSONValue) throws -> Data? {
     guard case let .number(requestID)? = request["id"] else { return nil }
-    let config = JSONValue.object(["providers": .array([])])
+    let config: JSONValue = request["tag"]?.stringValue == "server.getSettings" ? .object([:]) : .object([
+        "providers": .array([.object([
+            "instanceId": .string("codex"), "driver": .string("codex"),
+            "enabled": .bool(true), "installed": .bool(true), "status": .string("ready"),
+            "auth": .object(["status": .string("authenticated")]),
+            "checkedAt": .string("2026-09-04T12:00:00.000Z"),
+            "models": .array([.object([
+                "slug": .string("gpt-5.4"), "name": .string("GPT-5.4"), "isCustom": .bool(false),
+            ])]),
+        ])]),
+    ])
     if request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue {
         return try JSONEncoder.t3.encode(
             JSONValue.object([
@@ -953,4 +976,8 @@ private func retryDispatchCommand(from request: URLRequest) throws -> JSONValue 
         throw URLError(.cannotDecodeContentData)
     }
     return try JSONDecoder.t3.decode(JSONValue.self, from: body)
+}
+
+private func retryWireMessage(_ command: JSONValue) -> JSONValue {
+    command["initialMessage"] ?? command
 }

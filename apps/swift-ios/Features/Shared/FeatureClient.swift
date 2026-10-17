@@ -18,8 +18,6 @@ public protocol FeatureClient: AnyObject {
 
     func pair(endpoint: String, token: String?) async throws
     func setEnvironmentEnabled(id: String, enabled: Bool) async throws
-    func orchestrationPreference(environmentID: String) async throws -> OrchestrationProtocolPreference
-    func setOrchestrationPreference(environmentID: String, preference: OrchestrationProtocolPreference) async throws
     func removeEnvironment(id: String) async throws
     func disconnect() async
 
@@ -44,6 +42,21 @@ public protocol FeatureClient: AnyObject {
         attachments: [FeatureUploadAttachment],
         identity: FeatureSubmissionIdentity,
         context: OrchestrationMessageContext?
+    ) async throws -> FeatureThread
+    func createThreadAndSend(
+        projectID: String,
+        prompt: String,
+        selection: FeatureSelection?,
+        runtimeMode: FeatureRuntimeMode,
+        interactionMode: FeatureInteractionMode,
+        workspaceMode: FeatureWorkspaceMode,
+        branch: String?,
+        worktreePath: String?,
+        startFromOrigin: Bool,
+        attachments: [FeatureUploadAttachment],
+        identity: FeatureSubmissionIdentity,
+        context: OrchestrationMessageContext?,
+        pullRequestReference: String?
     ) async throws -> FeatureThread
     func listWorkspaceBranches(
         projectID: String,
@@ -253,6 +266,23 @@ public protocol FeatureClient: AnyObject {
 }
 
 public extension FeatureClient {
+    /// Older clients can still create ordinary threads, but must not silently drop a PR checkout.
+    func createThreadAndSend(
+        projectID: String, prompt: String, selection: FeatureSelection?,
+        runtimeMode: FeatureRuntimeMode, interactionMode: FeatureInteractionMode,
+        workspaceMode: FeatureWorkspaceMode, branch: String?, worktreePath: String?,
+        startFromOrigin: Bool, attachments: [FeatureUploadAttachment], identity: FeatureSubmissionIdentity,
+        context: OrchestrationMessageContext?, pullRequestReference: String?
+    ) async throws -> FeatureThread {
+        guard pullRequestReference == nil else { throw FeatureCapabilityUnavailable("Pull request workspaces") }
+        return try await createThreadAndSend(
+            projectID: projectID, prompt: prompt, selection: selection,
+            runtimeMode: runtimeMode, interactionMode: interactionMode, workspaceMode: workspaceMode,
+            branch: branch, worktreePath: worktreePath, startFromOrigin: startFromOrigin,
+            attachments: attachments, identity: identity, context: context
+        )
+    }
+
     func gitHubRoutingPermission(environmentID: String) async throws -> GitHubRoutingPermission { .off }
     func setGitHubRoutingPermission(environmentID: String, permission: GitHubRoutingPermission) async throws {
         throw FeatureCapabilityUnavailable("GitHub sharing")
@@ -360,10 +390,6 @@ public extension FeatureClient {
     }
 
     func setEnvironmentEnabled(id: String, enabled: Bool) async throws {}
-    func orchestrationPreference(environmentID: String) async throws -> OrchestrationProtocolPreference { .auto }
-    func setOrchestrationPreference(environmentID: String, preference: OrchestrationProtocolPreference) async throws {
-        throw FeatureCapabilityUnavailable("Orchestrator selection")
-    }
     func removeEnvironment(id: String) async throws {}
     func disconnect() async {}
     func refreshWorkspaceProviders(environmentID: String, cwd: String, instanceID: String) async throws -> [FeatureProvider] {

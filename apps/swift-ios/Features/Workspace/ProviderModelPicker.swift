@@ -240,6 +240,11 @@ private struct ModelPickerSheet: View {
     @State private var hasEditedDraft = false
     @State private var isRefreshing = false
     @State private var refreshError: String?
+    @State private var modelPreferences: ServerModelPreferencesSnapshot?
+    @State private var preferenceError: String?
+    @State private var isSavingPreferences = false
+    @State private var isLoadingPreferences = false
+    @State private var showsHiddenModels = false
 
     init(
         providers: [FeatureProvider],
@@ -323,13 +328,23 @@ private struct ModelPickerSheet: View {
                         .accessibilityIdentifier("model-picker-refresh")
                     }
                 }
+                if modelPreferences != nil {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            showsHiddenModels.toggle()
+                        } label: {
+                            Image(systemName: showsHiddenModels ? "eye.slash" : "eye")
+                        }
+                        .accessibilityLabel(showsHiddenModels ? "Hide hidden models" : "Show hidden models")
+                    }
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Apply") { applySelection() }
                         .fontWeight(.semibold)
-                        .disabled(!hasDraftChanges)
+                        .disabled(!hasDraftChanges || !ProjectProviderModelPolicy.canSelect(draftSelection, in: providers))
                         .accessibilityIdentifier("model-picker-apply")
                 }
             }
@@ -356,6 +371,7 @@ private struct ModelPickerSheet: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+        .task(id: setupContext?.environmentID) { await loadModelPreferences() }
         .onAppear {
             reconcileDraftSelectionWithCurrentState()
             revealSelectedLegacyModel()
@@ -381,6 +397,7 @@ private struct ModelPickerSheet: View {
         Task {
             do {
                 try await onRefresh()
+                await loadModelPreferences()
             } catch {
                 refreshError = error.localizedDescription
             }
@@ -393,6 +410,15 @@ private struct ModelPickerSheet: View {
         let sections = ProviderModelDisplaySections(catalog: catalog)
         let isSearching = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return List {
+            if let preferenceError {
+                Section {
+                    Text(preferenceError)
+                        .font(T3Typography.supporting)
+                        .foregroundStyle(T3Colors.danger)
+                    Button("Reload model preferences") { Task { await loadModelPreferences() } }
+                }
+                .listRowBackground(T3Colors.background)
+            }
             if modelChangesAreLocked {
                 Section {
                     Label(
@@ -472,7 +498,26 @@ private struct ModelPickerSheet: View {
                 }
             }
 
-            if catalog.all.isEmpty {
+            ForEach(pickerProviders) { provider in
+                let models = ProviderUpdateRequiredNotice.models(for: provider, query: query)
+                if !models.isEmpty {
+                    Section(provider.name) {
+                        ForEach(models) { model in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(model.name)
+                                    .font(T3Typography.control)
+                                Text(ProviderUpdateRequiredNotice.message(driver: provider.driver, model: model))
+                                    .font(T3Typography.supporting)
+                                    .foregroundStyle(T3Colors.textSecondary)
+                            }
+                            .accessibilityIdentifier("model-update-required-\(provider.id)-\(model.slug)")
+                            .listRowBackground(T3Colors.background)
+                        }
+                    }
+                }
+            }
+
+            if catalog.all.isEmpty && !hasUpdateRequiredModels {
                 ContentUnavailableView.search(text: query)
                     .listRowBackground(Color.clear)
             }
@@ -508,11 +553,15 @@ private struct ModelPickerSheet: View {
     }
 
     private var availableModelCount: Int {
-        pickerProviders
+        ProjectProviderModelPolicy.selectableProviders(pickerProviders)
             .filter(\.isAvailable)
             .reduce(into: 0) { count, provider in
-                count += provider.models.count
+                count += provider.models.count + (provider.updateRequiredModels?.count ?? 0)
             }
+    }
+
+    private var hasUpdateRequiredModels: Bool {
+        pickerProviders.contains { !ProviderUpdateRequiredNotice.models(for: $0, query: query).isEmpty }
     }
 
     private func modelRow(
@@ -553,7 +602,7 @@ private struct ModelPickerSheet: View {
             )
 
             Button {
-                toggleFavorite(option.id)
+                toggleFavorite(option)
             } label: {
                 Image(systemName: isFavorite ? "star.fill" : "star")
                     .font(.system(size: 15))
@@ -567,14 +616,34 @@ private struct ModelPickerSheet: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
+            .disabled(!canChangeFavorites)
             .accessibilityLabel(isFavorite ? "Remove from favorites" : "Add to favorites")
             .accessibilityValue(option.model.name)
         }
         .listRowBackground(T3Colors.background)
+        .contextMenu {
+            if modelPreferences != nil, option.model.isCustom != true {
+                let isHidden = ProviderModelPreferencesPolicy.isHidden(option, preferences: modelPreferences)
+                Button(isHidden ? "Show model" : "Hide model", systemImage: isHidden ? "eye" : "eye.slash") {
+                    changeModelPreferences(.hidden(
+                        .init(provider: option.provider.id, model: option.model.id), hidden: !isHidden
+                    ))
+                }
+                .disabled(!canWriteModelPreferences || isSavingPreferences || isLoadingPreferences)
+            }
+        }
     }
 
     @ViewBuilder
     private var selectionControls: some View {
+        if let pickerSelection,
+           !ProjectProviderModelPolicy.canSelect(pickerSelection, in: providers) {
+            Text("\(pickerSelection.modelID) is unavailable. Choose another model or update its provider.")
+                .font(T3Typography.supporting)
+                .foregroundStyle(T3Colors.textSecondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+        }
         if let selectedOption {
             VStack(alignment: .leading, spacing: 10) {
                 Divider()
@@ -783,7 +852,8 @@ private struct ModelPickerSheet: View {
     }
 
     private var favoriteIDs: Set<String> {
-        Set(favoriteStorage.split(separator: "\n").map(String.init))
+        if let modelPreferences { return modelPreferences.favoriteIDs(legacyStorage: favoriteStorage) }
+        return Set(favoriteStorage.split(separator: "\n").map(String.init))
     }
 
     private var recentIDs: [String] {
@@ -792,16 +862,18 @@ private struct ModelPickerSheet: View {
 
     private var cachedCatalog: DailyUXModelCatalog {
         catalogCache.catalog(
-            providers: pickerProviders,
+            providers: ProjectProviderModelPolicy.selectableProviders(pickerProviders),
             query: query,
-            favoriteStorage: favoriteStorage,
+            favoriteStorage: favoriteIDs.sorted().joined(separator: "\n"),
             recentStorage: recentStorage
         )
     }
 
     private var pickerProviders: [FeatureProvider] {
         ThreadComposerModelSelectionPolicy.pickerProviders(
-            providers,
+            ProviderModelPreferencesPolicy.providers(
+                providers, preferences: modelPreferences, includeHidden: showsHiddenModels
+            ),
             inherited: threadSelection,
             allowsProviderChange: allowProviderSwitch
         )
@@ -826,7 +898,9 @@ private struct ModelPickerSheet: View {
     }
 
     private func select(_ option: DailyUXModelOption) {
-        guard !isLocked(option) else { return }
+        guard !isLocked(option), ProjectProviderModelPolicy.canSelect(
+            .init(providerID: option.provider.id, modelID: option.model.id), in: providers
+        ) else { return }
         let next = ProviderModelDraftPolicy.selection(
             for: option,
             cached: modelDrafts[option.id],
@@ -850,7 +924,6 @@ private struct ModelPickerSheet: View {
             inheriting: threadSelection,
             allowsProviderChange: allowProviderSwitch
         ) else {
-            replaceDraft(with: committedSelection)
             return
         }
         selection = validated
@@ -926,7 +999,17 @@ private struct ModelPickerSheet: View {
         return modelChangesAreLocked && option.model.id != threadSelection.modelID
     }
 
-    private func toggleFavorite(_ id: String) {
+    private func toggleFavorite(_ option: DailyUXModelOption) {
+        guard canChangeFavorites else { return }
+        let id = option.id
+        if preferencesClient != nil {
+            changeModelPreferences(.favorite(
+                .init(provider: option.provider.id, model: option.model.id),
+                enabled: !favoriteIDs.contains(id),
+                legacyFavorites: ServerModelPreferencesSnapshot.legacyFavorites(favoriteStorage)
+            ))
+            return
+        }
         var next = favoriteIDs
         if next.contains(id) {
             next.remove(id)
@@ -934,6 +1017,66 @@ private struct ModelPickerSheet: View {
             next.insert(id)
         }
         favoriteStorage = next.sorted().joined(separator: "\n")
+    }
+
+    private var preferencesClient: (any FeatureModelPreferencesClient)? {
+        setupContext?.model.client as? any FeatureModelPreferencesClient
+    }
+
+    private var canWriteModelPreferences: Bool {
+        guard let setupContext else { return false }
+        return setupContext.model.snapshot.environments.first { $0.id == setupContext.environmentID }?
+            .permissions?.grants("settings:write") == true
+    }
+
+    private var canChangeFavorites: Bool {
+        preferencesClient == nil || (modelPreferences != nil && canWriteModelPreferences
+            && !isSavingPreferences && !isLoadingPreferences)
+    }
+
+    private func loadModelPreferences() async {
+        guard let setupContext, let client = preferencesClient, !isSavingPreferences, !isLoadingPreferences else { return }
+        isLoadingPreferences = true
+        defer { isLoadingPreferences = false }
+        let environmentID = setupContext.environmentID
+        do {
+            var preferences = try await client.modelPreferences(environmentID: environmentID)
+            guard self.setupContext?.environmentID == environmentID else { return }
+            modelPreferences = preferences
+            preferenceError = nil
+            if let migration = preferences.migrationChange(legacyStorage: favoriteStorage), canWriteModelPreferences {
+                isSavingPreferences = true
+                defer { isSavingPreferences = false }
+                preferences = try await client.updateModelPreferences(
+                    environmentID: environmentID,
+                    change: migration
+                )
+                guard self.setupContext?.environmentID == environmentID else { return }
+                modelPreferences = preferences
+            }
+        } catch {
+            guard self.setupContext?.environmentID == environmentID else { return }
+            preferenceError = "Could not load model preferences. \(error.localizedDescription)"
+        }
+    }
+
+    private func changeModelPreferences(_ change: ServerModelPreferencesChange) {
+        guard let setupContext, let client = preferencesClient, canWriteModelPreferences,
+              !isSavingPreferences, !isLoadingPreferences else { return }
+        let environmentID = setupContext.environmentID
+        isSavingPreferences = true
+        Task {
+            defer { isSavingPreferences = false }
+            do {
+                let preferences = try await client.updateModelPreferences(environmentID: environmentID, change: change)
+                guard self.setupContext?.environmentID == environmentID else { return }
+                modelPreferences = preferences
+                preferenceError = nil
+            } catch {
+                guard self.setupContext?.environmentID == environmentID else { return }
+                preferenceError = "Could not save model preferences. \(error.localizedDescription)"
+            }
+        }
     }
 
     private static func effectiveSelection(
@@ -977,12 +1120,7 @@ enum ProviderModelDraftPolicy {
         inheriting inherited: FeatureSelection?,
         allowsProviderChange: Bool
     ) -> FeatureSelection? {
-        guard let selection,
-              providers.contains(where: { provider in
-                  provider.id == selection.providerID
-                      && provider.isAvailable
-                      && provider.models.contains { $0.id == selection.modelID }
-              }) else {
+        guard let selection, ProjectProviderModelPolicy.canSelect(selection, in: providers) else {
             return nil
         }
         guard let validated = ProviderModelSelectionResolver.validated(selection, in: providers)
@@ -1009,8 +1147,11 @@ enum ProviderModelDraftPolicy {
         inheriting inherited: FeatureSelection?,
         allowsProviderChange: Bool
     ) -> Bool {
-        base == currentCommitted
-            && validated(
+        guard base == currentCommitted else { return false }
+        if let draft, ProjectProviderModelPolicy.preservesUnavailableSelection(draft, in: providers) {
+            return true
+        }
+        return validated(
                 draft,
                 providers: providers,
                 inheriting: inherited,
@@ -1102,6 +1243,9 @@ enum ProviderModelSelectionResolver {
         in providers: [FeatureProvider]
     ) -> FeatureSelection? {
         guard !providers.isEmpty else { return selection }
+        if let selection, ProjectProviderModelPolicy.preservesUnavailableSelection(selection, in: providers) {
+            return nil
+        }
         guard var validated = DailyUXModelOptions.validated(selection, in: providers),
               let model = providers
                   .first(where: { $0.id == validated.providerID })?
@@ -1120,10 +1264,14 @@ enum ProviderModelSelectionResolver {
         in providers: [FeatureProvider]
     ) -> FeatureSelection? {
         guard !providers.isEmpty else { return selection }
+        if let selection, ProjectProviderModelPolicy.preservesUnavailableSelection(selection, in: providers) {
+            return selection
+        }
         if let validated = validated(selection, in: providers) {
             return validated
         }
-        let currentProviders = providers.compactMap { provider -> FeatureProvider? in
+        let selectableProviders = ProjectProviderModelPolicy.selectableProviders(providers)
+        let currentProviders = selectableProviders.compactMap { provider -> FeatureProvider? in
             var current = provider
             current.models = provider.models.filter {
                 ProviderModelFamilyClassifier.isCurrent($0, provider: provider)
@@ -1131,7 +1279,7 @@ enum ProviderModelSelectionResolver {
             return current.models.isEmpty ? nil : current
         }
         return DailyUXModelOptions.preferredSelection(in: currentProviders)
-            ?? DailyUXModelOptions.preferredSelection(in: providers)
+            ?? DailyUXModelOptions.preferredSelection(in: selectableProviders)
     }
 }
 
@@ -1214,9 +1362,10 @@ enum ThreadComposerProviderCatalog {
     ) -> [FeatureProvider] {
         let environmentID = thread.environmentID
             ?? snapshot.projects.first(where: { $0.id == thread.projectID })?.environmentID
-        var providers = environmentID.flatMap {
+        let project = snapshot.projects.first { $0.id == thread.projectID }
+        var providers = ProjectProviderModelPolicy.providers(environmentID.flatMap {
             snapshot.providersByEnvironment?[$0]
-        } ?? []
+        } ?? [], for: project)
 
         guard let providerID = thread.providerID,
               let modelID = thread.modelID else {
@@ -1277,6 +1426,11 @@ enum ProviderModelCatalogNormalizer {
                     existing.skills,
                     provider.skills,
                     id: \.id
+                )
+                existing.updateRequiredModels = mergingMetadata(
+                    existing.updateRequiredModels,
+                    provider.updateRequiredModels,
+                    id: \.slug
                 )
                 providersByID[provider.id] = existing
             } else {

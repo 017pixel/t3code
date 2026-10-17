@@ -7,6 +7,9 @@ struct FeatureWorkspaceNavigationRequest: Equatable, Sendable {
         case threadDestination(id: String, destination: FeatureThreadDestination)
         case project(id: String)
         case newTask(projectID: String?)
+        case newPrompt(projectID: String, link: PlatformNewThreadLink)
+        case clonePrompt(environmentID: String, link: PlatformNewThreadLink)
+        case threadPrompt(id: String, request: PlatformThreadPromptRequest)
         case usageLimits
     }
 
@@ -31,6 +34,8 @@ public struct WorkspaceView: View {
     @State private var threadSelection = WorkspaceThreadSelection()
     @State private var requestedThreadDestination: FeatureThreadDestination?
     @State private var requestedThreadDestinationID: UUID?
+    @State private var requestedThreadPrompt: PlatformThreadPromptRequest?
+    @State private var requestedThreadPromptID: String?
     @State private var activeToolDestination: FeatureThreadDestination?
     @State private var selectedProjectID: String?
     @State private var searchText = ""
@@ -51,6 +56,7 @@ public struct WorkspaceView: View {
         var managedClone: FeatureProjectCloneIdentity? = nil
         var sourceThread: FeatureThread? = nil
         var recoveryID: String? = nil
+        var promptLink: PlatformNewThreadLink? = nil
     }
     @State private var newTaskPresentation: NewTaskPresentation?
     @State private var pendingWorkspaceAction: (@MainActor () -> Void)?
@@ -58,6 +64,12 @@ public struct WorkspaceView: View {
     @State private var pendingNavigationRequest: FeatureWorkspaceNavigationRequest?
     @State private var consumedNavigationRequestID: UUID?
     @State private var rootNavigationDismissalID: UUID?
+    private struct PromptCloneSeed {
+        let environmentID: String
+        let link: PlatformNewThreadLink
+        var remoteURL: String? { link.repository.map { "https://github.com/\($0.fullName).git" } }
+    }
+    @State private var promptCloneSeed: PromptCloneSeed?
     @State private var showingAddProject = false
     @State private var createdProjectID: String?
     @State private var createdManagedClone: FeatureProjectCloneIdentity?
@@ -121,7 +133,8 @@ public struct WorkspaceView: View {
                 initialProjectID: presentation.projectID,
                 initialManagedClone: presentation.managedClone,
                 initialWorkspaceThread: presentation.sourceThread,
-                initialRecoveryID: presentation.recoveryID
+                initialRecoveryID: presentation.recoveryID,
+                initialPromptLink: presentation.promptLink
             )
             .onAppear { workspacePresentationIsVisible = true }
         }
@@ -131,24 +144,12 @@ public struct WorkspaceView: View {
             }
             .onAppear { workspacePresentationIsVisible = true }
         }
-        .sheet(isPresented: $showingAddProject, onDismiss: {
-            workspacePresentationIsVisible = false
-            if pendingWorkspaceAction != nil {
-                createdProjectID = nil
-                createdManagedClone = nil
-                finishWorkspaceDismissal()
-                return
-            }
-            if let id = createdProjectID {
-                createdProjectID = nil
-                openNewTaskOrProjectCreation(initialProjectID: id, managedClone: createdManagedClone)
-            }
-            createdManagedClone = nil
-        }) {
+        .sheet(isPresented: $showingAddProject, onDismiss: finishProjectCreation) {
             AddProjectView(model: model, onNewProjectCreated: { projectID, clone in
                 createdProjectID = projectID
                 createdManagedClone = clone
-            })
+            }, initialEnvironmentID: promptCloneSeed?.environmentID,
+               initialRemoteURL: promptCloneSeed?.remoteURL)
             .onAppear { workspacePresentationIsVisible = true }
         }
         .sheet(item: $settingsProject, onDismiss: finishWorkspaceDismissal) { project in
@@ -460,6 +461,8 @@ public struct WorkspaceView: View {
                 onNewTaskFromThread: openNewTaskOnBranch,
                 initialDestination: id == selectedThreadID ? requestedThreadDestination : nil,
                 initialDestinationID: id == selectedThreadID ? requestedThreadDestinationID : nil,
+                linkedPromptRequest: id == requestedThreadPromptID ? requestedThreadPrompt : nil,
+                onLinkedPromptConsumed: consumeThreadPrompt,
                 onToolDestinationChange: { if id == selectedThreadID { activeToolDestination = $0 } },
                 rootNavigationDismissalID: id == selectedThreadID ? rootNavigationDismissalID : nil,
                 onRootNavigationDismissed: finishThreadNavigationDismissal,
@@ -872,6 +875,8 @@ public struct WorkspaceView: View {
     }
 
     private func openThread(_ id: String) {
+        requestedThreadPrompt = nil
+        requestedThreadPromptID = nil
         requestedThreadDestination = nil
         requestedThreadDestinationID = nil
         activeToolDestination = nil
@@ -898,7 +903,37 @@ public struct WorkspaceView: View {
 
     @MainActor
     private func openProjectCreation() {
-        dismissNewTaskBeforeRootAction { showingAddProject = true }
+        dismissNewTaskBeforeRootAction {
+            promptCloneSeed = nil
+            showingAddProject = true
+        }
+    }
+
+    private func finishProjectCreation() {
+        workspacePresentationIsVisible = false
+        let seed = promptCloneSeed
+        promptCloneSeed = nil
+        defer {
+            createdProjectID = nil
+            createdManagedClone = nil
+        }
+        if pendingWorkspaceAction != nil {
+            finishWorkspaceDismissal()
+            return
+        }
+        guard let id = createdProjectID else { return }
+        if let seed, case .pullRequest = seed.link {
+            selectedProjectID = id
+            closeSelectedThread()
+            model.errorMessage = "Open the pull request link again when the clone is ready."
+            return
+        }
+        // Managed clones have a durable identity that keeps creation blocked until ready.
+        if let clone = createdManagedClone, let seed, case .new = seed.link {
+            newTaskPresentation = NewTaskPresentation(projectID: id, managedClone: clone, promptLink: seed.link)
+        } else {
+            openNewTaskOrProjectCreation(initialProjectID: id, managedClone: createdManagedClone)
+        }
     }
 
     private func openNewTaskOrProjectCreation() {
@@ -928,10 +963,16 @@ public struct WorkspaceView: View {
         rootNavigationDismissalID = nil
         // Cold-start routes stay with the caller until their target exists.
         switch navigationRequest.destination {
-        case let .thread(id), let .threadDestination(id, _):
+        case let .thread(id), let .threadDestination(id, _), let .threadPrompt(id, _):
             guard model.snapshot.threads.contains(where: { $0.id == id }) else { return }
         case let .project(id):
             guard model.snapshot.projects.contains(where: { $0.id == id }) else { return }
+        case let .newPrompt(projectID, _):
+            guard model.snapshot.projects.contains(where: { $0.id == projectID }) else { return }
+        case let .clonePrompt(environmentID, _):
+            guard model.snapshot.environments.contains(where: {
+                $0.id == environmentID && $0.isEnabled && $0.connectionState == .connected
+            }) else { return }
         case .usageLimits, .newTask:
             break
         }
@@ -956,11 +997,30 @@ public struct WorkspaceView: View {
         applyNavigationRequest(request)
     }
 
+    private func consumeThreadPrompt(_ requestID: UUID) {
+        guard requestedThreadPrompt?.id == requestID else { return }
+        requestedThreadPrompt = nil
+        requestedThreadPromptID = nil
+    }
+
     private func applyNavigationRequest(_ navigationRequest: FeatureWorkspaceNavigationRequest) {
-        threadSelection.resetHistory()
+        let keepsComposer: Bool
+        if case let .threadPrompt(id, _) = navigationRequest.destination { keepsComposer = id == selectedThreadID }
+        else { keepsComposer = false }
+        if !keepsComposer { threadSelection.resetHistory() }
         switch navigationRequest.destination {
         case .usageLimits:
             showingUsageLimits = true
+        case let .threadPrompt(id, request):
+            if selectedThreadID != id { openThread(id) }
+            requestedThreadPromptID = id
+            requestedThreadPrompt = request
+        case let .clonePrompt(environmentID, link):
+            promptCloneSeed = PromptCloneSeed(environmentID: environmentID, link: link)
+            showingAddProject = true
+        case let .newPrompt(projectID, link):
+            selectedProjectID = projectID
+            newTaskPresentation = NewTaskPresentation(projectID: projectID, promptLink: link)
         case let .thread(id):
             openThread(id)
         case let .threadDestination(id, destination):

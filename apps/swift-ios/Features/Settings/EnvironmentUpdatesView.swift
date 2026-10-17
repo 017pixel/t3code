@@ -48,9 +48,9 @@ struct EnvironmentUpdatesView: View {
     @State private var confirmUpdate = false
 
     private var supported: Bool {
-        guard let capabilities = descriptor?.capabilities else { return false }
-        return capabilities.serverSelfUpdate != nil
-            && (capabilities.serverSelfUpdate != "desktop-managed" || capabilities.desktopAppUpdate == true)
+        guard let descriptor else { return false }
+        return (descriptor.orchestrationProtocolVersion ?? 1) <= OrchestrationProtocolVersion.v2.rawValue
+            && OutdatedHostUpdate.canSelfUpdate(descriptor)
     }
 
     var body: some View {
@@ -62,13 +62,17 @@ struct EnvironmentUpdatesView: View {
                     Button("Update to \(targetVersion)") { confirmUpdate = true }
                 }
                 Button("Check for updates") { Task { await check() } }
-                if descriptor != nil && !supported { Text("Update T3 Code on this computer.") }
+                if let descriptor, !supported,
+                   (descriptor.orchestrationProtocolVersion ?? 1) <= OrchestrationProtocolVersion.v2.rawValue {
+                    Text("Update T3 Code on this computer.")
+                }
                 if let notice { Text(notice).font(.footnote) }
             }
             Section {
                 NavigationLink("Provider updates") {
                     ProvidersSettingsView(model: model, environmentID: environmentID)
                 }
+                .disabled(descriptor?.orchestrationProtocolVersion != OrchestrationProtocolVersion.v2.rawValue)
             }
         }
         .disabled(busy)
@@ -93,21 +97,30 @@ struct EnvironmentUpdatesView: View {
         do {
             let current = try await model.client.environmentDescriptor(environmentID: environmentID)
             descriptor = current
+            if let version = current.orchestrationProtocolVersion,
+               version > OrchestrationProtocolVersion.v2.rawValue {
+                throw OrchestrationProtocolError.unsupportedServerVersion(version)
+            }
             targetVersion = try await EnvironmentReleaseIndex.findUpdate(for: current.serverVersion)
-            if targetVersion == nil { notice = "Up to date." }
-        } catch is CancellationError {} catch { notice = "Could not check for updates. Check this connection and try again." }
+            if OutdatedHostUpdate.requiresHostUpdate(current) {
+                notice = "Update T3 Code on this host to connect."
+            } else if targetVersion == nil {
+                notice = "Up to date."
+            }
+        } catch is CancellationError {} catch { notice = error.localizedDescription }
     }
 
     private func update() async {
         guard !busy, let targetVersion, supported else { return }
         busy = true
-        notice = "Installing update…"
+        notice = "Installing update and waiting for the host to return…"
         defer { busy = false }
         do {
             try await model.client.updateEnvironment(environmentID: environmentID, targetVersion: targetVersion)
             self.targetVersion = nil
-            notice = "Update installed. The environment is reconnecting."
+            descriptor = try? await model.client.environmentDescriptor(environmentID: environmentID)
+            notice = "Update installed."
             await model.reloadAfterConnection()
-        } catch { notice = "Could not confirm the update. Check the installed version before retrying." }
+        } catch is CancellationError {} catch { notice = error.localizedDescription }
     }
 }

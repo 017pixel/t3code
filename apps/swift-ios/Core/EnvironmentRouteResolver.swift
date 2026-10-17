@@ -25,6 +25,7 @@ public actor EnvironmentRouteResolver {
     ) async throws -> ResolvedEnvironmentRoute<Connection> {
         var firstError: (any Error)?
         var retryableError: (any Error)?
+        var protocolError: OrchestrationProtocolError?
         for route in environment.routes {
             try Task.checkCancellation()
             do {
@@ -35,8 +36,11 @@ public actor EnvironmentRouteResolver {
                 if error is CancellationError || Task.isCancelled { throw CancellationError() }
                 if firstError == nil { firstError = error }
                 if Self.isRetryable(error), retryableError == nil { retryableError = error }
+                if protocolError == nil { protocolError = error as? OrchestrationProtocolError }
             }
         }
+        // A verified host's protocol error is more useful than an offline route.
+        if let protocolError { throw protocolError }
         throw retryableError ?? firstError ?? EnvironmentRouteError.noAvailableRoute
     }
 
@@ -83,7 +87,7 @@ public actor EnvironmentRouteResolver {
         }
         let descriptor = try JSONDecoder.t3.decode(EnvironmentDescriptor.self, from: data)
         guard descriptor.environmentId == environment.id else { throw EnvironmentRouteError.identityMismatch }
-        _ = try OrchestrationProtocolSelection(descriptor: descriptor, preference: environment.orchestrationProtocolPreference)
+        _ = try OrchestrationProtocolSelection(descriptor: descriptor)
         var verified = environment
         verified.descriptor = descriptor
         return verified

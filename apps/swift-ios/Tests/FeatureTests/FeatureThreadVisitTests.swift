@@ -9,7 +9,7 @@ struct FeatureThreadVisitTests {
     private func thread() -> FeatureThread {
         FeatureThread(id: "computer:thread", projectID: "project", environmentID: "computer", title: "Task",
                       updatedAt: now, rawUpdatedAt: now.ISO8601Format(),
-                      inboxFacts: .init(orchestrationVersion: 2, lastVisitedAtIsPresent: true))
+                      inboxFacts: .init(lastVisitedAtIsPresent: true))
     }
 
     @Test
@@ -23,7 +23,7 @@ struct FeatureThreadVisitTests {
         #expect(tracker.nextVisit(for: .init(thread: value), at: now) == nil)
         value.inboxFacts?.lastVisitedAt = nil
         #expect(tracker.nextVisit(for: .init(thread: value), at: now)?.dispatchAt == now)
-        value.inboxFacts?.orchestrationVersion = nil
+        value.inboxFacts = nil
         #expect(tracker.nextVisit(for: .init(thread: value), at: now) == nil)
     }
 

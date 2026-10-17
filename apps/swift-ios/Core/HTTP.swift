@@ -189,6 +189,8 @@ enum DPoPFailurePresentation {
 }
 
 struct EnvironmentErrorBody: Decodable {
+    let code: String?
+    let orchestrationProtocolVersion: Int?
     let message: String?
     let reason: String?
     let dpopFailureReason: DPoPFailureReason?
@@ -240,68 +242,6 @@ public actor EnvironmentAPI {
             headers: ["x-t3-orchestration-protocol": "2"],
             timeoutInterval: timeoutInterval,
             as: type
-        )
-    }
-
-    public func shellSnapshot(
-        for environment: Environment,
-        timeoutInterval: TimeInterval? = nil
-    ) async throws
-        -> OrchestrationShellSnapshot
-    {
-        try await authorized(
-            environment: environment,
-            path: "/api/orchestration/shell",
-            method: "GET",
-            timeoutInterval: timeoutInterval,
-            as: OrchestrationShellSnapshot.self
-        )
-    }
-
-    public func readModel(for environment: Environment) async throws -> OrchestrationReadModel {
-        try await authorized(
-            environment: environment,
-            path: "/api/orchestration/snapshot",
-            method: "GET",
-            as: OrchestrationReadModel.self
-        )
-    }
-
-    public func threadSnapshot(
-        id: String,
-        environment: Environment,
-        turnLimit: Int? = nil,
-        beforeCursor: String? = nil,
-        timeoutInterval: TimeInterval? = nil
-    ) async throws -> OrchestrationThreadDetailSnapshot {
-        let encodedID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        var queryItems: [URLQueryItem] = []
-        if let turnLimit {
-            queryItems.append(URLQueryItem(name: "turnLimit", value: String(turnLimit)))
-        }
-        if let beforeCursor {
-            queryItems.append(URLQueryItem(name: "beforeCursor", value: beforeCursor))
-        }
-        return try await authorized(
-            environment: environment,
-            path: "/api/orchestration/threads/\(encodedID)",
-            queryItems: queryItems,
-            method: "GET",
-            timeoutInterval: timeoutInterval,
-            as: OrchestrationThreadDetailSnapshot.self
-        )
-    }
-
-    public func dispatch(
-        _ command: JSONValue,
-        environment: Environment
-    ) async throws -> DispatchResult {
-        try await authorized(
-            environment: environment,
-            path: "/api/orchestration/dispatch",
-            method: "POST",
-            body: JSONEncoder.t3.encode(command),
-            as: DispatchResult.self
         )
     }
 
@@ -648,6 +588,12 @@ public actor EnvironmentAPI {
         }
         guard (200..<300).contains(response.statusCode) else {
             let body = try? JSONDecoder.t3.decode(EnvironmentErrorBody.self, from: data)
+            if response.statusCode == 426, body?.code == "orchestration_protocol_incompatible" {
+                guard let version = body?.orchestrationProtocolVersion, version >= 2 else {
+                    throw OrchestrationProtocolError.hostUpdateRequired
+                }
+                throw OrchestrationProtocolError.unsupportedServerVersion(version)
+            }
             if response.statusCode == 403, let requiredScope = body?.requiredScope {
                 throw EnvironmentPermissionDeniedError(
                     message: body?.message,

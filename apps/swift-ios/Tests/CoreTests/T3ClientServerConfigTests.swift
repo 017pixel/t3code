@@ -344,7 +344,7 @@ final class T3ClientServerConfigTests: XCTestCase {
 
     func testSilentSubscriptionBootstrapTimesOutAndCancellationDoesNotLeaveAWaiter() async {
         let connection = ServerConfigTestConnection(mode: .silent)
-        let client = makeClient(connection: connection, waitTimeout: .milliseconds(20))
+        let client = makeClient(connection: connection, configWaitTimeout: .milliseconds(20))
         let cancelled = Task { try await client.serverConfig() }
         await connection.waitForRequestCount(1)
         cancelled.cancel()
@@ -400,6 +400,7 @@ final class T3ClientServerConfigTests: XCTestCase {
         connection: ServerConfigTestConnection,
         reconnectConnection: ServerConfigTestConnection? = nil,
         waitTimeout: Duration = .seconds(4),
+        configWaitTimeout: Duration = .seconds(75),
         failAttachmentUploads: Bool = false
     ) -> T3Client {
         let environment = Environment(
@@ -417,7 +418,8 @@ final class T3ClientServerConfigTests: XCTestCase {
             webSocketConnector: ServerConfigTestConnector(
                 connections: [connection] + (reconnectConnection.map { [$0] } ?? [])
             ),
-            rpcConnectionWaitTimeout: waitTimeout
+            rpcConnectionWaitTimeout: waitTimeout,
+            configSnapshotWaitTimeout: configWaitTimeout
         )
     }
 }
@@ -430,7 +432,7 @@ private struct ServerConfigTicketTransport: HTTPTransport {
             throw URLError(.networkConnectionLost)
         }
         let data = if request.url?.path == "/.well-known/t3/environment" {
-            Data(#"{"environmentId":"environment-1","label":"Studio","platform":{"os":"darwin","arch":"arm64"},"serverVersion":"1.0.0","capabilities":{"repositoryIdentity":false}}"#.utf8)
+            Data(#"{"environmentId":"environment-1","label":"Studio","platform":{"os":"darwin","arch":"arm64"},"serverVersion":"1.0.0", "orchestrationProtocolVersion": 2,"capabilities":{"repositoryIdentity":false}}"#.utf8)
         } else {
             Data(#"{"ticket":"ticket","expiresAt":"2026-09-01T12:05:00.000Z"}"#.utf8)
         }
@@ -602,7 +604,7 @@ private actor ServerConfigTestConnection: WebSocketConnection {
                 "environmentId": .string("environment-1"),
                 "label": .string("Studio"),
                 "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
-                "serverVersion": .string("1.0.0"),
+                "serverVersion": .string("1.0.0"), "orchestrationProtocolVersion": .number(2),
                 "capabilities": .object(capabilities),
             ]),
         ])

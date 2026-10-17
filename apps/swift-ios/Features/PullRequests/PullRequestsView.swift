@@ -603,6 +603,9 @@ private final class PullRequestDetailModel {
         mergeMethod: PullRequestMergeMethod? = nil,
         updateMethod: PullRequestUpdateMethod? = nil
     ) async {
+        guard let detail, detail.canPerform(action) else { return }
+        if let mergeMethod, !detail.availableMergeMethods.contains(mergeMethod) { return }
+        if let updateMethod, !detail.availableUpdateMethods.contains(updateMethod) { return }
         await mutate {
             try await client.runPullRequestAction(
                 target,
@@ -614,6 +617,7 @@ private final class PullRequestDetailModel {
     }
 
     func update(title: String? = nil, body: String? = nil) async {
+        guard detail?.canEditChangeRequest == true else { return }
         await mutate { try await client.updatePullRequest(target, title: title, body: body) }
     }
 
@@ -643,6 +647,7 @@ private final class PullRequestDetailModel {
     }
 
     func resolve(thread: PullRequestReviewThread) async {
+        guard detail?.canResolveThread(thread) == true else { return }
         await mutate {
             try await client.setPullRequestThreadResolved(
                 target,
@@ -702,17 +707,20 @@ private enum PullRequestDetailTab: String, CaseIterable {
     case summary = "Summary"
     case conversation = "Activity"
     case files = "Files"
+    case guide = "Guide"
 }
 
 struct PullRequestDetailView: View {
     private enum PendingAction: Identifiable {
         case merge(PullRequestMergeMethod)
         case close
+        case deleteBranch
 
         var id: String {
             switch self {
             case .merge(let method): "merge:\(method.rawValue)"
             case .close: "close"
+            case .deleteBranch: "delete-branch"
             }
         }
     }
@@ -721,6 +729,9 @@ struct PullRequestDetailView: View {
     let target: FeaturePullRequestTarget
     @State private var model: PullRequestDetailModel
     @State private var tab: PullRequestDetailTab = .summary
+    @State private var reviewGuidesEnabled = false
+    @State private var guideFileLocation: FeatureReviewGuideFileLocation?
+    @State private var guideSelection: FeatureReviewGuideStopSelection?
     @State private var editor: PullRequestEditor?
     @State private var reviewSheet = false
     @State private var reviewerSheet = false
@@ -745,7 +756,9 @@ struct PullRequestDetailView: View {
                 VStack(spacing: 0) {
                     detailHeader(detail)
                     Picker("Section", selection: $tab) {
-                        ForEach(PullRequestDetailTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        ForEach(PullRequestDetailTab.allCases.filter { $0 != .guide || reviewGuidesEnabled }, id: \.self) {
+                            Text($0.rawValue).tag($0)
+                        }
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 16)
@@ -770,6 +783,13 @@ struct PullRequestDetailView: View {
         }
         .t3NavigationChrome()
         .task { await model.load() }
+        .task(id: model.detail?.updatedAt) {
+            guard let client = rootModel.client as? any FeatureReviewGuideClient else { return }
+            let access = try? await client.reviewGuideAccess(target)
+            guard !Task.isCancelled else { return }
+            reviewGuidesEnabled = access?.enabled == true
+            if !reviewGuidesEnabled, tab == .guide { tab = .summary }
+        }
         .task(id: tab) {
             guard tab == .files else { return }
             await model.loadDiff()
@@ -818,6 +838,11 @@ struct PullRequestDetailView: View {
                     pendingAction = nil
                     Task { await model.run(.close) }
                 }
+            case .deleteBranch:
+                Button("Delete branch", role: .destructive) {
+                    pendingAction = nil
+                    Task { await model.run(.deleteBranch) }
+                }
             }
             Button("Cancel", role: .cancel) { pendingAction = nil }
         } message: { pending in
@@ -829,6 +854,7 @@ struct PullRequestDetailView: View {
         switch pending {
         case .merge: "Merge pull request?"
         case .close: "Close pull request?"
+        case .deleteBranch: "Delete branch?"
         }
     }
 
@@ -840,6 +866,9 @@ struct PullRequestDetailView: View {
             return "\(method.label) #\(number) into \(base). You cannot undo a merge."
         case .close:
             return "#\(number) will be closed without merging. You can reopen it later."
+        case .deleteBranch:
+            let branch = model.detail?.headBranch ?? "the source branch"
+            return "Delete \(branch), the source branch for #\(number)."
         }
     }
 
@@ -885,7 +914,31 @@ struct PullRequestDetailView: View {
                 drafts: $model.reviewDrafts,
                 canComment: detail.capabilities.review.inlineComment
                     && detail.viewerPermissions.comment,
-                sendToAgent: sendToAgent
+                sendToAgent: sendToAgent,
+                guideFocus: guideFileLocation
+            )
+        case .guide:
+            FeatureReviewGuideView(
+                client: rootModel.client,
+                target: target,
+                selection: $guideSelection,
+                onOpenFile: { location in
+                    guideFileLocation = location
+                    tab = .files
+                },
+                onFinish: detail.viewerPermissions.verdicts.isEmpty ? nil : { headSha in
+                    Task {
+                        await model.load()
+                        guard let guideClient = rootModel.client as? any FeatureReviewGuideClient else { return }
+                        let latestGuide = try? await guideClient.pullRequestReviewGuide(target)
+                        guard latestGuide?.currentHeadSha == headSha,
+                              model.detail?.viewerPermissions.verdicts.isEmpty == false else {
+                            notice = "The pull request changed. Refresh the guide before you finish the review."
+                            return
+                        }
+                        reviewSheet = true
+                    }
+                }
             )
         }
     }
@@ -894,7 +947,7 @@ struct PullRequestDetailView: View {
     private var actionMenu: some View {
         if let detail = model.detail {
             Menu {
-                if detail.capabilities.edit?.changeRequest == true {
+                if detail.canEditChangeRequest {
                     Button("Edit title", systemImage: "pencil") {
                         editor = PullRequestEditor(kind: .title, value: detail.title)
                     }
@@ -919,22 +972,23 @@ struct PullRequestDetailView: View {
                 }
                 Divider()
                 ForEach(detail.viewerPermissions.actions, id: \.self) { action in
-                    if detail.capabilities.actions.contains(action),
+                    if detail.canPerform(action),
                        action != .merge,
                        action != .updateBranch {
                         Button(action.label, systemImage: action.systemImage) {
                             if action == .close {
                                 pendingAction = .close
+                            } else if action == .deleteBranch {
+                                pendingAction = .deleteBranch
                             } else {
                                 Task { await model.run(action) }
                             }
                         }
                     }
                 }
-                if detail.capabilities.actions.contains(.merge),
-                   detail.viewerPermissions.actions.contains(.merge) {
+                if detail.canPerform(.merge) {
                     Menu("Merge pull request") {
-                        ForEach(availableMergeMethods(detail), id: \.self) { method in
+                        ForEach(detail.availableMergeMethods, id: \.self) { method in
                             Button(method.label) {
                                 pendingAction = .merge(method)
                             }
@@ -945,16 +999,6 @@ struct PullRequestDetailView: View {
                 Image(systemName: "ellipsis.circle")
             }
             .disabled(model.isActing)
-        }
-    }
-
-    private func availableMergeMethods(_ detail: PullRequestDetail) -> [PullRequestMergeMethod] {
-        detail.capabilities.mergeMethods.filter {
-            switch $0 {
-            case .merge: detail.mergeCapabilities.merge
-            case .squash: detail.mergeCapabilities.squash
-            case .rebase: detail.mergeCapabilities.rebase
-            }
         }
     }
 
@@ -1008,8 +1052,7 @@ private struct PullRequestSummaryView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 22) {
                 if detail.baseComparison == .behind,
-                   detail.capabilities.actions.contains(.updateBranch),
-                   detail.viewerPermissions.actions.contains(.updateBranch) {
+                   detail.canPerform(.updateBranch) {
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Branch is behind").font(T3Typography.supportingStrong)
@@ -1019,7 +1062,7 @@ private struct PullRequestSummaryView: View {
                         }
                         Spacer()
                         Menu("Update") {
-                            ForEach(detail.viewerPermissions.updateMethods ?? [], id: \.self) { method in
+                            ForEach(detail.availableUpdateMethods, id: \.self) { method in
                                 Button(method.rawValue.capitalized) {
                                     onUpdateBranch(method)
                                 }
@@ -1107,8 +1150,7 @@ private struct PullRequestActivityView: View {
                                 Label("\(thread.path):\(thread.line.map(String.init) ?? "file")", systemImage: "text.bubble")
                                     .font(T3Typography.supportingStrong)
                                 Spacer()
-                                if model.detail?.capabilities.review.resolve == true,
-                                   model.detail?.viewerPermissions.resolve == true {
+                                if model.detail?.canResolveThread(thread) == true {
                                     Button(thread.isResolved ? "Reopen" : "Resolve") {
                                         Task { await model.resolve(thread: thread) }
                                     }
@@ -1243,10 +1285,12 @@ private struct PullRequestFilesView: View {
     @Binding var drafts: [PullRequestReviewCommentDraft]
     let canComment: Bool
     let sendToAgent: (PullRequestDiffLine, PullRequestDiffFile) -> Void
+    var guideFocus: FeatureReviewGuideFileLocation? = nil
     @State private var commentingLine: PullRequestDiffSelection?
     @State private var selectedLine: PullRequestDiffSelection?
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 if isIncomplete {
@@ -1287,7 +1331,8 @@ private struct PullRequestFilesView: View {
                                         .t3CodeTextSize()
                                         .foregroundStyle(line.foreground)
                                         .padding(.vertical, 2)
-                                        .background(line.background)
+                                        .background(isGuideFocused(line, file: file) ? T3Colors.accent.opacity(0.12) : line.background)
+                                        .id("guide:\(file.path):\(line.id)")
                                         .contentShape(Rectangle())
                                         .onTapGesture {
                                             guard line.kind != .header else { return }
@@ -1297,6 +1342,7 @@ private struct PullRequestFilesView: View {
                                 }
                             }
                         }
+                        .id("guide:file:\(file.path)")
                         // One menu per file. A menu per line costs one interaction per row.
                         .contextMenu {
                             Button("Copy file path", systemImage: "doc.on.doc") {
@@ -1310,6 +1356,10 @@ private struct PullRequestFilesView: View {
                 }
             }
             .padding(16)
+        }
+        .onAppear { scrollToGuideFocus(proxy) }
+        .onChange(of: files) { _, _ in scrollToGuideFocus(proxy) }
+        .onChange(of: guideFocus) { _, _ in scrollToGuideFocus(proxy) }
         }
         .confirmationDialog(
             selectedLine.map { "\($0.file.path):\($0.line.displayLineNumber)" } ?? "",
@@ -1339,6 +1389,24 @@ private struct PullRequestFilesView: View {
                 )
             }
         }
+    }
+
+    private func scrollToGuideFocus(_ proxy: ScrollViewProxy) {
+        guard let focus = guideFocus,
+              let file = files.first(where: { $0.path == focus.path || $0.oldPath == focus.path }) else { return }
+        if let start = focus.start, let side = focus.side,
+           let line = file.lines.first(where: { (side == .old ? $0.oldLine : $0.newLine) == start }) {
+            proxy.scrollTo("guide:\(file.path):\(line.id)", anchor: .top)
+        } else {
+            proxy.scrollTo("guide:file:\(file.path)", anchor: .top)
+        }
+    }
+
+    private func isGuideFocused(_ line: PullRequestDiffLine, file: PullRequestDiffFile) -> Bool {
+        guard let focus = guideFocus, focus.path == file.path || focus.path == file.oldPath,
+              let start = focus.start, let end = focus.end, let side = focus.side,
+              let number = side == .old ? line.oldLine : line.newLine else { return false }
+        return number >= start && number <= end
     }
 }
 
@@ -1674,9 +1742,12 @@ private extension PullRequestAction {
         case .draft: "Convert to draft"
         case .close: "Close pull request"
         case .reopen: "Reopen pull request"
+        case .deleteBranch: "Delete branch"
         case .updateBranch: "Update branch"
         case .enableAutoMerge: "Enable auto-merge"
         case .disableAutoMerge: "Disable auto-merge"
+        case .revert: "Create revert pull request"
+        case .approveWorkflows: "Approve workflows"
         }
     }
     var systemImage: String {
@@ -1686,9 +1757,12 @@ private extension PullRequestAction {
         case .draft: "pencil.circle"
         case .close: "xmark.circle"
         case .reopen: "arrow.uturn.backward.circle"
+        case .deleteBranch: "trash"
         case .updateBranch: "arrow.clockwise"
         case .enableAutoMerge: "bolt.circle"
         case .disableAutoMerge: "bolt.slash.circle"
+        case .revert: "arrow.uturn.backward"
+        case .approveWorkflows: "checkmark.circle"
         }
     }
 }

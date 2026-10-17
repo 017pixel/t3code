@@ -1,5 +1,12 @@
 import Foundation
 
+private extension JSONValue {
+    var objectValue: [String: JSONValue]? {
+        guard case let .object(value) = self else { return nil }
+        return value
+    }
+}
+
 public enum BranchNamingMode: String, Codable, CaseIterable, Sendable {
     case `static`, semantic, custom
 
@@ -44,26 +51,67 @@ public enum ServerProjectSettingKey: String, Sendable {
     case defaultAutoPull, sidebarAutoSettleOnMerge, sidebarAutoSettleAfterDays, removeAgentCreditsOnMerge
     case branchNamingMode, branchNamePrefix, branchNameInstructions, enableAgentBrowserAccess
     case continueThreadsAfterServerUpdate, responseStreamingMode, worktreeSubmodules, worktreeCleanup
+    case providerInstances
 }
 
 public struct ServerProjectSettingChange: Sendable {
     public let key: ServerProjectSettingKey
     /// Nil inherits. JSON null is an explicit override for nullable settings.
     public let value: JSONValue?
+    public let providerInstanceID: String?
 
     public init(key: ServerProjectSettingKey, value: JSONValue?) {
         self.key = key
         self.value = value
+        providerInstanceID = nil
+    }
+
+    public init(providerInstanceID: String, enabled: Bool?) {
+        key = .providerInstances
+        value = enabled.map(JSONValue.bool)
+        self.providerInstanceID = providerInstanceID
     }
 
     public func patch(projectID: String, settings: ServerSettingsSnapshot) -> ServerSettingsChange {
         var entry = settings.projectSettingsOverrides[projectID] ?? [:]
-        entry[key.rawValue] = value
+        if let providerInstanceID {
+            var instances = entry["providerInstances"]?.objectValue ?? [:]
+            var instance = instances[providerInstanceID]?.objectValue ?? [:]
+            instance["enabled"] = value
+            instances[providerInstanceID] = instance.isEmpty ? nil : .object(instance)
+            entry.removeValue(forKey: "providerInstances")
+            // The server merges nested provider overrides. An explicit empty
+            // object clears the last override when other project settings remain.
+            if !instances.isEmpty || !entry.isEmpty {
+                entry["providerInstances"] = .object(instances)
+            }
+        } else {
+            entry[key.rawValue] = value
+        }
         return .projectSettingsOverrides(projectID: projectID, entry: entry.isEmpty ? nil : entry)
     }
 }
 
 public extension ServerSettingsSnapshot {
+    func providerInstanceOverrides(projectID: String) -> [String: Bool] {
+        let instances = projectSettingsOverrides[projectID]?["providerInstances"]?.objectValue ?? [:]
+        return instances.compactMapValues { $0["enabled"]?.boolValue }
+    }
+
+    func providerInstanceEnabled(instanceID: String, projectID: String? = nil) -> Bool {
+        if let projectID, let enabled = providerInstanceOverrides(projectID: projectID)[instanceID] {
+            return enabled
+        }
+        guard let instance = providerInstances[instanceID] else {
+            return ["codex", "claudeAgent"].contains(instanceID)
+        }
+        let enabled = instance["enabled"]?.boolValue
+        let configEnabled = instance["config"]?["enabled"]?.boolValue
+        if enabled == false || configEnabled == false { return false }
+        let disabledByDefault = ["cursor", "grok", "muse", "pi", "opencode", "antigravity"]
+        return enabled ?? configEnabled ?? !disabledByDefault.contains(instance["driver"]?.stringValue ?? "")
+    }
+
     var storageCleanupRules: [String: JSONValue] {
         var result = storageCleanup ?? [:]
         if worktreeCleanup?["mode"]?.stringValue == "off" {
