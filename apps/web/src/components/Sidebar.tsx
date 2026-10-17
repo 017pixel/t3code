@@ -2539,9 +2539,10 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(
   );
 });
 
-const SidebarSearchResultContent = memo(function SidebarSearchResultContent(
-  props: SidebarSearchResultRowProps & { setSlotNode: (node: HTMLLIElement | null) => void },
-) {
+const SidebarSearchResultContent = memo(function SidebarSearchResultContent({
+  setSlotNode,
+  ...props
+}: SidebarSearchResultRowProps & { setSlotNode: (node: HTMLLIElement | null) => void }) {
   const { thread } = props;
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
@@ -2604,7 +2605,7 @@ const SidebarSearchResultContent = memo(function SidebarSearchResultContent(
     return () => window.removeEventListener("dragend", clearFileDrag);
   }, [isFileDragOver]);
   return (
-    <li ref={props.setSlotNode} role="presentation" className="list-none" {...fileDropHandlers}>
+    <li ref={setSlotNode} role="presentation" className="list-none" {...fileDropHandlers}>
       <Tooltip>
         <TooltipTrigger
           render={
@@ -4908,14 +4909,13 @@ export default function Sidebar() {
                       const renderThreadRow = (
                         thread: EnvironmentThreadShell,
                         section: SidebarSection,
+                        initiallyVisible: boolean,
                       ) => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
                         );
                         const variant =
                           section === "settled" || section === "snoozed" ? "slim" : "card";
-                        const initiallyVisible = rowIndex++ < 16 || rowTopRem < initialRowBudgetRem;
-                        rowTopRem += SIDEBAR_ROW_HEIGHT_REM[variant];
                         return (
                           <SortableThreadRow
                             key={threadKey}
@@ -4953,7 +4953,21 @@ export default function Sidebar() {
                       ];
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
-                          items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          const initiallyVisible = rowIndex < 16 || rowTopRem < initialRowBudgetRem;
+                          rowIndex += 1;
+                          rowTopRem +=
+                            SIDEBAR_ROW_HEIGHT_REM[
+                              item.section === "settled" || item.section === "snoozed"
+                                ? "slim"
+                                : "card"
+                            ];
+                          items.push(
+                            renderThreadRow(
+                              threadByKey.get(item.key)!,
+                              item.section,
+                              initiallyVisible,
+                            ),
+                          );
                           continue;
                         }
                         switch (item.marker) {
