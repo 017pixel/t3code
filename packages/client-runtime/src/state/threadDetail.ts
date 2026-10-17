@@ -1,4 +1,11 @@
-import type { OrchestrationV2ThreadProjection, ScopedThreadRef } from "@t3tools/contracts";
+import type {
+  OrchestrationV2ConversationMessage,
+  OrchestrationV2ProjectedTurnItem,
+  OrchestrationV2ThreadProjection,
+  OrchestrationV2TurnItem,
+  ScopedThreadRef,
+} from "@t3tools/contracts";
+import * as Equal from "effect/Equal";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
@@ -25,6 +32,104 @@ const EMPTY_VISIBLE_TURN_ITEMS: OrchestrationV2ThreadProjection["visibleTurnItem
   [],
 );
 const EMPTY_CHECKPOINT_SUMMARIES: ReadonlyArray<ThreadCheckpointSummary> = Object.freeze([]);
+
+type StreamedText = {
+  readonly text: string;
+  readonly updatedAt: unknown;
+  readonly streaming: boolean;
+};
+
+function sameApartFromText(previous: StreamedText, next: StreamedText): boolean {
+  // An empty item can render differently from one with text, so only growth
+  // of text that is already there counts as streaming.
+  if (!previous.streaming || !next.streaming || previous.text === "" || next.text === "") {
+    return false;
+  }
+  const { text: _previousText, updatedAt: _previousUpdatedAt, ...previousRest } = previous;
+  const { text: _nextText, updatedAt: _nextUpdatedAt, ...nextRest } = next;
+  // Wire decoding recreates nested values on every update, so compare the
+  // changed entry structurally. Only the changed entries reach this.
+  return Equal.equals(previousRest, nextRest);
+}
+
+function isStreamedTextItem(
+  item: OrchestrationV2TurnItem,
+): item is Extract<OrchestrationV2TurnItem, { type: "assistant_message" | "reasoning" }> {
+  return item.type === "assistant_message" || item.type === "reasoning";
+}
+
+function sameTurnItemApartFromText(
+  previous: OrchestrationV2TurnItem,
+  next: OrchestrationV2TurnItem,
+): boolean {
+  return (
+    previous.type === next.type &&
+    isStreamedTextItem(previous) &&
+    isStreamedTextItem(next) &&
+    sameApartFromText(previous, next)
+  );
+}
+
+function sameRowApartFromText(
+  previous: OrchestrationV2ProjectedTurnItem,
+  next: OrchestrationV2ProjectedTurnItem,
+): boolean {
+  return (
+    previous.position === next.position &&
+    previous.visibility === next.visibility &&
+    previous.sourceThreadId === next.sourceThreadId &&
+    previous.sourceItemId === next.sourceItemId &&
+    sameTurnItemApartFromText(previous.item, next.item)
+  );
+}
+
+function sameMessageApartFromText(
+  previous: OrchestrationV2ConversationMessage,
+  next: OrchestrationV2ConversationMessage,
+): boolean {
+  return previous.role === "assistant" && sameApartFromText(previous, next);
+}
+
+function sameEntriesApartFrom<A>(
+  previous: ReadonlyArray<A>,
+  next: ReadonlyArray<A>,
+  sameApartFromStreamedText: (previous: A, next: A) => boolean,
+): boolean {
+  if (previous === next) return true;
+  if (previous.length !== next.length) return false;
+  for (let index = 0; index < next.length; index += 1) {
+    const before = previous[index]!;
+    const after = next[index]!;
+    if (before !== after && !sameApartFromStreamedText(before, after)) return false;
+  }
+  return true;
+}
+
+const STREAMED_PROJECTION_KEYS = new Set<string>([
+  "updatedAt",
+  "turnItems",
+  "visibleTurnItems",
+  "messages",
+]);
+
+/**
+ * True when `next` only grew the text of assistant or reasoning entries that
+ * were already streaming, plus the projection's `updatedAt`. Every other field
+ * is compared by reference: the reducer keeps the identity of untouched ones.
+ */
+export function projectionDiffersOnlyInStreamedText(
+  previous: OrchestrationV2ThreadProjection,
+  next: OrchestrationV2ThreadProjection,
+): boolean {
+  for (const key of Object.keys(next) as Array<keyof OrchestrationV2ThreadProjection>) {
+    if (!STREAMED_PROJECTION_KEYS.has(key) && previous[key] !== next[key]) return false;
+  }
+  return (
+    sameEntriesApartFrom(previous.turnItems, next.turnItems, sameTurnItemApartFromText) &&
+    sameEntriesApartFrom(previous.visibleTurnItems, next.visibleTurnItems, sameRowApartFromText) &&
+    sameEntriesApartFrom(previous.messages, next.messages, sameMessageApartFromText)
+  );
+}
 
 export function createEnvironmentThreadDetailAtoms<E>(
   threadStateAtom: (
@@ -55,12 +160,50 @@ export function createEnvironmentThreadDetailAtoms<E>(
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread:${key}`));
   });
 
+  // While a reply streams, every chunk replaces the projection. Readers that
+  // show run state, not the streamed text, keep the previous projection until
+  // something other than that text changes. A finished item (streaming: false)
+  // always counts, so this never holds text past the end of a stream.
+  const quietThreadAtomFamily = Atom.family((key: string) => {
+    let previous: EnvironmentThread | null = null;
+    return Atom.make((get) => {
+      const next = get(threadAtomFamily(key));
+      if (
+        previous !== null &&
+        next !== null &&
+        projectionDiffersOnlyInStreamedText(previous.projection, next.projection)
+      ) {
+        return previous;
+      }
+      previous = next;
+      return next;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-quiet-thread:${key}`));
+  });
+
   const visibleTurnItemsAtomFamily = Atom.family((key: string) => {
     const projectQuestionHistory = createQuestionHistoryProjector();
     return Atom.make((get): OrchestrationV2ThreadProjection["visibleTurnItems"] => {
       const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
       return projection === null ? EMPTY_VISIBLE_TURN_ITEMS : projectQuestionHistory(projection);
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-visible-turn-items:${key}`));
+  });
+
+  // The same array as visibleTurnItemsAtom, held while only streamed text moves.
+  const quietVisibleTurnItemsAtomFamily = Atom.family((key: string) => {
+    let previousThread: EnvironmentThread | null | undefined;
+    let previousItems = EMPTY_VISIBLE_TURN_ITEMS;
+    return Atom.make((get): OrchestrationV2ThreadProjection["visibleTurnItems"] => {
+      const thread = get(quietThreadAtomFamily(key));
+      const items = get(visibleTurnItemsAtomFamily(key));
+      if (thread !== previousThread) {
+        previousThread = thread;
+        previousItems = items;
+      }
+      return previousItems;
+    }).pipe(
+      Atom.setIdleTTL(0),
+      Atom.withLabel(`environment-quiet-thread-visible-turn-items:${key}`),
+    );
   });
 
   const queueWorkflowAtomFamily = Atom.family((key: string) => {
@@ -132,7 +275,8 @@ export function createEnvironmentThreadDetailAtoms<E>(
     let previous: Pick<OrchestrationV2ThreadProjection, "checkpoints" | "messages"> | null = null;
     let value = EMPTY_CHECKPOINT_SUMMARIES;
     return Atom.make((get) => {
-      const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
+      // Assistant message ids, not their text, feed the summaries.
+      const projection = get(quietThreadAtomFamily(key))?.projection ?? null;
       if (projection === null) {
         previous = null;
         value = EMPTY_CHECKPOINT_SUMMARIES;
@@ -219,6 +363,9 @@ export function createEnvironmentThreadDetailAtoms<E>(
     stateAtom: (ref: ScopedThreadRef) => threadStateValueAtomFamily(threadKey(ref)),
     threadAtom: (ref: ScopedThreadRef) => threadAtomFamily(threadKey(ref)),
     visibleTurnItemsAtom: (ref: ScopedThreadRef) => visibleTurnItemsAtomFamily(threadKey(ref)),
+    quietThreadAtom: (ref: ScopedThreadRef) => quietThreadAtomFamily(threadKey(ref)),
+    quietVisibleTurnItemsAtom: (ref: ScopedThreadRef) =>
+      quietVisibleTurnItemsAtomFamily(threadKey(ref)),
     statusAtom: (ref: ScopedThreadRef) => statusAtomFamily(threadKey(ref)),
     errorAtom: (ref: ScopedThreadRef) => errorAtomFamily(threadKey(ref)),
     historyAtom: (ref: ScopedThreadRef) => historyAtomFamily(threadKey(ref)),

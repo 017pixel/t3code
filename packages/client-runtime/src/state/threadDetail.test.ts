@@ -19,7 +19,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { v2Projection, v2Now } from "./orchestrationV2TestFixtures.ts";
 import { EMPTY_THREAD_HISTORY_META } from "./threadHistoryMerge.ts";
-import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
+import {
+  createEnvironmentThreadDetailAtoms,
+  projectionDiffersOnlyInStreamedText,
+} from "./threadDetail.ts";
 import type { EnvironmentThreadState } from "./threads.ts";
 
 const ref: ScopedThreadRef = {
@@ -371,4 +374,54 @@ it("rebuilds checkpoint summaries only when checkpoints or messages change", () 
   expect(registry.get(details.checkpointSummariesAtom(ref))).toEqual([]);
   dispose();
   registry.dispose();
+});
+
+describe("projectionDiffersOnlyInStreamedText", () => {
+  const assistantItem = (text: string, streaming: boolean) =>
+    ({
+      id: TurnItemId.make("item-assistant"),
+      threadId: v2Projection.thread.id,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: streaming ? "running" : "completed",
+      title: null,
+      startedAt: v2Now,
+      completedAt: streaming ? null : v2Now,
+      updatedAt: v2Now,
+      type: "assistant_message",
+      messageId: MessageId.make("message-assistant"),
+      text,
+      streaming,
+    }) satisfies OrchestrationV2ThreadProjection["turnItems"][number];
+  const withItem = (
+    item: OrchestrationV2ThreadProjection["turnItems"][number],
+  ): OrchestrationV2ThreadProjection => ({ ...v2Projection, turnItems: [item] });
+
+  it("holds while a streaming reply only grows its text", () => {
+    expect(
+      projectionDiffersOnlyInStreamedText(
+        withItem(assistantItem("Hel", true)),
+        withItem(assistantItem("Hello", true)),
+      ),
+    ).toBe(true);
+  });
+
+  it("lets through the first text, the end of the stream, and other fields", () => {
+    const streaming = withItem(assistantItem("Hel", true));
+    expect(
+      projectionDiffersOnlyInStreamedText(
+        withItem(assistantItem("", true)),
+        withItem(assistantItem("H", true)),
+      ),
+    ).toBe(false);
+    expect(
+      projectionDiffersOnlyInStreamedText(streaming, withItem(assistantItem("Hello", false))),
+    ).toBe(false);
+    expect(projectionDiffersOnlyInStreamedText(streaming, { ...streaming, runs: [] })).toBe(false);
+  });
 });

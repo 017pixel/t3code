@@ -151,6 +151,17 @@ export function useThreadProjection(ref: ScopedThreadRef | null): EnvironmentThr
   );
 }
 
+/**
+ * The projection without its streamed text: it keeps the previous value while
+ * a chunk only grows a streaming assistant or reasoning entry. See
+ * quietThreadAtom. Read the live projection only where the text is shown.
+ */
+export function useQuietThreadProjection(ref: ScopedThreadRef | null): EnvironmentThread | null {
+  return useAtomValue(
+    ref === null ? EMPTY_THREAD_PROJECTION_ATOM : environmentThreadDetails.quietThreadAtom(ref),
+  );
+}
+
 export function useThreadStatus(ref: ScopedThreadRef | null): EnvironmentThreadStatus {
   return useAtomValue(
     ref === null ? EMPTY_THREAD_STATUS_ATOM : environmentThreadDetails.statusAtom(ref),
@@ -180,6 +191,17 @@ export function useThreadVisibleTurnItems(
     ref === null
       ? EMPTY_VISIBLE_TURN_ITEMS_ATOM
       : environmentThreadDetails.visibleTurnItemsAtom(ref),
+  );
+}
+
+/** The visible items, held while only streamed text changes; see quietThreadAtom. */
+export function useQuietThreadVisibleTurnItems(
+  ref: ScopedThreadRef | null,
+): ReadonlyArray<OrchestrationV2ProjectedTurnItem> {
+  return useAtomValue(
+    ref === null
+      ? EMPTY_VISIBLE_TURN_ITEMS_ATOM
+      : environmentThreadDetails.quietVisibleTurnItemsAtom(ref),
   );
 }
 

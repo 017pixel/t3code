@@ -10,6 +10,7 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
+import { useThreadProjection } from "~/state/entities";
 import {
   type ThreadFindPositionReader,
   type ThreadFindStart,
@@ -42,19 +43,25 @@ export function useThreadFind({
   enabled,
   progressive = false,
   skills = EMPTY_SKILLS,
-  content,
+  content: contentProp,
+  followLiveContent = false,
 }: {
   thread: ScopedThreadRef | null;
   enabled: boolean;
   progressive?: boolean;
   skills?: readonly InlineSkill[];
-  content: Pick<OrchestrationV2ThreadProjection, "visibleTurnItems" | "runs"> | undefined;
+  content?: Pick<OrchestrationV2ThreadProjection, "visibleTurnItems" | "runs"> | undefined;
+  /**
+   * Refresh results from the thread's live projection. It is read only while
+   * the bar is open, so streamed chunks re-render the find owner only then.
+   */
+  followLiveContent?: boolean;
 }) {
   // Held in state so the timeline props that carry it can be stored in state too.
   const [positionReader] = useState<RefObject<ThreadFindPositionReader | null>>(() => ({
     current: null,
   }));
-  const lastContentRef = useRef(content);
+  const lastContentRef = useRef(contentProp);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshAfterSearchRef = useRef(false);
   const threadKey = thread ? scopedThreadKey(thread) : null;
@@ -62,6 +69,8 @@ export function useThreadFind({
   if (state.threadKey !== null && (!enabled || state.threadKey !== threadKey))
     setState(CLOSED_FIND);
   const isOpen = enabled && threadKey !== null && state.threadKey === threadKey;
+  const liveContent = useThreadProjection(followLiveContent && isOpen ? thread : null)?.projection;
+  const content = contentProp ?? liveContent;
   const open = useStableCallback(() => {
     if (threadKey === null) return;
     if (!enabled) {
@@ -248,13 +257,15 @@ export function useThreadFind({
   }, [remote.isPending, remote.error]);
   useEffect(() => {
     if (lastContentRef.current === content) return;
+    // Opening the bar attaches the live projection; that is not new content.
+    const attached = lastContentRef.current === undefined && contentProp === undefined;
     lastContentRef.current = content;
-    if (!isOpen || !state.query.trim() || refreshTimerRef.current !== null) return;
+    if (attached || !isOpen || !state.query.trim() || refreshTimerRef.current !== null) return;
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
       refreshLiveResultsRef.current();
     }, 300);
-  }, [content, isOpen, state.query]);
+  }, [content, contentProp, isOpen, state.query]);
   useEffect(() => {
     if (!isOpen || threadKey === null || !state.query.trim()) return;
     return () => {
