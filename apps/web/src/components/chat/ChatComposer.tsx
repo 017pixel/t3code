@@ -1423,6 +1423,10 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   );
 });
 
+function readComposerDraftPrompt(target: ComposerThreadTarget) {
+  return useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
+}
+
 // Local transactions have already painted in ProseMirror, so typing does not render this.
 // `promptVersion` moves on every rewrite from outside the editor (recall, chips, stash, send,
 // reload). It re-renders this memo, and the editor applies the value even when it equals the
@@ -1440,10 +1444,7 @@ const ComposerDraftEditor = memo(function ComposerDraftEditor({
   value: string | undefined;
 }) {
   "use no memo"; // The caret is imperative; caching readCursor() would rewind typed text.
-  const readValue = useCallback(
-    () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "",
-    [target],
-  );
+  const readValue = () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
   return (
     <ComposerPromptEditor
       {...props}
@@ -1482,10 +1483,7 @@ const ComposerDraftTraits = memo(function ComposerDraftTraits({
       getComposerPromptInjectionState(draft.prompt.replace(/^Ultrathink:\s*/i, "")),
     ]),
   );
-  const getPrompt = useCallback(
-    () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "",
-    [target],
-  );
+  const getPrompt = () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
   const prompt = getPrompt();
   return menu
     ? renderProviderTraitsMenuContent({ ...input, prompt, getPrompt })
@@ -2112,8 +2110,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     attachmentTargetKeyRef.current = attachmentTargetKey;
   });
   const questionPreparations = useQuestionAttachmentPreparation((state) => state.counts);
-  const prompt =
-    useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.prompt ?? "";
+  const prompt = readComposerDraftPrompt(composerDraftTarget);
   // The prompt the editor shows. onPromptChange records a local edit before it reaches the
   // store, so the version moves only for rewrites from outside the editor.
   const shownPromptRef = useRef(prompt);
@@ -2499,12 +2496,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return collapseExpandedComposerCursor(value, value.length, isLiteralPendingAnswer);
   });
   const composerCursorRef = useRef(composerCursor);
-  const setComposerCursor = useCallback((cursor: number | ((current: number) => number)) => {
+  useLayoutEffect(() => {
+    composerCursorRef.current = composerCursor;
+  }, [composerCursor]);
+  const setComposerCursor = useStableCallback((cursor: number | ((current: number) => number)) => {
     const next = typeof cursor === "function" ? cursor(composerCursorRef.current) : cursor;
     composerCursorRef.current = next;
     updateComposerCursor(next);
-  }, []);
-  const readComposerCursor = useCallback(() => composerCursorRef.current, []);
+  });
+  const readComposerCursor = () => composerCursorRef.current;
   const {
     trigger: composerTrigger,
     setTrigger: setComposerTrigger,
@@ -3384,7 +3384,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ) {
     setCursorClampedFor({ prompt, isLiteralPendingAnswer });
     if (!isLiteralPendingAnswer) {
-      setComposerCursor((existing) => clampCollapsedComposerCursor(prompt, existing));
+      updateComposerCursor((existing) => clampCollapsedComposerCursor(prompt, existing));
     }
   }
 
@@ -3474,6 +3474,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     resetComposerTrigger(trigger);
     setComposerHighlightedItemId(null);
   }, [
+    setComposerCursor,
     activePendingProgress?.customAnswer,
     activePendingProgress?.activeQuestion?.id,
     isLiteralPendingAnswer,
@@ -3496,7 +3497,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       typeof pendingAnswer === "string" ? pendingAnswer : prompt,
       isLiteralPendingAnswer,
     );
-    setComposerCursor(cursor);
+    updateComposerCursor(cursor);
     resetComposerTrigger(trigger);
     setIsDragOverComposer(false);
     setIsComposerScrollCollapsed(false);
