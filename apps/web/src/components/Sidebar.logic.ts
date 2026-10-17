@@ -854,6 +854,23 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   return "ready";
 }
 
+/**
+ * The dot on a closed boring-sidebar folder: the most urgent state among its
+ * hidden threads. Waiting threads stay quiet, like their rows.
+ */
+export function resolveSidebarFolderDot(
+  threads: ReadonlyArray<ThreadStatusInput & SidebarThreadStatusInput>,
+): "attention" | "failed" | "unread" | "working" | null {
+  const statuses = new Set(threads.map(resolveSidebarThreadStatus));
+  if (statuses.has("input") || statuses.has("approval") || statuses.has("limited")) {
+    return "attention";
+  }
+  if (statuses.has("failed")) return "failed";
+  if (threads.some(hasUnseenCompletion)) return "unread";
+  if (statuses.has("working")) return "working";
+  return null;
+}
+
 export type SidebarV2TopStatusKind =
   | "approval"
   | "done"

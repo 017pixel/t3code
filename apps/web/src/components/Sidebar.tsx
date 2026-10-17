@@ -214,6 +214,7 @@ import {
   resolveSidebarThreadSection,
   resolveSidebarRowAccessibility,
   type SidebarDropVerb,
+  resolveSidebarFolderDot,
   resolveSidebarThreadStatus,
   type SidebarThreadStatus,
   resolveThreadLastVisitedAt,
@@ -1385,17 +1386,12 @@ function SidebarSectionHeader(props: {
   );
 }
 
-// A closed folder can hide a thread that needs you, so it shows the most
-// urgent hidden status as a dot.
-function resolveFolderStatusDotClassName(
-  threads: readonly EnvironmentThreadShell[],
-): string | null {
-  const statuses = new Set(threads.map(resolveSidebarThreadStatus));
-  if (statuses.has("input") || statuses.has("approval")) return "bg-warning";
-  if (statuses.has("failed")) return "bg-error";
-  if (statuses.has("working")) return "bg-info";
-  return null;
-}
+const FOLDER_DOT_CLASS_NAME = {
+  attention: "bg-warning",
+  failed: "bg-error",
+  unread: "bg-success",
+  working: "bg-info",
+} as const;
 
 const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHeader(props: {
   group: SidebarProjectSnapshot;
@@ -1406,7 +1402,18 @@ const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHeader(prop
   onContextMenu: (group: SidebarProjectSnapshot, position: { x: number; y: number }) => void;
 }) {
   const { group, collapsed, hiddenInbox } = props;
-  const statusDotClassName = collapsed ? resolveFolderStatusDotClassName(hiddenInbox) : null;
+  const localLastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
+  const folderDot = collapsed
+    ? resolveSidebarFolderDot(
+        hiddenInbox.map((thread) => ({
+          ...thread,
+          lastVisitedAt: resolveThreadLastVisitedAt(
+            thread.lastVisitedAt,
+            localLastVisitedAtById[threadShellKey(thread)],
+          ),
+        })),
+      )
+    : null;
   return (
     <li className="group/project-folder relative mt-1 list-none first:mt-0">
       <button
@@ -1431,8 +1438,11 @@ const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHeader(prop
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-sidebar-foreground/90">
           {group.displayName}
         </span>
-        {statusDotClassName ? (
-          <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", statusDotClassName)} />
+        {folderDot ? (
+          <span
+            aria-hidden
+            className={cn("size-1.5 shrink-0 rounded-full", FOLDER_DOT_CLASS_NAME[folderDot])}
+          />
         ) : null}
         {collapsed && hiddenInbox.length > 0 ? (
           <span className="shrink-0 text-xs text-secondary-label tabular-nums">
