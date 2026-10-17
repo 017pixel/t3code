@@ -3493,6 +3493,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const subagentToolCalls = new Map<string, ActiveClaudeToolCall>();
         const pendingSubagentLaunchesByToolUseId = new Map<string, PendingClaudeSubagentLaunch>();
         const settledTurnByNativeThread = new Map<string, ActiveClaudeTurnContext>();
+        // Runs whose root turn ended without completing. Such a run stops
+        // ingesting at once, even while a subagent attributed to it runs on.
+        const runsEndedWithoutCompleting = new Set<RunId>();
         const subagentStopOutcomes = new Map<
           string,
           Deferred.Deferred<ProviderAdapter.ProviderAdapterV2SubagentOutcome>
@@ -5905,8 +5908,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
           if (input.status === "completed") {
             settledTurnByNativeThread.set(input.context.nativeThreadId, input.context);
+            runsEndedWithoutCompleting.delete(input.context.input.runId);
           } else {
             settledTurnByNativeThread.delete(input.context.nativeThreadId);
+            runsEndedWithoutCompleting.add(input.context.input.runId);
           }
           yield* Ref.update(interruptedTurns, (current) => {
             const next = new Set(current);
@@ -6417,7 +6422,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return null;
           }
           // A nested subagent's start, launched by a subagent that is already
-          // registered and running, is that subagent's own work like its tool calls.
+          // registered and running, is that subagent's own work like its tool
+          // calls. Its row joins the owner's run, so only while that run still
+          // ingests: a completed run stays open while its subagents run.
           if (
             message.type === "system" &&
             message.subtype === "task_started" &&
@@ -6437,6 +6444,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 ? undefined
                 : (yield* Ref.get(sessionSubagentsByTaskId)).get(ownerTaskId);
             return owner?.task.status === "running" &&
+              owner.task.runId !== null &&
+              !runsEndedWithoutCompleting.has(owner.task.runId) &&
               !bufferedStarts.some((start) => start.task_id === ownerTaskId)
               ? settled
               : null;
