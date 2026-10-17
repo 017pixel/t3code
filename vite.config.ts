@@ -1,6 +1,7 @@
 import "vite-plus/test/config";
 import { defineConfig } from "vite-plus";
 import * as NodeURL from "node:url";
+import { REACT_COMPILED_FILES } from "./apps/web/reactCompiledFiles.ts";
 
 const RESTRICTED_IMPORT_PATHS = [
   {
@@ -215,6 +216,14 @@ export default defineConfig({
         rules: { "t3code/no-global-process-runtime": "off" },
       },
       {
+        // The `t3` npm launcher is published as plain, dependency-free Node.
+        files: ["scripts/npm-launcher/**"],
+        rules: {
+          "t3code/no-global-process-runtime": "off",
+          "t3code/namespace-node-imports": "off",
+        },
+      },
+      {
         files: ["apps/server/src/mcp/McpHttpServer.ts"],
         rules: { "t3code/no-raw-mcp-registration": "off" },
       },
@@ -310,6 +319,27 @@ export default defineConfig({
               ],
             },
           ],
+        },
+      },
+      {
+        // Files the React Compiler must compile. Its bailout rules are errors here, and manual
+        // memoization is redundant. apps/web/src/compiledFiles.test.ts compiles each file and
+        // fails on any bailout lint cannot see, such as try/finally.
+        files: [...REACT_COMPILED_FILES],
+        rules: {
+          "react/exhaustive-effect-dependencies": "error",
+          "react/globals": "error",
+          "react/hooks": "error",
+          "react/immutability": "error",
+          "react/memo-dependencies": "error",
+          "react/preserve-manual-memoization": "error",
+          "react/purity": "error",
+          "react/refs": "error",
+          "react/set-state-in-effect": "error",
+          "react/set-state-in-render": "error",
+          "react/static-components": "error",
+          "react/unsupported-syntax": "error",
+          "t3code/no-manual-memo": "error",
         },
       },
       {
