@@ -1440,10 +1440,7 @@ const ComposerDraftEditor = memo(function ComposerDraftEditor({
   value: string | undefined;
 }) {
   "use no memo"; // The caret is imperative; caching readCursor() would rewind typed text.
-  const readValue = useCallback(
-    () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "",
-    [target],
-  );
+  const readValue = () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
   return (
     <ComposerPromptEditor
       {...props}
@@ -1482,10 +1479,7 @@ const ComposerDraftTraits = memo(function ComposerDraftTraits({
       getComposerPromptInjectionState(draft.prompt.replace(/^Ultrathink:\s*/i, "")),
     ]),
   );
-  const getPrompt = useCallback(
-    () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "",
-    [target],
-  );
+  const getPrompt = () => useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
   const prompt = getPrompt();
   return menu
     ? renderProviderTraitsMenuContent({ ...input, prompt, getPrompt })
@@ -2499,12 +2493,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return collapseExpandedComposerCursor(value, value.length, isLiteralPendingAnswer);
   });
   const composerCursorRef = useRef(composerCursor);
-  const setComposerCursor = useCallback((cursor: number | ((current: number) => number)) => {
+  const setComposerCursor = (cursor: number | ((current: number) => number)) => {
     const next = typeof cursor === "function" ? cursor(composerCursorRef.current) : cursor;
     composerCursorRef.current = next;
     updateComposerCursor(next);
-  }, []);
-  const readComposerCursor = useCallback(() => composerCursorRef.current, []);
+  };
+  const readComposerCursor = () => composerCursorRef.current;
   const {
     trigger: composerTrigger,
     setTrigger: setComposerTrigger,
