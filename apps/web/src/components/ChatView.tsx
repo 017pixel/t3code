@@ -3334,10 +3334,10 @@ export default function ChatView(props: ChatViewProps) {
       }
     };
     const finish = () => {
-      if (environmentChangeRef.current === request) {
-        environmentChangeRef.current = null;
-        setIsEnvironmentChanging(false);
-      }
+      if (environmentChangeRef.current === request) environmentChangeRef.current = null;
+      // Clear the busy state even when the request was abandoned, or returning
+      // to that draft would show it busy forever.
+      setEnvironmentChangingScope((scope) => (scope === request.scope ? null : scope));
     };
     if (target.projectId !== null) {
       const project = allProjects.find(
