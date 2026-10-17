@@ -569,7 +569,7 @@ export function secondaryRegistrationsToRetainAfterTopologyRead(
   );
 }
 
-const layerPlatformConnectionSource = Layer.effect(
+export const layerPlatformConnectionSource = Layer.effect(
   PlatformConnectionSource.PlatformConnectionSource,
   Effect.gen(function* () {
     if (isHostedStaticApp() || isLocalEnvironmentDisabled()) {
@@ -589,7 +589,19 @@ const layerPlatformConnectionSource = Layer.effect(
       cachedTarget.value.wsBaseUrl === primary.target.target.wsBaseUrl
         ? [new PrimaryConnectionRegistration({ target: cachedTarget.value })]
         : [];
-    const cacheRef = yield* Ref.make(new Map<string, CachedPlatformRegistration>());
+    const cacheRef = yield* Ref.make(
+      new Map<string, CachedPlatformRegistration>(
+        cachedRegistrations.map((registration) => [
+          PRIMARY_LOCAL_ENVIRONMENT_ID,
+          {
+            signature: `primary|${registration.target.httpBaseUrl}|${registration.target.wsBaseUrl}`,
+            registration,
+            // Cached identity is provisional: discover it on every poll until one succeeds.
+            refreshAtEpochMs: 0,
+          },
+        ]),
+      ),
+    );
     const rejectedRef = yield* Ref.make(new Map<string, RejectedSecondaryBootstrap>());
 
     const buildPlatformRegistrations = Effect.gen(function* () {
@@ -633,6 +645,10 @@ const layerPlatformConnectionSource = Layer.effect(
             const cacheEntry = { signature, registration: built.value };
             next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, cacheEntry);
             registrations.push(built.value);
+          } else if (cached?.signature === signature) {
+            // Discovery failure must not remove a published environment and its drafts.
+            next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, cached);
+            registrations.push(cached.registration);
           }
         }
       }
