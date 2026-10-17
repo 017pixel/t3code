@@ -1,6 +1,13 @@
-import type { AuthSessionState, EnvironmentId, ServerConfig } from "@t3tools/contracts";
+import {
+  type AuthEnvironmentScope,
+  type AuthSessionState,
+  type EnvironmentId,
+  type ServerConfig,
+  sessionGrantsScope,
+} from "@t3tools/contracts";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -143,6 +150,11 @@ function makeEnvironmentSessionAtoms<R, E>(
       })
       .pipe(
         Atom.swr({ staleTime: 30_000, revalidateOnMount: true }),
+        // Refetches and connection probes resolve to an equal session with a
+        // new timestamp. Structural equality (which ignores the timestamp) keeps
+        // them from re-rendering every reader. The SWR source keeps the fresh
+        // timestamp, so staleness is still judged from the latest fetch.
+        Atom.withEquality(Equal.equals),
         Atom.setIdleTTL(5 * 60_000),
         Atom.withLabel(`environment-session-state:${environmentId}`),
       ),
@@ -155,6 +167,18 @@ function makeEnvironmentSessionAtoms<R, E>(
     ).pipe(Atom.withLabel(`environment-session-state-value:${environmentId}`)),
   );
 
+  // Readers that only need one grant see a boolean, so revalidation (the
+  // `waiting` flag flipping) and unrelated session changes do not reach them.
+  const sessionScopeAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.family((scope: AuthEnvironmentScope) =>
+      Atom.make((get) => {
+        const result = get(sessionStateAtom(environmentId));
+        const session = Option.getOrNull(AsyncResult.value(result));
+        return result._tag !== "Failure" && session !== null && sessionGrantsScope(session, scope);
+      }).pipe(Atom.withLabel(`environment-session-scope:${environmentId}:${scope}`)),
+    ),
+  );
+
   return {
     initialConfigAtom,
     initialConfigValueAtom,
@@ -162,6 +186,7 @@ function makeEnvironmentSessionAtoms<R, E>(
     preparedConnectionValueAtom,
     sessionStateAtom,
     sessionStateValueAtom,
+    sessionScopeAtom,
   };
 }
 

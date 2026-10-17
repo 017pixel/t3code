@@ -1,11 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
-import {
-  type AuthEnvironmentScope,
-  type AuthSessionState,
-  type EnvironmentId,
-  sessionGrantsScope,
-} from "@t3tools/contracts";
+import type { AuthEnvironmentScope, EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
@@ -14,26 +9,17 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 
 export const environmentSession = createEnvironmentSessionAtoms(connectionAtomRuntime);
 
-const EMPTY_SESSION_STATE_ATOM = Atom.make(AsyncResult.initial<AuthSessionState>());
+const NO_SCOPE_ATOM = Atom.make(false).pipe(Atom.withLabel("web-session-scope:empty"));
 
 export function useEnvironmentScope(
   environmentId: EnvironmentId | null,
   scope: AuthEnvironmentScope,
 ): boolean {
-  const result = useAtomValue(
+  return useAtomValue(
     environmentId === null
-      ? EMPTY_SESSION_STATE_ATOM
-      : environmentSession.sessionStateAtom(environmentId),
+      ? NO_SCOPE_ATOM
+      : environmentSession.sessionScopeAtom(environmentId)(scope),
   );
-  return sessionHasScope(result, scope);
-}
-
-function sessionHasScope(
-  result: AsyncResult.AsyncResult<AuthSessionState, unknown>,
-  scope: AuthEnvironmentScope,
-): boolean {
-  const session = Option.getOrNull(AsyncResult.value(result));
-  return result._tag !== "Failure" && session !== null && sessionGrantsScope(session, scope);
 }
 
 export function useEnvironmentsWithScope(
@@ -43,8 +29,7 @@ export function useEnvironmentsWithScope(
   const permitted = Atom.make((get) => {
     const ids = new Set<EnvironmentId>();
     for (const { environmentId } of environments) {
-      const result = get(environmentSession.sessionStateAtom(environmentId));
-      if (sessionHasScope(result, scope)) {
+      if (get(environmentSession.sessionScopeAtom(environmentId)(scope))) {
         ids.add(environmentId);
       }
     }
@@ -57,10 +42,7 @@ export function readEnvironmentScope(
   environmentId: EnvironmentId,
   scope: AuthEnvironmentScope,
 ): boolean {
-  return sessionHasScope(
-    appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId)),
-    scope,
-  );
+  return appAtomRegistry.get(environmentSession.sessionScopeAtom(environmentId)(scope));
 }
 
 const EMPTY_PREPARED_CONNECTION_ATOM = Atom.make(Option.none()).pipe(

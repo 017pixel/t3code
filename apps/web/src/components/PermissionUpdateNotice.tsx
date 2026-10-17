@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { sessionHasLegacyPermissions, type EnvironmentId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
+import { Atom } from "effect/reactivity";
 import * as Schema from "effect/Schema";
 import { useEffect } from "react";
 
@@ -12,6 +13,17 @@ import { toastManager } from "./ui/toast";
 // Keep an active toast across remounts, including Strict Mode effect replay.
 const shown = new Set<EnvironmentId>();
 
+// A boolean, so session refetches and focus probes that leave the grant alone
+// do not re-render the notice.
+const settledOnLegacyPermissionsAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get) => {
+    const session = get(environmentSession.sessionStateAtom(environmentId));
+    return (
+      session._tag === "Success" && !session.waiting && sessionHasLegacyPermissions(session.value)
+    );
+  }),
+);
+
 function EnvironmentPermissionNotice({
   environmentId,
   label,
@@ -19,15 +31,10 @@ function EnvironmentPermissionNotice({
   environmentId: EnvironmentId;
   label: string;
 }) {
-  const session = useAtomValue(environmentSession.sessionStateAtom(environmentId));
+  const hasLegacyPermissions = useAtomValue(settledOnLegacyPermissionsAtom(environmentId));
   const navigate = useNavigate();
   useEffect(() => {
-    if (
-      session._tag !== "Success" ||
-      session.waiting ||
-      !sessionHasLegacyPermissions(session.value)
-    )
-      return;
+    if (!hasLegacyPermissions) return;
     if (shown.has(environmentId)) return;
     const key = `t3code:permission-update:v1:${environmentId}`;
     try {
@@ -62,7 +69,7 @@ function EnvironmentPermissionNotice({
         secondaryActionVariant: "ghost",
       },
     });
-  }, [environmentId, label, navigate, session]);
+  }, [environmentId, hasLegacyPermissions, label, navigate]);
   return null;
 }
 
