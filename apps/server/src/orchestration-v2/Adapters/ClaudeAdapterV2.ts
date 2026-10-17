@@ -4892,11 +4892,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 compileClaudeModelSelection(input.context.input.modelSelection).effort)
               : existingSubagent.effort;
           const model = input.model ?? priorTask?.model ?? null;
+          // Between root turns, a nested subagent joins its owner's run, which
+          // keeps ingesting while the owner works; the turn that settled last
+          // may have stopped. During a turn it joins the live run.
+          const runOwner =
+            existingSubagent === undefined && (yield* Ref.get(activeTurn)) !== input.context
+              ? input.owner
+              : undefined;
           const task = {
             ...(priorTask ?? {
               id: nodeId,
               threadId: input.context.input.threadId,
-              runId: input.context.input.runId,
+              runId: runOwner === undefined ? input.context.input.runId : runOwner.task.runId,
               parentNodeId: input.owner?.task.id ?? input.context.input.rootNodeId,
               origin: "provider_native" as const,
               createdBy: "agent" as const,
@@ -4949,7 +4956,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 : isReopen
                   ? undefined
                   : existingSubagent?.confirmedOutcome,
-            rootNodeId: existingSubagent?.rootNodeId ?? input.context.input.rootNodeId,
+            rootNodeId:
+              existingSubagent?.rootNodeId ??
+              runOwner?.rootNodeId ??
+              input.context.input.rootNodeId,
             childThreadId,
             childRootNodeId,
             turnItemId: existingSubagent?.turnItemId ?? derivedIds.turnItemId,
@@ -5037,13 +5047,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               createdBy: "agent",
               creationSource: "provider",
             });
-            if (existingSubagent === undefined) {
-              yield* emitProviderEvent({
-                type: "app_thread.created",
-                driver: CLAUDE_PROVIDER,
-                appThread: childThread,
-              });
-            }
             subagent.childThread = childThread;
           }
 
@@ -5074,13 +5077,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               },
             });
           }
-          // Ahead of the child thread's records: the run a resume attributes
-          // the subagent to adopts its child thread from this event.
+          // Ahead of the child thread and its records: the run a resume
+          // attributes the subagent to adopts its child thread from this
+          // event, and an ended run enrolls a new subagent's thread from it.
           yield* emitProviderEvent({
             type: "subagent.updated",
             driver: CLAUDE_PROVIDER,
             subagent: task,
           });
+          if (existingSubagent === undefined && subagent.childThread !== null) {
+            yield* emitProviderEvent({
+              type: "app_thread.created",
+              driver: CLAUDE_PROVIDER,
+              appThread: subagent.childThread,
+            });
+          }
           if (lifecycleChanged) {
             yield* emitProviderEvent({
               type: "node.updated",
@@ -6404,6 +6415,31 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             )
           ) {
             return null;
+          }
+          // A nested subagent's start, launched by a subagent that is already
+          // registered and running, is that subagent's own work like its tool calls.
+          if (
+            message.type === "system" &&
+            message.subtype === "task_started" &&
+            !isClaudeNonSubagentTask(message) &&
+            message.tool_use_id !== undefined &&
+            !(yield* Ref.get(sessionSubagentsByTaskId)).has(message.task_id)
+          ) {
+            const ownerToolUseId = pendingSubagentLaunchesByToolUseId.get(
+              message.tool_use_id,
+            )?.ownerToolUseId;
+            const ownerTaskId =
+              ownerToolUseId === undefined
+                ? undefined
+                : (yield* Ref.get(sessionSubagentTaskIdsByToolUseId)).get(ownerToolUseId);
+            const owner =
+              ownerTaskId === undefined
+                ? undefined
+                : (yield* Ref.get(sessionSubagentsByTaskId)).get(ownerTaskId);
+            return owner?.task.status === "running" &&
+              !bufferedStarts.some((start) => start.task_id === ownerTaskId)
+              ? settled
+              : null;
           }
           if (taskId === undefined) {
             return parentToolUseId === null ? null : settled;
