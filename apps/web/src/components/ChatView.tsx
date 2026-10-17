@@ -162,7 +162,7 @@ import {
   isUrlTargetSidebarTextKey,
   isUrlRouteTargetElsewhere,
   KeptViewWarmingContext,
-  takeHeldText,
+  insertHeldText,
 } from "./keptView";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { assistantCitationFromLocation } from "../lib/assistantCitationNavigation";
@@ -6125,9 +6125,12 @@ export default function ChatView(props: ChatViewProps) {
 
   // Text typed on the way to this view, while the view the user left was still shown.
   useEffect(() => {
-    const text = takeHeldText(viewRouteTargetKey);
-    if (text !== null) composerRef.current?.insertTextAtEnd(text);
-  }, [composerRef, viewRouteTargetKey]);
+    if (keptViewWarming || isUrlRouteTargetElsewhere(viewRouteTargetKey)) return;
+    insertHeldText(
+      viewRouteTargetKey,
+      (text) => composerRef.current?.insertTextAtEnd(text) === true,
+    );
+  });
 
   // A focused desktop browser page forwards these chords as menu actions. They
   // are for the shown thread, not one warming up out of sight.
