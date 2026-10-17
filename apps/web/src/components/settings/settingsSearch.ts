@@ -874,7 +874,9 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "review-guide-model",
     title: "Review guide model",
-    to: "/settings/source-control",
+    to: "/settings/beta",
+    // Hidden until review guides are on, so a search lands on the switch that shows it.
+    targetId: "review-guides",
     searchTerms: ["pull request pr guided review guide brief maintainer"],
     environmentOnly: true,
     scope: "project-defaults",
@@ -882,7 +884,8 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "review-guide-instructions",
     title: "Review guide instructions",
-    to: "/settings/source-control",
+    to: "/settings/beta",
+    targetId: "review-guides",
     searchTerms: ["pull request pr guided review guide preferences taste prompt custom"],
     environmentOnly: true,
     scope: "project-defaults",
