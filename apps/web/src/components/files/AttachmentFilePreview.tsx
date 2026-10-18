@@ -5,7 +5,11 @@ import { readFilePreviewResponse } from "@t3tools/client-runtime/file-preview";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
-import { filePreviewKind, FILE_TEXT_PREVIEW_MAX_BYTES } from "@t3tools/shared/filePreview";
+import {
+  filePreviewKind,
+  officePreviewKind,
+  FILE_TEXT_PREVIEW_MAX_BYTES,
+} from "@t3tools/shared/filePreview";
 import { ChevronRightIcon, DownloadIcon, Trash2Icon, WrapTextIcon, XIcon } from "lucide-react";
 import { Check, Code2, Copy, Eye, Table2 } from "lucide";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
@@ -22,6 +26,7 @@ import { cn } from "~/lib/utils";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
+import { OfficeFilePreview } from "./OfficeFilePreview";
 import {
   FILE_SURFACE_SUBHEADER_CLASS,
   FileSurfaceAction,
@@ -63,6 +68,7 @@ export function AttachmentFilePreview(props: {
   onClose?: () => void;
 }) {
   const kind = filePreviewKind(props);
+  const officeKind = officePreviewKind(props);
   const delimiter = filePreviewDelimiter(props);
   const renderedMode =
     kind === "markdown" ? "markdown" : kind === "html" ? "html" : delimiter ? "table" : null;
@@ -225,6 +231,8 @@ export function AttachmentFilePreview(props: {
     ) : (
       <ReadOnlySourcePreview name={props.name} text={content.text} />
     )
+  ) : officeKind ? (
+    <OfficeFilePreview src={url} name={props.name} kind={officeKind} sizeBytes={props.sizeBytes} />
   ) : kind === "pdf" || kind === "html" ? (
     <BrowserDocumentFrame
       src={url}

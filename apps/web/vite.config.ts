@@ -285,6 +285,7 @@ export default defineConfig(() => {
       manifest: true,
       sourcemap: buildSourcemap,
     },
+    worker: { format: "es" },
     test: {
       projects: [defineProject(unitTestProject), defineProject(browserTestProject)],
     },

@@ -12,6 +12,7 @@ import {
   isWorkspaceAudioPreviewPath,
   isWorkspaceImagePreviewPath,
   isWorkspaceVideoPreviewPath,
+  officePreviewKind,
 } from "@t3tools/shared/filePreview";
 import {
   DEFAULT_TOKENIZE_MAX_LENGTH,
@@ -75,6 +76,7 @@ import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
+import { OfficeFilePreview } from "./OfficeFilePreview";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
 import { breadcrumbPathOf, retainedBreadcrumbTrail, trailChildOf } from "./filePath";
@@ -251,6 +253,15 @@ function WorkspaceBrowserPreview(props: {
       </div>
     );
   }
+  const officeKind = officePreviewKind({ name: props.absolutePath });
+  if (officeKind)
+    return (
+      <OfficeFilePreview
+        src={`${assetUrl.url}${revisionSuffix}`}
+        name={props.title}
+        kind={officeKind}
+      />
+    );
   return (
     <BrowserDocumentFrame
       src={`${assetUrl.url}${revisionSuffix}`}
@@ -1004,6 +1015,7 @@ export default function FilePreviewPanel({
   const isImage = relativePath !== null && !isVideo && isWorkspaceImagePreviewPath(relativePath);
   const isMedia = isImage || isVideo || isAudio;
   const isPdf = relativePath !== null && isPdfPreviewFile(relativePath);
+  const isOffice = relativePath !== null && officePreviewKind({ name: relativePath }) !== null;
   const isHtml = relativePath !== null && !isPdf && isBrowserPreviewFile(relativePath);
   const isHostFile =
     attachment !== undefined || (relativePath !== null && isAbsolutePath(relativePath));
@@ -1089,7 +1101,8 @@ export default function FilePreviewPanel({
     file.data !== null &&
     !(isMarkdown && renderMarkdown) &&
     !(tableDelimiter && renderTable) &&
-    !renderBrowserFile;
+    !renderBrowserFile &&
+    !isOffice;
   const rendered = isMarkdown ? renderMarkdown : tableDelimiter ? renderTable : renderBrowserFile;
   const setRenderedPreferred = isMarkdown
     ? setRenderMarkdownPreferred
@@ -1126,7 +1139,7 @@ export default function FilePreviewPanel({
       // Media and PDFs never show their contents, so re-reading them on every
       // workspace mutation is waste. A folder named like one still re-reads, so
       // it notices when the path becomes a file.
-      (isFolder || (!isMedia && !isPdf)) &&
+      (isFolder || (!isMedia && !isPdf && !isOffice)) &&
       !selectedFilePending,
     mutationId: workspaceMutationId,
     refresh: file.refresh,
@@ -1337,7 +1350,7 @@ export default function FilePreviewPanel({
               alt={relativePath}
               workspaceMutationId={workspaceMutationId}
             />
-          ) : relativePath && renderBrowserFile && absolutePath ? (
+          ) : relativePath && (renderBrowserFile || isOffice) && absolutePath ? (
             <WorkspaceBrowserPreview
               key={absolutePath}
               environmentId={environmentId}
@@ -1465,7 +1478,7 @@ export default function FilePreviewPanel({
               selectedPathRevealId={revealRequestId}
               onOpenFile={onOpenFile}
               workspaceMutationId={workspaceMutationId}
-              {...(previewPath && !isMedia && !isPdf
+              {...(previewPath && !isMedia && !isPdf && !isOffice
                 ? { onRefreshSelectedFile: file.refresh }
                 : {})}
             />

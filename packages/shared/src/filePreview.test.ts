@@ -11,9 +11,34 @@ import {
   isWorkspacePreviewEntryPath,
   isWorkspaceVideoPreviewPath,
   mediaKindFromPath,
+  officePreviewKind,
 } from "./filePreview.ts";
 
 describe("workspace file previews", () => {
+  it.each([
+    [
+      "quarterly-report.DOCX",
+      "docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ],
+    [
+      "finance#q4/operating-plan.xlsx",
+      "xlsx",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ],
+    [
+      "slides?review/quarterly-review.pptx",
+      "pptx",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+  ])("recognizes Office assets at literal path %s", (name, kind, mimeType) => {
+    expect(officePreviewKind({ name })).toBe(kind);
+    expect(filePreviewKind({ name, mimeType: "application/octet-stream" })).toBe(kind);
+    expect(isWorkspacePreviewEntryPath(name)).toBe(true);
+    expect(hostPreviewMimeTypeFromExtension(`.${kind}`)).toBe(mimeType);
+    expect(filePreviewKind({ name: "download", mimeType })).toBe(kind);
+    expect(filePreviewKind({ name, mimeType: "application/zip" })).toBe("unsupported");
+  });
   it.each(["report.html", "report.HTM", "document#draft.pdf", "reports?old/document.pdf"])(
     "recognizes browser preview path %s",
     (path) => {
@@ -45,6 +70,11 @@ describe("workspace file previews", () => {
     "image.svg?notes.txt",
     "document.pdf?download=1",
     "report.html#notes.txt",
+    "report.docx#notes.txt",
+    "report.xlsx?download=1",
+    "slides%2Epptx",
+    "report.docm",
+    "slides.ppt",
     "image%2Epng",
   ])("rejects non-preview path %s", (path) => {
     expect(isWorkspacePreviewEntryPath(path)).toBe(false);

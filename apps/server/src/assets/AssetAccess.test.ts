@@ -983,7 +983,13 @@ describe("AssetAccess", () => {
       const directory = path.join(root, "assets#archive");
       yield* fileSystem.makeDirectory(directory);
 
-      for (const name of ["icon#v2.png", "report#draft.pdf"]) {
+      for (const name of [
+        "icon#v2.png",
+        "report#draft.pdf",
+        "report.docx",
+        "workbook.xlsx",
+        "slides.pptx",
+      ]) {
         const filePath = path.join(directory, name);
         yield* fileSystem.writeFileString(filePath, "preview fixture");
         const canonicalFile = yield* fileSystem.realPath(filePath);
