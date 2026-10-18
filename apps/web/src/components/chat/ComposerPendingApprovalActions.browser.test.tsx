@@ -39,8 +39,8 @@ async function render(options?: ReadonlyArray<ProviderApprovalOption>) {
 
 const rowLabels = () =>
   [...container.querySelectorAll("button")]
-    .map((button) => button.textContent?.trim())
-    .filter(Boolean);
+    .map((button) => button.getAttribute("aria-label"))
+    .filter((label) => label !== "More approval options");
 
 async function openMore() {
   await act(async () =>
@@ -76,7 +76,7 @@ describe("ComposerPendingApprovalActions", () => {
 
     await act(async () =>
       [...container.querySelectorAll("button")]
-        .find((button) => button.textContent?.trim() === "Allow once")!
+        .find((button) => button.getAttribute("aria-label") === "Allow once")!
         .click(),
     );
     expect(onRespond).toHaveBeenCalledWith(RuntimeRequestId.make("approval-1"), "accept");
