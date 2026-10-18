@@ -27,7 +27,7 @@ export interface ThreadCheckpointSummary {
 }
 
 export function deriveThreadCheckpointSummaries(
-  projection: Pick<OrchestrationV2ThreadProjection, "checkpoints" | "messages">,
+  projection: Pick<OrchestrationV2ThreadProjection, "checkpoints" | "messages" | "runs">,
 ): ReadonlyArray<ThreadCheckpointSummary> {
   // Idle compaction still captures a checkpoint, but it is never a review turn.
   const idleRunIds = new Set(

@@ -129,7 +129,10 @@ export function createEnvironmentThreadDetailAtoms<E>(
   });
 
   const checkpointSummariesAtomFamily = Atom.family((key: string) => {
-    let previous: Pick<OrchestrationV2ThreadProjection, "checkpoints" | "messages"> | null = null;
+    let previous: Pick<
+      OrchestrationV2ThreadProjection,
+      "checkpoints" | "messages" | "runs"
+    > | null = null;
     let value = EMPTY_CHECKPOINT_SUMMARIES;
     return Atom.make((get) => {
       const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
@@ -138,10 +141,11 @@ export function createEnvironmentThreadDetailAtoms<E>(
         value = EMPTY_CHECKPOINT_SUMMARIES;
       } else if (
         projection.checkpoints !== previous?.checkpoints ||
-        projection.messages !== previous?.messages
+        projection.messages !== previous?.messages ||
+        projection.runs !== previous?.runs
       ) {
-        const { checkpoints, messages } = projection;
-        previous = { checkpoints, messages };
+        const { checkpoints, messages, runs } = projection;
+        previous = { checkpoints, messages, runs };
         value = deriveThreadCheckpointSummaries(previous);
       }
       return value;
