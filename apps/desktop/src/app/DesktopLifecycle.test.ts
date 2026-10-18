@@ -37,6 +37,7 @@ function layerElectronApp(
     name: Effect.succeed("T3 Code"),
     systemLocale: Effect.succeed("en-US"),
     whenReady: Effect.void,
+    requestSingleInstanceLock: Effect.succeed(true),
     quit,
     exit: () => Effect.void,
     relaunch: () => relaunch,
