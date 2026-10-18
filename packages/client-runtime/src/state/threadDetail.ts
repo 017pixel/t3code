@@ -1,4 +1,5 @@
 import type { OrchestrationV2ThreadProjection, ScopedThreadRef } from "@t3tools/contracts";
+import { isUserFacingRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
@@ -25,6 +26,14 @@ const EMPTY_VISIBLE_TURN_ITEMS: OrchestrationV2ThreadProjection["visibleTurnItem
   [],
 );
 const EMPTY_CHECKPOINT_SUMMARIES: ReadonlyArray<ThreadCheckpointSummary> = Object.freeze([]);
+
+// Run updates stream constantly; summaries depend only on which runs are idle compactions.
+function idleCompactionRunIds(runs: OrchestrationV2ThreadProjection["runs"]): string {
+  return runs
+    .filter((run) => !isUserFacingRun(run))
+    .map((run) => run.id)
+    .join("\n");
+}
 
 export function createEnvironmentThreadDetailAtoms<E>(
   threadStateAtom: (
@@ -129,24 +138,26 @@ export function createEnvironmentThreadDetailAtoms<E>(
   });
 
   const checkpointSummariesAtomFamily = Atom.family((key: string) => {
-    let previous: Pick<
-      OrchestrationV2ThreadProjection,
-      "checkpoints" | "messages" | "runs"
-    > | null = null;
+    let previous: Pick<OrchestrationV2ThreadProjection, "checkpoints" | "messages"> | null = null;
+    let previousIdleRunIds = "";
     let value = EMPTY_CHECKPOINT_SUMMARIES;
     return Atom.make((get) => {
       const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
       if (projection === null) {
         previous = null;
         value = EMPTY_CHECKPOINT_SUMMARIES;
-      } else if (
+        return value;
+      }
+      const idleRunIds = idleCompactionRunIds(projection.runs);
+      if (
         projection.checkpoints !== previous?.checkpoints ||
         projection.messages !== previous?.messages ||
-        projection.runs !== previous?.runs
+        idleRunIds !== previousIdleRunIds
       ) {
         const { checkpoints, messages, runs } = projection;
-        previous = { checkpoints, messages, runs };
-        value = deriveThreadCheckpointSummaries(previous);
+        previous = { checkpoints, messages };
+        previousIdleRunIds = idleRunIds;
+        value = deriveThreadCheckpointSummaries({ checkpoints, messages, runs });
       }
       return value;
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-checkpoint-summaries:${key}`));
