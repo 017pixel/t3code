@@ -20,6 +20,7 @@ import * as CommandPolicy from "./CommandPolicy.ts";
 const commandId = CommandId.make("command-policy-test");
 const threadId = ThreadId.make("command-policy-thread");
 const activeRunId = RunId.make("command-policy-active-run");
+const userMessageId = MessageId.make("command-policy-user-message");
 
 const baseCapabilities: OrchestrationV2ProviderCapabilities = CodexProviderCapabilitiesV2;
 
@@ -31,33 +32,21 @@ function capabilities(
 
 function dispatchProjection(
   sessionCapabilities?: OrchestrationV2ProviderCapabilities,
-  activeMessageText?: string,
 ): OrchestrationV2ThreadProjection {
   const providerThreadId = ProviderThreadId.make("command-policy-provider-thread");
   const providerSessionId = ProviderSessionId.make("command-policy-provider-session");
-  const activeMessageId = MessageId.make("command-policy-active-message");
   return {
     runs:
       sessionCapabilities === undefined
         ? []
-        : [
-            {
-              id: activeRunId,
-              status: "running",
-              providerThreadId,
-              ...(activeMessageText === undefined ? {} : { userMessageId: activeMessageId }),
-            },
-          ],
+        : [{ id: activeRunId, status: "running", providerThreadId, userMessageId }],
+    messages: [{ id: userMessageId, text: "first", attachments: [] }],
     providerThreads:
       sessionCapabilities === undefined ? [] : [{ id: providerThreadId, providerSessionId }],
     providerSessions:
       sessionCapabilities === undefined
         ? []
         : [{ id: providerSessionId, capabilities: sessionCapabilities }],
-    messages:
-      activeMessageText === undefined
-        ? []
-        : [{ id: activeMessageId, role: "user", text: activeMessageText, attachments: [] }],
   } as unknown as OrchestrationV2ThreadProjection;
 }
 
@@ -77,14 +66,6 @@ it("resolves automatic message delivery from authoritative provider capabilities
       "auto",
     ),
     { type: "steer_active", targetRunId: activeRunId },
-  );
-  assert.deepEqual(
-    CommandPolicy.resolveMessageDispatchIntent(
-      dispatchProjection(baseCapabilities, "/compact"),
-      { type: "start_immediately" },
-      "auto",
-    ),
-    { type: "queue_after_active" },
   );
   assert.deepEqual(
     CommandPolicy.resolveMessageDispatchIntent(
@@ -161,27 +142,60 @@ it("targets the latest active run for explicit steer and restart intent", () => 
     ),
     { type: "start_immediately" },
   );
+});
+
+it.each(["/compact", " /LOGOUT "])("queues a steer sent while %s runs", (text) => {
+  const projection = dispatchProjection(baseCapabilities);
+  const maintenance = {
+    ...projection,
+    messages: [{ id: userMessageId, text, attachments: [] }],
+  } as unknown as OrchestrationV2ThreadProjection;
+  for (const deliveryIntent of ["auto", "steer"] as const) {
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(
+        maintenance,
+        { type: "start_immediately" },
+        deliveryIntent,
+      ),
+      { type: "queue_after_active" },
+    );
+  }
   assert.deepEqual(
-    CommandPolicy.resolveMessageDispatchIntent(
-      dispatchProjection(baseCapabilities, "/compact"),
-      { type: "start_immediately" },
-      "steer",
-    ),
-    { type: "steer_active", targetRunId: activeRunId },
-  );
-  const idleCompaction = dispatchProjection(baseCapabilities, "/compact");
-  const idleRuns = idleCompaction.runs.map((run) => ({
-    ...run,
-    idleCompactionOfRunId: RunId.make("command-policy-previous-run"),
-  }));
-  assert.deepEqual(
-    CommandPolicy.resolveMessageDispatchIntent(
-      { ...idleCompaction, runs: idleRuns },
-      { type: "start_immediately" },
-      "steer",
-    ),
+    CommandPolicy.resolveMessageDispatchIntent(maintenance, {
+      type: "steer_active",
+      targetRunId: activeRunId,
+    }),
     { type: "queue_after_active" },
   );
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(
+      maintenance,
+      { type: "start_immediately" },
+      "restart",
+    ),
+    { type: "restart_active", targetRunId: activeRunId },
+  );
+});
+
+it("queues every follow-up sent while idle compaction runs", () => {
+  const projection = dispatchProjection(baseCapabilities);
+  const idleCompaction = {
+    ...projection,
+    runs: projection.runs.map((run) => ({
+      ...run,
+      idleCompactionOfRunId: RunId.make("command-policy-previous-run"),
+    })),
+  };
+  for (const deliveryIntent of ["auto", "steer", "restart"] as const) {
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(
+        idleCompaction,
+        { type: "start_immediately" },
+        deliveryIntent,
+      ),
+      { type: "queue_after_active" },
+    );
+  }
 });
 
 const layer = it.layer(CommandPolicy.layer);
@@ -278,7 +292,6 @@ layer("CommandPolicyV2", (it) => {
               readonly detail: string;
             };
       }> = [
-        // Ordinary steering prefers direct active steering whenever available.
         {
           forceRestart: false,
           supportsActiveSteering: true,
@@ -307,8 +320,6 @@ layer("CommandPolicyV2", (it) => {
           supportsSteeringByInterruptRestart: true,
           expected: { type: "policy", value: "active_steering" },
         },
-        // Ordinary steering falls back to interrupt-and-restart, then to a
-        // typed error naming the capability that is actually missing.
         {
           forceRestart: false,
           supportsActiveSteering: false,
@@ -341,9 +352,6 @@ layer("CommandPolicyV2", (it) => {
           supportsSteeringByInterruptRestart: false,
           expected: { type: "error", capability: "active_steering", detail: fallbackDetail },
         },
-        // A forced restart skips direct steering and only succeeds via
-        // interrupt-and-restart; every other combination must report that
-        // capability instead of claiming live steering is unsupported.
         {
           forceRestart: true,
           supportsActiveSteering: true,

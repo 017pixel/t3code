@@ -11,6 +11,7 @@ import {
   injectHtmlRenderBootstrap,
   htmlRenderThemeMessage,
   readHtmlRenderContentHeight,
+  readHtmlRenderImageRequest,
   readHtmlRenderKeyDown,
   readHtmlRenderLinkRequest,
   readHtmlRenderReference,
@@ -106,6 +107,29 @@ describe("readHtmlRenderLinkRequest", () => {
     expect(
       readHtmlRenderLinkRequest({ type: "t3-html-render-link", url: "https://example.com" }),
     ).toBeUndefined();
+  });
+});
+
+describe("readHtmlRenderImageRequest", () => {
+  it("accepts http(s) and inline image URLs in an open-image notification", () => {
+    const image = (params: unknown) => ({
+      jsonrpc: "2.0",
+      method: "t3/notifications/open-image",
+      params,
+    });
+    expect(
+      readHtmlRenderImageRequest(image({ src: "data:image/png;base64,AA", name: " Chart " })),
+    ).toEqual({
+      src: "data:image/png;base64,AA",
+      name: "Chart",
+    });
+    expect(readHtmlRenderImageRequest(image({ src: "https://example.com/a.png" }))).toEqual({
+      src: "https://example.com/a.png",
+      name: "Image",
+    });
+    expect(readHtmlRenderImageRequest(image({ src: "javascript:alert(1)" }))).toBeUndefined();
+    expect(readHtmlRenderImageRequest(image({ src: "data:text/html,<p>" }))).toBeUndefined();
+    expect(readHtmlRenderImageRequest(image({ src: "blob:null/1" }))).toBeUndefined();
   });
 });
 
@@ -229,7 +253,6 @@ describe("htmlRenderFrameHeight", () => {
   });
 
   it("takes the taller layout when a breakpoint falls between measured widths", () => {
-    // 900px tall below a 600px media query, 450px above it.
     const responsive = readHtmlRenderReference({
       ...reference,
       height: 2000,
@@ -243,7 +266,6 @@ describe("htmlRenderFrameHeight", () => {
   });
 
   it("fits a page the client lays out taller than the server measured", () => {
-    // The agent passed contentHeight at the column width, so the page should never scroll.
     const fitted = { ...measured, height: 1403 };
     expect(htmlRenderFrameHeight(fitted, 728, 1415)).toBe(1415);
     expect(htmlRenderFrameHeight(fitted, 1400)).toBe(1660);
@@ -285,7 +307,6 @@ describe("htmlRenderOutlineBoxes", () => {
   })!;
 
   it("round-trips through a tool result and stretches to the client's width and height", () => {
-    // The empty box is dropped when encoded.
     expect(outline).toBe("t0,0,75,10,2;m0,12,182,75,1");
     expect(htmlRenderOutlineBoxes(outlined, 728)).toEqual([
       { kind: "text", x: 0, y: 0, width: 300, height: 40, lines: 2 },
