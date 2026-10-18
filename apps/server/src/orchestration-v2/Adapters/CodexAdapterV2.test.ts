@@ -9,6 +9,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   CheckpointId,
+  ChatAttachmentId,
+  ChatFileAttachment,
   CodexSettings,
   EnvironmentId,
   MessageId,
@@ -42,7 +44,7 @@ import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
 import * as FileSystem from "effect/FileSystem";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference } from "@t3tools/shared/mcpApp";
-import { resolveAttachmentPathById } from "../../attachmentStore.ts";
+import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachmentStore.ts";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -1105,6 +1107,7 @@ describe("CodexAdapterV2 native protocol logging", () => {
           params: {
             id: "evt-1",
             http_headers: { Authorization: "Bearer secret-codex-token" },
+            audio: { type: "audio", url: "data:audio/wav;base64,cHJpdmF0ZQ==" },
             usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
           },
         },
@@ -1131,6 +1134,7 @@ describe("CodexAdapterV2 native protocol logging", () => {
             params: {
               id: "evt-1",
               http_headers: { Authorization: "[REDACTED]" },
+              audio: { type: "audio", url: "[REDACTED AUDIO]" },
               usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
             },
           },
@@ -1961,11 +1965,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    config?: ServerConfig.ServerConfig["Service"],
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const serverConfig = yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie);
+      const serverConfig =
+        config ?? (yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie));
       const continuationRequests: Array<ProviderContinuationRequests.ProviderContinuationRequest> =
         [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
@@ -2077,6 +2083,232 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         firstTerminal: Deferred.await(firstTerminal),
       };
     });
+
+  it.effect.each([
+    "wav",
+    "mp3",
+    "m4a",
+    "ogg",
+    "webm",
+    "uppercase",
+    "unsupported",
+    "video",
+    "oversized",
+    "stale-size",
+    "empty",
+    "no-audio-model",
+    "old-server",
+    "rejected",
+    "steer",
+  ])("delivers audio attachments with %s input", (scenario) =>
+    Effect.gen(function* () {
+      const nativeThreadId = `audio-${scenario}`;
+      const prompt = "Transcribe without tools";
+      const bytes = Buffer.from("current-audio-bytes");
+      const extension =
+        scenario === "uppercase"
+          ? "WAV"
+          : ["mp3", "m4a", "ogg", "webm"].includes(scenario)
+            ? scenario
+            : scenario === "unsupported"
+              ? "flac"
+              : scenario === "video"
+                ? "webm"
+                : "wav";
+      const mimes: Record<string, string> = {
+        mp3: "audio/mpeg",
+        m4a: "audio/mp4",
+        ogg: "audio/ogg",
+        webm: "audio/webm",
+      };
+      const mime = mimes[extension] ?? "audio/wav";
+      const attachment = {
+        ...ChatFileAttachment.make({
+          type: "file",
+          id: ChatAttachmentId.make("audio-12345678-1234-1234-1234-123456789abc-wav"),
+          name: `voice.${extension}`,
+          mimeType: scenario === "video" ? "video/webm" : mime,
+          sizeBytes: bytes.length,
+        }),
+        sizeBytes: scenario === "oversized" ? 50 * 1024 * 1024 + 1 : bytes.length,
+      };
+      const serverConfig = yield* makeReplayServerConfig(nativeThreadId).pipe(Effect.orDie);
+      const fileSystem = yield* FileSystem.FileSystem;
+      yield* fileSystem.makeDirectory(serverConfig.attachmentsDir, { recursive: true });
+      const storedPath = resolveAttachmentPath({
+        attachmentsDir: serverConfig.attachmentsDir,
+        attachment,
+      })!;
+      yield* fileSystem.writeFile(storedPath, bytes);
+      if (scenario === "stale-size") yield* fileSystem.truncate(storedPath, 50 * 1024 * 1024 + 1);
+      if (scenario === "empty") yield* fileSystem.truncate(storedPath, 0);
+      const text = `${prompt}\n\n[Attached file "${attachment.name}" is saved at: ${storedPath}]`;
+      const queryModel = !["unsupported", "video", "oversized"].includes(scenario);
+      const nativeAudio = ![
+        "unsupported",
+        "video",
+        "oversized",
+        "stale-size",
+        "empty",
+        "no-audio-model",
+        "old-server",
+      ].includes(scenario);
+      const audioInput = [
+        { type: "text", text },
+        ...(nativeAudio
+          ? [{ type: "audio", url: `data:${mime};base64,${bytes.toString("base64")}` }]
+          : []),
+      ];
+      const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId: "audio-turn", prompt });
+      const entries = preamble.slice(0, -3);
+      let requestId = 3;
+      if (scenario === "steer") {
+        entries.push(...preamble.slice(-3));
+        requestId++;
+      }
+      if (queryModel) {
+        entries.push(
+          {
+            type: "expect_outbound",
+            label: "audio model",
+            frame: { id: requestId, method: "model/list", params: {} },
+          },
+          {
+            type: "emit_inbound",
+            label: "audio model",
+            frame:
+              scenario === "old-server"
+                ? { id: requestId, error: { code: -32601, message: "Unknown method" } }
+                : {
+                    id: requestId,
+                    result: {
+                      data: [
+                        {
+                          id: "gpt-5.4",
+                          model: "gpt-5.4",
+                          displayName: "Codex",
+                          description: "",
+                          hidden: false,
+                          isDefault: true,
+                          defaultReasoningEffort: "medium",
+                          supportedReasoningEfforts: [],
+                          inputModalities:
+                            scenario === "no-audio-model" ? ["text", "image"] : ["text", "audio"],
+                        },
+                      ],
+                      nextCursor: null,
+                    },
+                  },
+          },
+        );
+        requestId++;
+      }
+      if (scenario === "steer") {
+        entries.push(
+          {
+            type: "expect_outbound",
+            label: "audio steer",
+            frame: {
+              id: requestId,
+              method: "turn/steer",
+              params: { threadId: nativeThreadId, expectedTurnId: "audio-turn", input: audioInput },
+            },
+          },
+          {
+            type: "emit_inbound",
+            label: "audio steer",
+            frame: { id: requestId, result: { turnId: "audio-turn" } },
+          },
+        );
+      } else {
+        const start = preamble.at(-3)!;
+        if (
+          start.type !== "expect_outbound" ||
+          !Predicate.isObject(start.frame) ||
+          !Predicate.isObject(start.frame.params)
+        )
+          return yield* Effect.die("Missing start frame");
+        const frame = {
+          ...start.frame,
+          id: requestId,
+          params: { ...start.frame.params, input: audioInput },
+        };
+        entries.push({ ...start, frame });
+        if (scenario === "rejected") {
+          entries.push({
+            type: "emit_inbound",
+            label: "audio rejected",
+            frame: {
+              id: requestId,
+              error: { code: -32602, message: "Audio input is not supported" },
+            },
+          });
+          requestId++;
+          entries.push({
+            ...start,
+            frame: {
+              ...frame,
+              id: requestId,
+              params: {
+                ...frame.params,
+                input: audioInput.filter((item) => item.type !== "audio"),
+              },
+            },
+          });
+        }
+        entries.push(withReplayRequestId(preamble.at(-2)!, requestId), preamble.at(-1)!);
+      }
+      const transcript = makeCodexReplayTranscript({ scenario: nativeThreadId, entries });
+      const requests: Array<{ method: string; params: unknown }> = [];
+      const turnStarted = yield* Deferred.make<ProviderTurnId>();
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        (event) =>
+          event.type === "provider_turn.updated"
+            ? Deferred.succeed(turnStarted, event.providerTurn.id)
+            : Effect.void,
+        (method, params) =>
+          Effect.sync(() => {
+            requests.push({ method, params });
+          }),
+        undefined,
+        serverConfig,
+      );
+      const turn = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("audio-attempt"),
+        text: prompt,
+      });
+      if (scenario === "steer") {
+        yield* harness.runtime.startTurn(turn);
+        const providerTurnId = yield* Deferred.await(turnStarted);
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: turn.runId,
+          providerThread: harness.providerThread,
+          providerTurnId,
+          message: { ...turn.message, attachments: [attachment] },
+        });
+      } else {
+        yield* harness.runtime.startTurn({
+          ...turn,
+          message: { ...turn.message, attachments: [attachment] },
+        });
+      }
+      assert.equal(
+        requests.filter((request) => request.method === "model/list").length,
+        queryModel ? 1 : 0,
+      );
+      assert.notInclude(JSON.stringify(harness.events), bytes.toString("base64"));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
 
   it.effect.each(["supported", "unsupported", "invalid"] as const)(
     "delivers native history with %s app-server protocol",

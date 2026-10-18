@@ -1440,7 +1440,7 @@ export function makeCodexAppServerProtocolLogger(input: {
           protocol: "codex.app-server",
           kind: "protocol",
           providerSessionId: input.providerSessionId,
-          event: redactCodexProtocolValue(boundProviderEventForLogging(event)),
+          event: boundProviderEventForLogging(redactCodexProtocolValue(event)),
         },
         input.threadId,
       )
@@ -1459,6 +1459,7 @@ function redactCodexProtocolValue(value: unknown): unknown {
     if (/^Bearer\s+/i.test(value)) {
       return "[REDACTED]";
     }
+    if (/^data:audio\//i.test(value)) return "[REDACTED AUDIO]";
     const trimmed = value.trim();
     if (
       !(
@@ -3139,12 +3140,31 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             } satisfies CodexSchema.V2TurnStartParams__UserInput;
           });
 
+        const supportsAudioInput = (model: string) =>
+          Effect.gen(function* () {
+            let cursor: string | undefined;
+            do {
+              const page: CodexSchema.V2ModelListResponse = yield* client.request(
+                "model/list",
+                cursor === undefined ? {} : { cursor },
+              );
+              const selected = page.data.find(
+                (entry) => entry.model === model || entry.id === model,
+              );
+              if (selected !== undefined)
+                return selected.inputModalities?.includes("audio") === true;
+              cursor = page.nextCursor ?? undefined;
+            } while (cursor !== undefined);
+            return false;
+          }).pipe(Effect.orElseSucceed(() => false));
+
         const toCodexInput = (
           turnInput: Pick<
             | ProviderAdapter.ProviderAdapterV2TurnInput
             | ProviderAdapter.ProviderAdapterV2SteerInput,
             "message"
           >,
+          modelSelection: ModelSelection,
         ) =>
           Effect.gen(function* () {
             const inputItems: Array<CodexSchema.V2TurnStartParams__UserInput> = [];
@@ -3166,6 +3186,47 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               { concurrency: 1 },
             );
             inputItems.push(...attachmentItems);
+            // Match Codex 0.163's local-media formats and 50 MiB decoded-byte limit.
+            const audioMimes: Record<string, string> = {
+              wav: "audio/wav",
+              mp3: "audio/mpeg",
+              m4a: "audio/mp4",
+              webm: "audio/webm",
+              ogg: "audio/ogg",
+            };
+            const audioAttachments = turnInput.message.attachments.filter(
+              (attachment) =>
+                (attachment.mimeType.startsWith("audio/") ||
+                  attachment.mimeType === "application/octet-stream") &&
+                Object.hasOwn(audioMimes, attachment.name.split(".").at(-1)?.toLowerCase() ?? "") &&
+                attachment.sizeBytes <= 50 * 1024 * 1024,
+            );
+            if (audioAttachments.length > 0 && (yield* supportsAudioInput(modelSelection.model))) {
+              let remainingBytes = 50 * 1024 * 1024;
+              for (const attachment of audioAttachments) {
+                const audio = yield* Effect.gen(function* () {
+                  const path = resolveAttachmentPath({
+                    attachmentsDir: serverConfig.attachmentsDir,
+                    attachment,
+                  });
+                  if (path === null) return;
+                  const stat = yield* fileSystem.stat(path);
+                  if (stat.type !== "File" || stat.size > BigInt(remainingBytes)) return;
+                  const chunks = yield* fileSystem
+                    .stream(path, { bytesToRead: remainingBytes + 1 })
+                    .pipe(Stream.runCollect);
+                  const bytes = Buffer.concat(chunks);
+                  if (bytes.length === 0 || bytes.length > remainingBytes) return;
+                  remainingBytes -= bytes.length;
+                  const mime = audioMimes[attachment.name.split(".").at(-1)!.toLowerCase()];
+                  return {
+                    type: "audio" as const,
+                    url: `data:${mime};base64,${bytes.toString("base64")}`,
+                  };
+                }).pipe(Effect.orElseSucceed(() => undefined));
+                if (audio !== undefined) inputItems.push(audio);
+              }
+            }
             if (inputItems.length === 0) {
               return yield* toProtocolError("Turn requires non-empty text or attachments.");
             }
@@ -6208,7 +6269,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               else next.delete(threadId);
               return next;
             });
-            const started = yield* client.request("turn/start", turnStartParams);
+            const started = yield* client.request("turn/start", turnStartParams).pipe(
+              Effect.catchTags({
+                CodexAppServerRequestError: (error) =>
+                  error.code === -32602 &&
+                  /audio/i.test(error.errorMessage) &&
+                  turnStartParams.input.some((item) => item.type === "audio")
+                    ? client.request("turn/start", {
+                        ...turnStartParams,
+                        input: turnStartParams.input.filter((item) => item.type !== "audio"),
+                      })
+                    : Effect.fail(error),
+              }),
+            );
             yield* registerRootTurn({
               turnInput,
               nativeTurnId: started.turn.id,
@@ -6294,10 +6367,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* startNativeTurn(
                 turnInput,
                 command.type === "set"
-                  ? yield* toCodexInput({
-                      ...turnInput,
-                      message: { ...turnInput.message, text: command.objective },
-                    })
+                  ? yield* toCodexInput(
+                      {
+                        ...turnInput,
+                        message: { ...turnInput.message, text: command.objective },
+                      },
+                      turnInput.modelSelection,
+                    )
                   : [],
               );
               if (activation.stopped) return;
@@ -6617,7 +6693,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* startNativeTurn(
                 turnInput,
                 turnInput.restartContinuationOfRunId === undefined
-                  ? yield* toCodexInput(turnInput)
+                  ? yield* toCodexInput(turnInput, turnInput.modelSelection)
                   : [],
               );
             }).pipe(
@@ -6651,12 +6727,27 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 );
               }
 
-              const codexInput = yield* toCodexInput(turnInput);
-              yield* client.request("turn/steer", {
-                expectedTurnId: activeTurn.nativeTurnId,
-                input: codexInput,
-                threadId,
-              });
+              const codexInput = yield* toCodexInput(turnInput, activeTurn.input.modelSelection);
+              yield* client
+                .request("turn/steer", {
+                  expectedTurnId: activeTurn.nativeTurnId,
+                  input: codexInput,
+                  threadId,
+                })
+                .pipe(
+                  Effect.catchTags({
+                    CodexAppServerRequestError: (error) =>
+                      error.code === -32602 &&
+                      /audio/i.test(error.errorMessage) &&
+                      codexInput.some((item) => item.type === "audio")
+                        ? client.request("turn/steer", {
+                            expectedTurnId: activeTurn.nativeTurnId,
+                            input: codexInput.filter((item) => item.type !== "audio"),
+                            threadId,
+                          })
+                        : Effect.fail(error),
+                  }),
+                );
             }).pipe(
               Effect.mapError(
                 (cause) =>
@@ -7162,7 +7253,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 providerTurns: [],
                 messages: [],
                 runtimeRequests: [],
-                providerPayload: response.thread,
+                providerPayload: redactCodexProtocolValue(response.thread),
               };
             }).pipe(
               Effect.mapError(
@@ -7237,7 +7328,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 providerTurns: [],
                 messages: [],
                 runtimeRequests: [],
-                providerPayload: response.thread,
+                providerPayload: redactCodexProtocolValue(response.thread),
               };
             }).pipe(
               Effect.mapError(
