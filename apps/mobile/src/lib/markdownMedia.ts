@@ -2,6 +2,8 @@ import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
+import { audioMimeTypeFromExtension } from "@t3tools/shared/filePreview";
+import { inlineFilePreviewKind } from "./filePreview";
 import { splitFilePathPosition } from "@t3tools/shared/fileLinks";
 import {
   mediaFileReference,
@@ -27,7 +29,7 @@ export function resolveMarkdownMediaPreview(
   },
 ):
   | { readonly kind: "image"; readonly source: FilePreviewSource }
-  | { readonly kind: "pdf"; readonly source: FilePreviewSource }
+  | { readonly kind: "pdf" | "audio" | "table"; readonly source: FilePreviewSource }
   | { readonly kind: "video"; readonly source: MediaVideoPreviewSource }
   | null {
   const classified = classifyMarkdownImageSource(href, input.workspaceRoot);
@@ -39,12 +41,25 @@ export function resolveMarkdownMediaPreview(
         ? mediaUrlReference(path)
         : mediaFileReference(path, input.workspaceRoot);
     const name = reference && mediaReferenceFileName(reference);
-    if (name && /\.pdf$/i.test(name)) {
-      const common = { kind: "pdf" as const, name, mimeType: "application/pdf" };
+    const kind = name ? inlineFilePreviewKind({ name }) : null;
+    if (name && kind) {
+      const mimeType =
+        kind === "pdf"
+          ? "application/pdf"
+          : kind === "audio"
+            ? (audioMimeTypeFromExtension(name.slice(name.lastIndexOf("."))) ?? "audio/mpeg")
+            : /\.tsv$/i.test(name)
+              ? "text/tab-separated-values"
+              : "text/csv";
+      const common = {
+        kind: kind === "pdf" ? ("pdf" as const) : ("document" as const),
+        name,
+        mimeType,
+      };
       if (classified._tag === "Direct") {
         const uri = normalizeNativeMarkdownUrl(path);
         return {
-          kind: "pdf",
+          kind,
           source: {
             ...common,
             uri,
@@ -65,7 +80,7 @@ export function resolveMarkdownMediaPreview(
           : null;
       if (!resource) return null;
       return {
-        kind: "pdf",
+        kind,
         source: {
           ...common,
           environmentId: input.environmentId,

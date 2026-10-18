@@ -105,7 +105,8 @@ import { assetImageSource } from "../../lib/assetImageSource";
 import { composerImageGallery } from "../../lib/composerImageGallery";
 import { messageImageGallery } from "./messageImageGallery";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
-import { isPdfFile } from "../../lib/filePreview";
+import { inlineFilePreviewKind, isPdfFile } from "../../lib/filePreview";
+import { ThreadInlineFilePreview } from "./ThreadInlineFilePreview";
 import { flattenThemeColor } from "../../lib/mobileTheme";
 import { PresentationSource } from "../../components/ui/NativePresentation";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -612,6 +613,55 @@ function MessageAttachmentFile(props: {
     })();
   };
 
+  const openAttachment = () =>
+    isPdf
+      ? props.onPressPreview({
+          kind: "pdf",
+          name: attachment.name,
+          environmentId: props.environmentId,
+          resource: {
+            _tag: "attachment",
+            attachmentId: attachment.id,
+            fileName: attachment.name,
+            mimeType: "application/pdf",
+          },
+          sourceIdentifier,
+        })
+      : navigation.navigate("ThreadAttachment", {
+          environmentId: String(props.environmentId),
+          ...(selectedThread ? { threadId: String(selectedThread.id) } : {}),
+          attachmentId: attachment.id,
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          sizeBytes: String(attachment.sizeBytes),
+        });
+  const inlineKind = inlineFilePreviewKind(attachment);
+  if (inlineKind) {
+    return (
+      <PresentationSource identifier={sourceIdentifier}>
+        <ThreadInlineFilePreview
+          key={attachment.id}
+          kind={inlineKind}
+          source={{
+            kind: inlineKind === "pdf" ? "pdf" : "document",
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            environmentId: props.environmentId,
+            resource: {
+              _tag: "attachment",
+              attachmentId: attachment.id,
+              fileName: attachment.name,
+              mimeType: attachment.mimeType,
+            },
+          }}
+          sizeBytes={attachment.sizeBytes}
+          onOpen={openAttachment}
+          onLongPress={() => shareFile(sourceIdentifier)}
+        />
+      </PresentationSource>
+    );
+  }
+
   if (videoType !== null) {
     const sourceIdentifier = `attachment:${props.environmentId}:${attachment.id}`;
     return (
@@ -646,29 +696,7 @@ function MessageAttachmentFile(props: {
           disabled={opening || httpBaseUrl === null}
           className="min-w-0 flex-row items-center gap-3 rounded-xl border border-border bg-card p-3 active:bg-subtle"
           onLongPress={() => shareFile(sourceIdentifier)}
-          onPress={() =>
-            isPdf
-              ? props.onPressPreview({
-                  kind: "pdf",
-                  name: attachment.name,
-                  environmentId: props.environmentId,
-                  resource: {
-                    _tag: "attachment",
-                    attachmentId: attachment.id,
-                    fileName: attachment.name,
-                    mimeType: "application/pdf",
-                  },
-                  sourceIdentifier,
-                })
-              : navigation.navigate("ThreadAttachment", {
-                  environmentId: String(props.environmentId),
-                  ...(selectedThread ? { threadId: String(selectedThread.id) } : {}),
-                  attachmentId: attachment.id,
-                  name: attachment.name,
-                  mimeType: attachment.mimeType,
-                  sizeBytes: String(attachment.sizeBytes),
-                })
-          }
+          onPress={openAttachment}
         >
           <View className="h-12 w-10 shrink-0 items-center justify-center rounded-lg bg-subtle">
             {opening ? (
@@ -1808,6 +1836,17 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       void Haptics.selectionAsync();
       if (media.kind === "video") {
         setExpandedVideo((current) => current ?? media.source);
+      } else if (
+        (media.kind === "audio" || media.kind === "table") &&
+        "resource" in media.source &&
+        "path" in media.source.resource &&
+        typeof media.source.resource.path === "string"
+      ) {
+        navigation.navigate("ThreadFile", {
+          environmentId: String(props.environmentId),
+          threadId: String(props.threadId),
+          path: fileRoutePathSegments(media.source.resource.path),
+        });
       } else {
         setExpandedFile((current) => current ?? media.source);
       }
@@ -1894,6 +1933,16 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         <ThreadMarkdownVideo
           key={image.href}
           source={{ ...media.source, name: image.alt ?? media.source.name }}
+        />
+      );
+    }
+    if (media && (media.kind === "audio" || media.kind === "pdf" || media.kind === "table")) {
+      return (
+        <ThreadInlineFilePreview
+          key={image.href}
+          kind={media.kind}
+          source={media.source}
+          onOpen={() => onMarkdownLinkPress(image.href, true)}
         />
       );
     }
