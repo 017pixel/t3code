@@ -615,7 +615,9 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   const activeMode =
     relativePath !== null && modeOverride?.path === relativePath
       ? modeOverride.mode
-      : defaultViewMode(relativePath);
+      : targetLine !== null && filePreviewDelimiter({ name: relativePath ?? "" }) !== null
+        ? "source"
+        : defaultViewMode(relativePath);
   const resolvedActiveMode =
     isVideoFile || isAudioFile ? "preview" : canPreview ? activeMode : "source";
   const assetPreviewPath =

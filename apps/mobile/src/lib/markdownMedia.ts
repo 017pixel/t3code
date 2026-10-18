@@ -2,8 +2,10 @@ import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
-import { audioMimeTypeFromExtension } from "@t3tools/shared/filePreview";
-import { inlineFilePreviewKind } from "./filePreview";
+import {
+  audioMimeTypeFromExtension,
+  mediaMimeTypeFromExtension,
+} from "@t3tools/shared/filePreview";
 import { splitFilePathPosition } from "@t3tools/shared/fileLinks";
 import {
   mediaFileReference,
@@ -18,6 +20,18 @@ import type { FilePreviewSource } from "../components/FilePreviewModal";
 import type { MediaVideoPreviewSource } from "./videoPreviewSource";
 import type { MediaActionsSource } from "./mediaActionsSource";
 
+const DOCUMENT_MIME_TYPES: Readonly<Record<string, string>> = {
+  ".pdf": "application/pdf",
+  ".csv": "text/csv",
+  ".tsv": "text/tab-separated-values",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
 export function resolveMarkdownMediaPreview(
   href: string,
   input: {
@@ -29,10 +43,12 @@ export function resolveMarkdownMediaPreview(
   },
 ):
   | { readonly kind: "image"; readonly source: FilePreviewSource }
-  | { readonly kind: "pdf" | "audio" | "table"; readonly source: FilePreviewSource }
+  | { readonly kind: "pdf" | "audio" | "document"; readonly source: FilePreviewSource }
   | { readonly kind: "video"; readonly source: MediaVideoPreviewSource }
   | null {
   const classified = classifyMarkdownImageSource(href, input.workspaceRoot);
+  if (classified._tag === "Direct" && /^data:(?!image\/|video\/)/i.test(classified.uri))
+    return null;
   if (classified._tag !== "Blocked") {
     const path =
       classified._tag === "Direct" ? classified.uri : splitFilePathPosition(classified.path).path;
@@ -41,16 +57,13 @@ export function resolveMarkdownMediaPreview(
         ? mediaUrlReference(path)
         : mediaFileReference(path, input.workspaceRoot);
     const name = reference && mediaReferenceFileName(reference);
-    const kind = name ? inlineFilePreviewKind({ name }) : null;
-    if (name && kind) {
+    const extension = name?.slice(name.lastIndexOf(".")).toLowerCase() ?? "";
+    const isFile = classified._tag === "WorkspaceFile" || /^\.[a-z0-9]+$/i.test(extension);
+    if (name && isFile && mediaMimeTypeFromExtension(extension) === null) {
+      const audioMimeType = audioMimeTypeFromExtension(extension);
+      const kind = audioMimeType ? "audio" : extension === ".pdf" ? "pdf" : "document";
       const mimeType =
-        kind === "pdf"
-          ? "application/pdf"
-          : kind === "audio"
-            ? (audioMimeTypeFromExtension(name.slice(name.lastIndexOf("."))) ?? "audio/mpeg")
-            : /\.tsv$/i.test(name)
-              ? "text/tab-separated-values"
-              : "text/csv";
+        audioMimeType ?? DOCUMENT_MIME_TYPES[extension] ?? "application/octet-stream";
       const common = {
         kind: kind === "pdf" ? ("pdf" as const) : ("document" as const),
         name,

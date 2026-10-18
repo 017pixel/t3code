@@ -79,6 +79,11 @@ describe("resolveMarkdownMediaPreview", () => {
     "./sound.mp3",
     "./report.csv",
     "./report.tsv",
+    "./report.docx",
+    "./report.xlsx",
+    "./report.pptx",
+    "./report.unknown",
+    "./LICENSE",
   ])("opens relative media through the environment: %s", (href) => {
     const preview = resolveMarkdownMediaPreview(href, input);
     expect(preview?.source).toMatchObject({
@@ -117,6 +122,11 @@ describe("resolveMarkdownMediaPreview", () => {
     "./sound.mp3",
     "./report.csv",
     "./report.tsv",
+    "./report.docx",
+    "./report.xlsx",
+    "./report.pptx",
+    "./report.unknown",
+    "./LICENSE",
   ])("uses the draft workspace when no thread exists: %s", (href) => {
     expect(
       resolveMarkdownMediaPreview(href, { ...input, threadId: undefined })?.source,
@@ -134,6 +144,11 @@ describe("resolveMarkdownMediaPreview", () => {
       "./sound.mp3",
       "./report.csv",
       "./report.tsv",
+      "./report.docx",
+      "./report.xlsx",
+      "./report.pptx",
+      "./report.unknown",
+      "./LICENSE",
     ]) {
       expect(resolveMarkdownMediaPreview(href, captured)).toBeNull();
     }
@@ -157,8 +172,8 @@ describe("resolveMarkdownMediaPreview", () => {
   });
   it.each([
     ["/tmp/sound%23one.mp3", "audio", "audio/mpeg", "/tmp/sound#one.mp3"],
-    ["report.csv", "table", "text/csv", "/repo/report.csv"],
-    ["report.tsv", "table", "text/tab-separated-values", "/repo/report.tsv"],
+    ["report.csv", "document", "text/csv", "/repo/report.csv"],
+    ["report.tsv", "document", "text/tab-separated-values", "/repo/report.tsv"],
   ])("opens an authored embed through the host: %s", (href, kind, mimeType, path) => {
     expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true })).toMatchObject({
       kind,
@@ -174,8 +189,12 @@ describe("resolveMarkdownMediaPreview", () => {
 
   it.each([
     ["sound%20one.mp3", "audio"],
-    ["report%20one.csv", "table"],
-    ["report.tsv", "table"],
+    ["report%20one.csv", "document"],
+    ["report.tsv", "document"],
+    ["report.docx", "document"],
+    ["report.xlsx", "document"],
+    ["report.pptx", "document"],
+    ["report.unknown", "document"],
   ])("preserves direct signed embeds: %s", (name, kind) => {
     const href = `https://cdn.example.com/${name}?signature=a%2fb`;
     expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true })).toMatchObject({
@@ -184,10 +203,84 @@ describe("resolveMarkdownMediaPreview", () => {
     });
   });
 
-  it.each(["javascript:report.csv", "data:text/csv,a,b", "report.csv.exe"])(
-    "rejects blocked or unsupported document embeds: %s",
-    (href) => {
-      expect(resolveMarkdownMediaPreview(href, input)).toBeNull();
+  it.each([
+    "javascript:report.csv",
+    "data:text/csv,a,b",
+    "ftp://server/report.csv",
+    "~/report.csv",
+  ])("rejects blocked document links and embeds: %s", (href) => {
+    expect(resolveMarkdownMediaPreview(href, input)).toBeNull();
+    expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true })).toBeNull();
+  });
+
+  it.each([
+    "report.csv",
+    "report.tsv",
+    "report.docx",
+    "report.xlsx",
+    "report.pptx",
+    "report.unknown",
+    "LICENSE",
+  ])("requests the same signed asset for file links and embeds: %s", (name) => {
+    for (const href of [name, "./" + name, "/tmp/" + name, "file:///tmp/" + name]) {
+      const path = href.startsWith("file:")
+        ? href.slice(7)
+        : href.startsWith("/")
+          ? href
+          : "/repo/" + href;
+      for (const imageEmbed of [false, true]) {
+        expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed })).toMatchObject({
+          kind: "document",
+          source: {
+            kind: "document",
+            name,
+            environmentId: input.environmentId,
+            resource: { _tag: "media-file", threadId: input.threadId, path },
+          },
+        });
+      }
+    }
+  });
+
+  it.each(["mp3", "wav", "m4a", "ogg", "oga", "aac", "aiff", "flac", "opus"])(
+    "resolves audio embeds as audio rather than images: %s",
+    (extension) => {
+      expect(
+        resolveMarkdownMediaPreview("/tmp/sound." + extension, { ...input, imageEmbed: true }),
+      ).toMatchObject({
+        kind: "audio",
+        source: { kind: "document", resource: { _tag: "media-file" } },
+      });
     },
   );
+
+  it("does not authorize local files without thread or draft context", () => {
+    expect(
+      resolveMarkdownMediaPreview("/tmp/report.docx", {
+        ...input,
+        threadId: undefined,
+        workspaceRoot: null,
+      }),
+    ).toBeNull();
+    expect(
+      resolveMarkdownMediaPreview("report.docx", { ...input, workspaceRoot: null }),
+    ).toBeNull();
+  });
+
+  it("decodes document filenames once and preserves image and video embeds", () => {
+    expect(resolveMarkdownMediaPreview("/tmp/report%23one%2520.docx", input)).toMatchObject({
+      kind: "document",
+      source: {
+        name: "report#one%20.docx",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        resource: { path: "/tmp/report#one%20.docx" },
+      },
+    });
+    expect(
+      resolveMarkdownMediaPreview("/tmp/image.png", { ...input, imageEmbed: true })?.kind,
+    ).toBe("image");
+    expect(resolveMarkdownMediaPreview("/tmp/clip.mp4", { ...input, imageEmbed: true })?.kind).toBe(
+      "video",
+    );
+  });
 });
