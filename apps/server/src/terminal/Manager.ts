@@ -1531,10 +1531,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   };
 
   // Legacy files predate the "terminal_" scheme, so a legacy name carrying that
-  // prefix can only be another thread's current history file.
+  // prefix can only be another thread's current history file. Compare without
+  // case: on case-insensitive filesystems (macOS, Windows) "Terminal_x.log"
+  // resolves to the same file as "terminal_x.log".
   const legacyHistoryName = (threadId: string) => {
     const name = legacySafeThreadId(threadId);
-    return name.startsWith("terminal_") ? undefined : `${name}.log`;
+    return name.toLowerCase().startsWith("terminal_") ? undefined : `${name}.log`;
   };
 
   const readManagerState = SynchronizedRef.get(managerStateRef);
