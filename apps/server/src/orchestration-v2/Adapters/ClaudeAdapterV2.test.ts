@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- workflow fixtures use files and the fake Claude CLI uses Node streams
+import { PDFDocument } from "pdf-lib";
 import * as NodeEvents from "node:events";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -24,6 +25,7 @@ import type {
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ChatAttachmentId,
+  type ChatAttachment,
   ChatFileAttachment,
   ChatImageAttachment,
   CheckpointId,
@@ -1601,7 +1603,7 @@ describe("ClaudeAdapterV2 resume compaction", () => {
 });
 
 describe("ClaudeAdapterV2 attachments", () => {
-  it.effect("forwards images and references generic files on sends and steering", () =>
+  it.effect("sends native PDFs and images with path fallbacks", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -1677,9 +1679,12 @@ describe("ClaudeAdapterV2 attachments", () => {
           path.join(attachmentsDir, attachmentRelativePath(attachment)!),
           Uint8Array.from([1, 2, 3, 4]),
         );
+        const pdf = yield* Effect.promise(() => PDFDocument.create());
+        pdf.addPage();
+        const pdfBytes = yield* Effect.promise(() => pdf.save());
         yield* fileSystem.writeFile(
           path.join(attachmentsDir, attachmentRelativePath(document)!),
-          Uint8Array.from([5, 6, 7, 8]),
+          pdfBytes,
         );
         const attemptId = RunAttemptId.make("attempt-claude-attachments");
         const now = yield* DateTime.now;
@@ -1703,6 +1708,14 @@ describe("ClaudeAdapterV2 attachments", () => {
             data: "AQIDBA==",
           },
         } as const;
+        const expectedDocumentBlock = {
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: Buffer.from(pdfBytes).toString("base64"),
+          },
+        } as const;
         const expectedAttachmentPath = path.join(
           attachmentsDir,
           attachmentRelativePath(attachment)!,
@@ -1710,6 +1723,7 @@ describe("ClaudeAdapterV2 attachments", () => {
         const expectedDocumentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
         assert.deepEqual(offeredMessages[0]?.message.content, [
           expectedImageBlock,
+          expectedDocumentBlock,
           {
             type: "text",
             text: `Ultrathink:\nWhat's in this image?\n\n[Attached image "diagram.png" is saved at: ${expectedAttachmentPath}]\n\n[Attached file "requirements.pdf" is saved at: ${expectedDocumentPath}]`,
@@ -1737,11 +1751,69 @@ describe("ClaudeAdapterV2 attachments", () => {
         assert.equal(offeredMessages[1]?.priority, "now");
         assert.deepEqual(offeredMessages[1]?.message.content, [
           expectedImageBlock,
+          expectedDocumentBlock,
           {
             type: "text",
             text: `Ultrathink:\nFocus on the diagram labels.\n\n[Attached image "diagram.png" is saved at: ${expectedAttachmentPath}]\n\n[Attached file "requirements.pdf" is saved at: ${expectedDocumentPath}]`,
           },
         ]);
+        const documentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
+        for (const scenario of [
+          "pages",
+          "bytes",
+          "invalid",
+          "aggregate-pages",
+          "pasted-text",
+          "text-only",
+        ]) {
+          let attachments: ReadonlyArray<ChatAttachment> = [document];
+          if (scenario === "pages" || scenario === "aggregate-pages") {
+            const large = yield* Effect.promise(() => PDFDocument.create());
+            for (let i = 0; i < (scenario === "pages" ? 101 : 60); i++) large.addPage();
+            yield* fileSystem.writeFile(documentPath, yield* Effect.promise(() => large.save()));
+            if (scenario === "aggregate-pages") {
+              const second = {
+                ...document,
+                id: ChatAttachmentId.make("second-pdf"),
+                name: "second.pdf",
+              };
+              yield* fileSystem.copyFile(
+                documentPath,
+                path.join(attachmentsDir, attachmentRelativePath(second)!),
+              );
+              attachments = [document, second];
+            }
+          } else if (scenario === "bytes") {
+            yield* fileSystem.truncate(documentPath, 20 * 1024 * 1024 + 1);
+          } else if (scenario === "invalid") {
+            yield* fileSystem.writeFileString(documentPath, "This is not a PDF");
+          } else if (scenario === "pasted-text") {
+            yield* fileSystem.writeFile(documentPath, pdfBytes);
+            attachments = [{ ...document, source: { _tag: "pasted-text" } }];
+          } else {
+            attachments = [];
+            yield* fileSystem.remove(documentPath);
+          }
+          yield* runtime.steerTurn({
+            threadId,
+            runId: RunId.make("run-claude-attachments"),
+            providerThread,
+            providerTurnId,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: MessageId.make(`message-${scenario}`),
+              text: "Continue.",
+              attachments,
+            },
+          });
+          const sent = offeredMessages.at(-1)!.message.content;
+          const documents =
+            typeof sent === "string" ? [] : sent.filter((block) => block.type === "document");
+          assert.lengthOf(documents, scenario === "aggregate-pages" ? 1 : 0, scenario);
+          if (scenario === "text-only") assert.equal(sent, "Ultrathink:\nContinue.");
+          else assert.include(JSON.stringify(sent), documentPath);
+        }
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

@@ -1,4 +1,5 @@
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
+import { PDFDocument } from "pdf-lib";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 import {
   dynamicToolTitle,
@@ -59,6 +60,7 @@ import {
 } from "@t3tools/shared/claudeCompaction";
 import {
   type ChatAttachment,
+  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   ClaudeSettings,
   defaultInstanceIdForDriver,
   type ModelSelection,
@@ -1652,12 +1654,61 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
       ? undefined
       : planClaudeSkillDispatch(textWithAttachmentPaths, input.skillNames);
   const content: Array<ClaudeUserContentBlock> = [];
+  // Base64 adds a third to the payload. Leave room below Anthropic's 32 MB
+  // request limit for text, instructions, and SDK framing. The SDK does not
+  // expose document/context-window capabilities, so use the 100-page limit
+  // that also applies to models with less than a 1M-token context window.
+  let nativeBytes = Buffer.byteLength(textWithAttachmentPaths);
+  let pdfPages = 0;
+  const nativeByteBudget = Math.min(PROVIDER_SEND_TURN_MAX_FILE_BYTES, 20 * 1024 * 1024);
+  for (const attachment of input.attachments) {
+    if (attachment.type === "image") nativeBytes += attachment.sizeBytes;
+  }
   if (dispatch?.leadingText !== undefined) {
     content.push({ type: "text", text: dispatch.leadingText });
   }
 
   for (const attachment of input.attachments) {
     if (attachment.type === "file") {
+      if (
+        attachment.mimeType.toLowerCase().split(";", 1)[0]?.trim() !== "application/pdf" ||
+        ("source" in attachment && attachment.source?._tag === "pasted-text")
+      )
+        continue;
+      const attachmentPath = resolveAttachmentPath({
+        attachmentsDir: input.attachmentsDir,
+        attachment,
+      });
+      if (attachmentPath === null) continue;
+      const remainingBytes = nativeByteBudget - nativeBytes;
+      const info = yield* input.fileSystem
+        .stat(attachmentPath)
+        .pipe(Effect.orElseSucceed(() => null));
+      if (info?.type !== "File" || Number(info.size) > remainingBytes || remainingBytes <= 0)
+        continue;
+      const bytes = yield* input.fileSystem
+        .stream(attachmentPath, { bytesToRead: remainingBytes + 1 })
+        .pipe(
+          Stream.runCollect,
+          Effect.map((chunks) => Buffer.concat(chunks)),
+          Effect.orElseSucceed(() => null),
+        );
+      if (bytes === null || bytes.length > remainingBytes) continue;
+      const document = yield* Effect.tryPromise(() => PDFDocument.load(bytes)).pipe(
+        Effect.orElseSucceed(() => null),
+      );
+      if (
+        document === null ||
+        document.getPageCount() === 0 ||
+        pdfPages + document.getPageCount() > 100
+      )
+        continue;
+      nativeBytes += bytes.length;
+      pdfPages += document.getPageCount();
+      content.push({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: bytes.toString("base64") },
+      });
       continue;
     }
     if (!isSupportedClaudeImageMimeType(attachment.mimeType)) {

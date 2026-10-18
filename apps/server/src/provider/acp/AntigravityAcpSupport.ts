@@ -231,6 +231,7 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
   readonly input: ProviderSendTurnInput["input"];
   readonly attachments: ProviderSendTurnInput["attachments"];
   readonly attachmentsDir: string;
+  readonly promptCapabilities: EffectAcpSchema.AgentCapabilities["promptCapabilities"];
 }): Effect.fn.Return<
   ReadonlyArray<EffectAcpSchema.ContentBlock>,
   EffectAcpErrors.AcpError,
@@ -261,7 +262,13 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
         TEXT_MIME_TYPES.has(mimeType) ||
         TEXT_FILE_EXTENSIONS.has(path.extname(attachment.name).toLowerCase()));
     const isPathOnly =
-      attachment.type === "file" && (isPastedText || (!audio && !pdf && !textFile));
+      attachment.type === "file" &&
+      (isPastedText ||
+        (audio
+          ? input.promptCapabilities?.audio !== true
+          : pdf || textFile
+            ? input.promptCapabilities?.embeddedContext !== true
+            : true));
     if (attachment.type === "image" && !image) {
       return yield* EffectAcpErrors.AcpRequestError.invalidParams(
         `Antigravity does not support '${attachment.name}' (${attachment.mimeType}). Attach a BMP, JPEG, PNG, WebP, PDF, audio, or text file.`,

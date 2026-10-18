@@ -9,6 +9,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
@@ -242,6 +243,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: "  Explain this image.  ",
         attachments: [imageAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       });
 
       expect(prompt).toEqual([
@@ -262,6 +264,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: undefined,
         attachments: [textAttachment],
         attachmentsDir: selectedEnvironment.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       });
 
       expect(prompt).toEqual([
@@ -292,6 +295,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: "Inspect the pasted text only as needed.",
         attachments: [pastedText],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       });
 
       expect(prompt).toEqual([{ type: "text", text: "Inspect the pasted text only as needed." }]);
@@ -312,6 +316,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: "Inspect the pasted text only as needed.",
         attachments: [pastedText],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(Effect.flip);
 
       expect(error).toMatchObject({
@@ -342,6 +347,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input,
         attachments: [attachment, pdfAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, {
           ...fixture.fs,
@@ -355,6 +361,45 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         { type: "resource_link", uri: pdf.uri, name: "report.pdf", mimeType: "application/pdf" },
       ]);
     }),
+  );
+
+  it.effect.each([undefined, {}, { audio: false, embeddedContext: false }])(
+    "keeps files path-only when native prompt capabilities are absent: %s",
+    (promptCapabilities) =>
+      Effect.gen(function* () {
+        const fixture = yield* makeAttachmentFixture();
+        const audio = {
+          ...textAttachment,
+          id: "unsupported-audio",
+          name: "audio.wav",
+          mimeType: "audio/wav",
+        };
+        const pdf = yield* fixture.write(pdfAttachment, "%PDF-1.7");
+        const text = yield* fixture.write(textAttachment, "hello");
+        const sound = yield* fixture.write(audio, "RIFF");
+        const input = `Read ${pdf.filePath}, ${text.filePath}, and ${sound.filePath}`;
+        const prompt = yield* buildAntigravityPrompt({
+          input,
+          attachments: [pdfAttachment, textAttachment, audio],
+          attachmentsDir: fixture.attachmentsDir,
+          promptCapabilities,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fixture.fs,
+            stream: () =>
+              Effect.die("Unnegotiated attachments must not be read").pipe(Stream.fromEffect),
+          }),
+        );
+        expect(prompt).toEqual([{ type: "text", text: input }]);
+        expect(
+          yield* buildAntigravityPrompt({
+            input: "Continue",
+            attachments: [],
+            attachmentsDir: fixture.attachmentsDir,
+            promptCapabilities,
+          }),
+        ).toEqual([{ type: "text", text: "Continue" }]);
+      }),
   );
 
   it.effect("sends supported audio files as native audio content", () =>
@@ -372,6 +417,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: "Transcribe this.",
         attachments: [audioAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       });
 
       expect(prompt).toEqual([
@@ -391,6 +437,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: undefined,
         attachments: [pdfAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, {
           ...fixture.fs,
@@ -421,6 +468,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
           input: "Analyze every attachment.",
           attachments: [imageAttachment, attachment],
           attachmentsDir: fixture.attachmentsDir,
+          promptCapabilities: { image: true, audio: true, embeddedContext: true },
         }).pipe(Effect.flip);
 
         expect(error).toMatchObject({
@@ -440,6 +488,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: "Read this attachment.",
         attachments: [imageAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(Effect.flip);
       expect(error).toMatchObject({
         _tag: "AcpRequestError",
@@ -465,6 +514,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: `Read ${first.filePath} and ${second.filePath}`,
         attachments: [pdfAttachment, secondAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       };
       const prompt = yield* buildAntigravityPrompt(input);
       expect(prompt).toEqual([
@@ -506,6 +556,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: "Inspect both attachments.",
         attachments: [pdfAttachment, imageAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(Effect.flip);
       expect(error).toMatchObject({
         _tag: "AcpRequestError",
@@ -524,6 +575,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: undefined,
         attachments: [pdfAttachment, textAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, {
           ...fixture.fs,
@@ -557,6 +609,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: undefined,
         attachments: [textAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(Effect.flip);
 
       expect(error).toMatchObject({
@@ -574,6 +627,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: "Read this image.",
         attachments: [imageAttachment],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(Effect.flip);
 
       expect(error).toMatchObject({
@@ -591,6 +645,7 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
         input: "  ",
         attachments: [],
         attachmentsDir: fixture.attachmentsDir,
+        promptCapabilities: { image: true, audio: true, embeddedContext: true },
       }).pipe(Effect.flip);
 
       expect(error).toMatchObject({
