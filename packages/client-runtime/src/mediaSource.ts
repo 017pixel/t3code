@@ -73,7 +73,7 @@ export function resolveMediaSource(
         ? null
         : mediaMimeTypeFromExtension(basename.slice(extensionIndex));
   const mimeType = detectedMimeType ?? (input.imageEmbed ? "image/*" : null);
-  if (mimeType === null) return null;
+  if (mimeType === null || mimeType.startsWith("audio/")) return null;
   const kind = mimeType.startsWith("video/") ? "video" : "image";
 
   const reference =
