@@ -1741,25 +1741,23 @@ it.layer(
     }),
   );
 
-  it.effect.each([
-    { label: "open", close: false },
-    { label: "delete", close: true },
-  ])("does not $label another thread's history through a colliding legacy name", ({ close }) =>
-    Effect.gen(function* () {
-      const { manager, logsDir } = yield* createManager();
-      const fs = yield* FileSystem.FileSystem;
-      const otherThreadPath = yield* historyLogPath(logsDir, "a");
-      yield* fs.makeDirectory(logsDir, { recursive: true });
-      yield* fs.writeFileString(otherThreadPath, "thread a\n");
-      const threadId = `terminal_${Base64Url.encode("a")}`;
+  it.effect(
+    "does not read or delete another thread's history through a colliding legacy name",
+    () =>
+      Effect.gen(function* () {
+        const { manager, logsDir } = yield* createManager();
+        const fs = yield* FileSystem.FileSystem;
+        const otherThreadPath = yield* historyLogPath(logsDir, "a");
+        yield* fs.makeDirectory(logsDir, { recursive: true });
+        yield* fs.writeFileString(otherThreadPath, "thread a\n");
+        const threadId = `terminal_${Base64Url.encode("a")}`;
 
-      expect((yield* manager.open(openInput({ threadId }))).history).toBe("");
-      if (close) {
+        expect((yield* manager.open(openInput({ threadId }))).history).toBe("");
+        yield* manager.close({ threadId, terminalId: DEFAULT_TERMINAL_ID, deleteHistory: true });
         yield* manager.close({ threadId, deleteHistory: true });
-      }
 
-      expect(yield* fs.readFileString(otherThreadPath)).toBe("thread a\n");
-    }),
+        expect(yield* fs.readFileString(otherThreadPath)).toBe("thread a\n");
+      }),
   );
 
   it.effect("closes all terminals for a thread when close omits terminalId", () =>
