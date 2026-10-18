@@ -286,7 +286,10 @@ import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerImageThumbnail } from "./ComposerImageThumbnail";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
-import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
+import {
+  ComposerPendingApprovalKindIcon,
+  ComposerPendingApprovalPanel,
+} from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import {
@@ -1065,7 +1068,6 @@ import {
   PaperclipIcon,
   PencilRulerIcon,
   PlayIcon,
-  ShieldIcon,
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "@t3tools/shared/proposedPlanText";
@@ -6387,7 +6389,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     data-chat-composer-collapsed-controls="true"
                   >
                     <ComposerBanner.Icon>
-                      <ShieldIcon />
+                      <ComposerPendingApprovalKindIcon
+                        requestKind={activePendingApproval.requestKind}
+                      />
                     </ComposerBanner.Icon>
                     <ComposerBanner.Content>
                       <ComposerPendingApprovalPanel
