@@ -244,10 +244,6 @@ export const layerInstaller = Layer.effect(
   }),
 );
 
-/**
- * Split a chunk of installer output into complete lines. `\r` ends a line too,
- * so a redrawn progress bar reports its latest frame.
- */
 export function splitOutputLines(
   partialLine: string,
   text: string,
@@ -256,7 +252,6 @@ export function splitOutputLines(
   return { partialLine: (parts.pop() ?? "").slice(-UPDATE_PARTIAL_LINE_MAX_LENGTH), lines: parts };
 }
 
-/** Turn one raw output line into a short status message, or null if it has no text. */
 export function toProgressLine(line: string): string | null {
   const text = NodeUtil.stripVTControlCharacters(line).replace(/\s+/g, " ").trim();
   if (text.length === 0) {
@@ -267,7 +262,6 @@ export function toProgressLine(line: string): string | null {
     : `${text.slice(0, UPDATE_PROGRESS_MAX_LENGTH - 1)}…`;
 }
 
-/** `claude update` reads better in a status line than the full executable path. */
 function describeCommand(command: ProviderMaintenanceCommandAction): string {
   const executable = command.executable.split(/[\\/]/).pop() || command.executable;
   return [executable, ...command.args].join(" ");
@@ -618,12 +612,8 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               verified,
               instanceId,
             );
-            // "Succeeded" needs the provider to still be installed: an
-            // installer that exits 0 and leaves the binary missing is not a
-            // success. A missing version alone is not held against it, since
-            // Cursor's `about` probe can fail transiently on a healthy binary.
-            // A background install must reach its target, so a missing version
-            // counts there; a self-updater may land on a newer one.
+            // A missing version alone is not held against it, since Cursor's `about` probe can
+            // fail transiently on a healthy binary.
             const couldNotVerify =
               verifiedProviders.length === 0 ||
               verifiedProviders.some(
