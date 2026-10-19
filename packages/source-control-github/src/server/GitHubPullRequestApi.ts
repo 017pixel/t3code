@@ -1896,7 +1896,11 @@ export const make = Effect.gen(function* () {
             }),
             // An unreadable alias must not discard coverage answers for the other repositories.
             Effect.catchTags({
-              GraphQLClientError: () => Effect.succeed({ repository, covered: false }),
+              GraphQLClientError: (error) =>
+                error.reason._tag === "ResponseError" &&
+                error.reason.errors.every((error) => error.path?.[0] === "repository")
+                  ? Effect.succeed({ repository, covered: false })
+                  : Effect.fail(error),
             }),
           );
         },
