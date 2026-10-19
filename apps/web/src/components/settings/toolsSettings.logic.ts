@@ -597,7 +597,15 @@ export function parseMcpServerJson(text: string): McpServerDraft | null {
   const isServer = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" &&
     value !== null &&
-    ("command" in value || "url" in value || "serverUrl" in value || "httpUrl" in value);
+    !Array.isArray(value) &&
+    (("command" in value &&
+      (typeof value.command === "string" ||
+        (Array.isArray(value.command) &&
+          value.command.length > 0 &&
+          value.command.every((part) => typeof part === "string")))) ||
+      ("url" in value && typeof value.url === "string") ||
+      ("serverUrl" in value && typeof value.serverUrl === "string") ||
+      ("httpUrl" in value && typeof value.httpUrl === "string"));
   const [name, server] = isServer(record)
     ? ["", record]
     : (Object.entries(record).find(([, value]) => isServer(value)) ?? ["", undefined]);
@@ -612,7 +620,9 @@ export function parseMcpServerJson(text: string): McpServerDraft | null {
           stored: false,
         }))
       : [];
-  const url = server.url ?? server.serverUrl ?? server.httpUrl;
+  const url = [server.url, server.serverUrl, server.httpUrl].find(
+    (value) => typeof value === "string",
+  );
   if (typeof url === "string") {
     return {
       ...EMPTY_MCP_SERVER_DRAFT,

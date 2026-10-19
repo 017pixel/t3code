@@ -29,6 +29,53 @@ describe("MCP server editor", () => {
         env: [{ name: "API_TOKEN", value: "new-token", sensitive: true }],
       },
     });
+    for (const name of ["command", "url", "serverUrl", "httpUrl"]) {
+      for (const server of [
+        { command: "npx", args: ["my-mcp"] },
+        { command: ["npx", "my-mcp"] },
+        ...["url", "serverUrl", "httpUrl"].map((key) => ({
+          [key]: "https://example.com/mcp",
+        })),
+      ]) {
+        const imported = parseMcpServerJson(JSON.stringify({ [name]: server }));
+        expect(imported).not.toBeNull();
+        if (!imported) throw new Error("Expected a named server draft");
+        const transport =
+          "command" in server
+            ? { type: "stdio", command: "npx", args: ["my-mcp"], env: [] }
+            : { type: "http", url: "https://example.com/mcp", headers: [] };
+        expect(mcpServerFromDraft(imported, new Set())).toEqual({
+          ok: true,
+          name: name.toLowerCase(),
+          transport,
+        });
+        const single = parseMcpServerJson(JSON.stringify(server));
+        expect(single).not.toBeNull();
+        if (!single) throw new Error("Expected a single server draft");
+        expect(mcpServerFromDraft({ ...single, name: "single" }, new Set())).toEqual({
+          ok: true,
+          name: "single",
+          transport,
+        });
+      }
+    }
+    for (const invalid of [
+      null,
+      [],
+      { command: 42 },
+      { command: {} },
+      { command: [] },
+      { command: ["npx", 42] },
+      { url: false },
+      { serverUrl: {} },
+      { httpUrl: [] },
+    ]) {
+      expect(parseMcpServerJson(JSON.stringify({ invalid }))).toBeNull();
+      const imported = parseMcpServerJson(
+        JSON.stringify({ invalid, valid: { command: "npx", args: ["my-mcp"] } }),
+      );
+      expect(imported).toMatchObject({ name: "valid", command: "npx", args: "my-mcp" });
+    }
     expect(mcpServerFromDraft(draft, new Set(["docs"]))).toMatchObject({
       ok: false,
       field: "name",
