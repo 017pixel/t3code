@@ -22,6 +22,8 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
+  ProviderTurnId,
   OrchestrationV2ThreadProjectionJson,
   ScheduledTaskId,
   type ServerProvider,
@@ -37,6 +39,8 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
+import * as EffectWorker from "./EffectWorker.ts";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
@@ -261,6 +265,7 @@ function makeHarness(options: HarnessOptions = {}) {
   );
   return {
     layer: Layer.mergeAll(
+      layerOrchestrator,
       layerLaunch,
       layerRegistry,
       layerThreadManagement,
@@ -1466,7 +1471,11 @@ it.effect.each(
     const harness = makeHarness({
       createWorktree: (input) =>
         Effect.succeed({
-          worktree: { path: worktreePath, refName: input.newRefName, headSha: "abc" },
+          worktree: {
+            path: worktreePath,
+            refName: input.newRefName ?? input.refName,
+            headSha: "abc",
+          },
         } as never),
       renameBranch: git.renameBranch,
       generateBranchName: () =>
@@ -3446,4 +3455,179 @@ it.effect.each(
         }
       }).pipe(Effect.provide(Layer.merge(harness.layer, layerService)));
     }),
+);
+
+it.effect("names an empty launch only after its first provider-reaching message", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const worktreePath = yield* fs.makeTempDirectoryScoped({ prefix: "launch-first-turn-" });
+    let branch = "t3/abcd1234";
+    const delivered: Array<string> = [];
+    const testAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+      ...adapter,
+      openSession: (input) =>
+        Effect.gen(function* () {
+          const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+          const now = yield* DateTime.now;
+          const unused = () => Effect.die("unexpected provider operation");
+          return {
+            instanceId: adapter.instanceId,
+            driver: adapter.driver,
+            providerSessionId: input.providerSessionId,
+            providerSession: {
+              id: input.providerSessionId,
+              driver: adapter.driver,
+              providerInstanceId: adapter.instanceId,
+              status: "ready" as const,
+              cwd: worktreePath,
+              model: modelSelection.model,
+              capabilities: CodexProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+            events: Stream.fromQueue(events),
+            ensureThread: ({ threadId }) =>
+              Effect.succeed({
+                id: ProviderThreadId.make("provider-thread:first-real-turn"),
+                driver: adapter.driver,
+                providerInstanceId: adapter.instanceId,
+                providerSessionId: input.providerSessionId,
+                appThreadId: threadId,
+                ownerNodeId: null,
+                nativeThreadRef: {
+                  driver: adapter.driver,
+                  nativeId: "first-real-turn",
+                  strength: "strong" as const,
+                },
+                nativeConversationHeadRef: null,
+                status: "idle" as const,
+                firstRunOrdinal: null,
+                lastRunOrdinal: null,
+                handoffIds: [],
+                forkedFrom: null,
+                createdAt: now,
+                updatedAt: now,
+              }),
+            resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+            startTurn: (turn) =>
+              Effect.gen(function* () {
+                delivered.push(turn.message.text);
+                const providerTurnId = ProviderTurnId.make("provider-turn:" + turn.runOrdinal);
+                yield* Queue.offer(events, {
+                  type: "provider_turn.updated",
+                  driver: adapter.driver,
+                  providerTurn: {
+                    id: providerTurnId,
+                    providerThreadId: turn.providerThread.id,
+                    nodeId: turn.rootNodeId,
+                    runAttemptId: turn.attemptId,
+                    nativeTurnRef: null,
+                    ordinal: turn.providerTurnOrdinal,
+                    status: "completed",
+                    startedAt: now,
+                    completedAt: now,
+                  },
+                });
+                yield* Queue.offer(events, {
+                  type: "turn.terminal",
+                  driver: adapter.driver,
+                  providerThreadId: turn.providerThread.id,
+                  providerTurnId,
+                  runOrdinal: turn.runOrdinal,
+                  status: "completed",
+                  failure: null,
+                  threadDisposition: "reusable",
+                });
+              }),
+            steerTurn: unused,
+            interruptTurn: unused,
+            respondToRuntimeRequest: unused,
+            readThreadSnapshot: unused,
+            rollbackThread: unused,
+            forkThread: unused,
+          };
+        }),
+    };
+    const provisioned = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      adapters: [testAdapter],
+      createWorktree: (input) =>
+        Effect.succeed({
+          worktree: {
+            path: worktreePath,
+            refName: input.newRefName ?? input.refName,
+            headSha: "abc",
+          },
+        }),
+      runSetup: () =>
+        Deferred.succeed(provisioned, undefined).pipe(Effect.as({ status: "no-script" as const })),
+      renameBranch: (input) =>
+        Effect.sync(() => {
+          branch = input.newBranch;
+          return { branch };
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: "command:first-real-turn:launch",
+          thread: "thread:first-real-turn",
+          workspace: { type: "worktree", baseRef: "main", branch },
+        }),
+      );
+      yield* Deferred.await(provisioned);
+      const send = (text: string, suffix: string) =>
+        Effect.gen(function* () {
+          const afterSequence = yield* threads.getThreadEventSequence(launched.threadId);
+          yield* threads.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("command:first-real-turn:" + suffix),
+            threadId: launched.threadId,
+            messageId: MessageId.make("message:first-real-turn:" + suffix),
+            text,
+            attachments: [],
+            modelSelection,
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain();
+          yield* threads
+            .streamStoredEventsFrom({
+              threadId: launched.threadId,
+              afterSequence,
+              eventType: "run.updated",
+            })
+            .pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  !["starting", "running"].includes(event.payload.status),
+              ),
+              Stream.runHead,
+            );
+          yield* worker.drain();
+        });
+      yield* send("/compact", "local");
+      assert.equal(branch, "t3/abcd1234");
+      assert.equal(harness.generateBranchName.mock.calls.length, 0);
+      assert.deepEqual(delivered, []);
+
+      yield* send("Implement the settings editor", "valid");
+      const projection = yield* threads.getThreadProjection(launched.threadId);
+      assert.lengthOf(delivered, 1);
+      assert.include(delivered[0]!, "Implement the settings editor");
+      assert.equal(projection.runs.at(-1)?.status, "completed");
+      assert.equal(projection.thread.branch, "generated-branch");
+      assert.equal(branch, "generated-branch");
+      yield* send("Add keyboard support", "next");
+      assert.equal(harness.generateBranchName.mock.calls.length, 1);
+      assert.equal(harness.renameBranch.mock.calls.length, 1);
+      assert.equal((yield* threads.getThreadProjection(launched.threadId)).thread.branch, branch);
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
