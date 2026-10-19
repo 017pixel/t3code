@@ -36,6 +36,8 @@ import { McpSchema, McpServer } from "effect/ai";
 import type * as Tool from "effect/ai/Tool";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpEffect from "effect/http/HttpEffect";
+import * as HttpClient from "effect/http/HttpClient";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -369,7 +371,17 @@ const serveDestination = Effect.fnUntraced(function* (
   const bearers = yield* Ref.make(0);
   const probes = yield* Ref.make(0);
   const faults = yield* Ref.make<
-    ReadonlyArray<"404" | "malformed" | "rpc-error" | { redirect: string }>
+    ReadonlyArray<
+      | "404"
+      | "malformed"
+      | "rpc-error"
+      | { redirect: string }
+      | {
+          afterDispatch: Deferred.Deferred<string>;
+          resume: Deferred.Deferred<void>;
+          status: Deferred.Deferred<number>;
+        }
+    >
   >([]);
   const middleware = HttpRouter.middleware(
     (effect) =>
@@ -378,7 +390,7 @@ const serveDestination = Effect.fnUntraced(function* (
         if (request.headers.authorization !== undefined) yield* Ref.update(bearers, (n) => n + 1);
         if (request.url.startsWith("/.well-known/t3/environment"))
           yield* Ref.update(probes, (n) => n + 1);
-        if (request.url !== "/mcp") return yield* effect;
+        if (request.url !== "/mcp" || request.method !== "POST") return yield* effect;
         const body = yield* request.json;
         const method = (body as { method?: string }).method;
         yield* Ref.update(requests, (seen) => [
@@ -392,8 +404,18 @@ const serveDestination = Effect.fnUntraced(function* (
         ]);
         if (method === "tools/call") {
           const fault = yield* Ref.modify(faults, (items) => [items[0], items.slice(1)]);
-          if (typeof fault === "object")
-            return HttpServerResponse.redirect(fault.redirect, { status: 307 });
+          if (typeof fault === "object") {
+            if ("redirect" in fault)
+              return HttpServerResponse.redirect(fault.redirect, { status: 307 });
+            const response = yield* effect;
+            // Hold the committed reply before the transport's session check writes HTTP.
+            yield* HttpEffect.appendPreResponseHandler((_, response) =>
+              Deferred.succeed(fault.status, response.status).pipe(Effect.as(response)),
+            );
+            yield* Deferred.succeed(fault.afterDispatch, request.headers["mcp-session-id"]!);
+            yield* Deferred.await(fault.resume);
+            return response;
+          }
           if (fault === "404") return HttpServerResponse.empty({ status: 404 });
           if (fault === "malformed")
             return HttpServerResponse.text("private upstream secret", {
@@ -887,18 +909,18 @@ it.effect(
         expect(Number(first.args.timeoutMs)).toBeLessThanOrEqual(50_000);
         yield* TestClock.adjust(60_000);
         yield* Deferred.succeed(first.reply, response);
-        yield* TestClock.adjust(1);
+        yield* TestClock.adjust(100);
         const second = yield* Queue.take(requests);
         expect(second.args.runId).toBe(runId);
         expect(Number(second.args.timeoutMs)).toBeGreaterThan(0);
         expect(Number(second.args.timeoutMs)).toBeLessThanOrEqual(50_000);
         yield* TestClock.adjust(55_000);
         yield* Deferred.succeed(second.reply, { ...response, runId: RunId.make("successor") });
-        yield* TestClock.adjust(1);
+        yield* TestClock.adjust(100);
         const third = yield* Queue.take(requests);
         expect(third.args.runId).toBe(runId);
         const finalRemaining = 120_000 - ((yield* Clock.currentTimeMillis) - startedAt);
-        expect(finalRemaining).toBe(4_998);
+        expect(finalRemaining).toBe(4_800);
         const finalTimeout = Number(third.args.timeoutMs);
         // The destination starts its timer after probe/init/transit, not at the local deadline.
         const overhead = 100;
@@ -907,18 +929,43 @@ it.effect(
         const finalAnswer = yield* Fiber.join(waiting);
         yield* Deferred.await(third.finalized);
 
-        const quick = yield* wait(10).pipe(Effect.forkScoped);
+        const quickStartedAt = yield* Clock.currentTimeMillis;
+        const quickCompletedAt = yield* Deferred.make<number>();
+        const quick = yield* wait(10).pipe(
+          Effect.tap(() => Deferred.complete(quickCompletedAt, Clock.currentTimeMillis)),
+          Effect.forkScoped,
+        );
         const quickFirst = yield* Queue.take(requests);
+        const quickCount = yield* Ref.get(calls);
         yield* Deferred.succeed(quickFirst.reply, response);
         yield* Deferred.await(quickFirst.finalized);
-        yield* TestClock.adjust(1);
-        const quickSecond = yield* Queue.take(requests);
-        expect(quickSecond.args.runId).toBe(runId);
-        expect(Number(quickSecond.args.timeoutMs)).toBeGreaterThan(0);
-        expect(Number(quickSecond.args.timeoutMs)).toBeLessThanOrEqual(9);
         yield* TestClock.adjust(9);
+        expect.soft(yield* Ref.get(calls), "no retry inside a 10ms budget").toBe(quickCount);
+        yield* TestClock.adjust(1);
         expect(yield* Fiber.join(quick)).toEqual(response);
-        yield* Deferred.await(quickSecond.finalized);
+        expect((yield* Deferred.await(quickCompletedAt)) - quickStartedAt).toBe(10);
+        expect.soft(yield* Ref.get(calls)).toBe(quickCount);
+        for (const remaining of yield* Queue.clear(requests)) {
+          yield* Deferred.await(remaining.finalized);
+        }
+
+        const repeated = yield* wait(1_000).pipe(Effect.forkScoped);
+        let timedOutRequest = yield* Queue.take(requests);
+        for (let retry = 0; retry < 2; retry++) {
+          const beforeRetry = yield* Ref.get(calls);
+          yield* Deferred.succeed(timedOutRequest.reply, response);
+          yield* Deferred.await(timedOutRequest.finalized);
+          yield* TestClock.adjust(99);
+          expect
+            .soft(yield* Ref.get(calls), "quick timeouts need at least 100ms backoff")
+            .toBe(beforeRetry);
+          yield* TestClock.adjust(1);
+          timedOutRequest = yield* Queue.take(requests);
+          expect(yield* Ref.get(calls)).toBe(beforeRetry + 1);
+          expect(timedOutRequest.args.runId).toBe(runId);
+        }
+        yield* Deferred.succeed(timedOutRequest.reply, { ...response, timedOut: false });
+        expect(yield* Fiber.join(repeated)).toEqual({ ...response, timedOut: false });
 
         const noResponse = yield* wait(20).pipe(Effect.result, Effect.forkScoped);
         const pending = yield* Queue.take(requests);
@@ -970,7 +1017,7 @@ it.effect(
 );
 
 it.effect(
-  "renews MCP sessions once, revalidates repaired credentials, and persists safe best-effort outcomes",
+  "refuses ambiguous session loss, recovers on explicit retry, and persists safe best-effort outcomes",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1058,34 +1105,83 @@ it.effect(
         yield* f.call(OrchestratorToolkit.tools.t3_thread_read, read);
         expect((yield* outcome())[0]?.last_error).toBeNull();
 
+        const terminatingTarget = yield* f.destination.seed("terminated-session");
+        const afterDispatch = yield* Deferred.make<string>();
+        const resume = yield* Deferred.make<void>();
+        const status = yield* Deferred.make<number>();
         yield* Ref.set(f.http.requests, []);
-        yield* Ref.set(f.http.bearers, 0);
-        yield* Ref.set(f.http.faults, ["404"]);
-        const send = { ...read, message: "renew once", clientRequestId: "renew" };
-        const accepted = yield* f.call(OrchestratorToolkit.tools.t3_thread_send, send);
+        yield* Ref.set(f.http.faults, [{ afterDispatch, resume, status }]);
+        const inFlight = yield* f
+          .invoke(OrchestratorToolkit.tools.t3_thread_send, {
+            environmentId: destinationId,
+            threadId: terminatingTarget,
+            message: "unkeyed mutation survives session termination",
+          })
+          .pipe(Effect.forkScoped);
+        const terminatedSession = yield* Deferred.await(afterDispatch);
+        const committed = yield* f.destination.threads.getThreadProjection(terminatingTarget);
+        expect(committed.messages).toHaveLength(1);
+        expect(committed.runs).toHaveLength(1);
+        const resolved = yield* f.links.resolve(destinationId);
+        const deleted = yield* HttpClient.del(`${f.http.url}/mcp`, {
+          headers: {
+            authorization: `Bearer ${resolved.token}`,
+            "mcp-session-id": terminatedSession,
+            "mcp-protocol-version": "2025-06-18",
+          },
+        }).pipe(Effect.provide(FetchHttpClient.layer));
+        expect(deleted.status).toBe(204);
+        yield* Deferred.succeed(resume, undefined);
+        expect(yield* Deferred.await(status), "native transport response after DELETE").toBe(404);
+        const terminatedResult = yield* Fiber.join(inFlight);
+        expect.soft(terminatedResult).toMatchObject({
+          isError: true,
+          structuredContent: { code: "orchestration_error" },
+        });
         requests = yield* Ref.get(f.http.requests);
-        expect(requests.filter((r) => r.method === "initialize")).toHaveLength(1);
-        const retried = requests.filter((r) => r.method === "tools/call");
-        expect(retried).toHaveLength(2);
-        expect(retried[0]?.body).toEqual(retried[1]?.body);
-        expect(retried[0]?.session).not.toBe(retried[1]?.session);
+        expect
+          .soft(
+            requests.filter((r) => r.method === "tools/call"),
+            "a dispatched mutation must not be silently replayed",
+          )
+          .toHaveLength(1);
+        expect.soft(requests.filter((r) => r.method === "initialize")).toHaveLength(0);
+        expect
+          .soft(yield* f.destination.threads.getThreadProjection(terminatingTarget))
+          .toEqual(committed);
+
+        yield* Ref.set(f.http.requests, []);
+        yield* f.call(OrchestratorToolkit.tools.t3_thread_read, {
+          environmentId: destinationId,
+          threadId: terminatingTarget,
+        });
+        requests = yield* Ref.get(f.http.requests);
+        expect
+          .soft(
+            requests.filter((r) => r.method === "initialize"),
+            "the next explicit call must open a fresh session",
+          )
+          .toHaveLength(1);
+        expect(requests.filter((r) => r.method === "tools/call")).toHaveLength(1);
+        expect(requests.find((r) => r.method === "tools/call")?.session).not.toBe(
+          terminatedSession,
+        );
+
+        const send = { ...read, message: "explicit keyed retry", clientRequestId: "renew" };
+        const accepted = yield* f.call(OrchestratorToolkit.tools.t3_thread_send, send);
+        yield* Ref.set(f.http.requests, []);
+        yield* Ref.set(f.http.faults, ["404"]);
+        expect
+          .soft(yield* f.invoke(OrchestratorToolkit.tools.t3_thread_send, send))
+          .toMatchObject({ isError: true, structuredContent: { code: "orchestration_error" } });
+        requests = yield* Ref.get(f.http.requests);
+        expect.soft(requests.filter((r) => r.method === "initialize")).toHaveLength(0);
+        expect.soft(requests.filter((r) => r.method === "tools/call")).toHaveLength(1);
+        expect((yield* f.destination.threads.getThreadProjection(target)).messages).toHaveLength(1);
         expect(yield* f.call(OrchestratorToolkit.tools.t3_thread_send, send)).toEqual(accepted);
         expect((yield* f.destination.threads.getThreadProjection(target)).messages).toHaveLength(1);
         expect((yield* outcome())[0]?.last_error).toBeNull();
 
-        yield* Ref.set(f.http.requests, []);
-        yield* Ref.set(f.http.bearers, 0);
-        yield* Ref.set(f.http.faults, ["404", "404"]);
-        expect(
-          yield* f.invoke(OrchestratorToolkit.tools.t3_thread_send, {
-            ...send,
-            clientRequestId: "two404",
-          }),
-        ).toMatchObject({ isError: true, structuredContent: { code: "orchestration_error" } });
-        requests = yield* Ref.get(f.http.requests);
-        expect(requests.filter((r) => r.method === "initialize")).toHaveLength(1);
-        expect(requests.filter((r) => r.method === "tools/call")).toHaveLength(2);
-        expect((yield* f.destination.threads.getThreadProjection(target)).messages).toHaveLength(1);
         for (const fault of ["malformed", "rpc-error"] as const) {
           yield* Ref.set(f.http.faults, [fault]);
           const failed = yield* f.invoke(OrchestratorToolkit.tools.t3_thread_read, read);

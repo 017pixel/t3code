@@ -143,10 +143,11 @@ const make = Effect.gen(function* () {
         if (Option.isNone(result)) return yield* expired();
         last = result.value;
         if (pinnedRun === undefined && last.runId !== null) pinnedRun = last.runId;
-        if (!last.timedOut || deadline - (yield* Clock.currentTimeMillis) <= headroom) return last;
-        // A peer may answer a timeout immediately. Yield until time advances
-        // rather than spin indefinitely while spending no deadline budget.
-        yield* Effect.sleep(1);
+        if (!last.timedOut) return last;
+        const remainingAfterReply = deadline - (yield* Clock.currentTimeMillis);
+        if (remainingAfterReply <= headroom) return last;
+        // A peer may time out immediately; pace continuations within the absolute deadline.
+        yield* Effect.sleep(Math.min(100, remainingAfterReply));
       }
     });
 

@@ -253,12 +253,15 @@ const make = Effect.gen(function* () {
           "mcp-session-id": sessionId,
           "mcp-protocol-version": PROTOCOL_VERSION,
         });
-      let response = yield* callOnce(sessionId);
-      // A missing in-memory MCP session is the only safe transport replay.
+      const response = yield* callOnce(sessionId);
       if (response.status === 404) {
-        const renewed = yield* openSession(resolved.url, resolved.token, headers);
-        yield* saveSession(renewed);
-        response = yield* callOnce(renewed);
+        yield* Ref.update(sessions, (current) => {
+          const cached = current.get(key);
+          if (cached?.credential !== credential || cached.sessionId !== sessionId) return current;
+          const updated = new Map(current);
+          updated.delete(key);
+          return updated;
+        });
       }
       yield* assertOk(response.status);
       const result = yield* rpcResult(response, request.id).pipe(
