@@ -368,7 +368,9 @@ const serveDestination = Effect.fnUntraced(function* (
   const requests = yield* Ref.make<ReadonlyArray<RequestRecord>>([]);
   const bearers = yield* Ref.make(0);
   const probes = yield* Ref.make(0);
-  const faults = yield* Ref.make<ReadonlyArray<"404" | "malformed" | "rpc-error">>([]);
+  const faults = yield* Ref.make<
+    ReadonlyArray<"404" | "malformed" | "rpc-error" | { redirect: string }>
+  >([]);
   const middleware = HttpRouter.middleware(
     (effect) =>
       Effect.gen(function* () {
@@ -390,6 +392,8 @@ const serveDestination = Effect.fnUntraced(function* (
         ]);
         if (method === "tools/call") {
           const fault = yield* Ref.modify(faults, (items) => [items[0], items.slice(1)]);
+          if (typeof fault === "object")
+            return HttpServerResponse.redirect(fault.redirect, { status: 307 });
           if (fault === "404") return HttpServerResponse.empty({ status: 404 });
           if (fault === "malformed")
             return HttpServerResponse.text("private upstream secret", {
@@ -783,6 +787,43 @@ it.effect(
           runtimeMode: "auto",
           interactionMode: "default",
         });
+
+        const unicodeThreads: Array<ThreadId> = [];
+        const threadsBeforeUnicode = yield* f.destination.threads.listProjectThreads({
+          projectId: f.destination.project.id,
+          includeSubagents: false,
+        });
+        // JSON strings preserve lone UTF-16 surrogates; replacing them with U+FFFD aliases keys.
+        for (const [caller, clientRequestId] of [
+          [liveCaller, "\ud800"],
+          [otherCaller, "\ud800"],
+          [liveCaller, "\udc00"],
+          [liveCaller, "\ud801"],
+          [liveCaller, "\ufffd"],
+        ] as const) {
+          const input = {
+            environmentId: destinationId,
+            projectId: f.destination.project.id,
+            title: "Unicode retry key",
+            clientRequestId,
+          };
+          const first = yield* f.call(ProjectToolkit.tools.t3_thread_launch, input, caller);
+          const saved = yield* f.destination.threads.getThreadProjection(first.threadId);
+          expect(yield* f.call(ProjectToolkit.tools.t3_thread_launch, input, caller)).toEqual(
+            first,
+          );
+          expect(yield* f.destination.threads.getThreadProjection(first.threadId)).toEqual(saved);
+          expect(saved.messages).toEqual([]);
+          expect(saved.runs).toEqual([]);
+          expect(unicodeThreads).not.toContain(first.threadId);
+          unicodeThreads.push(first.threadId);
+        }
+        expect(
+          yield* f.destination.threads.listProjectThreads({
+            projectId: f.destination.project.id,
+            includeSubagents: false,
+          }),
+        ).toHaveLength(threadsBeforeUnicode.length + unicodeThreads.length);
       }),
     ).pipe(Effect.provide(Layer.mergeAll(NodeHttpServer.layerTest, NodeServices.layer))),
 );
@@ -973,6 +1014,49 @@ it.effect(
         const refused = (yield* outcome())[0]!;
         expect(refused.last_reached_at).toBe(reachedAt);
         expect(refused.last_error).toBe("Peer call failed (runtime_mode_escalation_denied).");
+
+        const receiverContext = yield* Layer.build(Layer.fresh(NodeHttpServer.layerTest));
+        const receiver = Context.get(receiverContext, HttpServer.HttpServer);
+        const received = yield* Ref.make<
+          ReadonlyArray<{ method: string; body: string; session: string | undefined }>
+        >([]);
+        yield* receiver.serve(
+          Effect.gen(function* () {
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const body = yield* request.text;
+            yield* Ref.update(received, (seen) => [
+              ...seen,
+              { method: request.method, body, session: request.headers["mcp-session-id"] },
+            ]);
+            return HttpServerResponse.empty({ status: 502 });
+          }),
+        );
+        if (receiver.address._tag === "UnixPathAddress") return yield* Effect.die("TCP expected");
+        const beforeRedirect = yield* f.destination.threads.getThreadProjection(target);
+        expect(requests.map((request) => request.method)).toContain("notifications/initialized");
+        yield* Ref.set(f.http.requests, []);
+        yield* Ref.set(f.http.probes, 0);
+        // This native listener is reachable, but its plain-HTTP origin is not an allowed peer.
+        yield* Ref.set(f.http.faults, [
+          { redirect: `http://0.0.0.0:${receiver.address.port}/untrusted` },
+        ]);
+        expect(
+          yield* f.invoke(OrchestratorToolkit.tools.t3_thread_send, {
+            ...read,
+            message: "synthetic body must stay at the paired origin",
+            clientRequestId: "redirected-write",
+          }),
+        ).toMatchObject({ isError: true, structuredContent: { code: "orchestration_error" } });
+        expect(yield* Ref.get(f.http.probes)).toBe(1);
+        expect((yield* Ref.get(f.http.requests)).map((request) => request.method)).toEqual([
+          "tools/call",
+        ]);
+        expect(yield* f.destination.threads.getThreadProjection(target)).toEqual(beforeRedirect);
+        expect
+          .soft(yield* Ref.get(received), "a tool POST must not follow a peer redirect")
+          .toEqual([]);
+        yield* f.call(OrchestratorToolkit.tools.t3_thread_read, read);
+        expect((yield* outcome())[0]?.last_error).toBeNull();
 
         yield* Ref.set(f.http.requests, []);
         yield* Ref.set(f.http.bearers, 0);

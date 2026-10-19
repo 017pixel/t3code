@@ -87,7 +87,8 @@ const make = Effect.gen(function* () {
           .digest(
             "SHA-256",
             new TextEncoder().encode(
-              `${encodeURIComponent(scope.requestNamespace)}:${encodeURIComponent(args.clientRequestId)}`,
+              // @effect-diagnostics-next-line preferSchemaOverJson:off -- Hash known strings without replacing lone UTF-16 surrogates.
+              JSON.stringify([scope.requestNamespace, args.clientRequestId]),
             ),
           )
           .pipe(

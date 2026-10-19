@@ -63,6 +63,11 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       Effect.gen(function* () {
         const context = yield* readCaller();
         const { caller } = context;
+        if (input.clientRequestId !== undefined && !input.clientRequestId.isWellFormed())
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "clientRequestId must contain valid paired Unicode surrogates.",
+          });
         const commandId =
           input.clientRequestId === undefined
             ? yield* newCommandId()

@@ -388,7 +388,12 @@ it.effect("a client launches at its ceiling with the project's default model", (
         .handle("t3_thread_launch", params)
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
 
-    const result = yield* handle({ title: "Fix", projectId, message: "Fix the bug" });
+    const result = yield* handle({
+      title: "Fix",
+      projectId,
+      message: "Fix the bug",
+      clientRequestId: "fix-😀",
+    });
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
     expect(launched[0]?.runtimeMode).toBe("auto-accept-edits");
     expect(launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
@@ -399,6 +404,26 @@ it.effect("a client launches at its ceiling with the project's default model", (
     const untargeted = yield* handle({ title: "Fix" });
     expect(untargeted.at(-1)?.result).toMatchObject({ code: "target_required" });
     expect(launched).toHaveLength(1);
+
+    const invalidKey = yield* handle({
+      title: "Fix",
+      projectId,
+      clientRequestId: "fix-\ud800",
+    }).pipe(Effect.exit);
+    expect(launched).toHaveLength(1);
+    expect(invalidKey).toMatchObject({
+      _tag: "Success",
+      value: [
+        {
+          isFailure: true,
+          result: {
+            _tag: "OrchestratorMcpFailure",
+            code: "invalid_request",
+            message: "clientRequestId must contain valid paired Unicode surrogates.",
+          },
+        },
+      ],
+    });
   }),
 );
 

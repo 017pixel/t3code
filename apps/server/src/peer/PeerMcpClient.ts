@@ -14,6 +14,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { McpSchema } from "effect/ai";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
@@ -89,7 +90,11 @@ const fromLinkError = (error: PeerLinkError) =>
 
 const make = Effect.gen(function* () {
   const links = yield* PeerLinks.PeerLinks;
-  const http = yield* HttpClient.HttpClient;
+  const http = (yield* HttpClient.HttpClient).pipe(
+    HttpClient.transform((request) =>
+      request.pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" })),
+    ),
+  );
   const crypto = yield* Crypto.Crypto;
   const nextRequestId = yield* Ref.make(1);
   const sessions = yield* Ref.make<
