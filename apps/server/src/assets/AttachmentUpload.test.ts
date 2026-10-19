@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import { ChatAttachmentId } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -16,6 +17,10 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { base64UrlEncode, signPayload } from "../auth/utils.ts";
 import * as ServerConfig from "../config.ts";
 import { parseThreadSegmentFromAttachmentId } from "../attachmentStore.ts";
+import {
+  claimPendingAttachments,
+  releaseClaimedAttachments,
+} from "../orchestration-v2/AttachmentClaims.ts";
 import {
   ATTACHMENT_UPLOAD_ROUTE_PREFIX,
   deletePendingAttachment,
@@ -202,6 +207,21 @@ describe("AttachmentUpload", () => {
         expect(
           NodeFS.readFileSync(NodePath.join(config.attachmentsDir, `${issued.attachmentId}.svg`)),
         ).toEqual(Buffer.from(bytes));
+        const claimed = yield* claimPendingAttachments({
+          threadId: "svg-upload-thread",
+          attachments: [
+            {
+              type: "file",
+              id: ChatAttachmentId.make(issued.attachmentId),
+              name,
+              mimeType: "image/svg+xml",
+              sizeBytes: bytes.length,
+            },
+          ],
+        });
+        expect(claimed.attachments[0]?.name).toBe(`${name}.svg`);
+        expect(NodeFS.readFileSync(claimed.claimedPaths[0]!)).toEqual(Buffer.from(bytes));
+        yield* releaseClaimedAttachments(claimed.claimedPaths);
         yield* deletePendingAttachment(issued.attachmentId);
       }
       expect(NodeFS.readdirSync(config.attachmentsDir)).toEqual([]);
