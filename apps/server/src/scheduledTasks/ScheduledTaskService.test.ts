@@ -436,7 +436,7 @@ it.effect("a deleted task stays deleted after concurrent and stale edits", () =>
   }).pipe(Effect.provide(atomicLayer)),
 );
 
-it.effect.each(["before request", "before dispatch re-read"] as const)(
+it.effect.each(["before request", "before dispatch re-read", "before running update"] as const)(
   "the old project cannot edit, delete or run a task moved %s",
   (timing) =>
     Effect.gen(function* () {
@@ -446,19 +446,35 @@ it.effect.each(["before request", "before dispatch re-read"] as const)(
         ...atomicScope,
         nextProjectId: ProjectId.make("project:destination"),
       });
+      const sql = yield* SqlClient.SqlClient;
       let reads = 0;
+      let movedInsideReservation = false;
       if (timing === "before request") yield* move;
-      const moveBeforeReread: Statement.Transformer = (statement) =>
+      const moveBeforeDispatch: Statement.Transformer = (statement) =>
         Effect.gen(function* () {
           const [query, params] = statement.compile();
           if (query.includes("FROM scheduled_tasks") && params[0] === atomicTaskId) {
             reads++;
-            if (reads === 2) {
-              yield* move.pipe(
-                Effect.provideService(Statement.CurrentTransformer, undefined),
-                Effect.orDie,
-              );
-            }
+          }
+          if (
+            (timing === "before dispatch re-read" &&
+              reads === 2 &&
+              query.includes("FROM scheduled_tasks")) ||
+            (timing === "before running update" &&
+              query.includes("UPDATE scheduled_tasks") &&
+              query.includes("last_run_status = 'running'") &&
+              query.includes("last_run_error = NULL") &&
+              params.includes(atomicTaskId))
+          ) {
+            assert.equal(reads, 2);
+            movedInsideReservation = Option.isSome(
+              yield* Effect.serviceOption(sql.transactionService),
+            );
+            const moved = yield* move.pipe(
+              Effect.provideService(Statement.CurrentTransformer, undefined),
+              Effect.orDie,
+            );
+            assert.equal(Option.getOrThrow(moved).task.projectId, "project:destination");
           }
           return statement;
         });
@@ -468,17 +484,25 @@ it.effect.each(["before request", "before dispatch re-read"] as const)(
         .pipe(
           Effect.provideService(
             Statement.CurrentTransformer,
-            timing === "before dispatch re-read" ? moveBeforeReread : undefined,
+            timing === "before request" ? undefined : moveBeforeDispatch,
           ),
           Effect.flip,
         );
       assert.isTrue(isScheduledTaskError(rejected));
-      if (timing === "before dispatch re-read") assert.equal(reads, 2);
-      const task = (yield* service.list()).tasks[0]!;
-      assert.equal(task.projectId, "project:destination");
+      if (timing !== "before request") assert.equal(reads, 2);
+      let task = (yield* service.list()).tasks[0]!;
+      // A failed reservation rolls back the synthetic nested move; a committed move survives.
+      const rolledBackMove = timing === "before running update" && movedInsideReservation;
+      assert.equal(task.projectId, rolledBackMove ? atomicProjectId : "project:destination");
       assert.equal(task.lastRunStatus, "never");
       assert.equal(task.runCount, 0);
       assert.isNull(task.lastRunAt);
+      assert.isNull(task.lastRunError);
+      if (rolledBackMove) {
+        yield* move;
+        task = (yield* service.list()).tasks[0]!;
+        assert.equal(task.projectId, "project:destination");
+      }
       assert.isTrue(Option.isNone(yield* service.update({ ...atomicScope, title: "Stale edit" })));
       assert.isTrue(Option.isNone(yield* service.delete(atomicScope)));
       assert.deepEqual((yield* service.list()).tasks, [task]);
