@@ -2293,6 +2293,18 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
           assert.deepEqual(resumedHistories, []);
           return;
         }
+        if (scenario === "compacted" && ordinal === 1) {
+          const sourcePath = NodePath.join(projectDir, `${sourceSessionId}.jsonl`);
+          const sourceTranscript = yield* fileSystem.readFileString(sourcePath);
+          yield* fileSystem.remove(sourcePath);
+          const error = yield* rollback.pipe(
+            Effect.flip,
+            Effect.ensuring(
+              fileSystem.writeFileString(sourcePath, sourceTranscript).pipe(Effect.orDie),
+            ),
+          );
+          assert.instanceOf(error, ProviderAdapter.ProviderAdapterRollbackThreadError);
+        }
         const snapshot = yield* rollback;
         // CheckpointRollbackService persists the thread row, not snapshot.providerTurns.
         // Its next rollback resolves the target from the original persisted turns.
