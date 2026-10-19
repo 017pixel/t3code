@@ -178,6 +178,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
   const shellReads: ThreadId[] = [];
   const catchUp = { shellSnapshotReads: 0 };
   const threads = ThreadManagementService.ThreadManagementService.of({
+    streamThreadEventsForClient: () => Effect.succeed(Stream.empty),
     getThreadShell: (threadId) =>
       Effect.sync(() => shellReads.push(threadId)).pipe(
         Effect.andThen(options.readShell?.(threadId) ?? Ref.get(currentShell)),

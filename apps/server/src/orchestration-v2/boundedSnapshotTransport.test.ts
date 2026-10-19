@@ -43,6 +43,10 @@ import { subscribeOrchestrationV2Thread } from "../ws.ts";
 import * as OrchestrationHttp from "./http.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as CommandReceiptStore from "./CommandReceiptStore.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 
 const decodeBounded = Schema.decodeUnknownSync(
@@ -66,11 +70,22 @@ const store = Layer.mergeAll(
   ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
   SqlitePersistence.layerMemory,
 );
+const threadManagementLayer = (overrides: Partial<Orchestrator.OrchestratorV2["Service"]>) =>
+  Layer.fresh(ThreadManagementService.layer).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(Orchestrator.OrchestratorV2)(overrides),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+        Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({}),
+        Layer.mock(ServerSettings.ServerSettingsService)({}),
+      ),
+    ),
+  );
+
 const management = Layer.unwrap(
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
-    return Layer.mock(ThreadManagementService.ThreadManagementService)({
-      ensureLegacyTranscript: () => Effect.void,
+    return threadManagementLayer({
       getThreadSnapshot: (id) => projections.getThreadSnapshot(id).pipe(Effect.orDie),
       getThreadSnapshotWindow: (id, options) =>
         projections.getThreadSnapshotWindow(id, options).pipe(Effect.orDie),
@@ -456,8 +471,7 @@ it.layer(TestLayer)("compact bounded snapshot transport", (it) => {
       assert.deepEqual(expected.pullRequests, [{ ...link, snapshot }]);
       assert.deepEqual(expected.updatedAt, thread.updatedAt);
 
-      const liveManagement = Layer.mock(ThreadManagementService.ThreadManagementService)({
-        ensureLegacyTranscript: () => Effect.void,
+      const liveManagement = threadManagementLayer({
         getThreadSnapshot: (id) => projections.getThreadSnapshot(id).pipe(Effect.orDie),
         getThreadSnapshotWindow: (id, options) =>
           projections.getThreadSnapshotWindow(id, options).pipe(Effect.orDie),

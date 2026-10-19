@@ -37,6 +37,10 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as EventStore from "./orchestration-v2/EventStore.ts";
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
+import { shouldUseBoundedThreadSnapshot } from "./orchestration-v2/ThreadStream.ts";
+import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
+import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
+import * as CommandReceiptStore from "./orchestration-v2/CommandReceiptStore.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
@@ -47,12 +51,23 @@ import * as ProjectService from "./project/ProjectService.ts";
 import {
   hasCompatibleOrchestrationProtocol,
   resolveAvailableEditorsForConfig,
-  shouldUseBoundedThreadSnapshot,
   subscribeOrchestrationV2Shell,
   subscribeOrchestrationV2Thread,
   subscribeServerConfig,
   withLateEditorConfig,
 } from "./ws.ts";
+
+const threadManagementLayer = (overrides: Partial<Orchestrator.OrchestratorV2["Service"]>) =>
+  ThreadManagement.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(Orchestrator.OrchestratorV2)(overrides),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+        Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({}),
+        Layer.mock(ServerSettings.ServerSettingsService)({}),
+      ),
+    ),
+  );
 
 it("accepts only the current orchestration protocol before websocket RPC setup", () => {
   assert.isTrue(
@@ -404,21 +419,23 @@ it.live.each(["thread", "shell"] as const)(
             }).pipe(Effect.flatMap(consume));
       });
       const items = yield* subscription.pipe(
-        Effect.provideService(ThreadManagement.ThreadManagementService, {
-          ensureLegacyTranscript: () => Effect.void,
-          streamStoredEventsFrom: (
-            input: Parameters<
-              ThreadManagement.ThreadManagementService["Service"]["streamStoredEventsFrom"]
-            >[0],
-          ) => {
-            assert.equal(input?.afterSequence, highWater!.sequence);
-            return store
-              .streamApplicationEvents({ afterSequence: input?.afterSequence ?? 0 })
-              .pipe(
-                Stream.filter((event): event is OrchestrationV2StoredEvent => "event" in event),
-              );
-          },
-        } as unknown as ThreadManagement.ThreadManagementService["Service"]),
+        Effect.provide(
+          threadManagementLayer({
+            streamStoredEventsFrom: (
+              input: Parameters<
+                ThreadManagement.ThreadManagementService["Service"]["streamStoredEventsFrom"]
+              >[0],
+            ) => {
+              assert.equal(input?.afterSequence, highWater!.sequence);
+              return store
+                .streamApplicationEvents({ afterSequence: input?.afterSequence ?? 0 })
+                .pipe(
+                  Stream.filter((event): event is OrchestrationV2StoredEvent => "event" in event),
+                  Stream.orDie,
+                );
+            },
+          }),
+        ),
         Effect.provideService(ProjectStore.ProjectStoreV2, {
           listShells: () => Effect.succeed([]),
         } as unknown as ProjectStore.ProjectStoreV2["Service"]),
@@ -506,10 +523,11 @@ it.effect("thread resume across compacted history keeps message order and final 
           Stream.runCollect,
         ),
       ),
-      Effect.provideService(ThreadManagement.ThreadManagementService, {
-        ensureLegacyTranscript: () => Effect.void,
-        streamStoredEventsFrom: () => Stream.never,
-      } as unknown as ThreadManagement.ThreadManagementService["Service"]),
+      Effect.provide(
+        threadManagementLayer({
+          streamStoredEventsFrom: () => Stream.never,
+        }),
+      ),
     );
     assert.deepEqual(
       Array.from(items, (item) =>

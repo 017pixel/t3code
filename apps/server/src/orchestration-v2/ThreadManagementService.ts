@@ -21,6 +21,8 @@ import {
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2CreationSource,
   type OrchestrationV2Run,
+  type OrchestrationV2SubscribeThreadInput,
+  type OrchestrationV2ThreadStreamItem,
   type OrchestrationV2ThreadShellSnapshot,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadTranscript,
@@ -49,11 +51,30 @@ import * as Stream from "effect/Stream";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import { projectedRowEncodedBytes } from "./threadHistoryPaging.ts";
+import {
+  projectedRowEncodedBytes,
+  THREAD_HISTORY_PAGE_POLICY,
+  THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
+} from "./threadHistoryPaging.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
-import { projectTurnItemForDetail } from "./WireProjection.ts";
+import {
+  projectTurnItemForDetail,
+  projectDomainEventForWire,
+  projectThreadProjectionForWire,
+} from "./WireProjection.ts";
+import { rpcInitialItems } from "../rpcInitialItems.ts";
+import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
+import { coalesceThreadLiveStream } from "./ThreadLiveEventCoalescer.ts";
+import {
+  buildBoundedThreadStreamSnapshot,
+  decideThreadResume,
+  isThreadReplayRawPayloadSafe,
+  shouldUseBoundedThreadSnapshot,
+  threadReplayEncodedBytes,
+  THREAD_RESUME_MAX_REPLAY_EVENTS,
+} from "./ThreadStream.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -310,7 +331,50 @@ export type ThreadManagementError = typeof ThreadManagementError.Type;
 
 type ThreadManagementFailure = ThreadManagementError | Orchestrator.OrchestratorV2Error;
 
+export class ThreadManagementThreadStreamError extends Schema.TaggedError<ThreadManagementThreadStreamError>()(
+  "ThreadManagementThreadStreamError",
+  {
+    threadId: ThreadId,
+    operation: Schema.Literals([
+      "hydrate",
+      "stream",
+      "replay",
+      "snapshot",
+      "prepareReplay",
+      "measureReplay",
+      "locateRecreated",
+    ]),
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    switch (this.operation) {
+      case "hydrate":
+        return `Failed to hydrate migrated thread ${this.threadId}`;
+      case "stream":
+        return `Failed while streaming orchestration V2 thread ${this.threadId}`;
+      case "replay":
+        return `Failed while replaying orchestration V2 thread ${this.threadId}`;
+      case "snapshot":
+        return `Failed to load orchestration V2 thread ${this.threadId}`;
+      case "prepareReplay":
+        return `Failed to prepare orchestration V2 thread ${this.threadId} replay`;
+      case "measureReplay":
+        return `Failed to measure orchestration V2 thread ${this.threadId} replay`;
+      case "locateRecreated":
+        return `Failed to locate recreated orchestration V2 thread ${this.threadId}`;
+    }
+  }
+}
+
 export interface ThreadManagementServiceShape {
+  readonly streamThreadEventsForClient: (
+    input: OrchestrationV2SubscribeThreadInput,
+  ) => Effect.Effect<
+    Stream.Stream<OrchestrationV2ThreadStreamItem, ThreadManagementThreadStreamError>,
+    ThreadManagementThreadStreamError,
+    OrchestrationEventStore.OrchestrationEventStore
+  >;
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
@@ -641,6 +705,232 @@ const make = Effect.gen(function* () {
     ensureProjectionTranscript(threadId).pipe(
       Effect.andThen(orchestrator.getThreadSnapshotWindow(threadId, options)),
     );
+
+  const streamThreadEventsForClient = Effect.fn(
+    "orchestrationV2.threadManagement.streamThreadEventsForClient",
+  )(function* (input: OrchestrationV2SubscribeThreadInput) {
+    const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
+
+    yield* ensureLegacyTranscript(input.threadId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ThreadManagementThreadStreamError({
+            threadId: input.threadId,
+            operation: "hydrate",
+            cause,
+          }),
+      ),
+    );
+
+    const eventStreamFrom = (afterSequence: number) =>
+      orchestrator
+        .streamStoredEventsFrom({
+          threadId: input.threadId,
+          afterSequence,
+        })
+        .pipe(
+          Stream.mapEffect((stored) =>
+            Effect.gen(function* () {
+              const event = stored.event;
+              if (
+                input.acceptThreadFieldEvents !== true &&
+                (event.type === "thread.pull-request-link-synced" ||
+                  event.type === "thread.visit-recorded")
+              ) {
+                // Older clients need the legacy full-thread event. The live stream reads
+                // committed metadata only; historical compact events use a fresh snapshot below.
+                const { thread } = yield* ensureProjectionTranscript(input.threadId).pipe(
+                  Effect.andThen(orchestrator.getThreadRecords(input.threadId, [])),
+                );
+                return {
+                  kind: "event" as const,
+                  sequence: stored.sequence,
+                  event: projectDomainEventForWire({
+                    ...event,
+                    type:
+                      event.type === "thread.visit-recorded"
+                        ? "thread.visited"
+                        : "thread.pull-request-synced",
+                    payload: thread,
+                  }),
+                };
+              }
+              return {
+                kind: "event" as const,
+                sequence: stored.sequence,
+                event: projectDomainEventForWire(event),
+              };
+            }),
+          ),
+          coalesceThreadLiveStream,
+          Stream.mapError(
+            (cause) =>
+              new ThreadManagementThreadStreamError({
+                threadId: input.threadId,
+                operation: "stream",
+                cause,
+              }),
+          ),
+        );
+
+    const loadReplayThrough = (afterSequence: number, throughSequence: number) =>
+      applicationEvents
+        .readAgentEvents({
+          threadId: input.threadId,
+          afterSequence,
+          throughSequence,
+          limit: THREAD_RESUME_MAX_REPLAY_EVENTS + 1,
+          // A row a newer build wrote (e.g. after a downgrade) must not fail
+          // every resubscribe. The live tail resumes from `highWater`, so a
+          // dropped row never hides later events.
+          skipUnknownEventTypes: true,
+        })
+        .pipe(
+          Stream.map((stored) => ({
+            kind: "event" as const,
+            sequence: stored.sequence,
+            event: projectDomainEventForWire(stored.event),
+          })),
+          Stream.runCollect,
+          Effect.map((items) => Array.from(items)),
+          Effect.mapError(
+            (cause) =>
+              new ThreadManagementThreadStreamError({
+                threadId: input.threadId,
+                operation: "replay",
+                cause,
+              }),
+          ),
+        );
+
+    const completionMarker =
+      input.requestCompletionMarker === true
+        ? Stream.make({ kind: "synchronized" as const })
+        : Stream.empty;
+
+    const snapshotThenLive = Effect.fn("orchestrationV2.threadManagement.threadSnapshotThenLive")(
+      function* () {
+        const useBoundedSnapshot = shouldUseBoundedThreadSnapshot(input);
+        const snapshot = yield* (
+          useBoundedSnapshot
+            ? getThreadSnapshotWindow(input.threadId, {
+                rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
+                userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
+              })
+            : getThreadSnapshot(input.threadId)
+        ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ThreadManagementThreadStreamError({
+                threadId: input.threadId,
+                operation: "snapshot",
+                cause,
+              }),
+          ),
+        );
+        const { snapshotSequence } = snapshot;
+        const snapshotItem = useBoundedSnapshot
+          ? buildBoundedThreadStreamSnapshot({
+              ...snapshot,
+              compactTurnItems: input.acceptCompactTurnItems === true,
+            })
+          : {
+              kind: "snapshot" as const,
+              snapshotSequence,
+              projection: projectThreadProjectionForWire(snapshot.projection),
+            };
+        return Stream.concat(
+          Stream.concat(rpcInitialItems([snapshotItem]), completionMarker),
+          eventStreamFrom(snapshotSequence),
+        );
+      },
+    );
+
+    // The event sink subscribes to live events before reading the persisted
+    // tail, so no event published during the replay window is lost; overlapping
+    // events are deduped by sequence on the client.
+    if (input.afterSequence !== undefined) {
+      const highWater = yield* applicationEvents.latestAgentSequence(input.threadId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ThreadManagementThreadStreamError({
+              threadId: input.threadId,
+              operation: "prepareReplay",
+              cause,
+            }),
+        ),
+      );
+      if (input.afterSequence > highWater) {
+        return yield* snapshotThenLive();
+      }
+      const stats = yield* applicationEvents
+        .getAgentReplayStats({
+          threadId: input.threadId,
+          afterSequence: input.afterSequence,
+          throughSequence: highWater,
+          maxEvents: THREAD_RESUME_MAX_REPLAY_EVENTS,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new ThreadManagementThreadStreamError({
+                threadId: input.threadId,
+                operation: "measureReplay",
+                cause,
+              }),
+          ),
+        );
+      // Bound stored JSON before decoding, then check projected event
+      // size separately. Neither byte count is a bound on process memory.
+      if (
+        stats.eventCount > THREAD_RESUME_MAX_REPLAY_EVENTS ||
+        !isThreadReplayRawPayloadSafe(stats.rawPayloadBytes)
+      ) {
+        return yield* snapshotThenLive();
+      }
+      if (stats.hasCreateEvent) {
+        const shell = yield* orchestrator.getThreadShell(input.threadId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ThreadManagementThreadStreamError({
+                threadId: input.threadId,
+                operation: "locateRecreated",
+                cause,
+              }),
+          ),
+        );
+        // A retained creation can belong to a thread already deleted.
+        // Only replace its bounded replay when a snapshot can exist.
+        if (shell !== null) return yield* snapshotThenLive();
+      }
+      const replay = yield* loadReplayThrough(input.afterSequence, highWater);
+      if (
+        input.acceptThreadFieldEvents !== true &&
+        replay.some(
+          (item) =>
+            item.event.type === "thread.pull-request-link-synced" ||
+            item.event.type === "thread.visit-recorded",
+        )
+      ) {
+        return yield* snapshotThenLive();
+      }
+      const plan = decideThreadResume({
+        afterSequence: input.afterSequence,
+        highWater,
+        replayEventCount: replay.length,
+        replayEncodedBytes: threadReplayEncodedBytes(replay),
+      });
+      if (plan.mode === "snapshot") {
+        return yield* snapshotThenLive();
+      }
+      return Stream.concat(
+        Stream.concat(rpcInitialItems(replay), completionMarker),
+        eventStreamFrom(highWater),
+      );
+    }
+
+    return yield* snapshotThenLive();
+  });
 
   const assertDispatchTargetEnabled = (command: OrchestrationV2ServerCommand) => {
     switch (command.type) {
@@ -1119,6 +1409,7 @@ const make = Effect.gen(function* () {
     });
 
   return ThreadManagementService.of({
+    streamThreadEventsForClient,
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(

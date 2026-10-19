@@ -143,23 +143,11 @@ import {
 } from "./orchestration-v2/ShellStream.ts";
 import { ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION } from "./orchestration-v2/ProjectionStore.ts";
 import { bufferLiveStream } from "./orchestration-v2/LiveStreamBudget.ts";
-import { coalesceThreadLiveStream } from "./orchestration-v2/ThreadLiveEventCoalescer.ts";
-import {
-  buildBoundedThreadStreamSnapshot,
-  decideThreadResume,
-  isThreadReplayRawPayloadSafe,
-  threadReplayEncodedBytes,
-  THREAD_RESUME_MAX_REPLAY_EVENTS,
-} from "./orchestration-v2/ThreadStream.ts";
 import {
   buildBoundedThreadProjection,
-  THREAD_HISTORY_PAGE_POLICY,
   THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
 } from "./orchestration-v2/threadHistoryPaging.ts";
-import {
-  projectDomainEventForWire,
-  projectThreadProjectionForWire,
-} from "./orchestration-v2/WireProjection.ts";
+import { projectThreadProjectionForWire } from "./orchestration-v2/WireProjection.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
@@ -719,12 +707,6 @@ export function hasCompatibleOrchestrationProtocol(url: URL): boolean {
   );
 }
 
-export function shouldUseBoundedThreadSnapshot(input: {
-  readonly acceptBoundedSnapshot?: boolean;
-}): boolean {
-  return input.acceptBoundedSnapshot === true;
-}
-
 function readClientConnectionOrigin(
   request: HttpServerRequest.HttpServerRequest,
 ): OrchestrationClientOrigin {
@@ -847,226 +829,31 @@ const enrichProjectShells = Effect.fn("ws.orchestrationV2.enrichProjectShells")(
 export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subscribeThread")(
   function* (input: OrchestrationV2SubscribeThreadInput) {
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
-    const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
-
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.thread_id": input.threadId,
     });
-    yield* threadManagement.ensureLegacyTranscript(input.threadId).pipe(
+    return yield* threadManagement.streamThreadEventsForClient(input).pipe(
       Effect.mapError(
         (cause) =>
           new OrchestrationV2GetThreadProjectionError({
             threadId: input.threadId,
-            message: `Failed to hydrate migrated thread ${input.threadId}`,
+            message: cause.message,
             cause,
           }),
       ),
-    );
-
-    const eventStreamFrom = (afterSequence: number) =>
-      threadManagement
-        .streamStoredEventsFrom({
-          threadId: input.threadId,
-          afterSequence,
-        })
-        .pipe(
-          Stream.mapEffect((stored) =>
-            Effect.gen(function* () {
-              const event = stored.event;
-              if (
-                input.acceptThreadFieldEvents !== true &&
-                (event.type === "thread.pull-request-link-synced" ||
-                  event.type === "thread.visit-recorded")
-              ) {
-                // Older clients need the legacy full-thread event. The live stream reads
-                // committed metadata only; historical compact events use a fresh snapshot below.
-                const { thread } = yield* threadManagement.getThreadRecords(input.threadId, []);
-                return {
-                  kind: "event" as const,
-                  sequence: stored.sequence,
-                  event: projectDomainEventForWire({
-                    ...event,
-                    type:
-                      event.type === "thread.visit-recorded"
-                        ? "thread.visited"
-                        : "thread.pull-request-synced",
-                    payload: thread,
-                  }),
-                };
-              }
-              return {
-                kind: "event" as const,
-                sequence: stored.sequence,
-                event: projectDomainEventForWire(event),
-              };
-            }),
-          ),
-          coalesceThreadLiveStream,
+      Effect.map((stream) =>
+        stream.pipe(
           Stream.mapError(
             (cause) =>
               new OrchestrationV2GetThreadProjectionError({
                 threadId: input.threadId,
-                message: `Failed while streaming orchestration V2 thread ${input.threadId}`,
+                message: cause.message,
                 cause,
               }),
           ),
-        );
-
-    const loadReplayThrough = (afterSequence: number, throughSequence: number) =>
-      applicationEvents
-        .readAgentEvents({
-          threadId: input.threadId,
-          afterSequence,
-          throughSequence,
-          limit: THREAD_RESUME_MAX_REPLAY_EVENTS + 1,
-          // A row a newer build wrote (e.g. after a downgrade) must not fail
-          // every resubscribe. The live tail resumes from `highWater`, so a
-          // dropped row never hides later events.
-          skipUnknownEventTypes: true,
-        })
-        .pipe(
-          Stream.map((stored) => ({
-            kind: "event" as const,
-            sequence: stored.sequence,
-            event: projectDomainEventForWire(stored.event),
-          })),
-          Stream.runCollect,
-          Effect.map((items) => Array.from(items)),
-          Effect.mapError(
-            (cause) =>
-              new OrchestrationV2GetThreadProjectionError({
-                threadId: input.threadId,
-                message: `Failed while replaying orchestration V2 thread ${input.threadId}`,
-                cause,
-              }),
-          ),
-        );
-
-    const completionMarker =
-      input.requestCompletionMarker === true
-        ? Stream.make({ kind: "synchronized" as const })
-        : Stream.empty;
-
-    const snapshotThenLive = Effect.fn("ws.orchestrationV2.threadSnapshotThenLive")(function* () {
-      const useBoundedSnapshot = shouldUseBoundedThreadSnapshot(input);
-      const snapshot = yield* (
-        useBoundedSnapshot
-          ? threadManagement.getThreadSnapshotWindow(input.threadId, {
-              rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
-              userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
-            })
-          : threadManagement.getThreadSnapshot(input.threadId)
-      ).pipe(
-        Effect.mapError(
-          (cause) =>
-            new OrchestrationV2GetThreadProjectionError({
-              threadId: input.threadId,
-              message: `Failed to load orchestration V2 thread ${input.threadId}`,
-              cause,
-            }),
         ),
-      );
-      const { snapshotSequence } = snapshot;
-      const snapshotItem = useBoundedSnapshot
-        ? buildBoundedThreadStreamSnapshot({
-            ...snapshot,
-            compactTurnItems: input.acceptCompactTurnItems === true,
-          })
-        : {
-            kind: "snapshot" as const,
-            snapshotSequence,
-            projection: projectThreadProjectionForWire(snapshot.projection),
-          };
-      return Stream.concat(
-        Stream.concat(rpcInitialItems([snapshotItem]), completionMarker),
-        eventStreamFrom(snapshotSequence),
-      );
-    });
-
-    // The event sink subscribes to live events before reading the persisted
-    // tail, so no event published during the replay window is lost; overlapping
-    // events are deduped by sequence on the client.
-    if (input.afterSequence !== undefined) {
-      const highWater = yield* applicationEvents.latestAgentSequence(input.threadId).pipe(
-        Effect.mapError(
-          (cause) =>
-            new OrchestrationV2GetThreadProjectionError({
-              threadId: input.threadId,
-              message: `Failed to prepare orchestration V2 thread ${input.threadId} replay`,
-              cause,
-            }),
-        ),
-      );
-      if (input.afterSequence > highWater) {
-        return yield* snapshotThenLive();
-      }
-      const stats = yield* applicationEvents
-        .getAgentReplayStats({
-          threadId: input.threadId,
-          afterSequence: input.afterSequence,
-          throughSequence: highWater,
-          maxEvents: THREAD_RESUME_MAX_REPLAY_EVENTS,
-        })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new OrchestrationV2GetThreadProjectionError({
-                threadId: input.threadId,
-                message: `Failed to measure orchestration V2 thread ${input.threadId} replay`,
-                cause,
-              }),
-          ),
-        );
-      // Bound stored JSON before decoding, then check projected event
-      // size separately. Neither byte count is a bound on process memory.
-      if (
-        stats.eventCount > THREAD_RESUME_MAX_REPLAY_EVENTS ||
-        !isThreadReplayRawPayloadSafe(stats.rawPayloadBytes)
-      ) {
-        return yield* snapshotThenLive();
-      }
-      if (stats.hasCreateEvent) {
-        const shell = yield* threadManagement.getThreadShell(input.threadId).pipe(
-          Effect.mapError(
-            (cause) =>
-              new OrchestrationV2GetThreadProjectionError({
-                threadId: input.threadId,
-                message: `Failed to locate recreated orchestration V2 thread ${input.threadId}`,
-                cause,
-              }),
-          ),
-        );
-        // A retained creation can belong to a thread already deleted.
-        // Only replace its bounded replay when a snapshot can exist.
-        if (shell !== null) return yield* snapshotThenLive();
-      }
-      const replay = yield* loadReplayThrough(input.afterSequence, highWater);
-      if (
-        input.acceptThreadFieldEvents !== true &&
-        replay.some(
-          (item) =>
-            item.event.type === "thread.pull-request-link-synced" ||
-            item.event.type === "thread.visit-recorded",
-        )
-      ) {
-        return yield* snapshotThenLive();
-      }
-      const plan = decideThreadResume({
-        afterSequence: input.afterSequence,
-        highWater,
-        replayEventCount: replay.length,
-        replayEncodedBytes: threadReplayEncodedBytes(replay),
-      });
-      if (plan.mode === "snapshot") {
-        return yield* snapshotThenLive();
-      }
-      return Stream.concat(
-        Stream.concat(rpcInitialItems(replay), completionMarker),
-        eventStreamFrom(highWater),
-      );
-    }
-
-    return yield* snapshotThenLive();
+      ),
+    );
   },
 );
 

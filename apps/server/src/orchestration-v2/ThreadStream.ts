@@ -11,6 +11,12 @@ import {
 } from "./threadHistoryPaging.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
 
+export function shouldUseBoundedThreadSnapshot(input: {
+  readonly acceptBoundedSnapshot?: boolean;
+}): boolean {
+  return input.acceptBoundedSnapshot === true;
+}
+
 export const THREAD_RESUME_MAX_REPLAY_EVENTS = 128;
 
 export const THREAD_RESUME_MAX_REPLAY_ENCODED_BYTES = 1_048_576;

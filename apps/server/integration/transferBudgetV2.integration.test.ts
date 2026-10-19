@@ -42,6 +42,10 @@ import * as OrchestrationEventStore from "../src/persistence/OrchestrationEventS
 import * as EventStore from "../src/orchestration-v2/EventStore.ts";
 import * as EventSink from "../src/orchestration-v2/EventSink.ts";
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
+import * as Orchestrator from "../src/orchestration-v2/Orchestrator.ts";
+import * as ProviderSessionManager from "../src/orchestration-v2/ProviderSessionManager.ts";
+import * as CommandReceiptStore from "../src/orchestration-v2/CommandReceiptStore.ts";
+import * as ServerSettings from "../src/serverSettings.ts";
 import * as ThreadManagementService from "../src/orchestration-v2/ThreadManagementService.ts";
 import * as ProjectStore from "../src/orchestration-v2/ProjectStore.ts";
 import * as ProjectService from "../src/project/ProjectService.ts";
@@ -81,18 +85,26 @@ const layerManagement = Layer.unwrap(
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sink = yield* EventSink.EventSinkV2;
-    return Layer.mock(ThreadManagementService.ThreadManagementService)({
-      ensureLegacyTranscript: () => Effect.void,
-      getThreadSnapshot: (id) => projections.getThreadSnapshot(id).pipe(Effect.orDie),
-      getThreadSnapshotWindow: (id, options) =>
-        projections.getThreadSnapshotWindow(id, options).pipe(Effect.orDie),
-      getThreadShell: (id) => projections.getThreadShell(id).pipe(Effect.orDie),
-      getShellSnapshot: (options) => projections.getShellSnapshot(options).pipe(Effect.orDie),
-      readShellSnapshot: (options) =>
-        projections.readShellSnapshot(options).pipe(Effect.map(Effect.orDie), Effect.orDie),
-      streamStoredEventsFrom: (input) =>
-        sink.stream({ ...input, bounded: true }).pipe(Stream.orDie),
-    });
+    return ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+          Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({}),
+          Layer.mock(ServerSettings.ServerSettingsService)({}),
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadSnapshot: (id) => projections.getThreadSnapshot(id).pipe(Effect.orDie),
+            getThreadSnapshotWindow: (id, options) =>
+              projections.getThreadSnapshotWindow(id, options).pipe(Effect.orDie),
+            getThreadShell: (id) => projections.getThreadShell(id).pipe(Effect.orDie),
+            getShellSnapshot: (options) => projections.getShellSnapshot(options).pipe(Effect.orDie),
+            readShellSnapshot: (options) =>
+              projections.readShellSnapshot(options).pipe(Effect.map(Effect.orDie), Effect.orDie),
+            streamStoredEventsFrom: (input) =>
+              sink.stream({ ...input, bounded: true }).pipe(Stream.orDie),
+          }),
+        ),
+      ),
+    );
   }),
 );
 const layerEnrichment = Layer.unwrap(
