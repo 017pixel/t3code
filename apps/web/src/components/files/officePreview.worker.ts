@@ -1,8 +1,8 @@
 import JSZip from "jszip";
+import { boundedZip } from "./boundedZip";
 import type { PresentationHandle, SlidePrimitive } from "@betteroffice/pptx";
 
 import {
-  OFFICE_PREVIEW_MAX_BYTES,
   OFFICE_PREVIEW_MAX_COLUMNS,
   OFFICE_PREVIEW_MAX_ROWS,
   type OfficeWorkerRequest,
@@ -15,52 +15,11 @@ function reply(result: OfficeWorkerResult) {
   self.postMessage(result, { transfer: [] });
 }
 
-// Stream each entry before handing it to an engine. A tiny compressed archive
-// must not turn into an unbounded allocation on the UI thread.
 async function boundedArchive(bytes: ArrayBuffer) {
-  if (bytes.byteLength > OFFICE_PREVIEW_MAX_BYTES)
-    throw new Error("Preview limited to files under 50 MB.");
-  const source = await JSZip.loadAsync(bytes).catch(() => {
-    throw new Error("This file is damaged, encrypted, or not a valid Office document.");
-  });
-  const entries = Object.values(source.files).filter((entry) => !entry.dir);
-  if (entries.length > 2048)
-    throw new Error("This file contains too many archive entries to preview.");
+  const files = await boundedZip(bytes);
   const archive = new JSZip();
-  let total = 0;
-  for (const entry of entries) {
-    const chunks: Uint8Array[] = [];
-    let length = 0;
-    await new Promise<void>((resolve, reject) => {
-      // JSZip exposes this streaming API at runtime but omits it from its types.
-      const stream = (
-        entry as JSZip.JSZipObject & {
-          internalStream(type: "uint8array"): JSZip.JSZipStreamHelper<Uint8Array>;
-        }
-      ).internalStream("uint8array");
-      stream
-        .on("data", (chunk: Uint8Array) => {
-          total += chunk.length;
-          length += chunk.length;
-          if (
-            total > OFFICE_PREVIEW_MAX_BYTES ||
-            (entry.name.endsWith(".xml") && length > 8 * 1024 * 1024)
-          ) {
-            stream.pause();
-            reject(new Error("The expanded document is too large to preview safely."));
-          } else chunks.push(chunk);
-        })
-        .on("error", reject)
-        .on("end", resolve)
-        .resume();
-    });
-    const content = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) {
-      content.set(chunk, offset);
-      offset += chunk.length;
-    }
-    archive.file(entry.name, content);
+  for (const [name, file] of files) {
+    if (!file.directory) archive.file(name, file.bytes);
   }
   return archive;
 }

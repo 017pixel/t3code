@@ -28,6 +28,8 @@ export type FilePreviewKind =
   | "markdown"
   | "mermaid"
   | "font"
+  | "archive"
+  | "sqlite"
   | "docx"
   | "xlsx"
   | "pptx"
@@ -44,6 +46,8 @@ export function filePreviewKind(file: {
   const generic = !mime || mime === "application/octet-stream" || mime === "text/plain";
   const office = officePreviewKind(file);
   if (office) return office;
+  const binary = binaryPreviewKind(file);
+  if (binary) return binary;
   if (mime === "application/pdf") return "pdf";
   if (mime === "text/html") return "html";
   if (mime === "text/markdown" || mime === "text/x-markdown") return "markdown";
@@ -85,6 +89,43 @@ export function filePreviewKind(file: {
   )
     return "text";
   return "unsupported";
+}
+
+const BINARY_MIME_TYPES = new Map([
+  [".zip", "application/zip"],
+  [".jar", "application/java-archive"],
+  [".tar", "application/x-tar"],
+  [".gz", "application/gzip"],
+  [".tgz", "application/gzip"],
+  [".sqlite", "application/vnd.sqlite3"],
+  [".sqlite3", "application/vnd.sqlite3"],
+  [".db", "application/vnd.sqlite3"],
+]);
+
+export function binaryPreviewKind(file: {
+  readonly name: string;
+  readonly mimeType?: string;
+}): "archive" | "sqlite" | null {
+  const mime = file.mimeType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  if (["application/vnd.sqlite3", "application/x-sqlite3", "application/x-sqlite"].includes(mime))
+    return "sqlite";
+  if (
+    [
+      "application/zip",
+      "application/x-zip-compressed",
+      "application/java-archive",
+      "application/x-java-archive",
+      "application/x-tar",
+      "application/gzip",
+      "application/x-gzip",
+      "application/x-compressed-tar",
+    ].includes(mime)
+  )
+    return "archive";
+  if (mime && mime !== "application/octet-stream" && mime !== "text/plain") return null;
+  const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+  const inferred = BINARY_MIME_TYPES.get(extension);
+  return inferred === "application/vnd.sqlite3" ? "sqlite" : inferred ? "archive" : null;
 }
 
 export const FILE_TEXT_PREVIEW_MAX_BYTES = 1024 * 1024;
@@ -136,6 +177,7 @@ export const WORKSPACE_IMAGE_PREVIEW_EXTENSIONS = [
   ".gif",
   ".ico",
   ".heic",
+  ".heif",
   ".jpeg",
   ".jpg",
   ".png",
@@ -149,6 +191,7 @@ const IMAGE_MIME_TYPE_BY_EXTENSION = new Map([
   [".avif", "image/avif"],
   [".bmp", "image/bmp"],
   [".heic", "image/heic"],
+  [".heif", "image/heif"],
   [".gif", "image/gif"],
   [".ico", "image/x-icon"],
   [".jpeg", "image/jpeg"],
@@ -212,6 +255,7 @@ export function hostPreviewMimeTypeFromExtension(extension: string): string | nu
     audioMimeTypeFromExtension(extension) ??
     BROWSER_MIME_TYPE_BY_EXTENSION.get(extension.toLowerCase()) ??
     FONT_MIME_TYPE_BY_EXTENSION.get(extension.toLowerCase()) ??
+    BINARY_MIME_TYPES.get(extension.toLowerCase()) ??
     (Object.hasOwn(OFFICE_MIME_TYPES, extension.toLowerCase().slice(1))
       ? OFFICE_MIME_TYPES[extension.toLowerCase().slice(1) as OfficePreviewKind]
       : null) ??
@@ -283,6 +327,7 @@ export function isWorkspacePreviewEntryPath(path: string): boolean {
     isWorkspaceBrowserPreviewPath(path) ||
     isWorkspaceImagePreviewPath(path) ||
     isWorkspaceFontPreviewPath(path) ||
-    officePreviewKind({ name: path }) !== null
+    officePreviewKind({ name: path }) !== null ||
+    binaryPreviewKind({ name: path }) !== null
   );
 }
