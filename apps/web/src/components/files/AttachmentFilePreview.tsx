@@ -23,6 +23,8 @@ import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 
+import { BinaryFilePreview } from "./BinaryFilePreview";
+import { PreviewImage } from "./PreviewImage";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
@@ -36,6 +38,8 @@ import {
   FileSurfaceLoading,
   FileSurfaceNotice,
 } from "./fileSurfaceChrome";
+
+const LargeTextViewer = lazy(() => import("./LargeTextViewer"));
 
 const SourcePreview = lazy(() => import("./ReadOnlySourcePreview"));
 
@@ -116,6 +120,7 @@ export function AttachmentFilePreview(props: {
   const [content, setContent] = useState<{ text: string; truncated: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [contentError, setContentError] = useState<string | null>(null);
+  const copyContents = useRef<(() => Promise<string>) | null>(null);
   const authorizedAt = useRef(0);
   useEffect(() => {
     if (!props.file) return;
@@ -147,10 +152,12 @@ export function AttachmentFilePreview(props: {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Retry must reauthorize the remote file.
   }, [props.file, refresh, revision]);
   const url = props.file ? localUrl : remoteUrl;
+  const streamsText =
+    kind === "text" && (props.sizeBytes === 0 || props.sizeBytes > FILE_TEXT_PREVIEW_MAX_BYTES);
   const needsText =
     kind === "text" || kind === "markdown" || kind === "mermaid" || (kind === "html" && !rendered);
   useEffect(() => {
-    if (!needsText || !url) return;
+    if (!needsText || streamsText || !url) return;
     const controller = new AbortController();
     // oxlint-disable-next-line react/set-state-in-effect -- A new external resource must clear the previous response before loading.
     setContent(null);
@@ -183,13 +190,13 @@ export function AttachmentFilePreview(props: {
         setContentError(cause instanceof Error ? cause.message : "Could not load this file.");
     });
     return () => controller.abort();
-  }, [url, needsText, revision, props.sizeBytes, props.file, refresh]);
+  }, [url, needsText, streamsText, revision, props.sizeBytes, props.file, refresh]);
   const failure = error ?? (needsText ? contentError : null);
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   const showsRawText =
     failure === null &&
     needsText &&
-    content !== null &&
+    (content !== null || streamsText) &&
     !(delimiter && rendered) &&
     !((kind === "markdown" || kind === "mermaid") && rendered);
 
@@ -234,6 +241,16 @@ export function AttachmentFilePreview(props: {
         setRevision((value) => value + 1);
       }}
     />
+  ) : streamsText && url ? (
+    <Suspense fallback={<FileSurfaceLoading />}>
+      <LargeTextViewer
+        key={`${url}:${rendered}`}
+        name={props.name}
+        src={url}
+        delimiter={rendered ? delimiter : null}
+        copyContents={copyContents}
+      />
+    </Suspense>
   ) : !url || (needsText && !content) ? (
     <FileSurfaceLoading />
   ) : needsText && content ? (
@@ -248,6 +265,8 @@ export function AttachmentFilePreview(props: {
     ) : (
       <ReadOnlySourcePreview name={props.name} text={content.text} />
     )
+  ) : kind === "archive" || kind === "sqlite" ? (
+    <BinaryFilePreview src={url} name={props.name} kind={kind} />
   ) : kind === "font" ? (
     <FontFilePreview src={url} name={props.name} />
   ) : officeKind ? (
@@ -274,15 +293,7 @@ export function AttachmentFilePreview(props: {
       />
     </div>
   ) : kind === "image" ? (
-    // oxlint-disable-next-line t3code/require-centered-scroll-gutter -- The image is capped at max-h-full max-w-full, so this never scrolls.
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
-      <img
-        src={url}
-        alt={props.name}
-        className="max-h-full max-w-full object-contain"
-        onError={() => setError("Unable to load image.")}
-      />
-    </div>
+    <PreviewImage key={url} src={url} name={props.name} mimeType={props.mimeType} />
   ) : (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 text-center">
       <p className="text-sm font-medium">No preview for this file</p>
@@ -331,10 +342,25 @@ export function AttachmentFilePreview(props: {
             <WrapTextIcon className="size-3.5" />
           </FileSurfaceAction>
         ) : null}
-        {content ? (
+        {content || streamsText ? (
           <FileSurfaceAction
-            label={isCopied ? "Copied" : content.truncated ? "Copy preview" : "Copy contents"}
-            onPress={() => copyToClipboard(content.text, undefined)}
+            label={isCopied ? "Copied" : content?.truncated ? "Copy preview" : "Copy contents"}
+            onPress={() => {
+              if (content) {
+                void copyToClipboard(content.text, undefined);
+                return;
+              }
+              void copyContents
+                .current?.()
+                .then((text) => copyToClipboard(text, undefined))
+                .catch((cause: unknown) =>
+                  toastManager.add({
+                    type: "error",
+                    title: "Could not copy file",
+                    description: cause instanceof Error ? cause.message : "Try again.",
+                  }),
+                );
+            }}
           >
             <MorphIcon className="size-3.5" icon={isCopied ? Check : Copy} />
           </FileSurfaceAction>

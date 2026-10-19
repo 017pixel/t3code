@@ -1,12 +1,10 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import type JSZip from "jszip";
 
-import {
-  OFFICE_PREVIEW_MAX_ROWS,
-  OFFICE_PREVIEW_MAX_COLUMNS,
-  type OfficeWorkerResult,
-  type NotebookCell,
-} from "./officePreviewProtocol";
+import { type OfficeWorkerResult, type NotebookCell } from "./officePreviewProtocol";
+
+const ODS_PREVIEW_MAX_ROWS = 500;
+const ODS_PREVIEW_MAX_COLUMNS = 50;
 
 type XmlNode = { name: string; attrs: Record<string, string>; children: XmlNode[]; text: string };
 type OrderedXml = { [key: string]: OrderedXml[] | Record<string, string> | string };
@@ -225,7 +223,7 @@ export async function openDocument(
         const rows: string[][] = [];
         let truncated = false;
         for (const row of find(table, "table:table-row")) {
-          if (rows.length >= OFFICE_PREVIEW_MAX_ROWS) {
+          if (rows.length >= ODS_PREVIEW_MAX_ROWS) {
             truncated = true;
             break;
           }
@@ -242,28 +240,31 @@ export async function openDocument(
               "";
             const count = repeat(
               cell.attrs["table:number-columns-repeated"],
-              OFFICE_PREVIEW_MAX_COLUMNS + 1,
+              ODS_PREVIEW_MAX_COLUMNS + 1,
             );
-            if (cells.length + count > OFFICE_PREVIEW_MAX_COLUMNS) truncated = true;
-            for (let i = 0; i < count && cells.length < OFFICE_PREVIEW_MAX_COLUMNS; i++) {
+            if (cells.length + count > ODS_PREVIEW_MAX_COLUMNS) truncated = true;
+            for (let i = 0; i < count && cells.length < ODS_PREVIEW_MAX_COLUMNS; i++) {
               if (value.length > 10_000)
                 throw new Error("A spreadsheet cell is too large to preview.");
               cells.push(value);
             }
           }
-          const count = repeat(
-            row.attrs["table:number-rows-repeated"],
-            OFFICE_PREVIEW_MAX_ROWS + 1,
-          );
-          if (rows.length + count > OFFICE_PREVIEW_MAX_ROWS) truncated = true;
-          for (let i = 0; i < count && rows.length < OFFICE_PREVIEW_MAX_ROWS; i++) {
+          const count = repeat(row.attrs["table:number-rows-repeated"], ODS_PREVIEW_MAX_ROWS + 1);
+          if (rows.length + count > ODS_PREVIEW_MAX_ROWS) truncated = true;
+          for (let i = 0; i < count && rows.length < ODS_PREVIEW_MAX_ROWS; i++) {
             cellBytes += cells.reduce((size, cell) => size + cell.length, 0);
             if (cellBytes > 8 * 1024 * 1024)
               throw new Error("This spreadsheet has too much text to preview.");
             rows.push(cells);
           }
         }
-        return { name: table.attrs["table:name"] || `Sheet ${index + 1}`, rows, truncated };
+        return {
+          name: table.attrs["table:name"] || `Sheet ${index + 1}`,
+          rows,
+          rowCount: rows.length,
+          columns: rows.reduce((columns, row) => Math.max(columns, row.length), 1),
+          truncated,
+        };
       }),
     };
   }

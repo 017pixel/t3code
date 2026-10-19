@@ -14,6 +14,7 @@ import {
   isWorkspaceFontPreviewPath,
   isWorkspaceVideoPreviewPath,
   officePreviewKind,
+  binaryPreviewKind,
 } from "@t3tools/shared/filePreview";
 import {
   DEFAULT_TOKENIZE_MAX_LENGTH,
@@ -42,7 +43,7 @@ import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 import { FolderTree, Globe2, WrapTextIcon } from "lucide-react";
 import { Code2, Eye, Table2 } from "lucide";
 import * as Schema from "effect/Schema";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import { useAssetUrlRefresh, useAssetUrlState } from "~/assets/assetUrls";
@@ -77,6 +78,8 @@ import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
+import { BinaryFilePreview } from "./BinaryFilePreview";
+import { PreviewImage } from "./PreviewImage";
 import { OfficeFilePreview } from "./OfficeFilePreview";
 import { FontFilePreview } from "./FontFilePreview";
 import { MermaidFilePreview } from "./MermaidFilePreview";
@@ -164,14 +167,16 @@ function WorkspaceImagePreview(props: {
   readonly workspaceMutationId: string | null;
 }) {
   const resource = workspaceAssetResource({
-    kind: "workspace-file",
+    kind:
+      mediaFileReference(props.absolutePath, props.workspaceRoot).relativePath !== undefined
+        ? "workspace-file"
+        : "media-file",
     threadRef: props.threadRef,
     draft: props.draft,
     workspaceRoot: props.workspaceRoot,
     absolutePath: props.absolutePath,
   });
   const assetUrl = useAssetUrlState(props.environmentId, resource);
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const revisionSuffix =
     props.workspaceMutationId === null
       ? ""
@@ -185,7 +190,7 @@ function WorkspaceImagePreview(props: {
     asset: { environmentId: props.environmentId, resource },
   };
 
-  if (assetUrl._tag === "Failure" || (imageUrl !== null && failedUrl === imageUrl)) {
+  if (assetUrl._tag === "Failure") {
     return (
       <MediaActions source={actionsSource}>
         <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive">
@@ -196,17 +201,11 @@ function WorkspaceImagePreview(props: {
   }
 
   return assetUrl._tag === "Success" && imageUrl !== null ? (
-    // oxlint-disable-next-line t3code/require-centered-scroll-gutter -- The image is capped at max-h-full max-w-full, so this never scrolls.
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
-      <MediaActions source={actionsSource}>
-        <img
-          className="max-h-full max-w-full object-contain"
-          src={imageUrl}
-          alt={props.alt}
-          onError={() => setFailedUrl(imageUrl)}
-        />
-      </MediaActions>
-    </div>
+    <MediaActions source={actionsSource}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <PreviewImage key={imageUrl} src={imageUrl} name={props.alt} />
+      </div>
+    </MediaActions>
   ) : (
     <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
       <Spinner size="lg" />
@@ -256,6 +255,15 @@ function WorkspaceBrowserPreview(props: {
       </div>
     );
   }
+  const binaryKind = binaryPreviewKind({ name: props.absolutePath });
+  if (binaryKind)
+    return (
+      <BinaryFilePreview
+        src={`${assetUrl.url}${revisionSuffix}`}
+        name={props.title}
+        kind={binaryKind}
+      />
+    );
   const officeKind = officePreviewKind({ name: props.absolutePath });
   if (isWorkspaceFontPreviewPath(props.absolutePath))
     return <FontFilePreview src={`${assetUrl.url}${revisionSuffix}`} name={props.title} />;
@@ -1026,7 +1034,8 @@ export default function FilePreviewPanel({
   const isPdf = relativePath !== null && isPdfPreviewFile(relativePath);
   const isDocument =
     relativePath !== null &&
-    (officePreviewKind({ name: relativePath }) !== null ||
+    (binaryPreviewKind({ name: relativePath }) !== null ||
+      officePreviewKind({ name: relativePath }) !== null ||
       isWorkspaceFontPreviewPath(relativePath));
   const isHtml = relativePath !== null && !isPdf && isBrowserPreviewFile(relativePath);
   const isHostFile =
@@ -1328,7 +1337,8 @@ export default function FilePreviewPanel({
       attachment === undefined &&
       !isMedia &&
       !renderBrowserFile &&
-      file.data?.truncated ? (
+      file.data?.truncated &&
+      (draft || isMarkdown || isMermaid || isHtml) ? (
         <div className="shrink-0 border-b border-warning/20 bg-warning-surface px-3 py-1.5 text-2xs text-warning-foreground">
           Preview limited to the first 1 MB of a {file.data.byteLength.toLocaleString()} byte file.
         </div>
@@ -1389,6 +1399,22 @@ export default function FilePreviewPanel({
               absolutePath={absolutePath}
               workspaceRoot={cwd}
               title={relativePath}
+              workspaceMutationId={workspaceMutationId}
+            />
+          ) : relativePath &&
+            absolutePath &&
+            file.data?.truncated &&
+            !draft &&
+            !isMarkdown &&
+            !isMermaid &&
+            !isHtml ? (
+            <WorkspaceLargeTextPreview
+              key={`${absolutePath}:${renderTable}`}
+              environmentId={environmentId}
+              threadRef={threadRef}
+              absolutePath={absolutePath}
+              name={relativePath}
+              delimiter={renderTable ? tableDelimiter : null}
               workspaceMutationId={workspaceMutationId}
             />
           ) : relativePath && absolutePath && file.readError?.failure === "binary_file" ? (
@@ -1518,5 +1544,34 @@ export default function FilePreviewPanel({
         ) : null}
       </div>
     </div>
+  );
+}
+
+const LargeTextViewer = lazy(() => import("./LargeTextViewer"));
+function WorkspaceLargeTextPreview(props: {
+  environmentId: EnvironmentId;
+  threadRef: ScopedThreadRef;
+  absolutePath: string;
+  name: string;
+  delimiter: "," | "\t" | null;
+  workspaceMutationId: string | null;
+}) {
+  const assetUrl = useAssetUrlState(props.environmentId, {
+    _tag: "media-file",
+    threadId: props.threadRef.threadId,
+    path: props.absolutePath,
+    disposition: "attachment",
+  });
+  if (assetUrl._tag !== "Success")
+    return (
+      <div className="p-6 text-xs text-muted-foreground">
+        {assetUrl._tag === "Failure" ? "Unable to load file preview." : "Loading…"}
+      </div>
+    );
+  const src = `${assetUrl.url}${assetUrl.url.includes("?") ? "&" : "?"}revision=${encodeURIComponent(props.workspaceMutationId ?? "")}`;
+  return (
+    <Suspense fallback={<div className="p-6 text-xs text-muted-foreground">Loading…</div>}>
+      <LargeTextViewer name={props.name} src={src} delimiter={props.delimiter} />
+    </Suspense>
   );
 }
