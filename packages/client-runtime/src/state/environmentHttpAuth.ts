@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import {
+  type EnvironmentHttpApi,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
 } from "@t3tools/contracts";
@@ -125,6 +126,7 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
   readonly url: (urls: ReturnType<typeof makeEnvironmentHttpApiUrlBuilder>[Group]) => string;
   readonly timeoutMs: number;
   readonly group: Group;
+  readonly api?: typeof EnvironmentHttpApi;
   readonly request: (input: {
     readonly client: Effect.Success<ReturnType<typeof makeEnvironmentHttpApiGroupClient<Group>>>;
     readonly headers: EnvironmentHttpAuthHeaders;
@@ -173,7 +175,7 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
       }
 
       const requestUrl = requestUrlFor(httpBaseUrl);
-      const client = yield* makeEnvironmentHttpApiGroupClient(httpBaseUrl, input.group);
+      const client = yield* makeEnvironmentHttpApiGroupClient(httpBaseUrl, input.group, input.api);
       const headers = yield* buildEnvironmentAuthHeaders(
         authorization,
         input.method,

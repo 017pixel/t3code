@@ -104,9 +104,10 @@ export const makeEnvironmentHttpApiGroupClient = <
 >(
   httpBaseUrl: string,
   group: Group,
+  api = EnvironmentHttpApi,
 ) =>
   Effect.flatMap(HttpClient.HttpClient, (httpClient) =>
-    HttpApiClient.group(EnvironmentHttpApi, {
+    HttpApiClient.group(api, {
       httpClient,
       group,
       baseUrl: remoteApiBaseUrl(httpBaseUrl),
