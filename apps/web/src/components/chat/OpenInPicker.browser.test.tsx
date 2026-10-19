@@ -66,6 +66,7 @@ vi.mock(import("../../remoteOpen"), async (importOriginal) => ({
 }));
 
 import { OpenInPicker } from "./OpenInPicker";
+import { useOpenFavoriteEditorShortcut } from "./OpenInPickerShortcut";
 
 const primary = EnvironmentId.make("primary");
 const selected = EnvironmentId.make("selected");
@@ -119,6 +120,19 @@ async function renderPicker(
     );
     root.render(node);
   });
+}
+
+function ChatEditorShortcut({ panelMounted }: { panelMounted: boolean }) {
+  const props = {
+    environmentId: selected,
+    keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
+    availableEditors: editors,
+    openInCwd: "/work/project",
+  };
+  useOpenFavoriteEditorShortcut({ ...props, enabled: true });
+  return panelMounted ? (
+    <OpenInPicker {...props} displayMode="panel" enableShortcut={false} />
+  ) : null;
 }
 
 function byLabel(label: string) {
@@ -176,6 +190,24 @@ it.each(["local-exec", "remote-links"] as const)(
 );
 
 describe("host editor access", () => {
+  it("rechecks the selected grant for the global shortcut while the panel is hidden", async () => {
+    state.allowed.add(selected);
+    await act(async () => root.render(<ChatEditorShortcut panelMounted={false} />));
+    state.allowed.delete(selected);
+    state.allowed.add(primary);
+    await pressOpenFavorite();
+    expect.soft(state.run).not.toHaveBeenCalled();
+
+    state.run.mockClear();
+    state.allowed.add(selected);
+    await pressOpenFavorite();
+    expect(state.run).toHaveBeenCalledExactlyOnceWith({
+      environmentId: selected,
+      input: { cwd: "/work/project", editor: "vscode" },
+    });
+    expect(state.openUrl).not.toHaveBeenCalled();
+  });
+
   it("uses the selected grant for both the button and a retained shortcut", async () => {
     state.allowed.add(selected);
     await renderPicker();
@@ -228,37 +260,45 @@ it("reveals a file in the file manager instead of opening it", async () => {
 });
 
 describe("client editor links", () => {
-  it("offers browser remote editors and remembers a choice without host operate permission", async () => {
-    const actual = await vi.importActual<typeof import("../../remoteOpen")>("../../remoteOpen");
-    vi.mocked(useRemoteCapableEditors).mockImplementation(actual.useRemoteCapableEditors);
-    state.remote = { mode: "remote-links", host: { kind: "ssh-alias", host: "test-host" } };
-    await renderPicker();
-    expect(primaryButton().disabled).toBe(false);
-    await click(primaryButton());
-    expect(state.openUrl).toHaveBeenCalledExactlyOnceWith(
-      "vscode://vscode-remote/ssh-remote+test-host/work/project",
-    );
-    expect(state.run).not.toHaveBeenCalled();
-    expect(state.markHintSeen).toHaveBeenCalledOnce();
-    expect(state.setPreferred).toHaveBeenCalledExactlyOnceWith("vscode");
+  it.each([true, false])(
+    "remembers a browser editor and opens it once through the chat shortcut (panel mounted: %s)",
+    async (panelMounted) => {
+      const actual = await vi.importActual<typeof import("../../remoteOpen")>("../../remoteOpen");
+      vi.mocked(useRemoteCapableEditors).mockImplementation(actual.useRemoteCapableEditors);
+      state.remote = { mode: "remote-links", host: { kind: "ssh-alias", host: "test-host" } };
+      await renderPicker();
+      expect(primaryButton().disabled).toBe(false);
+      await click(primaryButton());
+      expect(state.openUrl).toHaveBeenCalledExactlyOnceWith(
+        "vscode://vscode-remote/ssh-remote+test-host/work/project",
+      );
+      expect(state.run).not.toHaveBeenCalled();
+      expect(state.markHintSeen).toHaveBeenCalledOnce();
+      expect(state.setPreferred).toHaveBeenCalledExactlyOnceWith("vscode");
 
-    await click(byLabel("Choose editor"));
-    const labels = menuItems().map((item) => item.textContent);
-    expect(labels).toEqual(expect.arrayContaining(["IntelliJ IDEA", "VSCodium", "Cursor", "Zed"]));
-    await click(menuItems().find((item) => item.textContent === "VSCodium")!);
-    expect(state.openUrl).toHaveBeenCalledTimes(1);
-    expect(window.localStorage.getItem("t3code:last-editor")).toBe('"vscodium"');
+      await click(byLabel("Choose editor"));
+      const labels = menuItems().map((item) => item.textContent);
+      expect(labels).toEqual(
+        expect.arrayContaining(["IntelliJ IDEA", "VSCodium", "Cursor", "Zed"]),
+      );
+      await click(menuItems().find((item) => item.textContent === "VSCodium")!);
+      expect(state.openUrl).toHaveBeenCalledTimes(1);
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"vscodium"');
 
-    await act(async () => root.unmount());
-    root = createRoot(container);
-    await renderPicker();
-    await pressOpenFavorite();
-    expect(state.openUrl).toHaveBeenNthCalledWith(
-      2,
-      "vscodium://vscode-remote/ssh-remote+test-host/work/project",
-    );
-    expect(state.run).not.toHaveBeenCalled();
-  });
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      state.allowed.add(selected);
+      state.openUrl.mockClear();
+      await act(async () => root.render(<ChatEditorShortcut panelMounted={panelMounted} />));
+      await pressOpenFavorite();
+      expect
+        .soft(state.openUrl)
+        .toHaveBeenCalledExactlyOnceWith(
+          "vscodium://vscode-remote/ssh-remote+test-host/work/project",
+        );
+      expect.soft(state.run).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not change preferences when the client rejects the SSH URL", async () => {
     state.remote = { mode: "remote-links", host: { kind: "ssh-alias", host: "test-host" } };

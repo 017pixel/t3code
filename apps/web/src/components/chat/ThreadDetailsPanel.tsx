@@ -127,6 +127,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   availableEditors={props.availableEditors}
                   openInCwd={props.gitCwd}
                   displayMode="panel"
+                  enableShortcut={false}
                 />
               ) : null}
 
