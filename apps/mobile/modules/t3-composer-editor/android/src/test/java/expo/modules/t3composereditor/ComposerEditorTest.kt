@@ -4,9 +4,11 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.hardware.input.InputManager
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
+import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.inputmethod.BaseInputConnection
@@ -22,6 +24,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.InputDeviceBuilder
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], manifest = Config.NONE)
@@ -200,7 +203,7 @@ class ComposerEditorTest {
   }
 
   @Test
-  fun softKeyboardReturnStillEditsWhenHardwareReturnSends() {
+  fun imeReturnKeepsSoftEditsAndForwardedHardwareChords() {
     val sends = mutableListOf<Boolean>()
     val editor = submissionEditor(sends)
 
@@ -216,15 +219,22 @@ class ComposerEditorTest {
       controller.windowFocusChanged(true)
       val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
 
+      fun forwardReturn(deviceId: Int, modifiers: Int = 0) {
+        val now = SystemClock.uptimeMillis()
+        val down = KeyEvent(
+          now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0, modifiers, deviceId, 0, 0,
+        )
+        connection.sendKeyEvent(down)
+        connection.sendKeyEvent(KeyEvent.changeAction(down, KeyEvent.ACTION_UP))
+        shadowOf(Looper.getMainLooper()).idle()
+      }
+
+      assertNull(InputDevice.getDevice(1))
       for (returnSends in listOf(false, true)) {
         editor.returnSends = returnSends
         editor.setText("draft")
         editor.setSelection(editor.length())
-        val now = SystemClock.uptimeMillis()
-        val down = KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0, 0, 1, 0, 0)
-        connection.sendKeyEvent(down)
-        connection.sendKeyEvent(KeyEvent.changeAction(down, KeyEvent.ACTION_UP))
-        shadowOf(Looper.getMainLooper()).idle()
+        forwardReturn(deviceId = 1)
 
         assertEquals(
           "IME Return must not submit (returnSends=$returnSends)",
@@ -232,6 +242,41 @@ class ComposerEditorTest {
           sends,
         )
         assertEquals("draft\n", editor.text.toString())
+      }
+
+      val keyboard = InputDeviceBuilder.newBuilder()
+        .setId(42)
+        .setName("Physical keyboard")
+        .setExternal(true)
+        .setSources(InputDevice.SOURCE_KEYBOARD)
+        .setKeyboardType(InputDevice.KEYBOARD_TYPE_ALPHABETIC)
+        .build()
+      shadowOf(context.getSystemService(InputManager::class.java)).addInputDevice(keyboard)
+      val registered = checkNotNull(InputDevice.getDevice(keyboard.id))
+      assertFalse(registered.isVirtual)
+      assertEquals(InputDevice.KEYBOARD_TYPE_ALPHABETIC, registered.keyboardType)
+
+      for (returnSends in listOf(false, true)) {
+        editor.returnSends = returnSends
+        editor.setText("draft")
+        editor.setSelection(editor.length())
+        sends.clear()
+
+        forwardReturn(keyboard.id)
+        assertEquals(if (returnSends) listOf(false) else emptyList<Boolean>(), sends)
+        val expectedText = if (returnSends) "draft" else "draft\n"
+        assertEquals(expectedText, editor.text.toString())
+
+        forwardReturn(keyboard.id, KeyEvent.META_CTRL_ON)
+        if (!returnSends) {
+          forwardReturn(keyboard.id, KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON)
+        }
+        assertEquals(
+          "Forwarded hardware Return chords must submit (returnSends=$returnSends)",
+          listOf(false, true),
+          sends,
+        )
+        assertEquals(expectedText, editor.text.toString())
       }
     }
   }
