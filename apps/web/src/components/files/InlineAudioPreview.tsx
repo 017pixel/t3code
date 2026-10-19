@@ -45,9 +45,9 @@ export function InlineAudioPreview(props: {
     >
       <button
         type="button"
-        aria-label={`Preview ${props.name}`}
-        disabled={!props.onOpen}
-        onClick={props.onOpen}
+        aria-label={`${failed && !props.onOpen ? "Retry" : "Preview"} ${props.name}`}
+        disabled={!props.onOpen && !failed}
+        onClick={props.onOpen ?? (() => setFailedSrc(null))}
         className="flex h-11 w-full shrink-0 cursor-pointer items-center gap-2 px-3 text-left text-xs hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-default"
       >
         <Music2Icon className="size-4 shrink-0 text-muted-foreground" />
@@ -60,7 +60,11 @@ export function InlineAudioPreview(props: {
           className="flex min-h-0 flex-1 items-center px-3 pb-2 text-2xs text-muted-foreground"
           role={failed ? "status" : undefined}
         >
-          {failed ? "Audio unavailable. Open the file to try again." : "Loading audio..."}
+          {failed
+            ? props.onOpen
+              ? "Audio unavailable. Open the file to try again."
+              : "Audio unavailable. Select the filename to retry."
+            : "Loading audio..."}
         </span>
       )}
     </span>
