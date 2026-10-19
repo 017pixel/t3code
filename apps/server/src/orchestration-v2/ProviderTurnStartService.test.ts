@@ -284,6 +284,7 @@ function makeLocalCommandHarness(input: {
   readonly openFailure?: unknown;
   readonly ensureThreadFailure?: unknown;
   readonly historyReadFailureAfterFallback?: unknown;
+  readonly nativeResumeFailure?: string;
   readonly interruptOpen?: boolean;
   readonly interruptRunBeforeOpenFailure?: boolean;
   readonly writeFailure?: unknown;
@@ -320,7 +321,9 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make("codex"),
+    driver: ProviderDriverKind.make(
+      "historyReadFailureAfterFallback" in input ? "claudeAgent" : "codex",
+    ),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -460,7 +463,7 @@ function makeLocalCommandHarness(input: {
     checkpoints: [],
     updatedAt: now,
   };
-  if ("historyReadFailureAfterFallback" in input) {
+  if ("historyReadFailureAfterFallback" in input || input.nativeResumeFailure !== undefined) {
     const nativeThreadRef = {
       driver: providerThread.driver,
       nativeId: "native-resume-thread",
@@ -499,6 +502,7 @@ function makeLocalCommandHarness(input: {
       ),
     ),
   );
+  const ensureReplacementThread = vi.fn(() => Effect.succeed(providerThread));
   const resumeFallbackSession = {
     driver: providerThread.driver,
     resumeThread: () =>
@@ -506,15 +510,15 @@ function makeLocalCommandHarness(input: {
         new ProviderAdapter.ProviderAdapterEventStreamError({
           driver: providerThread.driver,
           providerSessionId,
-          cause: "native thread is gone",
+          cause: input.nativeResumeFailure ?? "native thread is gone",
         }),
       ),
-    ensureThread: () => Effect.succeed(providerThread),
+    ensureThread: ensureReplacementThread,
   };
   const open = vi.fn(() =>
     input.interruptOpen === true
       ? Effect.interrupt
-      : "historyReadFailureAfterFallback" in input
+      : "historyReadFailureAfterFallback" in input || input.nativeResumeFailure !== undefined
         ? Effect.succeed(resumeFallbackSession as never)
         : "ensureThreadFailure" in input
           ? Effect.succeed({ driver: providerThread.driver, ensureThread } as never)
@@ -677,6 +681,7 @@ function makeLocalCommandHarness(input: {
     resolveRuntimePolicy,
     createWorktree,
     open,
+    ensureReplacementThread,
     writeIfRunCurrent,
     startRootRun,
     tryHandlePromptCommand,
@@ -1154,3 +1159,26 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+effectIt.effect("preserves the saved Codex conversation when native resume fails", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      nativeResumeFailure: "already has an active writer",
+    });
+    const original = harness.projection().providerThreads.at(-1)?.nativeThreadRef;
+    const retry = yield* harness.startWithRetry.pipe(Effect.result);
+    expect(harness.ensureReplacementThread).not.toHaveBeenCalled();
+    expect(retry._tag).toBe("Failure");
+    expect(harness.projection().runs.at(-1)?.status).toBe("starting");
+    expect(harness.projection().providerThreads.at(-1)?.nativeThreadRef).toEqual(original);
+    const result = yield* harness.start.pipe(Effect.result);
+    expect(harness.ensureReplacementThread).not.toHaveBeenCalled();
+    expect(result._tag).toBe("Success");
+    expect(harness.startRootRun).not.toHaveBeenCalled();
+    expect(harness.projection().providerThreads.at(-1)?.nativeThreadRef).toEqual(original);
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    expect(harness.projection().turnItems.some((item) => item.type === "error")).toBe(true);
+    expect(harness.events.some((event) => event.type === "context-handoff.updated")).toBe(false);
+  }),
+);

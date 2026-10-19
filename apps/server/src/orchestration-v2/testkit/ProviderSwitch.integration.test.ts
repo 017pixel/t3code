@@ -390,6 +390,30 @@ const waitForIdle = Effect.fn("ProviderSwitchTest.waitForIdle")(function* (
   return yield* Effect.die(new Error("Provider switch test timed out waiting for idle"));
 });
 
+const dispatchToTerminal = Effect.fn("ProviderSwitchTest.dispatchToTerminal")(function* (
+  command: OrchestrationV2Command,
+) {
+  if (command.type !== "message.dispatch") return yield* Effect.die("Expected a turn dispatch");
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const before = yield* orchestrator.getThreadProjection(command.threadId);
+  const ordinal = (before.runs.at(-1)?.ordinal ?? 0) + 1;
+  const terminal = yield* orchestrator.streamStoredEvents.pipe(
+    Stream.filter(
+      ({ event }) =>
+        event.type === "run.updated" &&
+        event.threadId === command.threadId &&
+        event.payload.ordinal === ordinal &&
+        ["completed", "failed", "interrupted"].includes(event.payload.status),
+    ),
+    Stream.runHead,
+    Effect.forkScoped,
+  );
+  yield* orchestrator.dispatch(command);
+  yield* Fiber.join(terminal);
+  yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+  return yield* orchestrator.getThreadProjection(command.threadId);
+});
+
 describe("orchestration v2 provider switching", () => {
   it.live.each([
     "compact-native",
@@ -2734,7 +2758,7 @@ describe("orchestration v2 provider switching", () => {
     () => importedFailureScenario(true),
   );
 
-  it.live("uses portable fallback when native resume fails after a provider switch", () =>
+  it.live("preserves Codex history when native resume fails after a provider switch", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace("provider-switch");
@@ -2819,14 +2843,12 @@ describe("orchestration v2 provider switching", () => {
         const projection = yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           yield* orchestrator.dispatch(commands[0]!);
-          yield* orchestrator.dispatch(commands[1]!);
-          yield* waitForIdle(threadId);
-          yield* orchestrator.dispatch(commands[2]!);
+          yield* dispatchToTerminal(commands[1]!);
+          yield* dispatchToTerminal(commands[2]!);
           assert.deepEqual(
             (yield* orchestrator.getThreadProjection(threadId)).thread.modelSelection,
             CLAUDE_MODEL_SELECTION,
           );
-          yield* waitForIdle(threadId);
           const codexSession = (yield* orchestrator.getThreadProjection(
             threadId,
           )).providerSessions.find(
@@ -2839,12 +2861,12 @@ describe("orchestration v2 provider switching", () => {
             providerSessionId: codexSession.id,
           });
           yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
-          yield* orchestrator.dispatch(commands[3]!);
+          const final = yield* dispatchToTerminal(commands[3]!);
           assert.deepEqual(
             (yield* orchestrator.getThreadProjection(threadId)).thread.modelSelection,
             CODEX_MODEL_SELECTION,
           );
-          return yield* waitForIdle(threadId);
+          return final;
         }).pipe(
           Effect.provide(
             ProviderReplayHarness.layerWithRegistry(
@@ -2871,69 +2893,20 @@ describe("orchestration v2 provider switching", () => {
           [
             ["codex", "completed"],
             ["claudeAgent", "completed"],
-            ["codex", "completed"],
+            ["codex", "failed"],
           ],
         );
-        assert.lengthOf(projection.providerThreads, 2);
-        assert.equal(projection.runs[0]?.providerThreadId, projection.runs[2]?.providerThreadId);
-        assert.notEqual(projection.runs[0]?.providerThreadId, projection.runs[1]?.providerThreadId);
-        assert.equal(yield* Ref.get(codexNativeThreadGeneration), 2);
+        assert.lengthOf(turns, 2);
+        assert.equal(yield* Ref.get(codexNativeThreadGeneration), 1);
         const codexThread = projection.providerThreads.find(
-          (providerThread) => providerThread.id === projection.runs[2]?.providerThreadId,
+          (thread) => thread.id === projection.runs[2]?.providerThreadId,
         );
-        assert.equal(codexThread?.nativeThreadRef?.nativeId, `codex:${threadId}:1`);
+        assert.equal(codexThread?.nativeThreadRef?.nativeId, `codex:${threadId}:0`);
         assert.deepEqual(
-          projection.contextHandoffs.map((handoff) => [
-            handoff.strategy,
-            handoff.coveredRunOrdinals,
-            handoff.delivery?.status,
-            handoff.delivery?.nativeThreadId,
-          ]),
-          [
-            ["full_thread_summary", { from: 1, to: 1 }, "inline", `claudeAgent:${threadId}`],
-            ["delta_since_target_last_seen", { from: 2, to: 2 }, "inline", `codex:${threadId}:1`],
-            ["full_thread_summary", { from: 1, to: 2 }, "inline", `codex:${threadId}:1`],
-          ],
+          projection.contextHandoffs.map((handoff) => handoff.strategy),
+          ["full_thread_summary", "delta_since_target_last_seen"],
         );
-        assert.deepEqual(
-          projection.contextTransfers.map((transfer) => [
-            transfer.type,
-            transfer.status,
-            transfer.resolution?.strategy,
-          ]),
-          [
-            ["provider_handoff", "consumed", "portable_context"],
-            ["provider_handoff", "consumed", "delta_context"],
-            ["provider_handoff", "resolved_portable", "portable_context"],
-          ],
-        );
-        assert.deepEqual(
-          projection.turnItems
-            .filter((item) => item.type === "user_message")
-            .map((item) => item.text),
-          [firstPrompt, claudePrompt, returnPrompt],
-        );
-        assert.deepEqual(
-          projection.providerThreads.map((providerThread) => [
-            providerThread.driver,
-            providerThread.status,
-            providerThread.handoffIds.length,
-          ]),
-          [
-            ["codex", "idle", 1],
-            ["claudeAgent", "idle", 1],
-          ],
-        );
-        assert.equal(turns[0]?.text, firstPrompt);
-        assert.include(turns[1]?.text ?? "", "Context handoff (full_thread_summary):");
-        assert.include(turns[1]?.text ?? "", "codex before switch");
-        assert.include(turns[1]?.text ?? "", claudePrompt);
-        assert.include(turns[2]?.text ?? "", "Context handoff (full_thread_summary):");
-        assert.include(turns[2]?.text ?? "", "Context handoff (delta_since_target_last_seen):");
-        assert.include(turns[2]?.text ?? "", "codex before switch");
-        assert.include(turns[2]?.text ?? "", "claude switched response");
-        assert.include(turns[2]?.text ?? "", returnPrompt);
-        assert.equal(turns[0]?.providerThreadId, turns[2]?.providerThreadId);
+        assert.isTrue(projection.turnItems.some((item) => item.type === "error"));
       }),
     ),
   );
@@ -3337,13 +3310,10 @@ describe("orchestration v2 provider switching", () => {
           const projection = yield* Effect.gen(function* () {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             yield* orchestrator.dispatch(commands[0]!);
-            yield* orchestrator.dispatch(commands[1]!);
-            yield* waitForIdle(sourceThreadId);
-            yield* orchestrator.dispatch(commands[2]!);
-            yield* waitForIdle(sourceThreadId);
+            yield* dispatchToTerminal(commands[1]!);
+            yield* dispatchToTerminal(commands[2]!);
             yield* orchestrator.dispatch(commands[3]!);
-            yield* orchestrator.dispatch(commands[4]!);
-            yield* waitForIdle(forkThreadId);
+            yield* dispatchToTerminal(commands[4]!);
             yield* orchestrator.dispatch(commands[5]!);
             if (failResume) {
               const beforeResume = yield* orchestrator.getThreadProjection(sourceThreadId);
@@ -3368,8 +3338,7 @@ describe("orchestration v2 provider switching", () => {
                 ],
               });
             }
-            yield* orchestrator.dispatch(commands[6]!);
-            return yield* waitForIdle(sourceThreadId);
+            return yield* dispatchToTerminal(commands[6]!);
           }).pipe(
             Effect.provide(
               ProviderReplayHarness.layerWithRegistry(
@@ -3397,20 +3366,28 @@ describe("orchestration v2 provider switching", () => {
             (transfer) => transfer.type === "merge_back",
           );
 
-          if (failResume)
-            assert.isAtLeast(
-              projection.contextHandoffs.filter(
-                (handoff) => handoff.targetRunId === projection.runs.at(-1)?.id,
-              ).length,
-              2,
-            );
-          assert.isDefined(mergedTurn);
-          if (failResume)
-            assert.notEqual(
-              projection.providerThreads.find((thread) => thread.id === mergedTurn.providerThreadId)
-                ?.nativeThreadRef?.nativeId,
+          if (failResume) {
+            assert.equal(projection.runs.at(-1)?.status, "failed");
+            assert.equal(
+              projection.providerThreads.find(
+                (thread) => thread.id === projection.runs[0]?.providerThreadId,
+              )?.nativeThreadRef?.nativeId,
               "unloaded-native-merge-target",
             );
+            assert.isTrue(projection.turnItems.some((item) => item.type === "error"));
+            assert.isDefined(mergeTransfer);
+            assert.isTrue(
+              projection.contextHandoffs
+                .filter((handoff) => handoff.targetRunId === projection.runs.at(-1)?.id)
+                .every(
+                  (handoff) =>
+                    handoff.delivery?.status !== "inline" &&
+                    handoff.delivery?.status !== "injected",
+                ),
+            );
+            return;
+          }
+          assert.isDefined(mergedTurn);
           assert.include(mergedTurn.text, "Context handoff (full_thread_summary):");
           assert.include(mergedTurn.text, firstSourcePrompt);
           assert.include(mergedTurn.text, "I will remember amber.");

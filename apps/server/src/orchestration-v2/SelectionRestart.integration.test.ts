@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -17,6 +18,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -87,6 +89,9 @@ function makeRestartAdapter(
   state: Ref.Ref<RestartAdapterState>,
   sessionCapabilities: OrchestrationV2ProviderCapabilities = pooledCapabilities,
   providerInstanceId = initialSelection.instanceId,
+  onSessionEvents: (
+    events: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event>,
+  ) => Effect.Effect<unknown> = () => Effect.void,
 ): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: providerInstanceId,
@@ -128,6 +133,7 @@ function makeRestartAdapter(
         }
 
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* onSessionEvents(events);
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
           id: sessionInput.providerSessionId,
@@ -995,5 +1001,263 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
           assert.deepEqual(messages, ["first", "second", "third"]);
         }).pipe(Effect.provide(ProviderReplayHarness.layerWithRegistry({ name }, layerRegistry)));
       }),
+    ),
+);
+
+it.live.each(
+  (["restart_session", "apply_on_next_turn", "native_account", "incompatible"] as const).flatMap(
+    (transition) => [false, true].map((queued) => ({ transition, queued })),
+  ),
+)(
+  "applies saved selection after the active turn: $transition queued=$queued",
+  ({ transition, queued }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const name = `saved-selection-${transition}-${queued}`;
+        const cwd = yield* checkpointWorkspace(name);
+        const threadId = ThreadId.make(name);
+        const state = yield* Ref.make<RestartAdapterState>({
+          activeTurn: null,
+          opened: [],
+          started: [],
+          closedSessionCount: 0,
+          failedReplacementOpen: true,
+        });
+        const firstEvents =
+          yield* Deferred.make<Queue.Queue<ProviderAdapter.ProviderAdapterV2Event>>();
+        const targetId = ProviderInstanceId.make("codex-compatible-account");
+        const targetSelection =
+          transition === "incompatible"
+            ? handoffSelection
+            : transition === "native_account"
+              ? { ...replacementSelection, instanceId: targetId }
+              : replacementSelection;
+        const nativeStarts: string[] = [],
+          resumes: string[] = [];
+        const makeAdapter = (instanceId: ProviderInstanceId) => {
+          const base = makeRestartAdapter(state, exclusiveCapabilities, instanceId, (events) =>
+            Deferred.succeed(firstEvents, events),
+          );
+          return {
+            ...base,
+            planSelectionTransition: () =>
+              Effect.succeed({
+                type:
+                  transition === "restart_session"
+                    ? ("restart_session" as const)
+                    : ("apply_on_next_turn" as const),
+              }),
+            openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+              base.openSession(input).pipe(
+                Effect.map((runtime) => ({
+                  ...runtime,
+                  ensureThread: (
+                    request: Parameters<
+                      ProviderAdapter.ProviderAdapterV2SessionRuntime["ensureThread"]
+                    >[0],
+                  ) =>
+                    runtime.ensureThread(request).pipe(
+                      Effect.map((thread) => {
+                        const nativeId = `${instanceId}:native:${nativeStarts.length}`;
+                        nativeStarts.push(nativeId);
+                        return {
+                          ...thread,
+                          nativeThreadRef: { driver, nativeId, strength: "strong" as const },
+                        };
+                      }),
+                    ),
+                  resumeThread: (
+                    request: Parameters<
+                      ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]
+                    >[0],
+                  ) =>
+                    Effect.sync(() => {
+                      resumes.push(request.providerThread.nativeThreadRef!.nativeId!);
+                      return {
+                        ...request.providerThread,
+                        providerInstanceId: instanceId,
+                        providerSessionId: input.providerSessionId,
+                      };
+                    }),
+                  startTurn: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+                    transition !== "restart_session" ||
+                    input.modelSelection.model === turn.modelSelection.model
+                      ? runtime.startTurn(turn)
+                      : Effect.fail(
+                          new ProviderAdapter.ProviderAdapterProtocolError({
+                            driver,
+                            detail: "A model change requires a replacement session",
+                          }),
+                        ),
+                })),
+              ),
+          } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+        };
+        const targetStarts = yield* Ref.make(0);
+        const source = makeAdapter(initialSelection.instanceId);
+        const target =
+          transition === "incompatible"
+            ? makeCompletingHandoffAdapter(targetStarts)
+            : makeAdapter(targetId);
+        const adapters = [source, target];
+        const registry = Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, {
+          get: (id) => Effect.succeed(adapters.find((adapter) => adapter.instanceId === id)!),
+          list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+          getMetadata: (id) =>
+            Effect.succeed({
+              driver: id === handoffProviderInstanceId ? handoffDriver : driver,
+              continuationKey:
+                id === handoffProviderInstanceId ? "different-provider" : "codex:shared-home",
+              enabled: true,
+              capabilities: exclusiveCapabilities,
+            }),
+        });
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const milestone = (ordinal: number, statuses: string[]) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.threadId === threadId &&
+                  event.payload.ordinal === ordinal &&
+                  statuses.includes(event.payload.status),
+              ),
+              Stream.runHead,
+              Effect.forkScoped,
+            );
+          const dispatch = (ordinal: number, selection: ModelSelection, queue = false) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`${name}:dispatch:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`${name}:message:${ordinal}`),
+              text: "Continue",
+              attachments: [],
+              createdBy: "user",
+              creationSource: "web",
+              modelSelection: selection,
+              dispatchMode: { type: queue ? "queue_after_active" : "start_immediately" },
+            });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${name}:create`),
+            threadId,
+            projectId: ProjectId.make(name),
+            title: name,
+            modelSelection: initialSelection,
+            createdBy: "user",
+            creationSource: "web",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          const running = yield* orchestrator.streamStoredEvents.pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "provider-turn.updated" &&
+                event.threadId === threadId &&
+                event.payload.status === "running",
+            ),
+            Stream.runHead,
+            Effect.forkScoped,
+          );
+          yield* dispatch(1, initialSelection);
+          yield* Fiber.join(running);
+          yield* worker.drain();
+          const before = yield* orchestrator.getThreadProjection(threadId);
+          const original = before.providerThreads.find(
+            (thread) => thread.id === before.thread.activeProviderThreadId,
+          )!;
+          yield* orchestrator.dispatch({
+            type: queued ? "thread.model-selection.set" : "provider.switch",
+            commandId: CommandId.make(`${name}:select`),
+            threadId,
+            modelSelection: targetSelection,
+          });
+          const selected = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(selected.thread.modelSelection, targetSelection);
+          assert.equal(
+            selected.providerThreads.find((thread) => thread.id === original.id)?.providerSessionId,
+            original.providerSessionId,
+            "a selection for the next turn cannot detach the running source binding",
+          );
+          const secondDone = yield* milestone(2, ["completed", "failed"]);
+          if (queued) yield* dispatch(2, targetSelection, true);
+          const firstDone = yield* milestone(1, ["completed", "failed", "interrupted"]);
+          const active = (yield* Ref.get(state)).activeTurn!;
+          const events = yield* Deferred.await(firstEvents);
+          const now = yield* DateTime.now;
+          yield* Queue.offer(events, {
+            type: "provider_turn.updated",
+            driver,
+            providerTurn: {
+              id: active.providerTurnId,
+              providerThreadId: active.input.providerThread.id,
+              nodeId: active.input.rootNodeId,
+              runAttemptId: active.input.attemptId,
+              nativeTurnRef: {
+                driver,
+                nativeId: `native:${active.providerTurnId}`,
+                strength: "strong",
+              },
+              ordinal: 1,
+              status: "completed",
+              startedAt: now,
+              completedAt: now,
+            },
+          });
+          yield* Queue.offer(events, {
+            type: "turn.terminal",
+            driver,
+            providerThreadId: active.input.providerThread.id,
+            providerTurnId: active.providerTurnId,
+            runOrdinal: 1,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          });
+          yield* Fiber.join(firstDone);
+          if (queued) yield* orchestrator.resumeQueuedRuns;
+          else yield* dispatch(2, targetSelection);
+          yield* Fiber.join(secondDone);
+          yield* worker.drain();
+          const final = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            final.runs.map((run) => run.status),
+            ["completed", "completed"],
+          );
+          assert.equal(final.thread.modelSelection.instanceId, targetSelection.instanceId);
+          assert.equal(
+            (yield* Ref.get(state)).closedSessionCount,
+            transition === "apply_on_next_turn" ? 0 : 1,
+          );
+          if (transition === "incompatible") {
+            assert.equal(yield* Ref.get(targetStarts), 1);
+            assert.lengthOf(final.contextHandoffs, 1);
+            assert.equal(final.contextHandoffs[0]?.strategy, "full_thread_summary");
+          } else {
+            assert.equal(
+              final.providerThreads.find(
+                (thread) => thread.id === final.thread.activeProviderThreadId,
+              )?.nativeThreadRef?.nativeId,
+              original.nativeThreadRef?.nativeId,
+            );
+            assert.lengthOf(
+              nativeStarts,
+              1,
+              "continuation must not create a replacement native conversation",
+            );
+            assert.isTrue(
+              resumes.every((nativeId) => nativeId === original.nativeThreadRef?.nativeId),
+            );
+            if (transition !== "apply_on_next_turn") assert.isNotEmpty(resumes);
+            assert.isEmpty(final.contextHandoffs);
+            assert.equal((yield* Ref.get(state)).started.at(-1)?.model, replacementSelection.model);
+          }
+        }).pipe(Effect.provide(ProviderReplayHarness.layerWithRegistry({ name }, registry)));
+      }).pipe(Effect.provide(NodeServices.layer)),
     ),
 );
