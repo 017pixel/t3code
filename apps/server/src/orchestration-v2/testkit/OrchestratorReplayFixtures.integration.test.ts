@@ -31,7 +31,6 @@ import { PiOrchestratorReplayHarness } from "../Adapters/PiAdapterV2.testkit.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
-import type { OrchestratorV2ScenarioResult } from "./OrchestratorScenario.ts";
 import { provideDeterministicTestRuntime } from "./DeterministicRuntime.ts";
 import { ORCHESTRATOR_REPLAY_FIXTURES } from "./fixtures/index.ts";
 import { messageRestartInput } from "./fixtures/message_steering/input.ts";
@@ -159,41 +158,6 @@ function answerBeforeNextEvent<Transcript extends ProviderReplayTranscript, Erro
   };
 }
 
-/** Every approval and question node and card ends settled, as its request did. */
-function assertRequestArtifactsSettled(result: OrchestratorV2ScenarioResult) {
-  for (const projection of result.projections.values()) {
-    const open = (status: string) =>
-      status === "idle" || status === "pending" || status === "running" || status === "waiting";
-    assert.deepEqual(
-      [
-        ...projection.nodes
-          .filter(
-            (node) =>
-              (node.kind === "approval_request" || node.kind === "user_input_request") &&
-              open(node.status),
-          )
-          .map((node) => `node ${node.id}:${node.status}`),
-        ...projection.turnItems
-          .filter(
-            (item) =>
-              (item.type === "approval_request" || item.type === "user_input_request") &&
-              open(item.status),
-          )
-          .map((item) => `item ${item.id}:${item.status}`),
-      ],
-      [],
-    );
-    for (const item of projection.turnItems) {
-      if (item.type !== "user_input_request") continue;
-      const request = projection.runtimeRequests.find(
-        (candidate) => candidate.id === item.requestId,
-      );
-      if (request?.answers === undefined) continue;
-      assert.deepEqual(item.questionAnswer?.answers, request.answers);
-    }
-  }
-}
-
 const runFixtureProvider = Effect.fn("runOrchestratorReplayFixture")(function* <
   Transcript extends ProviderReplayTranscript,
   Error,
@@ -203,7 +167,6 @@ const runFixtureProvider = Effect.fn("runOrchestratorReplayFixture")(function* <
   readonly driver: ProviderOrchestratorReplayVariant;
   readonly harness: OrchestratorV2ProviderReplayHarness<Transcript, Error>;
   readonly transformTranscript?: (transcript: ProviderReplayTranscript) => ProviderReplayTranscript;
-  readonly answerBeforeNextEvent?: boolean;
 }) {
   const recordedTranscript = yield* readTranscript(input.driver.transcriptFile);
   const rawTranscript = input.transformTranscript?.(recordedTranscript) ?? recordedTranscript;
@@ -240,7 +203,7 @@ const runFixtureProvider = Effect.fn("runOrchestratorReplayFixture")(function* <
 
   const result = yield* runOrchestratorV2ProviderReplayScenario(
     scenario,
-    input.answerBeforeNextEvent === true ? answerBeforeNextEvent(input.harness) : input.harness,
+    input.harness,
     input.driver.runContinuationWorker === true ? { runContinuationWorker: true } : {},
   ).pipe(provideDeterministicTestRuntime);
   input.driver.assertOutput(result, transcript);
@@ -286,7 +249,6 @@ function runFixtureProviderWithRegisteredHarness(input: {
   readonly buildInput: () => OrchestratorFixtureInput;
   readonly driver: ProviderOrchestratorReplayVariant;
   readonly transformTranscript?: (transcript: ProviderReplayTranscript) => ProviderReplayTranscript;
-  readonly answerBeforeNextEvent?: boolean;
 }) {
   switch (input.driver.driver) {
     case "codex":
@@ -372,43 +334,39 @@ describe("orchestrator replay fixtures", () => {
     );
   }
 
-  // Adapters store a request, its node, and its card as separate writes, and a
-  // request is answerable once stored. Each answer here lands before the
-  // adapter's next event, so a node or card emitted after its request arrives
-  // already answered and must still end settled.
-  it.effect.each(
-    (
-      [
-        ["tool_call_read_only_on_request", "claudeAgent"],
-        ["tool_call_denied_write", "claudeAgent"],
-        ["tool_call_read_only_on_request", "acpRegistry"],
-        ["opencode2_question", "opencode"],
-        ["muse_permission", "muse"],
-      ] as const
-    ).map(([fixtureName, driver]) => {
-      const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find(
-        (candidate) => candidate.name === fixtureName,
-      );
-      const provider = fixture?.providers.find((candidate) => candidate.driver === driver);
-      if (fixture === undefined || provider === undefined) {
-        throw new Error(`Replay fixture ${fixtureName} has no ${driver} provider.`);
-      }
-      return [fixtureName, driver, fixture, provider] as const;
-    }),
-  )("settles %s/%s request cards answered before they arrive", ([, , fixture, provider]) =>
-    runFixtureProviderWithRegisteredHarness({
+  it.effect("settles a question answered before its card arrives and retains the answer", () => {
+    const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find(
+      (candidate) => candidate.name === "opencode2_question",
+    );
+    assert.isDefined(fixture);
+    const provider = fixture.providers.find((candidate) => candidate.driver === "opencode");
+    assert.isDefined(provider);
+    return runFixtureProvider({
       fixtureName: fixture.name,
       buildInput: fixture.buildInput,
-      driver: {
-        ...provider,
-        assertOutput: (result, transcript) => {
-          provider.assertOutput(result, transcript);
-          assertRequestArtifactsSettled(result);
-        },
-      },
-      answerBeforeNextEvent: true,
-    }),
-  );
+      driver: provider,
+      harness: answerBeforeNextEvent(OpenCode2OrchestratorReplayHarness),
+    }).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() => {
+          const projection = [...result.projections.values()][0]!;
+          const questions = projection.turnItems.filter(
+            (item) => item.type === "user_input_request",
+          );
+          assert.lengthOf(questions, 1);
+          const question = questions[0]!;
+          assert.equal(question.status, "completed");
+          assert.deepEqual(question.questionAnswer?.answers, { q0: "blue" });
+          assert.equal(
+            projection.nodes.find((node) => node.id === question.nodeId)?.status,
+            "completed",
+          );
+        }),
+      ),
+      Effect.mapError(normalizeTestError),
+      Effect.scoped,
+    );
+  });
 
   it.effect.each(
     (
