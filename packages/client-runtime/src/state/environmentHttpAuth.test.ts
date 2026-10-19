@@ -10,8 +10,9 @@ import {
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadBoundedSnapshot,
   OrchestrationV2ThreadTranscript,
-  type OrchestrationV2ThreadHistoryPage,
+  OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
+import { vi } from "vite-plus/test";
 import { RelayClientTracer } from "@t3tools/shared/relayTracing";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -47,6 +48,9 @@ import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 const encodeThreadSnapshot = Schema.encodeSync(OrchestrationV2ThreadDetailSnapshot);
 const encodeBoundedSnapshot = Schema.encodeSync(OrchestrationV2ThreadBoundedSnapshot);
 const encodeThreadTranscript = Schema.encodeSync(OrchestrationV2ThreadTranscript);
+const decodeThreadHistory = Schema.decodeUnknownEffect(
+  Schema.toCodecJson(OrchestrationV2ThreadHistoryPage),
+);
 
 const TARGET = new RelayConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -265,6 +269,107 @@ const LOADERS: ReadonlyArray<{
 ];
 
 describe("authenticated environment HTTP requests", () => {
+  it.live("yields during history validation and only returns a complete compatible page", () =>
+    Effect.gen(function* () {
+      const items = Array.from({ length: 129 }, (_, position) => ({
+        position,
+        visibility: "local",
+        sourceThreadId: THREAD.projection.thread.id,
+        sourceItemId: `history-${position}`,
+        item: {
+          id: `history-${position}`,
+          threadId: THREAD.projection.thread.id,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: position,
+          status: "completed",
+          title: null,
+          startedAt: "2026-06-20T00:00:00.000Z",
+          completedAt: "2026-06-20T00:00:00.000Z",
+          updatedAt: "2026-06-20T00:00:00.000Z",
+          type: position === 64 ? "future_item" : "command_execution",
+          input: "echo é",
+        },
+      }));
+      const response = {
+        ...THREAD_HISTORY,
+        items,
+        support: { nodes: [], checkpoints: [], runs: [], attempts: [] },
+      };
+      const expected = yield* decodeThreadHistory(response);
+      const body = JSON.stringify(response);
+      const visited = new Set<number>();
+      const hostTask = Promise.withResolvers<number>();
+      const channel = new MessageChannel();
+      channel.port1.addEventListener("message", () => hostTask.resolve(visited.size), {
+        once: true,
+      });
+      channel.port1.start();
+      let elapsed = 0;
+      const clock = vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+      const parse = JSON.parse;
+      const parser = vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+        const parsed: unknown = parse(text, reviver);
+        if (text !== body) return parsed;
+        const page = parsed as typeof response;
+        for (const row of page.items) {
+          const startedAt = row.item.startedAt;
+          Object.defineProperty(row.item, "startedAt", {
+            enumerable: true,
+            get() {
+              // Model expensive validation without burning CPU or depending on wall time.
+              elapsed += 1;
+              if (visited.size === 0) channel.port2.postMessage(null);
+              visited.add(row.position);
+              return startedAt;
+            },
+          });
+        }
+        return page;
+      });
+      try {
+        const harness = makeHarness((requestNumber) =>
+          requestNumber === 1
+            ? new Response(body, { headers: { "content-type": "application/json" } })
+            : Response.json({
+                ...response,
+                items: [
+                  ...items.slice(0, -1),
+                  {
+                    ...items.at(-1)!,
+                    item: {
+                      ...items.at(-1)!.item,
+                      startedAt: "invalid-date",
+                    },
+                  },
+                ],
+              }),
+        );
+        const load = fetchEnvironmentThreadHistoryPage({
+          ...harness.input,
+          threadId: THREAD.projection.thread.id,
+          cursor: "older-page",
+        }).pipe(Effect.provide(harness.httpLayer));
+        const page = yield* load;
+        const progressAtHostTask = yield* Effect.promise(() => hostTask.promise);
+        expect(page).toEqual(expected);
+        expect(page.items).toHaveLength(128);
+        expect((yield* Effect.flip(load))._tag).toBe("RemoteEnvironmentAuthInvalidJsonError");
+        expect(progressAtHostTask).toBeGreaterThan(0);
+        expect(progressAtHostTask).toBeLessThan(visited.size);
+      } finally {
+        channel.port1.close();
+        channel.port2.close();
+        parser.mockRestore();
+        clock.mockRestore();
+      }
+    }),
+  );
+
   it.effect.each(LOADERS)("rejects an invalid $name response", (loader) =>
     Effect.gen(function* () {
       const harness = makeHarness(() => Response.json({}));
