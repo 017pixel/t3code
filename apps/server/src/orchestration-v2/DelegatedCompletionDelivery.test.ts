@@ -980,6 +980,20 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
       { name: "rolled-back-parent", acknowledged: false, queued: false, discard: "parent" },
       { name: "rolled-back-receiver", acknowledged: false, queued: false, discard: "receiver" },
       { name: "stopped", acknowledged: false, queued: false, discard: "stop" },
+      {
+        name: "acknowledged-restart",
+        acknowledged: true,
+        queued: false,
+        discard: null,
+        restart: true,
+      },
+      {
+        name: "acknowledged-restart-rolled-back-receiver",
+        acknowledged: true,
+        queued: false,
+        discard: "receiver",
+        restart: true,
+      },
     ] as const)(
       "$name: delivers only surviving results after the receiving run settles",
       (scenario) =>
@@ -988,6 +1002,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           const sink = yield* EventSink.EventSinkV2;
           const now = yield* DateTime.now;
           const name = `steer-settlement:${scenario.name}`;
+          const restart = "restart" in scenario;
           const threadId = ThreadId.make(`thread:${name}`);
           const runId = RunId.make(`run:${name}`);
           const taskId = NodeId.make(`node:${name}:first`);
@@ -1057,7 +1072,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
                 payload: {
                   ...seeded.subagents[0]!,
                   id: siblingId,
-                  completionWake: scenario.queued ? "settled_only" : "always",
+                  completionWake: scenario.queued || restart ? "settled_only" : "always",
                   completionDelivery: { state: "pending", observedByRunId: null },
                 },
               },
@@ -1101,6 +1116,8 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             );
           }
           yield* sink.write({
+            // Simulate a crash after the terminal commit but before live finalization.
+            ...(restart ? { commandId: reconcileCommandId(`${name}:terminal`) } : {}),
             events: [
               ...(scenario.discard === "parent"
                 ? [
@@ -1123,6 +1140,9 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               },
             ],
           });
+          if (restart) {
+            yield* orchestrator.recoverDelegatedTasks;
+          }
           const wakes = (yield* collectSettlementWakes(name)).filter(
             (request) => request.threadId === threadId,
           );
@@ -1136,9 +1156,23 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           }
           if (scenario.discard !== null) {
             assert.isEmpty(wakes, "discarded work must not offer a wake");
+            if (scenario.discard === "receiver") {
+              assert.isNull(
+                settled.runs.find((run) => run.id === runId)?.delegatedCompletion?.delivery,
+                "rollback must release the surviving parent's obsolete reservation",
+              );
+              assert.deepEqual(
+                settled.subagents.find((task) => task.id === taskId)?.completionDelivery,
+                {
+                  state: scenario.acknowledged ? "acknowledged" : "pending",
+                  observedByRunId: scenario.acknowledged ? receiver.id : null,
+                },
+                "rollback must preserve read results and return unread results to pending",
+              );
+            }
             // A continuation may already have been taken before Stop or rollback.
             // Dispatching that stale request must not create another run either.
-            yield* orchestrator
+            const dispatch = yield* orchestrator
               .dispatch({
                 type: "message.dispatch",
                 commandId: CommandId.make(`command:${name}:late-wake`),
@@ -1152,15 +1186,32 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
                 delegatedCompletion: { parentRunId: runId, generation: 1, taskIds: [taskId] },
               })
               .pipe(Effect.exit);
+            if (scenario.discard !== "stop") {
+              assert.equal(
+                dispatch._tag,
+                "Success",
+                "rollback must accept a stale wake as a no-op",
+              );
+            }
             const after = yield* orchestrator.getThreadProjection(threadId);
             assert.deepEqual(
               after.runs,
               settled.runs,
               "a stale wake must not revive discarded work",
             );
+            assert.deepEqual(
+              after.thread,
+              settled.thread,
+              "a stale wake must preserve thread state",
+            );
             return;
           }
-          assert.isNotEmpty(wakes, "settlement must offer the stranded delegated result");
+          assert.isNotEmpty(
+            wakes,
+            restart
+              ? "startup recovery must release the empty reservation and offer its pending sibling"
+              : "settlement must offer the stranded delegated result",
+          );
           const delivery = settled.runs.find((run) => run.id === runId)?.delegatedCompletion
             ?.delivery;
           assert.ok(delivery);

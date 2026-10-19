@@ -10686,11 +10686,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (deliveryMessages.length === 0) return;
       const projection = yield* projectionStore.getThreadRecords(threadId, ["runs", "subagents"]);
       const deliveryRun = projection.runs.find((candidate) => candidate.id === runId);
-      if (
-        deliveryRun === undefined ||
-        deliveryRun.status === "rolled_back" ||
-        delegatedTaskTerminalStatus(deliveryRun.status) === null
-      )
+      if (deliveryRun === undefined || delegatedTaskTerminalStatus(deliveryRun.status) === null)
         return;
       for (const deliveryMessage of deliveryMessages) {
         const messageOwnership = deliveryMessage.delegatedCompletion;
@@ -10710,7 +10706,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ) {
           continue;
         }
-        if (deliveryMessage.id !== deliveryRun.userMessageId && delivery.taskIds.length > 0) {
+        if (
+          deliveryRun.status !== "rolled_back" &&
+          deliveryMessage.id !== deliveryRun.userMessageId &&
+          delivery.taskIds.length > 0
+        ) {
           // No acceptance drained this steer. Retry its reservation as a wake.
           yield* offerDelegatedCompletionDelivery(threadId, parentRun.id);
           continue;
@@ -10731,7 +10731,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             continue;
           }
           nextTaskStates.set(task.id, {
-            state: deliveryRun.status === "cancelled" ? "pending" : "delivered",
+            state:
+              deliveryRun.status === "cancelled" || deliveryRun.status === "rolled_back"
+                ? "pending"
+                : "delivered",
             observedByRunId: null,
           });
         }
@@ -10746,6 +10749,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           )
           .map((task) => task.id);
         const canReserveFollowUp =
+          // Discarded receivers release their reservation without waking work.
+          // A later sibling completion can claim these pending results again.
+          deliveryRun.status !== "rolled_back" &&
           cohort.disposition === "open" &&
           projection.thread.archivedAt === null &&
           projection.thread.deletedAt === null &&
@@ -11566,22 +11572,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 threadId,
                 Effect.gen(function* () {
                   const projection = yield* projectionStore.getThreadRecords(threadId, ["runs"]);
-                  // Only the run that consumed a cohort's current delivery
-                  // message can settle it. A long-lived parent keeps every
-                  // past delivery run, and finalizing each of them would
-                  // reload the thread once per historical delivery.
-                  const openDeliveryMessageIds = new Set(
-                    projection.runs.flatMap((run) =>
-                      run.delegatedCompletion?.delivery == null
-                        ? []
-                        : [run.delegatedCompletion.delivery.messageId],
-                    ),
+                  // Resolve only current reservations, including steers whose
+                  // message is not the receiving run's initial message.
+                  const openDeliveryMessageIds = projection.runs.flatMap((run) =>
+                    run.status === "rolled_back" ||
+                    run.delegatedCompletion?.disposition !== "open" ||
+                    run.delegatedCompletion.delivery == null
+                      ? []
+                      : [run.delegatedCompletion.delivery.messageId],
                   );
+                  const { messages } = yield* projectionStore.getThreadRecords(
+                    threadId,
+                    ["messages"],
+                    { messageIds: openDeliveryMessageIds, messageRoles: ["user"] },
+                  );
+                  const deliveryRunIds = new Set(messages.map((message) => message.runId));
                   const terminalDeliveryRunIds = projection.runs
                     .filter(
                       (run) =>
                         delegatedTaskTerminalStatus(run.status) !== null &&
-                        openDeliveryMessageIds.has(run.userMessageId),
+                        deliveryRunIds.has(run.id),
                     )
                     .map((run) => run.id);
                   for (const runId of terminalDeliveryRunIds) {
@@ -11593,8 +11603,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                       : yield* projectionStore.getThreadRecords(threadId, ["runs"]);
                   for (const run of refreshed.runs) {
                     if (
-                      run.delegatedCompletion?.delivery !== null &&
-                      run.delegatedCompletion !== undefined
+                      run.status !== "rolled_back" &&
+                      run.delegatedCompletion?.disposition === "open" &&
+                      run.delegatedCompletion.delivery !== null
                     ) {
                       yield* offerDelegatedCompletionDelivery(threadId, run.id);
                     }
