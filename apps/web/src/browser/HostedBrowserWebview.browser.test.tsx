@@ -5,7 +5,10 @@ import {
   ThreadId,
   type ClientSettings,
   type DesktopPreviewBridge,
+  type DesktopPreviewTabState,
 } from "@t3tools/contracts";
+import "~/index.css";
+
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -18,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   registerWebview: vi.fn<DesktopPreviewBridge["registerWebview"]>(),
   getPreviewConfig: vi.fn<DesktopPreviewBridge["getPreviewConfig"]>(),
   activeRecordings: new Set<string>(),
+  onStateChange: vi.fn<DesktopPreviewBridge["onStateChange"]>(),
+  captureReady: vi.fn<NonNullable<DesktopPreviewBridge["captureReady"]>>(),
 }));
 
 vi.mock(import("~/localApi"), async (original) => {
@@ -38,6 +43,8 @@ vi.mock(import("~/components/preview/previewBridge"), async (original) => ({
     closeTab: mocks.closeTab,
     registerWebview: mocks.registerWebview,
     getPreviewConfig: mocks.getPreviewConfig,
+    onStateChange: mocks.onStateChange,
+    captureReady: mocks.captureReady,
   } as unknown as DesktopPreviewBridge,
 }));
 
@@ -50,7 +57,7 @@ import {
   __resetClientSettingsPersistenceForTests,
   ensureClientSettingsHydrated,
 } from "~/hooks/useSettings";
-import { useBrowserSurfaceStore } from "./browserSurfaceStore";
+import { acquireBrowserSurfaceActivity, useBrowserSurfaceStore } from "./browserSurfaceStore";
 import * as desktopTabLifetime from "./desktopTabLifetime";
 import { HostedBrowserWebview } from "./HostedBrowserWebview";
 
@@ -71,6 +78,8 @@ beforeEach(() => {
   __resetClientSettingsPersistenceForTests();
   useBrowserSurfaceStore.setState({ activityByTabId: {}, byTabId: {} });
   mocks.getClientSettings.mockReset();
+  mocks.onStateChange.mockReset().mockReturnValue(() => undefined);
+  mocks.captureReady.mockReset().mockResolvedValue(undefined);
   mocks.setClientSettings.mockReset().mockResolvedValue(undefined);
   mocks.createTab.mockReset().mockResolvedValue(undefined);
   mocks.closeTab.mockReset().mockResolvedValue(undefined);
@@ -199,5 +208,90 @@ describe("HostedBrowserWebview settings hydration", () => {
     expect(mocks.registerWebview).toHaveBeenCalledExactlyOnceWith(runtimeTabId, 41);
     expect(mocks.closeTab).not.toHaveBeenCalled();
     expect(mocks.setClientSettings).not.toHaveBeenCalled();
+  });
+});
+
+describe("HostedBrowserWebview agent capture", () => {
+  it("makes an inactive guest paintable before acknowledging capture and releases only its activity", async () => {
+    mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+    const createElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation(((
+      tagName: string,
+      options?: ElementCreationOptions,
+    ) => {
+      const element = createElement(tagName, options);
+      return tagName === "webview"
+        ? Object.assign(element, { getWebContentsId: () => 41 })
+        : element;
+    }) as typeof document.createElement);
+    const runtimeTabId = "inactive-capture";
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <HostedBrowserWebview
+          threadRef={{
+            environmentId: EnvironmentId.make("capture"),
+            threadId: ThreadId.make("capture"),
+          }}
+          tabId="server-tab"
+          runtimeTabId={runtimeTabId}
+          initialUrl="about:blank"
+          viewport={FILL_PREVIEW_VIEWPORT}
+          pictureInPicture={false}
+          profileId={undefined}
+          zoomFactor={1}
+        />,
+      ),
+    );
+    const wrapper = container.querySelector<HTMLDivElement>("[data-preview-viewport]")!;
+    expect(wrapper.getBoundingClientRect().right).toBeLessThan(0);
+    const notify = (tabId: string, state: DesktopPreviewTabState) => {
+      for (const [listener] of mocks.onStateChange.mock.calls) listener(tabId, state);
+    };
+    const state: DesktopPreviewTabState = {
+      tabId: runtimeTabId,
+      webContentsId: 41,
+      navStatus: { kind: "Idle" },
+      canGoBack: false,
+      canGoForward: false,
+      zoomFactor: 1,
+      pictureInPicture: false,
+      colorScheme: "system",
+      audioMuted: false,
+      audible: false,
+      controller: "none",
+      updatedAt: new Date().toISOString(),
+    };
+    const readyBounds: DOMRect[] = [];
+    mocks.captureReady.mockImplementation(async () => {
+      readyBounds.push(wrapper.getBoundingClientRect());
+    });
+    // The acknowledgement observes committed layout, before the main process can copy.
+    notify(runtimeTabId, { ...state, captureRequestIds: ["first", "second"] });
+    expect(wrapper.getBoundingClientRect().left).toBe(0);
+    expect(readyBounds).toHaveLength(2);
+    for (const bounds of readyBounds) {
+      expect(bounds.left).toBeGreaterThanOrEqual(0);
+      expect(bounds.top).toBeGreaterThanOrEqual(0);
+      expect(bounds.width).toBeGreaterThan(0);
+    }
+    expect(useBrowserSurfaceStore.getState().byTabId[runtimeTabId]?.visible ?? false).toBe(false);
+    notify(runtimeTabId, { ...state, captureRequestIds: ["second"] });
+    expect(wrapper.getBoundingClientRect().left).toBe(0);
+    expect(mocks.captureReady).toHaveBeenCalledTimes(2);
+    let releaseRecording!: () => void;
+    await act(() => {
+      releaseRecording = acquireBrowserSurfaceActivity(runtimeTabId);
+    });
+    notify(runtimeTabId, state);
+    expect(wrapper.getBoundingClientRect().left).toBe(0);
+    await act(() => releaseRecording());
+    expect(wrapper.getBoundingClientRect().right).toBeLessThan(0);
+
+    notify(runtimeTabId, { ...state, captureRequestIds: ["unmounted"] });
+    expect(wrapper.getBoundingClientRect().left).toBe(0);
+    await act(() => root!.unmount());
+    root = undefined;
+    expect(useBrowserSurfaceStore.getState().activityByTabId[runtimeTabId]).toBeUndefined();
   });
 });

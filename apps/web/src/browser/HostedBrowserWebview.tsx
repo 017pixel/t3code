@@ -6,6 +6,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { useShallow } from "zustand/react/shallow";
+import { flushSync } from "react-dom";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { previewBridge } from "~/components/preview/previewBridge";
@@ -13,7 +14,11 @@ import { usePreviewBridge } from "~/components/preview/usePreviewBridge";
 import { useClientSettingsHydrated } from "~/hooks/useSettings";
 import { cn, isMacPlatform } from "~/lib/utils";
 
-import { resolveBrowserSurfacePanelRect, useBrowserSurfaceStore } from "./browserSurfaceStore";
+import {
+  acquireBrowserSurfaceActivity,
+  resolveBrowserSurfacePanelRect,
+  useBrowserSurfaceStore,
+} from "./browserSurfaceStore";
 import { useActiveBrowserRecordingTabIds } from "./browserRecording";
 import {
   browserViewportSettingKey,
@@ -105,6 +110,44 @@ export function HostedBrowserWebview(props: {
   );
   const recordingActive = useActiveBrowserRecordingTabIds().has(runtimeTabId);
   usePreviewBridge({ threadRef, tabId, runtimeTabId, serverDriven });
+
+  useEffect(() => {
+    const bridge = previewBridge;
+    const captureReady = bridge?.captureReady;
+    if (!bridge || !captureReady) return;
+    let releaseActivity: (() => void) | undefined;
+    const acknowledged = new Set<string>();
+    const unsubscribe = bridge.onStateChange((changedTabId, state) => {
+      if (changedTabId !== runtimeTabId) return;
+      const requests = state.captureRequestIds ?? [];
+      if (requests.length > 0 !== (releaseActivity !== undefined)) {
+        flushSync(() => {
+          if (requests.length > 0) releaseActivity = acquireBrowserSurfaceActivity(runtimeTabId);
+          else {
+            releaseActivity?.();
+            releaseActivity = undefined;
+          }
+        });
+      }
+      for (const id of acknowledged) if (!requests.includes(id)) acknowledged.delete(id);
+      if (requests.length === 0 || state.webContentsId === null) return;
+      const webview = webviewRef.current;
+      try {
+        if (!webview || webview.getWebContentsId() !== state.webContentsId) return;
+      } catch {
+        return;
+      }
+      for (const requestId of requests) {
+        if (acknowledged.has(requestId)) continue;
+        acknowledged.add(requestId);
+        void captureReady(runtimeTabId, state.webContentsId, requestId).catch(() => undefined);
+      }
+    });
+    return () => {
+      unsubscribe();
+      releaseActivity?.();
+    };
+  }, [runtimeTabId]);
 
   const serverColorScheme = serverRendering?.colorScheme;
   const serverZoomFactor = serverRendering?.zoomFactor;

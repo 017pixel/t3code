@@ -421,7 +421,7 @@ const decodeReply = Schema.decodeUnknownSync(
   ),
 );
 
-const setupAgentCapture = Effect.gen(function* () {
+const setupAgentCapture = Effect.fnUntraced(function* (autoReady = true) {
   const manager = yield* PreviewManager.PreviewManager;
   const host = yield* DesktopBrowserHost.DesktopBrowserHost;
   const serverTab = { threadId: "thread-capture", tabId: "server-capture" };
@@ -439,6 +439,18 @@ const setupAgentCapture = Effect.gen(function* () {
       return Effect.void;
     }),
     Effect.forkScoped,
+  );
+  const rendererStates: Array<PreviewManager.PreviewTabState> = [];
+  yield* manager.subscribeStateChanges((tabId, state) =>
+    Effect.gen(function* () {
+      if (tabId !== "tab_agent_capture") return;
+      rendererStates.push(state);
+      if (autoReady && state.webContentsId !== null) {
+        yield* Effect.forEach(state.captureRequestIds ?? [], (id) =>
+          manager.captureReady(tabId, state.webContentsId!, id),
+        );
+      }
+    }),
   );
   const copies: Array<PromiseWithResolvers<TestCapturedPreviewImage>> = [];
   const captures: Array<PromiseWithResolvers<{ data: string }>> = [];
@@ -473,6 +485,7 @@ const setupAgentCapture = Effect.gen(function* () {
   yield* Deferred.await(attached);
   return {
     hostWebContents,
+    rendererStates,
     manager,
     wc,
     copies,
@@ -3041,7 +3054,7 @@ describe("PreviewManager", () => {
           replies,
           send,
           setBackgroundThrottling,
-        } = yield* setupAgentCapture;
+        } = yield* setupAgentCapture();
         const staleCopy = {
           isEmpty: () => false,
           toPNG: () => Buffer.from("previous frame"),
@@ -3091,6 +3104,60 @@ describe("PreviewManager", () => {
       }).pipe(Effect.provide(managerLayer()), Effect.scoped),
   );
 
+  effectIt.effect(
+    "waits for the renderer before copying an inactive guest and bounds preparation",
+    () =>
+      Effect.gen(function* () {
+        const {
+          manager,
+          wc,
+          copies,
+          captures,
+          replies,
+          send,
+          rendererStates,
+          setBackgroundThrottling,
+        } = yield* setupAgentCapture(false);
+        const requests = () => rendererStates.at(-1)?.captureRequestIds ?? [];
+        yield* send(1);
+        yield* TestClock.adjust(0);
+        expect(requests()).toHaveLength(1);
+        expect(captures).toHaveLength(0);
+        expect(copies).toHaveLength(0);
+        const expired = requests()[0]!;
+        yield* TestClock.adjust(9_000);
+        expect(yield* Queue.take(replies)).toMatchObject({ id: 1, error: expect.anything() });
+        expect(requests()).toEqual([]);
+        expect(setBackgroundThrottling).toHaveBeenLastCalledWith(true);
+
+        yield* send(2);
+        yield* TestClock.adjust(0);
+        const first = requests()[0]!;
+        yield* send(3);
+        yield* TestClock.adjust(0);
+        const second = requests().find((id) => id !== first)!;
+        expect(requests()).toHaveLength(2);
+        yield* manager.captureReady("tab_agent_capture", wc.id, expired);
+        yield* manager.captureReady("tab_agent_capture", wc.id + 1, first);
+        expect(captures).toHaveLength(0);
+        yield* manager.captureReady("tab_agent_capture", wc.id, first);
+        yield* TestClock.adjust(0);
+        expect(captures).toHaveLength(1);
+        expect(copies).toHaveLength(1);
+        captures[0]!.resolve({ data: "first" });
+        expect(yield* Queue.take(replies)).toMatchObject({ id: 2, result: { data: "first" } });
+        expect(requests()).toEqual([second]);
+        expect(setBackgroundThrottling).toHaveBeenLastCalledWith(false);
+        yield* manager.captureReady("tab_agent_capture", wc.id, second);
+        yield* TestClock.adjust(0);
+        captures[1]!.resolve({ data: "second" });
+        expect(yield* Queue.take(replies)).toMatchObject({ id: 3, result: { data: "second" } });
+        expect(requests()).toEqual([]);
+        expect(setBackgroundThrottling).toHaveBeenLastCalledWith(true);
+        expect(wc.setBackgroundThrottling).not.toHaveBeenCalled();
+      }).pipe(Effect.provide(managerLayer("linux")), Effect.scoped),
+  );
+
   effectIt.effect("releases abandoned agent captures and lets the next capture finish", () =>
     Effect.forEach(["failure", "timeout", "replacement"] as const, (outcome) =>
       Effect.gen(function* () {
@@ -3104,7 +3171,7 @@ describe("PreviewManager", () => {
           replies,
           send,
           setBackgroundThrottling,
-        } = yield* setupAgentCapture;
+        } = yield* setupAgentCapture();
         const image = {
           isEmpty: () => false,
           toJPEG: () => Buffer.from("old copy"),
