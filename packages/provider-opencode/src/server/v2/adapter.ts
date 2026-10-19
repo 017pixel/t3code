@@ -3071,7 +3071,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             Effect.catchCause((cause) =>
               Effect.logWarning("Could not add an MCP server to OpenCode.", {
                 server: server.name,
-                cause,
+                errorTag: causeErrorTag(cause),
               }).pipe(Effect.as(false)),
             ),
           );

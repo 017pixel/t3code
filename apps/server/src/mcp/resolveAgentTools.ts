@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - The synchronous settings resolver uses Node's synchronous digest.
+import * as NodeCrypto from "node:crypto";
 import type { ProjectId, ResolvedMcpServer, ServerSettings } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
@@ -22,6 +24,8 @@ export function resolveAgentTools(
   const fingerprint =
     servers.length === 0 && disabledSkills.length === 0
       ? ""
-      : JSON.stringify({ servers, disabledSkills });
+      : NodeCrypto.createHash("sha256")
+          .update(JSON.stringify({ servers, disabledSkills }))
+          .digest("hex");
   return { servers, disabledSkills, fingerprint };
 }

@@ -1306,8 +1306,7 @@ export function claudeMcpQueryOverrides(input: {
 }
 
 /**
- * The user's servers for `--mcp-config`. Like T3's own token, a sensitive
- * env value or header becomes a `${VAR}` reference there, and its value goes
+ * The user's servers for `--mcp-config`. A sensitive env value or header becomes a `${VAR}` reference there, and its value goes
  * into the child's environment.
  */
 function claudeUserMcpServers(servers: ReadonlyArray<ResolvedMcpServer>): {

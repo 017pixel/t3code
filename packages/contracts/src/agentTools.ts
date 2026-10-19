@@ -85,3 +85,14 @@ export interface ResolvedMcpServer {
   readonly name: McpServerName;
   readonly transport: McpServerTransport;
 }
+
+export function mcpServerVariableRecord(
+  variables: ReadonlyArray<McpServerVariable>,
+): Record<string, string> {
+  const record: Record<string, string> = {};
+  for (const variable of variables) {
+    if (variable.valueRedacted === true && variable.value.length === 0) continue;
+    record[variable.name] = variable.value;
+  }
+  return record;
+}

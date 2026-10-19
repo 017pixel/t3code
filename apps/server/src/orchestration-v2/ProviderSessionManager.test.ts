@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderSessionId,
+  ServerSettingsError,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -637,6 +638,7 @@ function runBrowserAccessScenario(input: {
   readonly createThread?: boolean;
   readonly projectExists?: boolean;
   readonly toolsOverride?: boolean;
+  readonly settingsUnavailable?: boolean;
 }) {
   return Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -678,30 +680,43 @@ function runBrowserAccessScenario(input: {
           idleTimeoutMs: 1_000,
           mcpConfigs,
           projectServiceLayer: layerProjectService,
-          serverSettingsLayer: ServerSettings.layerTest({
-            enableAgentBrowserAccess: input.enableAgentBrowserAccess,
-            ...(input.toolsOverride
-              ? {
-                  mcpServers: {
-                    docs: {
-                      enabled: true,
-                      transport: { type: "http", url: "https://example.com/mcp", headers: [] },
-                    },
-                  },
-                }
-              : {}),
-            projectSettingsOverrides: {
-              [projectId]: {
-                enableAgentBrowserAccess: input.projectOverride,
+          serverSettingsLayer: input.settingsUnavailable
+            ? Layer.mock(ServerSettings.ServerSettingsService)({
+                getSettings: Effect.fail(
+                  new ServerSettingsError({
+                    settingsPath: "/test/settings.json",
+                    operation: "read-file",
+                    cause: new Error("unavailable"),
+                  }),
+                ),
+              })
+            : ServerSettings.layerTest({
+                enableAgentBrowserAccess: input.enableAgentBrowserAccess,
                 ...(input.toolsOverride
-                  ? { mcpServers: { docs: { enabled: false } }, disabledSkills: { review: true } }
+                  ? {
+                      mcpServers: {
+                        docs: {
+                          enabled: true,
+                          transport: { type: "http", url: "https://example.com/mcp", headers: [] },
+                        },
+                      },
+                    }
                   : {}),
-                ...(input.deviceOverride === undefined
-                  ? {}
-                  : { enableAgentDeviceAccess: input.deviceOverride }),
-              },
-            },
-          }),
+                projectSettingsOverrides: {
+                  [projectId]: {
+                    enableAgentBrowserAccess: input.projectOverride,
+                    ...(input.toolsOverride
+                      ? {
+                          mcpServers: { docs: { enabled: false } },
+                          disabledSkills: { review: true },
+                        }
+                      : {}),
+                    ...(input.deviceOverride === undefined
+                      ? {}
+                      : { enableAgentDeviceAccess: input.deviceOverride }),
+                  },
+                },
+              }),
         }),
       ),
     );
@@ -1941,6 +1956,8 @@ it.effect(
           },
         ]);
         assert.deepEqual(captured?.tools?.disabledSkills, ["review"]);
+        assert.match(captured!.tools!.fingerprint, /^[a-f0-9]{64}$/);
+        assert.notInclude(captured!.tools!.fingerprint, "provider-secret");
         const token = captured?.authorizationHeader.replace(/^Bearer\s+/, "");
         const resolved = yield* registry.resolve(token!);
         assert.deepEqual(
@@ -2032,6 +2049,18 @@ it.effect("ProviderSessionManagerV2 fails browser access closed for a missing th
     });
     assert.isDefined(captured);
     assert.equal(captured?.browserToolsAvailable, false);
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 refuses to start with unavailable tool settings", () =>
+  Effect.gen(function* () {
+    const captured = yield* runBrowserAccessScenario({
+      enableAgentBrowserAccess: true,
+      projectOverride: true,
+      toolsOverride: true,
+      settingsUnavailable: true,
+    });
+    assert.isUndefined(captured);
   }),
 );
 
