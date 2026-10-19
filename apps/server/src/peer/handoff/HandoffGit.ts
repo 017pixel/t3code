@@ -10,7 +10,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 
-export const MAX_HANDOFF_BUNDLE_BYTES = 50 * 1024 * 1024;
+const MAX_HANDOFF_BUNDLE_BYTES = 50 * 1024 * 1024;
 
 export interface HandoffPackage {
   readonly bundlePath: string;
