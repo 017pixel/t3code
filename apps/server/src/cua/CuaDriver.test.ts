@@ -309,6 +309,7 @@ const healthy: DesktopTelemetryReceiver.DesktopTelemetryReceiverHealth = {
 const desktopFixture = Effect.fnUntraced(function* (
   synchronous = false,
   healthChanges: Stream.Stream<DesktopTelemetryReceiver.DesktopTelemetryReceiverHealth> = Stream.empty,
+  beforeHealth = Effect.void,
 ) {
   const reports = yield* PubSub.unbounded<DesktopCuaDriverReport>();
   const requested = yield* Deferred.make<string>();
@@ -319,7 +320,7 @@ const desktopFixture = Effect.fnUntraced(function* (
     Effect.provide(
       DesktopTelemetryReceiver.layerTest({
         health: Effect.succeed(healthy),
-        subscribeHealth: Effect.succeed({ latest: healthy, changes: healthChanges }),
+        subscribeHealth: beforeHealth.pipe(Effect.as({ latest: healthy, changes: healthChanges })),
         cuaReports: Stream.fromPubSub(reports),
         requestCuaDriver: (requestId, enabled) =>
           Effect.gen(function* () {
@@ -390,6 +391,37 @@ it.effect.each([false, true])(
       }).pipe(Effect.scoped);
       expect(requests).toEqual([true, false]);
     }).pipe(Effect.provide([ServerSettings.layerTest(), NodeCrypto.layer]), Effect.scoped),
+);
+
+it.effect("does not enable a desktop host retired while subscribing to health", () =>
+  Effect.gen(function* () {
+    const subscribing = yield* Deferred.make<void>();
+    const releaseHealth = yield* Deferred.make<void>();
+    const startFinished =
+      yield* Deferred.make<Exit.Exit<CuaDriverMcpConfiguration, CuaDriver.CuaDriverError>>();
+    const f = yield* desktopFixture(
+      false,
+      Stream.empty,
+      Deferred.succeed(subscribing, undefined).pipe(Effect.andThen(Deferred.await(releaseHealth))),
+    );
+    const scope = yield* Scope.make();
+    const { service } = yield* makeService(
+      f.factory.pipe(
+        Effect.map((host) => ({
+          ...host,
+          start: host.start.pipe(Effect.onExit((exit) => Deferred.succeed(startFinished, exit))),
+        })),
+      ),
+    ).pipe(Effect.provideService(Scope.Scope, scope));
+    const acquiring = yield* service.acquire.pipe(Effect.forkChild);
+    yield* Deferred.await(subscribing);
+    yield* Scope.close(scope, Exit.void);
+    expect(yield* Fiber.join(acquiring)).toEqual(Option.none());
+    yield* Deferred.succeed(releaseHealth, undefined);
+    const result = yield* Deferred.await(startFinished);
+    expect(result).toEqual(Exit.fail(new CuaDriver.CuaDriverHostError({ operation: "desktop" })));
+    expect(f.requests).toEqual([]);
+  }).pipe(Effect.provide([ServerSettings.layerTest(), NodeCrypto.layer]), Effect.scoped),
 );
 
 it.effect("preserves the desktop driver through degraded telemetry until the receiver stops", () =>

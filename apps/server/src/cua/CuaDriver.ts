@@ -330,6 +330,7 @@ export const makeDesktopHostFactory = Effect.fn("CuaDriver.makeDesktopHostFactor
     const ready = yield* Deferred.make<CuaDriverMcpConfiguration, CuaDriverError>();
     const stopped = yield* Deferred.make<void>();
     let requested = false;
+    let retired = false;
     const unavailable = new CuaDriverHostError({ operation: "desktop" });
     const start = Effect.gen(function* () {
       // Start the subscription before writing: the desktop may reply synchronously.
@@ -366,6 +367,7 @@ export const makeDesktopHostFactory = Effect.fn("CuaDriver.makeDesktopHostFactor
         ),
         Effect.forkIn(scope, { startImmediately: true }),
       );
+      if (retired) return yield* unavailable;
       requested = true;
       yield* receiver
         .requestCuaDriver(requestId, true)
@@ -373,6 +375,7 @@ export const makeDesktopHostFactory = Effect.fn("CuaDriver.makeDesktopHostFactor
       return yield* Deferred.await(ready);
     });
     const stop = Effect.gen(function* () {
+      retired = true;
       if (!requested) return;
       yield* receiver
         .requestCuaDriver(requestId, false)
