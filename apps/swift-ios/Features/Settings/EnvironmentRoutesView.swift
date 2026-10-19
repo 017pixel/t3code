@@ -176,7 +176,7 @@ private struct AddEnvironmentRouteView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.disabled(isSaving)
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly).disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isSaving ? "Adding…" : "Add") {

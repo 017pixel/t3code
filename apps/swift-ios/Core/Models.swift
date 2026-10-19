@@ -139,6 +139,7 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
         public let threadTitleRegeneration: Bool?
         public let threadPullRequestLinking: Bool?
         public var threadPullRequests: Bool? = nil
+        public var threadPullRequestWatch: Bool? = nil
         public var pullRequestStackActions: Bool? = nil
         public var desktopAppUpdate: Bool? = nil
         public var serverUpdateThreadContinuation: Bool? = nil
@@ -174,6 +175,7 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
             case threadTitleRegeneration
             case threadPullRequestLinking
             case threadPullRequests
+            case threadPullRequestWatch
             case pullRequestStackActions
             case desktopAppUpdate, serverUpdateThreadContinuation
             case serverSelfUpdate
@@ -238,6 +240,7 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
                 forKey: .threadPullRequestLinking
             )
             threadPullRequests = try container.decodeIfPresent(Bool.self, forKey: .threadPullRequests)
+            threadPullRequestWatch = try container.decodeIfPresent(Bool.self, forKey: .threadPullRequestWatch)
             pullRequestStackActions = try container.decodeIfPresent(Bool.self, forKey: .pullRequestStackActions)
             desktopAppUpdate = try container.decodeIfPresent(Bool.self, forKey: .desktopAppUpdate)
             serverUpdateThreadContinuation = try container.decodeIfPresent(Bool.self, forKey: .serverUpdateThreadContinuation)
@@ -612,6 +615,7 @@ public struct OrchestrationThreadShell: Codable, Identifiable, Equatable, Sendab
 }
 
 public struct OrchestrationMessage: Codable, Identifiable, Equatable, Sendable {
+    public var workflowScript: Bool? = nil
     public var v2Timeline: OrchestrationV2TimelineMetadata? = nil
     public let id: String
     public let role: String

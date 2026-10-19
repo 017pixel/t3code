@@ -111,7 +111,7 @@ final class PlatformCloudDeliveryCoordinator {
     @ObservationIgnored private var pushToStartTask: Task<Void, Never>?
     @ObservationIgnored private var activityUpdatesTask: Task<Void, Never>?
     @ObservationIgnored private var activityTokenTasks: [String: Task<Void, Never>] = [:]
-    @ObservationIgnored private var pendingActivityTokens: Set<String> = []
+    @ObservationIgnored private var pendingActivityTokens: [String: String] = [:]
     @ObservationIgnored private var retryTask: Task<Void, Never>?
     @ObservationIgnored private var observedAccountID: String?
 
@@ -189,7 +189,7 @@ final class PlatformCloudDeliveryCoordinator {
             for await activity in Activity<LiveActivityAttributes>.activityUpdates {
                 guard !Task.isCancelled, let self else { return }
                 if let token = activity.pushToken?.hexadecimalString {
-                    pendingActivityTokens.insert(token)
+                    pendingActivityTokens[activity.id] = token
                 }
                 refreshActivityTokenObservers()
                 requestRegistration()
@@ -305,13 +305,13 @@ final class PlatformCloudDeliveryCoordinator {
 
         for activity in activities {
             if let token = activity.pushToken?.hexadecimalString {
-                pendingActivityTokens.insert(token)
+                pendingActivityTokens[activity.id] = token
             }
             guard activityTokenTasks[activity.id] == nil else { continue }
             activityTokenTasks[activity.id] = Task { @MainActor [weak self] in
                 for await token in activity.pushTokenUpdates {
                     guard !Task.isCancelled else { return }
-                    self?.pendingActivityTokens.insert(token.hexadecimalString)
+                    self?.pendingActivityTokens[activity.id] = token.hexadecimalString
                     self?.requestRegistration()
                 }
             }
@@ -384,13 +384,13 @@ final class PlatformCloudDeliveryCoordinator {
             var completed = (defaults.dictionary(forKey: activityFingerprintKey) ?? [:])
                 .compactMapValues { ($0 as? NSNumber)?.doubleValue }
                 .filter { now - $0.value < healingInterval }
-            for token in Array(pendingActivityTokens) {
+            for (activityID, token) in pendingActivityTokens {
                 let tokenFingerprint = Self.fingerprint(
                     "\(deviceID)|\(token)",
                     accountID: accountID
                 )
                 guard completed[tokenFingerprint] == nil else {
-                    pendingActivityTokens.remove(token)
+                    if pendingActivityTokens[activityID] == token { pendingActivityTokens[activityID] = nil }
                     continue
                 }
                 try await controller.registerLiveActivity(
@@ -404,7 +404,7 @@ final class PlatformCloudDeliveryCoordinator {
                     return
                 }
                 completed[tokenFingerprint] = now
-                pendingActivityTokens.remove(token)
+                if pendingActivityTokens[activityID] == token { pendingActivityTokens[activityID] = nil }
             }
             let bounded = completed.sorted { $0.value > $1.value }.prefix(8)
             defaults.set(

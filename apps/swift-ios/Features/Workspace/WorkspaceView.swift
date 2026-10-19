@@ -24,6 +24,7 @@ struct FeatureWorkspaceNavigationRequest: Equatable, Sendable {
 
 public struct WorkspaceView: View {
     @SwiftUI.Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @SwiftUI.Environment(\.openURL) private var openURL
 
     @Bindable var model: FeatureRootModel
     private let navigationRequest: FeatureWorkspaceNavigationRequest?
@@ -78,6 +79,7 @@ public struct WorkspaceView: View {
     @State private var settingsDestination: FeatureSettingsDestination?
     @State private var showingThreadArrangement = false
     @State private var settingsProject: FeatureProject?
+    @State private var linkedPullRequestThread: FeatureThread?
     @State private var showingUsageLimits = false
     @State private var renamingThread: FeatureThread?
     @State private var deletingThread: FeatureThread?
@@ -144,6 +146,14 @@ public struct WorkspaceView: View {
             }
             .onAppear { workspacePresentationIsVisible = true }
         }
+        .sheet(item: $linkedPullRequestThread, onDismiss: finishWorkspaceDismissal) { thread in
+            NavigationStack {
+                FeatureThreadPullRequestsView(model: model, threadID: thread.id, fallbackThread: thread,
+                    openURL: { openURL($0) })
+            }
+            .preferredColorScheme(.dark)
+            .onAppear { workspacePresentationIsVisible = true }
+        }
         .sheet(isPresented: $showingAddProject, onDismiss: finishProjectCreation) {
             AddProjectView(model: model, onNewProjectCreated: { projectID, clone in
                 createdProjectID = projectID
@@ -161,7 +171,7 @@ public struct WorkspaceView: View {
                 ConnectionsView(model: model)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") { showingEnvironments = false }
+                            Button("Close", systemImage: "xmark") { showingEnvironments = false }.labelStyle(.iconOnly)
                         }
                     }
             }
@@ -177,7 +187,7 @@ public struct WorkspaceView: View {
                 UsageView(client: model.client, initiallyShowsLimits: true)
                     .toolbar {
                         ToolbarItem(placement: .topBarLeading) {
-                            Button("Done") { showingUsageLimits = false }
+                            Button("Close", systemImage: "xmark") { showingUsageLimits = false }.labelStyle(.iconOnly)
                         }
                     }
             }
@@ -388,6 +398,7 @@ public struct WorkspaceView: View {
                 isArchiveExpanded: isArchiveExpanded,
                 settledLimit: settledLimit,
                 onOpen: openThread,
+                onOpenPullRequest: openPullRequest,
                 onToggleWorking: { isWorkingExpanded.toggle() },
                 onToggleSnoozed: { isSnoozedExpanded.toggle() },
                 onToggleSettled: { isSettledExpanded.toggle() },
@@ -1051,6 +1062,13 @@ public struct WorkspaceView: View {
         newTaskPresentation = nil
     }
 
+    private func openPullRequest(_ thread: FeatureThread, presentation: HomeThreadPullRequestPresentation) {
+        switch presentation.action {
+        case let .open(url): openURL(url)
+        case .list: linkedPullRequestThread = thread
+        }
+    }
+
     private func finishWorkspaceDismissal() {
         workspacePresentationIsVisible = false
         let action = pendingWorkspaceAction
@@ -1061,9 +1079,10 @@ public struct WorkspaceView: View {
     private func dismissTransientPresentations(before action: @escaping @MainActor () -> Void) {
         let needsDismissal = workspacePresentationIsVisible || pendingWorkspaceAction != nil || settingsProject != nil
             || newTaskPresentation != nil || customSnoozeSelection != nil || showingAddProject
-            || showingEnvironments || showingSettings || showingUsageLimits || showingThreadArrangement
+            || showingEnvironments || showingSettings || showingUsageLimits || showingThreadArrangement || linkedPullRequestThread != nil
         if needsDismissal { pendingWorkspaceAction = action }
         settingsProject = nil
+        linkedPullRequestThread = nil
         newTaskPresentation = nil
         customSnoozeSelection = nil
         showingAddProject = false
@@ -1432,6 +1451,17 @@ struct HomeThreadPullRequestPresentation: Equatable {
     let state: State
     var count = 1
     var isStack = false
+    var url: URL? = nil
+
+    enum Action: Equatable {
+        case open(URL)
+        case list
+    }
+
+    var action: Action {
+        if count == 1, !isStack, let url { return .open(url) }
+        return .list
+    }
 
     var label: String {
         count > 1 ? (isStack ? "\(count) PRs" : "#\(number) +\(count - 1)") : "#\(number)"
@@ -1448,7 +1478,7 @@ struct HomeThreadPullRequestPresentation: Equatable {
             ? .draft : visible.contains(where: \.isOpen) ? .open
             : visible.allSatisfy { $0.snapshot?.state == .merged } ? .merged : .closed
         return Self(number: current.number, state: state, count: visible.count,
-                    isStack: visible.count > 1 && ThreadPullRequests.chains(visible).count == 1)
+                    isStack: visible.count > 1 && ThreadPullRequests.chains(visible).count == 1, url: URL(string: current.url))
     }
 
     static func resolve(
@@ -1463,7 +1493,7 @@ struct HomeThreadPullRequestPresentation: Equatable {
               let state = State(rawValue: pullRequest.state.lowercased()) else {
             return nil
         }
-        return Self(number: pullRequest.number, state: state)
+        return Self(number: pullRequest.number, state: state, url: pullRequest.url)
     }
 
     static func resolve(
@@ -1477,7 +1507,7 @@ struct HomeThreadPullRequestPresentation: Equatable {
               let state = State(rawValue: detail.state.rawValue) else {
             return nil
         }
-        return Self(number: detail.number, state: state)
+        return Self(number: detail.number, state: state, url: URL(string: detail.url))
     }
 }
 
@@ -1517,6 +1547,7 @@ struct FeatureThreadRow: View {
     private let context: HomeThreadRowContext
     private let projectFaviconClient: (any FeatureClient)?
     private let onPullRequestChange: (HomeThreadPullRequestPresentation?) -> Void
+    private let onOpenPullRequest: (HomeThreadPullRequestPresentation) -> Void
     let isSelected: Bool
     let style: Style
     let now: Date
@@ -1528,6 +1559,7 @@ struct FeatureThreadRow: View {
         context: HomeThreadRowContext,
         projectFaviconClient: (any FeatureClient)? = nil,
         onPullRequestChange: @escaping (HomeThreadPullRequestPresentation?) -> Void = { _ in },
+        onOpenPullRequest: @escaping (HomeThreadPullRequestPresentation) -> Void = { _ in },
         isSelected: Bool = false,
         style: Style = .rich,
         now: Date = .now,
@@ -1537,6 +1569,7 @@ struct FeatureThreadRow: View {
         self.context = context
         self.projectFaviconClient = projectFaviconClient
         self.onPullRequestChange = onPullRequestChange
+        self.onOpenPullRequest = onOpenPullRequest
         self.isSelected = isSelected
         self.style = style
         self.now = now
@@ -1815,14 +1848,17 @@ struct FeatureThreadRow: View {
     }
 
     private func pullRequestIndicator(_ pullRequest: HomeThreadPullRequestPresentation) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: pullRequest.isStack ? "square.stack.3d.up" : "arrow.triangle.pull")
-                .font(.system(size: 10, weight: .semibold))
-            Text(pullRequest.label)
-                .font(T3Typography.homeMetadata.monospacedDigit().weight(.medium))
-                .lineLimit(1)
+        Button { onOpenPullRequest(pullRequest) } label: {
+            HStack(spacing: 3) {
+                Image(systemName: pullRequest.isStack ? "square.stack.3d.up" : "arrow.triangle.pull")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(pullRequest.label)
+                    .font(T3Typography.homeMetadata.monospacedDigit().weight(.medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(pullRequestColor(pullRequest.state))
         }
-        .foregroundStyle(pullRequestColor(pullRequest.state))
+        .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(pullRequest.accessibilityLabel)
     }

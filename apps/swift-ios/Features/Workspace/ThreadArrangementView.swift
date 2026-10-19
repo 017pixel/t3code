@@ -24,7 +24,7 @@ struct ThreadArrangementView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                         .disabled(model.isArrangingThreads)
                 }
             }

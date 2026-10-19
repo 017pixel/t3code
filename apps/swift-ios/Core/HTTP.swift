@@ -379,6 +379,9 @@ public actor EnvironmentAPI {
         isUnauthorizedResponse: (@Sendable (Result) -> Bool)? = nil,
         as type: Result.Type
     ) async throws -> Result {
+        guard !environment.sendsTokenInClear(environment.selectedRoute) else {
+            throw EnvironmentRouteError.unsafeLearnedRoute
+        }
         let credential = try await credentials.credential(for: environment.credentialID)
 
         switch environment.kind {

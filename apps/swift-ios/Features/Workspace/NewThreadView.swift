@@ -2093,7 +2093,7 @@ private struct NewTaskProjectPicker: View {
             .searchable(text: $query, prompt: "Search projects")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                 }
             }
         }
@@ -2284,7 +2284,7 @@ private struct NewTaskBranchPicker: View {
             .searchable(text: $query, prompt: "Search branches")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                         .disabled(isSwitching)
                 }
                 ToolbarItem(placement: .primaryAction) {

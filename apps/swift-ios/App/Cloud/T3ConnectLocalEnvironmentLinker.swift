@@ -5,6 +5,9 @@ struct T3ConnectLocalEnvironment: Sendable {
     let credential: EnvironmentCredential
 
     init(environment: Environment, credential: EnvironmentCredential) throws {
+        guard !environment.sendsTokenInClear(environment.selectedRoute) else {
+            throw EnvironmentRouteError.unsafeLearnedRoute
+        }
         guard environment.kind == .bearer, environment.isEnabled,
               credential.authorizationMethod == .bearer, !credential.accessToken.isEmpty else {
             throw T3ConnectRelayError.invalidConfiguration(

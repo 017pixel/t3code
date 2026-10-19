@@ -170,7 +170,7 @@ private struct FeatureToolOutputImageView: View {
                 NavigationStack {
                     FeatureNativeMediaPreviewView(source: .remote(url), kind: .image,
                         fileName: image.fileName, mimeType: image.mimeType, resolveURL: resolve)
-                        .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { preview = false } } }
+                        .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Close", systemImage: "xmark") { preview = false }.labelStyle(.iconOnly) } }
                 }
                 .preferredColorScheme(.dark)
             }

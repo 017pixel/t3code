@@ -4,6 +4,12 @@ import Testing
 
 @Suite("Subscription limits")
 struct UsageLimitsPresentationTests {
+    @Test func providerDriversUseTheirChartColors() {
+        #expect(UsageProviderKind(driver: "claudeAgent") == .claude)
+        #expect(UsageProviderKind(driver: "cursor") == .cursor)
+        #expect(UsageProviderKind(driver: "custom") == nil)
+    }
+
     @Test
     func providersMustBeEnabledInstalledAndAvailable() throws {
         let providers = try [

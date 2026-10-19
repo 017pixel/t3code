@@ -130,7 +130,7 @@ public struct AddProjectView: View {
             .t3NavigationChrome()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                 }
             }
         }

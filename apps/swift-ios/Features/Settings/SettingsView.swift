@@ -51,7 +51,7 @@ public struct SettingsView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                         .accessibilityIdentifier("settings-done")
                 }
             }

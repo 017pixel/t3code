@@ -316,6 +316,10 @@ public enum OrchestrationV2Presentation {
             if row.isLocal, intent == "queued_turn", let runID = item.runId,
                p.runs.first(where: { $0.id == runID })?.status == "queued" { break }
             result.message = message(id, role: "user", text: text, attachments: attachments, context: context)
+            if p.thread.creationSource == "provider", p.thread.lineage.relationshipToParent == "subagent",
+               p.visibleTurnItems.first(where: { $0.item.type == "user_message" })?.id == row.id {
+                result.message?.workflowScript = WorkflowScript.isScript(text, explicit: raw["workflowScript"]?.boolValue)
+            }
         case let .assistantMessage(id, text, streaming, attachments):
             result.message = message(id, role: "assistant", text: text, streaming: streaming, attachments: attachments)
         case let .reasoning(text, streaming):

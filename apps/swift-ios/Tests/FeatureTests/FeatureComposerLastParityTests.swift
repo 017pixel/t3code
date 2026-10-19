@@ -3,6 +3,14 @@ import Testing
 
 @Suite("Composer linked PR and handoff parity")
 struct FeatureComposerLastParityTests {
+    @Test func pathsDoNotOpenCommandMenu() {
+        #expect(FeatureComposerTriggerParser.detect(in: "/tmp/build.sh") == nil)
+        #expect(FeatureComposerTriggerParser.detect(in: "/tmp/x", cursorOffset: 4) == nil)
+        #expect(FeatureComposerTriggerParser.detect(in: "/rev")?.kind == .slashCommand)
+        #expect(FeatureComposerTriggerParser.detect(in: "/review @src/a")?.kind == .path)
+        #expect(FeatureComposerTriggerParser.detect(in: "/model openai/gpt")?.kind == .model)
+    }
+
     @Test func pullRequestTriggerUsesWholeTokens() {
         #expect(FeatureComposerTriggerParser.detect(in: "Review #42") == .init(
             kind: .pullRequest, query: "42", range: 7..<10

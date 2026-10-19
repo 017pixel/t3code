@@ -87,7 +87,7 @@ struct FeatureThreadQueueView: View {
 
     private func queueRow(_ entry: FeatureThreadExecution.QueuedEntry, index: Int) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Attachments" : entry.text)
+            Text(entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Attachments" : AssistantCitationText.plainText(entry.text))
                 .font(T3Typography.threadBody)
                 .lineLimit(3)
                 .textSelection(.enabled)

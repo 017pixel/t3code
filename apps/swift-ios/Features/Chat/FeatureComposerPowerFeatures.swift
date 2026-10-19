@@ -225,6 +225,12 @@ enum FeatureComposerTriggerParser {
         let linePrefix = String(text[lineStartIndex..<cursorIndex])
         let lowercasedLine = linePrefix.lowercased()
 
+        let wordEnd = text[cursorIndex...].firstIndex(where: { $0.isWhitespace }) ?? text.endIndex
+        let isPath = linePrefix.first == "/"
+            && !linePrefix.dropFirst().contains(where: { $0.isWhitespace })
+            && text[text.index(after: lineStartIndex)..<wordEnd].contains("/")
+        if isPath { return nil }
+
         if lowercasedLine == "/model" {
             return FeatureComposerTrigger(kind: .model, query: "", range: lineStart..<cursor)
         }

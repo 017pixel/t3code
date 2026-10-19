@@ -124,6 +124,7 @@ final class FeatureV2TimelineRenderer {
             rawMessages[raw.id] = raw
             var message = mapMessage(raw)
             message.v2Timeline = raw.v2Timeline
+            message.workflowScript = raw.workflowScript
             mapped[raw.id] = message
             dirtyIDs.insert(raw.id)
         }

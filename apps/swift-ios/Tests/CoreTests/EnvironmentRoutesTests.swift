@@ -5,6 +5,46 @@ import Testing
 @Suite("Environment routes")
 @MainActor
 struct EnvironmentRoutesTests {
+    @Test func learnedRoutesDoNotDowngradePairedTokens() async throws {
+        let secure = routeFixture()
+        let lan = EnvironmentRoute(id: "learned-lan", httpBaseURL: URL(string: "http://192.168.1.2/")!,
+            webSocketBaseURL: URL(string: "ws://192.168.1.2/ws")!, kind: .bearer,
+            credentialOwnerID: secure.credentialID, isLearned: true, endpointKind: .lan)
+        let tailnet = EnvironmentRoute(id: "learned-tailnet", httpBaseURL: URL(string: "http://100.100.1.2/")!,
+            webSocketBaseURL: URL(string: "ws://100.100.1.2/ws")!, kind: .bearer,
+            credentialOwnerID: secure.credentialID, isLearned: true, endpointKind: .tailnet)
+        #expect(secure.sendsTokenInClear(lan))
+        #expect(!secure.sendsTokenInClear(tailnet))
+        let discovered = secure.mergingDiscoveredEndpoints([
+            .init(kind: .lan, httpBaseUrl: lan.httpBaseURL.absoluteString),
+            .init(kind: .tailnet, httpBaseUrl: tailnet.httpBaseURL.absoluteString),
+        ], credentialOwnerID: secure.credentialID)
+        #expect(discovered.routes.count == 2)
+        #expect(!discovered.routes.contains { $0.endpointKind == .lan })
+        var plain = secure
+        plain.routes[0].httpBaseURL = URL(string: "http://192.168.1.1/")!
+        #expect(!plain.sendsTokenInClear(lan))
+        var dpop = lan
+        dpop = .init(id: dpop.id, httpBaseURL: dpop.httpBaseURL, webSocketBaseURL: dpop.webSocketBaseURL,
+            kind: .managedDPoP, credentialOwnerID: "cloud", isLearned: true, endpointKind: .lan)
+        #expect(!secure.sendsTokenInClear(dpop))
+        var oldCatalog = secure
+        oldCatalog.routes.insert(lan, at: 0)
+        oldCatalog = oldCatalog.selectingRoute(lan)
+        let attempts = RouteAuthenticationAttempts()
+        let resolved = try await EnvironmentRouteResolver(transport: RouteTestHTTP()).connect(environment: oldCatalog) { candidate in
+            await attempts.record(candidate.selectedRoute.id)
+            return candidate.id
+        }
+        #expect(resolved.environment.selectedRoute.id == secure.selectedRoute.id)
+        #expect(await attempts.ids == [secure.selectedRoute.id])
+        #expect(throws: EnvironmentRouteError.unsafeLearnedRoute) {
+            try T3ConnectLocalEnvironment(environment: oldCatalog, credential: .init(accessToken: "saved-token"))
+        }
+        let api = EnvironmentAPI(transport: RouteTestHTTP(), credentials: InMemoryCredentialStore())
+        await #expect(throws: EnvironmentRouteError.unsafeLearnedRoute) { try await api.session(for: oldCatalog) }
+    }
+
     @Test func legacyCatalogIgnoresProtocolPreferenceAndRetainsRouteAndCredential() async throws {
         let folder = routeTestDirectory()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -78,7 +118,7 @@ struct EnvironmentRoutesTests {
     @Test func discoveryPreservesOrderAndManualRoutesButPrunesStaleLearnedRoutes() throws {
         let manual = routeFixture()
         let first = manual.mergingDiscoveredEndpoints([
-            .init(kind: .lan, httpBaseUrl: "http://192.168.1.2:3000/"),
+            .init(kind: .lan, httpBaseUrl: "https://192.168.1.2:3000/"),
             .init(kind: .tailnet, httpBaseUrl: "https://TAIL.example:443/"),
             .init(kind: .tailnet, httpBaseUrl: "https://tail.example"),
             .init(kind: .lan, httpBaseUrl: "http://127.0.0.1:3000/"),
@@ -93,7 +133,7 @@ struct EnvironmentRoutesTests {
         reordered.routes = [tailnet, manual.selectedRoute, lan]
         let second = reordered.mergingDiscoveredEndpoints([
             .init(kind: .tailnet, httpBaseUrl: "https://tail.example/"),
-            .init(kind: .lan, httpBaseUrl: "http://192.168.1.3:3000/"),
+            .init(kind: .lan, httpBaseUrl: "https://192.168.1.3:3000/"),
         ], credentialOwnerID: manual.credentialID)
         #expect(second.routes.map(\.httpBaseURL.host) == ["192.168.1.3", "tail.example", "first.example"])
         #expect(second.routes[1].id == tailnet.id)

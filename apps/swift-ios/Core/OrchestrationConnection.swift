@@ -16,6 +16,9 @@ actor OrchestrationConnection {
     }
 
     func descriptor(refresh: Bool = false, maximumAge: Duration? = nil) async throws -> EnvironmentDescriptor {
+        guard !environment.sendsTokenInClear(environment.selectedRoute) else {
+            throw EnvironmentRouteError.unsafeLearnedRoute
+        }
         let withinAge = maximumAge.map { limit in
             validatedAt.map { $0.duration(to: .now) < limit } ?? false
         } ?? true

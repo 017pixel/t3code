@@ -163,12 +163,14 @@ public struct FeatureThreadWorkflows: Sendable, Equatable, Codable {
             return lhs == rhs ? $0.id < $1.id : lhs < rhs
         }
         let activeRun = projection.runs.last { ["preparing", "starting", "running", "waiting"].contains($0.status) }
-        let latestAgent = allAgents.reduce(nil as FeatureThreadAgent?) { latest, agent in
+        let rolledBack = Set(projection.runs.filter { $0.status == "rolled_back" }.map(\.id))
+        let eligible = agents.filter { $0.runID.map { !rolledBack.contains($0) } ?? true }
+        let latestAgent = eligible.reduce(nil as FeatureThreadAgent?) { latest, agent in
             guard let latest else { return agent }
             return agent.updatedAt > latest.updatedAt ? agent : latest
         }
         let rosterRunID = activeRun?.id ?? latestAgent?.runID
-        let rosterAgents = agents.filter { $0.runID == rosterRunID }
+        let rosterAgents = eligible.filter { $0.runID == rosterRunID || $0.status.isActive }
         agentRoster = rosterAgents.isEmpty ? nil : FeatureThreadAgentRoster(
             runID: rosterRunID, turnActive: activeRun != nil, agents: rosterAgents
         )

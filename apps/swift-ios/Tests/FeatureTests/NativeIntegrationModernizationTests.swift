@@ -29,6 +29,27 @@ struct NativeIntegrationModernizationTests {
     }
 
     @Test
+    func watchingUsesTheOwningThreadAndRechecksPermissions() async throws {
+        try await withClient { client, transport in
+            let snapshot = try await client.backgroundSnapshot()
+            let thread = try #require(snapshot.threads.first)
+            #expect(thread.supportsPullRequestWatching == true)
+            let key = try #require(thread.pullRequests?.first?.id)
+            try await client.setThreadPullRequestWatching(id: thread.id, key: key, watching: false)
+            let commands = await transport.commands
+            #expect(commands.count == 1)
+            #expect(commands[0]["type"] == .string("thread.pull-request.watch"))
+            #expect(commands[0]["threadId"] == .string("thread-v2"))
+            #expect(commands[0]["watching"] == .bool(false))
+            await transport.setPermissions(["orchestration:read"])
+            await #expect(throws: EnvironmentPermissionDeniedError.self) {
+                try await client.setThreadPullRequestWatching(id: thread.id, key: key, watching: true)
+            }
+            #expect(await transport.commands.count == 1)
+        }
+    }
+
+    @Test
     func goalUpdatesAndClearsInNativeShellAndDetailMapping() async throws {
         try await withClient { client, transport in
             let active: JSONValue = .object([
@@ -119,6 +140,9 @@ private actor ModernizationTransport: HTTPTransport {
         ])
     }
 
+    private var permissions = ["orchestration:read", "orchestration:operate"]
+    func setPermissions(_ value: [String]) { permissions = value }
+
     func setGoal(_ goal: JSONValue) throws {
         let thread = try #require(shell["threads"]?.v2Array?.first)
         let sequence = (shell["snapshotSequence"]?.v2Int ?? 0) + 1
@@ -144,21 +168,34 @@ private actor ModernizationTransport: HTTPTransport {
         return .object(["sequence": .number(200)])
     }
 
+    private var descriptor: JSONValue {
+        .object([
+                "environmentId": .string("modernization"), "label": .string("Modernization"),
+                "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
+                "serverVersion": .string("fixture"), "capabilities": .object([
+                    "threadPullRequests": .bool(true), "threadPullRequestWatch": .bool(true),
+                ]),
+                "orchestrationProtocolVersion": .number(Double(version)),
+            ])
+    }
+
+    func serverConfig() -> JSONValue {
+        .object([
+            "providers": .array([]), "threadResumeCompletionMarker": .bool(true),
+            "environment": descriptor,
+        ])
+    }
+
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         let url = try #require(request.url)
         let value: JSONValue
         switch url.path {
         case "/.well-known/t3/environment":
-            value = .object([
-                "environmentId": .string("modernization"), "label": .string("Modernization"),
-                "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
-                "serverVersion": .string("fixture"), "capabilities": .object([:]),
-                "orchestrationProtocolVersion": .number(Double(version)),
-            ])
+            value = descriptor
         case "/api/auth/session":
             value = try JSONValue.encode(AuthSessionState(
-                authenticated: true, scopes: ["orchestration:read", "orchestration:operate"],
-                sessionMethod: "bearer", permissions: ["orchestration:read", "orchestration:operate"]
+                authenticated: true, scopes: permissions,
+                sessionMethod: "bearer", permissions: permissions
             ))
         case "/api/auth/websocket-ticket":
             value = .object(["ticket": .string("fixture-ticket"), "expiresAt": .string("2099-01-01T00:00:00Z")])
@@ -196,14 +233,12 @@ private actor ModernizationSocket: WebSocketConnection {
         case RPCMethod.dispatchCommand.rawValue:
             value = await transport.dispatch(try #require(request["payload"]))
         case RPCMethod.serverGetConfig.rawValue:
-            value = .object(["providers": .array([]), "threadResumeCompletionMarker": .bool(true)])
+            value = await transport.serverConfig()
         case RPCMethod.subscribeServerConfig.rawValue:
             try enqueue(.object([
                 "_tag": .string("Chunk"), "requestId": id,
                 "values": .array([.object([
-                    "type": .string("snapshot"), "config": .object([
-                        "providers": .array([]), "threadResumeCompletionMarker": .bool(true),
-                    ]),
+                    "type": .string("snapshot"), "config": await transport.serverConfig(),
                 ])]),
             ]))
             return

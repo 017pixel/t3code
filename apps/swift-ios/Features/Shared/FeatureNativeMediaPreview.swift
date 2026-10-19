@@ -273,7 +273,7 @@ struct FeatureNativeMediaPreviewView: View {
                 FeatureQuickLookPreview(url: file.url)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") { nativeFile = nil }
+                            Button("Close", systemImage: "xmark") { nativeFile = nil }.labelStyle(.iconOnly)
                         }
                     }
             }

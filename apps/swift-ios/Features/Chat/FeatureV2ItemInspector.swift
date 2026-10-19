@@ -40,8 +40,11 @@ final class FeatureV2TimelineState: ObservableObject {
         expandedIDs.removeAll()
     }
 
-    func toggle(_ id: String) {
-        if !expandedIDs.insert(id).inserted { expandedIDs.remove(id) }
+    func toggle(_ id: String, linkedID: String? = nil) {
+        let expands = !expandedIDs.contains(id)
+        for key in [id, linkedID].compactMap({ $0 }) {
+            if expands { expandedIDs.insert(key) } else { expandedIDs.remove(key) }
+        }
     }
 
     func load(_ item: FeatureV2WorkItem, context: FeatureV2ItemInspectionContext, retry: Bool = false) async {
@@ -106,7 +109,7 @@ struct FeatureV2WorkLogView: View {
     var body: some View {
         let items = message.v2WorkItems ?? []
         if items.count == 1, let item = items.first {
-            FeatureV2ItemInspector(item: item, context: context, imageContext: imageContext, attachmentContext: attachmentContext)
+            FeatureV2ItemInspector(item: item, context: context, imageContext: imageContext, attachmentContext: attachmentContext, linkedID: message.id)
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 Button { state.toggle(message.id) } label: {
@@ -140,15 +143,17 @@ struct FeatureV2ItemInspector: View {
     let imageContext: MarkdownImageContext?
     let attachmentContext: FeatureAttachmentContext?
     let title: String?
+    let linkedID: String?
     @ObservedObject private var state: FeatureV2TimelineState
 
     init(item: FeatureV2WorkItem, context: FeatureV2ItemInspectionContext,
-         imageContext: MarkdownImageContext?, attachmentContext: FeatureAttachmentContext?, title: String? = nil) {
+         imageContext: MarkdownImageContext?, attachmentContext: FeatureAttachmentContext?, title: String? = nil, linkedID: String? = nil) {
         self.item = item
         self.context = context
         self.imageContext = imageContext
         self.attachmentContext = attachmentContext
         self.title = title
+        self.linkedID = linkedID
         self.state = context.state
     }
 
@@ -160,7 +165,7 @@ struct FeatureV2ItemInspector: View {
     var body: some View {
         let presentation = ToolActivityPresentation(payload: item.raw)
         VStack(alignment: .leading, spacing: 6) {
-            Button { state.toggle(item.id) } label: {
+            Button { state.toggle(item.id, linkedID: linkedID) } label: {
                 HStack(alignment: .top, spacing: 8) {
                     if failure { Image(systemName: "exclamationmark.triangle") }
                     else { FeatureToolActivityIcon(presentation: presentation, context: imageContext) }
@@ -357,7 +362,7 @@ private struct FeatureV2ExpandedItem: View {
                         .navigationTitle("Full output")
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
-                            ToolbarItem(placement: .topBarLeading) { Button("Done") { self.fullText = nil } }
+                            ToolbarItem(placement: .topBarLeading) { Button("Close", systemImage: "xmark") { self.fullText = nil }.labelStyle(.iconOnly) }
                             ToolbarItem(placement: .topBarTrailing) { Button("Copy") { UIPasteboard.general.string = fullText } }
                         }
                 }

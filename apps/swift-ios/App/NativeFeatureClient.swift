@@ -2302,6 +2302,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
               thread.supportsMultiplePullRequests == true || thread.supportsPullRequestLinking == true else {
             throw NativeFeatureClientError.invalidPullRequestLink
         }
+        try await requireScope("orchestration:operate", client: route.client)
         let existing = thread.pullRequests?.first { $0.url == url }
         let legacyKey = thread.linkedPullRequest.flatMap { link -> ThreadPullRequestKey? in
             guard link.url == url, let host = URL(string: link.url)?.host else { return nil }
@@ -2320,9 +2321,31 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             legacyProjectID: project.flatMap { projectWireIDs[$0.id] },
             legacyRepository: key.host == "dev.azure.com" ? key.repository.components(separatedBy: "/_git/").last : nil
         ) else { throw NativeFeatureClientError.invalidPullRequestLink }
+        guard try threadRoute(for: id).client === route.client else { throw RPCError.disconnected }
         _ = try await route.client.dispatch(command)
         try? await refresh(client: route.client)
         if activeThreadID == route.uiID { try? await refreshThread(id: route.uiID, client: route.client) }
+    }
+
+    func setThreadPullRequestWatching(id: String, key: ThreadPullRequestKey, watching: Bool) async throws {
+        let route = try await v2ActionContext(threadID: id)
+        try await requireScope("orchestration:operate", client: route.client)
+        let uiID = FeatureScopedID.thread(environmentID: route.environmentID, wireID: route.wireID)
+        guard let thread = cachedThread(id: uiID), thread.supportsPullRequestWatching == true,
+              let link = thread.pullRequests?.first(where: { $0.id == key }), link.isVisible, link.isOpen,
+              !watching || (!thread.isArchived && !thread.isSettled && !thread.isSubagent) else {
+            throw FeatureCapabilityUnavailable("Pull request watching")
+        }
+        let current = try threadRoute(for: id)
+        guard current.client === route.client else { throw RPCError.disconnected }
+        _ = try await route.client.dispatch(.object([
+            "type": .string("thread.pull-request.watch"), "commandId": .string(UUID().uuidString),
+            "threadId": .string(route.wireID), "host": .string(link.host),
+            "repository": .string(link.repository), "number": .number(Double(key.number)),
+            "watching": .bool(watching),
+        ]))
+        try? await refresh(client: route.client)
+        if activeThreadID == uiID { try? await refreshThread(id: uiID, client: route.client) }
     }
 
     func setRuntimeMode(id: String, mode: FeatureRuntimeMode) async throws {
@@ -6224,6 +6247,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         detail.thread.supportsPinning = capabilities?.threadPinning
         detail.thread.supportsTitleRegeneration = capabilities?.threadTitleRegeneration
         detail.thread.supportsPullRequestLinking = capabilities?.threadPullRequestLinking
+        detail.thread.supportsPullRequestWatching = capabilities?.threadPullRequestWatch
         detail.thread.supportsMultiplePullRequests = capabilities?.threadPullRequests
         let sessionIsLive = shellThread.session?.status == "starting"
             || shellThread.session?.status == "running"
@@ -6540,7 +6564,8 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                             rootPath: $0.rootPath,
                             displayName: $0.displayName,
                             name: $0.name,
-                            origin: $0.origin
+                            origin: $0.origin,
+                            provider: $0.provider, webURL: $0.webUrl, remoteURL: $0.locator.remoteUrl
                         )
                     },
                     createdAt: project.createdAt,
@@ -6792,6 +6817,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             supportsTitleRegeneration: capabilities?.threadTitleRegeneration,
             supportsPullRequestLinking: capabilities?.threadPullRequestLinking,
             supportsMultiplePullRequests: capabilities?.threadPullRequests,
+            supportsPullRequestWatching: capabilities?.threadPullRequestWatch,
             isRegeneratingTitle: thread.titleRegeneration != nil,
             attentionAt: failureDate(
                 latestTurn: thread.latestTurn,
@@ -6912,6 +6938,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             supportsTitleRegeneration: capabilities?.threadTitleRegeneration,
             supportsPullRequestLinking: capabilities?.threadPullRequestLinking,
             supportsMultiplePullRequests: capabilities?.threadPullRequests,
+            supportsPullRequestWatching: capabilities?.threadPullRequestWatch,
             isRegeneratingTitle: thread.titleRegeneration != nil,
             attentionAt: failureDate(
                 latestTurn: thread.latestTurn,

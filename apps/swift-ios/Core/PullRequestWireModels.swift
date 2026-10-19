@@ -302,6 +302,11 @@ public struct PullRequestListEntry: Codable, Equatable, Sendable, Identifiable {
     public let baseBranch: String
     public let state: PullRequestState
     public let isDraft: Bool
+    public var conflictLabel: String? {
+        guard state == .open, !isDraft, mergeability == .conflicting else { return nil }
+        return baseBranch.isEmpty ? "Has conflicts" : "Conflicts with \(baseBranch)"
+    }
+
     public let mergeability: PullRequestMergeability
     public let additions: Int
     public let deletions: Int

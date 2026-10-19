@@ -74,7 +74,7 @@ struct ProjectPreferencesSheet: View {
             ProjectPreferencesView(model: model, projectID: projectID)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") { dismiss() }
+                        Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                     }
                 }
         }

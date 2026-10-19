@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 
 public struct FeatureAttachmentUploadKey: Hashable, Sendable {
     public let environmentID: String
@@ -291,8 +292,9 @@ public final class FeatureAttachmentUploadCoordinator {
                 return
             }
             let draftKeys = matchingDraftKeys(key: key, attachment: attachment)
-            do {
-                for draftKey in draftKeys {
+            for draftKey in draftKeys {
+                guard currentAndOwned(key: key, token: token, attachment: attachment) else { return }
+                do {
                     let didPersist = try await persist(reference, attachment, draftKey)
                     guard currentAndOwned(key: key, token: token, attachment: attachment),
                           matchingDraftKeys(key: key, attachment: attachment).contains(draftKey)
@@ -301,10 +303,11 @@ public final class FeatureAttachmentUploadCoordinator {
                         fail(key: key, token: token, error: CoordinatorError.persistenceRejected)
                         return
                     }
+                } catch {
+                    // The upload is already accepted. Send can use its in-memory reference.
+                    Logger(subsystem: "com.t3tools.t3code.swiftui", category: "AttachmentUpload")
+                        .error("Could not save the uploaded attachment in the draft: \(error.localizedDescription, privacy: .public)")
                 }
-            } catch {
-                fail(key: key, token: token, error: error)
-                return
             }
         }
         guard var job = jobs[key], job.token == token,

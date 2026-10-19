@@ -26,7 +26,7 @@ public actor EnvironmentRouteResolver {
         var firstError: (any Error)?
         var retryableError: (any Error)?
         var protocolError: OrchestrationProtocolError?
-        for route in environment.routes {
+        for route in environment.routes where !environment.sendsTokenInClear(route) {
             try Task.checkCancellation()
             do {
                 let candidate = try await verified(environment.selectingRoute(route))
@@ -58,7 +58,7 @@ public actor EnvironmentRouteResolver {
         lastPromotionCheck[environment.id] = now
         promoting.insert(environment.id)
         defer { promoting.remove(environment.id) }
-        for route in environment.routes.prefix(activeIndex) {
+        for route in environment.routes.prefix(activeIndex) where !environment.sendsTokenInClear(route) {
             try Task.checkCancellation()
             let key = environment.id + ":" + route.id
             if let failed = failedPromotions[key], now.timeIntervalSince(failed) < Self.promotionCooldown { continue }

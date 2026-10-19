@@ -44,6 +44,7 @@ final class PullRequestsModel {
     private let client: any FeatureClient
     private var loadGeneration: UInt64 = 0
     private var loadedInput: PullRequestListInput?
+    private var inFlightInput: PullRequestListInput?
 
     /// Reuse filter results while this view is open. A new view must read its
     /// current environments instead of restoring rows from a removed account.
@@ -60,11 +61,14 @@ final class PullRequestsModel {
     }
 
     private var currentInput: PullRequestListInput {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parsed = PullRequestQuery(query)
+        let trimmedQuery = parsed.text
         let filters = PullRequestListFilters(
-            draft: draftFilter,
-            review: reviewFilter,
-            checks: checksFilter
+            draft: parsed.filters.draft ?? draftFilter,
+            review: parsed.filters.review ?? reviewFilter,
+            checks: parsed.filters.checks ?? checksFilter,
+            labels: parsed.filters.labels, excludedLabels: parsed.filters.excludedLabels,
+            author: parsed.filters.author
         )
         return PullRequestListInput(
             state: state,
@@ -74,7 +78,13 @@ final class PullRequestsModel {
         )
     }
 
-    func load(invalidate: Bool = false) async {
+    func load(invalidate: Bool = false, skipIfUnchanged: Bool = false) async {
+        let input = currentInput
+        if skipIfUnchanged, !invalidate,
+           inFlightInput == input || (inFlightInput == nil && loadedInput == input && errorMessage == nil) {
+            return
+        }
+        inFlightInput = input
         loadGeneration &+= 1
         let generation = loadGeneration
         isLoading = true
@@ -83,9 +93,9 @@ final class PullRequestsModel {
         defer {
             if loadGeneration == generation {
                 isLoading = false
+                inFlightInput = nil
             }
         }
-        let input = currentInput
         if !invalidate, let cached = cachedEnvironments(for: input) {
             loadedInput = input
             environments = cached
@@ -209,7 +219,7 @@ final class PullRequestsModel {
     /// branches, so the text filter only runs locally while a newer query is
     /// still in flight.
     func applyLocalFilters() {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = PullRequestQuery(query).text
         let needle = trimmed == (loadedInput?.query ?? "") ? "" : trimmed.lowercased()
         rows = allRows.filter { row in
             (environmentFilter == nil || row.environmentID == environmentFilter)
@@ -297,7 +307,7 @@ public struct PullRequestsView: View {
             searchTask = Task {
                 try? await Task.sleep(for: .milliseconds(400))
                 guard !Task.isCancelled else { return }
-                await model.load()
+                await model.load(skipIfUnchanged: true)
             }
         }
     }
@@ -340,12 +350,19 @@ public struct PullRequestsView: View {
         .padding(.vertical, 12)
     }
 
+    private var draftSelection: Binding<String?> {
+        Binding(get: { PullRequestQuery(model.query).filters.draft ?? model.draftFilter }, set: { value in
+            model.query = PullRequestQuery.settingDraft(value, in: model.query)
+            model.draftFilter = value
+        })
+    }
+
     private var filterMenu: some View {
         Menu {
             Menu("Drafts") {
-                filterButton("Any", value: nil, selection: $model.draftFilter)
-                filterButton("Only drafts", value: "only", selection: $model.draftFilter)
-                filterButton("Hide drafts", value: "hide", selection: $model.draftFilter)
+                filterButton("Any", value: nil, selection: draftSelection)
+                filterButton("Only drafts", value: "only", selection: draftSelection)
+                filterButton("Hide drafts", value: "hide", selection: draftSelection)
             }
             Menu("Review") {
                 filterButton("Any", value: nil, selection: $model.reviewFilter)
@@ -504,6 +521,11 @@ private struct PullRequestRowView: View {
             HStack(spacing: 7) {
                 Image(systemName: row.entry.state.systemImage)
                     .foregroundStyle(row.entry.state.color)
+                if let conflict = row.entry.conflictLabel {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(T3Colors.warning)
+                        .accessibilityLabel(conflict)
+                }
                 Text("\(row.entry.repository) #\(row.entry.number)")
                     .font(T3Typography.supportingStrong)
                     .foregroundStyle(T3Colors.textSecondary)
@@ -562,7 +584,9 @@ private final class PullRequestDetailModel {
         do {
             if invalidate { try await client.invalidatePullRequests(target) }
             detail = try await client.pullRequestDetail(target)
-            activity = try? await client.pullRequestActivity(target)
+            if let refreshedActivity = try? await client.pullRequestActivity(target) {
+                activity = refreshedActivity
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -711,6 +735,7 @@ private enum PullRequestDetailTab: String, CaseIterable {
 }
 
 struct PullRequestDetailView: View {
+    @SwiftUI.Environment(\.openURL) private var openURL
     private enum PendingAction: Identifiable {
         case merge(PullRequestMergeMethod)
         case close
@@ -947,6 +972,12 @@ struct PullRequestDetailView: View {
     private var actionMenu: some View {
         if let detail = model.detail {
             Menu {
+                Button("Copy link", systemImage: "link") { UIPasteboard.general.string = detail.url }
+                if let url = URL(string: detail.url) {
+                    Button("Open in browser", systemImage: "arrow.up.right") { openURL(url) }
+                    ShareLink(item: url)
+                }
+                Divider()
                 if detail.canEditChangeRequest {
                     Button("Edit title", systemImage: "pencil") {
                         editor = PullRequestEditor(kind: .title, value: detail.title)
@@ -1442,7 +1473,7 @@ private struct PullRequestReviewSheet: View {
             .navigationTitle("Submit Review")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly) }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Submit") {
                         Task {
@@ -1495,7 +1526,7 @@ private struct PullRequestReviewerSheet: View {
             .navigationTitle("Reviewers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly) }
             }
             .task { await model.loadReviewers() }
         }
@@ -1546,7 +1577,7 @@ private struct PullRequestTextSheet: View {
                 .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                    ToolbarItem(placement: .cancellationAction) { Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly) }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Save") { save(value); dismiss() }
                             .disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1697,7 +1728,7 @@ private extension PullRequestInvolvement {
     var label: String { rawValue.capitalized }
 }
 
-private extension PullRequestState {
+extension PullRequestState {
     var label: String { rawValue.capitalized }
     var systemImage: String {
         switch self {

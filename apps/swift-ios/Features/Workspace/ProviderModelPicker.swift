@@ -339,10 +339,13 @@ private struct ModelPickerSheet: View {
                     }
                 }
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Apply") { applySelection() }
+                    Button("Apply", systemImage: "checkmark") { applySelection() }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.circle)
                         .fontWeight(.semibold)
                         .disabled(!hasDraftChanges || !ProjectProviderModelPolicy.canSelect(draftSelection, in: providers))
                         .accessibilityIdentifier("model-picker-apply")

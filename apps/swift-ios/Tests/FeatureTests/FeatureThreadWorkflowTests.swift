@@ -91,7 +91,7 @@ struct FeatureThreadWorkflowTests {
     @Test
     func rosterUsesActiveRunThenLatestUpdatedRosterAndScopesChildLinks() throws {
         let agents = [
-            agent("old", run: "old", child: "old-child", updated: "2026-10-01T10:00:00Z"),
+            agent("old", run: "old", child: "old-child", status: "completed", updated: "2026-10-01T10:00:00Z"),
             agent("second", run: "current", child: nil, status: "waiting", started: "2026-10-01T12:01:00Z"),
             agent("first", run: "current", child: "child", status: "completed", started: "2026-10-01T12:00:00Z"),
         ]
@@ -112,8 +112,19 @@ struct FeatureThreadWorkflowTests {
         let finished = try self.workflows(agents: agents).agentRoster
         #expect(finished?.runID == "current")
         #expect(finished?.turnActive == false)
-        // A new active run with no agents must not show an older run's roster.
-        #expect(try self.workflows(runs: [V2Fixture.run("new", status: "running")], agents: agents).agentRoster == nil)
+        // An earlier waiting agent remains reachable while a new run starts.
+        #expect(try self.workflows(runs: [V2Fixture.run("new", status: "running")], agents: agents).agentRoster?.agents.map(\.id) == ["second"])
+    }
+
+    @Test func rosterKeepsBackgroundAgentsAndExcludesRolledBackRuns() throws {
+        let value = try workflows(runs: [V2Fixture.run("undone", status: "rolled_back")], agents: [
+            agent("background", run: "old", child: "child", status: "running", updated: "2026-10-01T10:00:00Z"),
+            agent("latest", run: "new", child: nil, status: "completed", updated: "2026-10-01T12:00:00Z"),
+            agent("undone", run: "undone", child: nil, updated: "2026-10-01T13:00:00Z"),
+        ])
+        #expect(value.agentRoster?.runID == "new")
+        #expect(Set(value.agentRoster?.agents.map(\.id) ?? []) == ["background", "latest"])
+        #expect(value.agentRoster?.liveCount == 1)
     }
 
     @Test

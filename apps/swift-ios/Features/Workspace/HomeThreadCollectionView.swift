@@ -16,6 +16,7 @@ struct HomeThreadCollectionView: UIViewRepresentable {
     let isArchiveExpanded: Bool
     let settledLimit: Int
     let onOpen: (String) -> Void
+    var onOpenPullRequest: (FeatureThread, HomeThreadPullRequestPresentation) -> Void = { _, _ in }
     var onToggleWorking: () -> Void = {}
     let onToggleSnoozed: () -> Void
     let onToggleSettled: () -> Void
@@ -397,6 +398,9 @@ struct HomeThreadCollectionView: UIViewRepresentable {
                     projectFaviconClient: parent.projectFaviconClient,
                     isSelected: identifier.threadID == selectedThreadID,
                     now: now,
+                    onOpenPullRequest: { [weak self] thread, presentation in
+                        self?.parent.onOpenPullRequest(thread, presentation)
+                    },
                     onPullRequestChange: { [weak self, weak cell] pullRequest in
                         guard let self,
                               let cell,
@@ -528,7 +532,7 @@ struct HomeThreadCollectionView: UIViewRepresentable {
             cell: HomeCollectionCell
         ) {
             guard let identifier = threadItemIDs[threadID],
-                  case let .thread(thread, context, style, _, _, _) = itemsByID[identifier],
+                  case let .thread(thread, context, style, isArchived, _, _) = itemsByID[identifier],
                   let indexPath = dataSource?.indexPath(for: identifier),
                   collectionView?.cellForItem(at: indexPath) === cell else {
                 return
@@ -538,11 +542,8 @@ struct HomeThreadCollectionView: UIViewRepresentable {
             } else {
                 pullRequestsByThreadID.removeValue(forKey: threadID)
             }
-            cell.accessibilityValue = threadAccessibilityValue(
-                thread,
-                context: context,
-                style: style
-            )
+            cell.accessibilityValue = threadAccessibilityValue(thread, context: context, style: style)
+            cell.accessibilityCustomActions = threadAccessibilityActions(for: thread, isArchived: isArchived)
         }
 
         private func threadAccessibilityActions(
@@ -553,6 +554,12 @@ struct HomeThreadCollectionView: UIViewRepresentable {
                 coordinator.parent.onRename(thread)
             }]
 
+            if let pullRequest = pullRequestsByThreadID[thread.id] {
+                let title = if case .open = pullRequest.action { "Open pull request" } else { "Show linked pull requests" }
+                actions.append(accessibilityAction(title, systemImage: "arrow.triangle.pull") { coordinator in
+                    coordinator.parent.onOpenPullRequest(thread, pullRequest)
+                })
+            }
             if let title = Self.newTaskOnBranchTitle(thread) {
                 actions.append(accessibilityAction(title, systemImage: "square.and.pencil") { coordinator in
                     coordinator.parent.onNewTaskOnBranch(thread)
@@ -1177,6 +1184,7 @@ private struct HomeCollectionCellContent: View {
     let projectFaviconClient: any FeatureClient
     let isSelected: Bool
     let now: Date
+    let onOpenPullRequest: (FeatureThread, HomeThreadPullRequestPresentation) -> Void
     let onPullRequestChange: (HomeThreadPullRequestPresentation?) -> Void
 
     @ViewBuilder
@@ -1188,6 +1196,7 @@ private struct HomeCollectionCellContent: View {
                 context: context,
                 projectFaviconClient: projectFaviconClient,
                 onPullRequestChange: onPullRequestChange,
+                onOpenPullRequest: { onOpenPullRequest(thread, $0) },
                 isSelected: isSelected,
                 style: style,
                 now: now,

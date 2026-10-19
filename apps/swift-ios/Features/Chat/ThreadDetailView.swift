@@ -67,6 +67,7 @@ public struct ThreadDetailView: View {
     @State private var rootNavigationDismissal = FeatureRootNavigationDismissal()
     @State private var branchPullRequest: FeaturePullRequest?
     @State private var showsLinkPullRequest = false
+    @State private var showsLinkedPullRequests = false
     @State private var pullRequestURL = ""
     @State private var pullRequestError: String?
     @State private var linkedMediaPreview: FeatureLinkedMediaPreview?
@@ -131,10 +132,18 @@ public struct ThreadDetailView: View {
         .featureKeyboardScope(
             id: "thread:\(thread.id)",
             isActive: scenePhase == .active && toolSurface == nil && !showsAgents
-                && !showsThreadQueue && customSnooze == nil && linkedMediaPreview == nil,
+                && !showsThreadQueue && !showsLinkedPullRequests && customSnooze == nil && linkedMediaPreview == nil,
             enabledCommands: [.files, .terminal, .review, .copyThreadReference],
             onCommand: performThreadKeyboardCommand
         )
+        .sheet(isPresented: $showsLinkedPullRequests, onDismiss: threadPresentationDidDismiss) {
+            NavigationStack {
+                FeatureThreadPullRequestsView(model: model, threadID: thread.id,
+                                              fallbackThread: currentThread, openURL: { parentOpenURL($0) })
+                    .onAppear { rootNavigationDismissal.presentationDidAppear() }
+            }
+            .preferredColorScheme(.dark)
+        }
         .sheet(item: sheetToolSurface, onDismiss: toolDidDismiss) { surface in
             toolView(surface)
                 .onAppear { rootNavigationDismissal.presentationDidAppear() }
@@ -182,12 +191,13 @@ public struct ThreadDetailView: View {
     private func dismissPresentationsForRootNavigation() {
         guard let id = rootNavigationDismissalID else { return }
         rootNavigationDismissal.request(id, hasPresentation:
-            toolSurface != nil || customSnooze != nil || showsAgents || showsThreadQueue
+            toolSurface != nil || customSnooze != nil || showsAgents || showsThreadQueue || showsLinkedPullRequests
                 || linkedMediaPreview != nil)
         pendingWorkspaceAction = nil
         toolSurface = nil
         customSnooze = nil
         showsAgents = false
+        showsLinkedPullRequests = false
         showsThreadQueue = false
         linkedMediaPreview = nil
         confirmsRestart = false
@@ -482,7 +492,7 @@ public struct ThreadDetailView: View {
         }
         .background(T3Colors.background)
         .alert("Link pull request", isPresented: $showsLinkPullRequest) {
-            TextField("Pull request URL", text: $pullRequestURL)
+            TextField("Pull request URL or #42", text: $pullRequestURL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             Button("Link") { changePullRequest(url: pullRequestURL, linked: true) }
@@ -543,7 +553,7 @@ public struct ThreadDetailView: View {
                     .onAppear { rootNavigationDismissal.presentationDidAppear() }
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { showsAgents = false }
+                            Button("Close", systemImage: "xmark") { showsAgents = false }.labelStyle(.iconOnly)
                         }
                     }
             }
@@ -572,7 +582,7 @@ public struct ThreadDetailView: View {
                     .onAppear { rootNavigationDismissal.presentationDidAppear() }
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { showsThreadQueue = false }
+                            Button("Close", systemImage: "xmark") { showsThreadQueue = false }.labelStyle(.iconOnly)
                         }
                     }
                 }
@@ -656,7 +666,7 @@ public struct ThreadDetailView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") { linkedMediaPreview = nil }
+                        Button("Close", systemImage: "xmark") { linkedMediaPreview = nil }.labelStyle(.iconOnly)
                     }
                 }
             }
@@ -857,24 +867,11 @@ public struct ThreadDetailView: View {
                     }
                 }
                 let links = ThreadPullRequests.visible(currentThread.pullRequests ?? [])
-                if links.count > 1 {
-                    Menu("Linked pull requests") {
-                        ForEach(links) { link in
-                            if let url = URL(string: link.url) {
-                                Button("\(link.repository)#\(link.number)") { parentOpenURL(url) }
-                            }
-                        }
-                    }
-                }
-                if currentThread.supportsMultiplePullRequests == true || currentThread.supportsPullRequestLinking == true {
+                if !links.isEmpty || currentThread.supportsMultiplePullRequests == true {
+                    Button("Linked pull requests", systemImage: "arrow.triangle.pull") { showsLinkedPullRequests = true }
+                } else if currentThread.supportsPullRequestLinking == true {
                     Button("Link pull request…") { showsLinkPullRequest = true }
-                    if !links.isEmpty {
-                        Menu("Unlink pull request") {
-                            ForEach(links) { link in
-                                Button("\(link.repository)#\(link.number)") { changePullRequest(url: link.url, linked: false) }
-                            }
-                        }
-                    } else if let linked = currentThread.linkedPullRequest {
+                    if let linked = currentThread.linkedPullRequest {
                         Button("Unlink pull request #\(linked.number)") { changePullRequest(url: linked.url, linked: false) }
                     }
                 }
@@ -1068,7 +1065,11 @@ public struct ThreadDetailView: View {
 
     private func changePullRequest(url: String, linked: Bool) {
         Task {
-            do { try await model.client.setThreadPullRequest(id: thread.id, url: url.trimmingCharacters(in: .whitespacesAndNewlines), linked: linked) }
+            do {
+                let repository = model.snapshot.projects.first { $0.id == currentThread.projectID }?.repositoryIdentity
+                let resolved = linked ? try FeaturePullRequestLinkInput.resolve(url, repository: repository) : url
+                try await model.client.setThreadPullRequest(id: thread.id, url: resolved, linked: linked)
+            }
             catch { pullRequestError = error.localizedDescription }
         }
     }
@@ -1775,6 +1776,7 @@ public struct ThreadDetailView: View {
                 try await model.prepareRelatedThread(id: id, from: thread.id)
                 try Task.checkCancellation()
                 showsAgents = false
+                showsLinkedPullRequests = false
                 onOpenThread(id)
             } catch is CancellationError {} catch { workflowError = error.localizedDescription }
         }
@@ -4255,6 +4257,7 @@ struct FeatureMessageView: View {
     @State private var previewedContext: ComposerContextRecord?
     @State private var contextAttachmentPresented = false
     @State private var contextUnavailable = false
+    @State private var showsWorkflowScript = false
 
     var body: some View {
         messageBody
@@ -4319,7 +4322,7 @@ struct FeatureMessageView: View {
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") { previewedContext = nil }
+                            Button("Close", systemImage: "xmark") { previewedContext = nil }.labelStyle(.iconOnly)
                         }
                     }
                     .t3NavigationChrome()
@@ -4363,7 +4366,11 @@ struct FeatureMessageView: View {
                         FeatureV2MessageAttribution(source: source, onOpenThread: v2Inspection?.onOpenThread)
                     }
                     FeatureMessageAttachmentsView(attachments: message.attachments, context: attachmentContext)
-                    if !message.text.isEmpty {
+                    if message.workflowScript == true {
+                        DisclosureGroup("Workflow script", isExpanded: $showsWorkflowScript) {
+                            Text(message.text).font(T3Typography.tool).textSelection(.enabled)
+                        }
+                    } else if !message.text.isEmpty {
                         MarkdownMessageView(
                             renderedText,
                             isStreaming: message.state == .streaming,
@@ -4772,7 +4779,7 @@ private struct FeatureAttachmentPreview: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                 }
             }
             .t3NavigationChrome()

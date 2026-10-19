@@ -108,6 +108,7 @@ public enum EnvironmentRouteError: LocalizedError, Equatable, Sendable {
     case learnedRoute
     case lastRoute
     case changedEnvironment
+    case unsafeLearnedRoute
     case noAvailableRoute
 
     public var errorDescription: String? {
@@ -119,6 +120,7 @@ public enum EnvironmentRouteError: LocalizedError, Equatable, Sendable {
         case .learnedRoute: "Automatically found routes are managed by the server."
         case .lastRoute: "Remove the environment to remove its last route."
         case .changedEnvironment: "The connection changed. Please retry."
+        case .unsafeLearnedRoute: "This discovered address cannot use this connection token over plain HTTP."
         case .noAvailableRoute: "No saved route could connect to this environment."
         }
     }
@@ -132,6 +134,18 @@ extension Environment {
     public var credentialID: String { selectedRoute.credentialOwnerID }
     public var credentialOwnerIDs: Set<String> { Set(routes.map(\.credentialOwnerID)) }
     public var hasManagedRoutes: Bool { routes.contains { $0.kind == .managedDPoP } }
+
+    /// A learned address must not downgrade the transport used to pair its token.
+    public func sendsTokenInClear(_ route: EnvironmentRoute) -> Bool {
+        guard route.isLearned, route.kind == .bearer,
+              route.httpBaseURL.scheme?.lowercased() == "http",
+              route.endpointKind != .tailnet, route.insertionRank != 2 else { return false }
+        return !routes.contains {
+            !$0.isLearned && $0.credentialOwnerID == route.credentialOwnerID
+                && $0.httpBaseURL.scheme?.lowercased() == "http"
+                && [1, 3].contains($0.insertionRank)
+        }
+    }
 
     var legacyRoute: EnvironmentRoute {
         EnvironmentRoute(
@@ -188,7 +202,7 @@ extension Environment {
         let advertised = Set(valid.map { $0.2 })
         var result = self
         // Discovery is environment-wide. Independent manual pairings survive.
-        result.routes.removeAll { $0.isLearned && !advertised.contains($0.normalizedOrigin ?? "") }
+        result.routes.removeAll { sendsTokenInClear($0) || ($0.isLearned && !advertised.contains($0.normalizedOrigin ?? "")) }
         for (hint, url, origin) in valid {
             if result.routes.contains(where: { $0.normalizedOrigin == origin }) { continue }
             var websocket = URLComponents(url: url, resolvingAgainstBaseURL: false)!
@@ -200,6 +214,7 @@ extension Environment {
                 kind: owner.kind, credentialOwnerID: owner.credentialOwnerID,
                 isLearned: true, endpointKind: hint.kind
             )
+            guard !result.sendsTokenInClear(route) else { continue }
             let index = result.routes.firstIndex { $0.insertionRank > route.insertionRank } ?? result.routes.endIndex
             result.routes.insert(route, at: index)
         }

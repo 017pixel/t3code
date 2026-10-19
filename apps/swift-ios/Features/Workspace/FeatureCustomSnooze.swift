@@ -102,10 +102,13 @@ struct FeatureCustomSnoozeSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Snooze") { submit() }
+                    Button("Snooze", systemImage: "checkmark") { submit() }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.circle)
                 }
             }
         }

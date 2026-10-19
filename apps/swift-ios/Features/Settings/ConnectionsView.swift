@@ -49,7 +49,7 @@ struct ConnectionsView: View {
                 DevicesView(manager: deviceManager)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { showingDevices = false }
+                            Button("Close", systemImage: "xmark") { showingDevices = false }.labelStyle(.iconOnly)
                         }
                     }
             }
@@ -68,7 +68,7 @@ struct ConnectionsView: View {
                     )
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { showingT3Connect = false }
+                            Button("Close", systemImage: "xmark") { showingT3Connect = false }.labelStyle(.iconOnly)
                         }
                     }
                 }
@@ -603,7 +603,7 @@ private struct ConnectionDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Done") { dismiss() }
+                Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly)
             }
         }
         .confirmationDialog(
@@ -776,7 +776,7 @@ private struct SavedConnectionEditView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.disabled(saving)
+                    Button("Close", systemImage: "xmark") { dismiss() }.labelStyle(.iconOnly).disabled(saving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(saving ? "Saving…" : "Save") {

@@ -4,6 +4,17 @@ import Testing
 
 @Suite("Web V2 home thread metadata")
 struct HomeThreadMetadataTests {
+    @Test func pullRequestBadgeOpensSingleLinkOrList() throws {
+        let url = try #require(URL(string: "https://github.com/a/b/pull/1"))
+        var badge = HomeThreadPullRequestPresentation(number: 1, state: .open, url: url)
+        #expect(badge.action == .open(url))
+        badge.count = 2
+        #expect(badge.action == .list)
+        badge.count = 1
+        badge.isStack = true
+        #expect(badge.action == .list)
+    }
+
     @Test
     func providerAccountBadgesUseTheSessionAndOwningEnvironment() throws {
         var personal = FeatureProvider(id: "codex", name: "Personal", driver: "codex")

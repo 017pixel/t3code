@@ -140,7 +140,7 @@ struct UsageLimitsView: View {
                                         let remaining = UsageLimitsMath.remainingPercent(accountWindow)
                                         ZStack(alignment: .leading) {
                                             Rectangle().fill(T3Colors.subtleStrong)
-                                            Rectangle().fill(remaining <= 10 ? T3Colors.danger : T3Colors.textPrimary)
+                                            Rectangle().fill(remaining <= 10 ? T3Colors.danger : (UsageProviderKind(driver: pool.driver)?.color ?? T3Colors.textPrimary))
                                                 .frame(width: geometry.size.width * remaining / 100)
                                         }
                                     }
@@ -481,7 +481,7 @@ private struct UsageLimitWindowView: View {
     private func barColor(remaining: Double) -> Color {
         if remaining <= 10 { return T3Colors.danger }
         if remaining <= 30 { return T3Colors.warning }
-        return driver == "claudeAgent" ? UsageProviderKind.claudeColor : T3Colors.textPrimary
+        return UsageProviderKind(driver: driver)?.color ?? T3Colors.textPrimary
     }
 }
 

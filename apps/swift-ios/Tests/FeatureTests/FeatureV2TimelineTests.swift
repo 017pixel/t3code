@@ -4,6 +4,14 @@ import XCTest
 
 @MainActor
 final class FeatureV2TimelineTests: XCTestCase {
+    func testLoneWorkItemExpansionSurvivesGrouping() {
+        let state = FeatureV2TimelineState()
+        state.toggle("tool", linkedID: "v2-work:tool")
+        XCTAssertEqual(state.expandedIDs, ["tool", "v2-work:tool"])
+        state.toggle("tool", linkedID: "v2-work:tool")
+        XCTAssertTrue(state.expandedIDs.isEmpty)
+    }
+
     func testEqualTimesPreserveInterleavedProjectedOrderAndAllWorkItems() throws {
         let before = command("before", ordinal: 1)
         let answer = V2Fixture.assistant("answer", ordinal: 2)

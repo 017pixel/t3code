@@ -3,6 +3,25 @@ import XCTest
 @testable import T3Code
 
 final class OrchestrationV2PresentationTests: XCTestCase {
+    func testWorkflowScriptOnlyFoldsTheOpeningProviderSubagentMessage() throws {
+        let script = "// Workflow\nexport const meta = {}"
+        func normalized(provider: Bool, flag: Bool?) throws -> [OrchestrationMessage] {
+            let thread = V2Fixture.patch(V2Fixture.thread, [
+                "creationSource": .string(provider ? "provider" : "mobile"),
+                "lineage": .object(["relationshipToParent": .string("subagent"), "parentThreadId": .string("parent"), "rootThreadId": .string("parent")]),
+            ])
+            var fields: [String: JSONValue] = ["messageId": .string("message"), "intent": .string("turn"), "text": .string(script), "attachments": .array([])]
+            if let flag { fields["workflowScript"] = .bool(flag) }
+            let item = V2Fixture.patch(V2Fixture.user("opening", ordinal: 1), fields)
+            return try OrchestrationV2ThreadState(snapshot: V2Fixture.snapshot(items: [item], fields: ["thread": thread]))
+                .normalizedSnapshot().thread.messages
+        }
+        XCTAssertEqual(try normalized(provider: true, flag: nil).first?.workflowScript, true)
+        XCTAssertEqual(try normalized(provider: true, flag: false).first?.workflowScript, false)
+        XCTAssertNil(try normalized(provider: false, flag: true).first?.workflowScript)
+        XCTAssertFalse(WorkflowScript.isScript("ordinary message", explicit: nil))
+    }
+
     func testGoalPresentationUsesProviderAccountingAndActualWorkingState() throws {
         let raw: JSONValue = .object([
             "objective": .string("Ship the fix"), "status": .string("budget_limited"),

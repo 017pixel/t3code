@@ -83,6 +83,7 @@ public protocol FeatureClient: AnyObject {
         orderedIDs: [String]
     ) async throws -> [FeatureThreadOrderAssignment]
     func setThreadPullRequest(id: String, url: String, linked: Bool) async throws
+    func setThreadPullRequestWatching(id: String, key: ThreadPullRequestKey, watching: Bool) async throws
     func setRuntimeMode(id: String, mode: FeatureRuntimeMode) async throws
     func setInteractionMode(id: String, mode: FeatureInteractionMode) async throws
     func deleteThread(id: String) async throws
@@ -289,6 +290,9 @@ public extension FeatureClient {
     }
     func setThreadPullRequest(id: String, url: String, linked: Bool) async throws {
         throw FeatureCapabilityUnavailable("Pull request linking")
+    }
+    func setThreadPullRequestWatching(id: String, key: ThreadPullRequestKey, watching: Bool) async throws {
+        throw FeatureCapabilityUnavailable("Pull request watching")
     }
     func canRewindConversation(threadID: String, messageID: String) -> Bool { false }
 

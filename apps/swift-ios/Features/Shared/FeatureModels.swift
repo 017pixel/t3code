@@ -131,6 +131,9 @@ public struct FeatureRepositoryIdentity: Sendable, Equatable, Hashable, Codable 
     public var displayName: String?
     public var name: String?
     public var origin: RepositoryIdentity.Origin?
+    public var provider: String? = nil
+    public var webURL: String? = nil
+    public var remoteURL: String? = nil
 
     public var groupingKey: String { origin?.canonicalKey ?? canonicalKey }
     public var groupingDisplayName: String { origin.map { $0.displayName ?? $0.canonicalKey } ?? displayName ?? name ?? canonicalKey }
@@ -140,9 +143,13 @@ public struct FeatureRepositoryIdentity: Sendable, Equatable, Hashable, Codable 
         rootPath: String? = nil,
         displayName: String? = nil,
         name: String? = nil,
-        origin: RepositoryIdentity.Origin? = nil
+        origin: RepositoryIdentity.Origin? = nil,
+        provider: String? = nil, webURL: String? = nil, remoteURL: String? = nil
     ) {
         self.origin = origin
+        self.provider = provider
+        self.webURL = webURL
+        self.remoteURL = remoteURL
         self.canonicalKey = canonicalKey
         self.rootPath = rootPath
         self.displayName = displayName
@@ -340,6 +347,7 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
     public var supportsTitleRegeneration: Bool?
     public var supportsPullRequestLinking: Bool?
     public var supportsMultiplePullRequests: Bool?
+    public var supportsPullRequestWatching: Bool? = nil
     /// True while the server is generating a new title. Derived from the wire
     /// snapshot only, the same way the web and React Native clients do it.
     public var isRegeneratingTitle: Bool
@@ -398,6 +406,7 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
         supportsTitleRegeneration: Bool? = nil,
         supportsPullRequestLinking: Bool? = nil,
         supportsMultiplePullRequests: Bool? = nil,
+        supportsPullRequestWatching: Bool? = nil,
         isRegeneratingTitle: Bool = false,
         attentionAt: Date? = nil,
         workingStartedAt: Date? = nil,
@@ -452,6 +461,7 @@ public struct FeatureThread: Identifiable, Sendable, Equatable, Hashable, Codabl
         self.supportsTitleRegeneration = supportsTitleRegeneration
         self.supportsPullRequestLinking = supportsPullRequestLinking
         self.supportsMultiplePullRequests = supportsMultiplePullRequests
+        self.supportsPullRequestWatching = supportsPullRequestWatching
         self.isRegeneratingTitle = isRegeneratingTitle
         self.attentionAt = attentionAt
         self.workingStartedAt = workingStartedAt
@@ -672,6 +682,7 @@ public struct FeatureUploadAttachment: Sendable, Equatable {
 }
 
 public struct FeatureMessage: Identifiable, Sendable, Equatable, Hashable, Codable {
+    public var workflowScript: Bool? = nil
     public var v2Timeline: OrchestrationV2TimelineMetadata? = nil
     public var v2WorkItems: [FeatureV2WorkItem]? = nil
     public var v2FoldID: String? = nil

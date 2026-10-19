@@ -20,6 +20,10 @@ public enum UsageProviderKind: String, Codable, CaseIterable, Sendable {
     case opencode
     case antigravity
 
+    public init?(driver: String) {
+        self.init(rawValue: driver == "claudeAgent" ? "claude" : driver)
+    }
+
     public var displayName: String {
         switch self {
         case .codex: "Codex"

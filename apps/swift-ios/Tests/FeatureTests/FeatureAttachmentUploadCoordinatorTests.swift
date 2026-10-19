@@ -100,31 +100,17 @@ struct FeatureAttachmentUploadCoordinatorTests {
         uploads.completeAll()
     }
 
-    @Test func persistenceFailureBlocksReadyAndRetryCanSucceed() async throws {
+    @Test func persistenceThrowStillPublishesReady() async throws {
         let uploads = CoordinatorUploadHarness()
         let persistence = CoordinatorPersistenceHarness(error: TestFailure.disk)
-        let coordinator = FeatureAttachmentUploadCoordinator(
-            upload: uploads.upload,
-            persist: persistence.persist
-        )
+        let coordinator = FeatureAttachmentUploadCoordinator(upload: uploads.upload, persist: persistence.persist)
         let value = attachment(byte: 1)
         coordinator.syncOwner(draftKey: "draft", environmentID: "one", attachments: [value])
         _ = await uploads.nextStart()
-        uploads.complete(value.id, environmentID: "one")
-        await waitUntilObserved {
-            if case .failed = coordinator.state(environmentID: "one", attachmentID: value.id) {
-                return true
-            }
-            return false
-        }
-
-        persistence.error = nil
-        coordinator.retry(environmentID: "one", attachmentID: value.id)
-        _ = await uploads.nextStart()
-        uploads.complete(value.id, environmentID: "one", attachmentID: "retry")
+        uploads.complete(value.id, environmentID: "one", attachmentID: "accepted")
         await waitUntilObserved {
             coordinator.state(environmentID: "one", attachmentID: value.id)
-                == .ready(.init(environmentID: "one", attachmentID: "retry"))
+                == .ready(.init(environmentID: "one", attachmentID: "accepted"))
         }
     }
 
