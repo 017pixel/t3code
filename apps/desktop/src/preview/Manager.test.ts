@@ -3105,19 +3105,23 @@ describe("PreviewManager", () => {
   );
 
   effectIt.effect(
-    "waits for the renderer before copying an inactive guest and bounds preparation",
+    "bounds renderer preparation and keeps agent captures alive across native navigation",
     () =>
       Effect.gen(function* () {
         const {
+          hostWebContents,
           manager,
           wc,
           copies,
           captures,
+          capturePage,
           replies,
           send,
           rendererStates,
           setBackgroundThrottling,
         } = yield* setupAgentCapture(false);
+        const loadURL = vi.fn(async () => undefined);
+        Object.assign(wc, { loadURL });
         const requests = () => rendererStates.at(-1)?.captureRequestIds ?? [];
         yield* send(1);
         yield* TestClock.adjust(0);
@@ -3137,13 +3141,18 @@ describe("PreviewManager", () => {
         yield* TestClock.adjust(0);
         const second = requests().find((id) => id !== first)!;
         expect(requests()).toHaveLength(2);
+        yield* manager.navigate("tab_agent_capture", "https://example.com/next");
+        expect(loadURL).toHaveBeenLastCalledWith("https://example.com/next");
+        expect(requests()).toEqual([first, second]);
         yield* manager.captureReady("tab_agent_capture", wc.id, expired);
         yield* manager.captureReady("tab_agent_capture", wc.id + 1, first);
         expect(captures).toHaveLength(0);
-        yield* manager.captureReady("tab_agent_capture", wc.id, first);
+        yield* manager.captureReady("tab_agent_capture", wc.id, requests()[0]!);
         yield* TestClock.adjust(0);
         expect(captures).toHaveLength(1);
         expect(copies).toHaveLength(1);
+        yield* manager.navigate("tab_agent_capture", "https://example.com/while-capturing");
+        expect(requests()).toEqual([first, second]);
         captures[0]!.resolve({ data: "first" });
         expect(yield* Queue.take(replies)).toMatchObject({ id: 2, result: { data: "first" } });
         expect(requests()).toEqual([second]);
@@ -3155,6 +3164,27 @@ describe("PreviewManager", () => {
         expect(requests()).toEqual([]);
         expect(setBackgroundThrottling).toHaveBeenLastCalledWith(true);
         expect(wc.setBackgroundThrottling).not.toHaveBeenCalled();
+
+        const replacement = Object.assign(
+          makeTestPreviewWebContents(capturePage, 43, hostWebContents),
+          { isDevToolsOpened: () => false, getUserAgent: () => "Electron" },
+        );
+        Object.assign(replacement.debugger, {
+          sendCommand: async () => ({ data: "after navigation" }),
+        });
+        fromId.mockImplementation((id) => (id === replacement.id ? replacement : wc));
+        yield* manager.registerWebview("tab_agent_capture", replacement.id);
+        yield* TestClock.adjust(0);
+        yield* send(4);
+        yield* TestClock.adjust(0);
+        expect(requests()).toHaveLength(1);
+        yield* manager.captureReady("tab_agent_capture", replacement.id, requests()[0]!);
+        yield* TestClock.adjust(0);
+        expect(yield* Queue.poll(replies)).toEqual(
+          Option.some({ id: 4, result: { data: "after navigation" } }),
+        );
+        expect(requests()).toEqual([]);
+        expect(setBackgroundThrottling).toHaveBeenLastCalledWith(true);
       }).pipe(Effect.provide(managerLayer("linux")), Effect.scoped),
   );
 
