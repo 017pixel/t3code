@@ -128,20 +128,22 @@ const pauseGit = Effect.fnUntraced(function* (
 });
 
 it.layer(layer)("Git bundle pack/apply", (it) => {
-  it.effect.each(["branch", "detached subdirectory", "sparse checkout"])(
+  it.effect.each(["branch", "detached subdirectory", "sparse checkout", "sparse receiver"])(
     "round-trips %s without changing either existing checkout",
     (mode) =>
       Effect.gen(function* () {
         const repo = yield* fixture;
         const { path, fs, sender, receiver, outDir, worktree } = repo;
         const handoff = yield* HandoffGit.HandoffGit;
-        if (mode === "sparse checkout") {
+        if (mode === "sparse checkout" || mode === "sparse receiver") {
           yield* fs.makeDirectory(path.join(sender, "excluded"));
           yield* fs.writeFileString(path.join(sender, "excluded", "file"), "outside cone\n");
+          yield* fs.writeFileString(path.join(sender, "excluded", "gone"), "delete outside cone\n");
           yield* git(sender, ["add", "."]);
           yield* git(sender, ["commit", "-m", "outside cone"]);
         }
         yield* editSender(sender);
+        if (mode === "sparse receiver") yield* fs.remove(path.join(sender, "excluded", "gone"));
         yield* git(sender, ["tag", branch]);
         if (mode === "detached subdirectory") yield* git(sender, ["checkout", "--detach"]);
         if (mode === "sparse checkout") yield* git(sender, ["sparse-checkout", "set", "sub"]);
@@ -158,7 +160,8 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
           yield* git(sender, ["update-index", "--split-index"]);
         }
         yield* fs.writeFileString(path.join(receiver, "app.ts"), "receiver work\n");
-        if (mode === "sparse checkout") yield* git(receiver, ["sparse-checkout", "set", "sub"]);
+        if (mode === "sparse checkout" || mode === "sparse receiver")
+          yield* git(receiver, ["sparse-checkout", "set", "sub"]);
         const senderBefore = yield* repositoryState(sender);
         const receiverBefore = yield* repositoryState(receiver);
         // A server launched by a Git hook can inherit another checkout's GIT_DIR.
@@ -198,7 +201,7 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
           "shared configuration\n",
         );
         assert.isFalse(yield* fs.exists(path.join(worktree, "settings.txt")));
-        if (mode === "sparse checkout") {
+        if (mode === "sparse checkout" || mode === "sparse receiver") {
           assert.equal(
             yield* git(worktree, ["show", `${packed.snapshot}:excluded/file`]),
             "outside cone",
@@ -210,7 +213,9 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         );
         assert.equal(
           yield* git(worktree, ["status", "--porcelain"]),
-          " M .gitignore\n M app.ts\n D old.ts\n D settings.txt\n?? sub/",
+          mode === "sparse receiver"
+            ? " M .gitignore\n M app.ts\n D excluded/gone\n D old.ts\n D settings.txt\n?? sub/"
+            : " M .gitignore\n M app.ts\n D old.ts\n D settings.txt\n?? sub/",
         );
         const receiverAfter = yield* repositoryState(receiver);
         assert.deepEqual({ ...receiverAfter, refs: receiverBefore.refs }, receiverBefore);

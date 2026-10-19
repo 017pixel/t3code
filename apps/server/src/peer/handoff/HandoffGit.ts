@@ -432,7 +432,15 @@ const make = Effect.gen(function* () {
         ? ["worktree", "add", "--detach", worktreePath, input.tip]
         : ["worktree", "add", worktreePath, branch],
     );
-    yield* git(worktreePath, ["checkout", "--no-overlay", input.snapshot, "--", "."]);
+    // Import the full snapshot, including deletions outside a receiver's sparse cone.
+    yield* git(worktreePath, [
+      "checkout",
+      "--ignore-skip-worktree-bits",
+      "--no-overlay",
+      input.snapshot,
+      "--",
+      ".",
+    ]);
     // Preserve sparse entries without resetting a branch another process may have moved.
     yield* git(worktreePath, ["read-tree", "-m", input.tip]);
     if ((yield* out(worktreePath, ["rev-parse", "HEAD"])) !== input.tip) {
