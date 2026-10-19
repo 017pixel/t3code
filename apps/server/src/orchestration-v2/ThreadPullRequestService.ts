@@ -259,9 +259,8 @@ export const make = Effect.gen(function* () {
               Effect.catchCauseIf(
                 (cause) => !Cause.hasInterruptsOnly(cause),
                 (cause) =>
-                  Effect.logWarning("thread pull request discovery failed", {
+                  logThreadPullRequestFailure("thread pull request discovery failed", cause, {
                     threadId: thread.id,
-                    cause: Cause.pretty(cause),
                   }).pipe(
                     Effect.tap(() => Effect.sync(() => failBackfill([thread]))),
                     Effect.as(null),

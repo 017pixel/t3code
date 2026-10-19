@@ -28,6 +28,7 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as References from "effect/References";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
+import { SourceControlRateLimitPausedError } from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -764,60 +765,82 @@ const startHarness = Effect.fn("startThreadSettlementHarness")(function* (
 });
 
 describe("ThreadSettlementServiceV2 worker", () => {
-  it.effect("logs a rate-limited linked pull request lookup at debug without settling", () => {
-    const logs: Array<{ level: string; parts: ReadonlyArray<unknown> }> = [];
-    const logger = Logger.make(({ logLevel, message }) => {
-      logs.push({ level: logLevel, parts: Array.isArray(message) ? message : [message] });
-    });
-    const retryAt = Date.parse(NOW) + 60_000;
-    return Effect.scoped(
-      Effect.gen(function* () {
-        yield* TestClock.setTime(Date.parse(NOW));
-        const thread = makeThread("paused", {
-          branch: "feature",
-          linkedPullRequest: {
-            projectId: PROJECT_ID,
-            repository: "owner/repository",
-            number: 42,
-            url: "https://github.com/owner/repository/pull/42",
-          },
-        });
-        const fixture = yield* makeHarness({
-          snapshot: makeSnapshot([thread]),
-          settings: { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterDays: null },
-          pullRequestSummary: () =>
-            Effect.fail(
-              new PullRequestOperationError({
-                operation: "summary",
-                detail: "paused",
-                cause: new PullRequestProviderError({
-                  provider: SourceControlProviderKind.make("github"),
-                  operation: "getChangeRequestSummary",
-                  reason: "rate-limited",
+  it.effect.each([
+    { timestamp: "on the provider error", wrapperRetryAt: true, innerPause: false },
+    { timestamp: "absent", wrapperRetryAt: false, innerPause: false },
+    { timestamp: "only on the inner pause", wrapperRetryAt: false, innerPause: true },
+  ] as const)(
+    "logs a rate-limited linked pull request lookup at debug without settling (retry time $timestamp)",
+    ({ wrapperRetryAt, innerPause }) => {
+      const logs: Array<{ level: string; parts: ReadonlyArray<unknown> }> = [];
+      const logger = Logger.make(({ logLevel, message }) => {
+        logs.push({ level: logLevel, parts: Array.isArray(message) ? message : [message] });
+      });
+      const retryAt = Date.parse(NOW) + 60_000;
+      return Effect.scoped(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(Date.parse(NOW));
+          const thread = makeThread("paused", {
+            branch: "feature",
+            linkedPullRequest: {
+              projectId: PROJECT_ID,
+              repository: "owner/repository",
+              number: 42,
+              url: "https://github.com/owner/repository/pull/42",
+            },
+          });
+          const fixture = yield* makeHarness({
+            snapshot: makeSnapshot([thread]),
+            settings: { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterDays: null },
+            pullRequestSummary: () =>
+              Effect.fail(
+                new PullRequestOperationError({
+                  operation: "summary",
                   detail: "paused",
-                  retryAt,
+                  cause: new PullRequestProviderError({
+                    provider: SourceControlProviderKind.make("github"),
+                    operation: "getChangeRequestSummary",
+                    reason: "rate-limited",
+                    detail: "paused",
+                    ...(wrapperRetryAt ? { retryAt } : {}),
+                    ...(innerPause
+                      ? {
+                          cause: new SourceControlRateLimitPausedError({
+                            provider: SourceControlProviderKind.make("github"),
+                            host: "github.com",
+                            retryAt,
+                          }),
+                        }
+                      : {}),
+                  }),
                 }),
-              }),
-            ),
-        });
-        yield* Effect.gen(function* () {
-          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
-          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
-        }).pipe(Effect.provide(fixture.layer));
+              ),
+          });
+          yield* Effect.gen(function* () {
+            const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+            yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          }).pipe(Effect.provide(fixture.layer));
 
-        expect(yield* Ref.get(fixture.commands)).toEqual([]);
-        expect(logs).toEqual([
-          {
-            level: "Debug",
-            parts: ["automatic thread settlement skipped", { threadIds: [thread.id], retryAt }],
-          },
-        ]);
-      }),
-    ).pipe(
-      Effect.provide(Logger.layer([logger])),
-      Effect.provideService(References.MinimumLogLevel, "Debug"),
-    );
-  });
+          expect(yield* Ref.get(fixture.commands)).toEqual([]);
+          expect(logs).toEqual([
+            {
+              level: "Debug",
+              parts: [
+                "automatic thread settlement skipped",
+                wrapperRetryAt || innerPause
+                  ? { threadIds: [thread.id], retryAt }
+                  : { threadIds: [thread.id] },
+              ],
+            },
+          ]);
+          expect(logs[0]?.parts[1]).not.toHaveProperty("cause");
+        }),
+      ).pipe(
+        Effect.provide(Logger.layer([logger])),
+        Effect.provideService(References.MinimumLogLevel, "Debug"),
+      );
+    },
+  );
 
   it.effect("settles a merged pull request stored only in the thread links", () =>
     Effect.scoped(

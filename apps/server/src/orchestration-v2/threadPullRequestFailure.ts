@@ -10,17 +10,24 @@ const isPullRequestProviderError = Schema.is(PullRequestProviderError);
 // A pause surfaces wrapped: the branch lookup nests SourceControlRateLimitPausedError inside
 // SourceControlProviderError, and the summary read nests a rate-limited PullRequestProviderError
 // inside PullRequestOperationError. A defect or a second failure next to the pause still warns.
-function rateLimitRetryAt(cause: Cause.Cause<unknown>): number | undefined {
+// A rate-limited provider error is a pause even without retryAt: GitHub omits the reset headers
+// on some refusals, so the timestamp is taken from a deeper typed pause when one exists and is
+// otherwise left out rather than invented.
+function rateLimitPause(cause: Cause.Cause<unknown>): { readonly retryAt?: number } | undefined {
   if (cause.reasons.length !== 1 || !Cause.isFailReason(cause.reasons[0]!)) return undefined;
   let error: unknown = cause.reasons[0].error;
+  let pause: { readonly retryAt?: number } | undefined;
   const seen = new Set<Error>();
   while (error instanceof Error && !seen.has(error)) {
     seen.add(error);
-    if (isPaused(error)) return error.retryAt;
-    if (isPullRequestProviderError(error) && error.reason === "rate-limited") return error.retryAt;
+    if (isPaused(error)) return { retryAt: error.retryAt };
+    if (isPullRequestProviderError(error) && error.reason === "rate-limited") {
+      if (error.retryAt !== undefined) return { retryAt: error.retryAt };
+      pause ??= {};
+    }
     error = error.cause;
   }
-  return undefined;
+  return pause;
 }
 
 /**
@@ -32,8 +39,8 @@ export function logThreadPullRequestFailure(
   cause: Cause.Cause<unknown>,
   context: { readonly threadId: string } | { readonly threadIds: ReadonlyArray<string> },
 ) {
-  const retryAt = rateLimitRetryAt(cause);
-  return retryAt === undefined
+  const pause = rateLimitPause(cause);
+  return pause === undefined
     ? Effect.logWarning(message, { ...context, cause: Cause.pretty(cause) })
-    : Effect.logDebug(message, { ...context, retryAt });
+    : Effect.logDebug(message, { ...context, ...pause });
 }
