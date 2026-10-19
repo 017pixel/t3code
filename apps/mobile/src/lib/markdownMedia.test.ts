@@ -2,6 +2,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { resolveMarkdownMediaPreview } from "./markdownMedia";
+import { resolveMarkdownLinkPresentation } from "./markdownLinks";
 
 const input = {
   environmentId: EnvironmentId.make("environment-1"),
@@ -35,9 +36,9 @@ describe("resolveMarkdownMediaPreview", () => {
   });
 
   it.each([
-    ["/tmp/frame%23one.png:12", "/tmp/frame#one.png"],
-    ["/tmp/frame%3Fone.png:12:3", "/tmp/frame?one.png"],
-    ["/tmp/frame%2523one.png:12", "/tmp/frame%23one.png"],
+    ["/tmp/frame%23one.png", "/tmp/frame#one.png"],
+    ["/tmp/frame%3Fone.png", "/tmp/frame?one.png"],
+    ["/tmp/frame%2523one.png", "/tmp/frame%23one.png"],
     ["file://server/share/frame.png", "\\\\server\\share\\frame.png"],
     ["\\\\server\\share\\frame.png", "\\\\server\\share\\frame.png"],
   ])("keeps encoded filename and UNC semantics for %s", (href, path) => {
@@ -72,25 +73,16 @@ describe("resolveMarkdownMediaPreview", () => {
     });
   });
 
-  it.each([
-    "./image.png",
-    "./clip.mp4",
-    "./report.pdf",
-    "./sound.mp3",
-    "./report.csv",
-    "./report.tsv",
-    "./report.docx",
-    "./report.xlsx",
-    "./report.pptx",
-    "./report.unknown",
-    "./LICENSE",
-  ])("opens relative media through the environment: %s", (href) => {
-    const preview = resolveMarkdownMediaPreview(href, input);
-    expect(preview?.source).toMatchObject({
-      environmentId: input.environmentId,
-      resource: { _tag: "media-file", threadId: input.threadId, path: `/repo/${href}` },
-    });
-  });
+  it.each(["./image.png", "./clip.mp4", "./report.pdf", "./sound.mp3"])(
+    "opens relative media through the environment: %s",
+    (href) => {
+      const preview = resolveMarkdownMediaPreview(href, input);
+      expect(preview?.source).toMatchObject({
+        environmentId: input.environmentId,
+        resource: { _tag: "media-file", threadId: input.threadId, path: `/repo/${href}` },
+      });
+    },
+  );
 
   it("preserves a signed PDF URL and its authored name", () => {
     const href = "//cdn.example.com/report%20one.pdf?signature=a%2fb#page=2";
@@ -109,47 +101,26 @@ describe("resolveMarkdownMediaPreview", () => {
   });
 
   it("opens encoded host PDFs without interpreting literal filename characters twice", () => {
-    expect(resolveMarkdownMediaPreview("/tmp/report%23one.pdf:12#page=2", input)).toMatchObject({
+    expect(resolveMarkdownMediaPreview("/tmp/report%23one.pdf#page=2", input)).toMatchObject({
       kind: "pdf",
       source: { resource: { path: "/tmp/report#one.pdf" }, srcFragment: "#page=2" },
     });
   });
 
-  it.each([
-    "./image.png",
-    "./clip.mp4",
-    "./report.pdf",
-    "./sound.mp3",
-    "./report.csv",
-    "./report.tsv",
-    "./report.docx",
-    "./report.xlsx",
-    "./report.pptx",
-    "./report.unknown",
-    "./LICENSE",
-  ])("uses the draft workspace when no thread exists: %s", (href) => {
-    expect(
-      resolveMarkdownMediaPreview(href, { ...input, threadId: undefined })?.source,
-    ).toMatchObject({
-      resource: { _tag: "draft-workspace-file", cwd: "/repo", path: `/repo/${href}` },
-    });
-  });
+  it.each(["./image.png", "./clip.mp4", "./report.pdf", "./sound.mp3"])(
+    "uses the draft workspace when no thread exists: %s",
+    (href) => {
+      expect(
+        resolveMarkdownMediaPreview(href, { ...input, threadId: undefined })?.source,
+      ).toMatchObject({
+        resource: { _tag: "draft-workspace-file", cwd: "/repo", path: `/repo/${href}` },
+      });
+    },
+  );
 
   it("keeps captured host media unavailable while allowing direct media", () => {
     const captured = { ...input, captured: true };
-    for (const href of [
-      "./image.png",
-      "./clip.mp4",
-      "./report.pdf",
-      "./sound.mp3",
-      "./report.csv",
-      "./report.tsv",
-      "./report.docx",
-      "./report.xlsx",
-      "./report.pptx",
-      "./report.unknown",
-      "./LICENSE",
-    ]) {
+    for (const href of ["./image.png", "./clip.mp4", "./report.pdf", "./sound.mp3"]) {
       expect(resolveMarkdownMediaPreview(href, captured)).toBeNull();
     }
     expect(resolveMarkdownMediaPreview("https://cdn.example.com/report.pdf", captured)?.kind).toBe(
@@ -170,22 +141,21 @@ describe("resolveMarkdownMediaPreview", () => {
       },
     });
   });
-  it.each([
-    ["/tmp/sound%23one.mp3", "audio", "audio/mpeg", "/tmp/sound#one.mp3"],
-    ["report.csv", "document", "text/csv", "/repo/report.csv"],
-    ["report.tsv", "document", "text/tab-separated-values", "/repo/report.tsv"],
-  ])("opens an authored embed through the host: %s", (href, kind, mimeType, path) => {
-    expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true })).toMatchObject({
-      kind,
-      source: {
-        kind: "document",
-        name: path.split("/").at(-1),
-        mimeType,
-        environmentId: input.environmentId,
-        resource: { _tag: "media-file", threadId: input.threadId, path },
-      },
-    });
-  });
+  it.each([["/tmp/sound%23one.mp3", "audio", "audio/mpeg", "/tmp/sound#one.mp3"]])(
+    "opens an authored embed through the host: %s",
+    (href, kind, mimeType, path) => {
+      expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true })).toMatchObject({
+        kind,
+        source: {
+          kind: "document",
+          name: path.split("/").at(-1),
+          mimeType,
+          environmentId: input.environmentId,
+          resource: { _tag: "media-file", threadId: input.threadId, path },
+        },
+      });
+    },
+  );
 
   it.each([
     ["sound%20one.mp3", "audio"],
@@ -214,6 +184,12 @@ describe("resolveMarkdownMediaPreview", () => {
   });
 
   it.each([
+    "src/main.ts",
+    "src/main.tsx",
+    "report.txt",
+    "report.md",
+    "report.html",
+    "package.json",
     "report.csv",
     "report.tsv",
     "report.docx",
@@ -221,24 +197,33 @@ describe("resolveMarkdownMediaPreview", () => {
     "report.pptx",
     "report.unknown",
     "LICENSE",
-  ])("requests the same signed asset for file links and embeds: %s", (name) => {
+    "Dockerfile",
+  ])("keeps source and unsupported host files on the file route: %s", (name) => {
     for (const href of [name, "./" + name, "/tmp/" + name, "file:///tmp/" + name]) {
-      const path = href.startsWith("file:")
-        ? href.slice(7)
-        : href.startsWith("/")
-          ? href
-          : "/repo/" + href;
       for (const imageEmbed of [false, true]) {
-        expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed })).toMatchObject({
-          kind: "document",
-          source: {
-            kind: "document",
-            name,
-            environmentId: input.environmentId,
-            resource: { _tag: "media-file", threadId: input.threadId, path },
-          },
-        });
+        expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed })).toBeNull();
       }
+      expect(resolveMarkdownLinkPresentation(href)).toMatchObject({ kind: "file" });
+    }
+  });
+
+  it.each([
+    ["src/main.ts:42", "/repo/src/main.ts", 42],
+    ["src/main.ts#L42C3", "/repo/src/main.ts", 42],
+    ["report.csv:142:3", "/repo/report.csv", 142],
+    ["/tmp/report.pdf:12#page=2", "/tmp/report.pdf", 12],
+    ["file:///tmp/sound.mp3#L12", "/tmp/sound.mp3", 12],
+    ["/tmp/frame%23one.png:12", "/tmp/frame#one.png", 12],
+    ["./clip.mp4#L12C3", "/repo/./clip.mp4", 12],
+    ["src/main.ts%3A42%3A3", "/repo/src/main.ts", 42],
+  ])("keeps positioned links on the file route: %s", (href, path, line) => {
+    expect(resolveMarkdownMediaPreview(href, input)).toBeNull();
+    const presentation = resolveMarkdownLinkPresentation(href);
+    expect(presentation).toMatchObject({ kind: "file", line });
+    if (presentation.kind === "file") {
+      expect(
+        presentation.path.startsWith("/") ? presentation.path : "/repo/" + presentation.path,
+      ).toBe(path);
     }
   });
 
@@ -256,24 +241,22 @@ describe("resolveMarkdownMediaPreview", () => {
 
   it("does not authorize local files without thread or draft context", () => {
     expect(
-      resolveMarkdownMediaPreview("/tmp/report.docx", {
+      resolveMarkdownMediaPreview("/tmp/report.pdf", {
         ...input,
         threadId: undefined,
         workspaceRoot: null,
       }),
     ).toBeNull();
-    expect(
-      resolveMarkdownMediaPreview("report.docx", { ...input, workspaceRoot: null }),
-    ).toBeNull();
+    expect(resolveMarkdownMediaPreview("report.pdf", { ...input, workspaceRoot: null })).toBeNull();
   });
 
   it("decodes document filenames once and preserves image and video embeds", () => {
-    expect(resolveMarkdownMediaPreview("/tmp/report%23one%2520.docx", input)).toMatchObject({
-      kind: "document",
+    expect(resolveMarkdownMediaPreview("/tmp/report%23one%2520.pdf", input)).toMatchObject({
+      kind: "pdf",
       source: {
-        name: "report#one%20.docx",
-        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        resource: { path: "/tmp/report#one%20.docx" },
+        name: "report#one%20.pdf",
+        mimeType: "application/pdf",
+        resource: { path: "/tmp/report#one%20.pdf" },
       },
     });
     expect(

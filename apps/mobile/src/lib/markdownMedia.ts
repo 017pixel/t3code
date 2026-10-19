@@ -7,6 +7,7 @@ import {
   mediaMimeTypeFromExtension,
 } from "@t3tools/shared/filePreview";
 import { splitFilePathPosition } from "@t3tools/shared/fileLinks";
+import { parseMarkdownFileLink } from "@t3tools/shared/markdownLinks";
 import {
   mediaFileReference,
   mediaUrlReference,
@@ -46,6 +47,7 @@ export function resolveMarkdownMediaPreview(
   | { readonly kind: "pdf" | "audio" | "document"; readonly source: FilePreviewSource }
   | { readonly kind: "video"; readonly source: MediaVideoPreviewSource }
   | null {
+  if (parseMarkdownFileLink(href)?.line !== undefined) return null;
   const classified = classifyMarkdownImageSource(href, input.workspaceRoot);
   if (classified._tag === "Direct" && /^data:(?!image\/|video\/)/i.test(classified.uri))
     return null;
@@ -61,6 +63,9 @@ export function resolveMarkdownMediaPreview(
     const isFile = classified._tag === "WorkspaceFile" || /^\.[a-z0-9]+$/i.test(extension);
     if (name && isFile && mediaMimeTypeFromExtension(extension) === null) {
       const audioMimeType = audioMimeTypeFromExtension(extension);
+      // Host assets only serve supported media; other files use ThreadFile.
+      if (classified._tag === "WorkspaceFile" && !audioMimeType && extension !== ".pdf")
+        return null;
       const kind = audioMimeType ? "audio" : extension === ".pdf" ? "pdf" : "document";
       const mimeType =
         audioMimeType ?? DOCUMENT_MIME_TYPES[extension] ?? "application/octet-stream";

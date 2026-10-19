@@ -38,6 +38,7 @@ export function ThreadMarkdownVideo(props: {
       name={source.name}
       thumbnailKey={thumbnailKey}
       thumbnailVisible={visible}
+      paused={!visible}
       unavailable={"resource" in source && asset._tag === "Failure"}
       actionsSource={source.actionsSource}
     />
