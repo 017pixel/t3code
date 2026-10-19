@@ -44,6 +44,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { Atom, AsyncResult } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
+import { applyOrchestrationV2ProjectionEvent } from "@t3tools/client-runtime/state/orchestration-v2-projection";
 
 import type { Thread, TurnDiffSummary } from "../types";
 import { makeThreadFixture, makeThreadProjectionFixture } from "../test-fixtures";
@@ -2268,23 +2269,89 @@ describe("waitForRevertedMessage", () => {
     await expect(waiting).rejects.toThrow("The provider could not roll back.");
   });
 
-  it("ignores a failure recorded for an earlier rollback", async () => {
-    vi.useFakeTimers();
+  it("rewinds a paged user prompt while ignoring a failure recorded for an earlier rollback", async () => {
     const { state, projection } = projectionAtom();
-    const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {}, 50);
-    const settled = expect(waiting).rejects.toThrow("Timed out waiting for the thread to rewind.");
-    appAtomRegistry.set(state, {
-      data: Option.some({
-        ...projection,
-        thread: {
-          ...projection.thread,
-          rollbackFailure: { requestId: CommandId.make("rollback-0"), message: "Old failure." },
+    const run = {
+      id: RunId.make("run-2"),
+      threadId: projection.thread.id,
+      ordinal: 2,
+      providerInstanceId: projection.thread.providerInstanceId,
+      modelSelection: projection.thread.modelSelection,
+      providerThreadId: null,
+      userMessageId: messageId,
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "completed" as const,
+      requestedAt: projection.updatedAt,
+      startedAt: projection.updatedAt,
+      completedAt: projection.updatedAt,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    const item = {
+      id: TurnItemId.make("item-message-2"),
+      threadId: projection.thread.id,
+      runId: run.id,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 2,
+      status: "completed" as const,
+      title: null,
+      startedAt: projection.updatedAt,
+      completedAt: projection.updatedAt,
+      updatedAt: projection.updatedAt,
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+      type: "user_message" as const,
+      messageId,
+      inputIntent: "turn_start" as const,
+      text: "second",
+      attachments: [],
+    };
+    const pagedProjection = {
+      ...projection,
+      messages: [],
+      runs: [run],
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local" as const,
+          sourceThreadId: item.threadId,
+          sourceItemId: item.id,
+          item,
         },
-      }),
+      ],
+      thread: {
+        ...projection.thread,
+        rollbackFailure: { requestId: CommandId.make("rollback-0"), message: "Old failure." },
+      },
+    };
+    appAtomRegistry.set(state, { data: Option.some(pagedProjection) });
+    let accept = () => {};
+    const accepted = new Promise<void>((resolve) => {
+      accept = resolve;
     });
-    await vi.advanceTimersByTimeAsync(50);
-    await settled;
-    vi.useRealTimers();
+    let settled = false;
+    const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {
+      accept();
+    }).then(() => {
+      settled = true;
+    });
+    await Promise.race([accepted, waiting]);
+    expect(settled).toBe(false);
+    const rewound = applyOrchestrationV2ProjectionEvent(pagedProjection, {
+      id: EventId.make("run-rolled-back"),
+      type: "run.updated",
+      threadId: run.threadId,
+      runId: run.id,
+      occurredAt: projection.updatedAt,
+      payload: { ...run, status: "rolled_back" },
+    });
+    appAtomRegistry.set(state, { data: Option.fromNullishOr(rewound) });
+    await expect(waiting).resolves.toBeUndefined();
   });
 });
 
