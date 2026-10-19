@@ -176,13 +176,35 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
           yield* f.fs.readFileString(f.path.join(f.worktreePath, "forced.txt")),
           "source forced\n",
         );
-        assert.equal(
-          yield* git(f.worktreePath, ["status", "--porcelain"]),
-          " M app.txt\n D deleted.txt\n?? new.txt\n",
-        );
         assert.equal(yield* git(f.worktreePath, ["diff", "--cached"]), "");
 
+        yield* f.write(f.worktreePath, "secret.txt", "receiver secret\n");
         const acceptedBefore = yield* checkoutState(f.worktreePath);
+        const repacked = yield* handoff.pack({
+          cwd: f.worktreePath,
+          handoffId: "roundtrip-again",
+          outDir: f.outDir,
+        });
+        assert.deepEqual(yield* checkoutState(f.source), sourceBefore);
+        assert.deepEqual(yield* checkoutState(f.worktreePath), acceptedBefore);
+        assert.deepEqual(yield* checkoutState(f.receiver), receiverBefore);
+        assert.equal(
+          yield* git(f.worktreePath, ["ls-tree", repacked.snapshot, "--", "secret.txt"]),
+          "",
+        );
+        const repackedForced = yield* native.run({
+          operation: "HandoffGit.test",
+          command: "git",
+          cwd: f.worktreePath,
+          args: ["show", `${repacked.snapshot}:forced.txt`],
+          allowNonZeroExit: true,
+        });
+        assert.equal(repackedForced.exitCode, 0, repackedForced.stderr);
+        assert.equal(repackedForced.stdout, "source forced\n");
+        assert.match(
+          acceptedBefore.status,
+          /^ M app\.txt\n D deleted\.txt\n A forced\.txt\n(?: A|\?\?) new\.txt\n$/,
+        );
         const detachedPath = f.path.join(f.root, "detached");
         yield* Effect.scoped(
           Effect.gen(function* () {

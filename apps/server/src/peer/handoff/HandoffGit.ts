@@ -134,7 +134,13 @@ const make = Effect.gen(function* () {
   const git = (
     cwd: string,
     args: ReadonlyArray<string>,
-    options: { readonly env?: NodeJS.ProcessEnv; readonly allowNonZeroExit?: boolean } = {},
+    options: {
+      readonly env?: NodeJS.ProcessEnv;
+      readonly allowNonZeroExit?: boolean;
+      readonly stdin?: string;
+      readonly maxOutputBytes?: number;
+      readonly outputMode?: VcsProcess.VcsProcessInput["outputMode"];
+    } = {},
   ) =>
     processes
       .run({
@@ -367,6 +373,28 @@ const make = Effect.gen(function* () {
         // No-overlay checkout carries deletions; read-tree unstages edits without moving the branch.
         yield* git(input.worktreePath, ["checkout", "--no-overlay", input.snapshot, "--", "."]);
         yield* git(input.worktreePath, ["read-tree", "-m", input.tip]);
+        // Keep carried force-added ignored files visible to the next commit or handoff.
+        const ignored = yield* git(
+          input.worktreePath,
+          ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
+          { maxOutputBytes: 16 * 1024 * 1024, outputMode: "error" },
+        );
+        if (ignored.stdout !== "") {
+          yield* git(
+            input.worktreePath,
+            [
+              "--literal-pathspecs",
+              "add",
+              "--intent-to-add",
+              "--force",
+              "--pathspec-from-file=-",
+              "--pathspec-file-nul",
+            ],
+            { stdin: ignored.stdout },
+          );
+          // An intent entry can displace a tracked ancestor in a file-to-directory replacement.
+          yield* git(input.worktreePath, ["diff", "--cached", "--quiet", input.tip]);
+        }
         return {
           branch,
           commit: Effect.sync(() => {
