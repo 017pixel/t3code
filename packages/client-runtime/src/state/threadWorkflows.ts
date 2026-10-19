@@ -205,6 +205,10 @@ export function forkCutTurnItemId(input: {
   while (!seen.has(threadId)) {
     seen.add(threadId);
     const forkedFrom = input.readForkedFrom(threadId);
+    // An archived ancestor may be absent from the client's shell index.
+    if (forkedFrom === undefined && input.projectedItem.sourceThreadId !== input.threadId) {
+      return input.projectedItem.item.id;
+    }
     if (forkedFrom?.type !== "run") return undefined;
     if (forkedFrom.threadId === input.projectedItem.sourceThreadId) {
       return forkedFrom.throughTurnItemId === input.projectedItem.sourceItemId

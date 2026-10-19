@@ -493,5 +493,7 @@ describe("response fork boundaries", () => {
     expect(cutFor(v2ThreadId, true)).toBe(cutId);
     expect(cutFor(firstFork, false)).toBe(cutId);
     expect(cutFor(secondFork, false)).toBe(cutId);
+    ancestry.delete(firstFork);
+    expect(cutFor(secondFork, false)).toBe(cutId);
   });
 });
