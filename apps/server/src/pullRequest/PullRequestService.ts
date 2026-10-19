@@ -1295,19 +1295,22 @@ export const make = Effect.gen(function* () {
                   cwd: first.project.workspaceRoot,
                   host: first.host,
                   repositories: unasked.map((project) => project.repository),
-                }).pipe(Effect.orElseSucceed(() => []));
-                // Missing answers and failed probes retain the per-repository fallback.
-                for (const project of unasked) {
-                  searchCoverageCache.set(searchCoverageKey(project.host, project.repository), {
-                    at: now,
-                    covered: false,
-                  });
-                }
-                for (const answer of answers) {
-                  searchCoverageCache.set(searchCoverageKey(first.host, answer.repository), {
-                    at: now,
-                    covered: answer.covered,
-                  });
+                }).pipe(Effect.option);
+                // Failed probes stay uncached so the next read can retry. Successful probes
+                // cache missing answers as uncovered to retain the per-repository fallback.
+                if (Option.isSome(answers)) {
+                  for (const project of unasked) {
+                    searchCoverageCache.set(searchCoverageKey(project.host, project.repository), {
+                      at: now,
+                      covered: false,
+                    });
+                  }
+                  for (const answer of answers.value) {
+                    searchCoverageCache.set(searchCoverageKey(first.host, answer.repository), {
+                      at: now,
+                      covered: answer.covered,
+                    });
+                  }
                 }
               }
               return yield* Effect.forEach(
