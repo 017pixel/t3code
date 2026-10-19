@@ -1,3 +1,5 @@
+import * as NodeModule from "node:module";
+
 import { CuaDriverMcpConfiguration } from "@t3tools/contracts";
 import type { EmbeddedCuaDriverHost, EmbeddedDriverConnection } from "@trycua/cua-driver/embedded";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -8,8 +10,10 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -204,9 +208,15 @@ type NativeModule = {
   ) => Pick<EmbeddedCuaDriverHost, "start" | "stop" | "waitForExit" | "uniffiDestroy">;
 };
 
+// SEA can load file-backed SDKs through require. This SDK only exports import
+// conditions, so resolve its package directory and require the entry file directly.
+const requireForCuaDriver = NodeModule.createRequire(import.meta.url);
+
 export const makeStandaloneHostFactory = Effect.fn("CuaDriver.makeStandaloneHostFactory")(
   function* <E, M>(executable: Effect.Effect<string, E>, module?: Effect.Effect<NativeModule, M>) {
     const environment = yield* HostProcess.Environment;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     let owned = false;
     return Effect.gen(function* () {
       if (owned) return yield* new CuaDriverHostError({ operation: "busy" });
@@ -216,12 +226,30 @@ export const makeStandaloneHostFactory = Effect.fn("CuaDriver.makeStandaloneHost
           Effect.mapError((cause) => new CuaDriverHostError({ operation: "start", cause })),
         ));
       const sdk = yield* module === undefined
-        ? Effect.tryPromise({
-            try: () => import("@trycua/cua-driver/embedded"),
-            catch: (cause) => new CuaDriverStartError({ binaryPath, cause }),
-          })
+        ? Effect.gen(function* () {
+            for (const lookup of requireForCuaDriver.resolve.paths("@trycua/cua-driver") ?? []) {
+              const directory = path.join(lookup, "@trycua", "cua-driver");
+              if (yield* fs.exists(path.join(directory, "package.json"))) {
+                return yield* Effect.try({
+                  try: () =>
+                    requireForCuaDriver(
+                      path.join(directory, "dist", "embedded.js"),
+                    ) as NativeModule,
+                  catch: (cause) => new CuaDriverStartError({ binaryPath, cause }),
+                });
+              }
+            }
+            return yield* new CuaDriverStartError({
+              binaryPath,
+              cause: "@trycua/cua-driver is not installed beside this server.",
+            });
+          }).pipe(
+            Effect.mapError((cause) =>
+              isStartError(cause) ? cause : new CuaDriverStartError({ binaryPath, cause }),
+            ),
+          )
         : module.pipe(Effect.mapError((cause) => new CuaDriverStartError({ binaryPath, cause })));
-      // Acquisition can suspend during installation/import, so check ownership again.
+      // Acquisition can suspend during installation/loading, so check ownership again.
       if (owned) return yield* new CuaDriverHostError({ operation: "busy" });
       const native = yield* Effect.try({
         try: () => new sdk.EmbeddedCuaDriverHost(binaryPath, "com.t3tools.t3code.server"),
@@ -331,9 +359,7 @@ export const makeDesktopHostFactory = Effect.fn("CuaDriver.makeDesktopHostFactor
         return yield* unavailable;
       yield* health.changes.pipe(
         Stream.runForEach((value) =>
-          value.status === "stopped" ||
-          value.status === "unavailable" ||
-          value.status === "degraded"
+          value.status === "stopped" || value.status === "unavailable"
             ? Deferred.fail(ready, unavailable).pipe(
                 Effect.andThen(Deferred.succeed(stopped, undefined)),
               )

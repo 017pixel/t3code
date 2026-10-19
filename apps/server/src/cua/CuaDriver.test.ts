@@ -1,4 +1,5 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -13,6 +14,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -240,7 +242,7 @@ const nativeFixture = Effect.fnUntraced(function* () {
         }
       },
     }),
-  );
+  ).pipe(Effect.provide(NodeServices.layer));
   return {
     factory,
     connection,
@@ -293,41 +295,73 @@ it.layer(ServerSettings.layerTest())("CuaDriver native ownership", (it) => {
   );
 });
 
+const healthy: DesktopTelemetryReceiver.DesktopTelemetryReceiverHealth = {
+  status: "healthy",
+  lastSampleAt: Option.none(),
+  lastError: Option.none(),
+};
+
+const desktopFixture = Effect.fnUntraced(function* (
+  synchronous = false,
+  healthChanges: Stream.Stream<DesktopTelemetryReceiver.DesktopTelemetryReceiverHealth> = Stream.empty,
+) {
+  const reports = yield* PubSub.unbounded<DesktopCuaDriverReport>();
+  const requested = yield* Deferred.make<string>();
+  const disabled = yield* Deferred.make<void>();
+  const watching = yield* Deferred.make<void>();
+  const requests: boolean[] = [];
+  const factory = yield* CuaDriver.makeDesktopHostFactory().pipe(
+    Effect.provide(
+      DesktopTelemetryReceiver.layerTest({
+        health: Effect.succeed(healthy),
+        subscribeHealth: Effect.succeed({ latest: healthy, changes: healthChanges }),
+        cuaReports: Stream.fromPubSub(reports),
+        requestCuaDriver: (requestId, enabled) =>
+          Effect.gen(function* () {
+            requests.push(enabled);
+            if (enabled) {
+              yield* Deferred.succeed(requested, requestId);
+              if (synchronous)
+                yield* PubSub.publish(reports, {
+                  version: 1,
+                  type: "cuaDriverReport",
+                  requestId,
+                  status: "ready",
+                  mcp,
+                });
+            } else {
+              yield* PubSub.publish(reports, {
+                version: 1,
+                type: "cuaDriverReport",
+                requestId,
+                status: "stopped",
+              });
+              yield* Deferred.succeed(disabled, undefined);
+            }
+          }),
+      }),
+    ),
+  );
+  return {
+    factory: factory.pipe(
+      Effect.map((host) => ({
+        ...host,
+        waitForExit: Deferred.succeed(watching, undefined).pipe(Effect.andThen(host.waitForExit)),
+      })),
+    ),
+    reports,
+    requested,
+    disabled,
+    watching,
+    requests,
+  };
+});
+
 it.effect.each([false, true])(
   "uses the supplied desktop receiver for correlated replies (synchronous: %s) and acknowledged stop",
   (synchronous) =>
     Effect.gen(function* () {
-      const reports = yield* PubSub.unbounded<DesktopCuaDriverReport>();
-      const requested = yield* Deferred.make<string>();
-      const requests: boolean[] = [];
-      const factory = yield* CuaDriver.makeDesktopHostFactory().pipe(
-        Effect.provide(
-          DesktopTelemetryReceiver.layerTest({
-            cuaReports: Stream.fromPubSub(reports),
-            requestCuaDriver: (requestId, enabled) =>
-              Effect.gen(function* () {
-                requests.push(enabled);
-                if (enabled) {
-                  yield* Deferred.succeed(requested, requestId);
-                  if (synchronous)
-                    yield* PubSub.publish(reports, {
-                      version: 1,
-                      type: "cuaDriverReport",
-                      requestId,
-                      status: "ready",
-                      mcp,
-                    });
-                } else
-                  yield* PubSub.publish(reports, {
-                    version: 1,
-                    type: "cuaDriverReport",
-                    requestId,
-                    status: "stopped",
-                  });
-              }),
-          }),
-        ),
-      );
+      const { factory, reports, requested, requests } = yield* desktopFixture(synchronous);
       yield* Effect.gen(function* () {
         const { service } = yield* makeService(factory);
         const acquiring = yield* service.acquire.pipe(Effect.forkChild);
@@ -353,6 +387,40 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide([ServerSettings.layerTest(), NodeCrypto.layer]), Effect.scoped),
 );
 
+it.effect("preserves the desktop driver through degraded telemetry until the receiver stops", () =>
+  Effect.gen(function* () {
+    const streamQueue =
+      yield* Queue.unbounded<
+        Stream.Stream<DesktopTelemetryReceiver.DesktopTelemetryReceiverHealth>
+      >();
+    const processed = yield* Deferred.make<void>();
+    const f = yield* desktopFixture(true, Stream.fromQueue(streamQueue).pipe(Stream.flatten));
+    const { service } = yield* makeService(f.factory);
+    const descriptor = yield* service.acquire;
+    expect(descriptor).toEqual(Option.some(mcp));
+    // Acquisition resolves before the exit watcher starts; wait so a false exit cannot go unnoticed.
+    yield* Deferred.await(f.watching);
+    yield* Queue.offer(
+      streamQueue,
+      Stream.make({ ...healthy, status: "degraded" as const }).pipe(
+        // The next stream runs only after the health listener consumes the degraded event.
+        Stream.concat(Stream.fromEffect(Deferred.succeed(processed, undefined)).pipe(Stream.drain)),
+      ),
+    );
+    yield* Effect.raceFirst(Deferred.await(processed), Deferred.await(f.disabled));
+    expect(f.requests).toEqual([true]);
+    expect(yield* service.acquire).toEqual(descriptor);
+    expect(f.requests).toEqual([true]);
+    expect(yield* service.lastFailure).toEqual(Option.none());
+    yield* Queue.offer(streamQueue, Stream.make({ ...healthy, status: "stopped" as const }));
+    yield* Deferred.await(f.disabled);
+    expect(f.requests).toEqual([true, false]);
+    expect(yield* service.lastFailure).toEqual(
+      Option.some(new CuaDriver.CuaDriverHostError({ operation: "exit" })),
+    );
+  }).pipe(Effect.provide([ServerSettings.layerTest(), NodeCrypto.layer]), Effect.scoped),
+);
+
 it.effect("uses an explicit driver path without consulting the installer", () =>
   Effect.gen(function* () {
     let binaryPath = "";
@@ -376,6 +444,7 @@ it.effect("uses an explicit driver path without consulting the installer", () =>
         },
       }),
     ).pipe(
+      Effect.provide(NodeServices.layer),
       Effect.provideService(HostProcess.Environment, {
         T3CODE_CUA_DRIVER_PATH: "/explicit/driver",
       }),

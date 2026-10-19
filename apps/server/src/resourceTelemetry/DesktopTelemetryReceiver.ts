@@ -688,7 +688,7 @@ export const layerTest = (
   const health =
     overrides.health ??
     Effect.succeed({
-      status: overrides.cuaReports === undefined ? ("unavailable" as const) : ("healthy" as const),
+      status: "unavailable" as const,
       lastSampleAt: Option.none<DateTime.Utc>(),
       lastError: Option.some("Desktop telemetry test implementation is unavailable."),
     });
