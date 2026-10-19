@@ -348,8 +348,9 @@ Pass the task in `message`. Project, model, and modes inherit when omitted;
 workspace does not. `scratch: true` launches without a project, in a folder of
 its own under the environment's Scratch project. For stacked PRs, use the parent branch as `baseRef` with
 `startFromOrigin: false`. The new thread may not run with broader runtime or
-interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
-launching again. `create_threads` remains the batch option for a shared checkout.
+interaction modes than the caller. To retry a launch, pass the same
+`clientRequestId` and arguments; inspect existing threads before using a new key
+after a failed or lost response. `create_threads` remains the batch option for a shared checkout.
 
 ### `t3_thread_list`
 
@@ -489,8 +490,9 @@ results use the latest assistant content from the final work turn.
   backed by a V2 adapter.
 - A requested model must be advertised by the selected provider when the
   provider publishes a model list.
-- `clientRequestId` derives stable command, thread, and message IDs within the
-  provider session. Retrying the same call returns the same durable work.
+- `clientRequestId` derives stable command, thread, and message IDs for the calling
+  thread and provider instance, across credential rotation. Launch retries preserve
+  accepted intent; changed or unverifiable intent is rejected as `invalid_request`.
 - Calls without `clientRequestId` receive a generated request key and create
   new work.
 
