@@ -85,10 +85,12 @@ describe("cliRelease", () => {
     expect(newestCliReleaseVersion([{ tag_name: "v1.2.3" }], "preview")).toBeUndefined();
   });
 
-  it("pages through the release index at the largest page GitHub allows", () => {
+  it("pages through the default release index or a configured mirror", () => {
     expect(cliReleaseIndexPageUrl(1)).toBe(
       "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100&page=1",
     );
-    expect(cliReleaseIndexPageUrl(3)).toContain("page=3");
+    expect(cliReleaseIndexPageUrl(3, " https://mirror.example/t3/// ")).toBe(
+      "https://mirror.example/t3/index.json?per_page=100&page=3",
+    );
   });
 });

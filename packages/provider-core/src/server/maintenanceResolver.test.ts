@@ -7,13 +7,16 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderLatestVersions from "./ProviderLatestVersions.ts";
 import {
@@ -124,6 +127,46 @@ function stdoutSpawner(onSpawn: (command: string, args: ReadonlyArray<string>) =
 }
 
 it.layer(NodeServices.layer)("providerMaintenance", (it) => {
+  it.effect.each([
+    { registry: undefined, origin: "https://registry.npmjs.org" },
+    { registry: " http://127.0.0.1:4321/npm/// ", origin: "http://127.0.0.1:4321/npm" },
+  ])("fetches npm latest from $origin", ({ registry, origin }) =>
+    Effect.gen(function* () {
+      const requests: Array<string> = [];
+      const provider = yield* enrichProviderSnapshotWithVersionAdvisory(
+        installedPackageToolProvider,
+        manualPackageTool,
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ProviderLatestVersions.layer,
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: registry === undefined ? {} : { npm_config_registry: registry },
+              }),
+            ),
+          ),
+        ),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            requests.push(request.url);
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(request, Response.json({ version: "2.0.0" })),
+            );
+          }),
+        ),
+      );
+
+      expect(requests).toEqual([`${origin}/%40example%2Fpackage-tool/latest`]);
+      expect(provider.versionAdvisory).toMatchObject({
+        status: "behind_latest",
+        currentVersion: "1.0.0",
+        latestVersion: "2.0.0",
+      });
+    }),
+  );
+
   it.effect("reads cached versions through ProviderLatestVersions", () =>
     resolveLatestProviderVersion(manualPackageTool).pipe(
       Effect.provideServiceEffect(
