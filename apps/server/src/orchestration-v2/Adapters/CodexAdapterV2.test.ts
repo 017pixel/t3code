@@ -8084,6 +8084,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     entries: ReadonlyArray<CodexReplay.CodexAppServerReplayEntry>,
     onRequest: (method: string) => Effect.Effect<void> = () => Effect.void,
     laterTranscripts: ReadonlyArray<CodexReplay.CodexAppServerReplayTranscript> = [],
+    readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    onEvent: (event: ProviderAdapter.ProviderAdapterV2Event) => Effect.Effect<unknown> = () =>
+      Effect.void,
   ) {
     const terminals =
       yield* Queue.unbounded<
@@ -8091,9 +8094,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       >();
     const harness = yield* makeCodexReplayHarness(
       reserveSession(entries),
-      (event) => (event.type === "turn.terminal" ? Queue.offer(terminals, event) : Effect.void),
+      (event) =>
+        (event.type === "turn.terminal" ? Queue.offer(terminals, event) : Effect.void).pipe(
+          Effect.andThen(onEvent(event)),
+        ),
       onRequest,
-      undefined,
+      readChildMetadata,
       laterTranscripts,
     );
     const turnInput = (
@@ -8121,6 +8127,159 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       harness.runtime.startTurn(turnInput(id, ordinal)).pipe(Effect.andThen(Queue.take(terminals)));
     return { ...harness, turnInput, run, nextTerminal: Queue.take(terminals) };
   });
+
+  it.effect.each(["spawn", "readback"] as const)(
+    "keeps Luna Reserve subagent models visible through %s, settings, and recovered continuation",
+    (source) =>
+      Effect.gen(function* () {
+        const child = "reserve-child";
+        const explicit = "explicit-child";
+        const grandchild = "reserve-grandchild";
+        const metadataReported = yield* Deferred.make<void>();
+        const notification = (
+          method: string,
+          params: unknown,
+        ): CodexReplay.CodexAppServerReplayEntry => ({
+          type: "emit_inbound",
+          frame: { method, params },
+        });
+        const spawn = (parent: string, turnId: string, threadId: string, model: string | null) =>
+          notification("item/completed", {
+            threadId: parent,
+            turnId,
+            item: {
+              type: "collabAgentToolCall",
+              id: `spawn-${threadId}`,
+              tool: "spawnAgent",
+              status: "completed",
+              senderThreadId: parent,
+              receiverThreadIds: [threadId],
+              prompt: threadId,
+              model,
+              reasoningEffort: "medium",
+              agentsStates: { [threadId]: { status: "pendingInit", message: null } },
+            },
+          });
+        const childTurn = (threadId: string, id: string, status: "inProgress" | "completed") =>
+          notification(status === "inProgress" ? "turn/started" : "turn/completed", {
+            threadId,
+            turn: makeCodexReplayTurn({ id, status }),
+          });
+        const initial = reserveTurn(5, "gpt-reserve");
+        const recovered = reserveTurn(7, "gpt-6-sol");
+        const harness = yield* openReserveReplay(
+          [
+            ...reserveTurn(3, "gpt-6-luna", "reserve-thread", true),
+            ...reserveRead(4, { result: reserveUsage }),
+            ...initial.slice(0, -1),
+            spawn("reserve-thread", "turn-5", child, source === "spawn" ? "gpt-reserve" : null),
+            childTurn(child, "child-first", "inProgress"),
+            childTurn(child, "child-first", "completed"),
+            spawn("reserve-thread", "turn-5", explicit, "gpt-6-astra"),
+            childTurn(explicit, "explicit-first", "inProgress"),
+            childTurn(explicit, "explicit-first", "completed"),
+            ...initial.slice(-1),
+            ...reserveRead(6, { result: recoveredUsage }),
+            ...recovered.slice(0, -1),
+            childTurn(child, "child-continued", "inProgress"),
+            notification("thread/settings/updated", {
+              threadId: child,
+              threadSettings: {
+                model: "gpt-reserve",
+                effort: "low",
+                modelProvider: "openai",
+                cwd: "/workspace",
+                approvalPolicy: "never",
+                approvalsReviewer: "user",
+                collaborationMode: { mode: "default", settings: { model: "gpt-reserve" } },
+                sandboxPolicy: { type: "dangerFullAccess" },
+              },
+            }),
+            spawn(child, "child-continued", grandchild, "gpt-reserve"),
+            childTurn(grandchild, "grandchild-first", "inProgress"),
+            childTurn(grandchild, "grandchild-first", "completed"),
+            childTurn(child, "child-continued", "completed"),
+            ...recovered.slice(-1),
+          ],
+          undefined,
+          [],
+          (threadId, method) => {
+            assert.equal(threadId, child);
+            assert.equal(method, "thread/read");
+            return Effect.succeed({
+              thread: { id: threadId, model: "gpt-reserve", reasoningEffort: "high" },
+            });
+          },
+          (event) =>
+            event.type === "subagent.updated" &&
+            event.subagent.modelSelection?.options?.some(
+              (option) => option.id === "reasoningEffort" && option.value === "high",
+            )
+              ? Deferred.succeed(metadataReported, undefined)
+              : Effect.void,
+        );
+        assert.equal((yield* harness.run(3, 1)).status, "failed");
+        assert.equal((yield* harness.run(5, 2)).status, "completed");
+        if (source === "readback") yield* Deferred.await(metadataReported);
+        const input = harness.turnInput(7, 3);
+        const modelSelection = { ...reserveSelection, model: "gpt-6-sol" };
+        yield* harness.runtime.startTurn({
+          ...input,
+          appThread: { ...input.appThread, modelSelection },
+          modelSelection,
+        });
+        assert.equal((yield* harness.nextTerminal).status, "completed");
+
+        const childThreads = harness.events.flatMap((event) =>
+          event.type === "app_thread.created" ? [event.appThread] : [],
+        );
+        assert.lengthOf(childThreads, 3);
+        const expectedModels = [
+          [explicit, "gpt-6-astra"],
+          [child, "gpt-6-luna"],
+          [grandchild, "gpt-6-luna"],
+        ];
+        assert.deepEqual(
+          expectedModels.map(([threadId]) => {
+            const updates = harness
+              .subagentUpdates()
+              .filter((event) => event.subagent.prompt === threadId);
+            const latest = updates.at(-1)!.subagent;
+            return {
+              threadId,
+              status: latest.status,
+              reportedModels: [
+                ...new Set(
+                  updates.flatMap(({ subagent }) =>
+                    subagent.model === null ? [] : [subagent.model],
+                  ),
+                ),
+              ],
+              selectedModel: latest.modelSelection?.model,
+              threadModel: childThreads.find((thread) => thread.id === latest.childThreadId)
+                ?.modelSelection.model,
+            };
+          }),
+          expectedModels.map(([threadId, model]) => ({
+            threadId,
+            status: "completed",
+            reportedModels: [model],
+            selectedModel: model,
+            threadModel: model,
+          })),
+        );
+        assert.deepEqual(
+          harness.subagentUpdates().findLast((event) => event.subagent.prompt === child)?.subagent
+            .modelSelection?.options,
+          [{ id: "reasoningEffort", value: "low" }],
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
 
   it.effect("routes Luna Reserve in collaboration mode and requires confirmed recovery", () =>
     Effect.gen(function* () {

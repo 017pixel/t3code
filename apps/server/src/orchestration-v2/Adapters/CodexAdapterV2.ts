@@ -1236,6 +1236,8 @@ interface DeferredCodexRootTerminal {
 
 interface CodexSubagentThreadContext {
   parentContext: ActiveCodexTurnContext;
+  // Continued children can outlive Reserve and move to a different parent turn.
+  readonly spawnerModel: string;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly childThread: OrchestrationV2AppThread;
   readonly subagentNodeId: OrchestrationV2ExecutionNode["id"];
@@ -2791,14 +2793,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
           });
 
+        const visibleSubagentModel = (reportedModel: string, spawnerModel: string) =>
+          reportedModel === CODEX_LUNA_RESERVE_MODEL ? spawnerModel : reportedModel;
+
         const updateSubagentSelection = Effect.fnUntraced(function* (
           nativeThreadId: string,
           value: string | null,
           effort?: string | null,
           tier?: string | null,
         ) {
-          const model = value?.trim();
-          if (!model) return;
+          const reportedModel = value?.trim();
+          if (!reportedModel) return;
           const previous = subagentSelections.get(nativeThreadId);
           const previousOptions = previous?.options;
           const options =
@@ -2818,13 +2823,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   ),
                 ];
           const selection = {
-            model,
+            model: reportedModel,
             ...(options === undefined ? {} : { options }),
           };
           subagentSelections.set(nativeThreadId, selection);
           const subagent = (yield* Ref.get(subagentThreads)).get(nativeThreadId);
           if (subagent === undefined) return;
-          const modelSelection = { instanceId: subagent.task.providerInstanceId, ...selection };
+          const model = visibleSubagentModel(reportedModel, subagent.spawnerModel);
+          const modelSelection = {
+            instanceId: subagent.task.providerInstanceId,
+            ...selection,
+            model,
+          };
           if (
             subagent.task.modelSelection &&
             modelSelectionsEqual(subagent.task.modelSelection, modelSelection)
@@ -2910,6 +2920,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               updatedAt: now,
             } satisfies OrchestrationV2ProviderThread;
             const reportedSelection = subagentSelections.get(input.nativeThreadId);
+            const spawnerModel =
+              input.context.subagent === null
+                ? input.context.input.modelSelection.model
+                : (input.context.subagent.task.model ?? input.context.subagent.spawnerModel);
+            const reportedModel = reportedSelection?.model ?? input.model;
+            const model =
+              reportedModel === null ? null : visibleSubagentModel(reportedModel, spawnerModel);
             const task = {
               id: subagentNodeId,
               threadId: input.context.projectionThreadId,
@@ -2924,13 +2941,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeTaskRef: codexNativeItemRef(input.nativeItemId),
               prompt: input.prompt,
               title: input.title,
-              model: reportedSelection?.model ?? input.model,
-              modelSelection: reportedSelection
-                ? {
-                    instanceId: input.context.input.modelSelection.instanceId,
-                    ...reportedSelection,
-                  }
-                : undefined,
+              model,
+              modelSelection:
+                reportedSelection && model !== null
+                  ? {
+                      instanceId: input.context.input.modelSelection.instanceId,
+                      ...reportedSelection,
+                      model,
+                    }
+                  : undefined,
               status: "running",
               result: null,
               startedAt: now,
@@ -2945,7 +2964,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               providerInstanceId: input.context.input.modelSelection.instanceId,
               modelSelection: {
                 ...input.context.input.modelSelection,
-                model: task.model ?? input.context.input.modelSelection.model,
+                model: task.model ?? spawnerModel,
               },
               title: subagentThreadTitle({
                 parentTitle: input.context.projectionAppThread.title,
@@ -2959,6 +2978,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
             const subagent = {
               parentContext: input.context,
+              spawnerModel,
               providerThread,
               childThread,
               subagentNodeId,
