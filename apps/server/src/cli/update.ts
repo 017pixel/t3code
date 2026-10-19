@@ -95,24 +95,11 @@ export function launcherOwnsVersionsDir(
   return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
-/**
- * The `<bin>/t3` launcher install.sh writes on POSIX. It runs the executable
- * by absolute path, so the executable's argv[1] is absolute. Through a PATH
- * symlink, argv[1] was the bare name `t3`, and code that trusts argv[1] (the
- * Cursor SDK's helper lookup) searched the current folder instead.
- */
-export function posixLauncherScript(executablePath: string): string {
+// Absolute exec keeps the Cursor SDK's helper lookup out of the working directory.
+function posixLauncherScript(executablePath: string): string {
   return `#!/bin/sh\nexec '${executablePath.replaceAll("'", "'\\''")}' "$@"\n`;
 }
 
-/**
- * The launcher the install scripts leave behind: a `t3` script on POSIX (a
- * symlink before that), a `t3.cmd` shim on Windows. `t3 update` repoints it
- * so the next `t3` invocation is the new version. Only a launcher that
- * already points into this home's `runtime/versions` tree is touched; a
- * plain copy of the executable, or a launcher for some other install, is
- * left alone.
- */
 export const repointLauncher = Effect.fn("cli.update.repoint_launcher")(function* (input: {
   readonly launchedAs: string | undefined;
   readonly versionsDir: string;
@@ -141,38 +128,31 @@ export const repointLauncher = Effect.fn("cli.update.repoint_launcher")(function
     return Option.some(shimPath);
   }
 
-  // Rename a new script over the old launcher, so a symlink is replaced, not
-  // written through.
-  const writeLauncher = (launcherPath: string) => {
-    const tempPath = `${launcherPath}.${process.pid}.tmp`;
-    return fs
-      .writeFileString(tempPath, posixLauncherScript(input.targetEntryPath), { mode: 0o755 })
-      .pipe(
-        Effect.andThen(fs.rename(tempPath, launcherPath)),
-        Effect.mapError(
-          (cause) =>
-            new CliUpdateError({
-              reason: `Could not repoint the t3 launcher at ${launcherPath}.`,
-              cause,
-            }),
-        ),
-        Effect.as(Option.some(launcherPath)),
-      );
-  };
-
-  // Older installs linked the executable. Replace that link with the script.
-  const linkTarget = yield* fs.readLink(input.launchedAs).pipe(Effect.option);
-  if (Option.isSome(linkTarget)) {
-    const resolvedTarget = path.resolve(path.dirname(input.launchedAs), linkTarget.value);
-    return ownsTarget(resolvedTarget)
-      ? yield* writeLauncher(input.launchedAs)
-      : Option.none<string>();
-  }
-  // The script runs the executable by absolute path, so the executable sees
-  // only itself. Look for the script, as with the Windows shim.
-  if (!ownsTarget(input.launchedAs)) return Option.none<string>();
-  const launcherPath = yield* findPosixLauncher(input.launchedAs);
-  return launcherPath === undefined ? Option.none<string>() : yield* writeLauncher(launcherPath);
+  const launcherPath = yield* findPosixLauncher({
+    launchedAs: input.launchedAs,
+    versionsDir: input.versionsDir,
+  });
+  if (launcherPath === undefined) return Option.none<string>();
+  // Rename replaces a legacy symlink without writing through it.
+  yield* Effect.gen(function* () {
+    const tempPath = yield* fs.makeTempFileScoped({
+      directory: path.dirname(launcherPath),
+      prefix: ".t3-",
+    });
+    yield* fs.writeFileString(tempPath, posixLauncherScript(input.targetEntryPath));
+    yield* fs.chmod(tempPath, 0o755);
+    yield* fs.rename(tempPath, launcherPath);
+  }).pipe(
+    Effect.scoped,
+    Effect.mapError(
+      (cause) =>
+        new CliUpdateError({
+          reason: `Could not repoint the t3 launcher at ${launcherPath}.`,
+          cause,
+        }),
+    ),
+  );
+  return Option.some(launcherPath);
 });
 
 /**
@@ -231,23 +211,27 @@ export const findWindowsShim = Effect.fn("cli.update.find_windows_shim")(functio
   return undefined;
 });
 
-/**
- * On POSIX the `t3` script execs the executable by absolute path, so the
- * executable only ever sees its own path. Look in install.sh's bin directory
- * and on PATH for a `t3` that is exactly the script for the running
- * executable; that is the launcher the install script or an update wrote.
- * A wrapper someone wrote by hand does not match and is left alone.
- */
-export const findPosixLauncher = Effect.fn("cli.update.find_posix_launcher")(function* (
-  executablePath: string,
-) {
+export const findPosixLauncher = Effect.fn("cli.update.find_posix_launcher")(function* (input: {
+  readonly launchedAs: string;
+  readonly versionsDir: string;
+}) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const environment = yield* HostProcess.Environment;
-  const expected = posixLauncherScript(executablePath);
+  const versionsDir = yield* fs.realPath(input.versionsDir).pipe(Effect.option);
+  const executable = yield* fs.realPath(input.launchedAs).pipe(Effect.option);
+  if (
+    Option.isNone(versionsDir) ||
+    Option.isNone(executable) ||
+    !launcherOwnsVersionsDir(path, versionsDir.value, executable.value)
+  ) {
+    return undefined;
+  }
+  const linkTarget = yield* fs.readLink(input.launchedAs).pipe(Effect.option);
+  if (Option.isSome(linkTarget)) return input.launchedAs;
+
+  const expected = posixLauncherScript(input.launchedAs);
   const expectedSize = BigInt(Buffer.byteLength(expected));
-  // install.sh's default, so `~/.local/bin/t3` run by full path is found
-  // when that folder is not on PATH.
   const installBinDir =
     environment["T3CODE_INSTALL_BIN_DIR"] ||
     (environment["HOME"] ? path.join(environment["HOME"], ".local", "bin") : "");
@@ -255,11 +239,10 @@ export const findPosixLauncher = Effect.fn("cli.update.find_posix_launcher")(fun
     (entry) => entry.trim().length > 0,
   );
   for (const directory of candidates) {
-    // Follow a symlink to the script it links, so an update rewrites that
-    // script and the symlink stays in place.
+    // Rewrite the real script, preserving aliases that link to it.
     const launcherPath = yield* fs.realPath(path.join(directory, "t3")).pipe(Effect.option);
     if (Option.isNone(launcherPath)) continue;
-    // Check the size first, so an executable found here is never read.
+    // Avoid reading a runtime executable found on PATH.
     const info = yield* fs.stat(launcherPath.value).pipe(Effect.option);
     if (Option.isNone(info) || info.value.type !== "File" || info.value.size !== expectedSize) {
       continue;

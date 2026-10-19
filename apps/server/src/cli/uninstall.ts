@@ -62,15 +62,7 @@ export const findOwnedLauncher = Effect.fn("cli.uninstall.find_launcher")(functi
       ? shimPath
       : undefined;
   }
-  const linkTarget = yield* fs.readLink(input.launchedAs).pipe(Effect.option);
-  if (Option.isNone(linkTarget)) {
-    // The `t3` script runs the executable by absolute path. Look for the script.
-    return launcherOwnsVersionsDir(path, input.versionsDir, input.launchedAs)
-      ? yield* findPosixLauncher(input.launchedAs)
-      : undefined;
-  }
-  const resolved = path.resolve(path.dirname(input.launchedAs), linkTarget.value);
-  return launcherOwnsVersionsDir(path, input.versionsDir, resolved) ? input.launchedAs : undefined;
+  return yield* findPosixLauncher({ launchedAs: input.launchedAs, versionsDir: input.versionsDir });
 });
 
 const planUninstall = Effect.fn("cli.uninstall.plan")(function* (input: {

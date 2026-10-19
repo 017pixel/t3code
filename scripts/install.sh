@@ -218,17 +218,17 @@ fi
 
 step "Setting up the t3 command..."
 mkdir -p "$bin_dir"
-# A script that runs the executable by absolute path, not a symlink. Through a
-# PATH symlink the executable's argv[1] is the bare name `t3`, and code that
-# trusts argv[1] (the Cursor SDK's helper lookup) then searches the current
-# folder. `t3 update` rewrites this script in the same format. The rename
-# replaces an older symlink instead of writing through it.
+# Absolute exec keeps the Cursor SDK's helper lookup out of the working directory.
 executable="$(CDPATH= cd -- "$target_dir" && pwd)/t3"
 quoted_executable="$(printf '%s' "$executable" | sed "s/'/'\\\\''/g")"
 launcher_tmp="$(mktemp "${bin_dir}/.t3.XXXXXX")"
+trap 'rm -f "$launcher_tmp"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 printf "#!/bin/sh\nexec '%s' \"\$@\"\n" "$quoted_executable" > "$launcher_tmp"
 chmod 755 "$launcher_tmp"
 mv -f "$launcher_tmp" "${bin_dir}/t3"
+trap - EXIT
 if "$interactive"; then printf '\r\033[2K' >&2; fi
 printf '  %sInstalled T3 Code %s%s\n\n' "$green" "$version" "$reset" >&2
 case ":${PATH}:" in
