@@ -1434,13 +1434,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             const fails =
               childProcess.command === "rustc" ||
               childProcess.command === "powershell.exe" ||
+              childProcess.command === "tar.exe" ||
               childProcess.command === pythonPath;
             return Effect.succeed(mockProcess(fails ? 1 : 0));
           }),
         );
         const error = yield* preflightWindowsDesktopBuild({
           arch: "x64",
-          bundlesWslRuntime: true,
         }).pipe(
           Effect.provide(
             Layer.merge(
@@ -1454,7 +1454,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         );
 
         assert.instanceOf(error, WindowsDesktopBuildPrerequisitesMissingError);
-        assert.deepStrictEqual(error.missing, ["rust", "python", "msvc"]);
+        assert.deepStrictEqual(error.missing, ["rust", "python", "msvc", "tar"]);
         assert.equal(error.rustTarget, "x86_64-pc-windows-msvc");
         assert.include(error.message, "Visual Studio Build Tools components");
       }),
@@ -1481,7 +1481,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
         yield* preflightWindowsDesktopBuild({
           arch: "x64",
-          bundlesWslRuntime: true,
         }).pipe(
           Effect.provide(
             Layer.merge(
@@ -1529,7 +1528,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         );
         const error = yield* preflightWindowsDesktopBuild({
           arch: "x64",
-          bundlesWslRuntime: false,
         }).pipe(
           Effect.provide(
             Layer.merge(

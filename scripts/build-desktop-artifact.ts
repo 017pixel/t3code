@@ -417,7 +417,10 @@ const WINDOWS_DESKTOP_BUILD_PREREQUISITES = [
     id: "msvc",
     description: "Visual Studio Build Tools with C++, Windows SDK, and Spectre libraries",
   },
-  { id: "tar", description: "tar to inspect the bundled WSL runtime archive" },
+  {
+    id: "tar",
+    description: "tar.exe to extract Cua Driver and inspect the bundled WSL runtime archive",
+  },
 ] as const;
 
 export class WindowsDesktopBuildPrerequisitesMissingError extends Schema.TaggedError<WindowsDesktopBuildPrerequisitesMissingError>()(
@@ -1926,7 +1929,7 @@ function windowsVswherePrerequisiteScript(arch: typeof BuildArch.Type): string {
 }
 
 export const preflightWindowsDesktopBuild = Effect.fn("preflightWindowsDesktopBuild")(
-  function* (input: { readonly arch: typeof BuildArch.Type; readonly bundlesWslRuntime: boolean }) {
+  function* (input: { readonly arch: typeof BuildArch.Type }) {
     const rustTarget = resolveResourceMonitorRustTargets("win", input.arch)[0]!;
     const reuseResourceMonitor = yield* Config.Boolean(
       "T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR",
@@ -1953,9 +1956,7 @@ export const preflightWindowsDesktopBuild = Effect.fn("preflightWindowsDesktopBu
               ]),
               "Visual Studio Build Tools",
             ),
-        tar: input.bundlesWslRuntime
-          ? desktopBuildProbeSucceeds(ChildProcess.make("tar.exe", ["--version"]), "tar")
-          : Effect.succeed(true),
+        tar: desktopBuildProbeSucceeds(ChildProcess.make("tar.exe", ["--version"]), "tar"),
       },
       { concurrency: "unbounded" },
     );
@@ -2453,7 +2454,12 @@ export const stageCuaDriverExecutable = Effect.fn("stageCuaDriverExecutable")(fu
       const command =
         release.format === "zip" && hostPlatform !== "win32"
           ? ChildProcess.make("unzip", ["-q", archivePath, "-d", extracted])
-          : ChildProcess.make("tar", ["-xf", archivePath, "-C", extracted]);
+          : ChildProcess.make(hostPlatform === "win32" ? "tar.exe" : "tar", [
+              "-xf",
+              archivePath,
+              "-C",
+              extracted,
+            ]);
       yield* runCommand(command, { label: "extract Cua Driver", verbose: input.verbose });
       const requiredFiles = [
         release.executable,
@@ -3492,13 +3498,18 @@ export const validateWindowsPackagedPayload = Effect.fn(
       );
     }
 
+    const hostPlatform = yield* HostProcess.Platform;
     const listing = yield* spawnAndCollectOutput(
-      ChildProcess.make("tar", ["-tzf", WSL_RUNTIME_ARCHIVE_NAME], {
-        cwd: resourcesDir,
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-      }),
+      ChildProcess.make(
+        hostPlatform === "win32" ? "tar.exe" : "tar",
+        ["-tzf", WSL_RUNTIME_ARCHIVE_NAME],
+        {
+          cwd: resourcesDir,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      ),
     ).pipe(Effect.mapError(invalidWslRuntime));
     if (listing.exitCode !== 0) {
       return yield* invalidWslRuntime(
@@ -3587,10 +3598,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (hostPlatform === "win32" && options.platform === "win") {
     yield* preflightWindowsDesktopBuild({
       arch: options.arch,
-      bundlesWslRuntime: bundlesWslRuntime({
-        platform: options.platform,
-        runtimeArchivePath: options.wslRuntime,
-      }),
     });
   }
   const workspaceConfig = yield* readWorkspaceConfig();
