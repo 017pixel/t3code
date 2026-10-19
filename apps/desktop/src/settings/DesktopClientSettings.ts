@@ -1,5 +1,6 @@
 import { ClientSettingsSchema, type ClientSettings } from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
+import { resolveSymlinkTarget } from "@t3tools/shared/symlink";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -26,7 +27,7 @@ const decodeClientSettingsJson = Effect.fnUntraced(function* (raw: string) {
 });
 const encodeClientSettingsJson = Schema.encodeEffect(ClientSettingsJson);
 
-export class DesktopClientSettingsReadError extends Schema.TaggedErrorClass<DesktopClientSettingsReadError>()(
+export class DesktopClientSettingsReadError extends Schema.TaggedError<DesktopClientSettingsReadError>()(
   "DesktopClientSettingsReadError",
   {
     operation: Schema.Literals(["read-file", "decode-document"]),
@@ -41,13 +42,14 @@ export class DesktopClientSettingsReadError extends Schema.TaggedErrorClass<Desk
 
 const DesktopClientSettingsWriteOperation = Schema.Literals([
   "create-temporary-file-name",
+  "resolve-symlink",
   "encode-document",
   "create-directory",
   "write-temporary-file",
   "replace-settings-file",
 ]);
 
-export class DesktopClientSettingsWriteError extends Schema.TaggedErrorClass<DesktopClientSettingsWriteError>()(
+export class DesktopClientSettingsWriteError extends Schema.TaggedError<DesktopClientSettingsWriteError>()(
   "DesktopClientSettingsWriteError",
   {
     operation: DesktopClientSettingsWriteOperation,
@@ -75,7 +77,7 @@ const readClientSettings = (
   settingsPath: string,
 ): Effect.Effect<Option.Option<ClientSettings>, DesktopClientSettingsReadError> =>
   fileSystem.readFileString(settingsPath).pipe(
-    Effect.map(Option.some),
+    Effect.asSome,
     Effect.catchTags({
       PlatformError: (cause) =>
         cause.reason._tag === "NotFound"
@@ -98,7 +100,7 @@ const readClientSettings = (
         onNone: () => Effect.succeed(Option.none<ClientSettings>()),
         onSome: (raw) =>
           decodeClientSettingsJson(raw).pipe(
-            Effect.map((settings) => Option.some(settings)),
+            Effect.asSome,
             Effect.catchTags({
               SchemaError: (cause) =>
                 Effect.logWarning("Could not decode desktop client settings.", cause).pipe(
@@ -126,8 +128,20 @@ const writeClientSettings = Effect.fnUntraced(function* (input: {
   readonly settings: ClientSettings;
   readonly suffix: string;
 }): Effect.fn.Return<void, DesktopClientSettingsWriteError> {
-  const directory = input.path.dirname(input.settingsPath);
-  const tempPath = `${input.settingsPath}.${process.pid}.${input.suffix}.tmp`;
+  const targetPath = yield* resolveSymlinkTarget(input.settingsPath).pipe(
+    Effect.provideService(FileSystem.FileSystem, input.fileSystem),
+    Effect.provideService(Path.Path, input.path),
+    Effect.mapError(
+      (cause) =>
+        new DesktopClientSettingsWriteError({
+          operation: "resolve-symlink",
+          path: input.settingsPath,
+          cause,
+        }),
+    ),
+  );
+  const directory = input.path.dirname(targetPath);
+  const tempPath = `${targetPath}.${process.pid}.${input.suffix}.tmp`;
   const encoded = yield* encodeClientSettingsJson(input.settings).pipe(
     Effect.mapError(
       (cause) =>
@@ -158,7 +172,7 @@ const writeClientSettings = Effect.fnUntraced(function* (input: {
         }),
     ),
   );
-  yield* input.fileSystem.rename(tempPath, input.settingsPath).pipe(
+  yield* input.fileSystem.rename(tempPath, targetPath).pipe(
     Effect.mapError(
       (cause) =>
         new DesktopClientSettingsWriteError({
@@ -181,7 +195,7 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("desktop.clientSettings.get"),
     ),
     set: (settings) =>
-      crypto.randomUUIDv4.pipe(
+      crypto.randomUUIDv4().pipe(
         Effect.map((uuid) => uuid.replace(/-/g, "")),
         Effect.mapError(
           (cause) =>

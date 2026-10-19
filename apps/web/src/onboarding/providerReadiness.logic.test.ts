@@ -8,6 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   getOnboardingProviderState,
+  resolveOnboardingProviderInstallCommand,
   resolveOnboardingProviderLoginCommand,
   selectOnboardingProvidersByDriver,
 } from "./providerReadiness.logic";
@@ -195,11 +196,12 @@ describe("resolveOnboardingProviderLoginCommand", () => {
         readyCodex,
         {
           ...DEFAULT_SERVER_SETTINGS,
-          providers: {
-            ...DEFAULT_SERVER_SETTINGS.providers,
-            codex: {
-              ...DEFAULT_SERVER_SETTINGS.providers.codex,
-              binaryPath: "C:\\Program Files\\Codex & Tools\\codex.exe",
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              config: {
+                binaryPath: "C:\\Program Files\\Codex & Tools\\codex.exe",
+              },
             },
           },
         },
@@ -220,11 +222,12 @@ describe("resolveOnboardingProviderLoginCommand", () => {
         provider,
         {
           ...DEFAULT_SERVER_SETTINGS,
-          providers: {
-            ...DEFAULT_SERVER_SETTINGS.providers,
-            claudeAgent: {
-              ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
-              binaryPath: "/opt/Claude Tools/$current/claude",
+          providerInstances: {
+            [ProviderInstanceId.make("claude")]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              config: {
+                binaryPath: "/opt/Claude Tools/$current/claude",
+              },
             },
           },
         },
@@ -245,11 +248,12 @@ describe("resolveOnboardingProviderLoginCommand", () => {
         readyCodex,
         {
           ...DEFAULT_SERVER_SETTINGS,
-          providers: {
-            ...DEFAULT_SERVER_SETTINGS.providers,
-            codex: {
-              ...DEFAULT_SERVER_SETTINGS.providers.codex,
-              binaryPath,
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              config: {
+                binaryPath,
+              },
             },
           },
         },
@@ -264,11 +268,12 @@ describe("resolveOnboardingProviderLoginCommand", () => {
         readyCodex,
         {
           ...DEFAULT_SERVER_SETTINGS,
-          providers: {
-            ...DEFAULT_SERVER_SETTINGS.providers,
-            codex: {
-              ...DEFAULT_SERVER_SETTINGS.providers.codex,
-              binaryPath: "/opt/codex\\work/codex",
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              config: {
+                binaryPath: "/opt/codex\\work/codex",
+              },
             },
           },
         },
@@ -283,11 +288,12 @@ describe("resolveOnboardingProviderLoginCommand", () => {
         readyCodex,
         {
           ...DEFAULT_SERVER_SETTINGS,
-          providers: {
-            ...DEFAULT_SERVER_SETTINGS.providers,
-            codex: {
-              ...DEFAULT_SERVER_SETTINGS.providers.codex,
-              binaryPath: "C:\\Tools\\codex.exe",
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              config: {
+                binaryPath: "C:\\Tools\\codex.exe",
+              },
             },
           },
         },
@@ -302,16 +308,37 @@ describe("resolveOnboardingProviderLoginCommand", () => {
         readyCodex,
         {
           ...DEFAULT_SERVER_SETTINGS,
-          providers: {
-            ...DEFAULT_SERVER_SETTINGS.providers,
-            codex: {
-              ...DEFAULT_SERVER_SETTINGS.providers.codex,
-              binaryPath: "/opt/Codex Tools/codex",
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              config: {
+                binaryPath: "/opt/Codex Tools/codex",
+              },
             },
           },
         },
         "unknown",
       ),
     ).toBe("codex login");
+  });
+});
+
+describe("resolveOnboardingProviderInstallCommand", () => {
+  it("uses the PowerShell installer on Windows environments", () => {
+    expect(resolveOnboardingProviderInstallCommand("codex", "windows")).toBe(
+      "irm https://chatgpt.com/codex/install.ps1 | iex",
+    );
+    expect(resolveOnboardingProviderInstallCommand("claudeAgent", "windows")).toBe(
+      "irm https://claude.ai/install.ps1 | iex",
+    );
+  });
+
+  it.each(["darwin", "linux", "unknown"] as const)("uses the shell installer on %s", (platform) => {
+    expect(resolveOnboardingProviderInstallCommand("codex", platform)).toBe(
+      "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+    );
+    expect(resolveOnboardingProviderInstallCommand("claudeAgent", platform)).toBe(
+      "curl -fsSL https://claude.ai/install.sh | bash",
+    );
   });
 });
