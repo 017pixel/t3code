@@ -6,7 +6,11 @@ import {
   BINARY_PREVIEW_MAX_BYTES,
 } from "./binaryPreviewProtocol";
 
-export async function boundedZip(bytes: ArrayBuffer, entryLimit = BINARY_PREVIEW_MAX_BYTES) {
+export async function boundedZip(
+  bytes: ArrayBuffer,
+  entryLimit = BINARY_PREVIEW_MAX_BYTES,
+  limits: { totalLimit?: number; xmlLimit?: number; ratioFloor?: number } = {},
+) {
   if (bytes.byteLength > BINARY_PREVIEW_MAX_BYTES)
     throw new Error("Preview limited to files under 50 MB.");
   // Reject oversized directories before JSZip allocates objects for their entries.
@@ -49,10 +53,11 @@ export async function boundedZip(bytes: ArrayBuffer, entryLimit = BINARY_PREVIEW
           total += chunk.length;
           length += chunk.length;
           if (
-            total > BINARY_PREVIEW_MAX_BYTES ||
-            total > Math.max(1, bytes.byteLength) * ARCHIVE_MAX_RATIO ||
+            total > (limits.totalLimit ?? BINARY_PREVIEW_MAX_BYTES) ||
+            total >
+              Math.max(limits.ratioFloor ?? 0, Math.max(1, bytes.byteLength) * ARCHIVE_MAX_RATIO) ||
             length > entryLimit ||
-            (entry.name.endsWith(".xml") && length > 8 * 1024 * 1024)
+            (entry.name.endsWith(".xml") && length > (limits.xmlLimit ?? 8 * 1024 * 1024))
           ) {
             stream.pause();
             reject(
