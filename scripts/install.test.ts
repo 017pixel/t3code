@@ -20,15 +20,15 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")("installer term
       let sawPartialProgress = false;
       let output = "";
       await NodeFSP.mkdir(NodePath.join(root, stem));
-      // Prints the path it was started with, so the test sees what argv[1] is.
+      // Exposes the executable path used for helper lookup and the arguments it receives.
       await NodeFSP.writeFile(
         NodePath.join(root, stem, "t3"),
-        `#!/bin/sh\nif [ "$1" = --version ]; then echo 't3 v1.2.3'; else printf '%s\\n' "$0"; fi\n`,
+        `#!/bin/sh\nif [ "$1" = --version ]; then echo 't3 v1.2.3'; else printf '[%s]\\n' "$0" "$@"; fi\n`,
         { mode: 0o755 },
       );
       // A quote and a space in the home path exercise the launcher's quoting.
       const home = NodePath.join(root, "it's home");
-      const bin = NodePath.join(root, "bin");
+      const bin = NodePath.join(root, "it's bin");
       // Older installers linked bin/t3 to the executable. Reinstalling must
       // replace that link, not write through it.
       const oldExecutable = NodePath.join(root, "old-t3");
@@ -114,22 +114,16 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")("installer term
               encoding: "utf8",
             }).trim(),
           ).toBe("t3 v1.2.3");
-          // bin/t3 is now a script that runs the executable by absolute path.
           const executable = NodePath.join(versions, version, "t3");
-          expect((await NodeFSP.lstat(NodePath.join(bin, "t3"))).isSymbolicLink()).toBe(false);
-          expect(await NodeFSP.readFile(NodePath.join(bin, "t3"), "utf8")).toBe(
-            `#!/bin/sh\nexec '${executable.replaceAll("'", "'\\''")}' "$@"\n`,
-          );
           expect(await NodeFSP.readFile(oldExecutable, "utf8")).toBe("old");
-          // Started as a bare `t3` from another folder, the executable still
-          // sees its absolute path.
+          const args = ["two words", "it's quoted", "", "*", "$HOME"];
           expect(
-            NodeChildProcess.execFileSync("t3", ["probe"], {
+            NodeChildProcess.execFileSync("t3", args, {
               cwd: root,
               env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
               encoding: "utf8",
-            }).trim(),
-          ).toBe(executable);
+            }),
+          ).toBe([executable, ...args].map((arg) => `[${arg}]\n`).join(""));
           expect(await NodeFSP.readdir(versions)).toEqual([version]);
         }
       } finally {

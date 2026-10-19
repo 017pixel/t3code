@@ -6,7 +6,6 @@ import * as Path from "effect/Path";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { findOwnedLauncher } from "./uninstall.ts";
-import { posixLauncherScript } from "./update.ts";
 
 it.layer(NodeServices.layer)("t3 uninstall launcher", (it) => {
   it.effect("claims only a launcher that points into this home's runtime tree", () =>
@@ -36,32 +35,41 @@ it.layer(NodeServices.layer)("t3 uninstall launcher", (it) => {
     }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
-  it.effect("claims the launcher script that runs this home's executable", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      // The real path, because the launcher is found by its real path.
-      const root = yield* fs.realPath(
-        yield* fs.makeTempDirectoryScoped({ prefix: "t3-uninstall-" }),
-      );
-      const versionsDir = path.join(root, "runtime/versions");
-      const exe = path.join(versionsDir, "1.0.0/t3");
-      const otherExe = path.join(root, "other/runtime/versions/1.0.0/t3");
-      const bin = path.join(root, "bin");
-      for (const file of [exe, otherExe]) {
-        yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-        yield* fs.writeFileString(file, "");
-      }
-      yield* fs.makeDirectory(bin, { recursive: true });
-      yield* fs.writeFileString(path.join(bin, "t3"), posixLauncherScript(exe));
-
-      // The script execs the executable by absolute path, so argv0 is the executable.
-      const find = (launchedAs: string) =>
-        findOwnedLauncher({ launchedAs, versionsDir }).pipe(
-          Effect.provideService(HostProcess.Environment, { PATH: bin }),
+  it.effect(
+    "recognizes the installed script without claiming a foreign or customized wrapper",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({ prefix: "t3-uninstall-" }),
         );
-      assert.equal(yield* find(exe), path.join(bin, "t3"));
-      assert.isUndefined(yield* find(otherExe));
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+        const versionsDir = path.join(root, "it's home/runtime/versions");
+        const exe = path.join(versionsDir, "1.0.0/t3");
+        const otherExe = path.join(root, "other/runtime/versions/1.0.0/t3");
+        const bin = path.join(root, "bin");
+        for (const file of [exe, otherExe]) {
+          yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+          yield* fs.writeFileString(file, "");
+        }
+        yield* fs.makeDirectory(bin, { recursive: true });
+        const launcher = path.join(bin, "t3");
+        const contents = `#!/bin/sh\nexec '${exe.replaceAll("'", "'\\''")}' "$@"\n`;
+        yield* fs.writeFileString(launcher, contents);
+
+        // The script execs the executable by absolute path, so argv0 is the executable.
+        const find = (launchedAs: string) =>
+          findOwnedLauncher({ launchedAs, versionsDir }).pipe(
+            Effect.provideService(HostProcess.Environment, { PATH: bin }),
+          );
+        assert.equal(yield* find(exe), launcher);
+        assert.isUndefined(yield* find(otherExe));
+
+        yield* fs.writeFileString(launcher, `#!/bin/sh\nexec '${otherExe}' "$@"\n`);
+        assert.isUndefined(yield* find(exe));
+
+        yield* fs.writeFileString(launcher, `${contents}# user customization\n`);
+        assert.isUndefined(yield* find(exe));
+      }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 });
