@@ -93,10 +93,7 @@ export interface ThreadLaunchInput {
   readonly creationSource: OrchestrationV2CreationSource;
 }
 
-type PreparationInput = Pick<
-  ThreadLaunchInput,
-  "commandId" | "projectId" | "workspaceStrategy" | "initialMessage"
-> & {
+type PreparationInput = Pick<ThreadLaunchInput, "commandId" | "projectId" | "workspaceStrategy"> & {
   readonly reusedWorktree?: { readonly baseRef: string };
 };
 
@@ -300,8 +297,6 @@ const make = Effect.gen(function* () {
     let setupTerminalId: string | null = null;
     let workspaceRecorded = false;
     let runReleased = false;
-    // The background branch rename records the worktree again when it lands,
-    // so cleanup stops it before forgetting a removed worktree.
     if (input.workspaceStrategy.type === "worktree") {
       yield* setupTracker.begin({
         threadId,
@@ -900,7 +895,11 @@ const make = Effect.gen(function* () {
                     );
               if (preparationStillRequired) {
                 yield* schedulePreparation(
-                  { ...input, workspaceStrategy: preparationStrategy },
+                  {
+                    commandId: input.commandId,
+                    projectId: input.projectId,
+                    workspaceStrategy: preparationStrategy,
+                  },
                   threadId,
                   runId,
                 );
@@ -957,7 +956,6 @@ const make = Effect.gen(function* () {
     run: OrchestrationV2ThreadProjection["runs"][number],
     workspacePreparation: ThreadLaunchWorkspaceStrategy,
   ) => {
-    const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
     const reuse =
       workspacePreparation.type === "worktree" &&
       projection.thread.worktreePath !== null &&
@@ -977,15 +975,6 @@ const make = Effect.gen(function* () {
         projectId: projection.thread.projectId,
         workspaceStrategy: reuse?.strategy ?? workspacePreparation,
         ...(reuse === null ? {} : { reusedWorktree: reuse.reusedWorktree }),
-        ...(message === undefined
-          ? {}
-          : {
-              initialMessage: {
-                text: message.text,
-                attachments: message.attachments,
-                ...(message.context ? { context: message.context } : {}),
-              },
-            }),
       },
       input.threadId,
       run.id,
