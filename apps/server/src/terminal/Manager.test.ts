@@ -2146,26 +2146,49 @@ it.layer(
       }),
   );
 
-  it.effect("identifies as T3 Code unless the terminal env overrides it", () =>
-    Effect.gen(function* () {
-      const env = Object.freeze({ TERM_PROGRAM: "Apple_Terminal", TERM_PROGRAM_VERSION: "455" });
-      const { manager, ptyAdapter } = yield* createManager(5, { env });
+  it.effect.each([
+    {
+      platform: "linux",
+      parentEnv: { TERM_PROGRAM: "Apple_Terminal", TERM_PROGRAM_VERSION: "455" },
+      runtimeEnv: { TERM_PROGRAM: "", TERM_PROGRAM_VERSION: "custom-version" },
+    },
+    {
+      platform: "win32",
+      parentEnv: { term_program: "Apple_Terminal", Term_Program_Version: "455" },
+      runtimeEnv: { Term_Program: "", term_program_version: "custom-version" },
+    },
+  ] as const)(
+    "identifies as T3 Code unless the terminal env overrides it on $platform",
+    ({ platform, parentEnv, runtimeEnv }) =>
+      Effect.gen(function* () {
+        const originalEnv = { ...parentEnv };
+        const env = Object.freeze(parentEnv);
+        const { manager, ptyAdapter } = yield* createManager(5, { env }).pipe(
+          Effect.provide(layerWithHostPlatform(platform)),
+        );
 
-      yield* manager.open(openInput());
-      expect(ptyAdapter.spawnInputs[0]?.env).toMatchObject({
-        TERM_PROGRAM: "t3code",
-        TERM_PROGRAM_VERSION: packageJson.version,
-      });
-      expect(env.TERM_PROGRAM).toBe("Apple_Terminal");
+        yield* manager.open(openInput());
+        yield* manager.restart(restartInput({ env: runtimeEnv }));
 
-      yield* manager.restart(
-        restartInput({ env: { TERM_PROGRAM: "", TERM_PROGRAM_VERSION: "custom-version" } }),
-      );
-      expect(ptyAdapter.spawnInputs[1]?.env).toMatchObject({
-        TERM_PROGRAM: "",
-        TERM_PROGRAM_VERSION: "custom-version",
-      });
-    }),
+        expect(ptyAdapter.spawnInputs).toHaveLength(2);
+        for (const [index, expected] of [
+          { TERM_PROGRAM: "t3code", TERM_PROGRAM_VERSION: packageJson.version },
+          { TERM_PROGRAM: "", TERM_PROGRAM_VERSION: "custom-version" },
+        ].entries()) {
+          const spawnEnv = ptyAdapter.spawnInputs[index]!.env;
+          for (const [key, value] of Object.entries(expected)) {
+            expect
+              .soft(
+                Object.entries(spawnEnv)
+                  .filter(([candidate]) => candidate.toUpperCase() === key)
+                  .map(([, entryValue]) => entryValue),
+                `${index === 0 ? "open" : "restart"} ${key}`,
+              )
+              .toEqual([value]);
+          }
+        }
+        expect(env).toEqual(originalEnv);
+      }),
   );
 
   it.effect("filters app runtime env variables from terminal sessions", () =>
