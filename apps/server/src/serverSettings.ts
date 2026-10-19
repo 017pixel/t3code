@@ -1059,16 +1059,15 @@ const make = Effect.gen(function* () {
     const directory = pathService.dirname(filePath);
     const fileName = pathService.basename(filePath);
     const resolvedFilePath = pathService.resolve(filePath);
-    return fs
-      .watch(directory, { onReady })
-      .pipe(
-        Stream.filter(
-          (event) =>
-            event.path === fileName ||
-            event.path === filePath ||
-            pathService.resolve(directory, event.path) === resolvedFilePath,
-        ),
-      );
+    return fs.watch(directory, { onReady }).pipe(
+      Stream.filter(
+        (event) =>
+          event.path === fileName ||
+          event.path === filePath ||
+          pathService.resolve(directory, event.path) === resolvedFilePath,
+      ),
+      Stream.concat(Stream.fail(new SettingsWatchEnded({}))),
+    );
   };
 
   const startWatcher = Effect.gen(function* () {
@@ -1120,10 +1119,7 @@ const make = Effect.gen(function* () {
             Stream.switchMap(
               Option.match({
                 onNone: () => Stream.empty,
-                onSome: (target) =>
-                  watchFileChanges(target, onReady).pipe(
-                    Stream.concat(Stream.fail(new SettingsWatchEnded({}))),
-                  ),
+                onSome: (target) => watchFileChanges(target, onReady),
               }),
             ),
           );
