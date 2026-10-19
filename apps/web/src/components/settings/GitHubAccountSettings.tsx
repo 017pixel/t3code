@@ -428,7 +428,7 @@ export function ProjectGitHubAccountRow({
 
   return (
     <SettingsRow
-      id="project-github-account"
+      id={`project-github-account-${environmentId}-${projectId}`}
       title={environmentLabel ? `GitHub account · ${environmentLabel}` : "GitHub account"}
       description={
         stale
