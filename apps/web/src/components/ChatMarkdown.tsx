@@ -2717,7 +2717,7 @@ function useChatMarkdownState({
     fileLinkMeta: MarkdownFileLinkMeta,
     copyMarkdown: string,
     mediaSource?: string,
-    displayMeta = fileLinkMeta,
+    display: MarkdownFileLinkMeta | string = fileLinkMeta,
     verified = false,
   ) => {
     const mediaPath = mediaSource ?? fileLinkMeta.filePath;
@@ -2739,14 +2739,18 @@ function useChatMarkdownState({
         displayPath={fileLinkMeta.displayPath}
         panelPath={panelPath}
         line={fileLinkMeta.line}
-        label={fileLinkLabel(
-          {
-            path: displayMeta.filePath,
-            ...(fileLinkMeta.line !== undefined ? { line: fileLinkMeta.line } : {}),
-            ...(fileLinkMeta.column !== undefined ? { column: fileLinkMeta.column } : {}),
-          },
-          fileLinkParentSuffixByPath,
-        )}
+        label={
+          typeof display === "string"
+            ? display
+            : fileLinkLabel(
+                {
+                  path: display.filePath,
+                  ...(fileLinkMeta.line !== undefined ? { line: fileLinkMeta.line } : {}),
+                  ...(fileLinkMeta.column !== undefined ? { column: fileLinkMeta.column } : {}),
+                },
+                fileLinkParentSuffixByPath,
+              )
+        }
         copyMarkdown={copyMarkdown}
         theme={resolvedTheme}
         threadRef={threadRef}
@@ -2868,10 +2872,10 @@ function ThreadFileLinkChip(props: {
     meta,
     props.copyMarkdown,
     props.href,
-    props.meta ?? meta,
+    props.meta ?? nodeToPlainText(props.fallback),
     selected !== null,
   );
-  return props.prefix ? (
+  return props.meta && props.prefix ? (
     <span data-markdown-copy={props.copyMarkdown}>
       {props.prefix} {chip}
     </span>

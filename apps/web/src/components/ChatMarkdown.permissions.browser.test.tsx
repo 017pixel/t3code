@@ -519,24 +519,34 @@ it("does not treat pending, failed, existing, or disabled root metadata as missi
 
 it("verifies a rootless candidate before opening its literal path and position", async () => {
   const candidate = "/outside/read%20 #?/docs/guide.ts";
-  await createTestRoot()(
-    <ChatMarkdown
-      cwd={undefined}
-      threadRef={threadRef}
-      text="[Read the file](docs/guide.ts:12:3)"
-    />,
-    createThreadFilePathIndex([candidate]),
-  );
-  expect(container.textContent).toBe("Read the file");
-  await settleMetadata(candidate, AsyncResult.success(null));
-  expect(container.textContent).toBe("Read the file");
-  expect(state.openFile).not.toHaveBeenCalled();
-  await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
-  await act(async () => anchor().click());
-  expect(state.openFile).toHaveBeenCalledExactlyOnceWith(threadRef, candidate, 12);
-  state.choose.mockResolvedValue("copy-full");
-  await openContextMenu();
-  expect(state.copy).toHaveBeenLastCalledWith(`${candidate}:12:3`);
+  const render = createTestRoot();
+  for (const text of [
+    "[Read the file](docs/guide.ts:12:3)",
+    "[docs/guide.ts:12:3](docs/guide.ts:12:3)",
+    "`docs/guide.ts:12:3`",
+  ]) {
+    await settleMetadata(candidate, AsyncResult.initial(true));
+    state.openFile.mockClear();
+    await render(
+      <ChatMarkdown cwd={undefined} threadRef={threadRef} text={text} />,
+      createThreadFilePathIndex([candidate]),
+    );
+    const indexedText = (
+      searchableMessageSegments({ role: "assistant", text, streaming: false }) ?? []
+    ).join(" ");
+    expect(container.textContent).toBe(indexedText);
+    await settleMetadata(candidate, AsyncResult.success(null));
+    expect(container.textContent).toBe(indexedText);
+    expect(state.openFile).not.toHaveBeenCalled();
+    await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
+    expect.soft(container.textContent).toBe(indexedText);
+    expect.soft(anchor().textContent).toBe(indexedText);
+    await act(async () => anchor().click());
+    expect(state.openFile).toHaveBeenCalledExactlyOnceWith(threadRef, candidate, 12);
+    state.choose.mockResolvedValue("copy-full");
+    await openContextMenu();
+    expect(state.copy).toHaveBeenLastCalledWith(`${candidate}:12:3`);
+  }
 });
 
 it("discards verification from a previous thread, environment, root, or evidence scope", async () => {
