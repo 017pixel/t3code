@@ -8755,6 +8755,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }),
           );
           const { subagent: owner } = yield* Queue.take(harness.subagentReceipts);
+          const ownerNode = harness.events.find(
+            (event) => event.type === "node.updated" && event.node.id === owner.id,
+          );
+          assert(ownerNode?.type === "node.updated");
           if (ending === "interrupted") {
             yield* harness.runtime
               .interruptTurn({
@@ -8825,6 +8829,26 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               session_id: WAKE_NATIVE_SESSION,
             }),
           );
+          if (ending === "completed") {
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                type: "system",
+                subtype: "task_progress",
+                task_id: nestedTaskId,
+                description: "Checking the nested result",
+                uuid: "00000000-0000-4000-8000-000000000b0a",
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+            );
+            yield* harness.offerAndWait(
+              makeSubagentNotificationFrame({
+                taskId: nestedTaskId,
+                toolUseId: nestedToolUseId,
+                summary: "NESTED_OK",
+                uuid: "00000000-0000-4000-8000-000000000b0b",
+              }),
+            );
+          }
           // Observe a later owner event so the subscriber has consumed the nested launch too.
           yield* harness.offerAndWait(
             claudeSdkFrame({
@@ -8844,8 +8868,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.lengthOf(harness.continuationRequests, 0);
           if (ending === "completed") {
             assert.deepEqual(
-              nestedRows().map(({ runId, parentNodeId }) => ({ runId, parentNodeId })),
-              [{ runId: owner.runId, parentNodeId: owner.id }],
+              nestedRows().map(({ runId, parentNodeId, status }) => ({
+                runId,
+                parentNodeId,
+                status,
+              })),
+              [
+                { runId: owner.runId, parentNodeId: owner.id, status: "running" },
+                { runId: owner.runId, parentNodeId: owner.id, status: "running" },
+                { runId: owner.runId, parentNodeId: owner.id, status: "completed" },
+              ],
             );
             assert.isTrue(
               harness.events.some(
@@ -8854,6 +8886,33 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   event.node.nativeItemRef?.nativeId === nestedTaskId &&
                   event.node.rootNodeId === NodeId.make("node-attempt-claude-stopped-run-1"),
               ),
+            );
+            assert.deepEqual(
+              {
+                nodes: harness.events.flatMap((event) =>
+                  event.type === "node.updated" &&
+                  event.node.kind === "subagent" &&
+                  event.node.nativeItemRef?.nativeId === nestedTaskId
+                    ? [event.node.providerTurnId]
+                    : [],
+                ),
+                cards: harness.events.flatMap((event) =>
+                  event.type === "turn_item.updated" &&
+                  event.turnItem.type === "subagent" &&
+                  event.turnItem.nativeItemRef?.nativeId === nestedTaskId
+                    ? [event.turnItem.providerTurnId]
+                    : [],
+                ),
+              },
+              {
+                nodes: [ownerNode.node.providerTurnId, ownerNode.node.providerTurnId],
+                cards: [
+                  ownerNode.node.providerTurnId,
+                  ownerNode.node.providerTurnId,
+                  ownerNode.node.providerTurnId,
+                ],
+              },
+              "the nested node and card retain the owner's original provider turn",
             );
             return;
           }

@@ -3078,6 +3078,7 @@ interface ActiveClaudeProviderRetry {
 interface ActiveClaudeSubagent {
   task: OrchestrationV2Subagent;
   readonly rootTurnOutcome: ActiveClaudeTurnContext["rootTurnOutcome"];
+  readonly providerTurnId: ActiveClaudeTurnContext["providerTurnId"];
   readonly confirmedOutcome: ProviderAdapter.ProviderAdapterV2SubagentOutcome | undefined;
   readonly rootNodeId: OrchestrationV2ExecutionNode["id"];
   readonly childThreadId: ThreadId;
@@ -4502,6 +4503,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const now = yield* DateTime.now;
           const subagent: ActiveClaudeSubagent = {
             rootTurnOutcome: resume.context.rootTurnOutcome,
+            providerTurnId: resume.context.providerTurnId,
             confirmedOutcome: undefined,
             childThread: null,
             task: {
@@ -5152,6 +5154,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 : (existingSubagent?.rootTurnOutcome ??
                   runOwner?.rootTurnOutcome ??
                   input.context.rootTurnOutcome),
+            providerTurnId:
+              input.reopen === true && input.status === "running" && existingSubagent !== undefined
+                ? input.context.providerTurnId
+                : (existingSubagent?.providerTurnId ??
+                  runOwner?.providerTurnId ??
+                  input.context.providerTurnId),
             confirmedOutcome:
               input.nativeOutcome !== undefined
                 ? confirmedSubagentOutcome(task)
@@ -5266,7 +5274,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 status: input.status,
                 countsForRun: false,
                 providerThreadId: input.context.input.providerThread.id,
-                providerTurnId: input.context.providerTurnId,
+                providerTurnId: subagent.providerTurnId,
                 nativeItemRef: {
                   driver: CLAUDE_PROVIDER,
                   nativeId: input.taskId,
@@ -5355,7 +5363,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               runId: task.runId,
               nodeId: task.id,
               providerThreadId: input.context.input.providerThread.id,
-              providerTurnId: input.context.providerTurnId,
+              providerTurnId: subagent.providerTurnId,
               nativeItemRef: task.nativeTaskRef,
               parentItemId: null,
               ordinal: subagent.turnItemOrdinal,
