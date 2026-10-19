@@ -1258,7 +1258,7 @@ interface SnapshotMessageState {
 const TOOL_UPDATE_PERSIST_EVERY = 10;
 
 // Bound early tool traffic without discarding assistant text.
-const MAX_PENDING_SUBAGENT_NOTIFICATIONS = 1_000;
+const MAX_PENDING_SUBAGENT_TOOL_NOTIFICATIONS = 1_000;
 
 /**
  * Some agents stream a tool's arguments (a file write's diff, `rawInput`) and
@@ -3854,14 +3854,27 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const buffered = context.pendingSubagentNotifications.get(notification.sessionId) ?? [];
           if (
             subagentsOutliveSettledRoot &&
-            buffered.length >= MAX_PENDING_SUBAGENT_NOTIFICATIONS
+            (notification.update.sessionUpdate === "tool_call" ||
+              notification.update.sessionUpdate === "tool_call_update") &&
+            buffered.length >= MAX_PENDING_SUBAGENT_TOOL_NOTIFICATIONS
           ) {
-            const oldestTool = buffered.findIndex(
-              (frame) =>
-                frame.update.sessionUpdate === "tool_call" ||
-                frame.update.sessionUpdate === "tool_call_update",
+            const toolCount = buffered.reduce(
+              (count, frame) =>
+                count +
+                (frame.update.sessionUpdate === "tool_call" ||
+                frame.update.sessionUpdate === "tool_call_update"
+                  ? 1
+                  : 0),
+              0,
             );
-            if (oldestTool !== -1) buffered.splice(oldestTool, 1);
+            if (toolCount >= MAX_PENDING_SUBAGENT_TOOL_NOTIFICATIONS) {
+              const oldestTool = buffered.findIndex(
+                (frame) =>
+                  frame.update.sessionUpdate === "tool_call" ||
+                  frame.update.sessionUpdate === "tool_call_update",
+              );
+              if (oldestTool !== -1) buffered.splice(oldestTool, 1);
+            }
           }
           buffered.push(notification);
           context.pendingSubagentNotifications.set(notification.sessionId, buffered);
