@@ -58,7 +58,7 @@ function toLabels(raw: ReadonlyArray<Label | null> | null | undefined): Readonly
   });
 }
 
-/** GitHub spells a close reason `COMPLETED` / `NOT_PLANNED`; an open issue has `""` or `REOPENED`. */
+/** GitHub uses uppercase close reasons; an open issue has `""` or `REOPENED`. */
 function toIssueState(
   state: string | null | undefined,
   stateReason: string | null | undefined,
@@ -72,7 +72,9 @@ function toIssueState(
       ? { closeReason: "completed" }
       : reason === "NOT_PLANNED"
         ? { closeReason: "not-planned" }
-        : {}),
+        : reason === "DUPLICATE"
+          ? { closeReason: "duplicate" }
+          : {}),
   };
 }
 

@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import { IssueTemplateList } from "@t3tools/contracts";
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubRest from "./GitHubRest.ts";
 import * as GitHubQuota from "./GitHubQuota.ts";
@@ -28,7 +29,7 @@ const DETAIL_RESPONSE = JSON.stringify({
           name: "Octo Cat",
         },
         state: "CLOSED",
-        stateReason: "NOT_PLANNED",
+        stateReason: "DUPLICATE",
         createdAt: "2026-07-01T00:00:00Z",
         updatedAt: "2026-07-03T00:00:00Z",
         closedAt: "2026-07-03T00:00:00Z",
@@ -198,6 +199,8 @@ function tracker(onRequest: (variables: unknown) => void, templateRepository?: u
     ),
   );
 }
+
+const encodeTemplateList = Schema.encodeSync(IssueTemplateList);
 
 const decodeBody = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
@@ -377,6 +380,14 @@ body:
             { name: "config.yml", object: config },
             { name: "bug_report.yml", object: form },
             {
+              name: "empty_name.yml",
+              object: { ...form, text: 'name: ""\ndescription: Empty name\nbody: []' },
+            },
+            {
+              name: "blank_name.yml",
+              object: { ...form, text: 'name: "   "\ndescription: Blank name\nbody: []' },
+            },
+            {
               name: "invalid.yml",
               object: { ...form, text: "name: Missing required metadata\nbody: []" },
             },
@@ -386,6 +397,7 @@ body:
       const api = yield* tracker(() => {}, repository);
       const input = { cwd: "/w", host: "github.com", scope: "acme/web" };
       const result = yield* api.listTemplates!(input);
+      expect(encodeTemplateList(result)).toEqual(result);
       expect(result.blankIssuesEnabled).toBe(false);
       expect(result.templates).toHaveLength(1);
       expect(result.templates[0]).toMatchObject({
@@ -460,7 +472,7 @@ Redact secrets before uploading.`);
         displayKey: "#42",
         title: "Composer loses focus",
         body: "Typing in the composer drops focus after a paste.",
-        state: { category: "closed", name: "closed", closeReason: "not-planned" },
+        state: { category: "closed", name: "closed", closeReason: "duplicate" },
         author: {
           login: "octocat",
           name: "Octo Cat",
