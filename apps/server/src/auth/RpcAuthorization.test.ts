@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   AuthOrchestrationOperateScope,
+  ORCHESTRATION_V2_WS_METHODS,
   AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
   AuthPreviewOperateScope,
@@ -33,6 +34,12 @@ import * as RpcAuthorization from "./RpcAuthorization.ts";
 describe("RPC authorization scopes", () => {
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
+  });
+
+  it("requires operate access to stop a workflow", () => {
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow)).toBe(
+      AuthOrchestrationOperateScope,
+    );
   });
 
   it("authorizes background policy reporting and observation deliberately", () => {
@@ -107,8 +114,6 @@ describe("RPC authorization scopes", () => {
   });
 
   it("reads the reviewer menu under the same scope as the pull request it belongs to", () => {
-    // The candidate list is a read like the detail beside it, and asking somebody for a review is
-    // a write like every other pull request operation.
     expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsChecks)).toBe(
       AuthOrchestrationReadScope,
     );
@@ -251,6 +256,27 @@ describe("RPC scope middleware", () => {
         requiredPermission: missing,
       });
       expect(handled).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reports only authorized requests that succeed", () =>
+    Effect.gen(function* () {
+      const observed: Array<string> = [];
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.serverProbe, () => Effect.succeed({})),
+            group.toLayerHandler(WS_METHODS.serverRetryResourceTelemetry, () => Effect.never),
+            RpcAuthorization.layer([AuthOrchestrationReadScope], (method) =>
+              Effect.sync(() => void observed.push(method)),
+            ),
+          ),
+        ),
+      );
+
+      yield* client[WS_METHODS.serverProbe]({});
+      yield* client[WS_METHODS.serverRetryResourceTelemetry]({}).pipe(Effect.flip);
+      expect(observed).toEqual([WS_METHODS.serverProbe]);
     }).pipe(Effect.scoped),
   );
 });

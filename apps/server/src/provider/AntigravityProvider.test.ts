@@ -257,31 +257,23 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
     ),
   );
 
-  it.effect("records explicit sign-in while disabled without starting a health probe", () =>
+  it.effect("ignores account updates while disabled", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeHarness({ enabled: false });
-        const signedIn = yield* Stream.toPull(
-          harness.provider.snapshot.streamChanges.pipe(
-            Stream.filter(
-              (snapshot) =>
-                snapshot.auth.status === "authenticated" && snapshot.slashCommands.length > 0,
-            ),
-          ),
-        );
         yield* harness.provider.onSessionStarted(started);
         yield* harness.provider.onAvailableCommands(commands);
-        const [snapshot] = yield* signedIn;
+        yield* harness.provider.onSignedOut;
+        const snapshot = yield* harness.provider.snapshot.refresh;
         expect(snapshot).toMatchObject({
           enabled: false,
-          installed: true,
+          installed: false,
           status: "disabled",
-          auth: { status: "authenticated", type: "oauth-personal" },
+          auth: { status: "unknown" },
+          models: [],
+          slashCommands: [],
           workspaceSnapshots: [],
         });
-        expect(snapshot.models).toEqual(buildAntigravityModelsFromSession(sessionSetupResult));
-        expect(snapshot.slashCommands).toEqual(expectedCommands);
-        expect((yield* harness.provider.snapshot.refresh).models).toEqual(snapshot.models);
         expect(yield* Ref.get(harness.probeCalls)).toBe(0);
       }),
     ),
@@ -434,6 +426,68 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
         });
         yield* harness.provider.onConfigOptionsUpdated([]);
         expect((yield* harness.provider.snapshot.getSnapshot).models).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("does not guess a version before a custom launcher's first handshake", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* Deferred.succeed(harness.initialProbe, {
+          ...initializeResult,
+          agentInfo: { ...initializeResult.agentInfo, version: "unknown" },
+        });
+        yield* harness.initialUpdate;
+        expect((yield* harness.provider.snapshot.getSnapshot).version).toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("accepts a known version from a later installation probe", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.initialize;
+        yield* harness.provider.onSessionStarted({
+          ...started,
+          initializeResult: {
+            ...initializeResult,
+            agentInfo: { ...initializeResult.agentInfo, version: "1.3.0" },
+          },
+        });
+        yield* Ref.set(
+          harness.probe,
+          Effect.succeed({
+            ...initializeResult,
+            agentInfo: { ...initializeResult.agentInfo, version: "1.4.0" },
+          }),
+        );
+        expect((yield* harness.provider.snapshot.refresh).version).toBe("1.4.0");
+      }),
+    ),
+  );
+
+  it.effect("does not replace a handshake version with an unknown custom-launcher probe", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.initialize;
+        yield* harness.provider.onSessionStarted({
+          ...started,
+          initializeResult: {
+            ...initializeResult,
+            agentInfo: { ...initializeResult.agentInfo, version: "1.4.0" },
+          },
+        });
+        yield* Ref.set(
+          harness.probe,
+          Effect.succeed({
+            ...initializeResult,
+            agentInfo: { ...initializeResult.agentInfo, version: "unknown" },
+          }),
+        );
+        expect((yield* harness.provider.snapshot.refresh).version).toBe("1.4.0");
       }),
     ),
   );
