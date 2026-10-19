@@ -1973,6 +1973,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
     onResponse: (method: string) => Effect.Effect<unknown> = () => Effect.void,
+    readChildHistory?: (threadId: string) => Effect.Effect<unknown>,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1997,9 +1998,28 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
             Effect.flatMap((context) =>
               Effect.service(CodexClient.CodexAppServerClient).pipe(
-                Effect.map((client) =>
-                  withCodexReplayChildMetadata(client, transcript, readChildMetadata),
-                ),
+                Effect.map((client) => {
+                  const wrapped = withCodexReplayChildMetadata(
+                    client,
+                    transcript,
+                    readChildMetadata,
+                  );
+                  return readChildHistory === undefined
+                    ? wrapped
+                    : ({
+                        ...wrapped,
+                        raw: {
+                          ...wrapped.raw,
+                          request: (method, params) =>
+                            method === "thread/read" &&
+                            Predicate.isObject(params) &&
+                            params.includeTurns === true &&
+                            typeof params.threadId === "string"
+                              ? readChildHistory(params.threadId)
+                              : wrapped.raw.request(method, params),
+                        },
+                      } satisfies CodexClient.CodexAppServerClient["Service"]);
+                }),
                 Effect.map(
                   (client) =>
                     ({
@@ -8070,16 +8090,26 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               })),
             ],
           }),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (threadId) =>
+            Effect.succeed({
+              thread: { id: threadId, turns: [{ id: "previous-child-turn" }, { id: childTurn }] },
+            }),
         );
-        yield* harness.runtime.startTurn(
-          makeCodexTestTurnInput({
+        yield* harness.runtime.startTurn({
+          ...makeCodexTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
             now: yield* DateTime.now,
             attemptId: RunAttemptId.make("first-child-input"),
             text: "Continue",
           }),
-        );
+          providerTurnOrdinal: tool === "sendInput" ? 2 : 1,
+        });
         yield* harness.firstTerminal;
         const messages = new Map(
           harness.events.flatMap((event) =>
@@ -8103,6 +8133,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           [...items.values()].filter((item) => item.type === "user_message" && item.text === input),
           1,
         );
+        if (tool === "sendInput") {
+          const childTurns = harness.events.filter(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.nativeTurnRef?.nativeId === childTurn,
+          );
+          assert.isNotEmpty(childTurns);
+          for (const event of childTurns)
+            if (event.type === "provider_turn.updated") assert.equal(event.providerTurn.ordinal, 2);
+        }
         const owned = harness.events.find(
           (event) =>
             event.type === "provider_thread.updated" &&
