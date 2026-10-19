@@ -27,7 +27,7 @@ describe("diffPanelStore", () => {
     });
   });
 
-  it("keeps a custom base when a generic open selects Changes again", () => {
+  it("keeps a custom base when explicitly selecting Changes again", () => {
     const store = useDiffPanelStore.getState();
     store.selectBranchBaseRef(THREAD_REF, "origin/release");
     store.selectGitScope(THREAD_REF, "branch");
