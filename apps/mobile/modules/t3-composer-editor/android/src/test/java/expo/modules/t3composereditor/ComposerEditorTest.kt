@@ -1,20 +1,26 @@
 package expo.modules.t3composereditor
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.EditorInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -137,7 +143,7 @@ class ComposerEditorTest {
     modifiers: Int = 0,
     repeats: Int = 0,
     deviceId: Int = 1,
-    flags: Int = 0,
+    flags: Int = 0
   ) {
     val down = KeyEvent(
       0, 0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER,
@@ -203,6 +209,31 @@ class ComposerEditorTest {
 
     assertEquals(emptyList<Boolean>(), sends)
     assertEquals("draft\n\n", editor.text.toString())
+
+    Robolectric.buildActivity(Activity::class.java).use { controller ->
+      controller.setup().get().setContentView(editor)
+      editor.requestFocus()
+      controller.windowFocusChanged(true)
+      val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
+
+      for (returnSends in listOf(false, true)) {
+        editor.returnSends = returnSends
+        editor.setText("draft")
+        editor.setSelection(editor.length())
+        val now = SystemClock.uptimeMillis()
+        val down = KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0, 0, 1, 0, 0)
+        connection.sendKeyEvent(down)
+        connection.sendKeyEvent(KeyEvent.changeAction(down, KeyEvent.ACTION_UP))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(
+          "IME Return must not submit (returnSends=$returnSends)",
+          emptyList<Boolean>(),
+          sends,
+        )
+        assertEquals("draft\n", editor.text.toString())
+      }
+    }
   }
 
   @Test
