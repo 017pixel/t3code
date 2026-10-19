@@ -33,7 +33,7 @@ export class CuaDriverInstallError extends Schema.TaggedError<CuaDriverInstallEr
 
 const isInstallError = Schema.is(CuaDriverInstallError);
 
-export class CuaDriverInstallation extends Context.Service<
+class CuaDriverInstallation extends Context.Service<
   CuaDriverInstallation,
   { readonly executable: Effect.Effect<string, CuaDriverInstallError> }
 >()("t3/cua/CuaDriverInstallation") {}

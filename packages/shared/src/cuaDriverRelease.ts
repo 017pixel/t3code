@@ -1,5 +1,5 @@
 // The SDK and executable use a private protocol; bump the catalog pin with this manifest.
-export const CUA_DRIVER_VERSION = "0.34.1";
+const CUA_DRIVER_VERSION = "0.34.1";
 
 const archives = {
   "darwin-universal": {
