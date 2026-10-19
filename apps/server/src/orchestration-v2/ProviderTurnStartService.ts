@@ -939,7 +939,7 @@ export const layer: Layer.Layer<
         continuationSource === undefined
           ? []
           : restartPendingMessageIds(
-              continuationSource,
+              run,
               projection.runs,
               projection.providerTurns,
               projection.attempts,

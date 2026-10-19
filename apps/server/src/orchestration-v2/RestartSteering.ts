@@ -35,5 +35,21 @@ export function restartPendingMessageIds(
     current = previous;
     pending.unshift(...(current.restartPendingMessageIds ?? []));
   }
-  return [...new Set(pending)];
+  // A sibling may already own this input. Keep its live work and proven
+  // acceptance separate from the ambiguous delivery of the cut chain.
+  return [...new Set(pending)].filter(
+    (id) =>
+      !runs.some(
+        (run) =>
+          run.userMessageId === id &&
+          !visited.has(run.id) &&
+          (completedRuns.has(run.id) ||
+            (run.activeAttemptId !== null && completedAttempts.has(run.activeAttemptId)) ||
+            run.status === "queued" ||
+            run.status === "preparing" ||
+            run.status === "starting" ||
+            run.status === "running" ||
+            run.status === "waiting"),
+      ),
+  );
 }
