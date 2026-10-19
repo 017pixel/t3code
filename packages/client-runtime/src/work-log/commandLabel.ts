@@ -1369,16 +1369,17 @@ export function commandDisplayText(command: string): string {
 }
 
 // A system `<shell> -c` or `-lc` with one literal script: single-quoted, double-quoted
-// without expansions or escapes, or a word with nothing to expand. Anything else,
-// such as options or redirects, keeps the whole invocation visible.
+// without expansions (escaped `"`, `\`, `$` and backticks are literal), or a word with
+// nothing to expand. Anything else, such as options or redirects, keeps the whole
+// invocation visible.
 const BARE_SHELL_WRAPPER =
-  /^(?:\/(?:usr\/(?:local\/)?|opt\/homebrew\/)?bin\/)?(?:sh|bash|zsh|dash|ash|ksh|fish) -l?c (?:'([^']*)'|"([^"\\$`]*)"|([\w./:@=+%,-]+))$/u;
+  /^(?:\/(?:usr\/(?:local\/)?|opt\/homebrew\/)?bin\/)?(?:sh|bash|zsh|dash|ash|ksh|fish) -l?c (?:'([^']*)'|"((?:[^"\\$`]|\\["\\$`])*)"|([\w./:@=+%,-]+))$/u;
 
 /** The command an approval asks about, unwrapped only when nothing else can run. */
 export function approvalCommandDisplayText(command: string): string {
   const trimmed = command.trim();
   const match = BARE_SHELL_WRAPPER.exec(trimmed);
-  const script = (match?.[1] ?? match?.[2] ?? match?.[3])?.trim();
+  const script = (match?.[1] ?? match?.[2]?.replace(/\\(["\\$`])/gu, "$1") ?? match?.[3])?.trim();
   return withVisibleControlCharacters(script || trimmed);
 }
 

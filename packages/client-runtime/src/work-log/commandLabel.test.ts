@@ -512,6 +512,12 @@ describe("approvalCommandDisplayText", () => {
     [`bash -c 'printf hi'>"/tmp/output file"`, `bash -c 'printf hi'>"/tmp/output file"`],
     [`/bin/bash -lc "rg -g '*.ts' TODO"`, "rg -g '*.ts' TODO"],
     [`bash -lc "echo $HOME"`, `bash -lc "echo $HOME"`],
+    [
+      `/bin/bash -lc "python3 - <<'EOF'\nprint(\\"hi \\$USER\\")\nEOF"`,
+      `python3 - <<'EOF'\nprint("hi $USER")\nEOF`,
+    ],
+    [`bash -lc "echo \\"$HOME\\""`, `bash -lc "echo \\"$HOME\\""`],
+    [`bash -lc "echo \\\nrm -rf build"`, `bash -lc "echo \\\nrm -rf build"`],
     ["/bin/bash -lc pwd", "pwd"],
     ["/tmp/delete.sh -c 'pwd'", "/tmp/delete.sh -c 'pwd'"],
     ["/tmp/bash -c 'echo safe'", "/tmp/bash -c 'echo safe'"],
