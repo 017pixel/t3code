@@ -12,7 +12,8 @@ import type { PlatformError } from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
-/** An incomplete record left by a crashed writer eventually stops blocking installs. */
+// The wrapper's go deadline + install backstop stay below this cap, so an
+// expired record cannot start or retain an installer even if its pid was reused.
 const MAX_LOCK_AGE = Duration.hours(1);
 const IDLE_POLL_INTERVAL = Duration.seconds(1);
 
@@ -90,25 +91,22 @@ const make = Effect.gen(function* () {
         }),
       );
 
-  /** Held while a recorded process is alive; a file mid-write counts as held until it ages out. */
+  /** Live pids and incomplete records hold the lock until the age cap. */
   const isHeld = Effect.fn("ProviderInstallLock.isHeld")(function* (file: string) {
     const info = yield* fileSystem.stat(file);
     const modifiedAt = Option.match(info.mtime, {
       onNone: () => 0,
       onSome: (date) => date.getTime(),
     });
+    if ((yield* Clock.currentTimeMillis) - modifiedAt >= Duration.toMillis(MAX_LOCK_AGE)) {
+      return false;
+    }
     // The first line holds pids; the second identifies the owning run, including within one server.
     const [pids = ""] = (yield* fileSystem.readFileString(file)).split("\n");
     if (pids === "released") return false;
     const recorded = pids.split(" ").map(Number);
     const valid = (pid: number) => Number.isSafeInteger(pid) && pid > 0;
-    // Age cannot fence a stopped live owner: it could resume and send "go"
-    // after a successor starts. Only dead pids permit reclaiming a complete record.
-    if (recorded.some((pid) => valid(pid) && isPidAlive(pid))) return true;
-    return (
-      recorded.some((pid) => !valid(pid)) &&
-      (yield* Clock.currentTimeMillis) - modifiedAt < Duration.toMillis(MAX_LOCK_AGE)
-    );
+    return recorded.some((pid) => !valid(pid) || isPidAlive(pid));
   });
 
   /** Publishes a complete record exclusively; a paused writer must never look abandoned. */
@@ -148,7 +146,7 @@ const make = Effect.gen(function* () {
     owner: string,
   ) {
     yield* fileSystem.makeDirectory(directory, { recursive: true });
-    // Older servers wrote an unnumbered lock. Never ignore their live owner.
+    // Older servers wrote an unnumbered lock with the same age cap.
     if (yield* isHeld(path.join(directory, key)).pipe(ignoreNotFound(false))) return undefined;
     const previous = (yield* generations).filter((entry) => entry.key === key);
     const highest = previous.reduce((max, entry) => Math.max(max, entry.generation), 0);

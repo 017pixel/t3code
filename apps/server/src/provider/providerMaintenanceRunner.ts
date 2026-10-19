@@ -50,6 +50,7 @@ const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 // An installer is never cut off mid-write for taking long; this only frees the
 // install lock and held turn starts from one that hangs.
 const INSTALL_BACKSTOP = Duration.minutes(30);
+const INSTALL_GO_TIMEOUT = Duration.seconds(30);
 // Only these may run their own updater without a pinned `package@version`.
 const SELF_UPDATING_LOCK_KEY = /^(?:homebrew|grok|muse:.*|.+-native)$/;
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
@@ -138,16 +139,19 @@ const encodeInstallWrapperInput = Schema.encodeSync(
   ),
 );
 
-// EOF before "g" aborts without touching the install target. The installer
+// EOF or the go deadline aborts without touching the install target. The installer
 // inherits this wrapper's process group and log descriptors, but no parent pipe.
 const INSTALL_WRAPPER = `
+const goDeadline = performance.now() + ${Duration.toMillis(INSTALL_GO_TIMEOUT)};
 const { spawn } = require("node:child_process");
 const { command, args, shell, runAsNode } = JSON.parse(process.argv[1]);
 let started = false;
+const goTimeout = setTimeout(() => process.exit(1), ${Duration.toMillis(INSTALL_GO_TIMEOUT)});
 process.stdin.once("end", () => { if (!started) process.exit(1); });
 process.stdin.once("data", (data) => {
-  if (data[0] !== 103) process.exit(1);
+  if (data[0] !== 103 || performance.now() >= goDeadline) process.exit(1);
   started = true;
+  clearTimeout(goTimeout);
   process.stdin.destroy();
   const env = { ...process.env };
   if (runAsNode === undefined) delete env.ELECTRON_RUN_AS_NODE;
@@ -155,8 +159,30 @@ process.stdin.once("data", (data) => {
   const installer = spawn(command, args, {
     shell, windowsHide: true, stdio: ["ignore", 1, 2], env,
   });
-  installer.once("error", (error) => { console.error(error); process.exitCode = 1; });
-  installer.once("exit", (code) => { process.exitCode = code ?? 1; });
+  // This backstop survives the server that normally enforces the same limit.
+  let timedOut = false;
+  const backstop = setTimeout(() => {
+    timedOut = true;
+    if (process.platform === "win32") {
+      const killer = spawn("taskkill", ["/PID", String(installer.pid), "/T", "/F"], {
+        windowsHide: true, stdio: "ignore",
+      });
+      killer.once("error", () => process.exit(1));
+      killer.once("exit", () => process.exit(1));
+    } else {
+      try { process.kill(-process.pid, "SIGKILL"); }
+      catch (error) { console.error(error); process.exit(1); }
+    }
+  }, ${Duration.toMillis(INSTALL_BACKSTOP)});
+  installer.once("error", (error) => {
+    clearTimeout(backstop);
+    console.error(error);
+    process.exitCode = 1;
+  });
+  installer.once("exit", (code) => {
+    clearTimeout(backstop);
+    process.exitCode = timedOut ? 1 : code ?? 1;
+  });
 });
 `;
 

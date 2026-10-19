@@ -1297,30 +1297,27 @@ describe("ProviderInstallLock", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("never reclaims an aged live owner, including while it records its child", () =>
+  it.effect("expires legacy and numbered records even when their pids are still alive", () =>
     Effect.gen(function* () {
       const { directory, first, second } = yield* withHome;
       const fileSystem = yield* FileSystem.FileSystem;
-      const entered = yield* Deferred.make<void>();
-      const finish = yield* Deferred.make<void>();
-      const original = yield* first
-        .tryRun("k", (recordChildPid) =>
-          Effect.gen(function* () {
-            yield* Deferred.succeed(entered, undefined);
-            yield* Deferred.await(finish);
-            yield* recordChildPid(process.pid);
-          }),
-        )
-        .pipe(Effect.forkScoped);
-      yield* Deferred.await(entered);
-      yield* fileSystem.utimes(`${lockFile(directory, "k")}.1`, 0, 0);
-      yield* TestClock.adjust(Duration.hours(1));
+      yield* fileSystem.makeDirectory(directory, { recursive: true });
+      for (const file of [lockFile(directory, "legacy"), `${lockFile(directory, "k")}.1`]) {
+        yield* fileSystem.writeFileString(file, String(process.pid));
+        yield* fileSystem.utimes(file, 0, 0);
+      }
+      yield* TestClock.adjust(Duration.minutes(59));
       assert.isTrue(yield* second.anyHeld);
       assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
-      yield* Deferred.succeed(finish, undefined);
-      yield* Fiber.join(original);
-      // The recorded child is still this live process after run completes.
-      assert.isTrue(yield* second.anyHeld);
+      assert.deepStrictEqual(yield* second.tryRun("legacy", () => Effect.void), Option.none());
+      yield* TestClock.adjust(Duration.minutes(1));
+      assert.isFalse(yield* second.anyHeld);
+      yield* second.untilIdle;
+      assert.deepStrictEqual(yield* first.tryRun("k", () => Effect.succeed(1)), Option.some(1));
+      assert.deepStrictEqual(
+        yield* first.tryRun("legacy", () => Effect.succeed(2)),
+        Option.some(2),
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -1386,8 +1383,6 @@ describe("ProviderInstallLock", () => {
       const legacy = lockFile(directory, "k");
       yield* fileSystem.makeDirectory(directory, { recursive: true });
       yield* fileSystem.writeFileString(legacy, String(process.pid));
-      yield* fileSystem.utimes(legacy, 0, 0);
-      yield* TestClock.adjust(Duration.hours(1));
       assert.isTrue(yield* first.anyHeld);
       assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
       yield* fileSystem.remove(legacy);
