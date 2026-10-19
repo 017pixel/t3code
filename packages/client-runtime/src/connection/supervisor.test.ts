@@ -650,15 +650,22 @@ describe("EnvironmentSupervisor", () => {
     }),
   );
 
-  it.effect("a mobile refocus restarts the retry ladder but never probes a live session", () =>
+  it.effect("a mobile refocus resets retries and checks routes without probing the session", () =>
     Effect.gen(function* () {
       const probeCount = yield* Ref.make(0);
+      const lanReachable = yield* Ref.make(false);
       const harness = yield* makeHarness({
-        prepare: (attempt) =>
-          attempt <= 2 ? Effect.fail(transient()) : Effect.succeed(PREPARED_CONNECTION),
+        checkRoute: (route) =>
+          route.target._tag === "BearerConnectionTarget"
+            ? Ref.get(lanReachable).pipe(
+                Effect.map((reachable) => (reachable ? "answered" : "silent")),
+              )
+            : Effect.succeed("unchecked"),
+        prepare: (attempt, target) =>
+          attempt <= 4 ? Effect.fail(transient()) : Effect.succeed(preparedFor(target)),
         probe: () => Ref.update(probeCount, (count) => count + 1),
       });
-      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+      const supervisor = yield* EnvironmentSupervisor.make(LAN_THEN_RELAY_ENTRY, {
         initiallyDesired: true,
       }).pipe(Effect.provide(harness.dependencies));
 
@@ -667,22 +674,31 @@ describe("EnvironmentSupervisor", () => {
         (state) => state.phase === "backoff" && state.attempt === 1,
       );
       yield* TestClock.adjust("3 seconds");
-      yield* eventuallyState(
+      yield* awaitState(
         supervisor.state,
         (state) => state.phase === "backoff" && state.attempt === 2,
       );
       yield* harness.wake("application-refocused");
-      yield* eventuallyState(
+      yield* awaitState(
         supervisor.state,
         (state) => state.phase === "connected" && state.attempt === 1,
       );
 
       yield* harness.wake("application-refocused");
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        yield* Effect.yieldNow;
-      }
+      yield* TestClock.adjust("0 millis");
       expect(yield* Ref.get(probeCount)).toBe(0);
       expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+
+      yield* Ref.set(lanReachable, true);
+      yield* harness.wake("application-refocused");
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 2,
+      );
+      expect(Option.getOrThrow(yield* SubscriptionRef.get(supervisor.prepared)).target._tag).toBe(
+        "BearerConnectionTarget",
+      );
+      expect(yield* Ref.get(probeCount)).toBe(0);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
@@ -1466,6 +1482,7 @@ describe("EnvironmentSupervisor", () => {
       yield* TestClock.adjust("10999 millis");
       expect(yield* Ref.get(harness.sessionCount)).toBe(1);
       yield* TestClock.adjust("1 milli");
+      expect(yield* Ref.get(harness.sessionCount)).toBe(2);
       yield* awaitState(
         supervisor.state,
         (state) => state.phase === "connected" && state.generation === 2,
@@ -1484,7 +1501,9 @@ describe("EnvironmentSupervisor", () => {
 
       yield* awaitState(supervisor.state, (state) => state.phase === "connected");
       yield* harness.wake("application-active-probe");
-      yield* TestClock.adjust("6 seconds");
+      yield* TestClock.adjust("5999 millis");
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+      yield* TestClock.adjust("1 milli");
       // The timed-out wake probe reconnects immediately without a backoff
       // sleep: no further clock advance is needed.
       yield* awaitState(
@@ -1520,31 +1539,7 @@ describe("EnvironmentSupervisor", () => {
       expect(yield* Ref.get(harness.sessionCount)).toBe(1);
       yield* Ref.set(frames, 3);
       yield* TestClock.adjust("1 milli");
-      yield* awaitState(
-        supervisor.state,
-        (state) => state.phase === "connected" && state.generation === 2,
-      );
-    }).pipe(Effect.provide(TestClock.layer())),
-  );
-
-  it.effect("times out a quick probe once data stops arriving", () =>
-    Effect.gen(function* () {
-      const frames = yield* Ref.make(0);
-      const harness = yield* makeHarness({
-        probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
-        receivedFrames: Ref.get(frames),
-      });
-      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
-        initiallyDesired: true,
-      }).pipe(Effect.provide(harness.dependencies));
-
-      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
-      yield* harness.wake("application-active-probe");
-      yield* TestClock.adjust("1 second");
-      yield* Ref.set(frames, 1);
-      yield* TestClock.adjust("5 seconds");
-      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
-      yield* TestClock.adjust("6 seconds");
+      expect(yield* Ref.get(harness.sessionCount)).toBe(2);
       yield* awaitState(
         supervisor.state,
         (state) => state.phase === "connected" && state.generation === 2,
