@@ -16,6 +16,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -337,6 +338,7 @@ function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean 
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  const scope = yield* Scope.Scope;
   const config = yield* DesktopConfig.DesktopConfig;
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const desktopState = yield* DesktopState.DesktopState;
@@ -614,6 +616,10 @@ export const make = Effect.gen(function* () {
         });
       }),
       Effect.ensuring(finishUpdateAction("download")),
+      // Native downloads outlive request cancellation. Keep their reservation and
+      // quit-install flag until completion or service shutdown.
+      Effect.forkIn(scope),
+      Effect.flatMap(Fiber.join),
     );
   });
 

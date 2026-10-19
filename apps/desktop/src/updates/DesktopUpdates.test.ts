@@ -571,45 +571,46 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
-  it.effect("restores download state and permits retry after interruption", () =>
-    Effect.gen(function* () {
-      const actionStarted = yield* Deferred.make<void>();
-      let disableDifferentialCalls = 0;
-      const harness = makeHarness({
-        setDisableDifferentialDownload: Effect.suspend(() => {
-          disableDifferentialCalls += 1;
-          if (disableDifferentialCalls === 1) {
-            return Effect.void;
-          }
-          if (disableDifferentialCalls === 2) {
-            return Deferred.succeed(actionStarted, undefined).pipe(Effect.andThen(Effect.never));
-          }
-          return Effect.void;
-        }),
-      });
+  it.effect("keeps a canceled request's native download eligible for normal quit", () => {
+    writeFileSyncMock.mockReset();
+    const downloadStarted = Deferred.makeUnsafe<void>();
+    const nativeDownload = Promise.withResolvers<void>();
+    const harness = makeHarness({
+      platform: "win32",
+      downloadUpdate: Deferred.succeed(downloadStarted, undefined).pipe(
+        Effect.andThen(Effect.promise(() => nativeDownload.promise)),
+      ),
+    });
 
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const updates = yield* DesktopUpdates.DesktopUpdates;
-          yield* updates.configure;
-          harness.emit("update-available", { version: "1.2.4" });
-          yield* flushCallbacks;
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
 
-          const downloadFiber = yield* updates.download.pipe(Effect.forkScoped);
-          yield* Deferred.await(actionStarted);
-          yield* Fiber.interrupt(downloadFiber);
+        const request = yield* updates.download.pipe(Effect.forkScoped);
+        yield* Deferred.await(downloadStarted);
+        yield* Fiber.interrupt(request);
+        const reservedAfterCancellation = yield* updates.isActionActive;
 
-          const interruptedState = yield* updates.getState;
-          assert.equal(interruptedState.status, "available");
-          assert.isNull(interruptedState.message);
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        nativeDownload.resolve();
+        yield* flushCallbacks;
 
-          const retry = yield* updates.download;
-          assert.isTrue(retry.accepted);
-          assert.isTrue(retry.completed);
-        }),
-      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
-    }),
-  );
+        assert.equal((yield* updates.getState).downloadedVersion, "1.2.4");
+        harness.emit("quit", {}, 0);
+        assert.equal(writeFileSyncMock.mock.calls.length, 1);
+        assert.deepEqual(JSON.parse(String(writeFileSyncMock.mock.calls[0]![1])), {
+          fromVersion: "1.2.3",
+          targetVersion: "1.2.4",
+        });
+        assert.isTrue(reservedAfterCancellation);
+        assert.isFalse(yield* updates.isActionActive);
+        assert.equal(harness.quitAndInstalls(), 0);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
 
   it.effect("clears quitting state after an unexpected install setup failure", () => {
     const harness = makeHarness({
