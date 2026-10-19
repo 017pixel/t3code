@@ -865,6 +865,38 @@ it("shows readable models and only differing workspace details in agent tooltips
   await update();
   expect(text()).toContain("12K context · 3 tool uses");
   expect(text()).not.toContain("41.1K context");
+
+  state.projection = {
+    ...projection,
+    subagents: [
+      {
+        ...contextAgent,
+        status: "completed",
+        completedAt: DateTime.makeUnsafe("2026-09-16T12:01:00Z"),
+      },
+    ],
+  };
+  const completedChild = {
+    ...child,
+    status: "completed",
+    activityRunStatus: null,
+    latestRunRequestedAt: DateTime.makeUnsafe("2026-09-16T12:00:00Z"),
+    latestRunCompletedAt: DateTime.makeUnsafe("2026-09-16T12:01:00Z"),
+  };
+  await rerender(completedChild);
+  await click(sectionToggle(false));
+  expect(text()).toContain("41.1K context · 2 tool uses");
+  const newerCompletedChild = {
+    ...completedChild,
+    latestRunRequestedAt: DateTime.makeUnsafe("2026-09-16T12:02:00Z"),
+    latestRunCompletedAt: DateTime.makeUnsafe("2026-09-16T12:03:00Z"),
+  };
+  await rerender(newerCompletedChild);
+  expect(text()).toContain("Worker");
+  expect(text()).not.toContain("context");
+  expect(text()).not.toContain("tool uses");
+  await click(sectionToggle(true));
+
   state.projection = projection;
   await rerender();
   expect(text()).not.toContain("context");

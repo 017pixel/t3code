@@ -201,6 +201,7 @@ function currentSubagent<Agent extends RuntimeSubagent>(
           : status,
     startedAt: startedAt ? DateTime.formatIso(startedAt) : null,
     completedAt: completedAt ? DateTime.formatIso(completedAt) : null,
+    contextUsage: newerRun ? null : agent.contextUsage,
     progress: null,
     result: null,
     error: null,
