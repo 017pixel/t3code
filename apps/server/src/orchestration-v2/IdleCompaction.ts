@@ -10,10 +10,11 @@ const MINUTE_MS = 60 * 1_000;
 // 30m; providers without a documented TTL use the same conservative 30m.
 // Only drivers whose adapters expose compactThread are listed. ACP Registry
 // flavors do not advertise supportsCompaction and must not receive /compact.
+// Cursor is left out: its SDK passes /compress to the model as plain text, so
+// the turn summarizes in chat and the next turn resends the full context.
 export const PROMPT_CACHE_TTL_MS: Readonly<Record<string, number>> = {
   claudeAgent: 60 * MINUTE_MS,
   codex: 30 * MINUTE_MS,
-  cursor: 30 * MINUTE_MS,
   opencode: 30 * MINUTE_MS,
   muse: 30 * MINUTE_MS,
   pi: 30 * MINUTE_MS,
