@@ -2817,7 +2817,9 @@ export function GeneralSettingsPanel() {
           status={
             !supportsAutomaticUpdates
               ? "All selected connected environments must support automatic updates."
-              : undefined
+              : !settings.enableProviderUpdateChecks
+                ? "Turn on Provider update checks to update automatically."
+                : undefined
           }
           resetAction={
             supportsAutomaticUpdates &&
@@ -2834,7 +2836,7 @@ export function GeneralSettingsPanel() {
             <ScopedSwitch
               settingKeys={["automaticUpdates"]}
               checked={settings.automaticUpdates}
-              disabled={!supportsAutomaticUpdates}
+              disabled={!supportsAutomaticUpdates || !settings.enableProviderUpdateChecks}
               onCheckedChange={(checked) => updateSettings({ automaticUpdates: Boolean(checked) })}
               aria-label="Update automatically"
             />

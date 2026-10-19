@@ -499,12 +499,18 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         subtitle={
                           projectSelected
                             ? "Environment-wide setting. Select All projects to change it."
-                            : supportsAutomaticUpdates
-                              ? "Install updates for provider CLIs that support one-click updates on the selected environments while nothing is running."
-                              : "Update older servers to control automatic updates."
+                            : !supportsAutomaticUpdates
+                              ? "Update older servers to control automatic updates."
+                              : uniform("enableProviderUpdateChecks") === false
+                                ? "Turn on Provider update checks to update automatically."
+                                : "Install updates for provider CLIs that support one-click updates on the selected environments while nothing is running."
                         }
                         value={uniform("automaticUpdates")}
-                        disabled={disabledFor("automaticUpdates") || !supportsAutomaticUpdates}
+                        disabled={
+                          disabledFor("automaticUpdates") ||
+                          !supportsAutomaticUpdates ||
+                          uniform("enableProviderUpdateChecks") === false
+                        }
                         onValueChange={(value) => write({ automaticUpdates: value })}
                       />
                     </View>
