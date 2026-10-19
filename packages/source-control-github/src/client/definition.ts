@@ -53,8 +53,12 @@ export function gitHubAccountsFor(
   const key = repository?.trim().toLowerCase();
   const owner = key?.split("/")[0];
   const chosen = [
-    key && key.includes("/") ? choice?.repositories?.[key] : undefined,
-    owner ? choice?.owners?.[owner] : undefined,
+    key && key.includes("/") && choice?.repositories && Object.hasOwn(choice.repositories, key)
+      ? choice.repositories[key]
+      : undefined,
+    owner && choice?.owners && Object.hasOwn(choice.owners, owner)
+      ? choice.owners[owner]
+      : undefined,
     choice?.account,
   ].filter((account): account is string => account !== undefined);
   return [...new Set(chosen)];

@@ -182,6 +182,8 @@ describe("GitHubCredentials", () => {
         expect(yield* tokenFor("github.com", "acme/legacy")).toBe("token-for-work");
         expect(yield* tokenFor("github.com", "departed/web")).toBe("token-for-personal");
         expect(yield* tokenFor("github.com", "other/web")).toBe("token-for-personal");
+        expect(yield* tokenFor("github.com", "constructor/repo")).toBe("token-for-personal");
+        expect(yield* tokenFor("github.com", "toString/repo")).toBe("token-for-personal");
         expect(yield* tokenFor("ghe.example.test", "acme/web")).toBe("active-token");
       }).pipe(Effect.provide(layer));
     },
