@@ -172,6 +172,7 @@ export const PullRequestThreadComment = Schema.Struct({
   author: Schema.NullOr(PullRequestActor),
   body: Schema.String,
   displayBody: Schema.optional(Schema.String),
+  displayText: Schema.optional(Schema.String),
   createdAt: IsoDateTime,
   editedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   url: Schema.NullOr(Schema.String),
