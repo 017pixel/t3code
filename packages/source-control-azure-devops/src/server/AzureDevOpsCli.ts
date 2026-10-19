@@ -350,33 +350,156 @@ function decodeAzureDevOpsJson<S extends Schema.Top>(
   );
 }
 
+function checkoutScopeFromConfig(output: string, remoteName: string | undefined) {
+  if (!output.endsWith("\0")) return null;
+  const remotes = new Map<string, string>();
+  for (const entry of output.slice(0, -1).split("\0")) {
+    const match = /^remote\.(.+)\.url\n([^\r\n]+)$/u.exec(entry);
+    if (!match?.[1] || !match[2]) return null;
+    if (!remotes.has(match[1])) remotes.set(match[1], match[2]);
+  }
+  // Match RepositoryIdentityResolver's primary remote, even if its URL is unsupported.
+  const selected =
+    remoteName ??
+    (remotes.has("upstream")
+      ? "upstream"
+      : remotes.has("origin")
+        ? "origin"
+        : [...remotes.keys()].toSorted((left, right) => left.localeCompare(right))[0]);
+  const remote = selected === undefined ? undefined : remotes.get(selected);
+  if (!remote) return null;
+
+  try {
+    const scp = /^(?:[^@/]+@)?([^/:]+):(.+)$/u.exec(remote);
+    const url = new URL(
+      remote.includes("://") ? remote : scp ? `ssh://${scp[1]}/${scp[2]}` : remote,
+    );
+    if (url.search || url.hash) return null;
+    const parts = url.pathname.slice(1).split("/").map(decodeURIComponent);
+    let organization: string | undefined;
+    if (
+      url.protocol === "ssh:" &&
+      (url.hostname === "ssh.dev.azure.com" || url.hostname === "vs-ssh.visualstudio.com")
+    ) {
+      if (parts.length !== 4 || parts.shift() !== "v3") return null;
+      organization = parts.shift();
+    } else if (url.protocol === "https:") {
+      if (url.hostname === "dev.azure.com") organization = parts.shift();
+      else {
+        organization = /^([^.]+)\.visualstudio\.com$/u.exec(url.hostname)?.[1];
+        if (!organization) return null;
+        if (parts[0]?.toLowerCase() === "defaultcollection") parts.shift();
+      }
+      if (parts.length !== 3 || parts[1] !== "_git") return null;
+      parts.splice(1, 1);
+    } else return null;
+    const [project, repository] = parts;
+    if (!organization || !project || !repository) return null;
+    if ([organization, project, repository].some((part) => /[\p{Cc}/\\]/u.test(part))) {
+      return null;
+    }
+    return {
+      organization: `https://dev.azure.com/${encodeURIComponent(organization)}`,
+      project,
+      repository,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const { process } = yield* SourceControlHost.SourceControlHost;
 
-  const execute: AzureDevOpsCli["Service"]["execute"] = (input) =>
-    process
-      .run({
-        operation: "AzureDevOpsCli.execute",
-        command: "az",
-        args: input.args,
-        cwd: input.cwd,
-        timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-        ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
-      })
-      .pipe(
-        Effect.mapError((error) =>
-          AzureDevOpsCommandFailedError.fromVcsError(
-            {
-              operation: "execute",
-              command: "az",
-              cwd: input.cwd,
-              argumentCount: input.args.length,
+  const execute: AzureDevOpsCli["Service"]["execute"] = Effect.fn("AzureDevOpsCli.execute")(
+    function* (input) {
+      let args = input.args;
+      const detectIndex = args.indexOf("--detect");
+      if (
+        args[0] !== "account" &&
+        detectIndex !== -1 &&
+        args[detectIndex + 1] === "true" &&
+        !args.some((arg) => /^(?:--organization|--org)(?:=|$)/u.test(arg))
+      ) {
+        // Windows az running in WSL cannot inspect the server's Linux checkout.
+        const config = yield* process
+          .run({
+            operation: "AzureDevOpsCli.resolveScope",
+            command: "git",
+            args: ["config", "--null", "--get-regexp", "^remote\\..*\\.url$"],
+            cwd: input.cwd,
+            env: {
+              GIT_DIR: undefined,
+              GIT_WORK_TREE: undefined,
+              GIT_COMMON_DIR: undefined,
+              GIT_INDEX_FILE: undefined,
+              GIT_OBJECT_DIRECTORY: undefined,
+              GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
             },
-            error,
+            timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+            maxOutputBytes: 64 * 1024,
+            allowNonZeroExit: true,
+          })
+          .pipe(Effect.orElseSucceed(() => null));
+        const remoteIndex = args.findIndex((arg) => /^--remote-name(?:=|$)/u.test(arg));
+        const remoteArg = args[remoteIndex];
+        const remoteName =
+          remoteIndex === -1
+            ? undefined
+            : remoteArg?.startsWith("--remote-name=")
+              ? remoteArg.slice("--remote-name=".length)
+              : (args[remoteIndex + 1] ?? "");
+        const scope =
+          config?.exitCode === 0 && !config.stdoutTruncated && !config.stdoutInvalidUtf8
+            ? checkoutScopeFromConfig(config.stdout, remoteName)
+            : null;
+        if (scope) {
+          const scoped = [...args, "--organization", scope.organization];
+          scoped[detectIndex + 1] = "false";
+          // PR-ID commands and devops invoke accept only organization scope.
+          const acceptsProject =
+            args[0] === "repos" &&
+            (args[1] === "show" ||
+              args[1] === "create" ||
+              (args[1] === "pr" && (args[2] === "list" || args[2] === "create")));
+          if (acceptsProject && !args.some((arg) => /^(?:--project|-p)(?:=|$)/u.test(arg))) {
+            scoped.push("--project", scope.project);
+          }
+          if (
+            acceptsProject &&
+            args[1] !== "create" &&
+            !args.some((arg) => /^(?:--repository|-r)(?:=|$)/u.test(arg))
+          ) {
+            scoped.push("--repository", scope.repository);
+          }
+          args = scoped;
+        }
+      }
+      return yield* process
+        .run({
+          operation: "AzureDevOpsCli.execute",
+          command: "az",
+          args,
+          cwd: input.cwd,
+          timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+          ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            AzureDevOpsCommandFailedError.fromVcsError(
+              {
+                operation: "execute",
+                command: "az",
+                cwd: input.cwd,
+                argumentCount: input.args.length,
+              },
+              error,
+            ),
           ),
-        ),
-      );
+        );
+    },
+  );
 
   const executeJson = (input: Parameters<AzureDevOpsCli["Service"]["execute"]>[0]) =>
     execute({

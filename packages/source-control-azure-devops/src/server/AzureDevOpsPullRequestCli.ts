@@ -309,7 +309,6 @@ function isReviewerName(value: string): boolean {
 export const make = Effect.gen(function* () {
   const azure = yield* AzureDevOpsCli.AzureDevOpsCli;
 
-  // The remote takes three shapes and only `az` knows how to read all of them.
   const detectArgs = ["--detect", "true"] as const;
 
   const executeJson = (input: {
