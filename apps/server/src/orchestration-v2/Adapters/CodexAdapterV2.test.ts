@@ -3510,9 +3510,23 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       completed: false,
       files: true,
     },
+    {
+      scenario: "two recovered siblings after the first completes and the second is cut",
+      restarts: 2,
+      completed: true,
+      files: true,
+      siblingState: "completed",
+    },
+    {
+      scenario: "two recovered siblings with the second held after another crash",
+      restarts: 2,
+      completed: true,
+      files: true,
+      siblingState: "queued",
+    },
   ])(
     "delivers queued steering to Codex after recovery: $scenario",
-    ({ scenario, restarts, completed, files }) =>
+    ({ scenario, restarts, completed, files, siblingState }) =>
       Effect.gen(function* () {
         const name = "restart-steering-" + scenario.replaceAll(" ", "-");
         const threadId = ThreadId.make(name);
@@ -3544,8 +3558,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               return { attachment, path };
             }),
         );
-        const completeTurn =
-          yield* Deferred.make<Effect.Effect<void, CodexError.CodexAppServerError>>();
+        const completeTurns: Array<
+          (turnId: string) => Effect.Effect<void, CodexError.CodexAppServerError>
+        > = [];
         const sent: Array<unknown> = [];
         let sessions = 0;
         const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
@@ -3615,14 +3630,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 ) =>
                   client.handleServerNotification(method, handler).pipe(
                     Effect.tap(() =>
-                      firstSession && method === "turn/completed"
-                        ? Deferred.succeed(
-                            completeTurn,
-                            handler({
-                              threadId: nativeThreadId,
-                              turn: makeCodexReplayTurn({ id: "turn-1", status: "completed" }),
-                            } as Parameters<typeof handler>[0]),
-                          )
+                      method === "turn/completed"
+                        ? Effect.sync(() => {
+                            completeTurns.push((turnId) =>
+                              handler({
+                                threadId: nativeThreadId,
+                                turn: makeCodexReplayTurn({ id: turnId, status: "completed" }),
+                              } as Parameters<typeof handler>[0]),
+                            );
+                          })
                         : Effect.void,
                     ),
                   );
@@ -3691,7 +3707,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               createdBy: "user",
               creationSource: "web",
             });
-            const started = yield* orchestrator.streamDomainEvents.pipe(
+            const started = yield* orchestrator.streamStoredEventsFrom({ threadId }).pipe(
+              Stream.map((stored) => stored.event),
               Stream.filter(
                 (event) =>
                   event.type === "provider-turn.updated" && event.payload.status === "running",
@@ -3740,7 +3757,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                       lineStart: 1,
                       lineEnd: 1,
                       text: files
-                        ? "CONTEXT_MARKER_" + index + "x".repeat(61_000)
+                        ? "CONTEXT_MARKER_" + index + (siblingState ? "" : "x".repeat(61_000))
                         : "CONTEXT_MARKER",
                     },
                   ],
@@ -3762,7 +3779,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             // No daemon is running: the steer is committed but has not reached the provider.
             assert.lengthOf(sent, 1);
             if (completed) {
-              const settled = yield* orchestrator.streamDomainEvents.pipe(
+              const settled = yield* orchestrator.streamStoredEventsFrom({ threadId }).pipe(
+                Stream.map((stored) => stored.event),
                 Stream.filter(
                   (event) => event.type === "run.updated" && event.payload.status === "waiting",
                 ),
@@ -3770,8 +3788,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 Stream.runDrain,
                 Effect.forkScoped,
               );
-              const completion = yield* Deferred.await(completeTurn);
-              yield* completion;
+              yield* completeTurns.at(-1)!("turn-1");
               yield* Fiber.join(settled);
               const finished = yield* orchestrator.getThreadProjection(threadId);
               assert.equal(finished.runs[0]?.status, "waiting");
@@ -3811,7 +3828,76 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* Effect.scoped(
             Effect.gen(function* () {
               const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-              if (restart < restarts) {
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const finishLatestTurn = Effect.gen(function* () {
+                const projection = yield* orchestrator.getThreadProjection(threadId);
+                const active = projection.runs.find(
+                  (run) => run.status === "starting" || run.status === "running",
+                );
+                assert.isDefined(active);
+                yield* orchestrator.streamStoredEventsFrom({ threadId }).pipe(
+                  Stream.filter(
+                    ({ event }) =>
+                      event.type === "provider-turn.updated" &&
+                      event.runId === active!.id &&
+                      event.payload.status === "running",
+                  ),
+                  Stream.take(1),
+                  Stream.runDrain,
+                );
+                yield* completeTurns.at(-1)!("turn-" + sent.length);
+                yield* orchestrator.streamStoredEventsFrom({ threadId }).pipe(
+                  Stream.filter(
+                    ({ event }) =>
+                      event.type === "run.updated" &&
+                      event.payload.id === active!.id &&
+                      event.payload.status === "waiting",
+                  ),
+                  Stream.take(1),
+                  Stream.runDrain,
+                );
+              });
+              if (restart < restarts && siblingState) {
+                // Settle the source checkpoint, then admit both recovered steers without starting S1.
+                assert.isTrue(yield* worker.runOnce);
+                assert.isTrue(yield* worker.runOnce);
+                const split = yield* orchestrator.getThreadProjection(threadId);
+                assert.deepEqual(
+                  split.runs.map((run) => run.status),
+                  ["completed", "starting", "queued"],
+                );
+                assert.deepEqual(
+                  split.runs.slice(1).map((run) => run.userMessageId),
+                  [MessageId.make(name + ":steer-0"), MessageId.make(name + ":steer-1")],
+                );
+                assert.lengthOf(sent, 1);
+                if (siblingState === "completed") {
+                  yield* worker.drain();
+                  yield* finishLatestTurn;
+                  const secondStarted = yield* orchestrator
+                    .streamStoredEventsFrom({ threadId })
+                    .pipe(
+                      Stream.map((stored) => stored.event),
+                      Stream.filter(
+                        (event) =>
+                          event.type === "provider-turn.updated" &&
+                          event.runId === split.runs[2]!.id &&
+                          event.payload.status === "running",
+                      ),
+                      Stream.take(1),
+                      Stream.runDrain,
+                      Effect.forkScoped,
+                    );
+                  yield* worker.drain();
+                  yield* Fiber.join(secondStarted);
+                  const running = yield* orchestrator.getThreadProjection(threadId);
+                  assert.equal(running.runs[1]?.status, "completed");
+                  assert.equal(running.providerTurns[1]?.status, "completed");
+                  assert.equal(running.providerTurns[2]?.status, "running");
+                  assert.lengthOf(sent, 3);
+                }
+                yield* snapshot(directory + "/crash-" + (restart + 1) + ".sqlite");
+              } else if (restart < restarts) {
                 // Admit the continuation, then lose the process before its provider-start effect.
                 assert.isTrue(yield* worker.runOnce);
                 const projection = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
@@ -3822,7 +3908,54 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 yield* snapshot(directory + "/crash-" + (restart + 1) + ".sqlite");
               } else {
                 yield* worker.drain();
-                if (completed) {
+                if (siblingState) {
+                  const projection = yield* orchestrator.getThreadProjection(threadId);
+                  const delivered = yield* decodeCodexTurnInput(sent.at(-1));
+                  const outbound = JSON.stringify(delivered.input);
+                  const carried = siblingState === "completed" ? 1 : 0;
+                  const excluded = 1 - carried;
+                  if (siblingState === "queued") {
+                    const queued = projection.runs.find(
+                      (run) => run.userMessageId === MessageId.make(name + ":steer-1"),
+                    );
+                    assert.equal(queued?.status, "queued");
+                    assert.isTrue(queued?.queueHeld);
+                    assert.lengthOf(sent, 2);
+                    yield* finishLatestTurn;
+                    yield* worker.drain();
+                    assert.lengthOf(sent, 2, "held S2 cannot start when S1 completes");
+                    yield* orchestrator.dispatch({
+                      type: "queue.resume",
+                      commandId: CommandId.make(name + ":resume"),
+                      threadId,
+                    });
+                    yield* worker.drain();
+                    assert.lengthOf(sent, 3);
+                    const resumed = yield* decodeCodexTurnInput(sent[2]);
+                    assert.include(JSON.stringify(resumed.input), "STEERING_MARKER_1");
+                    assert.notInclude(JSON.stringify(resumed.input), "STEERING_MARKER_0");
+                  } else {
+                    assert.lengthOf(sent, 4);
+                  }
+                  for (const marker of ["STEERING_MARKER_", "CONTEXT_MARKER_"]) {
+                    assert.include(outbound, marker + carried);
+                    assert.notInclude(outbound, marker + excluded);
+                  }
+                  assert.include(outbound, attachments[carried]!.path);
+                  assert.notInclude(outbound, attachments[excluded]!.path);
+                  assert.lengthOf(
+                    sent.filter((params) => JSON.stringify(params).includes("STEERING_MARKER_0")),
+                    1,
+                    "S1 is delivered once",
+                  );
+                  if (siblingState === "queued") {
+                    assert.lengthOf(
+                      sent.filter((params) => JSON.stringify(params).includes("STEERING_MARKER_1")),
+                      1,
+                      "S2 is delivered once after queue resume",
+                    );
+                  }
+                } else if (completed) {
                   yield* worker.drain();
                   const projection =
                     yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(threadId);
@@ -3840,6 +3973,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             }).pipe(Effect.provide(runtime())),
           );
         }
+        if (siblingState) return;
         assert.lengthOf(sent, 2);
         const delivered = yield* decodeCodexTurnInput(sent[1]);
         assert.include(JSON.stringify(delivered.input), "STEERING_MARKER");
