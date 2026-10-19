@@ -95,6 +95,8 @@ function WordFrame(props: {
   );
 }
 
+const loadSlidePainter = () => import("@betteroffice/pptx");
+
 function SlideCanvas(props: {
   readonly slide: Slide;
   readonly onError: (message: string) => void;
@@ -106,7 +108,7 @@ function SlideCanvas(props: {
     let cancelled = false;
     const images: ImageBitmap[] = [];
     void (async () => {
-      const { paintSlide } = await import("@betteroffice/pptx");
+      const { paintSlide } = await loadSlidePainter();
       const canvas = canvasRef.current;
       if (!canvas) return;
       const context = canvas.getContext("2d");
