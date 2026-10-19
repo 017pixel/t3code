@@ -7,7 +7,7 @@ import {
 } from "@t3tools/shared/composerContextReferences";
 import { markdownWithHtml, markdownWithTableBreaks } from "../lib/markdownDocument";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
-import { Platform, Share, StyleSheet, View } from "react-native";
+import { ActionSheetIOS, Platform, Share, StyleSheet, View } from "react-native";
 import {
   EnrichedMarkdownText,
   type DocumentAssetsEvent,
@@ -23,7 +23,6 @@ import { copyTextWithHaptic } from "../lib/copyTextWithHaptic";
 import {
   ENRICHED_INLINE_FILE_LINK_REGEX,
   enrichedSkillLinkRegex,
-  enrichedLinkVariantPattern,
 } from "../lib/enrichedLinkPresentation";
 
 function enrichedStyle(
@@ -194,44 +193,6 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
     },
     [onLinkPress, onFileContextMenuAction],
   );
-  const linkContextMenuItems = useMemo(
-    () =>
-      Platform.OS === "ios" && (fileContextMenu || onLinkPress)
-        ? Object.fromEntries(
-            [
-              ...new Set(
-                documentAssets.filter((asset) => asset.kind === "link").map((asset) => asset.url),
-              ),
-            ].map((url) => {
-              const shown = fileBindings.href(url);
-              const menu = (fileBindings.unverifiedRootless(url)
-                ? { title: url, actions: [{ id: "enriched-copy-link", title: "Copy link" }] }
-                : fileContextMenu?.(shown)) ?? {
-                title: url,
-                actions: [
-                  { id: "enriched-open-link", title: "Open link" },
-                  { id: "enriched-copy-link", title: "Copy link" },
-                  { id: "enriched-share-link", title: "Share link" },
-                ],
-              };
-              // Native dispatches through the latest callback table. An obsolete menu
-              // must lose its dispatch key rather than inherit another file or scope.
-              const identity = enrichedLinkVariantPattern(
-                JSON.stringify([fileBindings.menuKey, shown, menu.title, menu.actions]),
-              );
-              return [
-                `${enrichedLinkVariantPattern(url)}(?=${identity}|$)`,
-                menu.actions.map((action) => ({
-                  text: action.title,
-                  disabled: "disabled" in action && action.disabled,
-                  onPress: () => performMenuAction(shown, action.id),
-                })),
-              ];
-            }),
-          )
-        : undefined,
-    [documentAssets, fileContextMenu, onLinkPress, performMenuAction, fileBindings],
-  );
   const selectionClipboard = useMemo(() => {
     const fragment = decodeComposerContextFragment(props.contextClipboardFragment);
     if (!fragment) return undefined;
@@ -286,20 +247,46 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   );
   const renderMarkdown = (openAndroidMenu?: () => void) => {
     const onLinkLongPress =
-      Platform.OS === "android" && props.fileContextMenu
+      (Platform.OS === "ios" && (fileContextMenu || onLinkPress)) ||
+      (Platform.OS === "android" && fileContextMenu)
         ? ({ url }: { url: string }) => {
             const shown = fileBindings.href(url);
             const menu = (fileBindings.unverifiedRootless(url)
               ? { title: url, actions: [{ id: "enriched-copy-link", title: "Copy link" }] }
-              : props.fileContextMenu?.(shown)) ?? {
+              : fileContextMenu?.(shown)) ?? {
               title: url,
               actions: [
                 { id: "enriched-open-link", title: "Open link" },
                 { id: "enriched-copy-link", title: "Copy link" },
+                ...(Platform.OS === "ios"
+                  ? [{ id: "enriched-share-link", title: "Share link" }]
+                  : []),
               ],
             };
-            setActiveMenu({ url: shown, menu, isCurrent: fileBindings.captureOwner() });
-            openAndroidMenu?.();
+            const isCurrent = fileBindings.captureOwner();
+            if (Platform.OS === "ios") {
+              // The fork's custom menu dispatches against its latest table and exposes
+              // no opening event. An action sheet retains this opening's exact callback.
+              ActionSheetIOS.showActionSheetWithOptions(
+                {
+                  title: menu.title,
+                  options: [...menu.actions.map((action) => action.title), "Cancel"],
+                  cancelButtonIndex: menu.actions.length,
+                  disabledButtonIndices: menu.actions.flatMap((action, index) =>
+                    "disabled" in action && action.disabled ? [index] : [],
+                  ),
+                  userInterfaceStyle: themeAppearance,
+                },
+                (index) => {
+                  const action = menu.actions[index];
+                  if (isCurrent() && action && !("disabled" in action && action.disabled))
+                    performMenuAction(shown, action.id);
+                },
+              );
+            } else {
+              setActiveMenu({ url: shown, menu, isCurrent });
+              openAndroidMenu?.();
+            }
           }
         : undefined;
 
@@ -350,7 +337,6 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
               : undefined
           }
           onLinkLongPress={onLinkLongPress}
-          linkContextMenuItems={linkContextMenuItems}
           linkPillContent={linkPillContent}
         />
       </View>

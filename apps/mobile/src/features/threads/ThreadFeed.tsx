@@ -1753,7 +1753,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   useEffect(() => {
     setExpandedVideo(null);
     setExpandedFile(null);
-  }, [props.environmentId, props.threadId, props.contentPresentation.kind, fileLinks.scope]);
+  }, [props.environmentId, props.threadId, props.workspaceRoot, props.contentPresentation.kind]);
   const horizontalPadding = props.layoutVariant === "split" ? 20 : 16;
   const contentLeftInset = props.contentSideInsets?.left ?? 0;
   const contentRightInset = props.contentSideInsets?.right ?? 0;

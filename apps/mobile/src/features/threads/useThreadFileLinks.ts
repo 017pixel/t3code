@@ -54,13 +54,13 @@ export function useThreadFileLinks(ref: ScopedThreadRef, cwd: string | null) {
       generation.current++;
     },
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Leaving this scope invalidates delayed native actions.
-    [environmentId, threadId, cwd, connection, enabled],
+    [environmentId, threadId, cwd, connection, canRead, enabled],
   );
   const capture = () => {
     const current = generation.current;
     return () => generation.current === current;
   };
-  const scope = { environmentId, threadId, cwd, connection, enabled };
+  const scope = { environmentId, threadId, cwd, connection, canRead, enabled };
   return { ...scope, index, capture, scope };
 }
 
@@ -72,13 +72,14 @@ export function useThreadFileBindings(assets: ReadonlyArray<{ readonly url: stri
   const context = useContext(ThreadFileLinksContext);
   const scope = context?.scope;
   const captureScope = context?.capture;
-  const [menuScope, setMenuScope] = useState({ scope, revision: 0 });
-  let menuRevision = menuScope.revision;
-  if (menuScope.scope !== scope) {
-    menuRevision++;
-    setMenuScope({ scope, revision: menuRevision });
-  }
-  const menuKey = JSON.stringify([scope?.environmentId, scope?.threadId, scope?.cwd, menuRevision]);
+  const ownerGeneration = useRef(0);
+  useLayoutEffect(
+    () => () => {
+      ownerGeneration.current++;
+    },
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A menu may outlive this document or its owner, but keeps its opening selection.
+    [scope],
+  );
   const bindingsAtom = Atom.make((get) => {
     const selected = new Map<string, string>();
     if (!context?.enabled) return selected;
@@ -135,6 +136,10 @@ export function useThreadFileBindings(assets: ReadonlyArray<{ readonly url: stri
     context?.cwd === null &&
     !selected.has(url) &&
     resolveThreadFilePathCandidate(url, null, context.index) !== null;
-  const captureOwner = () => (scope && captureScope ? captureScope() : () => true);
-  return { href, unverifiedRootless, capture, captureOwner, menuKey };
+  const captureOwner = () => {
+    const isScopeCurrent = scope && captureScope ? captureScope() : null;
+    const current = ownerGeneration.current;
+    return () => ownerGeneration.current === current && (isScopeCurrent?.() ?? true);
+  };
+  return { href, unverifiedRootless, capture, captureOwner };
 }
