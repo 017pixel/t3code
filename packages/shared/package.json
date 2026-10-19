@@ -467,6 +467,10 @@
       "types": "./src/markdownLinks.ts",
       "import": "./src/markdownLinks.ts"
     },
+    "./threadFilePaths": {
+      "types": "./src/threadFilePaths.ts",
+      "import": "./src/threadFilePaths.ts"
+    },
     "./fileLinks": {
       "types": "./src/fileLinks.ts",
       "import": "./src/fileLinks.ts"

@@ -1,3 +1,6 @@
+import { MessageId, ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import { collectThreadFilePaths, createThreadFilePathIndex } from "./threadFilePaths.ts";
 import { splitFilePathPosition } from "./fileLinks.ts";
 import { parseFileUrlHref } from "./fileLinks.ts";
 import { workspaceRelativeFilePath, fileBasename } from "./path.ts";
@@ -5,6 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   extractMarkdownLinkHrefs,
   resolveMarkdownFileLinkTarget,
+  resolveThreadFilePathCandidate,
   isWindowsDrivePathHref,
 } from "./markdownLinks.ts";
 
@@ -341,5 +345,203 @@ describe("resolveMarkdownFileLinkTarget", () => {
     expect(resolveMarkdownFileLinkTarget("file:///c%3A/Users/x/shot.png")).toBe(
       "c:/Users/x/shot.png",
     );
+  });
+});
+
+describe("thread-evidenced file candidates", () => {
+  const cwd = "/repos/app-a";
+  const itemBase = (ordinal: number) => ({
+    id: TurnItemId.make(`file-evidence-${ordinal}`),
+    threadId: ThreadId.make("file-evidence-thread"),
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal,
+    status: "completed" as const,
+    title: null,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: DateTime.makeUnsafe("2026-10-19T00:00:00.000Z"),
+  });
+
+  it("suggests files from visible tool evidence without changing normal link resolution", () => {
+    const items = [
+      {
+        ...itemBase(0),
+        type: "file_change",
+        fileName: "/repos/app-a/.worktrees/feature-b/docs/guide.md",
+        changes: [{ operation: "update", path: "/repos/app-b/src/api/rules/categories.ts" }],
+      },
+      {
+        ...itemBase(1),
+        type: "dynamic_tool",
+        toolName: "Read",
+        input: { file_path: "/notes/meeting/summary.md" },
+        output: { path: "/not-evidence/tool-output.md" },
+      },
+      {
+        ...itemBase(2),
+        type: "dynamic_tool",
+        toolName: "view_image",
+        input: null,
+        viewedImagePath: "/tmp/images/shot.png",
+      },
+      {
+        ...itemBase(3),
+        type: "file_search",
+        results: [
+          { fileName: "/repos/app-b/src/api/rules/categories.ts" },
+          { fileName: "/repos/app-b/tests/rules.test.ts", preview: "/not-evidence/search.txt" },
+        ],
+      },
+      {
+        ...itemBase(4),
+        type: "command_execution",
+        input: "cd /notes/meeting-42 && ls raw",
+        output: "/not-evidence/command-output.md",
+      },
+      {
+        ...itemBase(5),
+        type: "assistant_message",
+        messageId: MessageId.make("file-evidence-reply"),
+        text: "Open /not-evidence/prose.md",
+        streaming: false,
+      },
+    ] satisfies OrchestrationV2TurnItem[];
+    const paths = collectThreadFilePaths(items, cwd);
+    expect([...paths].sort()).toEqual(
+      [
+        "/notes/meeting-42",
+        "/notes/meeting-42/raw",
+        "/notes/meeting/summary.md",
+        "/repos/app-a/.worktrees/feature-b/docs/guide.md",
+        "/repos/app-b/src/api/rules/categories.ts",
+        "/repos/app-b/tests/rules.test.ts",
+        "/tmp/images/shot.png",
+      ].sort(),
+    );
+
+    const index = createThreadFilePathIndex(paths);
+    for (const [href, candidate] of [
+      ["rules/categories.ts:2", "/repos/app-b/src/api/rules/categories.ts:2"],
+      ["docs/guide.md", "/repos/app-a/.worktrees/feature-b/docs/guide.md"],
+      ["raw/recording.mp3", "/notes/meeting-42/raw/recording.mp3"],
+    ] as const) {
+      expect(resolveThreadFilePathCandidate(href, cwd, index), href).toBe(candidate);
+    }
+    expect(resolveMarkdownFileLinkTarget("rules/categories.ts:2", cwd)).toBe(
+      "/repos/app-a/rules/categories.ts:2",
+    );
+    expect(resolveMarkdownFileLinkTarget("docs/guide.md", cwd, "/repos/app-a/preview")).toBe(
+      "/repos/app-a/preview/docs/guide.md",
+    );
+    expect(resolveThreadFilePathCandidate("raw/recording.mp3", null, index)).toBe(
+      "/notes/meeting-42/raw/recording.mp3",
+    );
+    expect(resolveMarkdownFileLinkTarget("raw/recording.mp3")).toBeNull();
+  });
+
+  it("requires one whole-segment match and declines ambiguous or speculative targets", () => {
+    const cases = [
+      {
+        href: "./docs/guide.md:12:3",
+        paths: ["/other/docs/guide.md", "/elsewhere/docs/notes.md"],
+        expected: "/other/docs/guide.md:12:3",
+      },
+      {
+        href: "docs/guide.md#L12C3",
+        paths: ["C:\\Work\\Docs\\Guide.md", "c:/work/docs/guide.md"],
+        expected: "C:\\Work\\Docs\\Guide.md:12:3",
+      },
+      { href: "guide.md", paths: ["/other/docs/guide.md"], expected: null },
+      { href: "../docs/guide.md", paths: ["/other/docs/guide.md"], expected: null },
+      { href: "~/docs/guide.md", paths: ["/other/docs/guide.md"], expected: null },
+      { href: "docs/../guide.md", paths: ["/other/docs/../guide.md"], expected: null },
+      { href: "/other/docs/guide.md", paths: ["/other/docs/guide.md"], expected: null },
+      { href: "docs/guide.md", paths: ["/other/mydocs/guide.md"], expected: null },
+      { href: "DOCS/guide.md", paths: ["/other/docs/guide.md"], expected: null },
+      { href: "docs/guide.md", paths: ["/repos/app-a/docs/guide.md"], expected: null },
+      { href: "docs/guide.md", paths: ["/repos/app-a/packages/web/docs/notes.md"], expected: null },
+      {
+        href: "docs/guide.md",
+        paths: ["/repos/app-a/docs/notes.md", "/other/docs/notes.md"],
+        expected: null,
+      },
+      {
+        href: "docs/guide.md",
+        paths: ["/other/docs/notes.md"],
+        expected: "/other/docs/guide.md",
+      },
+      {
+        href: "docs/guide.md",
+        paths: ["/other/docs/notes.md", "/elsewhere/docs/notes.md"],
+        expected: null,
+      },
+      {
+        href: "docs/guide.md",
+        paths: [
+          "/repos/app-a/one/docs/guide.md",
+          "/repos/app-a/two/docs/guide.md",
+          "/other/docs/notes.md",
+        ],
+        expected: null,
+      },
+    ];
+    for (const { href, paths, expected } of cases) {
+      expect(
+        resolveThreadFilePathCandidate(href, cwd, createThreadFilePathIndex(paths)),
+        JSON.stringify({ href, paths }),
+      ).toBe(expected);
+    }
+  });
+
+  it("uses literal same-command cwd and quoted paths without inheriting or guessing shell state", () => {
+    const items = [
+      'cd "../app b" && cat "docs/my guide.md"',
+      "cat src/local.ts",
+      "cd ../meeting/raw && ls",
+      'cat "/notes/meeting 42/transcript.md"',
+      'type "C:\\Work\\Docs\\Guide.md"',
+      "cd /other | cat pipe/file.ts",
+      "cd /other & cat background/file.ts",
+      "cd /other || cat failure/file.ts",
+      "cd /other; cd; cat unknown/home.ts",
+      "cd /other; popd; cat unknown/stack.ts",
+      "cd $DEST && cat unknown/variable.ts",
+    ].map(
+      (input, ordinal) =>
+        ({
+          ...itemBase(ordinal),
+          type: "command_execution" as const,
+          input,
+        }) satisfies OrchestrationV2TurnItem,
+    );
+    const paths = collectThreadFilePaths(items, cwd);
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        "/repos/app b",
+        "/repos/app b/docs/my guide.md",
+        "/repos/app-a/src/local.ts",
+        "/repos/meeting/raw",
+        "/notes/meeting 42/transcript.md",
+        "C:\\Work\\Docs\\Guide.md",
+      ]),
+    );
+    expect(paths).not.toContain("/repos/app b/src/local.ts");
+    expect(
+      paths.filter(
+        (path) =>
+          path.startsWith("/other/pipe/") ||
+          path.startsWith("/other/background/") ||
+          path.startsWith("/other/failure/") ||
+          path.includes("/unknown/"),
+      ),
+    ).toEqual([]);
+    expect(
+      resolveThreadFilePathCandidate("raw/recording.mp3", cwd, createThreadFilePathIndex(paths)),
+    ).toBe("/repos/meeting/raw/recording.mp3");
   });
 });

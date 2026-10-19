@@ -6,6 +6,7 @@ import {
   resolvePathLinkTarget,
   splitFilePathPosition,
 } from "./fileLinks.ts";
+import { matchThreadFilePath, type ThreadFilePathIndex } from "./threadFilePaths.ts";
 
 const RELATIVE_PATH_PREFIX_PATTERN = /^(~\/|\.{1,2}\/)/;
 
@@ -393,4 +394,16 @@ export function resolveMarkdownFileLinkTarget(
 
 export function isWindowsDrivePathHref(href: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(safeDecodeURIComponent(href));
+}
+
+/** An unverified suggestion for chat links; document-relative links keep their normal resolver. */
+export function resolveThreadFilePathCandidate(
+  href: string,
+  cwd: string | null | undefined,
+  index: ThreadFilePathIndex,
+): string | null {
+  const target = parseMarkdownFileLink(href);
+  if (!target || !isRelativeFilePath(target.path)) return null;
+  const path = matchThreadFilePath(target.path, cwd, index);
+  return path === null ? null : formatFilePathPosition({ ...target, path });
 }
