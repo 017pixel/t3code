@@ -3,6 +3,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { assertFailure } from "@effect/vitest/utils";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+import * as PlatformError from "effect/PlatformError";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -58,6 +63,102 @@ const readKeybindingsConfig = (configPath: string) =>
   });
 
 it.layer(NodeServices.layer)("keybindings", (it) => {
+  it.effect.each(["failure", "end"] as const)(
+    "recovers missed keybindings after watch %s and a transient recovery read failure",
+    (termination) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const attached = yield* Deferred.make<void>();
+        const disconnect = yield* Deferred.make<void>();
+        const disconnected = yield* Deferred.make<void>();
+        const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+        const changes: Array<Keybindings.KeybindingsChangeEvent> = [];
+        let watches = 0;
+        let configPath = "";
+        let failRead = false;
+        let failedReads = 0;
+        const unavailable = PlatformError.systemError({
+          _tag: "Unknown",
+          module: "FileSystem",
+          method: "watch",
+          description: "test watcher disconnected",
+        });
+        const controlled = FileSystem.make({
+          ...fs,
+          watch: () =>
+            Stream.unwrap(
+              Effect.gen(function* () {
+                watches += 1;
+                if (watches === 1) {
+                  yield* Deferred.succeed(attached, undefined);
+                  return Stream.fromEffect(Deferred.await(disconnect)).pipe(
+                    Stream.flatMap(() =>
+                      termination === "failure" ? Stream.fail(unavailable) : Stream.empty,
+                    ),
+                    Stream.ensuring(Deferred.succeed(disconnected, undefined)),
+                  );
+                }
+                // An edit at lazy attachment exposes recovery reads done too early.
+                yield* fs.writeFileString(
+                  configPath,
+                  '[{"key":"ctrl+shift+y","command":"terminal.toggle"}]',
+                );
+                return Stream.fromQueue(events);
+              }),
+            ),
+          readFileString: (path, encoding) =>
+            Effect.suspend(() => {
+              if (path === configPath && failRead) {
+                failRead = false;
+                failedReads += 1;
+                return Effect.fail(unavailable);
+              }
+              return fs.readFileString(path, encoding);
+            }),
+        });
+        yield* Effect.gen(function* () {
+          const config = yield* ServerConfig.ServerConfig;
+          configPath = config.keybindingsConfigPath;
+          const service = yield* Keybindings.Keybindings;
+          yield* service.streamChanges.pipe(
+            Stream.runForEach((change) =>
+              Effect.sync(() => {
+                changes.push(change);
+              }),
+            ),
+            Effect.forkScoped({ startImmediately: true }),
+          );
+          yield* service.start;
+          yield* Deferred.await(attached);
+          yield* Deferred.succeed(disconnect, undefined);
+          yield* Deferred.await(disconnected);
+          yield* fs.writeFileString(
+            configPath,
+            '[{"key":"ctrl+shift+x","command":"terminal.toggle"}]',
+          );
+          failRead = true;
+          yield* TestClock.adjust("1 minute");
+          assert.equal(failedReads, 1);
+          assert.isAtLeast(changes.length, 1, "recovery must publish without another file event");
+          assert.isTrue(changes.at(-1)!.keybindings.some((rule) => rule.shortcut.key === "y"));
+
+          yield* fs.writeFileString(
+            configPath,
+            '[{"key":"ctrl+shift+z","command":"terminal.toggle"}]',
+          );
+          yield* Queue.offer(events, { _tag: "Update", path: configPath });
+          yield* TestClock.adjust("1 second");
+          assert.isTrue(changes.at(-1)!.keybindings.some((rule) => rule.shortcut.key === "z"));
+        }).pipe(
+          Effect.provide(
+            layerKeybindings().pipe(
+              Layer.provide(Layer.succeed(FileSystem.FileSystem, controlled)),
+            ),
+          ),
+        );
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("parses shortcuts including plus key", () =>
     Effect.sync(() => {
       assert.deepEqual(Keybindings.parseKeybindingShortcut("mod+j"), {
