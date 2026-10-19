@@ -240,6 +240,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           return entry === undefined ? [] : [entry];
         }),
         nextCursor: end < runs.length ? end : null,
+        held: runs.some((run) => run.queueHeld === true),
       };
     }),
   ),
@@ -263,6 +264,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       runId: input.queuedRunId,
       text: input.text,
     })),
+  ),
+  t3_queue_resume: writesThread((input) =>
+    dispatch(input.threadId, (common) => ({ ...common, type: "queue.resume" })),
   ),
   t3_queue_cancel: writesThread((input) =>
     dispatch(input.threadId, (common) => ({

@@ -209,7 +209,8 @@ to a steer, or remove it.
 If you stop the agent or the server restarts, queued messages keep their order and are held.
 Press **Resume** in an empty composer on web and desktop, or **Resume queue** on mobile, to
 continue. Sending a new message also resumes the queue, unless it steers a turn that is already
-running. You can edit, reorder, or remove held messages without starting them.
+running. Messages from agents and scheduled tasks leave it held, but you can ask an agent to resume
+it. You can edit, reorder, or remove held messages without starting them.
 
 The pencil on a queued row opens that message in the composer for editing. The original message
 stays in the queue until you save, and its row is highlighted while you edit. The message's

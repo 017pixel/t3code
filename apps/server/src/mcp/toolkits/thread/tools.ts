@@ -89,6 +89,10 @@ const QueueListTool = Tool.make("t3_queue_list", {
   success: Schema.Struct({
     items: Schema.Array(queueEntry),
     nextCursor: Schema.NullOr(NonNegativeInt),
+    held: Schema.Boolean.annotate({
+      description:
+        "True when a stop, an interruption, a restart or a failure holds the queue: nothing in it starts until t3_queue_resume or the user resumes it.",
+    }),
   }),
 })
   .annotate(Tool.Readonly, true)
@@ -125,6 +129,13 @@ const QueuePromoteTool = Tool.make("t3_queue_promote_to_steer", {
   description:
     "Deliver a queued message as steering to the specified active run. Existing provider and run-state rules apply.",
   parameters: Schema.Struct({ ...queueTarget, targetRunId: RunId }),
+}).annotate(Tool.Destructive, true);
+
+const QueueResumeTool = Tool.make("t3_queue_resume", {
+  ...commandTool,
+  description:
+    "Resume a thread's held queue, so its next queued message starts once the thread is idle. A stop, an interruption, a restart or a failure holds the queue, and a message from an agent does not release it. t3_queue_list reports whether it is held. Omit threadId for this thread.",
+  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
 }).annotate(Tool.Destructive, true);
 
 const requestTarget = { threadId: Schema.optional(ThreadId), requestId: RuntimeRequestId };
@@ -289,4 +300,5 @@ export const ThreadToolkit = Toolkit.make(
   QueueCancelTool,
   QueueReorderTool,
   QueuePromoteTool,
+  QueueResumeTool,
 );

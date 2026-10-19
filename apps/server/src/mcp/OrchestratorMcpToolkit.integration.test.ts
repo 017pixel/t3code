@@ -1262,7 +1262,9 @@ describe("orchestrator MCP toolkit", () => {
               message: "The thread was not found.",
             });
             expect(missingThreadQueue.structuredContent).toBeUndefined();
-            expect(validateQueue({ items: "invalid", nextCursor: null }).valid).toBe(false);
+            expect(validateQueue({ items: "invalid", nextCursor: null, held: false }).valid).toBe(
+              false,
+            );
             const missingThreadRead = yield* invoke("t3_thread_read", {
               threadId: missingThreadId,
             });
@@ -1274,6 +1276,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(queueSecondPage.structuredContent).toEqual({
               items: [{ queuedRunId: queuedUserRun.id, text: "🙂".repeat(1000), truncated: true }],
               nextCursor: null,
+              held: false,
             });
             const queueRead = yield* invoke("t3_queue_read", { queuedRunId: queuedUserRun.id });
             expect(queueRead.structuredContent).toEqual({

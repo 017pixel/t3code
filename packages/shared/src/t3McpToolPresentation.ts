@@ -36,6 +36,7 @@ export type T3McpToolSummaryAction =
   | "queue-cancel"
   | "queue-reorder"
   | "queue-steer"
+  | "queue-resume"
   | "question-list"
   | "question-read"
   | "question-respond"
@@ -275,6 +276,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "queue-cancel",
   ),
   t3_queue_reorder: tool(["Reorder", "Reordering", "Reordered", "a queued run"], "queue-reorder"),
+  t3_queue_resume: tool(["Resume", "Resuming", "Resumed", "the queue"], "queue-resume"),
   t3_queue_promote_to_steer: tool(
     ["Steer with", "Steering with", "Requested steering with", "a queued message"],
     "queue-steer",

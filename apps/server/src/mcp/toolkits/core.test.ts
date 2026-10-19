@@ -181,6 +181,62 @@ it.effect("checks capability through the production registration", () =>
   ),
 );
 
+it.effect("shows an agent a held queue, which it can resume", () => {
+  const worker = ThreadId.make("mcp-core-worker");
+  const dispatched: Array<string> = [];
+  const shell = McpToolAccessTestkit.liveThreadShell(worker, { activeRunId: null });
+  // Its one queued message waits behind a Stop.
+  const projection = {
+    ...McpToolAccessTestkit.idleThreadProjection(shell),
+    runs: [
+      {
+        id: RunId.make("run:held"),
+        status: "queued",
+        queueHeld: true,
+        ordinal: 1,
+        userMessageId: "message:held",
+      },
+    ],
+    messages: [{ id: "message:held", text: "Next step." }],
+  } as never;
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (name: string, args: Record<string, unknown>) =>
+      server
+        .callTool({ name, arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const listed = yield* call("t3_queue_list", { threadId: worker });
+    expect(listed.structuredContent).toMatchObject({
+      items: [{ queuedRunId: "run:held", text: "Next step." }],
+      held: true,
+    });
+    const resumed = yield* call("t3_queue_resume", { threadId: worker });
+    expect(resumed.isError).toBe(false);
+    expect(dispatched).toEqual([`queue.resume ${worker}`]);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+            getProjectThreadRecords: () => Effect.succeed(projection),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(`${command.type} ${"threadId" in command ? command.threadId : ""}`);
+                return { sequence: 1, storedEvents: [] } as never;
+              }),
+          }),
+        ),
+      ),
+    ),
+  );
+});
+
 it.effect("returns a bounded public failure without serializing storage causes", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
