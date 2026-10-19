@@ -16,18 +16,18 @@ export const refreshPushedPullRequests = Effect.fn("refreshPushedPullRequests")(
       const engine = yield* OrchestratorV2.OrchestratorV2;
       const thread = yield* engine.getThreadShell(input.threadId);
       if (thread !== null) {
-        yield* pullRequests.refreshAfterTurn(thread.projectId);
+        yield* pullRequests.refreshAfterTurn(thread.projectId, { immediate: true });
         return;
       }
     }
     if (input.projectId !== undefined) {
-      yield* pullRequests.refreshAfterTurn(input.projectId);
+      yield* pullRequests.refreshAfterTurn(input.projectId, { immediate: true });
       return;
     }
     const projects = yield* (yield* ProjectStore.ProjectStoreV2).listShells();
     yield* Effect.forEach(
       projects.filter((project) => project.workspaceRoot === input.cwd),
-      (project) => pullRequests.refreshAfterTurn(project.id),
+      (project) => pullRequests.refreshAfterTurn(project.id, { immediate: true }),
       { discard: true },
     );
   },

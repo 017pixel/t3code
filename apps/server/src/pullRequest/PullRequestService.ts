@@ -203,7 +203,10 @@ export class PullRequestService extends Context.Service<
       input: PullRequestReportStateInput,
     ) => Effect.Effect<void, PullRequestError>;
     readonly subscribeRefreshes: Stream.Stream<number>;
-    readonly refreshAfterTurn: (projectId: ProjectId) => Effect.Effect<void>;
+    readonly refreshAfterTurn: (
+      projectId: ProjectId,
+      options?: { readonly immediate: true },
+    ) => Effect.Effect<void>;
     readonly detail: (input: PullRequestRef) => Effect.Effect<PullRequestDetail, PullRequestError>;
     readonly preview: (
       input: PullRequestRef,
@@ -1934,7 +1937,7 @@ export const make = Effect.gen(function* () {
                     Effect.ensuring(
                       input.stackNumber === undefined
                         ? Effect.void
-                        : refreshAfterTurn(project.project.id),
+                        : refreshAfterTurn(project.project.id, { immediate: true }),
                     ),
                     Effect.mapError(toPullRequestError("runAction")),
                     Effect.as(
@@ -3223,8 +3226,16 @@ export const make = Effect.gen(function* () {
     }).pipe(Effect.interruptible, Effect.forkIn(scope));
   }).pipe(Effect.uninterruptible);
 
-  const refreshAfterTurn: PullRequestService["Service"]["refreshAfterTurn"] = (projectId) =>
-    refreshListingsAfterTurn.pipe(
+  const refreshAfterTurn: PullRequestService["Service"]["refreshAfterTurn"] = (
+    projectId,
+    options,
+  ) =>
+    (options?.immediate
+      ? Effect.sync(() => {
+          listingsEpoch = ++epochCounter;
+        })
+      : refreshListingsAfterTurn
+    ).pipe(
       Effect.andThen(
         Effect.suspend(() => {
           const projectEpoch = ++epochCounter;
