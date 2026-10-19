@@ -9,6 +9,10 @@ import {
   type OfficeWorkerResult,
 } from "./officePreviewProtocol";
 
+import { PREVIEW_PAGE_ROWS } from "./largeTextProtocol";
+
+let workbook: string[][][] = [];
+
 let presentation: PresentationHandle | null = null;
 
 function reply(result: OfficeWorkerResult) {
@@ -17,7 +21,7 @@ function reply(result: OfficeWorkerResult) {
 
 // Stream each entry before handing it to an engine. A tiny compressed archive
 // must not turn into an unbounded allocation on the UI thread.
-async function boundedArchive(bytes: ArrayBuffer) {
+async function boundedArchive(bytes: ArrayBuffer, spreadsheet: boolean) {
   if (bytes.byteLength > OFFICE_PREVIEW_MAX_BYTES)
     throw new Error("Preview limited to files under 50 MB.");
   const source = await JSZip.loadAsync(bytes).catch(() => {
@@ -43,8 +47,10 @@ async function boundedArchive(bytes: ArrayBuffer) {
           total += chunk.length;
           length += chunk.length;
           if (
-            total > OFFICE_PREVIEW_MAX_BYTES ||
-            (entry.name.endsWith(".xml") && length > 8 * 1024 * 1024)
+            total > (spreadsheet ? 128 * 1024 * 1024 : OFFICE_PREVIEW_MAX_BYTES) ||
+            total > Math.max(bytes.byteLength * 200, 8 * 1024 * 1024) ||
+            (entry.name.endsWith(".xml") &&
+              length > (spreadsheet ? 64 * 1024 * 1024 : 8 * 1024 * 1024))
           ) {
             stream.pause();
             reject(new Error("The expanded document is too large to preview safely."));
@@ -66,6 +72,17 @@ async function boundedArchive(bytes: ArrayBuffer) {
 }
 
 async function handle(input: OfficeWorkerRequest) {
+  if (input.type === "sheet-page") {
+    const rows = workbook[input.sheet];
+    if (!rows) throw new Error("This sheet is unavailable.");
+    reply({
+      type: "sheet-page",
+      sheet: input.sheet,
+      index: input.index,
+      rows: rows.slice(input.index * PREVIEW_PAGE_ROWS, (input.index + 1) * PREVIEW_PAGE_ROWS),
+    });
+    return;
+  }
   if (input.type === "slide") {
     if (!presentation) throw new Error("The presentation is unavailable.");
     const frame = presentation.layoutSlide(input.index);
@@ -95,7 +112,7 @@ async function handle(input: OfficeWorkerRequest) {
     reply({ type: "slide", index: input.index, frame, images, text });
     return;
   }
-  const archive = await boundedArchive(input.bytes);
+  const archive = await boundedArchive(input.bytes, input.kind === "xlsx");
   const root =
     input.kind === "docx"
       ? "word/document.xml"
@@ -109,26 +126,50 @@ async function handle(input: OfficeWorkerRequest) {
     reply({ type: "docx", bytes });
   } else if (input.kind === "xlsx") {
     const { default: readXlsxFile } = await import("read-excel-file/universal");
+    let cells = 0;
+    for (const entry of Object.values(archive.files)) {
+      if (!/^xl\/worksheets\/[^/]+\.xml$/.test(entry.name)) continue;
+      const xml = await entry.async("string");
+      let maxRow = 0;
+      let maxColumn = 0;
+      for (const cell of xml.matchAll(/<c\b[^>]*\br=["']([A-Z]+)(\d+)["']/g)) {
+        cells++;
+        maxRow = Math.max(maxRow, Number(cell[2]));
+        let column = 0;
+        for (const letter of cell[1]!) column = column * 26 + letter.charCodeAt(0) - 64;
+        maxColumn = Math.max(maxColumn, column);
+      }
+      if (
+        maxRow > OFFICE_PREVIEW_MAX_ROWS ||
+        maxColumn > OFFICE_PREVIEW_MAX_COLUMNS ||
+        maxRow * maxColumn > 8_000_000 ||
+        cells > 2_000_000
+      )
+        throw new Error(
+          "This workbook exceeds the preview limit: 250,000 rows, 1,024 columns, 2 million cells or 8 million grid positions.",
+        );
+    }
     const sheets = await readXlsxFile(bytes);
     if (sheets.length === 0 || sheets.length > 100)
       throw new Error("This workbook has no readable sheets or too many sheets to preview.");
+    workbook = sheets.map(({ data }) =>
+      data.slice(0, OFFICE_PREVIEW_MAX_ROWS).map((row) => {
+        let end = Math.min(row.length, OFFICE_PREVIEW_MAX_COLUMNS);
+        while (end > 0 && row[end - 1] === null) end--;
+        return row
+          .slice(0, end)
+          .map((cell) =>
+            cell === null ? "" : cell instanceof Date ? cell.toLocaleDateString() : String(cell),
+          );
+      }),
+    );
     reply({
       type: "xlsx",
-      sheets: sheets.map(({ sheet, data }) => ({
+      sheets: sheets.map(({ sheet, data }, index) => ({
         name: sheet,
-        rows: data
-          .slice(0, OFFICE_PREVIEW_MAX_ROWS)
-          .map((row) =>
-            row
-              .slice(0, OFFICE_PREVIEW_MAX_COLUMNS)
-              .map((cell) =>
-                cell === null
-                  ? ""
-                  : cell instanceof Date
-                    ? cell.toLocaleDateString()
-                    : String(cell),
-              ),
-          ),
+        rows: workbook[index]!.slice(0, PREVIEW_PAGE_ROWS),
+        rowCount: workbook[index]!.length,
+        columns: workbook[index]!.reduce((columns, row) => Math.max(columns, row.length), 1),
         truncated:
           data.length > OFFICE_PREVIEW_MAX_ROWS ||
           data.some((row) => row.length > OFFICE_PREVIEW_MAX_COLUMNS),

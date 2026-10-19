@@ -3,6 +3,8 @@ import type { OfficePreviewKind } from "@t3tools/shared/filePreview";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import VirtualTablePreview from "./VirtualTablePreview";
+
 import { useTheme } from "~/hooks/useTheme";
 
 import { FileSurfaceAction, FileSurfaceLoading, FileSurfaceNotice } from "./fileSurfaceChrome";
@@ -166,6 +168,8 @@ export default function OfficeViewer(props: {
 }) {
   const [error, setError] = useState<string | null>(null);
   const [word, setWord] = useState<Awaited<ReturnType<typeof renderWord>> | null>(null);
+  const [sheetPages, setSheetPages] = useState(new Map<string, string[][]>());
+  const pendingPages = useRef(new Set<string>());
   const [workbook, setWorkbook] = useState<Workbook | null>(null);
   const [count, setCount] = useState(0);
   const [page, setPage] = useState(0);
@@ -214,6 +218,15 @@ export default function OfficeViewer(props: {
         if (timerRef.current) clearTimeout(timerRef.current);
         setWorkbook(result);
         setCount(result.sheets.length);
+      } else if (result.type === "sheet-page") {
+        const key = `${result.sheet}:${result.index}`;
+        pendingPages.current.delete(key);
+        setSheetPages((old) => {
+          const next = new Map(old);
+          next.set(key, result.rows);
+          if (next.size > 12) next.delete(next.keys().next().value!);
+          return next;
+        });
       } else if (result.type === "pptx") {
         void new FontFace("Carlito", result.font)
           .load()
@@ -312,38 +325,21 @@ export default function OfficeViewer(props: {
         <>
           <FileSurfaceNotice>
             Cell values only. Charts, images, and formatting are not shown.
-            {sheet.truncated ? " Limited to 500 rows and 50 columns." : ""}
+            {sheet.truncated ? " Limited to 250,000 rows and 1,024 columns." : ""}
           </FileSurfaceNotice>
-          <div className="scrollbar-gutter-both min-h-0 flex-1 overflow-auto">
-            <table
-              aria-label={`${props.name}: ${sheet.name}`}
-              className="min-w-full border-separate border-spacing-0 text-xs"
-            >
-              <tbody>
-                {sheet.rows.map((row, index) => (
-                  <tr key={index} className="even:bg-muted/30">
-                    <th
-                      scope="row"
-                      className="sticky left-0 border-b border-border/60 bg-muted px-2 py-1.5 text-right font-normal text-muted-foreground tabular-nums"
-                    >
-                      {index + 1}
-                    </th>
-                    {row.map((cell, column) => (
-                      <td
-                        key={column}
-                        className="max-w-80 min-w-24 border-b border-border/60 px-3 py-1.5 align-top whitespace-pre-wrap break-words tabular-nums"
-                      >
-                        {cell}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {sheet.rows.length === 0 ? (
-              <p className="p-6 text-center text-xs text-muted-foreground">This sheet is empty.</p>
-            ) : null}
-          </div>
+          <VirtualTablePreview
+            key={page}
+            name={`${props.name}: ${sheet.name}`}
+            count={sheet.rowCount}
+            columns={sheet.columns}
+            getRows={(index) => (index === 0 ? sheet.rows : sheetPages.get(`${page}:${index}`))}
+            loadPage={(index) => {
+              const key = `${page}:${index}`;
+              if (pendingPages.current.has(key)) return;
+              pendingPages.current.add(key);
+              workerRef.current?.postMessage({ type: "sheet-page", sheet: page, index });
+            }}
+          />
         </>
       ) : slide ? (
         <SlideCanvas slide={slide} onError={setError} />
