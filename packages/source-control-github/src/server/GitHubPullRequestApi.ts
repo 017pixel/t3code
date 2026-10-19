@@ -1411,7 +1411,10 @@ export const make = Effect.gen(function* () {
           });
           return {
             ...core,
-            comparison: { behindBy, viewerCanUpdate: core.comparison?.viewerCanUpdate === true },
+            comparison: {
+              behindBy,
+              viewerCanUpdate: behindBy > 0 && core.comparison?.viewerCanUpdate === true,
+            },
           };
         }).pipe(
           // Past a hundred checks the first page would let the rest imply success, so the whole

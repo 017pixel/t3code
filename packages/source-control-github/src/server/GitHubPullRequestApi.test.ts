@@ -4152,7 +4152,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
         const provider = yield* GitHubPullRequestProvider.make;
         for (const scenario of [
           { behindBy: 2, permission: "WRITE", headRef: { id: "REF_feature" }, canUpdate: true },
-          { behindBy: 0, permission: "WRITE", headRef: { id: "REF_feature" }, canUpdate: true },
+          { behindBy: 0, permission: "WRITE", headRef: { id: "REF_feature" }, canUpdate: false },
           { behindBy: 2, permission: "READ", headRef: { id: "REF_feature" }, canUpdate: false },
           { behindBy: 2, permission: "WRITE", headRef: null, canUpdate: false },
         ]) {
