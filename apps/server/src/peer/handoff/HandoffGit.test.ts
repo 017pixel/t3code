@@ -70,7 +70,7 @@ const fixture = Effect.gen(function* () {
   yield* fs.makeDirectory(path.join(source, "packages"));
   yield* write(source, "app.txt", "base\n");
   yield* write(source, "deleted.txt", "keep until deleted\n");
-  yield* write(source, ".gitignore", "secret.txt\n");
+  yield* write(source, ".gitignore", "secret.txt\nforced.txt\n");
   yield* write(source, "packages/lib.txt", "library\n");
   yield* git(source, ["add", "."]);
   yield* git(source, ["commit", "--quiet", "-m", "base"]);
@@ -87,6 +87,8 @@ const fixture = Effect.gen(function* () {
   yield* fs.remove(path.join(source, "deleted.txt"));
   yield* write(source, "new.txt", "source new\n");
   yield* write(source, "secret.txt", "source secret\n");
+  yield* write(source, "forced.txt", "source forced\n");
+  yield* git(source, ["add", "--force", "forced.txt"]);
   yield* write(receiver, "app.txt", "receiver staged\n");
   yield* git(receiver, ["add", "app.txt"]);
   yield* write(receiver, "app.txt", "receiver unstaged\n");
@@ -170,6 +172,10 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
         );
         assert.isFalse(yield* f.fs.exists(f.path.join(f.worktreePath, "deleted.txt")));
         assert.isFalse(yield* f.fs.exists(f.path.join(f.worktreePath, "secret.txt")));
+        assert.equal(
+          yield* f.fs.readFileString(f.path.join(f.worktreePath, "forced.txt")),
+          "source forced\n",
+        );
         assert.equal(
           yield* git(f.worktreePath, ["status", "--porcelain"]),
           " M app.txt\n D deleted.txt\n?? new.txt\n",
@@ -281,17 +287,19 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
           worktreePath: f.worktreePath,
           handoffId: "rollback",
         };
-        let injectResetFailure = false;
+        let indexAction: "fail" | "advance" | undefined;
+        let advanced: string | undefined;
         const faulted = yield* handoffService.pipe(
           Effect.provideService(VcsProcess.VcsProcess, {
             run: Effect.fnUntraced(
               function* (command: VcsProcess.VcsProcessInput) {
                 if (
-                  injectResetFailure &&
+                  indexAction !== undefined &&
                   command.cwd === f.worktreePath &&
-                  command.args[0] === "reset"
+                  (command.args[0] === "reset" || command.args[0] === "read-tree")
                 ) {
-                  injectResetFailure = false;
+                  const action = indexAction;
+                  indexAction = undefined;
                   assert.equal((yield* git(f.receiver, ["rev-parse", branch])).trim(), packed.tip);
                   assert.equal(
                     yield* f.fs
@@ -299,6 +307,18 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
                       .pipe(Effect.orDie),
                     "unstaged\n",
                   );
+                  if (action === "advance") {
+                    advanced = (yield* git(f.receiver, [
+                      "commit-tree",
+                      `${packed.tip}^{tree}`,
+                      "-p",
+                      packed.tip,
+                      "-m",
+                      "concurrent receiver commit",
+                    ])).trim();
+                    yield* git(f.receiver, ["update-ref", branchRef, advanced, packed.tip]);
+                    return yield* native.run(command);
+                  }
                   const index = (yield* git(f.worktreePath, [
                     "rev-parse",
                     "--path-format=absolute",
@@ -318,7 +338,7 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
           }),
         );
         for (const phase of ["late-git", "persistence", "concurrent-persistence"] as const) {
-          let advanced: string | undefined;
+          advanced = undefined;
           const assertRollback = Effect.gen(function* () {
             assert.deepEqual(yield* checkoutState(f.receiver), before);
             assert.equal(
@@ -341,37 +361,31 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
             assert.equal(yield* refs(f.receiver), expectedRefs);
           });
           if (phase === "late-git") {
-            injectResetFailure = true;
+            indexAction = "fail";
             yield* Effect.scoped(
               Effect.gen(function* () {
                 const error = yield* faulted.apply(input).pipe(Effect.flip);
                 assert.equal(error._tag, "HandoffGitStepError");
-                assert.isFalse(injectResetFailure);
+                assert.isUndefined(indexAction);
                 // Failure during apply must release ownership even while its caller scope is open.
                 yield* assertRollback;
               }),
             );
           } else {
+            indexAction = phase === "concurrent-persistence" ? "advance" : undefined;
             const error = yield* Effect.scoped(
               Effect.gen(function* () {
-                const lease = yield* handoff.apply(input);
+                const lease = yield* faulted.apply(input);
+                assert.isUndefined(indexAction);
                 assert.equal(lease.branch, branch);
-                assert.equal((yield* git(f.receiver, ["rev-parse", branch])).trim(), packed.tip);
+                assert.equal(
+                  (yield* git(f.receiver, ["rev-parse", branchRef])).trim(),
+                  advanced ?? packed.tip,
+                );
                 assert.equal(
                   (yield* git(f.worktreePath, ["rev-parse", "HEAD"])).trim(),
-                  packed.tip,
+                  advanced ?? packed.tip,
                 );
-                if (phase === "concurrent-persistence") {
-                  advanced = (yield* git(f.receiver, [
-                    "commit-tree",
-                    `${packed.tip}^{tree}`,
-                    "-p",
-                    packed.tip,
-                    "-m",
-                    "concurrent receiver commit",
-                  ])).trim();
-                  yield* git(f.receiver, ["update-ref", branchRef, advanced, packed.tip]);
-                }
                 return yield* Effect.fail({ _tag: "ReceiverPersistenceFailure" as const });
               }),
             ).pipe(Effect.flip);

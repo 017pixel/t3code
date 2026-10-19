@@ -181,10 +181,37 @@ const make = Effect.gen(function* () {
           GIT_COMMITTER_NAME: "T3 Code",
           GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
         };
-        // A new index avoids changing staging, merge state, or split-index files in the checkout.
         const indexGit = (args: ReadonlyArray<string>) =>
-          git(cwd, ["-c", "core.splitIndex=false", ...args], { env });
-        yield* indexGit(["read-tree", tip]);
+          git(
+            cwd,
+            [
+              "-c",
+              "core.splitIndex=false",
+              "-c",
+              "splitIndex.sharedIndexExpire=never",
+              "-c",
+              "core.fsmonitor=false",
+              ...args,
+            ],
+            { env },
+          );
+        const sourceIndex = yield* out(cwd, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "index",
+        ]);
+        const reusedIndex = yield* Effect.gen(function* () {
+          if (!(yield* fs.exists(sourceIndex))) return false;
+          // Retain force-added ignored paths without writing the source or its shared indexes.
+          yield* fs.copyFile(sourceIndex, env.GIT_INDEX_FILE);
+          // A nonzero past timestamp makes Git recheck same-size edits in the source index's second.
+          yield* fs.utimes(env.GIT_INDEX_FILE, 1, 1);
+          return true;
+        }).pipe(
+          Effect.mapError((cause) => new HandoffGitStepError({ step: "private-index", cause })),
+        );
+        if (!reusedIndex) yield* indexGit(["read-tree", tip]);
         yield* indexGit(["add", "--all", "--", ":/"]);
         const tree = (yield* indexGit(["write-tree"])).stdout.trim();
         const snapshot = (yield* git(
@@ -337,9 +364,9 @@ const make = Effect.gen(function* () {
             ? ["worktree", "add", "--detach", input.worktreePath, input.tip]
             : ["worktree", "add", input.worktreePath, branch],
         );
-        // No-overlay checkout carries deletions; resetting only the new index leaves edits uncommitted.
+        // No-overlay checkout carries deletions; read-tree unstages edits without moving the branch.
         yield* git(input.worktreePath, ["checkout", "--no-overlay", input.snapshot, "--", "."]);
-        yield* git(input.worktreePath, ["reset", "--quiet", input.tip]);
+        yield* git(input.worktreePath, ["read-tree", input.tip]);
         return {
           branch,
           commit: Effect.sync(() => {
