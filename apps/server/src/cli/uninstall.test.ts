@@ -3,7 +3,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { findOwnedLauncher } from "./uninstall.ts";
 import { posixLauncherScript } from "./update.ts";
@@ -33,7 +33,7 @@ it.layer(NodeServices.layer)("t3 uninstall launcher", (it) => {
       assert.isUndefined(yield* findOwnedLauncher({ launchedAs: theirs, versionsDir }));
       assert.isUndefined(yield* findOwnedLauncher({ launchedAs: copy, versionsDir }));
       assert.isUndefined(yield* findOwnedLauncher({ launchedAs: undefined, versionsDir }));
-    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("claims the launcher script that runs this home's executable", () =>
@@ -58,10 +58,10 @@ it.layer(NodeServices.layer)("t3 uninstall launcher", (it) => {
       // The script execs the executable by absolute path, so argv0 is the executable.
       const find = (launchedAs: string) =>
         findOwnedLauncher({ launchedAs, versionsDir }).pipe(
-          Effect.provideService(HostProcessEnvironment, { PATH: bin }),
+          Effect.provideService(HostProcess.Environment, { PATH: bin }),
         );
       assert.equal(yield* find(exe), path.join(bin, "t3"));
       assert.isUndefined(yield* find(otherExe));
-    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 });
