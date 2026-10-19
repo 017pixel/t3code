@@ -1,5 +1,5 @@
 import { it as effectIt } from "@effect/vitest";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -332,6 +332,58 @@ describe("findAccessibleWindow", () => {
     bounds: { x: 100, y: 200, width: 800, height: 600 },
   };
 
+  const chromeCapture = {
+    title: "Issues · pingdotgg/t3code",
+    bounds: captured.bounds,
+    platform: "darwin" as const,
+    bundleId: "com.google.Chrome",
+  };
+  const chromeWindow = {
+    name: `${chromeCapture.title} - Google Chrome – Profile`,
+    bounds: chromeCapture.bounds,
+    active: true,
+  };
+
+  it("uses a browser suffix only when no exact title matches", () => {
+    const exact = { name: chromeCapture.title, bounds: chromeCapture.bounds };
+    expect(findAccessibleWindow([chromeWindow, exact], chromeCapture)).toBe(exact);
+    expect(findAccessibleWindow([chromeWindow], chromeCapture)).toBe(chromeWindow);
+  });
+
+  it("rejects browser suffix matches with wrong bounds, page titles, or ambiguous windows", () => {
+    expect(
+      findAccessibleWindow(
+        [{ ...chromeWindow, bounds: { ...chromeWindow.bounds, x: 0 } }],
+        chromeCapture,
+      ),
+    ).toBeUndefined();
+    expect(
+      findAccessibleWindow([chromeWindow, { ...chromeWindow, active: false }], chromeCapture),
+    ).toBeUndefined();
+    expect(
+      findAccessibleWindow([chromeWindow], { ...chromeCapture, title: "Issues" }),
+    ).toBeUndefined();
+    expect(
+      findAccessibleWindow([chromeWindow], {
+        ...chromeCapture,
+        title: `${chromeCapture.title} - Google Chrome`,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps strict titles outside macOS Chrome and Chromium", () => {
+    for (const identity of [
+      { platform: "linux" as const, bundleId: "com.google.Chrome" },
+      { platform: "win32" as const, bundleId: "com.google.Chrome" },
+      { platform: "darwin" as const, bundleId: "com.example.Editor" },
+      { platform: "darwin" as const, bundleId: undefined },
+    ]) {
+      expect(
+        findAccessibleWindow([chromeWindow], { ...chromeCapture, ...identity }),
+      ).toBeUndefined();
+    }
+  });
+
   it("matches one window by its captured bounds", () => {
     const windows = [
       { name: "Private", bounds: { x: 0, y: 0, width: 400, height: 300 } },
@@ -462,6 +514,45 @@ describe("findAccessibleWindow", () => {
     const windows = [{ name: "", bounds: captured.bounds }];
 
     expect(findAccessibleWindow(windows, { ...captured, title: "" }, "wayland")).toBeUndefined();
+  });
+
+  it("accepts one PID-scoped untitled window whose bounds match", () => {
+    const windows = [{ name: null, bounds: captured.bounds }];
+
+    expect(
+      findAccessibleWindow(windows, captured, "wayland", { allowUntitledUniqueBounds: true }),
+    ).toBe(windows[0]);
+    expect(findAccessibleWindow(windows, captured, "wayland")).toBeUndefined();
+  });
+
+  it("rejects ambiguous PID-scoped untitled windows even when bounds match", () => {
+    const windows = [
+      { name: null, bounds: captured.bounds },
+      { name: "", bounds: { ...captured.bounds, x: 0, y: 0 } },
+    ];
+
+    expect(
+      findAccessibleWindow(windows, captured, "wayland", { allowUntitledUniqueBounds: true }),
+    ).toBeUndefined();
+  });
+
+  it("does not fall back to a differently titled PID-scoped window with matching bounds", () => {
+    const windows = [{ name: "Preferences", bounds: captured.bounds }];
+
+    expect(
+      findAccessibleWindow(windows, captured, "wayland", { allowUntitledUniqueBounds: true }),
+    ).toBeUndefined();
+  });
+
+  it("does not use unique bounds when a titled match is already ambiguous", () => {
+    const windows = [
+      { name: "Editor", bounds: captured.bounds },
+      { name: "Editor", bounds: { ...captured.bounds, x: 0, y: 0 } },
+    ];
+
+    expect(
+      findAccessibleWindow(windows, captured, "wayland", { allowUntitledUniqueBounds: true }),
+    ).toBeUndefined();
   });
 
   it.each(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])(
@@ -664,7 +755,7 @@ describe("isWaylandSession", () => {
     "falls back to a live runtime directory socket when session variables are stripped",
     () =>
       Effect.gen(function* () {
-        if ((yield* HostProcessPlatform) !== "linux") return;
+        if ((yield* HostProcess.Platform) !== "linux") return;
         yield* Effect.promise(async () => {
           const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
           const { createServer } = await import("node:net");

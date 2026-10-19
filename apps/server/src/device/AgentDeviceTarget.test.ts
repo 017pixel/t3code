@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - exercises concurrent real CLI subprocesses.
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeUtil from "node:util";
@@ -17,12 +17,62 @@ import {
 const exec = NodeUtil.promisify(NodeChildProcess.execFile);
 
 describe("host-bound agent commands", () => {
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "runs both desktop hops as Node with a stripped environment, preserving arguments and exit code",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const temp = yield* fs.makeTempDirectoryScoped({ prefix: "t3-device-target-" });
+        const dir = path.join(temp, "quotes '\" $HOME `literal`");
+        yield* fs.makeDirectory(dir);
+        const desktopApp = path.join(dir, "T3 Code");
+        // Dropping Node mode after checking it forces each hop to set it independently.
+        yield* fs.writeFileString(
+          desktopApp,
+          `#!/bin/sh
+if [ "\${ELECTRON_RUN_AS_NODE:-}" != "1" ]; then
+  echo "started the desktop app" >&2
+  exit 134
+fi
+unset ELECTRON_RUN_AS_NODE
+exec '${process.execPath.replaceAll("'", "'\"'\"'")}' "$@"
+`,
+        );
+        yield* fs.chmod(desktopApp, 0o755);
+        const entryPath = path.join(dir, "cli.mjs");
+        yield* fs.writeFileString(
+          entryPath,
+          "console.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 23;",
+        );
+        const shim = yield* ensureAgentDeviceShim({ entryPath, stateDir: dir }).pipe(
+          Effect.provideService(HostProcess.ExecutablePath, desktopApp),
+          Effect.provideService(HostProcess.IsExecutable, false),
+        );
+        const args = [
+          "snapshot",
+          "--config",
+          path.join(dir, "config.json"),
+          "--session",
+          "a!b!c",
+          "",
+        ];
+        yield* Effect.promise(() =>
+          expect(
+            exec(path.join(shim, "agent-device"), args, {
+              env: { PATH: process.env.PATH ?? "", HOME: temp },
+            }),
+          ).rejects.toMatchObject({ code: 23, stdout: `${JSON.stringify(args)}\n`, stderr: "" }),
+        );
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("runs two hosts concurrently and only updates the reconnected host", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const temp = yield* fs.makeTempDirectoryScoped({ prefix: "t3-device-target-" });
-      const platform = yield* HostProcessPlatform;
+      const platform = yield* HostProcess.Platform;
       const dir = path.join(
         temp,
         platform === "win32" ? "paths with spaces" : "quotes '\" $HOME `literal`",
@@ -37,7 +87,9 @@ console.log(readFileSync(args[args.indexOf('--config') + 1], 'utf8'));
 if (process.env.AGENT_DEVICE_DAEMON_BASE_URL) process.exit(2);`,
       );
       const shim = yield* ensureAgentDeviceShim({ entryPath, stateDir: dir });
-      const files = ["mini", "android"].map((host) => agentDeviceConfigPath(dir, host, path));
+      const files = yield* Effect.forEach(["mini", "android"], (host) =>
+        agentDeviceConfigPath(dir, host, path),
+      );
       for (const [index, file] of files.entries())
         yield* writeAgentDeviceConfig(file, {
           baseUrl: `http://127.0.0.1:${1000 + index}`,
@@ -69,8 +121,8 @@ if (process.env.AGENT_DEVICE_DAEMON_BASE_URL) process.exit(2);`,
       });
       expect((yield* Effect.promise(() => invoke(files[0]!))).daemonAuthToken).toBe("new");
       expect(yield* fs.readFileString(files[1]!)).toBe(second);
-      expect(agentDeviceSession("thread", "mini", "same-id")).not.toBe(
-        agentDeviceSession("thread", "android", "same-id"),
+      expect(yield* agentDeviceSession("thread", "mini", "same-id")).not.toBe(
+        yield* agentDeviceSession("thread", "android", "same-id"),
       );
       for (const args of [
         ["snapshot"],
@@ -84,6 +136,11 @@ if (process.env.AGENT_DEVICE_DAEMON_BASE_URL) process.exit(2);`,
           ).rejects.toThrow("Call device_open first"),
         );
       }
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(HostProcess.IsExecutable, true),
+      Effect.provideService(HostProcess.ExecutablePath, "/packaged/t3"),
+      Effect.provide(NodeServices.layer),
+    ),
   );
 });

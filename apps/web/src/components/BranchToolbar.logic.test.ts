@@ -13,7 +13,7 @@ import {
   resolveBranchToolbarPrBranch,
   resolveBranchToolbarValue,
   resolveLockedWorkspaceLabel,
-  resolveLocalCheckoutBranchMismatch,
+  resolveCheckoutBranchMismatch,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
   sanitizeNewRefName,
@@ -301,10 +301,10 @@ describe("resolveBranchToolbarPrBranch", () => {
   });
 });
 
-describe("resolveLocalCheckoutBranchMismatch", () => {
+describe("resolveCheckoutBranchMismatch", () => {
   it("detects when a local thread is associated with a different branch than the checkout", () => {
     expect(
-      resolveLocalCheckoutBranchMismatch({
+      resolveCheckoutBranchMismatch({
         effectiveEnvMode: "local",
         activeWorktreePath: null,
         activeThreadBranch: "feature/thread",
@@ -313,12 +313,13 @@ describe("resolveLocalCheckoutBranchMismatch", () => {
     ).toEqual({
       threadBranch: "feature/thread",
       currentBranch: "feature/current",
+      canRestoreThreadBranch: true,
     });
   });
 
   it("ignores matching local checkout state", () => {
     expect(
-      resolveLocalCheckoutBranchMismatch({
+      resolveCheckoutBranchMismatch({
         effectiveEnvMode: "local",
         activeWorktreePath: null,
         activeThreadBranch: "feature/thread",
@@ -327,20 +328,34 @@ describe("resolveLocalCheckoutBranchMismatch", () => {
     ).toBeNull();
   });
 
-  it("ignores dedicated worktrees because their checkout is already thread-scoped", () => {
+  it("warns about worktree branch drift without restore, but ignores a pending rename status", () => {
+    const worktree = {
+      effectiveEnvMode: "worktree" as const,
+      activeWorktreePath: "/repo/.t3/worktrees/feature-thread",
+      activeThreadBranch: "t3code/fix-sidebar",
+    };
+
     expect(
-      resolveLocalCheckoutBranchMismatch({
-        effectiveEnvMode: "worktree",
-        activeWorktreePath: "/repo/.t3/worktrees/feature-thread",
-        activeThreadBranch: "feature/thread",
-        currentGitBranch: "feature/current",
+      resolveCheckoutBranchMismatch({
+        ...worktree,
+        currentGitBranch: "t3code/1a2b3c4d",
       }),
     ).toBeNull();
+    expect(
+      resolveCheckoutBranchMismatch({
+        ...worktree,
+        currentGitBranch: "feature/checkout",
+      }),
+    ).toEqual({
+      threadBranch: worktree.activeThreadBranch,
+      currentBranch: "feature/checkout",
+      canRestoreThreadBranch: false,
+    });
   });
 
   it("ignores new-worktree base selection before a worktree exists", () => {
     expect(
-      resolveLocalCheckoutBranchMismatch({
+      resolveCheckoutBranchMismatch({
         effectiveEnvMode: "worktree",
         activeWorktreePath: null,
         activeThreadBranch: "feature/base",
@@ -424,9 +439,28 @@ describe("shouldShowEnvironmentIndicator", () => {
 });
 
 describe("shouldShowComposerContextStrip", () => {
+  it.each([false, true])(
+    "honors the active-thread preference with resting controls %s",
+    (hostsRestingComposerControls) => {
+      const input = {
+        isDraftHeroState: false,
+        hasActiveProject: true,
+        isGitRepo: true,
+        showEnvironmentIndicator: true,
+        hostsRestingComposerControls,
+      };
+      expect(shouldShowComposerContextStrip({ ...input, persistInActiveThreads: false })).toBe(
+        false,
+      );
+      expect(shouldShowComposerContextStrip({ ...input, persistInActiveThreads: true })).toBe(true);
+    },
+  );
+
   it("keeps the environment indicator visible for a non-Git project", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: true,
@@ -438,6 +472,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("hides the strip when a non-Git project has nothing to show", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: false,
@@ -449,6 +485,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("keeps the strip for visible resting composer controls in a non-Git thread", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: false,
@@ -460,6 +498,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("shows Git controls without requiring an environment indicator", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: true,
         showEnvironmentIndicator: false,
@@ -489,6 +529,24 @@ describe("resolveEffectiveEnvMode", () => {
       }),
     ).toBe("worktree");
   });
+
+  it("keeps a server thread in worktree mode while its worktree is still being created", () => {
+    expect(
+      resolveEffectiveEnvMode({
+        activeWorktreePath: null,
+        hasServerThread: true,
+        draftThreadEnvMode: undefined,
+        preparingWorktree: true,
+      }),
+    ).toBe("worktree");
+    expect(
+      resolveEffectiveEnvMode({
+        activeWorktreePath: null,
+        hasServerThread: true,
+        draftThreadEnvMode: undefined,
+      }),
+    ).toBe("local");
+  });
 });
 
 describe("resolveEnvModeLabel", () => {
@@ -510,11 +568,17 @@ describe("resolveCurrentWorkspaceLabel", () => {
 
 describe("resolveLockedWorkspaceLabel", () => {
   it("uses a shorter label for the main repo checkout", () => {
-    expect(resolveLockedWorkspaceLabel(null)).toBe("Local checkout");
+    expect(resolveLockedWorkspaceLabel(null, "local")).toBe("Local checkout");
   });
 
   it("uses a shorter label for an attached worktree", () => {
-    expect(resolveLockedWorkspaceLabel("/repo/.t3/worktrees/feature-a")).toBe("Worktree");
+    expect(resolveLockedWorkspaceLabel("/repo/.t3/worktrees/feature-a", "worktree")).toBe(
+      "Worktree",
+    );
+  });
+
+  it("describes a worktree that is still being created as a new worktree", () => {
+    expect(resolveLockedWorkspaceLabel(null, "worktree")).toBe("New worktree");
   });
 });
 
@@ -745,8 +809,6 @@ describe("shouldIncludeBranchPickerItem", () => {
     ).toBe(false);
   });
 
-  // Typing a spaced name must still surface the ref it would have been created
-  // as, or the picker shows nothing at all for that query.
   it("surfaces an existing ref matching the sanitized query", () => {
     expect(
       shouldIncludeBranchPickerItem({
@@ -758,8 +820,6 @@ describe("shouldIncludeBranchPickerItem", () => {
     ).toBe(true);
   });
 
-  // A partial query has to reach the ref it would have been created as, so
-  // searching "hello w" still finds an existing hello-world.
   it("surfaces a ref from a partial query containing a space", () => {
     expect(
       shouldIncludeBranchPickerItem({
@@ -783,10 +843,6 @@ describe("shouldIncludeBranchPickerItem", () => {
   });
 });
 
-// Git rejects ASCII space and the ASCII control characters in ref names, so a
-// typed name like "new branch" can only ever fail. Replacing exactly those can
-// turn a failing name into a working one without touching a name git already
-// accepts, including one holding non-ASCII whitespace such as U+00A0.
 describe("sanitizeNewRefName", () => {
   it("replaces a space with a dash", () => {
     expect(sanitizeNewRefName("new branch")).toBe("new-branch");
@@ -804,8 +860,6 @@ describe("sanitizeNewRefName", () => {
     expect(sanitizeNewRefName("new\tbranch")).toBe("new-branch");
   });
 
-  // git accepts U+00A0, U+2009 and other non-ASCII whitespace in ref names, so
-  // rewriting them would silently create a ref the user never typed.
   it("preserves whitespace that git accepts", () => {
     expect(sanitizeNewRefName("new\u00a0branch")).toBe("new\u00a0branch");
     expect(sanitizeNewRefName("new\u2009branch")).toBe("new\u2009branch");
@@ -827,8 +881,6 @@ describe("sanitizeNewRefName", () => {
     expect(sanitizeNewRefName("   ")).toBe("");
   });
 
-  // Scoped deliberately to whitespace: git accepts consecutive dashes, so
-  // collapsing them would rewrite names the user may have typed on purpose.
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");

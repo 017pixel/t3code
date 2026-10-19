@@ -36,6 +36,7 @@ describe("buildT3ProjectFileJsonSchema", () => {
       "defaultThreadEnvMode",
       "iconPath",
       "scripts",
+      "worktreeSubmodules",
     ]);
     expect(schema.required).toBeUndefined();
     expect(schema.properties.iconPath?.description).toContain("Workspace-relative path");
@@ -44,11 +45,13 @@ describe("buildT3ProjectFileJsonSchema", () => {
     const script = schema.properties.scripts?.items;
     expect(script?.required).toEqual(["name", "command"]);
     expect(Object.keys(script?.properties ?? {}).sort()).toEqual([
+      "async",
       "autoOpenPreview",
       "command",
       "icon",
       "name",
       "previewUrl",
+      "runOnSettle",
       "runOnWorktreeCreate",
     ]);
   });
@@ -79,10 +82,13 @@ describe("T3ProjectFileFromJson", () => {
 });
 
 describe("parseT3ProjectFile", () => {
-  it("returns the decoded file for valid contents", () => {
-    expect(parseT3ProjectFile('{ "defaultThreadEnvMode": "worktree" }')).toEqual({
-      defaultThreadEnvMode: "worktree",
-    });
+  it("reads project defaults from JSONC with a URL in a block comment", () => {
+    expect(
+      parseT3ProjectFile(`{
+        /* See https://t3.codes/schema/t3.json */
+        "defaultThreadEnvMode": "worktree"
+      }`),
+    ).toEqual({ defaultThreadEnvMode: "worktree" });
   });
 
   it("returns null for malformed or invalid contents", () => {

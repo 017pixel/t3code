@@ -3,11 +3,10 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { ProjectSettingsPanel } from "./ProjectSettingsPanel";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
+import { SettingsPageContainer } from "./settingsLayout";
 
-/** Project identity and checkout management for the selected project. */
 export function ProjectsSettings() {
   const { search: value, scope } = useSettingsScope();
-  // The panel follows remembered members when grouping replaces a project key.
   const projectScope =
     scope.kind === "project" ||
     scope.kind === "checkout" ||
@@ -22,7 +21,9 @@ export function ProjectsSettings() {
           checkoutKey={value.checkout ?? null}
         />
       ) : scope.kind === "unavailable" ? (
-        <p className="p-8 text-sm text-muted-foreground">{scope.message}</p>
+        <SettingsPageContainer>
+          <p className="text-sm text-muted-foreground">{scope.message}</p>
+        </SettingsPageContainer>
       ) : (
         <SettingsScopeNotice target="project">
           Choose a project to manage its name, icon, checkouts and actions.

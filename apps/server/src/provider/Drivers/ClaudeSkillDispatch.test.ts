@@ -7,13 +7,12 @@ const SKILLS = new Set(["2spec", "implement", "review", "re-release-version"]);
 describe("planClaudeSkillDispatch", () => {
   it("leaves a prompt without a known skill untouched", () => {
     expect(planClaudeSkillDispatch("fix the build", SKILLS)).toBeUndefined();
-    // Not a discovered skill, so it stays prose rather than becoming a command.
     expect(planClaudeSkillDispatch("echo $HOME then $unknown", SKILLS)).toBeUndefined();
   });
 
-  it("moves a mid-prompt mention into a trailing slash command", () => {
+  it("keeps the whole request ahead of a mid-prompt slash command", () => {
     expect(planClaudeSkillDispatch("ok, now $implement all the tickets", SKILLS)).toEqual({
-      leadingText: "ok, now",
+      leadingText: "ok, now /implement all the tickets",
       commandText: "/implement all the tickets",
       skillName: "implement",
     });
@@ -29,7 +28,7 @@ describe("planClaudeSkillDispatch", () => {
 
   it("dispatches a known skill whose name begins with a digit", () => {
     expect(planClaudeSkillDispatch("use $2spec for this", SKILLS)).toEqual({
-      leadingText: "use",
+      leadingText: "use /2spec for this",
       commandText: "/2spec for this",
       skillName: "2spec",
     });
@@ -37,10 +36,31 @@ describe("planClaudeSkillDispatch", () => {
 
   it("dispatches the last mention and rewrites earlier ones inline", () => {
     expect(planClaudeSkillDispatch("$review the diff, then $implement the fixes", SKILLS)).toEqual({
-      leadingText: "/review the diff, then",
+      leadingText: "/review the diff, then /implement the fixes",
       commandText: "/implement the fixes",
       skillName: "implement",
     });
+  });
+
+  it("dispatches currency-prefixed mentions and preserves their source boundaries", () => {
+    for (const symbol of ["€", "£", "¥", "₹", "₩", "₿", "𑿝"]) {
+      expect(
+        planClaudeSkillDispatch(
+          `${symbol}review the diff, then ${symbol}implement the fixes`,
+          SKILLS,
+        ),
+      ).toEqual({
+        leadingText: "/review the diff, then /implement the fixes",
+        commandText: "/implement the fixes",
+        skillName: "implement",
+      });
+      expect(planClaudeSkillDispatch(`${symbol}2spec for this`, SKILLS)).toEqual({
+        leadingText: undefined,
+        commandText: "/2spec for this",
+        skillName: "2spec",
+      });
+      expect(planClaudeSkillDispatch(`5${symbol}review ${symbol}unknown`, SKILLS)).toBeUndefined();
+    }
   });
 
   it("ignores a dollar token glued to other text", () => {
@@ -48,8 +68,14 @@ describe("planClaudeSkillDispatch", () => {
   });
 
   it("ignores currency amounts and compact monetary expressions", () => {
-    const skillsWithCurrency = new Set([...SKILLS, "20", "20k", "100M"]);
-    expect(planClaudeSkillDispatch("pay $20 tomorrow", skillsWithCurrency)).toBeUndefined();
-    expect(planClaudeSkillDispatch("budget is $20k tomorrow", skillsWithCurrency)).toBeUndefined();
+    const skillsWithCurrency = new Set([...SKILLS, "20", "20k", "100M", "1e6"]);
+    for (const symbol of ["$", "€", "£", "¥", "₹", "₩", "₿", "𑿝"]) {
+      expect(
+        planClaudeSkillDispatch(
+          `pay ${symbol}20 ${symbol}20k ${symbol}100M ${symbol}1e6 tomorrow`,
+          skillsWithCurrency,
+        ),
+      ).toBeUndefined();
+    }
   });
 });

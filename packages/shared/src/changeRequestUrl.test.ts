@@ -1,11 +1,14 @@
+import { ProjectId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   changeRequestUrlFor,
+  matchesLinkedPullRequestUrl,
   parseChangeRequestUrl,
   pullRequestCandidateUrlFromReferenceAutolink,
   siblingPullRequestUrl,
 } from "./changeRequestUrl.ts";
+import { normalizeThreadPullRequestKey } from "./threadPullRequests.ts";
 
 describe("parseChangeRequestUrl", () => {
   it("reads a GitHub pull request, lower-casing the repository", () => {
@@ -20,6 +23,15 @@ describe("parseChangeRequestUrl", () => {
     expect(parseChangeRequestUrl("https://github.acme.test/platform/api/pull/7")).toEqual({
       host: "github.acme.test",
       repository: "platform/api",
+      number: 7,
+    });
+  });
+
+  it("reads Forgejo URLs even when the hostname contains github", () => {
+    expect(parseChangeRequestUrl("https://github.internal/team/repo/pulls/7")).toEqual({
+      host: "github.internal",
+      authority: "github.internal",
+      repository: "team/repo",
       number: 7,
     });
   });
@@ -60,6 +72,32 @@ describe("parseChangeRequestUrl", () => {
     ).toEqual({ host: "acme.visualstudio.com", repository: "platform/_git/t3code", number: 17 });
   });
 
+  it("reads Azure DevOps Server links and keeps servers on different ports distinct", () => {
+    for (const host of ["scm.example.test", "git.cafe", "code.bitbucket.example.test"]) {
+      const repository = "tfs/collection/project/_git/repo";
+      const linked = {
+        projectId: ProjectId.make("project-1"),
+        host,
+        repository,
+        number: 123,
+        url: `https://${host.toUpperCase()}:8443/tfs/Collection/Project/_git/Repo/pullrequest/123`,
+      };
+      const other = { ...linked, url: linked.url.replace(":8443/", ":9443/") };
+      expect.soft(parseChangeRequestUrl(linked.url), host).toEqual({
+        host,
+        authority: `${host}:8443`,
+        repository,
+        number: 123,
+      });
+      expect.soft(matchesLinkedPullRequestUrl(linked, `${linked.url}?view=files`), host).toBe(true);
+      expect.soft(matchesLinkedPullRequestUrl(linked, other.url), host).toBe(false);
+      expect.soft([linked, other].map(normalizeThreadPullRequestKey), host).toEqual([
+        { host: `${host}:8443`, repository, number: 123 },
+        { host: `${host}:9443`, repository, number: 123 },
+      ]);
+    }
+  });
+
   it("survives trailing segments, a trailing slash and a query string", () => {
     expect(parseChangeRequestUrl("https://github.com/t3tools/t3code/pull/123/files?w=1")).toEqual({
       host: "github.com",
@@ -81,6 +119,12 @@ describe("parseChangeRequestUrl", () => {
       "https://github.com/t3tools/t3code/pull/abc",
       "https://gitlab.com/t3tools/t3code/-/issues/12",
       "https://blog.example.test/2026/updates/pull/3",
+      "https://scm.example.test/tfs/Collection/Project/_git/Repo",
+      "https://scm.example.test/tfs/Collection/Project/pullrequest/123",
+      "https://scm.example.test/tfs/Collection/Project/_git/Repo/pullrequest/abc",
+      "https://scm.example.test/tfs/Collection/Project/_git/Repo/pullrequest/0",
+      "https://scm.example.test/tfs/Collection/Project/_git/Repo/pullrequest/9007199254740992",
+      "ftp://scm.example.test/tfs/Collection/Project/_git/Repo/pullrequest/123",
       "javascript:alert(1)//github.com/t3tools/t3code/pull/1",
       "not a url",
     ]) {
@@ -90,7 +134,23 @@ describe("parseChangeRequestUrl", () => {
 });
 
 describe("siblingPullRequestUrl", () => {
+  it("recognizes Forgejo on custom HTTP hosts", () => {
+    expect(parseChangeRequestUrl("http://git.example.test:3000/team/repo/pulls/42/files")).toEqual({
+      host: "git.example.test",
+      authority: "git.example.test:3000",
+      repository: "team/repo",
+      number: 42,
+    });
+  });
   it.each([
+    [
+      "http://git.example.test:3000/team/repo/pulls/42/files",
+      "http://git.example.test:3000/team/repo/pulls/43",
+    ],
+    [
+      "https://git.example.test/forgejo/team/repo/pulls/42/files",
+      "https://git.example.test/forgejo/team/repo/pulls/43",
+    ],
     ["https://github.com/pull/1/pull/42/files", "https://github.com/pull/1/pull/43"],
     [
       "https://git.acme.test/team/merge_requests/1/repo/-/merge_requests/42/diffs",
@@ -125,6 +185,29 @@ describe("siblingPullRequestUrl", () => {
 });
 
 describe("changeRequestUrlFor", () => {
+  it("preserves the origin when the Forgejo host already contains its port", () => {
+    expect(
+      changeRequestUrlFor(
+        "forgejo",
+        "forge.example:3000",
+        "team/repo",
+        42,
+        "http://forge.example:3000/team/repo.git",
+      ),
+    ).toBe("http://forge.example:3000/team/repo/pulls/42");
+  });
+
+  it.each([
+    ["http://forge.example:3000/git/owner/repo.git", "http://forge.example:3000"],
+    ["https://forge.example:8443/git/owner/repo.git", "https://forge.example:8443"],
+    ["git@forge.example:git/owner/repo.git", "https://forge.example"],
+    ["http://other.example:3000/git/owner/repo.git", "https://forge.example"],
+  ])("preserves the matching Forgejo web origin from %s", (remoteUrl, origin) => {
+    expect(changeRequestUrlFor("forgejo", "forge.example", "git/owner/repo", 42, remoteUrl)).toBe(
+      `${origin}/git/owner/repo/pulls/42`,
+    );
+  });
+
   it.each([
     ["ssh.dev.azure.com", "v3/org/project/web"],
     ["vs-ssh.visualstudio.com", "v3/org/project/web"],

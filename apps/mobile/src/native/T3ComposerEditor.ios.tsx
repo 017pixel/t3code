@@ -13,17 +13,14 @@ import {
   type Ref,
 } from "react";
 import type { NativeSyntheticEvent, StyleProp, ViewProps, ViewStyle } from "react-native";
-import { Image, StyleSheet } from "react-native";
+import { StyleSheet } from "react-native";
 
-import { markdownFileIconSource } from "@t3tools/mobile-markdown-text/file-icons";
-import {
-  composerChipSizeSuffix,
-  contextChipPresentation,
-} from "@t3tools/mobile-markdown-text/markdown";
-import { resolveMarkdownFileIcon } from "@t3tools/mobile-markdown-text/links";
+import { markdownFileIconSource, markdownIconAssetUri } from "../lib/markdownFileIcons";
+import { composerChipSizeSuffix, contextChipPresentation } from "../lib/composerChipPresentation";
+import { resolveMarkdownFileIcon } from "../lib/markdownLinks";
 import { useUniwindTheme } from "../lib/useUniwindTheme";
-import { flattenThemeColor } from "../lib/mobileTheme";
-import { useFontFamily } from "../lib/useFontFamily";
+import { createNativeComposerTheme } from "../lib/nativeComposerTheme";
+import { FONT_FAMILIES } from "../lib/fontFamilies";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import {
   acknowledgeComposerNativeEvent,
@@ -33,6 +30,7 @@ import {
   resolveComposerControlledEventCount,
   type ComposerNativeEventSnapshot,
 } from "./composerEditorRevision";
+import { DEFAULT_COMPOSER_ENTER_BEHAVIOR } from "../lib/composerEnterBehavior";
 import type { ComposerEditorProps, ComposerEditorSelection } from "./T3ComposerEditor.types";
 
 const NATIVE_MODULE_NAME = "T3ComposerEditor";
@@ -79,6 +77,9 @@ interface NativeComposerEditorProps extends ViewProps {
   readonly contentInsetVertical: number;
   readonly editable: boolean;
   readonly readOnly: boolean;
+  readonly enterBehavior: string;
+  readonly submitTitle: string;
+  readonly alternateSubmitTitle: string;
   readonly scrollEnabled: boolean;
   readonly autoFocus: boolean;
   readonly autoCorrect: boolean;
@@ -97,7 +98,7 @@ interface NativeComposerEditorProps extends ViewProps {
   readonly onComposerPasteText?: (event: NativePasteTextEvent) => void;
   readonly onComposerFocus?: () => void;
   readonly onComposerBlur?: () => void;
-  readonly onComposerSubmit?: () => void;
+  readonly onComposerSubmit?: (event: NativeSyntheticEvent<{ alternate: boolean }>) => void;
 }
 
 const NativeView = requireNativeView<NativeComposerEditorProps>(NATIVE_MODULE_NAME);
@@ -107,8 +108,8 @@ function basename(path: string): string {
   return separator >= 0 ? path.slice(separator + 1) : path;
 }
 
-function fileIconUri(path: string): string {
-  return Image.resolveAssetSource(markdownFileIconSource(resolveMarkdownFileIcon(path))).uri;
+function fileIconUri(path: string): string | null {
+  return markdownIconAssetUri(markdownFileIconSource(resolveMarkdownFileIcon(path))) ?? null;
 }
 
 export function ComposerEditor({
@@ -138,7 +139,7 @@ export function ComposerEditor({
   const confirmedTokensRef = useRef(collectComposerInlineTokens(props.value));
   const bodyText = useScaledTextRole("body");
   const theme = useUniwindTheme();
-  const fontFamily = useFontFamily("regular");
+  const fontFamily = FONT_FAMILIES.regular;
 
   useImperativeHandle(
     ref,
@@ -179,9 +180,6 @@ export function ComposerEditor({
                 ? `${token.label}${props.context?.records.some((record) => record.contextId === token.contextId) ? "" : " · unavailable"}`
                 : basename(token.value),
           detail: token.type === "context" ? composerChipSizeSuffix(record) : "",
-          // Only a mention wears per-filetype artwork. An attachment chip keeps the tinted
-          // monochrome glyph web draws for it: coloured artwork ignores the chip's accent and
-          // makes the composer chip read differently from the same chip in a sent message.
           iconUri:
             token.type === "mention"
               ? fileIconUri(token.value)
@@ -255,18 +253,7 @@ export function ComposerEditor({
     },
     [],
   );
-  const themeJson = JSON.stringify({
-    text: theme["--color-foreground"],
-    placeholder: theme["--color-placeholder"],
-    chipBackground: theme["--color-subtle"],
-    // Native chip drawing parses opaque hex only, and this role is translucent.
-    chipBorder: flattenThemeColor(theme["--color-border"], theme["--color-user-bubble"]),
-    chipText: theme["--color-foreground"],
-    skillBackground: theme["--color-inline-skill-background"],
-    skillBorder: theme["--color-inline-skill-border"],
-    skillText: theme["--color-inline-skill-foreground"],
-    fileTint: theme["--color-icon-muted"],
-  });
+  const themeJson = JSON.stringify(createNativeComposerTheme(theme));
   const resolvedTextStyle = StyleSheet.flatten(textStyle) ?? {};
   return (
     <NativeView
@@ -291,6 +278,9 @@ export function ComposerEditor({
       contentInsetVertical={contentInsetVertical}
       editable={props.editable ?? true}
       readOnly={props.readOnly ?? false}
+      enterBehavior={props.enterBehavior ?? DEFAULT_COMPOSER_ENTER_BEHAVIOR}
+      submitTitle={props.submitTitle ?? "Send Message"}
+      alternateSubmitTitle={props.alternateSubmitTitle ?? props.submitTitle ?? "Send Message"}
       scrollEnabled={props.scrollEnabled ?? true}
       autoFocus={props.autoFocus ?? false}
       autoCorrect={props.autoCorrect ?? true}
@@ -362,7 +352,11 @@ export function ComposerEditor({
       }}
       onComposerFocus={onFocus}
       onComposerBlur={onBlur}
-      onComposerSubmit={onSubmit}
+      onComposerSubmit={
+        onSubmit === undefined
+          ? undefined
+          : (event) => onSubmit(event.nativeEvent.alternate === true)
+      }
     />
   );
 }
