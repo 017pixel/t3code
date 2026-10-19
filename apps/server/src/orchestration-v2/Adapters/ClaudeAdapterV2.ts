@@ -800,12 +800,19 @@ export const layerQueryRunner: Layer.Layer<
             ),
           ];
       const encodedOptions = yield* encodeClaudeHistoryOptions(options);
-      return yield* spawner.string(
-        ChildProcess.make(executablePath, [...args, method, sessionId, encodedOptions], {
-          env: { ...environment, ELECTRON_RUN_AS_NODE: "1" },
-          extendEnv: false,
-        }),
-      );
+      return yield* spawner
+        .string(
+          ChildProcess.make(executablePath, [...args, method, sessionId, encodedOptions], {
+            env: { ...environment, ELECTRON_RUN_AS_NODE: "1" },
+            extendEnv: false,
+          }),
+        )
+        .pipe(
+          Effect.timeoutOrElse({
+            duration: "30 seconds",
+            orElse: () => Effect.fail(queryRunnerError("Claude history worker timed out.", method)),
+          }),
+        );
     });
 
     return ClaudeAgentSdkQueryRunner.of({
