@@ -35,8 +35,8 @@ export function restartPendingMessageIds(
     current = previous;
     pending.unshift(...(current.restartPendingMessageIds ?? []));
   }
-  // A sibling may already own this input. Keep its live work and proven
-  // acceptance separate from the ambiguous delivery of the cut chain.
+  // A sibling may already own this input. Keep its live work, proven acceptance,
+  // and explicit stop separate from the ambiguous delivery of the cut chain.
   return [...new Set(pending)].filter(
     (id) =>
       !runs.some(
@@ -49,7 +49,8 @@ export function restartPendingMessageIds(
             run.status === "preparing" ||
             run.status === "starting" ||
             run.status === "running" ||
-            run.status === "waiting"),
+            run.status === "waiting" ||
+            run.status === "interrupted"),
       ),
   );
 }
