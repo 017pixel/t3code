@@ -380,7 +380,19 @@ export function mcpServerForTarget(
   initial: McpServerTransport | undefined,
   target: McpServerProjectOverride | undefined,
   renamedFrom?: string,
+  destination?: {
+    readonly name: string;
+    readonly previousName?: string;
+    readonly servers: Readonly<Record<string, McpServerProjectOverride>>;
+  },
 ): McpServerConfig {
+  if (
+    destination &&
+    destination.name !== destination.previousName &&
+    destination.servers[destination.name]?.transport !== undefined
+  ) {
+    throw new Error("A server with this name already exists.");
+  }
   const transport = mcpServerTransportForTarget(
     edited.transport,
     initial,

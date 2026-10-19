@@ -290,6 +290,57 @@ it("preserves different destination headers in a URL-only bulk edit", () => {
     mcpServerForTarget({ enabled: true, transport: edited }, undefined, undefined).enabled,
   ).toBe(true);
 
+  const imported = parseMcpServerJson(JSON.stringify({ docs: { url: "https://new.example/mcp" } }));
+  if (!imported) throw new Error("Expected an added server draft");
+  const added = mcpServerFromDraft(imported, new Set());
+  if (!added.ok) throw new Error("Expected a valid added server");
+  const addedConfig = { enabled: true, transport: added.transport };
+  const remainingB = { docs: { enabled: false, transport: initial } };
+  const beforeB = structuredClone(remainingB);
+  // Retry maps the remaining destination against its latest snapshot.
+  for (const previousName of [undefined, "old-docs"]) {
+    const source = { enabled: false, transport: local };
+    const beforeCollision = previousName ? { [previousName]: source } : {};
+    const identity = { name: added.name, ...(previousName ? { previousName } : {}) };
+    const initialTransport = previousName ? local : undefined;
+    const mapped = mcpServerForTarget(
+      addedConfig,
+      initialTransport,
+      previousName ? source : undefined,
+      previousName,
+      { ...identity, servers: beforeCollision },
+    );
+    expect(mapped).toEqual({
+      ...addedConfig,
+      enabled: previousName ? source.enabled : true,
+    });
+    const afterCollision = { ...beforeCollision, ...remainingB };
+    expect(() =>
+      mcpServerForTarget(
+        addedConfig,
+        initialTransport,
+        previousName ? source : afterCollision.docs,
+        previousName,
+        { ...identity, servers: afterCollision },
+      ),
+    ).toThrow("A server with this name already exists.");
+    expect(afterCollision.docs).toEqual(beforeB.docs);
+  }
+  expect(remainingB).toEqual(beforeB);
+  expect(
+    mcpServerForTarget({ enabled: true, transport: edited }, initial, remainingB.docs, undefined, {
+      name: "docs",
+      previousName: "docs",
+      servers: remainingB,
+    }),
+  ).toEqual({ enabled: false, transport: edited });
+  expect(
+    mcpServerForTarget(addedConfig, undefined, { enabled: false }, undefined, {
+      name: "docs",
+      servers: { docs: { enabled: false } },
+    }),
+  ).toEqual(addedConfig);
+
   const sameHeader = {
     ...initial,
     headers: [{ name: "Authorization", value: "local-token", sensitive: false }],

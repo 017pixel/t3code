@@ -61,11 +61,7 @@ export function McpServerDialog({
   const [attempted, setAttempted] = useState(false);
   const [pending, setPending] = useState(false);
   const [retryOnly, setRetryOnly] = useState(false);
-  const result = mcpServerFromDraft(
-    draft,
-    pending || retryOnly ? new Set() : takenNames,
-    initial?.name ?? null,
-  );
+  const result = mcpServerFromDraft(draft, pending ? new Set() : takenNames, initial?.name ?? null);
   const error = attempted && !result.ok ? result : null;
 
   const update = (patch: Partial<McpServerDraft>) =>
