@@ -188,7 +188,7 @@ describe("threadHistoryPaging", () => {
         creationSource: "web",
         inputIntent: "turn_start",
         messageId: MessageId.make("long-turn-prompt"),
-        text: "Do the long task",
+        text: "Do the long task.\n".repeat(375),
         attachments: [],
       },
     };
@@ -233,6 +233,78 @@ describe("threadHistoryPaging", () => {
       rows.map((row) => row.sourceItemId),
     );
     expect(older.hasMoreHistory).toBe(false);
+
+    const policy = { maxItems: 75, maxEncodedBytes: 20_000 };
+    const encodedBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+    expect(encodedBytes(makeProjection([prompt]))).toBeLessThan(policy.maxEncodedBytes);
+    const smallest = buildBoundedThreadProjection({
+      projection,
+      snapshotSequence: 7,
+      viewportWindow: true,
+      policy: { ...policy, maxItems: 1 },
+    });
+    expect(smallest.projection.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([
+      prompt.sourceItemId,
+      rows.at(-1)!.sourceItemId,
+    ]);
+    expect(encodedBytes(smallest.projection)).toBeLessThan(policy.maxEncodedBytes);
+    expect(smallest.payloadBudgetExceeded).toBe(false);
+
+    const byteBounded = buildBoundedThreadProjection({
+      projection,
+      snapshotSequence: 7,
+      viewportWindow: true,
+      policy,
+    });
+    expect.soft(encodedBytes(byteBounded.projection)).toBeLessThanOrEqual(policy.maxEncodedBytes);
+    expect.soft(byteBounded.payloadBudgetExceeded).toBe(false);
+    expect(byteBounded.projection.visibleTurnItems[0]?.item).toEqual(prompt.item);
+    expect(byteBounded.projection.turnItems).toContainEqual(prompt.item);
+    expect(byteBounded.projection.turnItems).toContainEqual(rows[1]!.item);
+    const tail = byteBounded.projection.visibleTurnItems.slice(1);
+    expect(tail.length).toBeGreaterThan(0);
+    expect(tail.length).toBeLessThan(recent.length);
+    expect(tail.map((row) => row.sourceItemId)).toEqual(
+      rows.slice(-tail.length).map((row) => row.sourceItemId),
+    );
+    expect(byteBounded.hasMoreHistory).toBe(true);
+    expect(decodeThreadHistoryCursor(byteBounded.historyCursor!).si).toBe(tail[0]!.sourceItemId);
+    let cursor = byteBounded.historyCursor;
+    const recovered = [...tail];
+    const seenCursors = new Set<string>();
+    while (cursor !== null) {
+      expect(seenCursors.has(cursor)).toBe(false);
+      seenCursors.add(cursor);
+      const page = selectHistoryPageFromCursor({
+        items: rows,
+        cursor,
+        snapshotSequence: 7,
+        policy,
+      });
+      expect(page.items.length).toBeGreaterThan(0);
+      expect(page.hasMoreHistory).toBe(page.nextCursor !== null);
+      recovered.unshift(...page.items);
+      cursor = page.nextCursor;
+    }
+    expect(recovered.map((row) => row.sourceItemId)).toEqual(rows.map((row) => row.sourceItemId));
+
+    const hugePrompt = { ...prompt, item: { ...prompt.item, text: "p".repeat(20_000) } };
+    const hugeRows = [hugePrompt, ...rows.slice(1)];
+    const oversized = buildBoundedThreadProjection({
+      projection: {
+        ...projection,
+        visibleTurnItems: hugeRows,
+        turnItems: hugeRows.map((row) => row.item),
+      },
+      snapshotSequence: 7,
+      viewportWindow: true,
+      policy,
+    });
+    expect(encodedBytes(oversized.projection)).toBeGreaterThan(policy.maxEncodedBytes);
+    expect(oversized.payloadBudgetExceeded).toBe(true);
+    expect(oversized.projection.visibleTurnItems[0]?.item).toEqual(hugePrompt.item);
+    expect(oversized.projection.visibleTurnItems.at(-1)?.item).toEqual(rows.at(-1)!.item);
+    expect(oversized.projection.turnItems).toContainEqual(hugePrompt.item);
   });
 
   it("keeps background turns with user turns, with main's 150-turn fan-out ceiling", () => {
@@ -776,6 +848,9 @@ describe("threadHistoryPaging", () => {
     expect(bounded.payloadBudgetExceeded).toBe(true);
     expect(bounded.projection.plans[0]).toEqual(actionable.plans[0]);
     expect(bounded.projection.visibleTurnItems).toEqual(actionable.visibleTurnItems);
+    expect(Buffer.byteLength(JSON.stringify(bounded.projection), "utf8")).toBeGreaterThan(
+      THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes,
+    );
   });
 
   it("keeps agent-only turns visible when checkpoint file lists fill the byte budget", () => {
