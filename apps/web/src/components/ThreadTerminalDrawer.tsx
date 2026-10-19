@@ -610,6 +610,9 @@ function TerminalSessionViewport({
   useEffect(() => {
     const mount = containerRef.current;
     if (!mount) return;
+    // Session cleanup can hide the surface while the drawer remains visible.
+    visibleRef.current = visible;
+    terminalRef.current?.setVisible(visible);
     const surfaceKey = [environmentId, threadId, terminalId, cwd, worktreePath, runtimeEnvKey].join(
       "\u0000",
     );

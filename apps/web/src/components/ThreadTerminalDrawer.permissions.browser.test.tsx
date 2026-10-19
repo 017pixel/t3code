@@ -83,6 +83,7 @@ vi.mock(import("../state/session"), async (original) => {
 });
 
 import { TerminalViewport } from "./ThreadTerminalDrawer";
+import { KeptViewLifetimeContext, createKeptViewLifetime } from "./keptView";
 
 const threadRef = {
   environmentId: EnvironmentId.make("secondary-terminal"),
@@ -110,6 +111,38 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+});
+
+it("keeps a replacement terminal session visible while the drawer stays open", async () => {
+  const lifetime = createKeptViewLifetime();
+  const viewport = (terminalId: string) => (
+    <KeptViewLifetimeContext value={lifetime}>
+      <TerminalViewport
+        advancedTypography={false}
+        threadRef={threadRef}
+        threadId={threadRef.threadId}
+        terminalId={terminalId}
+        terminalLabel="Terminal"
+        cwd="/repo"
+        onSessionExited={state.otherCommand}
+        focusRequestId={0}
+        autoFocus={false}
+        visible={true}
+        resizeEpoch={0}
+        drawerHeight={200}
+        keybindings={[]}
+      />
+    </KeptViewLifetimeContext>
+  );
+  try {
+    await act(async () => root.render(viewport("terminal-1")));
+    expect(state.createSurface.mock.calls[0]![1].visible).toBe(true);
+    await act(async () => root.render(viewport("terminal-2")));
+    expect(state.createSurface).toHaveBeenCalledTimes(2);
+    expect(state.createSurface.mock.calls[1]![1].visible).toBe(true);
+  } finally {
+    lifetime.dispose();
+  }
 });
 
 it("rechecks the target terminal grant when a retained surface callback reports a resize", async () => {
