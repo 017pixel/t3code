@@ -18,6 +18,7 @@ import type {
 import { TrimmedNonEmptyString } from "@t3tools/contracts";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 
+import { bitbucketMentionDisplayBody } from "./bitbucketMentions.ts";
 import { dedupeChecks } from "@t3tools/source-control-core/server/pullRequestChecks";
 
 /**
@@ -55,10 +56,20 @@ const RawBranchSchema = Schema.Struct({
 
 const RawLinkSchema = Schema.Struct({ href: Schema.optional(Schema.String) });
 
+const RawContentSchema = Schema.Struct({
+  raw: Schema.optional(Schema.String),
+  html: Schema.optional(Schema.Unknown),
+});
+
+const decodeRenderedDescription = Schema.decodeUnknownOption(
+  Schema.Struct({ description: Schema.Struct({ html: Schema.String }) }),
+);
+
 const RawPullRequestSchema = Schema.Struct({
   id: Schema.Int,
   title: Schema.String,
   description: Schema.optional(Schema.NullOr(Schema.String)),
+  rendered: Schema.optional(Schema.Unknown),
   state: Schema.optional(Schema.NullOr(Schema.String)),
   draft: Schema.optional(Schema.Boolean),
   author: Schema.optional(Schema.NullOr(RawUserSchema)),
@@ -93,7 +104,7 @@ const RawPageSchema = Schema.Struct({
 
 const RawCommentSchema = Schema.Struct({
   id: Schema.Int,
-  content: Schema.optional(Schema.NullOr(Schema.Struct({ raw: Schema.optional(Schema.String) }))),
+  content: Schema.optional(Schema.NullOr(RawContentSchema)),
   user: Schema.optional(Schema.NullOr(RawUserSchema)),
   created_on: Schema.String,
   deleted: Schema.optional(Schema.Boolean),
@@ -180,6 +191,7 @@ export interface BitbucketPullRequest {
   /** When the request was merged or declined, unlike `updatedAt`, which later comments move. */
   readonly closedAt: string | null;
   readonly body: string;
+  readonly displayBody?: string | undefined;
   readonly reviewRequestLogins: ReadonlyArray<string>;
   readonly reviewers: ReadonlyArray<PullRequestActor>;
   readonly reviewerIds: ReadonlyArray<string>;
@@ -286,6 +298,15 @@ function toPullRequest(raw: Schema.Schema.Type<typeof RawPullRequestSchema>): Bi
     updatedAt: toIsoUtc(raw.updated_on),
     closedAt: raw.closed_on == null ? null : toIsoUtc(raw.closed_on),
     body: raw.description ?? "",
+    displayBody: bitbucketMentionDisplayBody(
+      raw.description ?? "",
+      Option.getOrUndefined(
+        Option.map(
+          decodeRenderedDescription(raw.rendered),
+          (rendered) => rendered.description.html,
+        ),
+      ),
+    ),
     reviewRequestLogins: reviewers.map((reviewer) => reviewer.login),
     reviewers,
     reviewerIds: (raw.reviewers ?? []).flatMap((reviewer) => trimmed(reviewer.uuid) ?? []),
@@ -436,6 +457,7 @@ export function buildReviewThreads(
         id: String(comment.id),
         author: toActor(comment.user),
         body: comment.content?.raw ?? "",
+        displayBody: bitbucketMentionDisplayBody(comment.content?.raw ?? "", comment.content?.html),
         createdAt: toIsoUtc(comment.created_on),
         url: trimmed(comment.links?.html?.href),
       }));
@@ -464,6 +486,7 @@ export function decodeCommentsJson(raw: string): Result.Result<BitbucketComments
       kind: path === null ? "issue-comment" : "review-comment",
       author: toActor(comment.user),
       body,
+      displayBody: bitbucketMentionDisplayBody(body, comment.content?.html),
       createdAt: toIsoUtc(comment.created_on),
       url: trimmed(comment.links?.html?.href),
       path,
