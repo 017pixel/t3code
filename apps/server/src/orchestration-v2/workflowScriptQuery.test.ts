@@ -16,6 +16,7 @@ import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { readWorkflowScript } from "./workflowScriptQuery.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Layer from "effect/Layer";
+import * as NodePathService from "@effect/platform-node/NodePath";
 
 const sandbox = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "wf-script-"));
 const home = NodePath.join(sandbox, "home");
@@ -65,7 +66,10 @@ effectIt.layer(
         environment: [{ name: "CLAUDE_CONFIG_DIR", value: envHome }],
       },
     },
-  }).pipe(Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, home))),
+  }).pipe(
+    Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, home)),
+    Layer.provideMerge(NodePathService.layer),
+  ),
 )("workflow script containment", (effectIt) => {
   effectIt.effect("reads configured Claude homes while rejecting escapes", () =>
     Effect.gen(function* () {
