@@ -52,6 +52,7 @@ const interactive =
 
 /** One project's resolved tracker: which driver, where it is served from, and its container. */
 interface ProjectTrackerBinding {
+  readonly canonicalKey: string;
   readonly tracker: IssueTrackerKind;
   readonly host: string;
   readonly scope: string;
@@ -73,6 +74,7 @@ function resolveGitHostBinding(project: OrchestrationProjectShell): ProjectTrack
   const kind = identity?.provider;
   if (!identity || kind === undefined || kind === "unknown" || scope === null) return null;
   return {
+    canonicalKey: identity.canonicalKey,
     tracker: IssueTrackerKind.make(kind),
     host: pullRequestHostOf(identity, SourceControlProviderKind.make(kind)),
     scope,
@@ -237,8 +239,7 @@ const make = Effect.gen(function* () {
       // Worktrees of one repository are separate projects; read each scope once.
       const scopes = new Map<string, SupportedProject>();
       for (const project of supported) {
-        const key = listCursorKey(project.host, project.scope);
-        if (!scopes.has(key)) scopes.set(key, project);
+        if (!scopes.has(project.canonicalKey)) scopes.set(project.canonicalKey, project);
       }
       const continuing = input.cursors;
       const viewers = new Map<string, string>();
@@ -282,9 +283,10 @@ const make = Effect.gen(function* () {
       };
 
       yield* Effect.forEach(
-        scopes,
-        ([key, project]) =>
+        scopes.values(),
+        (project) =>
           Effect.gen(function* () {
+            const key = listCursorKey(project.host, project.scope);
             // A continuation names the scopes it wants; one not named has nothing to add.
             if (continuing !== undefined && continuing[key] === undefined) return;
             const cursor = continuing?.[key];

@@ -21,6 +21,8 @@ import {
   type TrackerIssueDetail,
 } from "@t3tools/issue-tracker-core/server/IssueTracker";
 
+import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
+
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as IssueService from "./IssueService.ts";
@@ -42,7 +44,7 @@ function project(input: {
     ...(input.repository
       ? {
           repositoryIdentity: {
-            canonicalKey: `${host}/${input.repository}`,
+            canonicalKey: normalizeGitRemoteUrl(`https://${host}/${input.repository}.git`),
             locator: {
               source: "git-remote" as const,
               remoteName: "origin",
@@ -291,7 +293,7 @@ describe("IssueService", () => {
       let failContinuation = true;
       const service = yield* makeService({
         projects: [
-          project({ id: "web", repository: "acme/web" }),
+          project({ id: "web", repository: "Acme/Web" }),
           project({ id: "web-worktree", repository: "acme/web" }),
           project({ id: "api", repository: "acme/api" }),
           project({ id: "docs", repository: "acme/docs" }),
@@ -337,13 +339,16 @@ describe("IssueService", () => {
         ],
       });
       const result = yield* service.list({ state: "open" });
-      expect(listed.sort()).toEqual(["acme/api", "acme/docs", "acme/web"]);
+      expect(listed.sort()).toEqual(["Acme/Web", "acme/api", "acme/docs"]);
       expect(result.entries.map((entry) => [entry.projectId, entry.key])).toEqual([
         ["web", "2"],
         ["docs", "3"],
         ["web", "1"],
       ]);
-      expect(result.nextCursors).toEqual({ "github.com acme/web": "next" });
+      expect(
+        result.entries.filter((entry) => entry.projectId === "web").map((entry) => entry.scope),
+      ).toEqual(["Acme/Web", "Acme/Web"]);
+      expect(result.nextCursors).toEqual({ "github.com Acme/Web": "next" });
       expect(result.errors).toEqual([{ projectId: "api", projectTitle: "api", message: "boom" }]);
       expect(result.viewers).toEqual({ "github.com": "julius" });
       expect(result.trackers).toEqual([
@@ -363,7 +368,7 @@ describe("IssueService", () => {
         state: "open",
         cursors: result.nextCursors,
       });
-      expect(listed).toEqual(["acme/web"]);
+      expect(listed).toEqual(["Acme/Web"]);
       expect(failed.nextCursors).toEqual(result.nextCursors);
       expect(failed.errors).toEqual([
         { projectId: "web", projectTitle: "web", message: "try again" },
