@@ -212,7 +212,9 @@ export function hostPreviewMimeTypeFromExtension(extension: string): string | nu
     audioMimeTypeFromExtension(extension) ??
     BROWSER_MIME_TYPE_BY_EXTENSION.get(extension.toLowerCase()) ??
     FONT_MIME_TYPE_BY_EXTENSION.get(extension.toLowerCase()) ??
-    OFFICE_MIME_TYPES[extension.toLowerCase().slice(1) as OfficePreviewKind] ??
+    (Object.hasOwn(OFFICE_MIME_TYPES, extension.toLowerCase().slice(1))
+      ? OFFICE_MIME_TYPES[extension.toLowerCase().slice(1) as OfficePreviewKind]
+      : null) ??
     null
   );
 }

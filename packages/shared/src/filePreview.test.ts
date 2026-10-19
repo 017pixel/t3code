@@ -108,6 +108,10 @@ describe("workspace file previews", () => {
     expect(hostPreviewMimeTypeFromExtension(".weba")).toBe("audio/webm");
     expect(hostPreviewMimeTypeFromExtension(".mp4")).toBe("video/mp4");
     expect(hostPreviewMimeTypeFromExtension(".txt")).toBeNull();
+    expect(hostPreviewMimeTypeFromExtension(".constructor")).toBeNull();
+    expect(hostPreviewMimeTypeFromExtension(".toString")).toBeNull();
+    expect(hostPreviewMimeTypeFromExtension(".__proto__")).toBeNull();
+    expect(hostPreviewMimeTypeFromExtension(".webm-audio")).toBe("audio/webm");
   });
 });
 
