@@ -2815,7 +2815,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               turnId: nativeTurnId,
               itemId: "network",
               startedAtMs: 1782622441000,
-              command: "node task.js",
+              command: "curl -sI https://example.com | head -n 1",
+              reason: "Check response headers",
               networkApprovalContext: { protocol: "https", host: "example.com" },
             },
             decision: "decline",
@@ -2892,7 +2893,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           [
             { prompt: command, title: "Inspect files" },
             { prompt: "printf '%s' 'hello world' '' 'it'\\''s $HOME'", title: "Print arguments" },
-            { prompt: "https example.com", title: "node task.js" },
+            {
+              prompt: "https example.com\ncurl -sI https://example.com | head -n 1",
+              title: "Check response headers",
+            },
           ],
         );
       }).pipe(

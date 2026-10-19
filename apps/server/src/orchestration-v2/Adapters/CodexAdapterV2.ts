@@ -5057,12 +5057,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeItemId: payload.itemId,
               nativeRequestId,
               requestKind: "command",
-              // A network approval grants its host, so the host leads and the command that
-              // wants it explains; with neither, the reason is all there is.
+              // Network approvals grant the host; keep the requesting command visible too.
               ...(payload.networkApprovalContext
                 ? {
-                    prompt: `${payload.networkApprovalContext.protocol} ${payload.networkApprovalContext.host}`,
-                    title: payload.reason ?? payload.command,
+                    prompt: `${payload.networkApprovalContext.protocol} ${payload.networkApprovalContext.host}${payload.command ? `\n${payload.command}` : ""}`,
+                    title: payload.reason,
                   }
                 : payload.command
                   ? { prompt: payload.command, title: payload.reason }
