@@ -1,5 +1,5 @@
 diff --git a/index.mjs b/index.mjs
-index 7ad811c..1b5bbee 100644
+index 7ad811c..16ced5f 100644
 --- a/index.mjs
 +++ b/index.mjs
 @@ -142,17 +142,20 @@ function updatePos(el, debounce = true) {
@@ -96,3 +96,12 @@ index 7ad811c..1b5bbee 100644
                  // unobserve resize
                  resize === null || resize === void 0 ? void 0 : resize.unobserve(node);
                  // cancel animations
+@@ -786,6 +816,8 @@ function autoAnimate(el, config = {}) {
+                 }
+                 catch { }
+                 animations.delete(node);
++                if (DEL in node)
++                    node.remove();
+                 // disconnect observers
+                 const io = intersections.get(node);
+                 io === null || io === void 0 ? void 0 : io.disconnect();

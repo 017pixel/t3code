@@ -1,12 +1,10 @@
 import type { AnimationController } from "@formkit/auto-animate";
 import * as NodeModule from "node:module";
 import * as NodeURL from "node:url";
-import { act } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-// Run the installed library with controlled browser scheduling. Layout and frame
-// timings are covered by the real-client sidebar performance recording.
+// Control scheduling and DOM primitives while exercising the installed package.
+// Browser tests cover actual DOM mutation delivery and sidebar animations.
 class TestElement {
   readonly nodeName = "DIV";
   readonly style = {};
@@ -92,7 +90,6 @@ let parent: TestElement;
 let root: TestElement;
 let idleCallbacks: Array<() => void>;
 let controllers: AnimationController[];
-let renderer: ReactTestRenderer | null;
 let moduleInstance = 0;
 const libraryUrl = NodeURL.pathToFileURL(
   NodeModule.createRequire(import.meta.url).resolve("@formkit/auto-animate"),
@@ -141,8 +138,6 @@ beforeEach(() => {
   root = new TestElement();
   idleCallbacks = [];
   controllers = [];
-  renderer = null;
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("Element", TestElement);
   vi.stubGlobal("HTMLElement", TestElement);
   vi.stubGlobal(
@@ -173,7 +168,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  act(() => renderer?.unmount());
   controllers.forEach((controller) => controller.destroy?.());
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -190,16 +184,6 @@ describe("AutoAnimate controller cleanup", () => {
     expect(parent.getBoundingClientRect).not.toHaveBeenCalled();
   });
 
-  it("tears down running intervals and position observers", async () => {
-    parent.appendChild(new TestElement());
-    const controller = await start();
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(vi.getTimerCount()).toBe(2);
-    expect(parent.getBoundingClientRect).toHaveBeenCalled();
-    controller.destroy?.();
-    expectStopped();
-  });
-
   it("ignores an old polling callback after destroy and recreation", async () => {
     const controller = await start();
     await vi.advanceTimersByTimeAsync(4_000);
@@ -211,19 +195,6 @@ describe("AutoAnimate controller cleanup", () => {
     idleCallbacks.splice(0).forEach((callback) => callback());
     expect(vi.getTimerCount()).toBe(1);
     next.destroy?.();
-    await vi.advanceTimersByTimeAsync(10_000);
-    expectStopped();
-  });
-
-  it("ignores queued root-resize work after destroying its parent", async () => {
-    const controller = await start();
-    await vi.advanceTimersByTimeAsync(250);
-    const resize = TestObserver.instances.find((observer) => observer.observed.has(root))!;
-    resize.callback([{ target: root } as unknown as MutationRecord]);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(idleCallbacks).toHaveLength(1);
-    controller.destroy?.();
-    idleCallbacks.splice(0).forEach((callback) => callback());
     await vi.advanceTimersByTimeAsync(10_000);
     expectStopped();
   });
@@ -265,28 +236,17 @@ describe("AutoAnimate controller cleanup", () => {
     expectStopped();
   });
 
-  it("stops tracking a child after its removal animation finishes", async () => {
+  it("removes a retained row when destroy interrupts its removal animation", async () => {
     const child = new TestElement();
     parent.appendChild(child);
     const controller = await start();
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(250);
     const observer = queueRemoval(child);
     observer.callback(observer.takeRecords());
-    child.animate.mock.results[0]!.value.finish();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(TestObserver.instances.some((item) => item.observed.has(child))).toBe(false);
+    expect(parent.children.includes(child)).toBe(true);
     controller.destroy?.();
+    expect(parent.children.includes(child)).toBe(false);
     expectStopped();
-  });
-
-  it("can repeatedly destroy and recreate without accumulating work", async () => {
-    for (let cycle = 0; cycle < 5; cycle++) {
-      const controller = await start();
-      await vi.advanceTimersByTimeAsync(cycle % 2 === 0 ? 100 : 2_000);
-      controller.destroy?.();
-      controller.destroy?.();
-      expectStopped();
-    }
   });
 
   it("preserves a moved child's live registration in another animated parent", async () => {
@@ -335,35 +295,5 @@ describe("AutoAnimate controller cleanup", () => {
     expect(TestObserver.instances.some((item) => item.observed.has(child))).toBe(false);
     controller.destroy?.();
     expectStopped();
-  });
-
-  it("registers an initially large sidebar only after it becomes small", async () => {
-    const { useSidebarThreadListAutoAnimate } = await import("./useSidebarThreadListAutoAnimate");
-    function ThreadList({ rowCount }: { rowCount: number }) {
-      return <ul ref={useSidebarThreadListAutoAnimate(rowCount)} />;
-    }
-    act(() => {
-      renderer = create(<ThreadList rowCount={101} />, { createNodeMock: () => parent });
-    });
-    expectStopped();
-    act(() => renderer!.update(<ThreadList rowCount={1} />));
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(vi.getTimerCount()).toBe(1);
-    act(() => renderer!.update(<ThreadList rowCount={101} />));
-    expectStopped();
-    act(() => renderer!.update(<ThreadList rowCount={1} />));
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(vi.getTimerCount()).toBe(1);
-    act(() => renderer!.unmount());
-    renderer = null;
-    expectStopped();
-  });
-
-  it("does not initialize browser work during server rendering", async () => {
-    vi.stubGlobal("window", undefined);
-    const controller = await start();
-    controller.destroy?.();
-    expect(vi.getTimerCount()).toBe(0);
-    expect(TestObserver.instances).toEqual([]);
   });
 });

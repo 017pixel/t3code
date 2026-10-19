@@ -1,7 +1,9 @@
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 
-export const MAX_ANIMATED_SIDEBAR_THREAD_ROWS = 20;
+import { useStableCallback } from "../../hooks/useStableCallback";
+
+const MAX_ANIMATED_SIDEBAR_THREAD_ROWS = 20;
 
 interface ThreadListAnimation {
   node: HTMLElement;
@@ -10,7 +12,7 @@ interface ThreadListAnimation {
 
 export function useSidebarThreadListAutoAnimate(visibleRowCount: number) {
   const animationRef = useRef<ThreadListAnimation | null>(null);
-  const attach = useCallback((node: HTMLElement | null) => {
+  const attach = useStableCallback((node: HTMLElement | null) => {
     if (!node) return;
 
     const animation: ThreadListAnimation = { node, controller: null };
@@ -20,7 +22,7 @@ export function useSidebarThreadListAutoAnimate(visibleRowCount: number) {
       animation.controller?.destroy?.();
       animationRef.current = null;
     };
-  }, []);
+  });
 
   useLayoutEffect(() => {
     const animation = animationRef.current;
