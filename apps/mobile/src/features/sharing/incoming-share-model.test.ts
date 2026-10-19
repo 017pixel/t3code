@@ -36,6 +36,9 @@ describe("incoming native shares", () => {
       originalName: "Screenshot.png",
     };
     const removeOwnedFile = vi.fn(() => Promise.resolve());
+    const readBase64 = vi.fn(async () => "YWJj");
+    const persistedUri = "file:///documents/t3-composer-attachments/Screenshot.png";
+    const persistFile = vi.fn(async () => persistedUri);
 
     const result = await buildIncomingShareDraft({
       id: "share-1",
@@ -43,7 +46,9 @@ describe("incoming native shares", () => {
       payloads,
       resolvedPayloads: [resolvedImage],
       fileReader: {
-        readBase64: async () => "YWJj",
+        readBase64,
+        persistFile,
+        readSize: async (uri) => (uri === persistedUri ? 3 : null),
         removeOwnedFile,
       },
     });
@@ -60,14 +65,51 @@ describe("incoming native shares", () => {
           name: "Screenshot.png",
           mimeType: "image/png",
           sizeBytes: 3,
-          dataUrl: "data:image/png;base64,YWJj",
-          previewUri: "data:image/png;base64,YWJj",
+          fileUri: persistedUri,
+          previewUri: persistedUri,
         },
       ],
       warnings: [],
     });
     expect(removeOwnedFile).toHaveBeenCalledWith(image.value);
+    expect(removeOwnedFile).not.toHaveBeenCalledWith(persistedUri);
     expect(hasIncomingShareContent(result)).toBe(true);
+  });
+
+  it("releases a shared image when its stored size cannot be measured", async () => {
+    const image: SharePayload = {
+      shareType: "image",
+      value: "file:///shared/photo.png",
+      mimeType: "image/png",
+    };
+    const persistedUri = "file:///documents/t3-composer-attachments/photo.png";
+    const removeOwnedFile = vi.fn(async (_uri: string) => undefined);
+    const result = await buildIncomingShareDraft({
+      id: "share-unmeasured",
+      createdAt: "2026-07-15T10:00:00.000Z",
+      payloads: [image],
+      resolvedPayloads: [
+        {
+          ...image,
+          contentUri: image.value,
+          contentType: "image",
+          contentMimeType: "image/png",
+          contentSize: 3,
+          originalName: "photo.png",
+        },
+      ],
+      fileReader: {
+        readBase64: async () => "unused",
+        persistFile: async () => persistedUri,
+        readSize: async () => null,
+        removeOwnedFile,
+      },
+    });
+
+    expect(result.attachments).toEqual([]);
+    expect(result.warnings).toEqual(["'photo.png' is empty or could not be read."]);
+    expect(removeOwnedFile).toHaveBeenCalledWith(persistedUri);
+    expect(removeOwnedFile).toHaveBeenCalledWith(image.value);
   });
 
   it("skips oversized images and releases the temporary native file", async () => {

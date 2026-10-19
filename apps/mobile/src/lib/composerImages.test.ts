@@ -24,10 +24,11 @@ const manipulator = vi.hoisted(() => {
       renderAsync: vi.fn(async () => ({
         ...size,
         release: vi.fn(),
-        saveAsync: vi.fn(async (options: { format: string }) => ({
-          uri: `file:///cache/rendered.${options.format}`,
-          base64: `cmVuZGVyZWQ=`,
-        })),
+        saveAsync: vi.fn(async (options: { format: string }) => {
+          const uri = `file:///cache/rendered.${options.format}`;
+          files.set(uri, { base64: "cmVuZGVyZWQ=", deleted: false });
+          return { uri, base64: "cmVuZGVyZWQ=" };
+        }),
       })),
     };
     return context;
@@ -57,6 +58,16 @@ vi.mock("expo-file-system", () => ({
       return files.has(this.uri) && files.get(this.uri)?.deleted === false;
     }
 
+    get size(): number {
+      return Buffer.from(files.get(this.uri)?.base64 ?? "", "base64").byteLength;
+    }
+
+    async copy(destination: { readonly uri: string }): Promise<void> {
+      const entry = files.get(this.uri);
+      if (!entry || entry.deleted) throw new Error("missing file");
+      files.set(destination.uri, { ...entry });
+    }
+
     async base64(): Promise<string> {
       const entry = files.get(this.uri);
       if (!entry || entry.deleted) {
@@ -76,8 +87,12 @@ vi.mock("expo-file-system", () => ({
       files.set(this.uri, { base64: "", deleted: false });
     }
 
-    write(text: string): void {
-      files.set(this.uri, { base64: "", deleted: false, text });
+    write(text: string, options?: { encoding?: string }): void {
+      files.set(this.uri, {
+        base64: options?.encoding === "base64" ? text : "",
+        deleted: false,
+        ...(options?.encoding === "base64" ? {} : { text }),
+      });
     }
 
     moveSync(destination: { readonly uri: string }): void {
@@ -96,6 +111,7 @@ vi.mock("expo-file-system", () => ({
 
     create(): void {}
   },
+  FileMode: { ReadOnly: "r", WriteOnly: "w" },
   Paths: { document: "file:///documents" },
 }));
 
@@ -104,15 +120,25 @@ vi.mock("./uuid", () => ({
 }));
 
 import {
+  type DraftComposerImageAttachment,
   convertPastedImagesToAttachments,
   createPastedTextComposerAttachment,
   isOwnedPastedImageUri,
   pasteComposerClipboard,
 } from "./composerImages";
 
+function expectOwnedImageBytes(image: DraftComposerImageAttachment | undefined, base64: string) {
+  expect(image?.fileUri).toMatch(/^file:\/\/\/documents\/t3-composer-attachments\/[^/]+$/);
+  expect(image).not.toHaveProperty("dataUrl");
+  expect(image?.previewUri).toBe(image?.fileUri);
+  expect(files.get(image!.fileUri!)).toMatchObject({ base64, deleted: false });
+  expect(image?.sizeBytes).toBe(Buffer.from(base64, "base64").byteLength);
+}
+
 describe("composer clipboard paste", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    files.clear();
     clipboard.hasImageAsync.mockResolvedValue(false);
     clipboard.hasStringAsync.mockResolvedValue(true);
     clipboard.getStringAsync.mockResolvedValue("clipboard text");
@@ -127,6 +153,7 @@ describe("composer clipboard paste", () => {
       text: null,
       error: null,
     });
+    expectOwnedImageBytes(result.images[0], "aGVsbG8=");
     expect(clipboard.getStringAsync).not.toHaveBeenCalled();
   });
 
@@ -184,6 +211,7 @@ describe("oversized pasted images", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    files.clear();
     clipboard.hasImageAsync.mockResolvedValue(true);
   });
 
@@ -200,10 +228,9 @@ describe("oversized pasted images", () => {
     expect(result.images).toEqual([
       expect.objectContaining({
         mimeType: "image/png",
-        dataUrl: "data:image/png;base64,cmVuZGVyZWQ=",
-        previewUri: "data:image/png;base64,cmVuZGVyZWQ=",
       }),
     ]);
+    expectOwnedImageBytes(result.images[0], "cmVuZGVyZWQ=");
   });
 
   it("keeps a 2000px clipboard image byte for byte without rendering it", async () => {
@@ -213,7 +240,7 @@ describe("oversized pasted images", () => {
     const result = await pasteComposerClipboard({ existingCount: 0 });
 
     expect(manipulator.manipulate).not.toHaveBeenCalled();
-    expect(result.images).toEqual([expect.objectContaining({ dataUrl: pasted })]);
+    expectOwnedImageBytes(result.images[0], pasted.split(",")[1]!);
   });
 });
 
@@ -232,7 +259,7 @@ describe("native pasted image cleanup", () => {
     expect(isOwnedPastedImageUri("https://example.com/t3-composer-paste/id.png")).toBe(false);
   });
 
-  it("converts owned files to data-backed previews and deletes the source", async () => {
+  it("preserves pasted bytes in an owned file after deleting the temporary source", async () => {
     const uri =
       "file:///private/var/mobile/Containers/Data/Application/app/tmp/t3-composer-paste/id.png";
     files.set(uri, { base64: "aGVsbG8=", deleted: false });
@@ -242,12 +269,8 @@ describe("native pasted image cleanup", () => {
       existingCount: 0,
     });
 
-    expect(attachments).toEqual([
-      expect.objectContaining({
-        dataUrl: "data:image/png;base64,aGVsbG8=",
-        previewUri: "data:image/png;base64,aGVsbG8=",
-      }),
-    ]);
+    expect(attachments).toHaveLength(1);
+    expectOwnedImageBytes(attachments[0], "aGVsbG8=");
     expect(files.get(uri)?.deleted).toBe(true);
   });
 
