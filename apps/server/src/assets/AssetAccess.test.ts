@@ -4,6 +4,7 @@ import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import * as NodeFSP from "node:fs/promises";
 import {
   AssetAccessError,
+  AssetCreateUrlInput,
   AssetPreviewTypeValidationError,
   ThreadId,
   TurnItemId,
@@ -43,6 +44,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFSP>();
   return { ...actual, open: vi.fn(actual.open), realpath: vi.fn(actual.realpath) };
 });
+
+const decodeAssetCreateUrlInput = Schema.decodeUnknownEffect(AssetCreateUrlInput);
 
 const layerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-asset-access-test-",
@@ -1456,6 +1459,30 @@ describe("AssetAccess", () => {
       expect(error.message).toBe("Failed to resolve project favicon.");
       expect(error._tag).toBe("AssetProjectFaviconResolutionError");
       expect(error.cause).toBe(resolutionCause);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("preserves the PR repository through RPC decoding and signed media capabilities", () =>
+    Effect.gen(function* () {
+      const resource = {
+        _tag: "github-media",
+        cwd: "/personal-fork",
+        url: "https://github.com/user-attachments/assets/1a1842fb-6383-492f-873c-57aa0033fa6c",
+        repository: "enterprise/private",
+      };
+      const input = yield* decodeAssetCreateUrlInput({ resource });
+      const issued = yield* issueAssetUrl(input);
+      const suffix = issued.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separator = suffix.indexOf("/");
+      const resolved = yield* resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1));
+
+      expect(resolved).toEqual({
+        kind: "github-media",
+        url: resource.url,
+        cwd: resource.cwd,
+        repository: resource.repository,
+        expiresAt: issued.expiresAt,
+      });
     }).pipe(Effect.provide(layerTest)),
   );
 

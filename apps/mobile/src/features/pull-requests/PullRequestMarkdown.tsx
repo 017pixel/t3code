@@ -39,9 +39,10 @@ export function PullRequestMarkdownRepository(props: {
     projectId: target.input.projectId,
   });
   const cwd = project?.workspaceRoot;
+  const repository = props.params.repository;
   const media = useMemo(
-    () => (cwd ? { environmentId: target.environmentId, cwd } : null),
-    [target.environmentId, cwd],
+    () => (cwd ? { environmentId: target.environmentId, cwd, repository } : null),
+    [target.environmentId, cwd, repository],
   );
   return (
     <RepositoryContext value={props.value}>
@@ -61,7 +62,7 @@ function MarkdownImage(props: {
   return (
     <ThreadMarkdownImageView
       uri={media.uri}
-      sourceKey={props.href}
+      sourceKey={JSON.stringify(media.source)}
       unavailable={media.unavailable || !/^https?:\/\//i.test(props.href)}
       alt={props.alt}
       onPressPreview={(source) =>

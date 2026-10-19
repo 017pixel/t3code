@@ -4,7 +4,11 @@ import { filePreviewGallery } from "../../lib/filePreviewGallery";
 import { mediaVideoPreviewUri, mediaVideoThumbnailKey } from "../../lib/videoPreviewSource";
 import { pullRequestImageSource, pullRequestMediaSource } from "./pullRequestMediaSource";
 
-const location = { environmentId: EnvironmentId.make("test"), cwd: "/repo" };
+const location = {
+  environmentId: EnvironmentId.make("test"),
+  cwd: "/repo",
+  repository: "enterprise/private",
+};
 const url = "https://github.com/user-attachments/assets/abc-123";
 
 describe("PR media previews", () => {
@@ -15,6 +19,15 @@ describe("PR media previews", () => {
       mimeType: "video/mp4",
       ...pullRequestMediaSource(url, location),
     };
+    expect(source).toMatchObject({
+      environmentId: location.environmentId,
+      resource: {
+        _tag: "github-media",
+        cwd: location.cwd,
+        url,
+        repository: location.repository,
+      },
+    });
     expect(mediaVideoPreviewUri(source, null)).toBeNull();
     expect(mediaVideoPreviewUri(source, "https://signed/first")).toBe("https://signed/first");
     expect(mediaVideoPreviewUri(source, "https://signed/renewed")).toBe("https://signed/renewed");
@@ -27,7 +40,10 @@ describe("PR media previews", () => {
     const selected = { ...second, sourceIdentifier: "tapped" };
     const gallery = filePreviewGallery(selected, [first, second]);
     expect(gallery).toEqual([first, selected]);
-    expect(gallery.every((item) => "resource" in item)).toBe(true);
+    expect(gallery).toMatchObject([
+      { resource: { url, repository: location.repository } },
+      { resource: { url: `${url}-second`, repository: location.repository } },
+    ]);
   });
 
   it("leaves custom-domain media as direct URLs", () => {

@@ -47,12 +47,12 @@ export const AssetResource = Schema.Union([
   Schema.TaggedStruct("native-app-icon", {
     app: ToolActivityNativeAppReference,
   }),
-  // An upload a pull request body points at on GitHub. A private repository serves these only
-  // to a request that carries a credential, which the client has none of, so the server fetches
-  // them with the `gh` credential the repository at `cwd` authenticates with.
+  // Private GitHub media needs the server credential; repository is the PR context, which
+  // can differ from the checkout at cwd when viewing an upstream or unrelated PR.
   Schema.TaggedStruct("github-media", {
     cwd: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
     url: TrimmedNonEmptyString.check(Schema.isMaxLength(2048)),
+    repository: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
   }),
 ]);
 export type AssetResource = typeof AssetResource.Type;

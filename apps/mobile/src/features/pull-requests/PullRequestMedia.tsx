@@ -1,8 +1,10 @@
 import { createContext, useContext, useMemo, useState } from "react";
-import { pullRequestMediaSource, pullRequestImageSource } from "./pullRequestMediaSource";
+import {
+  pullRequestMediaSource,
+  pullRequestImageSource,
+  type PullRequestMediaLocation,
+} from "./pullRequestMediaSource";
 import { useFilePreviewGallery } from "../../components/FilePreviewGallery";
-import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
-import { githubMediaFetchUrl } from "@t3tools/shared/githubMedia";
 import { videoMimeType } from "@t3tools/shared/video";
 import { Pressable, View } from "react-native";
 import { Image } from "expo-image";
@@ -18,24 +20,18 @@ import {
   type FilePreviewItem,
 } from "../../components/FilePreviewModal";
 
-export const PullRequestMediaContext = createContext<{
-  readonly environmentId: EnvironmentId;
-  readonly cwd: string;
-} | null>(null);
+export const PullRequestMediaContext = createContext<PullRequestMediaLocation | null>(null);
 
 export function usePullRequestMediaUrl(url: string) {
   const context = useContext(PullRequestMediaContext);
-  const fetchUrl = githubMediaFetchUrl(url);
-  const resource = useMemo<AssetResource | null>(
-    () => (context && fetchUrl ? { _tag: "github-media", cwd: context.cwd, url: fetchUrl } : null),
-    [context, fetchUrl],
-  );
+  const source = useMemo(() => pullRequestMediaSource(url, context), [context, url]);
+  const resource = "resource" in source ? (source.resource ?? null) : null;
   const asset = useAssetUrlState(context?.environmentId ?? null, resource);
   const refresh = useRefreshAssetUrl(context?.environmentId ?? null, resource);
   return {
     uri: asset._tag === "Success" ? asset.url : resource ? null : url,
     unavailable: resource !== null && asset._tag === "Failure",
-    source: pullRequestMediaSource(url, context),
+    source,
     resolvePlaybackUri: resource ? async () => (await refresh()) ?? null : undefined,
   };
 }
@@ -51,13 +47,14 @@ export function PullRequestMedia(props: {
   const withGallery = useFilePreviewGallery();
   const [image, setImage] = useState<FilePreviewSource | null>(null);
   const [video, setVideo] = useState<VideoPreviewSource | null>(null);
+  const sourceKey = JSON.stringify(media.source);
   const name = props.caption || new URL(props.url).pathname.split("/").pop() || "Attachment";
   if (props.kind === "image")
     return (
       <>
         <ThreadMarkdownImageView
           uri={media.uri}
-          sourceKey={props.url}
+          sourceKey={sourceKey}
           unavailable={media.unavailable}
           alt={name}
           onPressPreview={(source) =>
@@ -78,7 +75,7 @@ export function PullRequestMedia(props: {
       {props.compact ? (
         <VideoAttachmentTile
           name={name}
-          sourceIdentifier={props.url}
+          sourceIdentifier={sourceKey}
           thumbnailSource={media.uri}
           style={{ width: 176, height: 112, borderRadius: 16 }}
           onPress={() =>
@@ -97,7 +94,7 @@ export function PullRequestMedia(props: {
           uri={media.uri}
           unavailable={media.unavailable}
           name={name}
-          thumbnailKey={props.url}
+          thumbnailKey={sourceKey}
           resolvePlaybackUri={media.resolvePlaybackUri}
         />
       )}
