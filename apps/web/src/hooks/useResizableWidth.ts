@@ -103,14 +103,14 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
   // rewrites the committed width, so re-apply the live pointer position.
   useLayoutEffect(refresh, [clamp, clampedWidth, refresh]);
 
-  const onDoubleClick = useCallback(() => {
+  const onDoubleClick = () => {
     setWidthState({ storageKey, width: clamp(defaultWidth) });
     try {
       removeLocalStorageItem(storageKey);
     } catch (error) {
       console.error("Could not reset persisted panel width.", error);
     }
-  }, [clamp, defaultWidth, storageKey]);
+  };
 
   return { width: clampedWidth, handlers: { ...handlers, onDoubleClick } };
 }
