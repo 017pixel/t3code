@@ -90,7 +90,7 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
       }),
     });
     return {
-      subject: sanitizeCommitSubject(generated.subject),
+      subject: sanitizeCommitSubject(generated.subject, input.policy?.kind),
       body: generated.body.trim(),
       ...("branch" in generated && typeof generated.branch === "string"
         ? { branch: sanitizeFeatureBranchName(generated.branch) }
