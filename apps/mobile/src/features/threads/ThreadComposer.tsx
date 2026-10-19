@@ -582,6 +582,8 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     currentModelSelection,
     lockedProviderInstanceId,
     props.selectedThread.projectId,
+    false,
+    props.projectCwd,
   );
   const threadProviderGroups = groupByProvider(modelOptions);
   const currentModelOption =
@@ -599,6 +601,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     ownerId: settingsOwnerId,
     environmentId: props.environmentId,
     projectId: props.selectedThread.projectId,
+    cwd: props.projectCwd,
     providerInstanceId: currentModelSelection.instanceId,
     ...(lockedProviderInstanceId ? { lockedProviderInstanceId } : {}),
     providerGroups: threadProviderGroups,

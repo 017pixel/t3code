@@ -1102,6 +1102,7 @@ import {
   getProviderSkillsForSlashMenu,
   hasCompleteProviderWorkspaceSnapshot,
   hasCurrentProviderWorkspaceSnapshot,
+  resolveProviderForCwd,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
 } from "@t3tools/client-runtime/providerSkills";
@@ -2281,7 +2282,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedModel,
     composerProviderState,
   } = useComposerProviderModel({
-    providerStatuses,
+    providerStatuses: providerStatuses.map((provider) => resolveProviderForCwd(provider, gitCwd)),
     settings,
     activeProjectId,
     threadRef: composerDraftTarget,
