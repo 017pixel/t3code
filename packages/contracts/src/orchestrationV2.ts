@@ -707,6 +707,13 @@ export const OrchestrationV2Subagent = Schema.Struct({
     "interrupted",
   ]),
   progress: Schema.optional(Schema.String),
+  /** Latest context snapshot; may decrease after compaction and must not be summed. */
+  usage: Schema.optional(
+    Schema.Struct({
+      contextTokens: NonNegativeInt,
+      toolUses: NonNegativeInt,
+    }),
+  ),
   workflow: Schema.optional(OrchestrationV2SubagentWorkflow),
   result: Schema.NullOr(Schema.String),
   startedAt: Schema.NullOr(Schema.DateTimeUtc),

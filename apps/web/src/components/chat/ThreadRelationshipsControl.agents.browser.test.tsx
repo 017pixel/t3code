@@ -832,6 +832,44 @@ it("shows readable models and only differing workspace details in agent tooltips
   expect(text()).not.toContain("Worktree");
   expect(text()).not.toContain("Workspace");
 
+  expect(text()).not.toContain("context");
+  expect(text()).not.toContain("tool uses");
+  const contextAgent = {
+    ...projection.subagents[0],
+    origin: "provider_native",
+    driver: "claudeAgent",
+    providerInstanceId: "claude",
+    status: "running",
+    usage: { contextTokens: 41_100, toolUses: 2 },
+  };
+  state.projection = { ...projection, subagents: [contextAgent] };
+  await update();
+  expect(text()).toContain("41.1K context · 2 tool uses");
+
+  state.projection = {
+    ...projection,
+    subagents: [{ ...contextAgent, status: "completed" }],
+  };
+  state.shells = [{ environmentId: "test", source: { ...child, activityRunStatus: "running" } }];
+  await update();
+  expect(text()).not.toContain("context");
+  expect(text()).not.toContain("tool uses");
+
+  state.projection = { ...projection, subagents: [contextAgent] };
+  await update();
+  expect(text()).toContain("41.1K context · 2 tool uses");
+  state.projection = {
+    ...projection,
+    subagents: [{ ...contextAgent, usage: { contextTokens: 12_000, toolUses: 3 } }],
+  };
+  await update();
+  expect(text()).toContain("12K context · 3 tool uses");
+  expect(text()).not.toContain("41.1K context");
+  state.projection = projection;
+  await rerender();
+  expect(text()).not.toContain("context");
+  expect(text()).not.toContain("tool uses");
+
   for (const [model, expected] of [
     [null, "Not reported"],
     ["", "Not reported"],

@@ -55,6 +55,7 @@ export interface RuntimeSubagent {
   readonly status: RuntimeSubagentStatus;
   readonly activationCount: number;
   readonly usage: SubagentUsage | null;
+  readonly contextUsage?: OrchestrationV2Subagent["usage"] | null;
   readonly progress: string | null;
   readonly lastToolName: string | null;
   readonly result: string | null;
@@ -152,6 +153,7 @@ function workflowMembersToRuntime(
       status,
       activationCount: agent.attempt ?? 1,
       usage: workflowUsage(agent),
+      contextUsage: null,
       progress: agent.prompt ?? null,
       result: failed ? null : (agent.result ?? null),
       error: failed ? (agent.result ?? null) : null,
@@ -179,6 +181,7 @@ export function projectedSubagentsToRuntime(
     readonly model: string | null;
     readonly status: OrchestrationV2Subagent["status"];
     readonly progress?: string | undefined;
+    readonly usage?: OrchestrationV2Subagent["usage"];
     readonly childThreadId?: string | null | undefined;
     readonly workflow?: OrchestrationV2SubagentWorkflow | undefined;
     readonly result: string | null;
@@ -205,6 +208,7 @@ export function projectedSubagentsToRuntime(
       status: subagent.status,
       activationCount: 1,
       usage: workflow === undefined ? null : workflowUsage(workflow),
+      contextUsage: subagent.usage ?? null,
       progress: subagent.progress ?? null,
       lastToolName: null,
       result: subagent.result,

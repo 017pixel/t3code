@@ -16,7 +16,10 @@ import {
   type HandoffEndpoints,
   type HandoffTimelineRun,
 } from "@t3tools/client-runtime/handoff";
-import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import {
+  formatSubagentDisplayTitle,
+  resolveSubagentContextUsage,
+} from "@t3tools/client-runtime/state/subagent-display";
 import {
   ProviderDriverKind,
   type OrchestrationV2Notification,
@@ -517,6 +520,8 @@ function SubagentTimelineLink(props: {
           status={liveStatus}
           result={agent?.result ?? props.result}
           progress={agent?.progress ?? props.progress}
+          usage={agent?.usage}
+          taskStatus={agent?.status ?? props.status}
         />
       </ThreadHoverCardPopup>
     </Tooltip>
@@ -526,6 +531,8 @@ function SubagentTimelineLink(props: {
 function SubagentTimelineTooltip(
   props: Parameters<typeof SubagentTimelineLink>[0] & {
     model: string | null;
+    usage: OrchestrationV2Subagent["usage"];
+    taskStatus: OrchestrationV2Subagent["status"];
     modelSelection: OrchestrationV2Subagent["modelSelection"];
     elapsed: ReactNode;
   },
@@ -557,6 +564,7 @@ function SubagentTimelineTooltip(
       status={props.status}
       result={props.result}
       progress={props.progress}
+      usage={resolveSubagentContextUsage({ status: props.taskStatus, usage: props.usage }, child)}
       parentThread={parent}
       childThread={child}
       parentProject={parentProject ?? undefined}

@@ -1,10 +1,12 @@
 import type {
+  OrchestrationV2Subagent,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2ThreadShell,
   OrchestrationProjectShell,
   ServerProvider,
 } from "@t3tools/contracts";
 import { formatModelSlugName, resolveSelectableModel } from "@t3tools/shared/model";
+import { formatTokens } from "@t3tools/shared/usageFormat";
 import { fileBasename } from "@t3tools/shared/path";
 import { isTerminalSubagentStatus } from "./subagentRuntime.ts";
 
@@ -121,4 +123,27 @@ export function subagentDetailPreview(input: {
     (isTerminalSubagentStatus(input.status) ? result || progress : progress || result) || "";
   const compact = detail.replace(/\s+/gu, " ");
   return compact.length > 280 ? `${compact.slice(0, 280).trimEnd()}…` : compact || null;
+}
+
+export function resolveSubagentContextUsage(
+  subagent: {
+    readonly status: OrchestrationV2Subagent["status"];
+    readonly usage?: OrchestrationV2Subagent["usage"] | null;
+  },
+  childThread?: Pick<OrchestrationV2ThreadShell, "activityRunStatus" | "status"> | null,
+): OrchestrationV2Subagent["usage"] | null {
+  // A follow-up runs in the child thread without updating the settled task.
+  if (
+    isTerminalSubagentStatus(subagent.status) &&
+    (childThread?.activityRunStatus || childThread?.status === "queued")
+  ) {
+    return null;
+  }
+  return subagent.usage ?? null;
+}
+
+export function formatSubagentUsage(usage: OrchestrationV2Subagent["usage"] | null): string | null {
+  if (!usage) return null;
+  const tools = `${usage.toolUses} ${usage.toolUses === 1 ? "tool use" : "tool uses"}`;
+  return `${formatTokens(usage.contextTokens)} context · ${tools}`;
 }

@@ -1,6 +1,10 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { resolveProviderInstanceDisplayName } from "@t3tools/client-runtime/state/provider-instance-display";
-import { resolveSubagentMetadata } from "@t3tools/client-runtime/state/subagent-display";
+import {
+  formatSubagentUsage,
+  resolveSubagentContextUsage,
+  resolveSubagentMetadata,
+} from "@t3tools/client-runtime/state/subagent-display";
 import type { EnvironmentId, OrchestrationV2Subagent } from "@t3tools/contracts";
 import type { ReactNode } from "react";
 import { View } from "react-native";
@@ -26,6 +30,7 @@ type SubagentRowSubagent = Pick<
   | "status"
   | "progress"
   | "result"
+  | "usage"
 >;
 
 export function SubagentRow(props: {
@@ -112,38 +117,42 @@ function SubagentMetadata(props: {
     parentProject,
     childProject,
   });
+  const usage = formatSubagentUsage(resolveSubagentContextUsage(subagent, child));
   return (
-    <View className="min-w-0 flex-row items-center gap-1.5">
-      <ProviderIcon
-        provider={provider?.driver ?? subagent.driver}
-        iconUrl={provider?.iconUrl}
-        size={12}
-      />
-      <Text className="min-w-0 shrink text-xs text-foreground-muted" numberOfLines={1}>
-        {provider ? `${resolveProviderInstanceDisplayName(provider)} · ` : ""}
-        {modelLabel}
-      </Text>
-      {workspace.map(({ label, value }) => (
-        // The row reads this label in place of the icon. collapsable keeps the
-        // view (and label) from being flattened away without making it a
-        // separate accessibility stop.
-        <View
-          key={label}
-          collapsable={false}
-          accessibilityLabel={`${label}: ${value}`}
-          className="min-w-0 shrink flex-row items-center gap-1.5"
-        >
-          <Text className="text-xs text-foreground-muted">·</Text>
-          <SymbolView
-            name={label === "Branch" ? "arrow.triangle.branch" : "folder"}
-            size={11}
-            tintColorClassName="accent-icon-muted"
-          />
-          <Text className="min-w-0 shrink text-xs text-foreground-muted" numberOfLines={1}>
-            {value}
-          </Text>
-        </View>
-      ))}
+    <View className="gap-1">
+      <View className="min-w-0 flex-row items-center gap-1.5">
+        <ProviderIcon
+          provider={provider?.driver ?? subagent.driver}
+          iconUrl={provider?.iconUrl}
+          size={12}
+        />
+        <Text className="min-w-0 shrink text-xs text-foreground-muted" numberOfLines={1}>
+          {provider ? `${resolveProviderInstanceDisplayName(provider)} · ` : ""}
+          {modelLabel}
+        </Text>
+        {workspace.map(({ label, value }) => (
+          // The row reads this label in place of the icon. collapsable keeps the
+          // view (and label) from being flattened away without making it a
+          // separate accessibility stop.
+          <View
+            key={label}
+            collapsable={false}
+            accessibilityLabel={`${label}: ${value}`}
+            className="min-w-0 shrink flex-row items-center gap-1.5"
+          >
+            <Text className="text-xs text-foreground-muted">·</Text>
+            <SymbolView
+              name={label === "Branch" ? "arrow.triangle.branch" : "folder"}
+              size={11}
+              tintColorClassName="accent-icon-muted"
+            />
+            <Text className="min-w-0 shrink text-xs text-foreground-muted" numberOfLines={1}>
+              {value}
+            </Text>
+          </View>
+        ))}
+      </View>
+      {usage ? <Text className="text-xs tabular-nums text-foreground-muted">{usage}</Text> : null}
     </View>
   );
 }

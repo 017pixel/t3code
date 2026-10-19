@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  OrchestrationV2SubagentJson,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -7,6 +8,7 @@ import {
   type OrchestrationV2SubagentWorkflow,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 
 import {
   deriveWorkflowGroups,
@@ -56,6 +58,56 @@ describe("projectedSubagentsToRuntime workflow expansion", () => {
     expect(rest).toEqual([]);
     expect(agent?.kind).toBe("subagent");
     expect(agent?.phases).toEqual([]);
+  });
+
+  it("keeps wire context snapshots separate from cumulative workflow usage", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2SubagentJson);
+    const encode = Schema.encodeSync(OrchestrationV2SubagentJson);
+    const wire = {
+      ...subagent(),
+      threadId: "parent",
+      runId: "run",
+      parentNodeId: "root",
+      origin: "provider_native",
+      createdBy: "agent",
+      driver: "claudeAgent",
+      providerInstanceId: "claude",
+      providerThreadId: null,
+      childThreadId: null,
+      nativeTaskRef: null,
+      startedAt: "2026-08-01T10:00:00.000Z",
+      updatedAt: "2026-08-01T10:00:05.000Z",
+    };
+    for (const usage of [
+      { contextTokens: 41_100, toolUses: 2 },
+      { contextTokens: 12_000, toolUses: 3 },
+      { contextTokens: 0, toolUses: 0 },
+      undefined,
+    ]) {
+      const projected = decode({ ...wire, ...(usage === undefined ? {} : { usage }) });
+      const roundTripped = decode(encode(projected));
+      const [plain] = projectedSubagentsToRuntime([roundTripped]);
+      expect(plain).toMatchObject({ contextUsage: usage ?? null, usage: null });
+
+      const [coordinator, child] = projectedSubagentsToRuntime([
+        {
+          ...roundTripped,
+          workflow: {
+            phases: [],
+            agents: [member({ totalTokens: 500, toolCalls: 1 })],
+            totalTokens: 1000,
+          },
+        },
+      ]);
+      expect(coordinator).toMatchObject({
+        contextUsage: usage ?? null,
+        usage: { totalTokens: 1000 },
+      });
+      expect(child).toMatchObject({
+        contextUsage: null,
+        usage: { totalTokens: 500, toolUses: 1 },
+      });
+    }
   });
 
   it("projects a coordinator plus one row per member", () => {
