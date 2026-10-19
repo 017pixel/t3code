@@ -1,4 +1,5 @@
-import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
+import { Toolbar } from "../../components/ui/Toolbar";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { LegendList } from "@legendapp/list/react-native";
 import { type StaticScreenProps, useNavigation } from "@react-navigation/native";
 import {
@@ -12,15 +13,15 @@ import { useCallback, useMemo, useState } from "react";
 import { Linking, Platform, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { SymbolView } from "../../components/AppSymbol";
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
 import { SettingsScreen } from "./components/SettingsScreen";
-import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
+import { NativeStackScreenOptions } from "../../native/StackHeader";
 import {
   createNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET,
-  NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
+import { useNativeMailSearchToolbar } from "../../native/use-native-mail-search-toolbar";
 
 import { getMobileThirdPartyLicenses } from "./mobileThirdPartyLicenses";
 
@@ -44,7 +45,7 @@ function LicenseRow(props: {
       accessibilityLabel={`${props.entry.name}, ${props.entry.license}`}
       accessibilityRole="button"
       onPress={props.onPress}
-      className="border-b border-border bg-card px-5 py-4 active:bg-card-alt"
+      className="border-b border-border bg-grouped-card px-5 py-4 active:bg-card-alt"
     >
       <View className="flex-row items-start gap-3">
         <View className="min-w-0 flex-1 gap-1">
@@ -72,7 +73,7 @@ export function SettingsOpenSourceLicensesRouteScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const [query, setQuery] = useState("");
-  const usesNativeMailSearchToolbar = Platform.OS === "ios" && NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED;
+  const usesNativeMailSearchToolbar = useNativeMailSearchToolbar();
   const manifest = useMobileThirdPartyLicenses();
   const entries = manifest?.entries ?? [];
   const filteredEntries = useMemo(
@@ -140,9 +141,9 @@ export function SettingsOpenSourceLicensesRouteScreen() {
         />
       ) : null}
       {Platform.OS === "ios" && !usesNativeMailSearchToolbar ? (
-        <NativeHeaderToolbar placement="bottom">
-          <NativeHeaderToolbar.SearchBarSlot />
-        </NativeHeaderToolbar>
+        <Toolbar placement="bottom">
+          <Toolbar.SearchBarSlot />
+        </Toolbar>
       ) : null}
 
       <LegendList
@@ -235,11 +236,11 @@ export function SettingsOpenSourceLicenseRouteScreen({ route }: LicenseDetailPro
               onPress={() => void Linking.openURL(sourceUrl)}
               className="min-h-12 flex-row items-center gap-2 self-start py-2 active:opacity-60"
             >
-              <Text className="font-t3-medium text-primary">Project source</Text>
+              <Text className="font-t3-medium text-primary-text">Project source</Text>
               <SymbolView
                 name="arrow.up.right"
                 size={16}
-                tintColorClassName={"accent-primary"}
+                tintColorClassName={"accent-primary-text"}
                 type="monochrome"
                 weight="semibold"
               />
@@ -247,7 +248,7 @@ export function SettingsOpenSourceLicenseRouteScreen({ route }: LicenseDetailPro
           ) : null}
         </View>
 
-        <View className="overflow-hidden rounded-[24px] border-continuous bg-card p-4">
+        <View className="overflow-hidden rounded-[24px] border-continuous bg-grouped-card p-4">
           <Text selectable className="font-mono text-base leading-normal text-foreground">
             {entry.noticeText}
           </Text>

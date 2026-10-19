@@ -3,7 +3,6 @@ import type { FileTreeBatchOperation, FileTreeSortComparator, GitStatus } from "
 
 import { resolveFileDiffPath } from "~/lib/diffRendering";
 
-/** One changed file as the tree shows it: its current path and how it changed. */
 export interface DiffFileTreeEntry {
   readonly path: string;
   readonly status: GitStatus;
@@ -23,17 +22,19 @@ function toGitStatus(file: FileDiffMetadata): GitStatus {
   }
 }
 
-/** Maps parsed diff files to tree entries, keeping the diff's own order. */
 export function diffFileTreeEntries(
   files: ReadonlyArray<FileDiffMetadata>,
 ): ReadonlyArray<DiffFileTreeEntry> {
-  return files.map((file) => ({ path: resolveFileDiffPath(file), status: toGitStatus(file) }));
+  const statusByPath = new Map<string, GitStatus>();
+  for (const file of files) {
+    const path = resolveFileDiffPath(file);
+    const status = toGitStatus(file);
+    const previous = statusByPath.get(path);
+    statusByPath.set(path, previous === undefined || previous === status ? status : "modified");
+  }
+  return [...statusByPath].map(([path, status]) => ({ path, status }));
 }
 
-/**
- * Every directory on the way to each file, registered with the trailing slash Pierre uses for
- * directory ids. Parents come before children so the tree can add them in order.
- */
 export function collectDirectoryPaths(paths: ReadonlyArray<string>): ReadonlyArray<string> {
   const directories = new Set<string>();
   for (const path of paths) {
@@ -47,7 +48,6 @@ export function collectDirectoryPaths(paths: ReadonlyArray<string>): ReadonlyArr
   return [...directories];
 }
 
-/** A folder takes the position of its first file in the diff. */
 export function diffFileTreePositions(paths: ReadonlyArray<string>): ReadonlyMap<string, number> {
   const positions = new Map<string, number>();
   paths.forEach((path, index) => {
@@ -79,14 +79,6 @@ function pathDepth(path: string): number {
   return path.split("/").filter(Boolean).length;
 }
 
-/**
- * The adds and removes that turn one set of file paths into another, so a diff that changes
- * under the reader (a new slice, a refresh after an agent edit) keeps the directories they
- * have already opened or closed instead of rebuilding the tree from scratch.
- *
- * Directories are removed only once no file needs them; a directory that gains its first file
- * is added before that file.
- */
 export function buildDiffFileTreeUpdates(
   previousPaths: ReadonlyArray<string>,
   nextPaths: ReadonlyArray<string>,

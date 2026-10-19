@@ -1,3 +1,4 @@
+import * as Dialog from "../../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
 import {
   connectionCatalogDisplayUrl,
@@ -6,10 +7,10 @@ import {
   type GitHubRoutingPermission,
 } from "@t3tools/client-runtime/connection";
 import { useState } from "react";
-import { Alert, Pressable, View } from "react-native";
+import { Pressable, View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { environmentCatalog } from "../../connection/catalog";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsSection } from "../settings/components/SettingsSection";
@@ -43,15 +44,12 @@ export function GitHubRoutingSettings() {
   return (
     <View className="mt-5 gap-3">
       <SettingsSection title="GitHub routing">
-        {[...catalog.entries.values()].map((entry, index) => {
+        {[...catalog.entries.values()].map((entry) => {
           const environmentId = entry.target.environmentId;
           const selected = gitHubRoutingPermissionFor(entry, permissions);
           const disabled = !catalog.isReady || saving || gitHubRoutingConnectionKey(entry) === null;
           return (
-            <View
-              key={environmentId}
-              className={index === 0 ? undefined : "border-t border-border-subtle"}
-            >
+            <View key={environmentId}>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`${entry.target.label} GitHub routing`}
@@ -83,13 +81,13 @@ export function GitHubRoutingSettings() {
                       accessibilityRole="radio"
                       accessibilityState={{ checked: selected === option.value, disabled }}
                       disabled={disabled}
-                      className="flex-row items-center gap-4 border-t border-border-subtle p-4 disabled:opacity-50"
+                      className="flex-row items-center gap-4 p-4 disabled:opacity-50"
                       onPress={() => {
                         setSaving(true);
                         void update({ environmentId, permission: option.value }).then((result) => {
                           setSaving(false);
                           if (result._tag === "Failure")
-                            Alert.alert(
+                            Dialog.alert(
                               "Could not save GitHub routing permission",
                               "Try again before leaving this screen.",
                             );

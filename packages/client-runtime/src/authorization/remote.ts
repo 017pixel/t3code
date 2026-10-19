@@ -37,8 +37,6 @@ const clientMetadataTokenExchangeFields = (
   };
 };
 
-// The server reads these off the /ws upgrade URL next to wsTicket. Optional on
-// both ends: old servers ignore unknown params, old clients never send them.
 export const appendClientConnectionParams = (
   url: URL,
   clientMetadata: AuthClientPresentationMetadata | undefined,
@@ -153,27 +151,6 @@ export const fetchRemoteSessionState = Effect.fn(
     client.session({
       headers: {
         authorization: `Bearer ${input.bearerToken}`,
-      },
-    }),
-  );
-});
-
-export const fetchRemoteDpopSessionState = Effect.fn(
-  "clientRuntime.authorization.fetchRemoteDpopSessionState",
-)(function* (input: {
-  readonly httpBaseUrl: string;
-  readonly accessToken: string;
-  readonly dpopProof: string;
-  readonly timeoutMs?: number;
-}) {
-  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
-  return yield* executeEnvironmentHttpRequest(
-    environmentEndpointUrl(input.httpBaseUrl, "/api/auth/session"),
-    input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
-    client.session({
-      headers: {
-        authorization: `DPoP ${input.accessToken}`,
-        dpop: input.dpopProof,
       },
     }),
   );

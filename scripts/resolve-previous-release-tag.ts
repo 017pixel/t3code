@@ -8,8 +8,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as String from "effect/String";
-import { Command, Flag } from "effect/unstable/cli";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { Command, Flag } from "effect/cli";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const ReleaseChannel = Schema.Literals(["stable", "nightly", "preview"]);
 type ReleaseChannel = typeof ReleaseChannel.Type;
@@ -151,9 +151,6 @@ const parseStableTag = (tag: string): StableVersion | undefined => {
   if (!major || !minor || !patch) return undefined;
 
   const prereleaseIdentifiers = prerelease ? prerelease.split(".") : [];
-  // Nightly and preview tags also start with `v` and carry their channel as
-  // the prerelease identifier. They must not be considered stable candidates
-  // when resolving the previous stable tag.
   if (prereleaseIdentifiers[0] === "nightly" || prereleaseIdentifiers[0] === "preview") {
     return undefined;
   }
@@ -178,8 +175,6 @@ const parseNightlyTag = (
   tag: string,
   channel: "nightly" | "preview" = "nightly",
 ): NightlyVersion | undefined => {
-  // Accept both the current `v<semver>` format and the legacy `nightly-v<semver>`
-  // format so release note diffs keep working across the tag-format transition.
   const match = new RegExp(
     `^(?:nightly-)?v(\\d+)\\.(\\d+)\\.(\\d+)-${channel}\\.(\\d{8})\\.(\\d+)$`,
   ).exec(tag);
@@ -320,7 +315,7 @@ export const writePreviousReleaseTagOutput = Effect.fn("writePreviousReleaseTagO
 
   if (writeGithubOutput) {
     const fs = yield* FileSystem.FileSystem;
-    const githubOutputPath = yield* Config.nonEmptyString("GITHUB_OUTPUT").pipe(
+    const githubOutputPath = yield* Config.NonEmptyString("GITHUB_OUTPUT").pipe(
       Effect.mapError(
         (cause) =>
           new PreviousReleaseTagGitHubOutputConfigError({
@@ -346,13 +341,13 @@ export const writePreviousReleaseTagOutput = Effect.fn("writePreviousReleaseTagO
 const command = Command.make(
   "resolve-previous-release-tag",
   {
-    channel: Flag.choice("channel", ReleaseChannel.literals).pipe(
+    channel: Flag.Literals("channel", ReleaseChannel.literals).pipe(
       Flag.withDescription("Release channel whose previous tag should be resolved."),
     ),
-    currentTag: Flag.string("current-tag").pipe(
+    currentTag: Flag.String("current-tag").pipe(
       Flag.withDescription("Current release tag to compare against."),
     ),
-    githubOutput: Flag.boolean("github-output").pipe(
+    githubOutput: Flag.Boolean("github-output").pipe(
       Flag.withDescription("Write values to GITHUB_OUTPUT instead of stdout."),
       Flag.withDefault(false),
     ),

@@ -5,9 +5,21 @@ import {
   enumerateHourStarts,
   formatDateTimeShort,
   formatHourShort,
+  formatPercent,
   formatRelativeHourShort,
   makeWindow,
 } from "./usageFormat.ts";
+
+describe("formatPercent", () => {
+  it("distinguishes a small positive share from zero", () => {
+    expect(formatPercent(0)).toBe("0.0%");
+    expect(formatPercent(0.0004)).toBe("<0.1%");
+    expect(formatPercent(0.0009)).toBe("<0.1%");
+    expect(formatPercent(0.001)).toBe("0.1%");
+    expect(formatPercent(0.023)).toBe("2.3%");
+    expect(formatPercent(0.00004, 2)).toBe("<0.01%");
+  });
+});
 
 describe("hourly usage formatting", () => {
   it("keeps requested zones separate when formatting repeated calls", () => {
@@ -51,6 +63,30 @@ describe("hourly usage formatting", () => {
   it("disambiguates repeated hours during a fall-back transition", () => {
     expect(formatHourShort("2026-11-01T05:37:00.000Z", "America/New_York")).toBe("1 AM EDT");
     expect(formatHourShort("2026-11-01T06:37:00.000Z", "America/New_York")).toBe("1 AM EST");
+    expect(formatHourShort("2026-11-01T05:37:00.000Z", "America/New_York", false)).toBe(
+      "01:00 EDT",
+    );
+    expect(formatHourShort("2026-11-01T06:37:00.000Z", "America/New_York", false)).toBe(
+      "01:00 EST",
+    );
+  });
+
+  it.each([
+    [true, "2 PM", "12 AM"],
+    [false, "14:00", "00:00"],
+  ])("formats hourly usage labels with hour12=%s", (hour12, afternoon, midnight) => {
+    const instant = "2026-08-11T14:37:00.000Z";
+
+    expect(formatHourShort(instant, "UTC", hour12)).toBe(afternoon);
+    expect(formatHourShort("2026-08-11T00:37:00.000Z", "UTC", hour12)).toBe(midnight);
+    expect(formatDateTimeShort(instant, "UTC", hour12)).toBe(`Aug 11, ${afternoon}`);
+    expect(formatRelativeHourShort(instant, instant, "UTC", hour12)).toBe(`${afternoon} today`);
+    expect(formatRelativeHourShort(instant, "2026-08-12T15:37:00.000Z", "UTC", hour12)).toBe(
+      `${afternoon} yesterday`,
+    );
+    expect(formatRelativeHourShort(instant, "2026-08-14T15:37:00.000Z", "UTC", hour12)).toBe(
+      `Aug 11, ${afternoon}`,
+    );
   });
 
   it("makes hourly tooltip dates relative to the window in its requested time zone", () => {

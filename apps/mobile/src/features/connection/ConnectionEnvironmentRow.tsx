@@ -1,31 +1,34 @@
+import * as Dialog from "../../components/ui/Dialog";
 import { ConnectionTraceId } from "./ConnectionTraceId";
-import { SymbolView } from "../../components/AppSymbol";
-import { connectionStatusText } from "@t3tools/client-runtime/connection";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { hasSavedBearerRoute } from "@t3tools/client-runtime/connection";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { useCallback, useState } from "react";
-import { Platform, Alert, Pressable, View } from "react-native";
+import { Platform, Pressable, View } from "react-native";
 import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanimated";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
-import { MaterialButton } from "../../components/MaterialButton";
-import { MaterialIconButton } from "../../components/MaterialIconButton";
-import { ThemedSwitch } from "../../components/ThemedSwitch";
+import { Button } from "../../components/ui/Button";
+import { IconButton } from "../../components/ui/IconButton";
+import { ThemedSwitch } from "../../components/ui/ThemedSwitch";
 import { cn } from "../../lib/cn";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { serverEnvironment } from "../../state/server";
+import { environmentPresentations } from "../../state/presentation";
 import { ConnectionFormField } from "./ConnectionFormField";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
+import { environmentStatusText } from "./environmentStatusText";
 
 function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string | null {
   if (!environment.isEnabled && environment.connectionState !== "unsupported") {
     return "Off";
   }
-  return connectionStatusText({
+  return environmentStatusText({
     phase: environment.connectionState,
     error: environment.connectionError,
     traceId: environment.connectionErrorTraceId,
@@ -35,6 +38,7 @@ function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string
 export function ConnectionEnvironmentRow(props: {
   readonly environment: ConnectedEnvironmentSummary;
   readonly expanded: boolean;
+  readonly opensDetails?: boolean;
   readonly onToggle: () => void;
   readonly onReconnect: (environmentId: EnvironmentId) => void;
   readonly onRemove: (environmentId: EnvironmentId) => void;
@@ -50,10 +54,13 @@ export function ConnectionEnvironmentRow(props: {
     serverEnvironment.configValueAtom(props.environment.environmentId),
   );
   const unsupported = props.environment.connectionState === "unsupported";
+  const presentation = useAtomValue(
+    environmentPresentations.presentationAtom(props.environment.environmentId),
+  );
+  const canRetry = presentation !== null && hasSavedBearerRoute(presentation.entry);
   const enabled = props.environment.isEnabled && !unsupported;
   const statusLabel = connectionStatusLabel(props.environment);
   const statusTraceId = enabled ? props.environment.connectionErrorTraceId : null;
-  // Unsupported is a compatibility note, not a failure, so it stays muted.
   const hasConnectionFailure = enabled && props.environment.connectionError !== null;
   const isRetrying =
     enabled &&
@@ -69,26 +76,31 @@ export function ConnectionEnvironmentRow(props: {
       return;
     }
     const error = Cause.squash(result.cause);
-    Alert.alert(
+    Dialog.alert(
       "Could not update environment",
       error instanceof Error ? error.message : "The environment could not be updated.",
     );
   }, [label, url, props]);
 
   return (
-    <Animated.View layout={LinearTransition.duration(250)} className="bg-card">
-      <Pressable
-        className="flex-row items-center gap-3 px-4 py-3.5 active:opacity-70"
-        onPress={props.onToggle}
-      >
-        <ConnectionStatusDot
-          state={enabled || unsupported ? props.environment.connectionState : "available"}
-          pulse={isRetrying}
-          size={8}
-        />
-
-        <View className="flex-1 gap-0.5">
+    <Animated.View layout={LinearTransition.duration(250)} className="bg-grouped-card">
+      <View className="flex-row items-center gap-3 px-4 py-3.5">
+        <Pressable
+          className="min-w-0 flex-1 gap-0.5 active:opacity-70"
+          accessibilityRole="button"
+          accessibilityLabel={
+            props.opensDetails
+              ? `Manage ${props.environment.environmentLabel}`
+              : `${props.expanded ? "Collapse" : "Expand"} details for ${props.environment.environmentLabel}`
+          }
+          onPress={props.onToggle}
+        >
           <View className="flex-row items-center gap-1.5">
+            <ConnectionStatusDot
+              state={enabled || unsupported ? props.environment.connectionState : "available"}
+              pulse={isRetrying}
+              size={8}
+            />
             <EnvironmentMachineSymbol
               kind={resolveEnvironmentMachineKind(serverConfig)}
               size={14}
@@ -101,9 +113,11 @@ export function ConnectionEnvironmentRow(props: {
               {props.environment.environmentLabel}
             </Text>
           </View>
-          <Text className="text-xs text-foreground-muted" numberOfLines={1}>
-            {props.environment.displayUrl}
-          </Text>
+          {!props.environment.isRelayManaged && props.environment.displayUrl.trim() ? (
+            <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+              {props.environment.displayUrl}
+            </Text>
+          ) : null}
           {statusLabel ? (
             <Text
               className={cn(
@@ -123,23 +137,39 @@ export function ConnectionEnvironmentRow(props: {
               ) : null}
             </Text>
           ) : null}
-        </View>
+        </Pressable>
 
         <ThemedSwitch
-          disabled={unsupported}
+          accessibilityLabel={`Enable ${props.environment.environmentLabel}`}
+          style={{ alignSelf: "center" }}
+          disabled={unsupported && !canRetry}
           onValueChange={(next) => props.onSetEnabled(props.environment.environmentId, next)}
           value={enabled}
         />
-        <SymbolView
-          name="chevron.down"
-          size={12}
-          tintColorClassName="accent-icon-subtle"
-          type="monochrome"
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            props.opensDetails
+              ? `Manage ${props.environment.environmentLabel}`
+              : `${props.expanded ? "Collapse" : "Expand"} details for ${props.environment.environmentLabel}`
+          }
+          onPress={props.onToggle}
           style={{
-            transform: [{ rotate: props.expanded ? "180deg" : "0deg" }],
+            minWidth: 44,
+            minHeight: 44,
+            alignItems: "center",
+            justifyContent: "center",
           }}
-        />
-      </Pressable>
+        >
+          <SymbolView
+            name={props.opensDetails ? "chevron.right" : "chevron.down"}
+            size={12}
+            tintColorClassName="accent-icon-subtle"
+            type="monochrome"
+            style={{ transform: [{ rotate: props.expanded ? "180deg" : "0deg" }] }}
+          />
+        </Pressable>
+      </View>
 
       {props.expanded ? (
         <Animated.View
@@ -178,7 +208,7 @@ export function ConnectionEnvironmentRow(props: {
             <View className="flex-row items-center justify-end gap-2">
               {props.environment.isRelayManaged ? null : (
                 <View className="flex-1">
-                  <MaterialButton
+                  <Button
                     label="Save"
                     tone="primary"
                     fullWidth
@@ -188,14 +218,14 @@ export function ConnectionEnvironmentRow(props: {
                   />
                 </View>
               )}
-              <MaterialIconButton
+              <IconButton
                 accessibilityLabel="Reconnect environment"
                 icon="arrow.clockwise"
                 variant="tonal"
                 disabled={!enabled}
                 onPress={() => props.onReconnect(props.environment.environmentId)}
               />
-              <MaterialIconButton
+              <IconButton
                 accessibilityLabel="Remove environment"
                 icon="trash"
                 variant="danger"
