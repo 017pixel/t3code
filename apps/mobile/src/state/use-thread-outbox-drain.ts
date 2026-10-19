@@ -25,7 +25,6 @@ import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildProjectThreadStartTurnInput } from "../lib/projectThreadStartTurn";
 import { serializeComposerMessageForServer, uploadedComposerContext } from "../lib/composerContext";
 import { prepareTurnAttachments, type PreparedTurnAttachments } from "../lib/attachmentUpload";
-import { randomHex } from "../lib/uuid";
 import {
   describeUnavailableModelSelection,
   isModelSelectionUnavailable,
@@ -1036,7 +1035,8 @@ export function useThreadOutboxDrain(): void {
           branch: workspace.branch,
           worktreePath: workspace.worktreePath,
           startFromOrigin: workspace.startFromOrigin ?? false,
-          worktreeBranchName: buildTemporaryWorktreeBranchName(randomHex),
+          // Keep the launch intent stable across retries and remounts.
+          worktreeBranchName: buildTemporaryWorktreeBranchName(() => queuedMessage.commandId),
         }),
       });
       if (AsyncResult.isFailure(deliveryResult) && !hasAccess()) return true;
