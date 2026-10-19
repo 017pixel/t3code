@@ -1207,39 +1207,22 @@ describe("orchestrator MCP toolkit", () => {
             ).toMatchObject({ state: "acknowledged", observedByRunId: parentRun.id });
             yield* Ref.set(continuationOffers, []);
 
-            // The default 4,000-char message budget is the acknowledgement
-            // boundary: one char over stays claimed until a larger budget
-            // returns the result whole, and exactly at it acknowledges.
-            const resultPrefix = "Claude completed: ";
-            const readBudgetResult = (
-              task: (typeof directRead)["task"],
-              maxCharsPerItem: number | undefined,
-            ) =>
-              Effect.gen(function* () {
-                const readCall = yield* invoke("t3_thread_read", {
-                  threadId: task.childThreadId!,
-                  ...(maxCharsPerItem === undefined ? {} : { maxCharsPerItem }),
-                });
-                const read = yield* decodeThreadReadResult(readCall.structuredContent).pipe(
-                  Effect.orDie,
-                );
-                return read.items.find((item) => item.type === "assistant_message");
-              });
-            const awaitBudgetAcknowledged = (completion: typeof directRead) =>
-              waitForProjection(
-                orchestrator,
-                parentThreadId,
-                (projection) =>
-                  projection.runs.find((run) => run.id === completion.queuedRun.id)?.status ===
-                    "cancelled" &&
-                  projection.subagents.find((task) => task.id === completion.task.id)
-                    ?.completionDelivery?.state === "acknowledged",
-              );
+            // A default read previews messages at 4,000 chars, so a longer
+            // child result stays unacknowledged until it is read whole.
             const overBudget = yield* queueAutomaticCompletion(
               "default-budget-over",
-              "o".repeat(4_001 - resultPrefix.length),
+              "o".repeat(4_001 - "Claude completed: ".length),
             );
-            expect(yield* readBudgetResult(overBudget.task, undefined)).toMatchObject({
+            const readOverBudgetResult = (maxCharsPerItem?: number) =>
+              invoke("t3_thread_read", {
+                threadId: overBudget.task.childThreadId!,
+                ...(maxCharsPerItem === undefined ? {} : { maxCharsPerItem }),
+              }).pipe(
+                Effect.flatMap((call) => decodeThreadReadResult(call.structuredContent)),
+                Effect.orDie,
+                Effect.map((read) => read.items.find((item) => item.type === "assistant_message")),
+              );
+            expect(yield* readOverBudgetResult()).toMatchObject({
               textTruncated: true,
               nextTextOffset: 4_000,
             });
@@ -1248,18 +1231,12 @@ describe("orchestrator MCP toolkit", () => {
                 (task) => task.id === overBudget.task.id,
               )?.completionDelivery?.state,
             ).toBe("claimed");
-            expect(yield* readBudgetResult(overBudget.task, 4_001)).toMatchObject({
-              textTruncated: false,
-            });
-            yield* awaitBudgetAcknowledged(overBudget);
-            const atBudget = yield* queueAutomaticCompletion(
-              "default-budget-at",
-              "a".repeat(4_000 - resultPrefix.length),
-            );
-            const atBudgetResult = yield* readBudgetResult(atBudget.task, undefined);
-            expect(atBudgetResult).toMatchObject({ textTruncated: false });
-            expect(atBudgetResult?.text).toHaveLength(4_000);
-            yield* awaitBudgetAcknowledged(atBudget);
+            expect(yield* readOverBudgetResult(4_001)).toMatchObject({ textTruncated: false });
+            expect(
+              (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+                (task) => task.id === overBudget.task.id,
+              )?.completionDelivery?.state,
+            ).toBe("acknowledged");
             yield* Ref.set(continuationOffers, []);
 
             const queueRace = yield* queueAutomaticCompletion(

@@ -119,8 +119,8 @@ const SECRET_REQUEST_POLL_INTERVAL_MS = 500;
 const DEFAULT_THREAD_LIST_LIMIT = 50;
 const DEFAULT_THREAD_READ_LIMIT = 20;
 const DEFAULT_THREAD_RUN_LIMIT = 5;
-// Default text budgets per item. Tool output is a preview; callers expand one
-// item with itemId/textOffset/maxCharsPerItem, which overrides both budgets.
+// Agents pay for every character they read back, so tool output is only a
+// preview by default; an explicit maxCharsPerItem overrides both budgets.
 const DEFAULT_THREAD_MESSAGE_MAX_CHARS = 4_000;
 const DEFAULT_THREAD_TOOL_MAX_CHARS = 600;
 const TOOL_OUTPUT_ITEM_TYPES: ReadonlySet<OrchestrationV2TurnItem["type"]> = new Set([
@@ -897,7 +897,6 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
   }
 }
 
-/** The caller's maxCharsPerItem, else the default budget for the item's type. */
 function itemTextBudget(item: OrchestrationV2TurnItem, maxCharsPerItem: number | undefined) {
   return (
     maxCharsPerItem ??
@@ -907,7 +906,6 @@ function itemTextBudget(item: OrchestrationV2TurnItem, maxCharsPerItem: number |
   );
 }
 
-/** Projects a timeline row, omitting fields that are absent or implied by the read thread. */
 function timelineItem(input: {
   readonly threadId: ThreadId;
   readonly row: OrchestrationV2ThreadProjection["visibleTurnItems"][number];
@@ -2588,7 +2586,7 @@ const make = Effect.gen(function* () {
         }
         return {
           thread: threadDetail(target, timeline.totalItems, shell, yield* Clock.currentTimeMillis),
-          // A later page already saw the runs, so only send them again on request.
+          // The first page already carried the runs; later pages repeat them only on request.
           recentRuns:
             input.afterPosition !== undefined && input.runLimit === undefined
               ? []

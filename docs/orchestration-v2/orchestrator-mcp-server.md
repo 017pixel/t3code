@@ -364,14 +364,13 @@ Reads the durable state, recent runs, and visible timeline of any thread in
 the environment by thread ID. A deleted thread returns `thread_not_found`. The
 default `messages` view returns user messages, assistant
 messages, and proposed plans. The `activity` view also returns summarized tool,
-reasoning, checkpoint, handoff, and runtime-request items. Defaults stay small
-because agents pay for every character: prose is bounded at 4,000 characters and
-tool output is only a 600-character preview. Re-reading a truncated item's
-`itemId` at `nextTextOffset` continues the same text; repeat until
-`nextTextOffset` is absent, or pass a larger `maxCharsPerItem`.
-`afterPosition`
-and `nextPosition` support incremental reads; later pages omit recent runs
-unless `runLimit` is given.
+reasoning, checkpoint, handoff, and runtime-request items. Item text is bounded
+per item (4,000 characters for messages, a 600-character preview for tool
+output, or an explicit `maxCharsPerItem`); a truncated item reports
+`nextTextOffset`, and re-reading it by `itemId` from that offset continues the
+same text until `nextTextOffset` is absent. `afterPosition` and `nextPosition`
+support incremental reads; later pages omit recent runs unless `runLimit` is
+given.
 
 Thread and message results include required `createdBy` and `creationSource`
 provenance. MCP-created threads and user-role messages use `createdBy: "agent"`
