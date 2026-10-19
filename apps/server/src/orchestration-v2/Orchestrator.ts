@@ -4989,12 +4989,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // without a worktree. It waits, held, like the messages queued before the
       // failure, instead of starting in the project checkout.
       const latestRun = latestExecutedRun(projection.runs);
-      const worktreeSetupFailed =
+      const worktreeMissingRun =
+        activeRun === undefined &&
+        dispatchMode.type === "queue_after_active" &&
         (latestRun?.status === "failed" || latestRun?.status === "interrupted") &&
         latestRun.workspacePreparation?.type === "worktree" &&
-        projection.thread.worktreePath === null;
-      const worktreeMissingRun =
-        activeRun === undefined && dispatchMode.type === "queue_after_active" && worktreeSetupFailed
+        projection.thread.worktreePath === null
           ? latestRun
           : undefined;
       const queueBehindRun = activeRun ?? worktreeMissingRun;
@@ -5010,13 +5010,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // Continuations and scheduled tasks the server sends for them are not
       // them coming back. Starting the queue still re-holds it for a failed
       // provider or a usage limit; a queue held after worktree setup failed
-      // keeps its hold, since its messages would start in the project checkout.
+      // keeps its hold until a worktree exists, even once later messages have
+      // run, since its messages would start in the project checkout.
+      const worktreeSetupUnresolved =
+        projection.thread.worktreePath === null &&
+        projection.runs.some(
+          (run) =>
+            (run.status === "failed" || run.status === "interrupted") &&
+            run.workspacePreparation?.type === "worktree",
+        );
       const sentByUserFromClient =
         command.createdBy === "user" &&
         (command.creationSource === "web" || command.creationSource === "mobile") &&
         command.scheduledTaskId === undefined;
       const heldRunsToRelease =
-        sentByUserFromClient && startsOrQueuesRun && !worktreeSetupFailed
+        sentByUserFromClient && startsOrQueuesRun && !worktreeSetupUnresolved
           ? projection.runs.filter((run) => run.status === "queued" && run.queueHeld === true)
           : [];
       const releasedAt = yield* DateTime.now;

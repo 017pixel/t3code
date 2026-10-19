@@ -1768,6 +1768,19 @@ it.effect.each(["failed", "interrupted"] as const)(
         createdBy: "user",
         creationSource: "web",
       });
+      // Nor does the next one, though the run that message started is now the
+      // latest and carries no workspace preparation.
+      yield* threads.sendToThread({
+        projectId,
+        commandId: CommandId.make(`command:launch:late-queued-follow-up-${ending}:again`),
+        threadId: launched.threadId,
+        messageId: MessageId.make(`message:launch:late-queued-follow-up-${ending}:again`),
+        text: "Sent after that",
+        attachments: [],
+        mode: "auto",
+        createdBy: "user",
+        creationSource: "web",
+      });
       const after = yield* threads.getThreadProjection(launched.threadId);
       assert.isTrue(after.runs.find((run) => run.id === held.id)?.queueHeld);
     }).pipe(Effect.provide(harness.layer));
