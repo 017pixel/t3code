@@ -92,7 +92,13 @@ function fileOptions(container: HTMLElement) {
 describe("ChatMarkdown bare anchor placeholders", () => {
   // Exercise the cold import before another render caches the raw HTML pipeline.
   it("preserves paired HTML as text while loading, then renders sanitized content", async () => {
-    const parserReady = Promise.withResolvers<void>();
+    let resolveParserReady = () => {};
+    const parserReady = {
+      promise: new Promise<void>((resolve) => {
+        resolveParserReady = resolve;
+      }),
+      resolve: () => resolveParserReady(),
+    };
     vi.doMock(import("@t3tools/shared/markdownRawPipeline"), async (original) => {
       await parserReady.promise;
       return original();
