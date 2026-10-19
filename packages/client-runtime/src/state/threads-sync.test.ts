@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  OrchestrationV2ThreadHistoryPage,
   EventId,
   MessageId,
   ORCHESTRATION_V2_WS_METHODS,
@@ -20,6 +21,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as TestClock from "effect/testing/TestClock";
@@ -53,6 +55,7 @@ const TARGET = new PrimaryConnectionTarget({
   wsBaseUrl: "wss://environment.example.test",
 });
 const THREAD_ID = v2ThreadId;
+const encodeHistoryPage = Schema.encodeSync(OrchestrationV2ThreadHistoryPage);
 const CACHED_SNAPSHOT_SEQUENCE = 7;
 const PREPARED: PreparedConnection = {
   environmentId: TARGET.environmentId,
@@ -123,6 +126,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   const lastRequestCompletionMarker = yield* Ref.make(false);
   const lastAcceptBoundedSnapshot = yield* Ref.make<true | undefined>(undefined);
   const lastAcceptCompactTurnItems = yield* Ref.make<true | undefined>(undefined);
+  const lastAcceptViewportWindow = yield* Ref.make<true | undefined>(undefined);
   const wakeups = yield* Queue.unbounded<ConnectionWakeups.ConnectionWakeup>();
   const savedThreads = yield* Ref.make<ReadonlyArray<OrchestrationV2ThreadDetailSnapshot>>([]);
   const removedThreads = yield* Ref.make<ReadonlyArray<ThreadId>>([]);
@@ -141,6 +145,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
       readonly requestCompletionMarker?: true;
       readonly acceptBoundedSnapshot?: true;
       readonly acceptCompactTurnItems?: true;
+      readonly acceptViewportWindow?: true;
     }) =>
       Stream.unwrap(
         Ref.updateAndGet(subscriptionCount, (count) => count + 1).pipe(
@@ -150,6 +155,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
           ),
           Effect.andThen(Ref.set(lastAcceptBoundedSnapshot, input.acceptBoundedSnapshot)),
           Effect.andThen(Ref.set(lastAcceptCompactTurnItems, input.acceptCompactTurnItems)),
+          Effect.andThen(Ref.set(lastAcceptViewportWindow, input.acceptViewportWindow)),
           Effect.as(streamFrom(inputs)),
         ),
       ),
@@ -266,6 +272,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
     lastRequestCompletionMarker,
     lastAcceptBoundedSnapshot,
     lastAcceptCompactTurnItems,
+    lastAcceptViewportWindow,
     supervisorState,
     supervisorSession,
     savedThreads,
@@ -750,6 +757,174 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect(
+    "hydrates support-only history without reverting live entities or checkpoint captures",
+    () =>
+      Effect.gen(function* () {
+        const at = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+        const supportFor = (ordinal: number) =>
+          ({
+            runs: [
+              {
+                id: `run-${ordinal}` as never,
+                threadId: THREAD_ID,
+                ordinal,
+                providerInstanceId: "codex" as never,
+                modelSelection: { instanceId: "codex" as never, model: "gpt-5" },
+                providerThreadId: null,
+                userMessageId: MessageId.make(`message-${ordinal}`),
+                rootNodeId: `node-${ordinal}` as never,
+                activeAttemptId: null,
+                status: ordinal === 1 ? ("completed" as const) : ("running" as const),
+                requestedAt: at,
+                startedAt: at,
+                completedAt: ordinal === 1 ? at : null,
+                checkpointId: `checkpoint-${ordinal}` as never,
+                contextHandoffId: null,
+              },
+            ],
+            attempts: [
+              {
+                id: `attempt-${ordinal}` as never,
+                runId: `run-${ordinal}` as never,
+                attemptOrdinal: 1,
+                rootNodeId: `node-${ordinal}` as never,
+                providerInstanceId: "codex" as never,
+                providerThreadId: "provider-thread" as never,
+                providerTurnId: null,
+                reason: "initial" as const,
+                status: ordinal === 1 ? ("completed" as const) : ("running" as const),
+                startedAt: at,
+                completedAt: ordinal === 1 ? at : null,
+              },
+            ],
+            nodes: [
+              {
+                id: `node-${ordinal}` as never,
+                threadId: THREAD_ID,
+                runId: `run-${ordinal}` as never,
+                parentNodeId: null,
+                rootNodeId: `node-${ordinal}` as never,
+                kind: "root_turn" as const,
+                status: ordinal === 1 ? ("completed" as const) : ("running" as const),
+                countsForRun: true,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: at,
+                completedAt: ordinal === 1 ? at : null,
+              },
+            ],
+            checkpoints: [
+              {
+                id: `checkpoint-${ordinal}` as never,
+                threadId: THREAD_ID,
+                scopeId: "scope" as never,
+                runId: `run-${ordinal}` as never,
+                nodeId: `node-${ordinal}` as never,
+                parentCheckpointId: null,
+                ordinalWithinScope: ordinal,
+                appRunOrdinal: ordinal,
+                ref: `refs/t3/${ordinal}` as never,
+                status: "ready" as const,
+                files: [
+                  { path: `file-${ordinal}.ts`, kind: "modified", additions: 1, deletions: 0 },
+                ],
+                capturedAt: at,
+              },
+            ],
+          }) satisfies NonNullable<OrchestrationV2ThreadHistoryPage["support"]>;
+        const older = supportFor(1);
+        const stale = supportFor(2);
+        const full = stale.checkpoints[0]!;
+        const listed = { ...full, files: [], deferredFileCount: 1 };
+        const incompatible = [
+          { ...listed, id: "checkpoint-status" as never, status: "stale" as const },
+          { ...listed, id: "checkpoint-ref" as never, ref: "refs/t3/new-capture" as never },
+          {
+            ...listed,
+            id: "checkpoint-capture" as never,
+            capturedAt: DateTime.add(at, { seconds: 1 }),
+          },
+        ];
+        const live = {
+          ...BASE_PROJECTION,
+          runs: stale.runs.map((run) => ({
+            ...run,
+            status: "completed" as const,
+            completedAt: at,
+          })),
+          nodes: stale.nodes.map((node) => ({
+            ...node,
+            status: "completed" as const,
+            completedAt: at,
+          })),
+          attempts: stale.attempts.map((attempt) => ({
+            ...attempt,
+            status: "superseded" as const,
+            completedAt: at,
+          })),
+          checkpoints: [listed, ...incompatible],
+        };
+        const page: OrchestrationV2ThreadHistoryPage = {
+          snapshotSequence: 14,
+          items: [],
+          nextCursor: null,
+          hasMoreHistory: false,
+          support: {
+            runs: [...older.runs, ...stale.runs],
+            nodes: [...older.nodes, ...stale.nodes],
+            attempts: [...older.attempts, ...stale.attempts],
+            checkpoints: [
+              ...older.checkpoints,
+              full,
+              ...incompatible.map((checkpoint) => ({ ...full, id: checkpoint.id })),
+            ],
+          },
+        };
+        const requestedSupport: Array<string | null> = [];
+        const harness = yield* makeHarness({
+          historyHttpClient: HttpClient.make((request, url) => {
+            requestedSupport.push(url.searchParams.get("includeSupport"));
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(request, Response.json(encodeHistoryPage(page))),
+            );
+          }),
+        });
+        yield* Queue.offer(harness.inputs, {
+          ...snapshot(live, 15),
+          historyCursor: "support-cursor",
+          hasMoreHistory: true,
+          latestLocalTurnOrdinal: 47,
+        });
+        yield* awaitThreadState(
+          harness.observed,
+          (state) => state.history.historyCursor === "support-cursor",
+        );
+        expect(yield* harness.loadEarlier()).toEqual({ _tag: "loaded" });
+        const state = yield* SubscriptionRef.get(harness.threadState);
+        const merged = Option.getOrThrow(state.data);
+        expect.soft(requestedSupport).toEqual(["1"]);
+        expect.soft(merged.runs).toEqual([...older.runs, ...live.runs]);
+        expect.soft(merged.nodes).toEqual([...older.nodes, ...live.nodes]);
+        expect.soft(merged.attempts).toEqual([...older.attempts, ...live.attempts]);
+        expect.soft(merged.checkpoints).toEqual([...older.checkpoints, full, ...incompatible]);
+        expect
+          .soft(
+            merged.checkpoints.find((checkpoint) => checkpoint.id === full.id)?.deferredFileCount,
+          )
+          .toBeUndefined();
+        expect(merged.visibleTurnItems).toEqual(live.visibleTurnItems);
+        expect(state.history).toMatchObject({
+          historyCursor: null,
+          hasMoreHistory: false,
+          loading: false,
+        });
+      }),
+  );
+
   it.effect("keeps progressive history metadata from a bounded socket fallback", () =>
     Effect.gen(function* () {
       const olderItem = {
@@ -822,6 +997,7 @@ describe("EnvironmentThreads", () => {
       });
       expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBeUndefined();
       expect(yield* Ref.get(harness.lastAcceptBoundedSnapshot)).toBe(true);
+      expect(yield* Ref.get(harness.lastAcceptViewportWindow)).toBe(true);
 
       yield* TestClock.adjust("500 millis");
       yield* Effect.yieldNow;
@@ -1348,6 +1524,7 @@ describe("EnvironmentThreads", () => {
               value.data.value.thread.title === "Paging unavailable",
           );
           expect(yield* Ref.get(harness.lastAcceptBoundedSnapshot)).toBeUndefined();
+          expect(yield* Ref.get(harness.lastAcceptViewportWindow)).toBeUndefined();
         }
       }),
   );

@@ -39,6 +39,15 @@ const encodeStoredShellSnapshotJson = Schema.encodeSync(StoredShellSnapshotJson)
 const decodeStoredShellSnapshotJson = Schema.decodeUnknownSync(StoredShellSnapshotJson);
 const encodeStoredThreadSnapshotJson = Schema.encodeSync(StoredThreadSnapshotJson);
 const decodeStoredThreadSnapshotJson = Schema.decodeUnknownSync(StoredThreadSnapshotJson);
+const decodeStoredThreadSnapshotEffect = Schema.decodeEffect(StoredThreadSnapshotJson);
+const Version4ThreadSnapshotJson = Schema.fromJsonString(
+  StoredOrchestrationThreadSnapshot.mapFields((fields) => ({
+    ...fields,
+    schemaVersion: Schema.Literal(4),
+  })),
+);
+const decodeVersion4ThreadSnapshot = Schema.decodeSync(Version4ThreadSnapshotJson);
+const encodeVersion4ThreadSnapshot = Schema.encodeEffect(Version4ThreadSnapshotJson);
 
 class TestCacheDecodeError extends Schema.TaggedError<TestCacheDecodeError>()(
   "TestCacheDecodeError",
@@ -160,21 +169,62 @@ describe("orchestration cache envelopes", () => {
     }),
   );
 
-  it("rejects thread snapshots saved before queued-run items were kept, but not shells", () => {
-    const staleThread = encodeStoredThreadSnapshotJson({
-      schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
-      environmentId,
-      threadId: v2ThreadId,
-      snapshot: { snapshotSequence: 4, projection: v2Projection },
-    }).replace(`"schemaVersion":${ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION}`, `"schemaVersion":3`);
-    expect(() => decodeStoredThreadSnapshotJson(staleThread)).toThrow();
-    const shell = encodeStoredShellSnapshot({
-      schemaVersion: ORCHESTRATION_CACHE_SCHEMA_VERSION,
-      environmentId,
-      snapshot: v2ShellSnapshot,
-    });
-    expect(decodeStoredShellSnapshotSync(shell).schemaVersion).toBe(3);
-  });
+  it.effect(
+    "round-trips deferred checkpoints and rejects thread caches across a version-4 rollback",
+    () =>
+      Effect.gen(function* () {
+        const checkpoint = {
+          id: "deferred-checkpoint" as never,
+          threadId: v2ThreadId,
+          scopeId: "scope" as never,
+          runId: null,
+          nodeId: "node" as never,
+          parentCheckpointId: null,
+          ordinalWithinScope: 1,
+          appRunOrdinal: 1,
+          ref: "refs/t3/deferred" as never,
+          status: "ready" as const,
+          files: [],
+          deferredFileCount: 2,
+          capturedAt: v2Now,
+        };
+        const encoded = encodeStoredThreadSnapshotJson({
+          schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
+          environmentId,
+          threadId: v2ThreadId,
+          snapshot: {
+            snapshotSequence: 4,
+            projection: { ...v2Projection, checkpoints: [checkpoint] },
+          },
+        });
+        expect(decodeStoredThreadSnapshotJson(encoded).snapshot.projection.checkpoints).toEqual([
+          checkpoint,
+        ]);
+
+        expect.soft(() => decodeVersion4ThreadSnapshot(encoded)).toThrow();
+        const oldCache = yield* encodeVersion4ThreadSnapshot({
+          schemaVersion: 4,
+          environmentId,
+          threadId: v2ThreadId,
+          snapshot: { snapshotSequence: 4, projection: v2Projection },
+        });
+        let discarded = false;
+        const restored = yield* decodeOrDiscardOrchestrationCache(
+          decodeStoredThreadSnapshotEffect(oldCache).pipe(Effect.asSome),
+          Effect.sync(() => {
+            discarded = true;
+          }),
+        );
+        expect.soft(Option.isNone(restored)).toBe(true);
+        expect.soft(discarded).toBe(true);
+        const shell = encodeStoredShellSnapshot({
+          schemaVersion: ORCHESTRATION_CACHE_SCHEMA_VERSION,
+          environmentId,
+          snapshot: v2ShellSnapshot,
+        });
+        expect(decodeStoredShellSnapshotSync(shell).schemaVersion).toBe(3);
+      }),
+  );
 
   it.effect("discards V1-versioned cache envelopes after a decode failure", () =>
     Effect.gen(function* () {

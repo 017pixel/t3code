@@ -123,7 +123,7 @@ describe("boundedThreadSnapshotLoader", () => {
   it.effect.each([
     ["an older server that ignores the opt-in", false],
     ["a server that sends compact turnItems", true],
-  ] as const)("requests compact turnItems and loads %s", ([, compact]) => {
+  ] as const)("requests viewport and compact turnItems and loads %s", ([, compact]) => {
     const urls: string[] = [];
     const fetchFn = ((input: RequestInfo | URL) => {
       urls.push(String(input));
@@ -134,6 +134,7 @@ describe("boundedThreadSnapshotLoader", () => {
       const loader = yield* ThreadSnapshotLoader.ThreadSnapshotLoader;
       const result = yield* loader.load(PREPARED, THREAD_ID);
       expect(new URL(urls[0]!).searchParams.get("compactTurnItems")).toBe("1");
+      expect(new URL(urls[0]!).searchParams.get("viewportWindow")).toBe("1");
       expect(result._tag).toBe("present");
       if (result._tag !== "present") return;
       expect(result.snapshot.projection.turnItems.map((item) => String(item.id))).toEqual([

@@ -1,4 +1,4 @@
-import type { OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
+import { MessageId, RunId, type OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 
@@ -14,7 +14,7 @@ import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection
 
 const NOW = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
 
-function row(index: number): OrchestrationV2ProjectedTurnItem {
+function row(index: number) {
   const id = `item-${index}` as never;
   return {
     position: index,
@@ -41,10 +41,61 @@ function row(index: number): OrchestrationV2ProjectedTurnItem {
       completedAt: NOW,
       updatedAt: NOW,
     },
-  };
+  } satisfies OrchestrationV2ProjectedTurnItem;
 }
 
 describe("threadHistoryMerge", () => {
+  it("keeps a retained prompt above within-run gaps across successive older pages", () => {
+    const runId = RunId.make("long-run");
+    const activity = (index: number) => ({
+      ...row(index),
+      item: { ...row(index).item, runId },
+    });
+    const prompt: OrchestrationV2ProjectedTurnItem = {
+      ...activity(0),
+      item: {
+        ...activity(0).item,
+        type: "user_message",
+        messageId: MessageId.make("long-run-prompt"),
+        createdBy: "user",
+        creationSource: "web",
+        workflowScript: false,
+        inputIntent: "turn_start",
+        text: "Keep this prompt above the older activity",
+        attachments: [],
+      },
+    };
+    const retained = [prompt, activity(5), activity(6)];
+    const initial = {
+      ...v2Projection,
+      turnItems: retained.map((entry) => entry.item),
+      visibleTurnItems: retained.map((entry, position) => ({ ...entry, position })),
+    };
+    const first = mergeOlderHistoryIntoProjection(initial, [activity(3), activity(4)]);
+    expect
+      .soft(first.visibleTurnItems.map((entry) => entry.sourceItemId))
+      .toEqual(["item-0", "item-3", "item-4", "item-5", "item-6"]);
+    const empty = mergeOlderHistoryIntoProjection(first, []);
+    expect(empty).toBe(first);
+    const second = mergeOlderHistoryIntoProjection(empty, [activity(1), activity(2), activity(3)]);
+    expect
+      .soft(second.visibleTurnItems.map((entry) => entry.sourceItemId))
+      .toEqual(["item-0", "item-1", "item-2", "item-3", "item-4", "item-5", "item-6"]);
+    const complete = mergeOlderHistoryIntoProjection(second, [prompt, activity(1)]);
+    expect(complete.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual([
+      "item-0",
+      "item-1",
+      "item-2",
+      "item-3",
+      "item-4",
+      "item-5",
+      "item-6",
+    ]);
+    expect(complete.visibleTurnItems.map((entry) => entry.position)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(complete.visibleTurnItems[0]?.item).toBe(prompt.item);
+    expect(complete.turnItems).toHaveLength(7);
+  });
+
   it("fills activity around partial messages in canonical order and preserves live edits", () => {
     const initial = { ...v2Projection, turnItems: [row(4).item], visibleTurnItems: [row(4)] };
     const preview = [row(1), row(3)];
