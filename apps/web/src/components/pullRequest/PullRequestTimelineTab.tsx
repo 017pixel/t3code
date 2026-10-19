@@ -39,6 +39,7 @@ import { canEditPullRequestComment } from "./pullRequestEditing.logic";
 import { PullRequestMarkdown } from "./PullRequestMarkdown";
 import { PullRequestMarkdownEditor } from "./PullRequestMarkdownEditor";
 import { PullRequestReactionBar } from "./PullRequestReactions";
+import { canReactPullRequestComment } from "./pullRequestReactions.logic";
 import {
   PullRequestActorAvatar,
   PullRequestDiffStat,
@@ -51,7 +52,7 @@ import {
 import { PullRequestGlyph } from "./pullRequestIcons";
 
 interface ReactionSurface {
-  readonly canReact: boolean;
+  readonly canReact: (event: PullRequestTimelineEvent) => boolean;
   readonly environmentId: EnvironmentId;
   readonly threadRef: ScopedThreadRef | null;
   readonly reference: PullRequestRef;
@@ -190,6 +191,7 @@ function ConversationCard({
   const updateComment = useAtomCommand(pullRequestEnvironment.updateComment, {
     reportFailure: false,
   });
+  const canReact = reactions.canReact(event);
 
   const save = async (body: string) => {
     // A review's own summary is not a kind any host rewrites, which is why `editable` is never
@@ -238,11 +240,11 @@ function ConversationCard({
               onClick={() => setEditing(true)}
             />
           ) : null}
-          {reactions.canReact || event.reactions.length > 0 ? (
+          {canReact || event.reactions.length > 0 ? (
             <PullRequestReactionBar
               className="ml-auto justify-end"
               reactions={event.reactions}
-              canReact={reactions.canReact}
+              canReact={canReact}
               subjectId={event.id}
               environmentId={reactions.environmentId}
               reference={reactions.reference}
@@ -455,6 +457,7 @@ function ReviewVerdictEvent({
   onOpen: (url: string) => void;
   reactions: ReactionSurface;
 }) {
+  const canReact = reactions.canReact(event);
   return (
     <div className="group relative mb-5 pl-12 [contain-intrinsic-block-size:48px] [content-visibility:auto]">
       <ActorTimelineMarker
@@ -499,11 +502,11 @@ function ReviewVerdictEvent({
             </PullRequestMetaLine>
           </div>
         </div>
-        {reactions.canReact || event.reactions.length > 0 ? (
+        {canReact || event.reactions.length > 0 ? (
           <PullRequestReactionBar
             className="ml-auto justify-end"
             reactions={event.reactions}
-            canReact={reactions.canReact}
+            canReact={canReact}
             subjectId={event.id}
             environmentId={reactions.environmentId}
             reference={reactions.reference}
@@ -547,7 +550,10 @@ export function PullRequestTimelineTab({
   const events = buildPullRequestTimeline(detail);
   const newestCommitAt = newestPullRequestCommitAt(detail.commits);
   const reactions: ReactionSurface = {
-    canReact: detail.capabilities.reactions === true,
+    canReact: (event) =>
+      canReactPullRequestComment(detail, {
+        kind: event.kind === "review" ? "review" : "issue-comment",
+      }),
     environmentId,
     threadRef,
     reference,

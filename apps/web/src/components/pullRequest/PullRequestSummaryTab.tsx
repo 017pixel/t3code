@@ -68,6 +68,7 @@ import { PullRequestMarkdown } from "./PullRequestMarkdown";
 import { PullRequestCommentBody } from "./PullRequestCommentBody";
 import { PullRequestMarkdownEditor } from "./PullRequestMarkdownEditor";
 import { PullRequestReactionBar } from "./PullRequestReactions";
+import { canReactPullRequestComment } from "./pullRequestReactions.logic";
 import { PullRequestConversationGhost } from "./PullRequestGhosts";
 import { sectionCollapseAnchorScrollTop } from "./pullRequestSummaryScroll.logic";
 
@@ -543,7 +544,7 @@ export function PullRequestSummaryTab({
             <PullRequestReactionBar
               className="ml-auto justify-end"
               reactions={comment.reactions ?? []}
-              canReact={detail.capabilities.reactions === true}
+              canReact={canReactPullRequestComment(detail, comment)}
               subjectId={comment.id}
               environmentId={environmentId}
               reference={reference}
@@ -565,7 +566,7 @@ export function PullRequestSummaryTab({
     const reactionBar = (
       <PullRequestReactionBar
         reactions={comment.reactions ?? []}
-        canReact={detail.capabilities.reactions === true}
+        canReact={canReactPullRequestComment(detail, comment)}
         subjectId={comment.id}
         environmentId={environmentId}
         reference={reference}

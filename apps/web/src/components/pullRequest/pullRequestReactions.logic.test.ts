@@ -1,7 +1,8 @@
-import type {
-  PullRequestDetail,
-  PullRequestReaction,
-  PullRequestReactionContent,
+import {
+  SourceControlProviderKind,
+  type PullRequestDetail,
+  type PullRequestReaction,
+  type PullRequestReactionContent,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -17,7 +18,7 @@ import {
 describe("comment reaction permissions", () => {
   it("excludes GitLab review system notes while preserving supported comment reactions", () => {
     const detail = {
-      provider: "gitlab",
+      provider: SourceControlProviderKind.make("gitlab"),
       capabilities: {
         diff: true,
         comment: true,
@@ -32,9 +33,12 @@ describe("comment reaction permissions", () => {
 
     expect(canReactPullRequestComment(detail, { kind: "issue-comment" })).toBe(true);
     expect(canReactPullRequestComment(detail, { kind: "review-comment" })).toBe(true);
-    expect(canReactPullRequestComment({ ...detail, provider: "github" }, { kind: "review" })).toBe(
-      true,
-    );
+    expect(
+      canReactPullRequestComment(
+        { ...detail, provider: SourceControlProviderKind.make("github") },
+        { kind: "review" },
+      ),
+    ).toBe(true);
     expect(
       canReactPullRequestComment(
         { ...detail, capabilities: { ...detail.capabilities, reactions: false } },
