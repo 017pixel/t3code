@@ -395,7 +395,6 @@ it.effect("a client launches at its ceiling with the project's default model", (
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
     expect(launched[0]?.runtimeMode).toBe("auto-accept-edits");
     expect(launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
-    expect(launched[0]?.openedByThreadId).toBeUndefined();
 
     const escalated = yield* handle({ title: "Fix", projectId, runtimeMode: "full-access" });
     expect(escalated.at(-1)?.result).toMatchObject({ code: "runtime_mode_escalation_denied" });

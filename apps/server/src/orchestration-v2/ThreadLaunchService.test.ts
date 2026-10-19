@@ -411,7 +411,7 @@ it.effect("retains automation and sender attribution while a message waits in th
   }).pipe(Effect.provide(harness.layer));
 });
 
-it.effect("records the launching thread on the new thread and its shell", () => {
+it.effect("records a missing opener in the projection and shell without making it a parent", () => {
   const harness = makeHarness();
   return Effect.gen(function* () {
     const launches = yield* ThreadLaunch.ThreadLaunchService;
@@ -425,6 +425,11 @@ it.effect("records the launching thread on the new thread and its shell", () => 
     });
     const projection = yield* threads.getThreadProjection(launched.threadId);
     assert.equal(projection.thread.openedByThreadId, openedByThreadId);
+    assert.deepEqual(projection.thread.lineage, {
+      parentThreadId: null,
+      relationshipToParent: null,
+      rootThreadId: launched.threadId,
+    });
     const shell = yield* threads.getThreadShell(launched.threadId);
     assert.equal(shell?.openedByThreadId, openedByThreadId);
   }).pipe(Effect.provide(harness.layer));

@@ -14,39 +14,24 @@ import {
 } from "./threadRelationships.ts";
 
 describe("thread relationships", () => {
-  describe("resolveThreadOpener", () => {
-    const opener = ThreadId.make("opener");
-    const thread = (input: {
-      createdBy: "user" | "agent";
-      relationshipToParent?: "fork" | "subagent";
-      openedByThreadId?: ThreadId;
-    }) =>
-      ({
-        createdBy: input.createdBy,
-        lineage: { relationshipToParent: input.relationshipToParent ?? null },
-        openedByThreadId: input.openedByThreadId,
-      }) as never;
-
-    it("names the recorded opener of an agent-opened thread", () => {
-      expect(resolveThreadOpener(thread({ createdBy: "agent", openedByThreadId: opener }))).toEqual(
-        { threadId: opener },
-      );
-    });
-
-    it("keeps agent-opened threads without a recorded opener", () => {
-      expect(resolveThreadOpener(thread({ createdBy: "agent" }))).toEqual({ threadId: null });
-    });
-
-    it("ignores threads a person opened, subagents, and forks", () => {
-      expect(resolveThreadOpener(thread({ createdBy: "user" }))).toBeNull();
+  it.each([
+    ["agent", null, ThreadId.make("opener"), { threadId: ThreadId.make("opener") }],
+    ["agent", null, undefined, { threadId: null }],
+    ["user", null, undefined, null],
+    ["agent", "subagent", undefined, null],
+    ["agent", "fork", undefined, null],
+  ] as const)(
+    "resolves the opener of a %s thread with relationship %s",
+    (createdBy, relationshipToParent, openedByThreadId, expected) => {
       expect(
-        resolveThreadOpener(thread({ createdBy: "agent", relationshipToParent: "subagent" })),
-      ).toBeNull();
-      expect(
-        resolveThreadOpener(thread({ createdBy: "agent", relationshipToParent: "fork" })),
-      ).toBeNull();
-    });
-  });
+        resolveThreadOpener({
+          createdBy,
+          lineage: { parentThreadId: null, relationshipToParent, rootThreadId: ThreadId.make("t") },
+          openedByThreadId,
+        }),
+      ).toEqual(expected);
+    },
+  );
 
   it.each([
     ["running", "completed"],
