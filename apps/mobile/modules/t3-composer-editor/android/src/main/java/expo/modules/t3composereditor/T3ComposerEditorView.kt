@@ -22,6 +22,7 @@ import android.view.KeyCharacterMap
 import android.view.MotionEvent
 import android.view.KeyEvent
 import android.view.ViewGroup
+import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputConnectionWrapper
@@ -668,7 +669,7 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
       event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
         (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0
     val canSubmit = isEnabled && !readOnly && submitEnabled && submitListener != null
-    if (!isReturn || fromSoftKeyboard || !canSubmit) {
+    if (!isReturn || fromSoftKeyboard || !canSubmit || BaseInputConnection.getComposingSpanStart(text) >= 0) {
       return null
     }
     return when {
