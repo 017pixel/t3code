@@ -182,6 +182,32 @@ describe("AttachmentUpload", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("stores MIME-identified SVG files with a previewable signed extension", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const bytes = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
+      for (const name of ["diagram", "diagram.bin"]) {
+        const issued = yield* issueAttachmentUploadUrl({
+          type: "file",
+          name,
+          mimeType: "image/svg+xml",
+          sizeBytes: bytes.length,
+        });
+        const token = issued.relativeUrl.slice(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`.length);
+        const claims = yield* validateAttachmentUploadToken(token);
+        if (!claims) throw new Error("Expected valid SVG upload claims.");
+        expect(claims.name).toBe(`${name}.svg`);
+        expect(issued.attachmentId).toMatch(/-svg$/);
+        expect(yield* storeAttachmentUpload(claims, bytes)).toEqual({ ok: true });
+        expect(
+          NodeFS.readFileSync(NodePath.join(config.attachmentsDir, `${issued.attachmentId}.svg`)),
+        ).toEqual(Buffer.from(bytes));
+        yield* deletePendingAttachment(issued.attachmentId);
+      }
+      expect(NodeFS.readdirSync(config.attachmentsDir)).toEqual([]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("removes partial streamed uploads that exceed their signed size", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
