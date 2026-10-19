@@ -1355,6 +1355,33 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }).pipe(Effect.provide(relay));
     });
 
+    it.effect("registers an existing Live Activity before waiting on the widget read", () => {
+      const order: Array<string> = [];
+      const activity = {
+        getId: () => "activity-1",
+        getPushToken: vi.fn(() => {
+          order.push("push-token");
+          return Promise.resolve(null);
+        }),
+        addPushTokenListener: vi.fn(),
+      };
+      widgetMocks.getInstances.mockReturnValue([activity] as never);
+      const relay = fakeRelay(() =>
+        Effect.sync(() => {
+          order.push("widget-snapshot");
+          return { aggregate };
+        }),
+      );
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
+
+      return Effect.gen(function* () {
+        yield* refreshActiveLiveActivityRemoteRegistration();
+
+        expect(order).toEqual(["push-token", "widget-snapshot"]);
+        expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "snapshot", aggregate });
+      }).pipe(Effect.provide(relay));
+    });
+
     it("shows the signed-out state after cloud sign-out", () => {
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
 

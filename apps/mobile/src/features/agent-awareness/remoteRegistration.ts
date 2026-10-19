@@ -1059,18 +1059,21 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
     }
 
     // The home-screen widget has no push path of its own, so every foreground
-    // refresh repaints it from the same snapshot that primes the Live Activity.
+    // refresh repaints it from one snapshot read. Returns false once the account
+    // changed during the read, so a stale result is never shown or primed.
     const identity = relayTokenProviderIdentity;
-    const snapshot = yield* readAgentActivitySnapshot();
-    if (!relayTokenProvider || relayTokenProviderIdentity !== identity) {
-      return;
-    }
-    if (snapshot) {
-      widgetShowsCurrentAccount = true;
-      publishWidget({ kind: "snapshot", aggregate: snapshot.aggregate });
-    } else if (!widgetShowsCurrentAccount) {
-      publishWidget({ kind: "unavailable" });
-    }
+    const repaintWidget = (snapshot: RelayAgentActivitySnapshotResponse | null): boolean => {
+      if (!relayTokenProvider || relayTokenProviderIdentity !== identity) {
+        return false;
+      }
+      if (snapshot) {
+        widgetShowsCurrentAccount = true;
+        publishWidget({ kind: "snapshot", aggregate: snapshot.aggregate });
+      } else if (!widgetShowsCurrentAccount) {
+        publishWidget({ kind: "unavailable" });
+      }
+      return true;
+    };
 
     let activities = yield* Effect.try({
       try: () => getAgentLiveActivities(),
@@ -1090,6 +1093,7 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
 
     // The relay tracks exactly one card per device; if concurrent arming ever
     // produced extras, end them so only one keeps receiving updates.
+    const hadActivities = activities.length > 0;
     if (activities.length > 1) {
       for (const extra of activities.slice(1)) {
         extra.end("immediate").catch((error: unknown) => {
@@ -1103,7 +1107,11 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
     // update token can be observed and registered immediately — the relay never
     // remote-starts one (background push-to-start wakes proved too unreliable
     // to hand the token over).
-    if (activities.length === 0) {
+    if (!hadActivities) {
+      const snapshot = yield* readAgentActivitySnapshot();
+      if (!repaintWidget(snapshot)) {
+        return;
+      }
       const preferences = yield* Effect.tryPromise({
         try: () => loadPreferences(),
         catch: (cause) =>
@@ -1113,8 +1121,8 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
           }),
       }).pipe(Effect.orElseSucceed(() => null));
       if (preferences?.liveActivitiesEnabled !== false) {
-        // Loading preferences yields; an arm-on-send may have created the card
-        // in the meantime. Re-check so two cards are never started.
+        // The snapshot and preference reads yield; an arm-on-send may have
+        // created the card in the meantime. Re-check so two cards are never started.
         const armedMeanwhile = yield* Effect.try({
           try: () => getAgentLiveActivities(),
           catch: () => [] as ReadonlyArray<LiveActivity<AgentActivityProps>>,
@@ -1172,6 +1180,12 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
 
     if (registrationResults.some(Boolean)) {
       scheduleActiveLiveActivityRegistrationRetry();
+    }
+
+    // An existing card keeps its push token registered without waiting on the
+    // relay; the widget still repaints afterwards.
+    if (hadActivities) {
+      repaintWidget(yield* readAgentActivitySnapshot());
     }
   });
 }
