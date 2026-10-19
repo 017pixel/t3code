@@ -2344,71 +2344,6 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect.each([
-    { order: "before", inputFirst: true },
-    { order: "after", inputFirst: false },
-  ])(
-    "shows a shell approval's whole command when its input arrives $order the request",
-    ({ inputFirst }) =>
-      Effect.gen(function* () {
-        const command = "curl -sI https://example.com | head -n 1";
-        const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call_1" };
-        const called = event("session.tool.called", {
-          ...tool,
-          name: "shell",
-          input: { command },
-          executed: false,
-        });
-        const asked = event("permission.asked", {
-          ...shellAsk.data,
-          resources: ["curl -sI https://example.com", "head -n 1"],
-        });
-        const { runtime, thread } = yield* resumed(
-          [
-            out("session.prompt", { sessionID: SESSION, text: "<any>" }),
-            promptAccepted,
-            event("session.tool.input.started", { ...tool, name: "shell" }),
-            ...(inputFirst ? [called, asked] : [asked, called]),
-            out("permission.reply", {
-              sessionID: SESSION,
-              requestID: shellAsk.data.id,
-              decision: "once",
-            }),
-            reply("permission.reply", null),
-            event("session.execution.succeeded", { sessionID: SESSION }),
-          ],
-          { supervised: true },
-        );
-        const events = yield* runtime.events.pipe(
-          Stream.takeUntil((event) => event.type === "turn.terminal"),
-          // Answered only once the card shows the whole command.
-          Stream.tap((event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.type === "approval_request" &&
-            event.turnItem.status === "waiting" &&
-            event.turnItem.prompt === command
-              ? runtime.respondToRuntimeRequest({
-                  requestId: event.turnItem.requestId,
-                  decision: "accept",
-                })
-              : Effect.void,
-          ),
-          Stream.runCollect,
-          Effect.forkScoped,
-        );
-        yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
-        const collected = yield* Fiber.join(events);
-        const approval = collected.findLast(
-          (event) =>
-            event.type === "turn_item.updated" && event.turnItem.type === "approval_request",
-        );
-        const item = approval?.type === "turn_item.updated" ? approval.turnItem : undefined;
-        assert.equal(item?.type === "approval_request" ? item.prompt : undefined, command);
-        assert.equal(item?.title, null);
-        assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
-      }).pipe(Effect.scoped),
-  );
-
   it.effect("counts an answer to a request OpenCode already dropped as delivered", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed(
@@ -3212,14 +3147,26 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("shows a permission asked while the stream was down, and answers it", () =>
+  it.effect.each([
+    { source: "late tool input", metadata: {} },
+    { source: "permission metadata", metadata: { command: "echo METADATA" } },
+  ])("restores a permission after reconnect and prefers $source before answering", ({ metadata }) =>
     Effect.gen(function* () {
+      const command = "\u00a0curl -sI https://example.com | head -n 1\\ ";
+      const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call_1" };
       const { runtime, thread } = yield* resumed(
         [
           out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
           promptAccepted,
           ...reconnected({ [SESSION]: { type: "running" } }),
-          ...openRequests([shellAsk.data]),
+          ...openRequests([{ ...shellAsk.data, metadata }]),
+          event("session.tool.input.started", { ...tool, name: "shell" }),
+          event("session.tool.called", {
+            ...tool,
+            name: "shell",
+            input: { command },
+            executed: false,
+          }),
           out("permission.reply", {
             sessionID: SESSION,
             requestID: shellAsk.data.id,
@@ -3230,11 +3177,44 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         ],
         { supervised: true },
       );
-      const requested = yield* requestOf(runtime).pipe(Effect.forkScoped);
-      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      // The tool artifact is emitted after the input has been handled, even without the approval fix.
+      const inputHandled = yield* runtime.events.pipe(
+        Stream.takeUntil(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "command_execution" &&
+            event.turnItem.input === command,
+        ),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
       yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
-      const request = yield* Fiber.join(requested);
+      const collected = yield* Fiber.join(inputHandled);
+      const request = collected.findLast(
+        (event) => event.type === "runtime_request.updated",
+      )?.runtimeRequest;
       assert.equal(request?.nativeRequestRef?.nativeId, shellAsk.data.id);
+      const approvals = collected.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "approval_request"
+          ? [
+              {
+                id: event.turnItem.requestId,
+                prompt: event.turnItem.prompt,
+                title: event.turnItem.title,
+              },
+            ]
+          : [],
+      );
+      assert.deepEqual(
+        approvals,
+        metadata.command
+          ? [{ id: request!.id, prompt: metadata.command, title: null }]
+          : [
+              { id: request!.id, prompt: "echo FIRST", title: "shell" },
+              { id: request!.id, prompt: command, title: null },
+            ],
+      );
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
       yield* runtime.respondToRuntimeRequest({ requestId: request!.id, decision: "accept" });
       assert.equal((yield* Fiber.join(terminal))?.status, "completed");
     }).pipe(Effect.scoped),

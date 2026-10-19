@@ -1792,7 +1792,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               : undefined;
           return {
             ...base,
-            // A title explains a request; "bash" beside its own command explains nothing.
             title: command === undefined ? permission.permission : null,
             type: "approval_request",
             requestId: pending.requestId,

@@ -5838,7 +5838,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly nativeRequestId: string;
           readonly requestKind: OrchestrationV2RuntimeRequest["kind"];
           readonly prompt?: string;
-          /** Claude's description of the request, kept apart so it cannot replace the prompt. */
           readonly title?: string;
           readonly questions?: ReadonlyArray<OrchestrationV2UserInputQuestion>;
         }) {

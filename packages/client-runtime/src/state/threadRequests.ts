@@ -16,7 +16,6 @@ const APPROVAL_REQUEST_LABELS: Record<ProviderRequestKind, string> = {
   permission: "App permission approval",
 };
 
-/** Names an approval card by what it asks for; web and mobile show the same words. */
 export function approvalRequestLabel(requestKind: ProviderRequestKind): string {
   return APPROVAL_REQUEST_LABELS[requestKind];
 }

@@ -333,6 +333,7 @@ interface PendingRequest {
         readonly resources: ReadonlyArray<string>;
         readonly save: ReadonlyArray<string>;
         readonly toolId?: string | undefined;
+        readonly command?: string | undefined;
       }
     | { readonly type: "form"; readonly id: string; readonly form: NativeForm };
 }
@@ -1821,10 +1822,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const tool = data.source === undefined ? undefined : turn?.tools.get(data.source.id);
       const toolName = tool?.name;
       const save = data.save ?? [];
-      // Resources split a pipeline into its commands, and 2.x sends no command metadata,
-      // so a shell request shows the command from its tool call.
+      // Resources split pipelines; prefer the full command from permission metadata or tool input.
+      const metadataCommand = stringField(data.metadata, "command");
       const command =
-        stringField(data.metadata, "command") ??
+        metadataCommand ??
         (data.action === "shell" ? stringField(tool?.input, "command") : undefined);
       yield* showRequest(
         data.sessionID,
@@ -1835,13 +1836,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           resources: data.resources,
           save,
           toolId: data.source?.id,
+          command: metadataCommand,
         },
         {
           type: "approval_request",
           requestKind: openCodePermissionRequestKind(data.action, toolName),
           prompt:
             command ?? (data.resources.length === 0 ? data.action : data.resources.join("\n")),
-          // "bash" beside its own command explains nothing.
           title: command === undefined ? data.action : null,
           options: [
             { decision: "cancel", label: "Cancel" },
@@ -1872,9 +1873,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       for (const [requestId, entry] of pending) {
         const { native, item } = entry;
         if (native.type !== "permission" || native.action !== "shell") continue;
+        if (native.command !== undefined) continue;
         if (entry.sessionId !== sessionId || native.toolId !== toolId) continue;
         if (entry.answering || item.type !== "approval_request") continue;
-        if (item.prompt === command) continue;
+        if (item.prompt === command && item.title === null) continue;
         const updated = { ...item, prompt: command, title: null, updatedAt: yield* DateTime.now };
         pending.set(requestId, { ...entry, item: updated });
         yield* emit({ type: "turn_item.updated", driver, turnItem: updated });
