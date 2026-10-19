@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CheckpointScopeId,
   CommandId,
   ContextTransferId,
   EventId,
@@ -16,6 +17,9 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as EventSink from "./EventSink.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -1332,5 +1336,200 @@ it.effect.each(["missing session", "completed", "failed", "cancelled"] as const)
         )?.status,
         "running",
       );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+const seedCheckpointWait = (key: string) =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make(`thread:checkpoint-wait:${key}`);
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const sql = yield* SqlClient.SqlClient;
+    yield* createWatchingThread(threadId, 1);
+    yield* send(threadId, "active", "start_immediately");
+    yield* send(threadId, "follow-up", "queue_after_active");
+    const projection = yield* orchestrator.getThreadProjection(threadId);
+    const run = projection.runs[0]!;
+    const root = projection.nodes.find((node) => node.id === run.rootNodeId)!;
+    const queued = projection.runs[1]!;
+    const now = yield* DateTime.now;
+    const scopeId = CheckpointScopeId.make(`scope:checkpoint-wait:${key}`);
+    const turnId = ProviderTurnId.make(`turn:checkpoint-wait:${key}`);
+    // Start from the persisted post-provider state; this suite never starts provider CLIs.
+    yield* sql`DELETE FROM orchestration_v2_effect_outbox WHERE thread_id = ${threadId}`;
+    const effectId = `effect:checkpoint-wait:${key}`;
+    yield* sink.writeWithEffects({
+      events: [
+        {
+          id: EventId.make("checkpoint-wait:run"),
+          type: "run.updated",
+          threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: { ...run, status: "waiting", startedAt: now, activeAttemptId: null },
+        },
+        {
+          id: EventId.make("checkpoint-wait:root"),
+          type: "node.updated",
+          threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: {
+            ...root,
+            status: "waiting",
+            checkpointScopeId: scopeId,
+            providerTurnId: turnId,
+          },
+        },
+        {
+          id: EventId.make("checkpoint-wait:queue"),
+          type: "run.updated",
+          threadId,
+          runId: queued.id,
+          occurredAt: now,
+          payload: { ...queued, queueHeld: true },
+        },
+        {
+          id: EventId.make("checkpoint-wait:turn"),
+          type: "provider-turn.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: turnId,
+            providerThreadId: run.providerThreadId!,
+            nodeId: root.id,
+            runAttemptId: run.activeAttemptId!,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "completed",
+            startedAt: now,
+            completedAt: now,
+          },
+        },
+      ],
+      effects: [
+        {
+          id: effectId,
+          commandId: CommandId.make("checkpoint-wait:capture"),
+          threadId,
+          request: { type: "checkpoint.capture", runId: run.id, scopeId },
+        },
+      ],
+    });
+    return { threadId, run, root, queued, effectId, turnId };
+  });
+
+it.effect(
+  "exhausted checkpoint retries settle the durable run and preserve a resumable held queue",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const sql = yield* SqlClient.SqlClient;
+      const { threadId, run, root, queued, effectId } = yield* seedCheckpointWait("failure");
+      // The missing scope exercises the same final-failure path as a Git error.
+      yield* worker.drain();
+      const retrying = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(retrying.runs.find((item) => item.id === run.id)?.status, "waiting");
+      assert.equal(retrying.turnItems.filter((item) => item.type === "system_notice").length, 0);
+      for (const delay of [100, 200, 400, 800]) {
+        yield* TestClock.adjust(delay);
+        yield* worker.drain();
+      }
+      const failed = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(
+        yield* sql`SELECT status, attempt_count FROM orchestration_v2_effect_outbox WHERE effect_id = ${effectId}`,
+        [{ status: "failed", attempt_count: 5 }],
+      );
+      assert.equal(failed.runs.find((item) => item.id === run.id)?.status, "failed");
+      assert.isNotNull(failed.runs.find((item) => item.id === run.id)?.completedAt);
+      assert.isNull(failed.runs.find((item) => item.id === run.id)?.checkpointId);
+      assert.equal(failed.nodes.find((item) => item.id === root.id)?.status, "failed");
+      const notices = failed.turnItems.filter(
+        (item) => item.type === "system_notice" && item.runId === run.id,
+      );
+      assert.lengthOf(notices, 1);
+      assert.match(notices[0]!.title ?? "", /checkpoint.*failed/i);
+      assert.equal(failed.runs.find((item) => item.id === queued.id)?.queueHeld, true);
+      yield* orchestrator.dispatch({
+        type: "queue.resume",
+        commandId: CommandId.make("resume:failed-capture"),
+        threadId,
+      });
+      const resumed = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(resumed.runs.find((item) => item.id === queued.id)?.status, "starting");
+      assert.notEqual(resumed.runs.find((item) => item.id === queued.id)?.queueHeld, true);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "Stop cancels running checkpoint work without interrupting the completed provider and the held queue resumes",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sql = yield* SqlClient.SqlClient;
+      const { threadId, run, root, queued, effectId, turnId } = yield* seedCheckpointWait("stop");
+      const started = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const capturing = yield* worker.runOnce.pipe(Effect.forkChild);
+        yield* Effect.raceFirst(
+          Deferred.await(started),
+          Fiber.join(capturing).pipe(
+            Effect.flatMap((result) =>
+              Effect.die(`Checkpoint worker exited before capture started: ${result}`),
+            ),
+          ),
+        );
+        yield* orchestrator.dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make("stop:checkpoint"),
+          threadId,
+          runId: run.id,
+          holdQueue: true,
+        });
+        const stopped = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(stopped.runs.find((item) => item.id === run.id)?.status, "interrupted");
+        assert.equal(stopped.nodes.find((item) => item.id === root.id)?.status, "interrupted");
+        assert.isNull(stopped.runs.find((item) => item.id === run.id)?.checkpointId);
+        assert.equal(stopped.providerTurns.find((item) => item.id === turnId)?.status, "completed");
+        assert.equal(stopped.runs.find((item) => item.id === queued.id)?.queueHeld, true);
+        yield* Deferred.await(interrupted);
+        yield* Fiber.join(capturing);
+        assert.deepEqual(
+          yield* sql`SELECT status FROM orchestration_v2_effect_outbox WHERE effect_id = ${effectId}`,
+          [{ status: "cancelled" }],
+        );
+        assert.deepEqual(
+          yield* sql`SELECT effect_id FROM orchestration_v2_effect_outbox WHERE thread_id = ${threadId} AND effect_type = 'provider-turn.interrupt'`,
+          [],
+        );
+        assert.equal(stopped.turnItems.filter((item) => item.type === "system_notice").length, 0);
+      }).pipe(
+        Effect.provide(
+          EffectWorker.layerWithOptions({ workerId: "checkpoint-stop-test" }).pipe(
+            Layer.provide(
+              Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+                execute: (effect) => {
+                  assert.equal(effect.request.type, "checkpoint.capture");
+                  return Deferred.succeed(started, undefined).pipe(
+                    Effect.andThen(Effect.never),
+                    Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+                  );
+                },
+              }),
+            ),
+          ),
+        ),
+      );
+      yield* orchestrator.dispatch({
+        type: "queue.resume",
+        commandId: CommandId.make("resume:stopped-capture"),
+        threadId,
+      });
+      const resumed = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(resumed.runs.find((item) => item.id === queued.id)?.status, "starting");
+      assert.notEqual(resumed.runs.find((item) => item.id === queued.id)?.queueHeld, true);
     }).pipe(Effect.provide(layerTest)),
 );
