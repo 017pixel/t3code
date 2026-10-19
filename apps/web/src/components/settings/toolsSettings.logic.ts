@@ -522,7 +522,16 @@ export function mcpServerFromDraft(
   const variableNames = new Set<string>();
   for (const variable of draft.type === "stdio" ? draft.env : draft.headers) {
     const name = variable.name.trim();
-    if (name.length === 0) continue;
+    if (name.length === 0) {
+      if (variable.value.length > 0 || variable.stored) {
+        return {
+          ok: false,
+          field: "variables",
+          message: "Enter a variable name or remove the row.",
+        };
+      }
+      continue;
+    }
     const key = draft.type === "http" ? name.toLowerCase() : name;
     if (variableNames.has(key)) {
       return {

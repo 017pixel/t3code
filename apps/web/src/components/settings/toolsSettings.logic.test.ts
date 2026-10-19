@@ -46,6 +46,55 @@ describe("MCP server editor", () => {
       field: "variables",
       message: "Duplicate environment variable name: API_TOKEN.",
     });
+    for (const transport of [
+      {
+        type: "stdio" as const,
+        command: "node",
+        args: [],
+        env: [
+          { name: "API_TOKEN", value: "", sensitive: true, valueRedacted: true },
+          { name: "REGION", value: "east", sensitive: false },
+        ],
+      },
+      {
+        type: "http" as const,
+        url: "https://example.com/mcp",
+        headers: [
+          { name: "Authorization", value: "", sensitive: true, valueRedacted: true },
+          { name: "X-Region", value: "east", sensitive: false },
+        ],
+      },
+    ]) {
+      const draft = mcpServerDraftFrom("docs", { enabled: true, transport });
+      const key = draft.type === "stdio" ? "env" : "headers";
+      for (const variable of draft[key]) {
+        expect(
+          mcpServerFromDraft({ ...draft, [key]: [{ ...variable, name: "  " }] }, new Set(), "docs"),
+        ).toEqual({
+          ok: false,
+          field: "variables",
+          message: "Enter a variable name or remove the row.",
+        });
+      }
+      const empty = { id: "unused", name: "  ", value: "", sensitive: true, stored: false };
+      expect(
+        mcpServerFromDraft(
+          {
+            ...draft,
+            [key]: [
+              ...draft[key],
+              empty,
+              { ...empty, id: "plain", sensitive: false, storedName: draft[key][0]!.name },
+            ],
+            [draft.type === "stdio" ? "headers" : "env"]: [
+              { ...empty, value: "inactive-transport-value", stored: true },
+            ],
+          },
+          new Set(),
+          "docs",
+        ),
+      ).toEqual({ ok: true, name: "docs", transport });
+    }
   });
 
   it("preserves an untouched secret and its original identity through an editor rename", () => {
