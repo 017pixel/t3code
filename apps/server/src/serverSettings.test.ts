@@ -99,7 +99,7 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
-  it.effect.each(["target-failure", "target-end", "root-end"] as const)(
+  it.effect.each(["target-failure", "target-end", "root-end", "attachment-repoint"] as const)(
     "recovers a disconnected settings watcher and retries missed reads: %s",
     (ending) =>
       Effect.gen(function* () {
@@ -115,6 +115,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const attached = yield* Deferred.make<void>();
         const disconnect = yield* Deferred.make<void>();
         const disconnected = yield* Deferred.make<void>();
+        const repointComplete = yield* Deferred.make<void>();
         const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
         const failedRecoveryRead = yield* Deferred.make<void>();
         const recovered = yield* Deferred.make<void>();
@@ -126,6 +127,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         let failedReads = 0;
         let recoveryAttachments = 0;
         let rootDisconnected = false;
+        let recovering = false;
+        let repointed = false;
+        const activeTargets = new Set<string>();
         const unavailable = PlatformError.systemError({
           _tag: "Unknown",
           module: "FileSystem",
@@ -137,16 +141,26 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           watch: (directory, options) => {
             if (directory === path.dirname(first)) {
               return Stream.unwrap(
-                Effect.sync(() => options?.onReady?.()).pipe(
+                Effect.acquireRelease(
+                  Effect.gen(function* () {
+                    if (ending === "attachment-repoint" && recovering)
+                      yield* Deferred.await(repointComplete);
+                    activeTargets.add(first);
+                    options?.onReady?.();
+                  }),
+                  () => Effect.sync(() => activeTargets.delete(first)),
+                ).pipe(
                   Effect.andThen(Deferred.succeed(attached, undefined)),
                   Effect.as(
-                    ending === "root-end"
+                    ending === "root-end" || (ending === "attachment-repoint" && recovering)
                       ? Stream.never
                       : Stream.fromEffect(
                           Deferred.await(disconnect).pipe(
                             Effect.andThen(Deferred.succeed(disconnected, undefined)),
                             Effect.andThen(
-                              ending === "target-failure" ? Effect.fail(unavailable) : Effect.void,
+                              ending === "target-failure" || ending === "attachment-repoint"
+                                ? Effect.fail(unavailable)
+                                : Effect.void,
                             ),
                           ),
                         ).pipe(Stream.drain),
@@ -158,6 +172,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
               return Stream.unwrap(
                 Effect.gen(function* () {
                   recoveryAttachments += 1;
+                  yield* Effect.acquireRelease(
+                    Effect.sync(() => activeTargets.add(second)),
+                    () => Effect.sync(() => activeTargets.delete(second)),
+                  );
                   yield* fs.writeFileString(second, '{"responseStreamingMode":"paragraph"}');
                   options?.onReady?.();
                   return Stream.fromQueue(events).pipe(
@@ -167,7 +185,17 @@ it.layer(NodeServices.layer)("server settings", (it) => {
               );
             }
             return Stream.unwrap(
-              Effect.sync(() => {
+              Effect.gen(function* () {
+                if (ending === "attachment-repoint" && recovering && !repointed) {
+                  // The old target has been resolved, but neither replacement link watch is attached.
+                  repointed = true;
+                  yield* fs.remove(settingsPath);
+                  yield* fs.symlink(second, settingsPath);
+                  yield* fs.writeFileString(second, '{"responseStreamingMode":"paragraph"}');
+                  yield* Deferred.succeed(repointComplete, undefined);
+                }
+                if (ending === "attachment-repoint" && recovering)
+                  yield* Deferred.await(repointComplete);
                 options?.onReady?.();
                 return ending === "root-end" && !rootDisconnected
                   ? Stream.fromEffect(
@@ -221,13 +249,21 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           yield* Deferred.await(attached);
           yield* Deferred.succeed(disconnect, undefined);
           yield* Deferred.await(disconnected);
-          yield* fs.remove(settingsPath);
-          yield* fs.symlink(second, settingsPath);
+          recovering = true;
+          if (ending !== "attachment-repoint") {
+            yield* fs.remove(settingsPath);
+            yield* fs.symlink(second, settingsPath);
+          }
           failRead = true;
           yield* TestClock.adjust("1 second");
           yield* Deferred.await(failedRecoveryRead);
           yield* TestClock.adjust("1 minute");
           yield* Deferred.await(recovered);
+          assert.equal((yield* service.getSettings).responseStreamingMode, "paragraph");
+          assert.isTrue(
+            activeTargets.has(second),
+            "recovery must watch the new target, not just reconcile its contents once",
+          );
           assert.isAtLeast(
             recoveryAttachments,
             1,
@@ -247,6 +283,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           yield* TestClock.adjust("1 second");
           yield* Deferred.await(subsequent);
           assert.equal(changes.at(-1)?.responseStreamingMode, "turn");
+          assert.equal((yield* service.getSettings).responseStreamingMode, "turn");
         }).pipe(
           Effect.provide(
             layerServerSettings().pipe(
