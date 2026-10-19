@@ -113,7 +113,8 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const browserToolsAvailable = request.browserToolsAvailable ?? true;
       const scope: McpInvocationContext.McpThreadInvocationScope = {
         environmentId,
-        requestNamespace: providerSessionId,
+        // Credential rotation must not change the receipts used to retry accepted writes.
+        requestNamespace: `thread:${encodeURIComponent(request.threadId)}:${encodeURIComponent(request.providerInstanceId)}`,
         thread: {
           threadId: ThreadId.make(request.threadId),
           providerSessionId,
