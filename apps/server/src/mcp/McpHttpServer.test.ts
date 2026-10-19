@@ -1,5 +1,6 @@
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -8,6 +9,8 @@ import {
   OrchestratorMcpFailure,
   PreviewTabId,
   ProviderInstanceId,
+  ProviderInteractionMode,
+  RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -1084,6 +1087,7 @@ it.effect("admits provider and OAuth client credentials and points only clients 
         issuedAt: 1,
       };
       const seen: Array<McpInvocationContext.McpInvocationScope> = [];
+      const started: Array<string> = [];
       const ProbeToolkit = Toolkit.make(
         Tool.make("probe", {
           description: "Reports the caller.",
@@ -1092,10 +1096,31 @@ it.effect("admits provider and OAuth client credentials and points only clients 
           failureMode: "return",
           dependencies: [McpInvocationContext.McpInvocationContext],
         }),
+        Tool.make("starts", {
+          description: "Records the modes admitted by the thread-start gate.",
+          parameters: Schema.Struct({
+            runtimeMode: Schema.optional(RuntimeMode),
+            interactionMode: Schema.optional(ProviderInteractionMode),
+          }),
+          success: Schema.Void,
+          failure: OrchestratorMcpFailure,
+          failureMode: "return",
+          dependencies: [
+            McpInvocationContext.McpInvocationContext,
+            ThreadManagementService.ThreadManagementService,
+          ],
+        }),
       );
       const serverLayer = McpHttpServer.toolkitRegistration(
         ProbeToolkit,
         McpToolAccess.toLayer(ProbeToolkit, {
+          starts: McpToolAccess.startsThreads(
+            (input) => input,
+            (_, modes) =>
+              Effect.sync(() => {
+                started.push(`${modes.runtimeMode}/${modes.interactionMode}`);
+              }),
+          ),
           probe: McpToolAccess.reads(() =>
             McpInvocationContext.McpInvocationContext.pipe(
               Effect.tap((scope) => Effect.sync(() => seen.push(scope))),
@@ -1105,6 +1130,7 @@ it.effect("admits provider and OAuth client credentials and points only clients 
         }),
       ).pipe(
         Layer.provideMerge(McpHttpServer.layerMcpTransport),
+        Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({
             resolve: (token) =>
@@ -1119,7 +1145,18 @@ it.effect("admits provider and OAuth client credentials and points only clients 
           Layer.succeed(McpHttpServer.McpClientAuthenticator, {
             authenticate: (request) =>
               Effect.succeed(
-                request.headers.authorization === `Bearer ${clientToken}` ? clientScope : undefined,
+                request.headers.authorization === `Bearer ${clientToken}`
+                  ? clientScope
+                  : request.headers.authorization === "Bearer readonly.signature"
+                    ? {
+                        ...clientScope,
+                        client: {
+                          sessionId: "read-only",
+                          label: "Reader",
+                          access: "read-only" as const,
+                        },
+                      }
+                    : undefined,
               ),
           }),
         ),
@@ -1128,10 +1165,16 @@ it.effect("admits provider and OAuth client credentials and points only clients 
         Layer.build,
       );
       const httpClient = yield* HttpClient.HttpClient;
-      const call = (token: string | undefined) =>
+      const call = (
+        token: string | undefined,
+        limit?: string,
+        tool = "probe",
+        args: Record<string, string> = {},
+      ) =>
         Effect.gen(function* () {
           const headers = {
             accept: "application/json, text/event-stream",
+            ...(limit === undefined ? {} : { "t3-mode-limit": limit }),
             ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
           };
           const initialize = yield* httpClient.post("/mcp", {
@@ -1149,7 +1192,12 @@ it.effect("admits provider and OAuth client credentials and points only clients 
               "mcp-protocol-version": "2025-06-18",
             },
             body: HttpBody.text(
-              `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"probe","arguments":{}}}`,
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: 2,
+                method: "tools/call",
+                params: { name: tool, arguments: args },
+              }),
               "application/json",
             ),
           });
@@ -1161,6 +1209,32 @@ it.effect("admits provider and OAuth client credentials and points only clients 
         "provider-session",
         "client:session-1",
       ]);
+
+      for (const limit of [undefined, "approval-required/plan", "full-access/default"]) {
+        expect((yield* call(clientToken, limit, "starts")).status).toBe(200);
+      }
+      expect(started).toEqual(["auto/default", "approval-required/plan", "auto/default"]);
+      for (const [limit, args, code] of [
+        ["approval-required/plan", { runtimeMode: "auto" }, "runtime_mode_escalation_denied"],
+        [
+          "approval-required/plan",
+          { interactionMode: "default" },
+          "interaction_mode_escalation_denied",
+        ],
+        ["full-access/default", { runtimeMode: "full-access" }, "runtime_mode_escalation_denied"],
+      ] as const) {
+        expect(yield* (yield* call(clientToken, limit, "starts", args)).text).toContain(code);
+      }
+      expect(
+        yield* (yield* call("readonly.signature", "full-access/default", "starts")).text,
+      ).toContain("capability_denied");
+      expect((yield* call(clientToken, "auto/default/extra", "starts")).status).toBe(400);
+      expect(started).toHaveLength(3);
+      expect(clientScope.client).toEqual({
+        sessionId: "session-1",
+        label: "Claude Code",
+        access: "auto",
+      });
 
       const missing = yield* call(undefined);
       expect(missing.status).toBe(401);

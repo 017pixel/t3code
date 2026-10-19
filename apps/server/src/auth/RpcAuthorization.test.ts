@@ -1,5 +1,8 @@
 import {
   AuthEnvironmentMaintainScope,
+  AuthAccessReadScope,
+  AuthAccessWriteScope,
+  EnvironmentId,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
   AuthProvidersManageScope,
@@ -469,4 +472,61 @@ it.effect("denies manual cleanup before the handler without settings permission"
     });
     expect(handled).toBe(false);
   }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "allows peer-link discovery but requires access management before pairing or unlinking",
+  () =>
+    Effect.gen(function* () {
+      const tested = [
+        WS_METHODS.peerLinksList,
+        WS_METHODS.peerLinksLink,
+        WS_METHODS.peerLinksUnlink,
+      ] as const;
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
+            !(tested as ReadonlyArray<string>).includes(tag),
+        ),
+      );
+      const handled: Array<string> = [];
+      const handlers = Layer.mergeAll(
+        group.toLayerHandler(WS_METHODS.peerLinksList, () => Effect.succeed({ links: [] })),
+        group.toLayerHandler(WS_METHODS.peerLinksLink, () =>
+          Effect.die("Pairing must not run without access:write"),
+        ),
+        group.toLayerHandler(WS_METHODS.peerLinksUnlink, () =>
+          Effect.sync(() => {
+            handled.push("unlink");
+            return { removed: true };
+          }),
+        ),
+      );
+      const readOnly = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthAccessReadScope]))),
+      );
+      expect(yield* readOnly[WS_METHODS.peerLinksList]({})).toEqual({ links: [] });
+      expect(
+        yield* readOnly[WS_METHODS.peerLinksLink]({
+          url: "https://peer.example.com",
+          pairingCode: "test-code",
+          access: "auto",
+        }).pipe(Effect.flip),
+      ).toMatchObject({ requiredPermission: AuthAccessWriteScope });
+      const input = { environmentId: EnvironmentId.make("peer") };
+      expect(yield* readOnly[WS_METHODS.peerLinksUnlink](input).pipe(Effect.flip)).toMatchObject({
+        requiredPermission: AuthAccessWriteScope,
+      });
+      expect(handled).toEqual([]);
+      const manager = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(
+            handlers,
+            RpcAuthorization.layer([AuthAccessReadScope, AuthAccessWriteScope]),
+          ),
+        ),
+      );
+      expect(yield* manager[WS_METHODS.peerLinksUnlink](input)).toEqual({ removed: true });
+      expect(handled).toEqual(["unlink"]);
+    }).pipe(Effect.scoped),
 );

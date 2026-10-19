@@ -8,6 +8,8 @@ import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   AuthOrchestrationOperateScope,
+  AuthAccessWriteScope,
+  type AuthEnvironmentScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   ThreadId,
@@ -34,7 +36,10 @@ const sessions = Atom.family((_id: EnvironmentId) =>
 );
 const env = EnvironmentId.make("target");
 const other = EnvironmentId.make("other");
-const grant = (allowed: boolean): AuthSessionState => ({
+const grant = (
+  allowed: boolean,
+  scope: AuthEnvironmentScope = AuthOrchestrationOperateScope,
+): AuthSessionState => ({
   authenticated: true,
   auth: {
     policy: "remote-reachable",
@@ -42,8 +47,8 @@ const grant = (allowed: boolean): AuthSessionState => ({
     sessionMethods: [],
     sessionCookieName: "test",
   },
-  scopes: allowed ? [AuthOrchestrationOperateScope] : [],
-  permissions: allowed ? [AuthOrchestrationOperateScope] : [],
+  scopes: allowed ? [scope] : [],
+  permissions: allowed ? [scope] : [],
 });
 const runtime = Atom.runtime(
   Layer.succeed(EnvironmentRegistry, {
@@ -106,11 +111,16 @@ describe("command permissions", () => {
     ),
   );
 
-  it.effect("uses the target grant for both availability and execution", () =>
+  it.effect.each([
+    { tag: WS_METHODS.scheduledTasksDelete, scope: AuthOrchestrationOperateScope },
+    { tag: WS_METHODS.peerLinksLink, scope: AuthAccessWriteScope },
+    { tag: WS_METHODS.peerLinksUnlink, scope: AuthAccessWriteScope },
+  ])("uses the target grant for $tag availability and execution", ({ tag, scope }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const registry = yield* setup;
-        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        const permissions = createCommandPermissions(runtime, tag);
+        registry.set(sessions(env), AsyncResult.success(grant(true, scope)));
         expect(registry.get(permissions.permissionAtom(env))).toBe(true);
         expect(permissions.permissionAtom(env)).toBe(permissions.permissionAtom(env));
         yield* permissions.authorize(registry, env);
@@ -118,6 +128,11 @@ describe("command permissions", () => {
         expect(registry.get(permissions.permissionAtom(other))).toBe(false);
         const denied = yield* permissions.authorize(registry, other).pipe(Effect.flip);
         expect(denied._tag).toBe("EnvironmentAuthorizationError");
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(permissions.permissionAtom(env))).toBe(false);
+        expect(
+          (yield* permissions.authorize(registry, env).pipe(Effect.flip)).requiredPermission,
+        ).toBe(scope);
       }),
     ),
   );

@@ -5,6 +5,7 @@ import {
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
+  type ProviderInteractionMode,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -30,14 +31,46 @@ export interface McpClientCaller {
   readonly sessionId: string;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
+  readonly linked?: boolean;
+  /** Request limits retain the signed access grant and can only narrow it. */
+  readonly narrowedTo?: ClientModes | undefined;
 }
 
-/**
- * A read-only client never reaches a write (`McpToolAccess` refuses it first),
- * so it maps to the lowest mode rather than to nothing.
- */
-export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): RuntimeMode =>
-  client === undefined || client.access === "read-only" ? "approval-required" : client.access;
+export const MODE_LIMIT_HEADER = "t3-mode-limit";
+
+interface ClientModes {
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+}
+
+const runtimeModeRank: Record<RuntimeMode, number> = {
+  "approval-required": 0,
+  "auto-accept-edits": 1,
+  auto: 2,
+  "full-access": 3,
+};
+const interactionModeRank: Record<ProviderInteractionMode, number> = { plan: 0, default: 1 };
+
+/** Read-only clients still hit the write gate before this mode ceiling. */
+export const clientModeCeiling = (client: McpClientCaller | undefined): ClientModes => {
+  const approved: ClientModes = {
+    runtimeMode:
+      client === undefined || client.access === "read-only" ? "approval-required" : client.access,
+    interactionMode: "default",
+  };
+  const asked = client?.narrowedTo;
+  if (asked === undefined) return approved;
+  return {
+    runtimeMode:
+      runtimeModeRank[asked.runtimeMode] < runtimeModeRank[approved.runtimeMode]
+        ? asked.runtimeMode
+        : approved.runtimeMode,
+    interactionMode:
+      interactionModeRank[asked.interactionMode] < interactionModeRank[approved.interactionMode]
+        ? asked.interactionMode
+        : approved.interactionMode,
+  };
+};
 
 /**
  * A thread caller's omitted target falls back to its own thread; a client

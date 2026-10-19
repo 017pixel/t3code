@@ -92,6 +92,7 @@ export const mcpClientScopes = (
       : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
 
 export interface McpClientSession {
+  readonly linked?: boolean;
   readonly sessionId: AuthSessionId;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
@@ -554,6 +555,7 @@ export class EnvironmentAuth extends Context.Service<
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<McpClientSession, ServerAuthCredentialError | ServerAuthInternalError>;
     readonly issueMcpClientSession: (input: {
+      readonly linked?: boolean;
       readonly label: string;
       readonly access: AuthMcpClientAccess;
       readonly client: AuthClientMetadata;
@@ -1266,6 +1268,7 @@ export const make = Effect.gen(function* () {
         session.subject === MCP_CLIENT_SUBJECT && session.method === "bearer-access-token"
           ? Effect.succeed({
               sessionId: session.sessionId,
+              ...(session.peerLink ? { linked: true } : {}),
               label: session.client.label ?? "MCP client",
               access: session.scopes.includes(AuthOrchestrationOperateScope)
                 ? (session.runtimeModeCeiling ?? "approval-required")
@@ -1285,6 +1288,7 @@ export const make = Effect.gen(function* () {
     sessions
       .issue({
         subject: MCP_CLIENT_SUBJECT,
+        ...(input.linked ? { peerLink: true } : {}),
         method: "bearer-access-token",
         scopes: mcpClientScopes(input.access),
         ttl: MCP_CLIENT_SESSION_TTL,

@@ -423,7 +423,10 @@ export const AuthMcpAuthorizationServerMetadata = Schema.Struct({
 });
 export type AuthMcpAuthorizationServerMetadata = typeof AuthMcpAuthorizationServerMetadata.Type;
 
+export const MCP_PEER_LINK_SOFTWARE_ID = "t3code-peer-link";
+
 export const AuthMcpClientRegistration = Schema.Struct({
+  software_id: Schema.optionalKey(Schema.String),
   client_name: Schema.optionalKey(Schema.String),
   redirect_uris: Schema.optionalKey(Schema.Array(Schema.String)),
   token_endpoint_auth_method: Schema.optionalKey(Schema.String),

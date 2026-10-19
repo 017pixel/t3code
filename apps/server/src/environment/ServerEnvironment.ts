@@ -217,6 +217,7 @@ export const make = Effect.gen(function* () {
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     capabilities: {
       repositoryIdentity: true,
+      mcpModeLimitHeader: true,
       connectionProbe: true,
       attachmentUploads: true,
       questionAttachments: true,
