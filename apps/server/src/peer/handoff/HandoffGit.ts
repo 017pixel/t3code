@@ -276,10 +276,20 @@ const make = Effect.gen(function* () {
       snapshotRef,
     ]);
     const worktreePath = path.resolve(input.worktreePath);
-    const worktrees = (yield* out(input.repoRoot, ["worktree", "list", "--porcelain", "-z"])).split(
-      "\0",
-    );
-    if (worktrees.includes(`worktree ${worktreePath}`)) {
+    const worktreeListArgs = ["worktree", "list", "--porcelain"];
+    const listed = yield* git(input.repoRoot, [...worktreeListArgs, "-z"], {
+      allowNonZeroExit: true,
+    });
+    // Git before 2.36 only supports the line-delimited form.
+    const worktrees =
+      listed.exitCode === 0
+        ? listed.stdout.split("\0")
+        : (yield* out(input.repoRoot, worktreeListArgs)).split("\n");
+    if (
+      worktrees.some(
+        (field) => field.startsWith("worktree ") && path.resolve(field.slice(9)) === worktreePath,
+      )
+    ) {
       return yield* new HandoffGitStepError({ step: "worktree" });
     }
     let branch = input.branch;
