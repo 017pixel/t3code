@@ -1745,7 +1745,10 @@ it.effect(
         );
         assert.isTrue(Result.isFailure(result));
         if (Result.isFailure(result)) {
-          assert.equal(result.failure.operation, "update-thread");
+          assert.equal(result.failure._tag, "ThreadLaunchError");
+          if (result.failure._tag === "ThreadLaunchError") {
+            assert.equal(result.failure.operation, "update-thread");
+          }
         }
         assert.isEmpty(
           yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:initial-message`)),
