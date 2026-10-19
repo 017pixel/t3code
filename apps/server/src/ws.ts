@@ -1181,7 +1181,11 @@ export const layerSharedConnectionRpc = SharedConnectionRpcGroup.toLayer(
       [WS_METHODS.agentSessionsScan]: () => scanner.scan,
     };
   }),
-).pipe(Layer.provide(ProviderMaintenanceRunner.layer), Layer.provide(SourceControlDiscovery.layer));
+).pipe(
+  Layer.provide(ProviderMaintenanceRunner.layer),
+  Layer.provide(SourceControlDiscovery.layer),
+  Layer.provide(DefectReporter.layer),
+);
 
 const PerConnectionRpcGroup = ServerWsRpcGroup.omit(...sharedConnectionMethods);
 
