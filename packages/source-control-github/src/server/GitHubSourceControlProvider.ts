@@ -36,6 +36,7 @@ import {
 } from "./gitHubPullRequests.ts";
 import {
   gitHubApiHostForRemote,
+  gitHubRepositoryEnvironment,
   parseFetchRemotes,
   parseGitHubRepositorySelector,
   parsePullRequestReference,
@@ -473,13 +474,9 @@ export const make = Effect.gen(function* () {
       readonly host?: string | undefined;
       readonly context?: SourceControlProvider.SourceControlProviderContext | undefined;
     }) {
-      const envRepository = environment.GH_REPO?.trim();
       const hostHint = input.host ?? contextHost(input.context);
-      const defaultHost = (hostHint ?? environment.GH_HOST ?? "github.com").toLowerCase();
-      if (envRepository) {
-        const locator = parseGitHubRepositorySelector(envRepository, defaultHost);
-        if (locator !== null) return locator;
-      }
+      const { defaultHost, locator: override } = gitHubRepositoryEnvironment(environment, hostHint);
+      if (override !== null) return override;
       const [remotes, resolved] = yield* Effect.all([
         gitRead(input.cwd, ["remote", "-v"]),
         gitRead(input.cwd, ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"]),

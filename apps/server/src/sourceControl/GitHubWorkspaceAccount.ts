@@ -1,7 +1,6 @@
 import * as Effect from "effect/Effect";
 
 import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
-import { gitHubApiHostForRemote } from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
 
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 
@@ -9,12 +8,10 @@ const workspaceGitHubRepository = Effect.fn("GitHubWorkspaceAccount.repository")
   cwd: string,
 ) {
   const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
-  const identity = yield* resolver.resolve(cwd);
-  if (identity === null) return null;
-  const host = gitHubApiHostForRemote(identity.locator.remoteUrl);
-  const owner = identity.owner?.trim();
-  const name = identity.name?.trim();
-  return host === null || !owner || !name ? null : { host, repository: `${owner}/${name}` };
+  const repository = yield* resolver.resolveGitHubRepository(cwd);
+  return repository === null
+    ? null
+    : { host: repository.host, repository: `${repository.owner}/${repository.name}` };
 });
 
 export const workspaceGitHubCredential = Effect.fn("GitHubWorkspaceAccount.credential")(function* (

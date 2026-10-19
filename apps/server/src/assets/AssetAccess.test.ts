@@ -202,7 +202,7 @@ describe("AssetAccess", () => {
       Effect.provide(
         Layer.mergeAll(
           Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
-            resolve: () => Effect.succeed(null),
+            resolveGitHubRepository: () => Effect.succeed(null),
           }),
           Layer.mock(GitHubCredentials.GitHubCredentials)({
             get: (host) =>

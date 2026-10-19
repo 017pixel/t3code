@@ -49,8 +49,9 @@ export const AssetResource = Schema.Union([
   }),
   // An upload a pull request body points at on GitHub. A private repository serves these only
   // to a request that carries a credential, which the client has none of, so the server fetches
-  // them with the `gh` credential the repository at `cwd` authenticates with.
+  // them with the repository credential, falling back to the checkout at `cwd`.
   Schema.TaggedStruct("github-media", {
+    repository: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(2048))),
     cwd: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
     url: TrimmedNonEmptyString.check(Schema.isMaxLength(2048)),
   }),

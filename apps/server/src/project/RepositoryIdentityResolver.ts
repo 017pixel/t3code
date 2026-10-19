@@ -4,6 +4,11 @@ import {
   detectSourceControlProviderFromGitRemoteUrl,
   normalizeGitRemoteUrl,
 } from "@t3tools/shared/git";
+import {
+  gitHubRepositoryEnvironment,
+  resolveGitHubRepository,
+  type GitHubRepositoryLocator,
+} from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -34,6 +39,10 @@ export interface RepositoryIdentityResolverOptions {
 export class RepositoryIdentityResolver extends Context.Service<
   RepositoryIdentityResolver,
   {
+    readonly resolveGitHubRepository: (
+      cwd: string,
+      options?: { readonly refresh?: boolean },
+    ) => Effect.Effect<GitHubRepositoryLocator | null>;
     readonly resolve: (
       cwd: string,
       options?: { readonly refresh?: boolean },
@@ -188,6 +197,7 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
   options: RepositoryIdentityResolverOptions = {},
 ) {
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const platform = yield* HostProcess.Platform;
   const cacheCapacity = options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY;
   const refine = options.refine ?? Effect.succeed;
   const timeToLive = (exit: Exit.Exit<unknown>) =>
@@ -219,17 +229,64 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
     { capacity: cacheCapacity, timeToLive },
   );
 
+  // GitHub's effective target can differ from the upstream identity used to group projects.
+  const gitHubRemotesCache = yield* Cache.makeWith(
+    (rootPath: string) =>
+      Effect.all(
+        [
+          ["remote", "-v"],
+          ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
+        ].map((args) =>
+          processRunner.run({
+            command: "git",
+            args: ["-C", rootPath, ...args],
+            env: explicitBareRepositoryEnv(process.env, platform),
+            timeoutBehavior: "timedOutResult",
+          }),
+        ),
+      ).pipe(
+        Effect.map(([remotes, resolved]) => ({
+          remotes: remotes?.code === 0 ? remotes.stdout : "",
+          resolved: resolved?.code === 0 ? resolved.stdout : "",
+        })),
+        Effect.orElseSucceed(() => ({ remotes: "", resolved: "" })),
+      ),
+    {
+      capacity: cacheCapacity,
+      timeToLive: () => options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL,
+    },
+  );
+
+  const resolveGitHub: RepositoryIdentityResolver["Service"]["resolveGitHubRepository"] =
+    Effect.fnUntraced(function* (cwd, resolveOptions) {
+      const environment = yield* HostProcess.Environment;
+      const { defaultHost, locator: override } = gitHubRepositoryEnvironment(environment);
+      if (override !== null) return override;
+      if (resolveOptions?.refresh) yield* Cache.invalidate(repositoryRootCache, cwd);
+      const rootPath = yield* Cache.get(repositoryRootCache, cwd);
+      if (rootPath === null) return null;
+      if (resolveOptions?.refresh) yield* Cache.invalidate(gitHubRemotesCache, rootPath);
+      return resolveGitHubRepository({
+        ...(yield* Cache.get(gitHubRemotesCache, rootPath)),
+        hostHint: undefined,
+        defaultHost,
+      }).locator;
+    });
+
   const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fnUntraced(
     function* (cwd, options) {
       if (options?.refresh) yield* Cache.invalidate(repositoryRootCache, cwd);
       const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
       if (cacheKey === null) return null;
-      if (options?.refresh) yield* Cache.invalidate(repositoryIdentityCache, cacheKey);
+      if (options?.refresh) {
+        yield* Cache.invalidate(repositoryIdentityCache, cacheKey);
+        yield* Cache.invalidate(gitHubRemotesCache, cacheKey);
+      }
       return yield* Cache.get(repositoryIdentityCache, cacheKey);
     },
   );
 
-  return RepositoryIdentityResolver.of({ resolve });
+  return RepositoryIdentityResolver.of({ resolve, resolveGitHubRepository: resolveGitHub });
 });
 
 export const layer = Layer.effect(RepositoryIdentityResolver, make()).pipe(
