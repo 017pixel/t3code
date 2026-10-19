@@ -132,15 +132,14 @@ export const make = Effect.fn("CuaDriver.make")(function* (
       failure = Option.none();
       yield* Deferred.succeed(entry.result, Option.some(mcp));
       entry.watcher = yield* entry.host.waitForExit.pipe(
-        Effect.catch((error) =>
-          Effect.sync(() => {
-            if (active === entry) failure = Option.some(error);
-          }),
-        ),
-        Effect.andThen(
+        Effect.match({
+          onFailure: (error) => error,
+          onSuccess: () => new CuaDriverHostError({ operation: "exit" }),
+        }),
+        Effect.flatMap((error) =>
           Effect.gen(function* () {
             if (active !== entry) return;
-            failure = Option.some(new CuaDriverHostError({ operation: "exit" }));
+            failure = Option.some(error);
             // The watcher must not interrupt itself while retiring its host.
             entry.watcher = undefined;
             yield* revoke(entry);

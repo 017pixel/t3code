@@ -31,7 +31,7 @@ const makeHost = Effect.fnUntraced(function* () {
   const stopped = yield* Deferred.make<void>();
   const watching = yield* Deferred.make<void>();
   const ready = yield* Deferred.make<CuaDriverMcpConfiguration, CuaDriver.CuaDriverError>();
-  const exited = yield* Deferred.make<void>();
+  const exited = yield* Deferred.make<void, CuaDriver.CuaDriverError>();
   let stops = 0;
   const host: CuaDriver.CuaDriverHost = {
     start: Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(ready))),
@@ -129,8 +129,13 @@ it.layer(ServerSettings.layerTest())("CuaDriver lifecycle", (it) => {
       expect(yield* service.acquire).toEqual(Option.some(mcp));
       expect(yield* service.lastFailure).toEqual(Option.none());
       yield* Deferred.await(crashed.watching);
-      yield* Deferred.succeed(crashed.exited, undefined);
+      const waitError = new CuaDriver.CuaDriverHostError({
+        operation: "exit",
+        cause: new Error("native waitForExit failed"),
+      });
+      yield* Deferred.fail(crashed.exited, waitError);
       yield* Deferred.await(crashed.stopped);
+      expect(Option.getOrThrow(yield* service.lastFailure)).toBe(waitError);
       const next = { ...mcp, args: ["mcp", "--generation=next"] };
       yield* Deferred.succeed(replacement.ready, next);
       expect(yield* service.acquire).toEqual(Option.some(next));
