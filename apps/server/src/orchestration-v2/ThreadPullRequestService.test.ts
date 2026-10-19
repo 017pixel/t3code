@@ -377,6 +377,117 @@ describe("ThreadPullRequestServiceV2 reads", () => {
     ),
   );
 
+  it.effect(
+    "backfills only the last seven days of settled threads and keeps discovering unsettled threads",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(DateTime.toEpochMillis(NOW));
+          const boundary = DateTime.subtract(NOW, { days: 7 });
+          const old = DateTime.subtract(boundary, { milliseconds: 1 });
+          const threads = [
+            { id: "recent", settledAt: NOW },
+            { id: "boundary", settledAt: boundary },
+            { id: "old", settledAt: old, updatedAt: old },
+            // Auto-settle records old activity in settledAt but updates updatedAt now.
+            { id: "auto-settled", settledAt: old, updatedAt: NOW },
+            { id: "old-unsettled", updatedAt: old },
+            { id: "recent-override", settledOverride: "settled" as const, updatedAt: NOW },
+            { id: "old-override", settledOverride: "settled" as const, updatedAt: old },
+          ].map(({ id, ...overrides }) => ({
+            ...threadShell(id),
+            ...overrides,
+            branch: id,
+          })) satisfies ReadonlyArray<OrchestrationV2ThreadShell>;
+          const project: OrchestrationProjectShell = {
+            id: ProjectId.make("project-1"),
+            title: "Project",
+            workspaceRoot: "/workspace/project",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+          };
+          const activation = yield* Deferred.make<void>();
+          const sweeps = yield* Queue.unbounded<void>();
+          const branches: Array<string> = [];
+          const layerDependencies = Layer.mergeAll(
+            Layer.mock(Orchestrator.OrchestratorV2)({
+              streamDomainEvents: Stream.never,
+              getShellSnapshot: (options) =>
+                Queue.offer(sweeps, undefined).pipe(
+                  Effect.as({
+                    schemaVersion: 2,
+                    snapshotSequence: 1,
+                    threads: options?.unsettledOnly
+                      ? threads.filter(
+                          (thread) =>
+                            thread.settledAt === null && thread.settledOverride !== "settled",
+                        )
+                      : threads,
+                    archivedThreads: [],
+                  }),
+                ),
+            }),
+            Layer.mock(ProjectStore.ProjectStoreV2)({
+              listShells: () => Effect.succeed([project]),
+            }),
+            Layer.mock(GitManager.GitManager)({
+              branchPullRequest: ({ branch }) =>
+                Effect.sync(() => {
+                  branches.push(branch);
+                  return null;
+                }),
+            }),
+            Layer.mock(PullRequestService.PullRequestService)({}),
+            Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+              resolve: () =>
+                Effect.succeed({
+                  canonicalKey: "github.com/acme/project",
+                  locator: {
+                    source: "git-remote" as const,
+                    remoteName: "origin",
+                    remoteUrl: "git@github.com:acme/project.git",
+                  },
+                  provider: "github" as const,
+                  owner: "acme",
+                  name: "project",
+                }),
+            }),
+            Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
+            Layer.succeed(
+              Crypto.Crypto,
+              Crypto.make({
+                randomBytes: (size) => new Uint8Array(size).fill(1),
+                digest: (_algorithm, data) => Effect.succeed(data),
+              }),
+            ),
+            FileSystem.layerNoop({}),
+          );
+
+          yield* Effect.gen(function* () {
+            const service = yield* ThreadPullRequestService.make;
+            yield* service.start();
+            yield* Deferred.succeed(activation, undefined);
+            yield* Queue.take(sweeps);
+            yield* service.drain;
+            const startupBranches = branches.splice(0).sort();
+
+            yield* TestClock.adjust("1 minute");
+            yield* Queue.take(sweeps);
+            yield* service.drain;
+            expect(branches).toEqual(["old-unsettled"]);
+            expect(startupBranches).toEqual([
+              "boundary",
+              "old-unsettled",
+              "recent",
+              "recent-override",
+            ]);
+          }).pipe(Effect.provide(layerDependencies));
+        }),
+      ),
+  );
+
   it.effect("periodic sweeps read only unsettled threads once backfill is done", () =>
     Effect.scoped(
       Effect.gen(function* () {
