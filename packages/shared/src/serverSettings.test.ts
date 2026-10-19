@@ -674,6 +674,19 @@ describe("serverSettings helpers", () => {
       },
     });
 
+    const compatible = applyServerSettingsPatch(patched, {
+      projectSettingsOverrides: {
+        [projectId]: {
+          newWorktreesStartFromOrigin: false,
+          mcpServers: undefined,
+          disabledSkills: undefined,
+        },
+      },
+    });
+    expect(compatible.projectSettingsOverrides[projectId]).toEqual(
+      patched.projectSettingsOverrides[projectId],
+    );
+
     expect(patched.projectSettingsOverrides[projectId]).toEqual({
       newWorktreesStartFromOrigin: false,
       providerInstances: { [instanceId]: { enabled: false } },

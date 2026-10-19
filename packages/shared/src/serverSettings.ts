@@ -272,7 +272,7 @@ function mergeProjectSettingsOverridesPatch(
       ...entry,
       ...Object.fromEntries(
         (["providerInstances", "mcpServers", "disabledSkills"] as const).flatMap((key) =>
-          Object.hasOwn(entry, key) || stored?.[key] === undefined ? [] : [[key, stored[key]]],
+          entry[key] !== undefined || stored?.[key] === undefined ? [] : [[key, stored[key]]],
         ),
       ),
     });
