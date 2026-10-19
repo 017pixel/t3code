@@ -3453,6 +3453,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           const error = yield* Effect.flip(resume);
           assert.equal(error._tag, "ProviderAdapterResumeThreadError");
           assert.nestedPropertyVal(error, "cause.errorMessage", finalError);
+          assert.propertyVal(
+            error,
+            "preserveNativeThread",
+            finalError !== "thread not found" && finalError !== "no rollout found",
+          );
           assert.nestedPropertyVal(
             error,
             "cause.method",

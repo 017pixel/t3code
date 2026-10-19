@@ -218,6 +218,7 @@ export class ProviderAdapterResumeThreadError extends Schema.TaggedError<Provide
     driver: ProviderDriverKind,
     providerSessionId: ProviderSessionId,
     providerThreadId: ProviderThreadId,
+    preserveNativeThread: Schema.optional(Schema.Boolean),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
