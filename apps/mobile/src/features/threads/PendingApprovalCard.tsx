@@ -42,9 +42,11 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
         {props.approval.appName ?? approvalRequestLabel(props.approval.requestKind)}
       </Text>
       {props.approval.title && !props.approval.appName ? (
-        <Text className="font-sans text-sm leading-normal text-foreground-secondary">
-          {props.approval.title}
-        </Text>
+        <ScrollView className="max-h-20" nestedScrollEnabled showsVerticalScrollIndicator>
+          <Text className="font-sans text-sm leading-normal text-foreground-secondary" selectable>
+            {props.approval.title}
+          </Text>
+        </ScrollView>
       ) : null}
       {props.approval.detail ? (
         props.approval.requestKind === "command" ? (
