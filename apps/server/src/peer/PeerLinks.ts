@@ -372,16 +372,19 @@ const make = Effect.gen(function* () {
 
   const findPeer = (link: PeerLink) =>
     Effect.gen(function* () {
+      let incompatibleUrl: string | undefined;
       for (const url of link.urls) {
         const found = yield* describe(url);
         if (Option.isSome(found) && found.value.environmentId === link.environmentId) {
-          return Option.some({
-            url,
-            compatible: found.value.capabilities.mcpModeLimitHeader === true,
-          });
+          if (found.value.capabilities.mcpModeLimitHeader === true) {
+            return Option.some({ url, compatible: true });
+          }
+          incompatibleUrl ??= url;
         }
       }
-      return Option.none();
+      return incompatibleUrl === undefined
+        ? Option.none()
+        : Option.some({ url: incompatibleUrl, compatible: false });
     });
 
   const statusOf = (link: PeerLink, now: DateTime.Utc) =>

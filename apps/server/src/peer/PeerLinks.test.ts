@@ -93,6 +93,7 @@ const ProbeToolkit = Toolkit.make(
 const serveB = (initial: ExecutionEnvironmentDescriptor) =>
   Effect.gen(function* () {
     const descriptor = yield* Ref.make(initial);
+    const alternateDescriptor = yield* Ref.make(initial);
     const bearers = yield* Ref.make<ReadonlyArray<string>>([]);
     const probes = yield* Ref.make(0);
     const redirects = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
@@ -118,6 +119,9 @@ const serveB = (initial: ExecutionEnvironmentDescriptor) =>
           const request = yield* HttpServerRequest.HttpServerRequest;
           if (request.url.startsWith("/.well-known/t3/environment")) {
             yield* Ref.update(probes, (count) => count + 1);
+            if (request.headers.host?.startsWith("localhost:")) {
+              return HttpServerResponse.jsonUnsafe(yield* Ref.get(alternateDescriptor));
+            }
           }
           const redirect = (yield* Ref.get(redirects)).get(request.url);
           if (redirect !== undefined) {
@@ -197,6 +201,7 @@ const serveB = (initial: ExecutionEnvironmentDescriptor) =>
       url: `http://127.0.0.1:${address.port}`,
       auth: Context.get(authContext, EnvironmentAuth.EnvironmentAuth),
       descriptor,
+      alternateDescriptor,
       bearers,
       toolResult,
       redirects,
@@ -387,13 +392,20 @@ it.effect("never sends a bearer after the peer identity or mode capability chang
       const b = yield* serveB(box);
       const a = yield* makeA(laptop);
       const pairing = yield* b.auth.issuePairingCredential();
-      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      const alternateUrl = b.url.replace("127.0.0.1", "localhost");
+      yield* a.links.link({
+        url: b.url,
+        alternateUrls: [alternateUrl],
+        pairingCode: pairing.credential,
+        access: "auto",
+      });
       yield* probe(a);
       expect((yield* Ref.get(b.bearers)).length).toBeGreaterThan(0);
 
       const readsBefore = yield* Ref.get(a.secretReads);
       // The address now answers as another environment, as a reused LAN address would.
       yield* Ref.set(b.descriptor, descriptorOf("environment-impostor", "Impostor"));
+      yield* Ref.set(b.alternateDescriptor, descriptorOf("environment-impostor", "Impostor"));
       yield* Ref.set(b.bearers, []);
       const failed = yield* probe(a).pipe(Effect.flip);
       expect(failed.message).toContain("Box did not answer");
@@ -404,6 +416,7 @@ it.effect("never sends a bearer after the peer identity or mode capability chang
         b.descriptor,
         descriptorOf("environment-box", "Box", { mcpModeLimitHeader: false }),
       );
+      yield* Ref.set(b.alternateDescriptor, yield* Ref.get(b.descriptor));
       const probesBefore = yield* Ref.get(b.probes);
       const downgraded = yield* probe(a, {
         runtimeMode: "approval-required",
@@ -412,11 +425,23 @@ it.effect("never sends a bearer after the peer identity or mode capability chang
       expect(yield* Ref.get(b.bearers)).toHaveLength(0);
       expect(Exit.isFailure(downgraded)).toBe(true);
       expect(yield* Ref.get(a.secretReads)).toBe(readsBefore);
-      expect(yield* Ref.get(b.probes)).toBe(probesBefore + 1);
+      expect(yield* Ref.get(b.probes)).toBe(probesBefore + 2);
       expect((yield* a.links.list).map((link) => link.status)).toEqual(["incompatible"]);
       expect((yield* a.links.get(box.environmentId)).pipe(Option.getOrThrow).lastError).toContain(
         "limits",
       );
+
+      yield* Ref.set(b.alternateDescriptor, box);
+      const beforeFallback = yield* Ref.get(b.probes);
+      expect((yield* a.links.resolve(box.environmentId)).url).toBe(alternateUrl);
+      expect(yield* Ref.get(b.probes)).toBe(beforeFallback + 2);
+      expect(yield* Ref.get(a.secretReads)).toBe(readsBefore + 1);
+      expect(
+        yield* probe(a, { runtimeMode: "approval-required", interactionMode: "plan" }),
+      ).toEqual({ caller: "T3 Code · Laptop", modes: "approval-required/plan" });
+      expect(yield* Ref.get(b.probes)).toBe(beforeFallback + 4);
+      expect((yield* a.links.list).map((link) => link.status)).toEqual(["reachable"]);
+      expect(yield* Ref.get(b.probes)).toBe(beforeFallback + 6);
     }),
   ).pipe(Effect.provide(Layer.merge(NodeHttpServer.layerTest, NodeServices.layer))),
 );

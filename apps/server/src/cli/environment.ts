@@ -86,17 +86,19 @@ const environmentLinkCommand = Command.make("link", {
     Flag.atLeast(0),
   ),
   pairingCode: Flag.String("pairing-code").pipe(
-    Flag.withDescription("A pairing code from the other environment (`t3 pair` there)."),
+    Flag.withDescription(
+      "A pairing code from the other environment (`t3 auth pairing create` there).",
+    ),
   ),
   access: Flag.Literals("access", AuthMcpClientAccess.literals).pipe(
     Flag.withDescription(
-      "What this environment's agents may do there: read-only, or the broadest runtime mode.",
+      "Access ceiling for this outgoing link: read-only, or the broadest runtime mode.",
     ),
     Flag.withDefault("approval-required" as const),
   ),
 }).pipe(
   Command.withDescription(
-    "Link another T3 Code environment, so agents here can work there. It shows up there under Settings → Connections, where it can be revoked.",
+    "Create an outgoing link to another T3 Code environment. Revoke its session in that environment's Settings → Connections.",
   ),
   Command.withHandler((flags) =>
     runWithPeerLinks(flags, (links) =>
@@ -179,7 +181,7 @@ const environmentUnlinkCommand = Command.make("unlink", {
 );
 
 export const environmentCommand = Command.make("environment").pipe(
-  Command.withDescription("Link other T3 Code environments, so agents here can work there."),
+  Command.withDescription("Manage outgoing links to other T3 Code environments."),
   Command.withSubcommands([
     environmentLinkCommand,
     environmentListCommand,
