@@ -4,6 +4,7 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  NodeId,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -3999,7 +4000,7 @@ it.effect("ProviderSessionManagerV2 persists session-scoped runtime requests wit
       yield* eventSink.write({
         events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
       });
-      yield* manager.open({
+      const runtime = yield* manager.open({
         threadId,
         providerSessionId,
         modelSelection,
@@ -4026,7 +4027,61 @@ it.effect("ProviderSessionManagerV2 persists session-scoped runtime requests wit
       );
       const adapterEvents = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
       assert.isDefined(adapterEvents);
+      const taskId = NodeId.make("node:idle-native-task");
+      yield* eventSink.write({
+        events: [
+          {
+            id: yield* idAllocator.allocate.event({ threadId }),
+            type: "subagent.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: taskId,
+              threadId,
+              runId: null,
+              parentNodeId: NodeId.make("node:old-root"),
+              origin: "provider_native",
+              createdBy: "agent",
+              driver: CODEX_DRIVER,
+              providerInstanceId: modelSelection.instanceId,
+              providerThreadId: null,
+              childThreadId: null,
+              nativeTaskRef: { driver: CODEX_DRIVER, nativeId: "old-task", strength: "strong" },
+              prompt: "Review",
+              title: "Review",
+              model: null,
+              status: "running",
+              result: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      const subscription = yield* runtime.subscribeEvents!;
+      yield* Queue.offer(adapterEvents!, {
+        type: "subagent.native-task-ended",
+        driver: CODEX_DRIVER,
+        threadId,
+        nativeTaskId: "old-task",
+        status: "cancelled",
+        result: "Previous session ended",
+      });
       yield* Queue.offerAll(adapterEvents!, pendingRequest.providerEvents);
+      yield* Queue.offer(adapterEvents!, {
+        type: "provider_thread.updated",
+        driver: CODEX_DRIVER,
+        providerThread,
+      });
+      const published = yield* subscription.events.pipe(
+        Stream.takeUntil((event) => event.type === "provider_thread.updated"),
+        Stream.runCollect,
+      );
+      assert.deepEqual(
+        published.map((event) => event.type),
+        ["subagent.native-task-ended", "provider_thread.updated"],
+      );
       const persisted = Array.from(yield* Fiber.join(persistedFiber));
 
       assert.sameMembers(
@@ -4034,6 +4089,7 @@ it.effect("ProviderSessionManagerV2 persists session-scoped runtime requests wit
         ["runtime-request.updated", "node.updated", "turn-item.updated"],
       );
       const projection = yield* projectionStore.getThreadProjection(threadId);
+      assert.equal(projection.subagents.find((task) => task.id === taskId)?.status, "cancelled");
       const request = projection.runtimeRequests.find(
         (candidate) => candidate.id === pendingRequest.requestId,
       );
