@@ -2090,6 +2090,7 @@ it.effect("MCP replays accepted launches and checks worktree membership", () =>
         title: "Only once",
         projectId,
         clientRequestId: "lost-response",
+        runtimeMode: "approval-required" as const,
         message: "Do the work",
         workspaceStrategy: { type: "worktree" as const, baseRef: "temporary-base" },
       };
@@ -2166,7 +2167,24 @@ it.effect("MCP replays accepted launches and checks worktree membership", () =>
         { code: "invalid_request" },
       );
       const threadId = ThreadId.make("mcp:launch:client%3Alaunch-retry:lost-response");
+      assert.equal((yield* threads.getThreadShell(threadId))?.runtimeMode, "approval-required");
+      yield* threads.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("owner:raise-launch-modes"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      assert.include(
+        yield* launch(input).pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...context,
+            client: { ...context.client!, access: "approval-required" },
+          }),
+        ),
+        { code: "orchestration_error" },
+      );
       const projection = yield* threads.getThreadProjection(threadId);
+      assert.equal(projection.thread.runtimeMode, "full-access");
       assert.equal(projection.messages.length, 1);
       assert.equal(projection.runs.length, 1);
       assert.equal(projection.runs[0]?.status, "preparing");
@@ -2182,6 +2200,15 @@ it.effect("MCP replays accepted launches and checks worktree membership", () =>
             stored.event.type === "run.updated",
         ),
         Stream.runHead,
+      );
+      assert.include(
+        yield* launch(input).pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...context,
+            client: { ...context.client!, access: "approval-required" },
+          }),
+        ),
+        { threadId, status: "starting" },
       );
     }).pipe(Effect.provide(dependencies));
   }),
@@ -2588,19 +2615,38 @@ it.effect("schedules an accepted preparing message exactly once across concurren
         text: "Resume preparation",
         attachments: [],
         modelSelection: input.modelSelection,
-        dispatchMode: { type: "defer_start" },
+        dispatchMode: { type: "defer_start", workspaceStrategy: input.workspaceStrategy },
         createdBy: input.createdBy,
         creationSource: input.creationSource,
       });
       const preparing = yield* threads.getThreadProjection(input.threadId);
       assert.equal(preparing.runs[0]?.status, "preparing");
 
-      const [first, second] = yield* Effect.all([launches.launch(input), launches.launch(input)], {
+      const retry = { ...input, workspaceStrategy: { type: "root" as const } };
+      const [first, second] = yield* Effect.all([launches.launch(retry), launches.launch(retry)], {
         concurrency: "unbounded",
       });
-      yield* Deferred.await(setupEntered);
+      const prepared = yield* Effect.raceFirst(
+        Deferred.await(setupEntered).pipe(Effect.as(true)),
+        threads.streamStoredEventsFrom({ threadId: input.threadId }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.commandId === CommandId.make(input.commandId + ":release") &&
+              stored.event.type === "run.updated",
+          ),
+          Stream.runHead,
+          Effect.as(false),
+        ),
+      );
+      assert.isTrue(prepared, "the accepted worktree setup must run before releasing the run");
       assert.isTrue(first.resumed);
       assert.isTrue(second.resumed);
+      assert.equal(harness.createWorktree.mock.calls.length, 1);
+      assert.equal(harness.runSetup.mock.calls[0]?.[0].worktreePath, "/repo-worktrees/feature");
+      assert.deepEqual(
+        (yield* threads.getThreadProjection(input.threadId)).runs[0]?.workspacePreparation,
+        input.workspaceStrategy,
+      );
       assert.equal(harness.runSetup.mock.calls.length, 1);
       yield* Deferred.succeed(allowSetup, undefined);
     }).pipe(Effect.provide(harness.layer));
