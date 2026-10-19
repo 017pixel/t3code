@@ -250,6 +250,10 @@ body:
           entries: [
             { name: "config.yml", object: config },
             { name: "bug_report.yml", object: form },
+            {
+              name: "invalid.yml",
+              object: { ...form, text: "name: Missing required metadata\nbody: []" },
+            },
           ],
         },
       };

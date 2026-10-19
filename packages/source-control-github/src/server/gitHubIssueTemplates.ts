@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { parse as parseYaml } from "yaml";
 import { IssueTrackerKind, type IssueTemplate } from "@t3tools/contracts";
@@ -117,10 +118,11 @@ export const readIssueTemplates = Effect.fnUntraced(function* (
       });
     }
     const text = blob.text;
+    const isConfig = /^config\.ya?ml$/i.test(entry.name);
     const parsed = yield* Effect.try({
       try: () => {
         const document: unknown = parseYaml(text);
-        if (/^config\.ya?ml$/i.test(entry.name)) {
+        if (isConfig) {
           return { config: decodeConfig(document ?? {}) };
         }
         return { form: decodeForm(document) };
@@ -133,11 +135,15 @@ export const readIssueTemplates = Effect.fnUntraced(function* (
           detail: "The repository has an unreadable issue template or configuration.",
           cause,
         }),
-    });
-    if (parsed.config !== undefined) {
-      blankIssuesEnabled = parsed.config.blank_issues_enabled ?? true;
-    } else if (parsed.form !== undefined) {
-      const form = parsed.form;
+    }).pipe(Effect.result);
+    if (Result.isFailure(parsed)) {
+      if (isConfig) return yield* parsed.failure;
+      continue;
+    }
+    if (parsed.success.config !== undefined) {
+      blankIssuesEnabled = parsed.success.config.blank_issues_enabled ?? true;
+    } else if (parsed.success.form !== undefined) {
+      const form = parsed.success.form;
       templates.set(entry.name, {
         key: entry.name,
         name: form.name,
