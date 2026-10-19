@@ -24,6 +24,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -38,6 +39,7 @@ import {
 } from "@t3tools/shared/git";
 
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -49,6 +51,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
+import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
@@ -157,6 +160,15 @@ export class ThreadLaunchBaseRefError extends Schema.TaggedError<ThreadLaunchBas
   }
 }
 
+class ThreadLaunchWorktreeError extends Schema.TaggedError<ThreadLaunchWorktreeError>()(
+  "ThreadLaunchWorktreeError",
+  { projectId: ProjectId },
+) {
+  override get message(): string {
+    return "worktreePath must be one of the project's git worktrees. t3_worktree_list shows them.";
+  }
+}
+
 export class ThreadLaunchService extends Context.Service<
   ThreadLaunchService,
   {
@@ -166,13 +178,24 @@ export class ThreadLaunchService extends Context.Service<
       ThreadLaunchResult,
       ThreadLaunchError | ThreadManagement.ThreadManagementProviderInstanceDisabledError
     >;
+    readonly resolveModelSelection: (
+      input: Pick<ThreadLaunchInput, "commandId" | "projectId"> & {
+        readonly modelSelection?: ModelSelection | undefined;
+      },
+    ) => Effect.Effect<ModelSelection | undefined, ThreadLaunchError>;
     /**
-     * `launch` accepts such a launch and reports the failure inside the
-     * thread; a caller that needs it before a thread exists checks first.
+     * Refuse invalid workspaces before creating a thread, while allowing an
+     * accepted launch to replay after its original workspace changes.
      */
-    readonly checkWorktreeBase: (
-      input: Pick<ThreadLaunchInput, "projectId" | "workspaceStrategy">,
-    ) => Effect.Effect<void, ThreadLaunchBaseRefError>;
+    readonly checkWorkspace: (
+      input: Pick<ThreadLaunchInput, "commandId" | "projectId" | "workspaceStrategy">,
+    ) => Effect.Effect<
+      void,
+      | ThreadLaunchError
+      | ThreadLaunchBaseRefError
+      | ThreadLaunchWorktreeError
+      | ProjectService.ProjectNotFoundError
+    >;
     readonly retryPreparation: (
       input: ThreadLaunchPreparationInput,
     ) => Effect.Effect<
@@ -201,6 +224,8 @@ const make = Effect.gen(function* () {
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
   const terminals = yield* TerminalManager.TerminalManager;
   const git = yield* GitWorkflow.GitWorkflowService;
+  const gitDriver = yield* GitVcsDriver.GitVcsDriver;
+  const fileSystem = yield* FileSystem.FileSystem;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -214,7 +239,11 @@ const make = Effect.gen(function* () {
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
 
   const mapError =
-    (input: PreparationInput, operation: ThreadLaunchError["operation"], threadId?: ThreadId) =>
+    (
+      input: Pick<ThreadLaunchInput, "commandId" | "projectId">,
+      operation: ThreadLaunchError["operation"],
+      threadId?: ThreadId,
+    ) =>
     (cause: unknown) =>
       new ThreadLaunchError({
         operation,
@@ -253,10 +282,70 @@ const make = Effect.gen(function* () {
     }
   });
 
-  const checkWorktreeBase: ThreadLaunchService["Service"]["checkWorktreeBase"] = Effect.fn(
-    "ThreadLaunchService.checkWorktreeBase",
+  const readAcceptedLaunchThread = Effect.fn("ThreadLaunchService.readAcceptedLaunchThread")(
+    function* (input: Pick<ThreadLaunchInput, "commandId" | "projectId">) {
+      const receipt = yield* receipts
+        .getByCommandId(input.commandId)
+        .pipe(Effect.mapError(mapError(input, "read-receipt")));
+      if (
+        Option.isNone(receipt) ||
+        receipt.value.status !== "accepted" ||
+        receipt.value.commandType !== "thread.create"
+      )
+        return;
+      const threadId = receipt.value.threadId;
+      const shell = yield* threads
+        .getThreadShell(threadId)
+        .pipe(Effect.mapError(mapError(input, "create-thread", threadId)));
+      if (shell === null)
+        return yield* mapError(input, "create-thread", threadId)("Thread not found.");
+      if (shell.projectId !== input.projectId)
+        return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
+      return shell;
+    },
+  );
+
+  const resolveModelSelection: ThreadLaunchService["Service"]["resolveModelSelection"] = Effect.fn(
+    "ThreadLaunchService.resolveModelSelection",
   )(function* (input) {
+    const accepted = yield* readAcceptedLaunchThread(input);
+    if (accepted !== undefined) return accepted.modelSelection;
+    if (input.modelSelection !== undefined) return input.modelSelection;
+    const project = yield* projects
+      .getById(input.projectId)
+      .pipe(Effect.mapError(mapError(input, "resolve-project")));
+    return Option.getOrUndefined(project)?.defaultModelSelection ?? undefined;
+  });
+
+  const checkWorkspace: ThreadLaunchService["Service"]["checkWorkspace"] = Effect.fn(
+    "ThreadLaunchService.checkWorkspace",
+  )(function* (input) {
+    const accepted = yield* readAcceptedLaunchThread(input);
     const strategy = input.workspaceStrategy;
+    if (
+      accepted !== undefined &&
+      (strategy.type !== "existing_worktree" || accepted.worktreePath === strategy.worktreePath)
+    )
+      return;
+    if (strategy.type === "existing_worktree") {
+      const project = Option.getOrUndefined(
+        yield* projects
+          .getById(input.projectId)
+          .pipe(Effect.mapError(mapError(input, "resolve-project"))),
+      );
+      const real = (path: string) =>
+        fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path));
+      if (project === undefined)
+        return yield* new ProjectService.ProjectNotFoundError({ projectId: input.projectId });
+      const paths = yield* gitDriver.listWorktreePaths(project.workspaceRoot).pipe(
+        Effect.flatMap((paths) => Effect.forEach(paths, real)),
+        Effect.orElseSucceed((): ReadonlyArray<string> => []),
+      );
+      if (!paths.includes(yield* real(strategy.worktreePath))) {
+        return yield* new ThreadLaunchWorktreeError({ projectId: input.projectId });
+      }
+      return;
+    }
     // `:/text` is a commit search, which cannot be asked for a commit type.
     if (strategy.type !== "worktree" || strategy.baseRef.startsWith(":")) return;
     const { baseRef } = strategy;
@@ -824,7 +913,7 @@ const make = Effect.gen(function* () {
         type: "thread.create",
         projectId: input.projectId,
       }).pipe(Effect.mapError(mapError(input, "resolve-project")));
-      const project = yield* projects.getById(input.projectId).pipe(
+      yield* projects.getById(input.projectId).pipe(
         Effect.mapError(mapError(input, "resolve-project")),
         Effect.flatMap(
           Option.match({
@@ -847,12 +936,9 @@ const make = Effect.gen(function* () {
         instanceId: input.modelSelection.instanceId,
       });
       return yield* Effect.gen(function* () {
-        // A retried launch has no client-supplied id to replay against, so
-        // recover the thread id its accepted create was recorded under before
-        // allocating another one; a fresh id would only collide with the
-        // recorded receipt.
+        // The accepted create owns the thread and project, even when a retry
+        // changes the caller-supplied identity.
         const reusableLaunchReceipt =
-          input.threadId === undefined &&
           Option.isSome(launchReceipt) &&
           launchReceipt.value.status === "accepted" &&
           launchReceipt.value.commandType === "thread.create"
@@ -867,7 +953,7 @@ const make = Effect.gen(function* () {
 
         if (reusableLaunchReceipt !== undefined) {
           const shell = yield* threads
-            .getThreadShell(candidateThreadId)
+            .getThreadShell(reusableLaunchReceipt.threadId)
             .pipe(Effect.mapError(mapError(input, "create-thread", candidateThreadId)));
           if (shell === null) {
             return yield* mapError(input, "create-thread", candidateThreadId)("Thread not found.");
@@ -941,9 +1027,6 @@ const make = Effect.gen(function* () {
         const threadId =
           claimed.storedEvents.find((stored) => stored.event.type.startsWith("thread."))?.event
             .threadId ?? candidateThreadId;
-        if (project.id !== input.projectId) {
-          return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
-        }
 
         let runId: RunId | null = null;
         let messageWasAlreadyAccepted = false;
@@ -977,7 +1060,17 @@ const make = Effect.gen(function* () {
               createdBy: input.createdBy,
               creationSource: input.creationSource,
             })
-            .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId)));
+            .pipe(
+              // A retry may find a thread with broader modes; enforce the agent's
+              // limit under the command lock before dispatching its message.
+              input.createdBy === "agent"
+                ? Effect.provideService(DispatchModeLimit, {
+                    runtimeMode: input.runtimeMode,
+                    interactionMode: input.interactionMode,
+                  })
+                : (effect) => effect,
+              Effect.mapError(mapError(input, "dispatch-message", threadId)),
+            );
           const runCreated = dispatched.storedEvents.find(
             (stored) => stored.event.type === "run.created",
           );
@@ -1116,7 +1209,13 @@ const make = Effect.gen(function* () {
     );
   };
 
-  return ThreadLaunchService.of({ launch, checkWorktreeBase, retryPreparation, prepareRun });
+  return ThreadLaunchService.of({
+    launch,
+    resolveModelSelection,
+    checkWorkspace,
+    retryPreparation,
+    prepareRun,
+  });
 });
 
 export const layer = Layer.effect(ThreadLaunchService, make);
