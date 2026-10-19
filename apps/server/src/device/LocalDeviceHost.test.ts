@@ -391,6 +391,38 @@ describe("Android SDK availability", () => {
     }),
   );
 
+  it.effect("prefers a complete Homebrew SDK over an incomplete standard macOS SDK", () =>
+    Effect.gen(function* () {
+      const root = "/opt/homebrew/share/android-commandlinetools";
+      const files = [
+        "/test/home/Library/Android/sdk/platform-tools/adb",
+        `${root}/platform-tools/adb`,
+        `${root}/emulator/emulator`,
+        `${root}/cmdline-tools/latest/bin/avdmanager`,
+      ];
+      const sdk = yield* LocalDeviceHost.__testing.androidSdk.pipe(
+        Effect.provideService(HostProcess.Environment, { HOME: "/test/home" }),
+        Effect.provideService(HostProcess.Platform, "darwin"),
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.makeNoop({ exists: (file) => Effect.succeed(files.includes(file)) }),
+        ),
+        Effect.provide(NodePath.layerPosix),
+      );
+      expect(sdk).toMatchObject({ root, adb: true });
+    }),
+  );
+
+  it.effect("reports missing Platform-Tools in a fresh Homebrew command-line tools install", () =>
+    Effect.gen(function* () {
+      const root = "/opt/homebrew/share/android-commandlinetools";
+      const reason = yield* diagnose([`${root}/cmdline-tools/latest/bin/avdmanager`], {
+        HOME: "/test/home",
+      });
+      expect(reason).toContain(`Platform-Tools are missing from ${root}`);
+    }),
+  );
+
   it.effect("reports an absent SDK without running or installing tools", () =>
     Effect.gen(function* () {
       expect(yield* diagnose([], { HOME: "/test/home" })).toContain("Android SDK was not found");
@@ -409,6 +441,7 @@ it.effect("puts detected Android tools on the helper PATH without losing existin
     );
     expect(environment.PATH).toBe("/sdk/platform-tools:/sdk/emulator:/usr/bin");
     expect(environment.ANDROID_HOME).toBe("/sdk");
+    expect(environment.ANDROID_SDK_ROOT).toBe("/sdk");
     expect(environment.HOME).toBe("/test/home");
   }).pipe(Effect.provide(NodePath.layerPosix)),
 );
