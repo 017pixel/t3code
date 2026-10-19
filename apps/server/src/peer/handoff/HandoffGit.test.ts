@@ -125,6 +125,7 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         const { path, fs, sender, receiver, outDir, worktree } = repo;
         const handoff = yield* HandoffGit.HandoffGit;
         yield* editSender(sender);
+        yield* git(sender, ["tag", branch]);
         if (mode === "detached subdirectory") yield* git(sender, ["checkout", "--detach"]);
         yield* fs.writeFileString(path.join(receiver, "app.ts"), "receiver work\n");
         const senderBefore = yield* repositoryState(sender);
@@ -318,6 +319,40 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
           assert.equal(yield* fs.readFileString(path.join(worktree, "later.ts")), "pushed later\n");
         }
       }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["submodule", "nested repository"])("refuses omitted work in a %s", (kind) =>
+    Effect.gen(function* () {
+      const { path, fs, sender, origin, outDir } = yield* fixture;
+      const handoff = yield* HandoffGit.HandoffGit;
+      const nested = path.join(sender, "nested");
+      if (kind === "submodule") {
+        yield* git(sender, [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          origin,
+          "nested",
+        ]);
+        yield* git(sender, ["commit", "-am", "submodule"]);
+      } else {
+        yield* git(sender, ["clone", origin, nested]);
+      }
+      yield* fs.writeFileString(path.join(nested, "app.ts"), "uncommitted nested work\n");
+      const cwd = path.join(sender, "subdirectory");
+      yield* fs.makeDirectory(cwd);
+      const before = yield* repositoryState(sender);
+      const error = yield* handoff.pack({ cwd, handoffId, outDir }).pipe(Effect.flip);
+      assert.equal(error._tag, "HandoffGitStepError");
+      assert.include(error.message, "does not carry submodules or nested repositories");
+      assert.deepEqual(yield* repositoryState(sender), before);
+      assert.deepEqual(yield* fs.readDirectory(outDir), []);
+      assert.equal(
+        yield* fs.readFileString(path.join(nested, "app.ts")),
+        "uncommitted nested work\n",
+      );
+    }).pipe(Effect.scoped),
   );
 
   it.effect("rejects an incompressible bundle over 50 MiB and removes its artifacts", () =>

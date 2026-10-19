@@ -68,7 +68,9 @@ export class HandoffGitStepError extends Schema.TaggedError<HandoffGitStepError>
   "HandoffGitStepError",
   {
     step: Schema.String,
-    reason: Schema.optional(Schema.Literals(["bundle-not-written", "snapshot-mismatch"])),
+    reason: Schema.optional(
+      Schema.Literals(["bundle-not-written", "snapshot-mismatch", "gitlinks", "index-too-large"]),
+    ),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -78,6 +80,10 @@ export class HandoffGitStepError extends Schema.TaggedError<HandoffGitStepError>
         return "The bundle was not written.";
       case "snapshot-mismatch":
         return "The bundle does not hold the snapshot it was sent with.";
+      case "gitlinks":
+        return "Git handoff does not carry submodules or nested repositories. Transfer this checkout manually.";
+      case "index-too-large":
+        return "This checkout has too many indexed files for Git handoff. Transfer it manually.";
       default:
         return `git ${this.step} failed.`;
     }
@@ -140,7 +146,11 @@ const make = Effect.gen(function* () {
   const git = (
     cwd: string,
     args: ReadonlyArray<string>,
-    options: { readonly env?: NodeJS.ProcessEnv; readonly allowNonZeroExit?: boolean } = {},
+    options: {
+      readonly env?: NodeJS.ProcessEnv;
+      readonly allowNonZeroExit?: boolean;
+      readonly maxOutputBytes?: number;
+    } = {},
   ) =>
     processes
       .run({
@@ -153,6 +163,7 @@ const make = Effect.gen(function* () {
         ...(options.allowNonZeroExit === undefined
           ? {}
           : { allowNonZeroExit: options.allowNonZeroExit }),
+        ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
       })
       .pipe(
         Effect.mapError(
@@ -180,10 +191,11 @@ const make = Effect.gen(function* () {
       return yield* new HandoffNotARepositoryError({ cwd: input.cwd });
     }
     const tip = yield* out(input.cwd, ["rev-parse", "HEAD"]);
-    const branchName = yield* git(input.cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+    const branchName = yield* git(input.cwd, ["symbolic-ref", "--quiet", "HEAD"], {
       allowNonZeroExit: true,
     });
-    const branch = branchName.exitCode === 0 ? branchName.stdout.trim() : null;
+    const branch =
+      branchName.exitCode === 0 ? branchName.stdout.trim().replace(/^refs\/heads\//, "") : null;
     const gitDir = yield* out(input.cwd, ["rev-parse", "--path-format=absolute", "--git-dir"]);
     const indexDir = yield* fileSystem
       .makeTempDirectoryScoped({
@@ -195,6 +207,16 @@ const make = Effect.gen(function* () {
     yield* git(input.cwd, ["read-tree", tip], { env });
     // The root pathspec includes edits above cwd without touching the sender index.
     yield* git(input.cwd, ["add", "--all", "--", ":/"], { env });
+    const entries = yield* git(input.cwd, ["ls-files", "--stage", "-z", "--", ":/"], {
+      env,
+      maxOutputBytes: 16 * 1024 * 1024,
+    });
+    if (entries.stdoutTruncated) {
+      return yield* new HandoffGitStepError({ step: "pack", reason: "index-too-large" });
+    }
+    if (entries.stdout.split("\0").some((entry) => entry.startsWith("160000 "))) {
+      return yield* new HandoffGitStepError({ step: "pack", reason: "gitlinks" });
+    }
     const tree = (yield* git(input.cwd, ["write-tree"], { env })).stdout.trim();
     const snapshot = (yield* git(
       input.cwd,
