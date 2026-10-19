@@ -3260,8 +3260,14 @@ const CHAT_MARKDOWN_COMPONENTS = {
       const fileLinkMeta =
         inlineCodeFileLinkMetaByText.get(codeText.trim()) ??
         resolveInlineCodeFileLinkMeta(codeText, cwd, imageBaseDir ?? cwd);
-      const href = inlineCodeFilePathCandidate(codeText) ?? codeText.trim();
-      if (fileLinkMeta || (filePaths && resolveThreadFilePathCandidate(href, cwd, filePaths))) {
+      const pathCandidate = inlineCodeFilePathCandidate(codeText);
+      const href = pathCandidate ?? codeText.trim();
+      if (
+        fileLinkMeta ||
+        (pathCandidate !== null &&
+          filePaths &&
+          resolveThreadFilePathCandidate(pathCandidate, cwd, filePaths))
+      ) {
         return (
           <ThreadFileLinkChip
             href={href}

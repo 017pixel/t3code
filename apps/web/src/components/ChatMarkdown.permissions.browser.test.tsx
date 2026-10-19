@@ -555,6 +555,15 @@ it("verifies a rootless candidate before opening its literal path and position",
       await expect.element(anchor()).toHaveAccessibleName("guide.ts · L12:C3");
     }
   }
+
+  const rejectedCandidate = "/outside/scripts/deploy";
+  await render(
+    <ChatMarkdown cwd={undefined} threadRef={threadRef} text="`scripts/deploy`" />,
+    createThreadFilePathIndex([rejectedCandidate]),
+  );
+  await settleMetadata(rejectedCandidate, AsyncResult.success({ kind: "file" }));
+  expect(container.querySelector("a")).toBeNull();
+  expect(container.querySelector("code")?.textContent).toBe("scripts/deploy");
 });
 
 it("discards verification from a previous thread, environment, root, or evidence scope", async () => {
