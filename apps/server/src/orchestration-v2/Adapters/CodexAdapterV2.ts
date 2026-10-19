@@ -6676,38 +6676,26 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   }),
               ),
             ),
-          // Dropping this connection's subscription lets the shared app-server
-          // shut the native thread (and its MCP servers) down once it is idle.
-          // Codex subscribes this connection to every thread it creates, so the
-          // thread's subagents (each with its own MCP servers, such as Computer
-          // Use) are unsubscribed with it, or they stay loaded until the
-          // app-server exits. Every unsubscribe is attempted even if one fails,
-          // since nothing retries an unload; the first failure is reported.
+          // Each native subagent has its own subscription and MCP servers;
+          // release the whole subtree even if an unsubscribe fails.
           unloadThread: (unloadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
-              const isInUnloadedSubtree = (subagent: CodexSubagentThreadContext) => {
-                let context: ActiveCodexTurnContext | undefined = subagent.parentContext;
-                while (context !== undefined) {
-                  if (context.providerThread.id === unloadInput.providerThread.id) return true;
-                  context = context.subagent?.parentContext;
+              const nativeThreadIds = new Set([nativeThreadId]);
+              for (const [threadId, subagent] of yield* Ref.get(subagentThreads)) {
+                let parent: ActiveCodexTurnContext | undefined = subagent.parentContext;
+                while (parent !== undefined) {
+                  if (parent.providerThread.id === unloadInput.providerThread.id) {
+                    nativeThreadIds.add(threadId);
+                    break;
+                  }
+                  parent = parent.subagent?.parentContext;
                 }
-                return false;
-              };
-              const subagentNativeThreadIds = Array.from(
-                (yield* Ref.get(subagentThreads)).entries(),
-              ).flatMap(([subagentNativeThreadId, subagent]) =>
-                subagentNativeThreadId !== nativeThreadId && isInUnloadedSubtree(subagent)
-                  ? [subagentNativeThreadId]
-                  : [],
-              );
-              const [, failures] = yield* Effect.partition(
-                [nativeThreadId, ...subagentNativeThreadIds],
-                (threadId) => {
-                  sessionApprovals.delete(threadId);
-                  return client.request("thread/unsubscribe", { threadId });
-                },
-              );
+              }
+              const [, failures] = yield* Effect.partition(nativeThreadIds, (threadId) => {
+                sessionApprovals.delete(threadId);
+                return client.request("thread/unsubscribe", { threadId });
+              });
               const [firstFailure] = failures;
               if (firstFailure !== undefined) return yield* firstFailure;
             }).pipe(
