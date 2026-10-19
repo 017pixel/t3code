@@ -69,6 +69,28 @@ describe("buildCommitMessagePrompt", () => {
 
     expect(result.prompt).toContain("Additional instructions:");
     expect(result.prompt).toContain("Use a terse repository-specific subject.");
+    expect(result.prompt).toContain(
+      "- subject must be imperative, <= 72 chars, and no trailing period",
+    );
+  });
+
+  it("lets repository conventions override the default commit format", () => {
+    const { prompt } = buildCommitMessagePrompt({
+      branch: "main",
+      stagedSummary: "M README.md",
+      stagedPatch: "diff",
+      policy: {
+        kind: "repo_conventions",
+        commitInstructions: "Subjects may exceed 72 characters and must end with a period.",
+        inferRepositoryConventions: true,
+      },
+    });
+
+    expect(prompt).toContain("Subjects may exceed 72 characters and must end with a period.");
+    expect(prompt).toMatch(/precedence over (?:the )?defaults/i);
+    expect(prompt).not.toContain(
+      "- subject must be imperative, <= 72 chars, and no trailing period",
+    );
   });
 });
 

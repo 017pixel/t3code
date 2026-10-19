@@ -222,6 +222,34 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
     ),
   );
 
+  it.effect("preserves repository commit subjects through provider output normalization", () => {
+    const subject =
+      "[docs] Added the project readme so that new contributors can find the setup steps quickly.";
+    return withFakeCodexEnv(
+      {
+        output: JSON.stringify({ subject: "  " + subject + "\nignored line", body: " Details " }),
+        stdinMustContain: "Subjects may exceed 72 characters and must end with a period.",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateCommitMessage({
+            cwd: process.cwd(),
+            branch: "main",
+            stagedSummary: "M README.md",
+            stagedPatch: "diff --git a/README.md b/README.md",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+            policy: {
+              kind: "repo_conventions",
+              commitInstructions: "Subjects may exceed 72 characters and must end with a period.",
+              inferRepositoryConventions: true,
+            },
+          });
+
+          expect(generated).toEqual({ subject, body: "Details" });
+        }),
+    );
+  });
+
   it.effect(
     "forwards codex service tier and non-default reasoning effort into codex exec config",
     () =>

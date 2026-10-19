@@ -3720,7 +3720,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       NodeFS.writeFileSync(NodePath.join(repoDir, "CLAUDE.md"), claudeInstructions);
       NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\n");
       yield* runGit(repoDir, ["add", "README.md"]);
-      let generatedPolicy: TextGeneration.CommitMessageGenerationInput["policy"] = undefined;
+      let generatedPolicy: TextGeneration.CommitMessageGenerationInput["policy"];
 
       const { manager } = yield* makeManager({
         serverSettings: {
@@ -3746,10 +3746,63 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
 
       expect(generatedPolicy).toEqual({
         kind: "repo_conventions",
-        commitInstructions: `Follow the repository's established commit message style when examples are available.\n\nLocal AGENTS.md:\n${agentInstructions}\n\nLocal CLAUDE.md:\n${claudeInstructions}`,
-        changeRequestInstructions: `Follow the repository's established change request title and body style when examples are available.\n\nLocal AGENTS.md:\n${agentInstructions}\n\nLocal CLAUDE.md:\n${claudeInstructions}`,
+        commitInstructions: expect.stringContaining(agentInstructions),
+        changeRequestInstructions: expect.stringContaining(claudeInstructions),
         inferRepositoryConventions: true,
       });
+      expect(generatedPolicy?.commitInstructions).toContain(claudeInstructions);
+      expect(generatedPolicy?.changeRequestInstructions).toContain(agentInstructions);
+    }),
+  );
+
+  it.effect("commits repository subjects with documented conventions ahead of history", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const instructions = "Subjects may exceed 72 characters and must end with a period.";
+      NodeFS.writeFileSync(NodePath.join(repoDir, "AGENTS.md"), instructions);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "CLAUDE.md"), instructions);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\nconventions\n");
+      const previousSubject = (yield* runGit(repoDir, ["log", "-1", "--pretty=%s"])).stdout.trim();
+      const subject =
+        "[docs] Added the project readme so that new contributors can find the setup steps quickly.";
+      let generatedPolicy: TextGeneration.CommitMessageGenerationInput["policy"];
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          textGenerationModelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-4-6",
+          },
+          sourceControlWritingStyle: { mode: "repo_conventions" as const },
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            generatedPolicy = input.policy;
+            return Effect.succeed({ subject, body: "" });
+          },
+        },
+      });
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(result.commit.status).toBe("created");
+      expect.soft(result.commit.subject).toBe(subject);
+      expect
+        .soft((yield* runGit(repoDir, ["log", "-1", "--pretty=%s"])).stdout.trim())
+        .toBe(subject);
+      expect(generatedPolicy).toMatchObject({
+        kind: "repo_conventions",
+        inferRepositoryConventions: true,
+      });
+      const commitInstructions = generatedPolicy?.commitInstructions ?? "";
+      expect(commitInstructions).toContain(instructions);
+      expect(commitInstructions).toContain(previousSubject);
+      expect
+        .soft(commitInstructions.indexOf(instructions))
+        .toBeLessThan(commitInstructions.indexOf(previousSubject));
+      expect
+        .soft(commitInstructions)
+        .toMatch(/precedence over (?:the )?(?:recent |commit )?examples/i);
+      expect.soft(commitInstructions.split(instructions)).toHaveLength(2);
     }),
   );
 
