@@ -1,3 +1,4 @@
+import * as DocumentText from "../../../provider/DocumentText.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
 import * as DeviceService from "../../../device/DeviceService.ts";
@@ -164,7 +165,7 @@ it.effect("production mcp layer lists worktree tools over http", () =>
         ServerConfig.layerTest(process.cwd(), { prefix: "t3-worktree-mcp-" }).pipe(
           Layer.provide(NodeServices.layer),
         ),
-        NodeServices.layer,
+        DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer)),
       ),
     ),
   ),

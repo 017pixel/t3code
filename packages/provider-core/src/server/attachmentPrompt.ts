@@ -7,6 +7,13 @@ import {
   type SnapShotAccessibilityNode,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- provider prompts only run on the attachment-owning server.
+import * as NodeFS from "node:fs";
+
+export function attachmentExtractedTextPath(path: string): string | undefined {
+  const sidecar = `${path}.txt`;
+  return NodeFS.existsSync(sidecar) ? sidecar : undefined;
+}
 
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -165,10 +172,11 @@ export function providerMessageTextWithAttachmentPaths(input: {
   // The text-input budget must never hide the existence of an attachment.
   for (const attachment of input.attachments) {
     const path = input.resolveAttachmentPath(attachment);
+    const extracted = path === null ? undefined : attachmentExtractedTextPath(path);
     const context =
       path === null
         ? `[Attached ${attachment.type} "${attachment.name}" is unavailable: could not resolve a saved path for attachment '${attachment.id}'.]`
-        : `[Attached ${attachment.type} "${attachment.name}" is saved at: ${path}]`;
+        : `[Attached ${attachment.type} "${attachment.name}" is saved at: ${path}${extracted ? ` (text extracted to: ${extracted})` : ""}]`;
     text = text ? `${text}\n\n${context}` : context;
   }
 

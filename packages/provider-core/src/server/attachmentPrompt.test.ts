@@ -5,6 +5,11 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- verify actual persisted sidecar discovery.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- temporary attachment directory.
+import * as NodePath from "node:path";
 
 import {
   isProviderNativeImageAttachment,
@@ -30,6 +35,33 @@ const resolveAttachmentPath = (attachment: { readonly id: string; readonly name:
   `/attachments/${attachment.id}${attachment.name.slice(attachment.name.lastIndexOf("."))}`;
 
 describe("provider attachment prompts", () => {
+  it("lists the original and extracted text only after extraction succeeds", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-document-prompt-"));
+    try {
+      const path = NodePath.join(directory, "report.docx");
+      const file = ChatFileAttachment.make({ ...document, name: "report.docx" });
+      const input = {
+        text: "Review this.",
+        attachments: [file],
+        resolveAttachmentPath: () => path,
+      };
+      assert.notInclude(providerMessageTextWithAttachmentPaths(input), "text extracted");
+      NodeFS.writeFileSync(`${path}.txt`, "## Report\nNorth\t731");
+      assert.include(
+        providerMessageTextWithAttachmentPaths(input),
+        `saved at: ${path} (text extracted to: ${path}.txt)`,
+      );
+      assert.include(
+        providerMessageTextWithAttachmentPaths({
+          ...input,
+          text: "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+        }),
+        `${path}.txt`,
+      );
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("appends resolvable file paths for documents and images", () => {
     assert.equal(
       providerMessageTextWithAttachmentPaths({

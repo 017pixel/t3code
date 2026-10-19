@@ -31,6 +31,7 @@ import {
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import { inferImageExtension } from "../imageMime.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 
 export const ATTACHMENT_UPLOAD_ROUTE_PREFIX = "/api/attachments/upload";
 
@@ -201,6 +202,8 @@ export const storeAttachmentUpload = Effect.fn("AttachmentUpload.store")(functio
       } satisfies StoreAttachmentUploadResult;
     }
     yield* fileSystem.rename(partPath, finalPath);
+    const documents = yield* DocumentText.DocumentText;
+    yield* documents.ensure(finalPath);
     return { ok: true } satisfies StoreAttachmentUploadResult;
   }).pipe(
     Effect.catch((cause) =>
@@ -239,4 +242,5 @@ export const deletePendingAttachment = Effect.fn("AttachmentUpload.deletePending
 
   const fileSystem = yield* FileSystem.FileSystem;
   yield* fileSystem.remove(attachmentPath, { force: true }).pipe(Effect.orElseSucceed(() => {}));
+  yield* fileSystem.remove(`${attachmentPath}.txt`, { force: true }).pipe(Effect.ignore);
 });

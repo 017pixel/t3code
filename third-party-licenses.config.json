@@ -151,6 +151,19 @@
   ],
   "packageOverrides": [
     {
+      "name": "saxes",
+      "version": "6.0.0",
+      "license": "ISC",
+      "sourceUrl": "https://github.com/lddubeau/saxes",
+      "generatedNotice": {
+        "licenseId": "ISC",
+        "copyrights": [
+          "Copyright (c) Contributors",
+          "Copyright (c) Isaac Z. Schlueter and Contributors"
+        ]
+      }
+    },
+    {
       "name": "@bufbuild/protobuf",
       "version": "1.10.0",
       "generatedNotices": [
