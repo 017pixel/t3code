@@ -36,7 +36,10 @@ import { ASSET_ROUTE_PREFIX, issueAssetUrl, readMcpAppHtml, resolveAsset } from 
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import { openMediaFile } from "./MediaFile.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import * as GitHubRest from "@t3tools/source-control-github/server/GitHubRest";
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
+import * as GitHubMediaFetch from "./GitHubMediaFetch.ts";
 import { githubMediaResponse } from "./GitHubMediaFetch.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
@@ -123,6 +126,121 @@ const layerTest = Layer.mergeAll(
   ServerSecretStore.layer.pipe(Layer.provide(layerConfig)),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
+const makeSsoMediaFixture = (
+  asset: { url: string; cwd: string; repository?: string; expiresAt: number },
+  checkoutRepository = "personal/unrelated",
+) => {
+  const bytes = new Uint8Array([0, 255, 2, 128, 4, 127, 6, 7, 8, 9]);
+  const state = { account: "account-a", expired: new Set<string>() };
+  const rendered: Array<GitHubRest.GitHubRestInput> = [];
+  const signedUrls: Array<string> = [];
+  const requests: Array<{
+    url: string;
+    authorization: string | undefined;
+    range: string | undefined;
+  }> = [];
+  const resolve = vi.fn(() =>
+    Effect.succeed({
+      canonicalKey: `github.com/${checkoutRepository}`,
+      locator: { source: "git-remote" as const, remoteName: "origin", remoteUrl: "" },
+    }),
+  );
+  const credential = (host: string) =>
+    Effect.sync(() => ({
+      host,
+      token: Redacted.make(state.account),
+      fingerprint: state.account,
+      source: "gh" as const,
+    }));
+  const externals = Layer.mergeAll(
+    Layer.mock(GitHubCredentials.GitHubCredentials)({ get: credential }),
+    Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({ resolve }),
+    Layer.mock(GitHubRest.GitHubRest)({
+      credential,
+      rest: (input) =>
+        Effect.sync(() => {
+          rendered.push(input);
+          expect(input).toMatchObject({
+            host: "github.com",
+            method: "POST",
+            path: "markdown",
+            accept: "text/html",
+          });
+          const signed = `https://private-user-images.githubusercontent.com/1/upload.mp4?jwt=${state.account}-${rendered.length}&x=1`;
+          const correctContext =
+            typeof input.body === "object" &&
+            input.body !== null &&
+            "context" in input.body &&
+            input.body.context === "enterprise/private";
+          if (correctContext) signedUrls.push(signed);
+          return {
+            status: 200,
+            headers: {},
+            body: `<p><img src="${correctContext ? signed.replaceAll("&", "&amp;") : asset.url}" alt=""></p>`,
+            truncated: false,
+            invalidUtf8: false,
+          };
+        }),
+    }),
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.sync(() => {
+          requests.push({
+            url: request.url,
+            authorization: request.headers.authorization,
+            range: request.headers.range,
+          });
+          if (request.url === asset.url) {
+            return HttpClientResponse.fromWeb(
+              request,
+              new Response("<html>Sign in with SSO</html>", {
+                headers: { "content-type": "text/html; charset=utf-8" },
+              }),
+            );
+          }
+          expect(signedUrls).toContain(request.url);
+          expect(request.headers.authorization).toBeUndefined();
+          if (state.expired.has(request.url)) {
+            return HttpClientResponse.fromWeb(request, new Response(null, { status: 403 }));
+          }
+          const range = request.headers.range;
+          if (range) {
+            expect(range).toBe("bytes=2-5");
+            expect(request.headers["if-range"]).toBe('"upload"');
+          }
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response(range ? bytes.slice(2, 6) : bytes, {
+              status: range ? 206 : 200,
+              headers: {
+                "content-type": "video/mp4",
+                "content-length": range ? "4" : "10",
+                "accept-ranges": "bytes",
+                etag: '"upload"',
+                ...(range ? { "content-range": "bytes 2-5/10" } : {}),
+              },
+            }),
+          );
+        }),
+      ),
+    ),
+  );
+  const layer = GitHubMediaFetch.layer.pipe(Layer.provide(externals));
+  const read = Effect.fnUntraced(function* (headers: Record<string, string> = {}) {
+    const response = HttpServerResponse.toWeb(yield* githubMediaResponse(asset, headers));
+    expect(response.status).toBe(headers.range ? 206 : 200);
+    expect(response.headers.get("content-type")).toBe("video/mp4");
+    expect(response.headers.get("content-length")).toBe(headers.range ? "4" : "10");
+    expect(response.headers.get("accept-ranges")).toBe("bytes");
+    expect(response.headers.get("etag")).toBe('"upload"');
+    expect(response.headers.get("content-range")).toBe(headers.range ? "bytes 2-5/10" : null);
+    const body = yield* Effect.promise(() => response.arrayBuffer());
+    expect(new Uint8Array(body)).toEqual(headers.range ? bytes.slice(2, 6) : bytes);
+  });
+  return { layer, read, state, rendered, signedUrls, requests, resolve };
+};
+
 describe("AssetAccess", () => {
   describe("readMcpAppHtml", () => {
     it.effect("accepts snapshots at the stored HTML byte limit", () =>
@@ -198,17 +316,25 @@ describe("AssetAccess", () => {
       expect(authorizations).toEqual([undefined, "Bearer signed-in", "Bearer signed-in"]);
     }).pipe(
       Effect.provide(
-        Layer.mock(GitHubCredentials.GitHubCredentials)({
-          get: (host) =>
-            ++lookups === 1
-              ? Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host }))
-              : Effect.succeed({
-                  host,
-                  token: Redacted.make("signed-in"),
-                  source: "gh" as const,
-                  fingerprint: "fingerprint",
-                }),
-        }),
+        GitHubMediaFetch.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(GitHubRest.GitHubRest)({}),
+              Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
+              Layer.mock(GitHubCredentials.GitHubCredentials)({
+                get: (host) =>
+                  ++lookups === 1
+                    ? Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host }))
+                    : Effect.succeed({
+                        host,
+                        token: Redacted.make("signed-in"),
+                        source: "gh" as const,
+                        fingerprint: "fingerprint",
+                      }),
+              }),
+            ),
+          ),
+        ),
       ),
       Effect.provideService(
         HttpClient.HttpClient,
@@ -228,6 +354,111 @@ describe("AssetAccess", () => {
       Effect.scoped,
     );
   });
+
+  it.effect(
+    "loads SSO uploads in the PR repository and reuses the signed URL for a range request",
+    () => {
+      const asset = {
+        url: "https://github.com/user-attachments/assets/explicit-pr-context",
+        cwd: "/personal-checkout",
+        repository: "enterprise/private",
+        expiresAt: Number.MAX_SAFE_INTEGER,
+      };
+      const fixture = makeSsoMediaFixture(asset);
+      return Effect.gen(function* () {
+        yield* fixture.read();
+        yield* fixture.read({ range: "bytes=2-5", "if-range": '"upload"' });
+        expect(fixture.resolve).not.toHaveBeenCalled();
+        expect(fixture.rendered).toHaveLength(1);
+        expect(fixture.rendered[0]?.body).toEqual({
+          text: `![](${asset.url})`,
+          mode: "gfm",
+          context: asset.repository,
+        });
+        expect(fixture.requests).toEqual([
+          { url: asset.url, authorization: "Bearer account-a", range: undefined },
+          { url: fixture.signedUrls[0], authorization: undefined, range: undefined },
+          { url: fixture.signedUrls[0], authorization: undefined, range: "bytes=2-5" },
+        ]);
+      }).pipe(Effect.provide(fixture.layer), Effect.scoped);
+    },
+  );
+
+  it.effect.each([
+    {
+      name: "checkout identity",
+      url: "https://github.com/user-attachments/assets/old-client",
+      checkout: "enterprise/private",
+      resolves: true,
+    },
+    {
+      name: "legacy upload repository",
+      url: "https://github.com/enterprise/private/assets/123/old-client",
+      checkout: "personal/unrelated",
+      resolves: false,
+    },
+  ])("loads uploads without PR context using $name", ({ url, checkout, resolves }) => {
+    const fixture = makeSsoMediaFixture(
+      { url, cwd: "/old-client", expiresAt: Number.MAX_SAFE_INTEGER },
+      checkout,
+    );
+    return Effect.gen(function* () {
+      yield* fixture.read();
+      expect(fixture.rendered).toHaveLength(1);
+      expect(fixture.rendered[0]?.body).toEqual({
+        text: `![](${url})`,
+        mode: "gfm",
+        context: "enterprise/private",
+      });
+      if (resolves) expect(fixture.resolve).toHaveBeenCalledWith("/old-client");
+      else expect(fixture.resolve).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(fixture.layer), Effect.scoped);
+  });
+
+  it.effect(
+    "refreshes signed media across account changes, early expiry, TTL and service lifetimes",
+    () => {
+      const fixture = makeSsoMediaFixture({
+        url: "https://github.com/user-attachments/assets/cache-lifecycle",
+        cwd: "/personal-checkout",
+        repository: "enterprise/private",
+        expiresAt: Number.MAX_SAFE_INTEGER,
+      });
+      const session = Effect.gen(function* () {
+        yield* fixture.read();
+        const firstAccountUrl = fixture.signedUrls[0];
+        fixture.state.account = "account-b";
+        const beforeSwitch = fixture.requests.length;
+        yield* fixture.read();
+        expect(fixture.rendered).toHaveLength(2);
+        expect(fixture.requests.slice(beforeSwitch).map(({ url }) => url)).not.toContain(
+          firstAccountUrl,
+        );
+        const stale = fixture.signedUrls.at(-1)!;
+        fixture.state.expired.add(stale);
+        const beforeExpiry = fixture.requests.length;
+        yield* fixture.read({ range: "bytes=2-5", "if-range": '"upload"' });
+        expect(fixture.requests[beforeExpiry]?.url).toBe(stale);
+        expect(fixture.rendered).toHaveLength(3);
+        yield* TestClock.adjust("6 minutes");
+        const beforeTtl = fixture.requests.length;
+        const beforeTtlUrl = fixture.signedUrls.at(-1);
+        yield* fixture.read();
+        expect(fixture.rendered).toHaveLength(4);
+        expect(fixture.requests.slice(beforeTtl).map(({ url }) => url)).not.toContain(beforeTtlUrl);
+      }).pipe(Effect.provide(fixture.layer), Effect.scoped);
+      return Effect.gen(function* () {
+        yield* session;
+        const previousUrl = fixture.signedUrls.at(-1);
+        const beforeRestart = fixture.requests.length;
+        yield* fixture.read().pipe(Effect.provide(fixture.layer), Effect.scoped);
+        expect(fixture.rendered).toHaveLength(5);
+        expect(fixture.requests.slice(beforeRestart).map(({ url }) => url)).not.toContain(
+          previousUrl,
+        );
+      });
+    },
+  );
 
   it.effect("serves an image a tool returned inline from the stored item", () =>
     Effect.gen(function* () {
