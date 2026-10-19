@@ -2998,15 +2998,20 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
   );
 
   it.effect.each([true, false])(
-    "never replays an uncertain guarded restore, expectedIdle=%s",
+    "projects an uncertain guarded restore without replay after startup, expectedIdle=%s",
     (expectedIdle) =>
       Effect.gen(function* () {
         const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
         const commandId = CommandId.make("command:guarded-restore-process-loss");
+        const threadId = ThreadId.make("thread:guarded-restore-process-loss");
+        const thread = makeThread(threadId, now);
         const effect = {
           id: "effect:guarded-restore-process-loss",
           commandId,
-          threadId: ThreadId.make("thread:guarded-restore-process-loss"),
+          threadId,
           request: {
             type: "provider-thread.rollback" as const,
             providerThreadId: ProviderThreadId.make("provider-thread:guarded-restore-process-loss"),
@@ -3016,24 +3021,68 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
             expectedWorkspaceFingerprint: "before-destructive-restore",
           },
         };
-        yield* outbox.enqueue([effect]);
+        yield* eventSink.commitCommand({
+          commandId,
+          threadId,
+          commandType: "checkpoint.rollback",
+          acceptedAt: now,
+          events: [
+            threadCreatedEvent({ id: "event:guarded-restore-process-loss:thread", thread, now }),
+            {
+              id: EventId.make("event:guarded-restore-process-loss:pending"),
+              type: "thread.metadata-updated",
+              threadId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: { ...thread, rollbackRequestId: commandId, rollbackFailure: null },
+            },
+            {
+              id: EventId.make("event:guarded-restore-process-loss:requested"),
+              type: "checkpoint.rollback-requested",
+              threadId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                scopeId: effect.request.scopeId,
+                checkpointId: effect.request.checkpointId,
+                requestedAt: now,
+              },
+            },
+          ],
+          effects: [effect],
+        });
+        const pending = yield* projectionStore.getThreadProjection(threadId);
+        assert.equal(pending.thread.rollbackRequestId, commandId);
+        assert.isNull(pending.thread.rollbackFailure);
         const claimed = yield* outbox.claimNext({
           workerId: "lost-worker",
           leaseDurationMs: 30_000,
         });
         assert.equal(Option.getOrThrow(claimed).id, effect.id);
 
-        yield* outbox.reconcileAfterProcessLoss;
-        yield* outbox.reconcileAfterProcessLoss;
-        const settled = Option.getOrThrow(yield* outbox.get(effect.id));
-        assert.equal(settled.status, "failed");
-        assert.include(settled.lastError ?? "", "uncertain");
-        assert.isTrue(
-          Option.isNone(
-            yield* outbox.claimNext({ workerId: "replacement-worker", leaseDurationMs: 30_000 }),
-          ),
+        const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+          Effect.provide(ServerSettings.layerTest()),
         );
-      }).pipe(Effect.provide(layerIsolatedOutbox)),
+        for (let pass = 0; pass < 2; pass++) {
+          yield* recovery.recover;
+          const settled = Option.getOrThrow(yield* outbox.get(effect.id));
+          assert.equal(settled.status, "failed");
+          assert.equal(settled.failureCode, "checkpoint_restore_partial");
+          assert.include(settled.lastError ?? "", "uncertain");
+          assert.equal(settled.attemptCount, 1);
+          assert.isTrue(
+            Option.isNone(
+              yield* outbox.claimNext({ workerId: "replacement-worker", leaseDurationMs: 30_000 }),
+            ),
+          );
+          const projection = yield* projectionStore.getThreadProjection(threadId);
+          assert.equal(projection.thread.rollbackRequestId, commandId);
+          assert.deepEqual(projection.thread.rollbackFailure, {
+            requestId: commandId,
+            message: settled.lastError,
+          });
+        }
+      }).pipe(Effect.provide(Layer.fresh(layerTest))),
   );
 
   it.effect("atomically cancels stale runs and their process-bound effects", () =>

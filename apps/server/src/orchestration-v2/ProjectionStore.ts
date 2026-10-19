@@ -602,6 +602,8 @@ function needsRecovery(
     }
     case "runtime":
       return (
+        (projection.thread.rollbackRequestId != null &&
+          projection.thread.rollbackFailure == null) ||
         projection.runs.some(
           (run) =>
             ["preparing", "starting", "running", "waiting"].includes(run.status) ||
@@ -3788,6 +3790,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 UNION
                 SELECT thread_id FROM orchestration_v2_effect_outbox
                 WHERE status IN ('pending', 'running')
+                UNION
+                SELECT thread_id FROM orchestration_v2_projection_threads AS thread
+                WHERE CASE WHEN json_valid(thread.payload_json) THEN
+                  json_extract(thread.payload_json, '$.rollbackRequestId') IS NOT NULL
+                  AND json_extract(thread.payload_json, '$.rollbackFailure') IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM orchestration_v2_effect_outbox AS effect
+                    WHERE effect.command_id = json_extract(thread.payload_json, '$.rollbackRequestId')
+                      AND effect.thread_id = thread.thread_id
+                      AND effect.effect_type = 'provider-thread.rollback'
+                      AND effect.status = 'failed'
+                  )
+                  ELSE 0 END
               `;
           }
         })();

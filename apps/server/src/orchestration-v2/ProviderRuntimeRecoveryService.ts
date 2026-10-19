@@ -713,6 +713,7 @@ export const make = Effect.gen(function* () {
       let closedRequests = 0;
       let retiredEffects = 0;
       const stoppedThisPass = new Map<string, RecoverySession>();
+      const pendingRollbackThreadIds: Array<ThreadId> = [];
       for (const threadId of threadIds) {
         const projection = yield* projections.getRuntimeRecoveryProjection(threadId).pipe(
           Effect.mapError(
@@ -724,6 +725,11 @@ export const make = Effect.gen(function* () {
               }),
           ),
         );
+        if (
+          projection.thread.rollbackRequestId != null &&
+          projection.thread.rollbackFailure == null
+        )
+          pendingRollbackThreadIds.push(threadId);
         const enabled =
           continueAfterRestart !== null &&
           resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
@@ -744,6 +750,52 @@ export const make = Effect.gen(function* () {
           (cause) => new ProviderRuntimeRecoveryError({ operation: "drain-outbox", cause }),
         ),
       );
+      // Revisit pending metadata even when a prior startup already settled the outbox.
+      for (const threadId of pendingRollbackThreadIds) {
+        yield* Effect.gen(function* () {
+          const thread = yield* projections.getThread(threadId);
+          const requestId = thread.rollbackRequestId;
+          if (thread.deletedAt !== null || requestId == null || thread.rollbackFailure != null)
+            return;
+          const effects = yield* outbox.listByCommandId(requestId);
+          const failed = effects.find(
+            (effect) =>
+              effect.threadId === threadId &&
+              effect.request.type === "provider-thread.rollback" &&
+              effect.status === "failed" &&
+              effect.failureCode === "checkpoint_restore_partial",
+          );
+          if (failed?.lastError == null) return;
+          const now = yield* DateTime.now;
+          const commandId = CommandId.make(`command:runtime-reconcile:rollback:${requestId}`);
+          yield* eventSink.commitCommand({
+            commandId,
+            threadId,
+            commandType: "provider-runtime.reconcile",
+            acceptedAt: now,
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId, commandId }),
+                type: "thread.metadata-updated",
+                threadId,
+                providerInstanceId: thread.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...thread,
+                  rollbackFailure: { requestId, message: failed.lastError },
+                  updatedAt: now,
+                },
+              },
+            ],
+            effects: [],
+          });
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderRuntimeRecoveryError({ operation: "reconcile", threadId, cause }),
+          ),
+        );
+      }
       return {
         terminalizedRuns,
         stoppedSessions,
