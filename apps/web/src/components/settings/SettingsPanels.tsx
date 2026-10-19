@@ -2817,7 +2817,9 @@ export function GeneralSettingsPanel() {
           status={
             !supportsAutomaticUpdates
               ? "All selected connected environments must support automatic updates."
-              : undefined
+              : !settings.enableProviderUpdateChecks
+                ? "Provider CLIs update only while Provider update checks is on."
+                : undefined
           }
           resetAction={
             supportsAutomaticUpdates &&

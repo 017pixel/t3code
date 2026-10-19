@@ -499,9 +499,11 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         subtitle={
                           projectSelected
                             ? "Environment-wide setting. Select All projects to change it."
-                            : supportsAutomaticUpdates
-                              ? "Install provider CLI updates, and update background-service installs, on the selected environments while nothing is running."
-                              : "Update older servers to control automatic updates."
+                            : !supportsAutomaticUpdates
+                              ? "Update older servers to control automatic updates."
+                              : uniform("enableProviderUpdateChecks") === false
+                                ? "Update background-service installs on the selected environments while nothing is running. Provider CLIs update only while Provider update checks is on."
+                                : "Install provider CLI updates, and update background-service installs, on the selected environments while nothing is running."
                         }
                         value={uniform("automaticUpdates")}
                         disabled={disabledFor("automaticUpdates") || !supportsAutomaticUpdates}
