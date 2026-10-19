@@ -941,7 +941,10 @@ const make = Effect.gen(function* () {
         const threadId =
           claimed.storedEvents.find((stored) => stored.event.type.startsWith("thread."))?.event
             .threadId ?? candidateThreadId;
-        if (project.id !== input.projectId) {
+        const shell = yield* threads
+          .getThreadShell(threadId)
+          .pipe(Effect.mapError(mapError(input, "resolve-project", threadId)));
+        if (shell?.projectId !== project.id) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
         }
 
@@ -1013,16 +1016,24 @@ const make = Effect.gen(function* () {
           const ownsPreparation = yield* reservePreparation(input.commandId);
           if (ownsPreparation) {
             yield* Effect.gen(function* () {
-              const preparationStillRequired =
+              const preparingRun =
                 runId === null
-                  ? true
+                  ? undefined
                   : yield* threads.getThreadRecords(threadId, ["runs"], { runIds: [runId] }).pipe(
                       Effect.map((current) =>
-                        current.runs.some((run) => run.id === runId && run.status === "preparing"),
+                        current.runs.find((run) => run.id === runId && run.status === "preparing"),
                       ),
                       Effect.mapError(mapError(input, "update-thread", threadId)),
                     );
-              if (preparationStillRequired) {
+              if (preparingRun !== undefined) {
+                // A retry may change its arguments after acceptance; preparation belongs to the saved run.
+                yield* scheduleRunPreparation(
+                  { commandId: input.commandId, threadId, runId: preparingRun.id },
+                  projection,
+                  preparingRun,
+                  preparingRun.workspacePreparation ?? preparationStrategy,
+                );
+              } else if (runId === null) {
                 yield* schedulePreparation(
                   { ...input, workspaceStrategy: preparationStrategy },
                   threadId,
