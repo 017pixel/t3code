@@ -35,7 +35,9 @@ export function useSidebarThreadListAutoAnimate(visibleRowCount: number) {
       return;
     }
 
-    animation.controller ??= autoAnimate(animation.node, { duration: 180, easing: "ease-out" });
+    if (!animation.controller) {
+      animation.controller = autoAnimate(animation.node, { duration: 180, easing: "ease-out" });
+    }
   });
 
   return attach;
