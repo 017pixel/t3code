@@ -240,6 +240,7 @@ export interface CommandPolicyV2Shape {
       readonly hasStrongNativeSource: boolean;
       readonly sourceRunStatus: OrchestrationV2Run["status"];
       readonly fromSpecificTurn: boolean;
+      readonly fromSpecificItem?: boolean;
     },
   ) => Effect.Effect<ForkExecutionPolicyV2, CommandPolicyV2Error>;
   readonly ensureRollback: (
@@ -400,7 +401,9 @@ const ensureContextHandoff: CommandPolicyV2Shape["ensureContextHandoff"] = (inpu
 const decideForkExecution: CommandPolicyV2Shape["decideForkExecution"] = (input) => {
   // Unsuccessful runs may have no native turn or assistant cursor. Forking
   // those at native head can include later turns, so use the bounded transcript.
+  // Item cuts use portable context because native turn cursors can include a later steer.
   const canForkNatively =
+    input.fromSpecificItem !== true &&
     (input.sourceRunStatus === "completed" || input.sourceRunStatus === "waiting") &&
     input.sameProvider &&
     input.hasStrongNativeSource &&

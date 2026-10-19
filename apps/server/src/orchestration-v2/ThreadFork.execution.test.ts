@@ -13,15 +13,21 @@ import {
   RunId,
   ThreadId,
   TurnItemId,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Schema from "effect/Schema";
+import { ThreadToolkit } from "../mcp/toolkits/thread/tools.ts";
 import * as TestClock from "effect/testing/TestClock";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -395,4 +401,350 @@ it.effect.each(forkCases)(
       assert.notInclude(`${handoff.summaryText}\n${history}`, "EXCLUDED_LATER_MARKER");
       assert.isNull(target.providerThreads[0]?.forkedFrom);
     }).pipe(Effect.provide(layer)),
+);
+
+const decodeForkInput = Schema.decodeUnknownEffect(
+  ThreadToolkit.tools.t3_thread_fork.parametersSchema,
+);
+
+const responseForkCases = [
+  { ...forkCases[0]!, replyStatus: "completed" as const },
+  { ...forkCases[3]!, replyStatus: "completed" as const },
+  { ...forkCases[0]!, replyStatus: "interrupted" as const },
+  { ...forkCases[0]!, replyStatus: "failed" as const },
+];
+
+it.effect.each(responseForkCases)(
+  "bounds a $driver fork at a $replyStatus response before a steer",
+  ({ driver, instanceId, modelSelection, layer, replyStatus }) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const sourceThreadId = ThreadId.make("response-source");
+      const runId = RunId.make("response-run");
+      const providerThreadId = ProviderThreadId.make("response-provider-thread");
+      const laterRunId = RunId.make("later-run");
+      const cutId = TurnItemId.make("response-cut");
+      const projectId = ProjectId.make("response-project");
+      const projects = yield* ProjectStore.ProjectStoreV2;
+      yield* projects.apply({
+        sequence: 0,
+        eventId: EventId.make("response-project-created"),
+        aggregateKind: "project",
+        aggregateId: projectId,
+        occurredAt: DateTime.formatIso(now),
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "project.created",
+        payload: {
+          projectId,
+          title: "Response forks",
+          workspaceRoot: "/work/response-project",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: DateTime.formatIso(now),
+          updatedAt: DateTime.formatIso(now),
+        },
+      });
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-response-source"),
+        threadId: sourceThreadId,
+        projectId,
+        title: "Response before steer",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const base = {
+        threadId: sourceThreadId,
+        runId,
+        nodeId: null,
+        providerThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      } as const;
+      const items = [
+        {
+          ...base,
+          id: TurnItemId.make("prompt"),
+          ordinal: 1,
+          type: "user_message",
+          messageId: MessageId.make("prompt"),
+          text: "INCLUDED_PROMPT",
+          attachments: [],
+          inputIntent: "turn_start",
+          createdBy: "user",
+          creationSource: "web",
+        },
+        {
+          ...base,
+          id: cutId,
+          ordinal: 2,
+          type: "assistant_message",
+          messageId: MessageId.make("cut"),
+          text: "INCLUDED_RESPONSE",
+          streaming: false,
+          status: replyStatus,
+        },
+        {
+          ...base,
+          id: TurnItemId.make("steer"),
+          ordinal: 3,
+          type: "user_message",
+          messageId: MessageId.make("steer"),
+          text: "EXCLUDED_STEER",
+          attachments: [],
+          inputIntent: "steer",
+          createdBy: "user",
+          creationSource: "web",
+        },
+        {
+          ...base,
+          id: TurnItemId.make("reply"),
+          ordinal: 4,
+          type: "assistant_message",
+          messageId: MessageId.make("reply"),
+          text: "EXCLUDED_REPLY",
+          streaming: false,
+        },
+        {
+          ...base,
+          id: TurnItemId.make("later-response"),
+          runId: laterRunId,
+          ordinal: 5,
+          type: "assistant_message",
+          messageId: MessageId.make("later-response"),
+          text: "EXCLUDED_LATER_RUN",
+          streaming: false,
+        },
+      ] satisfies ReadonlyArray<OrchestrationV2TurnItem>;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("response-provider-thread"),
+            type: "provider-thread.updated",
+            threadId: sourceThreadId,
+            occurredAt: now,
+            payload: {
+              id: providerThreadId,
+              driver,
+              providerInstanceId: instanceId,
+              providerSessionId: null,
+              appThreadId: sourceThreadId,
+              ownerNodeId: null,
+              nativeThreadRef: null,
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: 1,
+              lastRunOrdinal: 2,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      for (const [ordinal, id] of [runId, laterRunId].entries()) {
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(id),
+              type: "run.created",
+              threadId: sourceThreadId,
+              runId: id,
+              occurredAt: now,
+              payload: {
+                id,
+                threadId: sourceThreadId,
+                ordinal: ordinal + 1,
+                providerInstanceId: instanceId,
+                modelSelection,
+                providerThreadId,
+                userMessageId: MessageId.make(ordinal === 0 ? "prompt" : "later-prompt"),
+                rootNodeId: null,
+                activeAttemptId: null,
+                status:
+                  replyStatus === "interrupted" && ordinal === 0 ? "interrupted" : "completed",
+                requestedAt: now,
+                startedAt: now,
+                completedAt: now,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+          ],
+        });
+      }
+      yield* eventSink.write({
+        events: items.map((item) => ({
+          id: EventId.make(item.id),
+          type: "turn-item.updated" as const,
+          threadId: sourceThreadId,
+          runId: item.runId,
+          occurredAt: now,
+          payload: item,
+        })),
+      });
+
+      const continueFork = (targetThreadId: ThreadId) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`continue-${targetThreadId}`),
+          threadId: targetThreadId,
+          messageId: MessageId.make(`continue-${targetThreadId}`),
+          text: "Continue",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+
+      const runEndId = ThreadId.make("whole-run-fork");
+      yield* orchestrator.dispatch({
+        type: "thread.fork",
+        commandId: CommandId.make("fork-whole-run"),
+        sourceThreadId,
+        targetThreadId: runEndId,
+        sourcePoint: { type: "run", runId },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(runEndId)).visibleTurnItems
+          .filter((row) => row.visibility === "inherited")
+          .map((row) => row.sourceItemId),
+        items.slice(0, 4).map((item) => item.id),
+      );
+
+      yield* continueFork(runEndId);
+      const wholeRun = yield* orchestrator.getThreadProjection(runEndId);
+      assert.include(wholeRun.contextHandoffs[0]?.summaryText ?? "", "EXCLUDED_STEER");
+      assert.include(wholeRun.contextHandoffs[0]?.summaryText ?? "", "EXCLUDED_REPLY");
+
+      // Decode the public MCP input before dispatching its point through the real service.
+      const forkAt = (turnItemId: TurnItemId, target: string) =>
+        Effect.gen(function* () {
+          const input = yield* decodeForkInput({
+            sourcePoint: { type: "turn_item", runId, turnItemId },
+          });
+          return yield* orchestrator.dispatch({
+            type: "thread.fork",
+            commandId: CommandId.make(target),
+            sourceThreadId,
+            targetThreadId: ThreadId.make(target),
+            sourcePoint: input.sourcePoint,
+            createdBy: "user",
+            creationSource: "mcp",
+          });
+        });
+
+      // A valid point must decode, so an invalid item's failure cannot pass on schema rejection.
+      yield* decodeForkInput({
+        sourcePoint: { type: "turn_item", runId, turnItemId: cutId },
+      });
+      for (const invalidId of [
+        "steer",
+        "missing",
+        "later-response",
+        ...(replyStatus === "failed" ? [cutId] : []),
+      ]) {
+        const targetId = ThreadId.make(`invalid-${invalidId}`);
+        const error = yield* forkAt(TurnItemId.make(invalidId), targetId).pipe(Effect.flip);
+        assert.equal(error._tag, "OrchestratorDispatchError");
+        assert.isNull(yield* orchestrator.getThreadShell(targetId));
+      }
+      if (replyStatus === "failed") return;
+
+      const targetThreadId = ThreadId.make("response-fork");
+      yield* forkAt(cutId, targetThreadId);
+      const expectedIds = items.slice(0, 2).map((item) => item.id);
+      const inherited = yield* orchestrator.getThreadProjection(targetThreadId);
+      assert.deepEqual(
+        inherited.visibleTurnItems
+          .filter((row) => row.visibility === "inherited")
+          .map((row) => row.sourceItemId),
+        expectedIds,
+      );
+      const window = yield* orchestrator.getThreadSnapshotWindow(targetThreadId, { rowLimit: 1 });
+      assert.deepEqual(
+        window.projection.visibleTurnItems
+          .filter((row) => row.visibility === "inherited")
+          .map((row) => row.sourceItemId),
+        [cutId],
+      );
+      const olderWindow = yield* orchestrator.getThreadSnapshotWindow(targetThreadId, {
+        rowLimit: 1,
+        anchorItemId: items[0]!.id,
+      });
+      assert.deepEqual(
+        olderWindow.projection.visibleTurnItems
+          .filter((row) => row.visibility === "inherited")
+          .map((row) => row.sourceItemId),
+        [items[0]!.id],
+      );
+      const page = yield* orchestrator.getTimelinePage(targetThreadId, { limit: 1 });
+      assert.deepEqual(
+        page.items.map((row) => row.sourceItemId),
+        [items[0]!.id],
+      );
+      assert.equal(page.totalItems, inherited.visibleTurnItems.length);
+      assert.isTrue(page.hasMore);
+      const nextPage = yield* orchestrator.getTimelinePage(targetThreadId, {
+        afterPosition: page.items[0]!.position,
+        limit: 10,
+      });
+      assert.deepEqual(
+        nextPage.items
+          .filter((row) => row.visibility === "inherited")
+          .map((row) => row.sourceItemId),
+        [cutId],
+      );
+      assert.isFalse(nextPage.hasMore);
+      const shell = yield* orchestrator.getThreadShell(targetThreadId);
+      assert.equal(shell?.visibleItemCount, inherited.visibleTurnItems.length);
+      assert.equal(
+        (yield* orchestrator.searchThread({ threadId: targetThreadId, query: "INCLUDED_RESPONSE" }))
+          .totalMatches,
+        1,
+      );
+      assert.equal(
+        (yield* orchestrator.searchThread({ threadId: targetThreadId, query: "EXCLUDED" }))
+          .totalMatches,
+        0,
+      );
+
+      yield* continueFork(targetThreadId);
+      const continued = yield* orchestrator.getThreadProjection(targetThreadId);
+      // This source has no native session. Check the context payload, not the chosen strategy.
+      assert.lengthOf(continued.contextHandoffs, 1);
+      const handoff = continued.contextHandoffs[0]!;
+      const context = [
+        handoff.summaryText,
+        ...(handoff.history?.messages.map((message) => message.text) ?? []),
+      ].join("\n");
+      assert.include(context, "INCLUDED_PROMPT");
+      assert.include(context, "INCLUDED_RESPONSE");
+      assert.notInclude(context, "EXCLUDED");
+    }).pipe(
+      Effect.provide(
+        Layer.merge(layer, ProjectStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+      ),
+    ),
 );

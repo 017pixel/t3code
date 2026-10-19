@@ -135,6 +135,8 @@ export const OrchestrationV2ThreadForkSourcePoint = Schema.Union([
   Schema.Struct({ type: Schema.Literal("latest_stable") }),
   Schema.Struct({ type: Schema.Literal("run"), runId: RunId }),
   Schema.Struct({ type: Schema.Literal("checkpoint"), checkpointId: CheckpointId }),
+  /** A finished assistant response; the fork leaves out the rest of its run, such as a steer. */
+  Schema.Struct({ type: Schema.Literal("turn_item"), runId: RunId, turnItemId: TurnItemId }),
 ]);
 export type OrchestrationV2ThreadForkSourcePoint = typeof OrchestrationV2ThreadForkSourcePoint.Type;
 
@@ -372,7 +374,13 @@ export const OrchestrationV2AppThread = Schema.Struct({
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
-      Schema.Struct({ type: Schema.Literal("run"), threadId: ThreadId, runId: RunId }),
+      Schema.Struct({
+        type: Schema.Literal("run"),
+        threadId: ThreadId,
+        runId: RunId,
+        /** Set when the fork cuts inside the run: history ends at this item. */
+        throughTurnItemId: Schema.optional(TurnItemId),
+      }),
       Schema.Struct({ type: Schema.Literal("node"), nodeId: NodeId }),
       Schema.Struct({
         type: Schema.Literal("provider_thread"),

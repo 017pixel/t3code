@@ -638,6 +638,7 @@ function runForSourcePoint(
     case "latest_stable":
       return latestStableRun(projection);
     case "run":
+    case "turn_item":
       return projection.runs.find((run) => run.id === sourcePoint.runId) ?? null;
     case "checkpoint": {
       const checkpoint = projection.checkpoints.find(
@@ -3681,6 +3682,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: forkableSourceRunStatusError(sourceRun),
       });
     }
+    const throughTurnItemId =
+      command.sourcePoint.type === "turn_item" ? command.sourcePoint.turnItemId : undefined;
+    if (throughTurnItemId !== undefined) {
+      const runItems = yield* readHandoffItems(command.sourceThreadId, [sourceRun.id]);
+      const item = runItems.find((candidate) => candidate.id === throughTurnItemId);
+      if (
+        item?.type !== "assistant_message" ||
+        item.runId !== sourceRun.id ||
+        (item.status !== "completed" && item.status !== "interrupted")
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Fork source item ${throughTurnItemId} is not a finished assistant response of run ${sourceRun.id}.`,
+        });
+      }
+    }
     const sourceProviderThread = providerThreadForRun(sourceProjection, sourceRun);
     const now = command.createdAt ?? (yield* DateTime.now);
     const emitEvent = emit(events, command);
@@ -3696,7 +3714,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         sourceProjection,
         sourceRun,
         sourceProviderThread,
-        canonicalSourcePoint: contextSourcePointForRun(sourceProjection, sourceRun),
+        canonicalSourcePoint: {
+          ...contextSourcePointForRun(sourceProjection, sourceRun),
+          ...(throughTurnItemId === undefined ? {} : { turnItemId: throughTurnItemId }),
+        },
         transferId,
         targetThreadId: command.targetThreadId,
         ...(command.title === undefined ? {} : { title: command.title }),
@@ -3778,6 +3799,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
+    if (command.sourcePoint.type === "turn_item") {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Merge-back requires a run or checkpoint rather than a single response.",
+      });
+    }
     const sourceRun = runForSourcePoint(sourceProjection, command.sourcePoint);
     if (sourceRun === null) {
       return yield* new OrchestratorDispatchError({
@@ -5803,6 +5831,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 hasStrongNativeSource: sourceProviderThread?.nativeThreadRef?.strength === "strong",
                 sourceRunStatus: sourceRun.status,
                 fromSpecificTurn: sourceRun !== null,
+                fromSpecificItem: pendingForkTransfer.sourcePoint.turnItemId !== undefined,
               }),
             );
       const canResolveForkNatively = forkExecution === "native_fork";
@@ -5865,6 +5894,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .map((run) => run.id),
               ...(sourceProjection.thread.historyOrigin === "v1_import" ? [null] : []),
             ]);
+      const cutItemId = pendingForkTransfer?.sourcePoint.turnItemId;
+      const cutItem = portableForkItems.find((item) => item.id === cutItemId);
+      if (requiresPortableFork && cutItemId !== undefined && cutItem === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Fork source item ${cutItemId} is no longer available.`,
+        });
+      }
+      const boundedForkItems =
+        cutItem === undefined
+          ? portableForkItems
+          : portableForkItems.filter(
+              (item) => item.runId !== sourceRun?.id || item.ordinal <= cutItem.ordinal,
+            );
       const portableForkHandoff =
         !requiresPortableFork ||
         pendingForkTransfer === undefined ||
@@ -5881,9 +5925,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 toProviderThreadId: ensuredProviderThread.id,
                 fromProviderInstanceId: sourceRun.providerInstanceId,
                 toProviderInstanceId: modelSelection.instanceId,
-                coveredRunOrdinals: visibleDeltaRunOrdinals(sourceProjection, portableForkItems),
+                coveredRunOrdinals: visibleDeltaRunOrdinals(sourceProjection, boundedForkItems),
                 strategy: "full_thread_summary",
-                items: portableForkItems,
+                items: boundedForkItems,
                 runs: sourceProjection.runs,
                 createdAt: now,
               })
