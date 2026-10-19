@@ -231,7 +231,8 @@ const SettingsUpdate = Schema.Struct({
 });
 
 const requiredScopesForSettingsUpdate = (payload: unknown) => {
-  const input = Schema.decodeUnknownSync(SettingsUpdate)(payload);
+  // RPC middleware receives decoded values, including Duration instances.
+  const input = Schema.decodeUnknownSync(Schema.toType(SettingsUpdate))(payload);
   const scopes = requiredScopesForServerSettingsPatch(input.patch);
   if (input.providerInstanceMutation === undefined) return scopes;
   // An atomic provider mutation carries an empty patch unless it also changes settings.

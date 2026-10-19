@@ -23,6 +23,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as RpcTest from "effect/rpc/RpcTest";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import {
   RPC_REQUIRED_SCOPES,
@@ -273,6 +274,31 @@ describe("settings mutation authorization", () => {
     operation: "remove" as const,
     instanceId: ProviderInstanceId.make("codex_work"),
   };
+
+  it.effect("restores computer use alongside duration settings through authorization", () =>
+    Effect.gen(function* () {
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.serverUpdateSettings, ({ patch }) =>
+              Effect.succeed(
+                applyServerSettingsPatch({ ...DEFAULT_SERVER_SETTINGS, enableCua: true }, patch),
+              ),
+            ),
+            RpcAuthorization.layer([AuthSettingsWriteScope]),
+          ),
+        ),
+      );
+      const defaults = {
+        enableCua: DEFAULT_SERVER_SETTINGS.enableCua,
+        automaticGitFetchInterval: DEFAULT_SERVER_SETTINGS.automaticGitFetchInterval,
+        providerHealthRefreshInterval: DEFAULT_SERVER_SETTINGS.providerHealthRefreshInterval,
+      };
+      expect(yield* client[WS_METHODS.serverUpdateSettings]({ patch: defaults })).toMatchObject(
+        defaults,
+      );
+    }).pipe(Effect.scoped),
+  );
 
   it.effect("allows provider-only mutations while denying mixed settings without their grant", () =>
     Effect.gen(function* () {
