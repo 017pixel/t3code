@@ -4774,7 +4774,11 @@ export default function Sidebar() {
                 role="status"
                 className="px-2 py-6 text-center text-xs text-sidebar-muted-foreground"
               >
-                {threadSearch.isPending ? "Searching thread messages…" : "No threads found"}
+                {threadSearch.isPending
+                  ? "Searching thread messages…"
+                  : deferredQuery !== threadSearchQuery
+                    ? "Searching threads…"
+                    : "No threads found"}
               </p>
             )
           ) : null}
