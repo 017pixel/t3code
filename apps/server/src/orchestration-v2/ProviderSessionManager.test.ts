@@ -4550,6 +4550,8 @@ function runIdleThreadUnloadScenario(
   name: string,
   scenario: (input: {
     readonly state: Ref.Ref<TestProviderRuntimeState>;
+    readonly eventSink: EventSink.EventSinkV2["Service"];
+    readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
     readonly manager: ProviderSessionManager.ProviderSessionManagerV2Shape;
     readonly providerSessionId: ProviderSessionId;
     readonly threadA: ThreadId;
@@ -4662,6 +4664,8 @@ function runIdleThreadUnloadScenario(
       yield* startTurn(threadB, 1);
       yield* scenario({
         state,
+        eventSink,
+        idAllocator,
         manager,
         providerSessionId,
         threadA,
@@ -5059,10 +5063,17 @@ it.effect("reuses an idle writer only after a proven refusal before native relea
     const refusedThread = yield* Ref.make<OrchestrationV2ProviderThread | undefined>(undefined);
     yield* runIdleThreadUnloadScenario(
       "proven-refusal",
-      ({ state, threadA, providerSessionId, startTurn, endTurn, resume }) =>
+      ({
+        state,
+        threadA,
+        providerSessionId,
+        startTurn,
+        endTurn,
+        resume,
+        eventSink: sink,
+        idAllocator: ids,
+      }) =>
         Effect.gen(function* () {
-          const ids = yield* IdAllocator.IdAllocatorV2;
-          const sink = yield* EventSink.EventSinkV2;
           const now = yield* DateTime.now;
           const providerThread = makeProviderThread({
             idAllocator: ids,
