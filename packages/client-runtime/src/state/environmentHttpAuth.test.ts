@@ -265,6 +265,28 @@ const LOADERS: ReadonlyArray<{
 ];
 
 describe("authenticated environment HTTP requests", () => {
+  it.effect.each([
+    { view: undefined, support: "1" },
+    { view: "conversation" as const, support: null },
+    { view: "activity" as const, support: null },
+  ])("requests history support only without a view ($view)", ({ view, support }) =>
+    Effect.gen(function* () {
+      const harness = makeHarness(() => Response.json(THREAD_HISTORY));
+      yield* fetchEnvironmentThreadHistoryPage({
+        ...harness.input,
+        threadId: THREAD.projection.thread.id,
+        cursor: "older-page",
+        view,
+      }).pipe(Effect.provide(harness.httpLayer));
+
+      expect(harness.calls).toHaveLength(1);
+      const query = new URL(harness.calls[0]!.url).searchParams;
+      expect(query.get("cursor")).toBe("older-page");
+      expect(query.get("view")).toBe(view ?? null);
+      expect(query.get("includeSupport")).toBe(support);
+    }),
+  );
+
   it.effect.each(LOADERS)("rejects an invalid $name response", (loader) =>
     Effect.gen(function* () {
       const harness = makeHarness(() => Response.json({}));

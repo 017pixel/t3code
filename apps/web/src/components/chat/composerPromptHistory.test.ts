@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import { buildPlanImplementationPrompt } from "../../proposedPlan";
 import {
   buildComposerPromptHistoryEntries,
+  loadEarlierComposerPromptHistory,
   recallableComposerPrompt,
   stepComposerPromptHistory,
   type ComposerPromptHistoryPosition,
@@ -186,5 +187,122 @@ describe("stepComposerPromptHistory", () => {
       currentPrompt: "A",
     });
     expect(step?.prompt).toBe("first");
+  });
+});
+
+function deferredPage() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function pagedRecall() {
+  let current: Omit<Parameters<typeof stepComposerPromptHistory>[0], "direction"> & {
+    blocked: boolean;
+  } = {
+    entries: entries.slice(-1),
+    position: { entryId: "m3", recalled: "third" },
+    currentPrompt: "third",
+    blocked: false,
+  };
+  const page = deferredPage();
+  const cancellation = new AbortController();
+  const loadEarlier = vi.fn(() => page.promise);
+  return {
+    page,
+    cancellation,
+    loadEarlier,
+    update: (next: Partial<typeof current>) => {
+      current = { ...current, ...next };
+    },
+    recall: () =>
+      loadEarlierComposerPromptHistory({
+        getCurrent: () => current,
+        loadEarlier,
+        signal: cancellation.signal,
+      }),
+  };
+}
+
+describe("loadEarlierComposerPromptHistory", () => {
+  it("takes one backward step using the messages available after the page resolves", async () => {
+    const history = pagedRecall();
+    const pending = history.recall();
+    expect(history.loadEarlier).toHaveBeenCalledTimes(1);
+
+    history.update({ entries });
+    history.page.resolve();
+    expect(await pending).toEqual({
+      position: { entryId: "m2", recalled: "second" },
+      prompt: "second",
+    });
+    expect(history.loadEarlier).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels an in-flight recall even if an edited draft returns to its original text", async () => {
+    const history = pagedRecall();
+    const pending = history.recall();
+    history.update({ currentPrompt: "third edited" });
+    history.cancellation.abort();
+    history.update({ entries, currentPrompt: "third" });
+    history.page.resolve();
+    expect(await pending).toBeNull();
+    expect(history.loadEarlier).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not recall when input context blocks history while the page is loading", async () => {
+    const history = pagedRecall();
+    const pending = history.recall();
+    history.update({ entries, blocked: true });
+    history.page.resolve();
+    expect(await pending).toBeNull();
+    expect(history.loadEarlier).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after a page with no recallable prompt and lets the next keypress load another", async () => {
+    const history = pagedRecall();
+    history.update({ entries: [], position: null, currentPrompt: "" });
+    const pending = history.recall();
+    history.update({
+      entries: buildComposerPromptHistoryEntries([
+        { id: "work", role: "assistant", text: "Still working" },
+        { id: "attachment", role: "user", text: ATTACHMENT_ONLY_BOOTSTRAP_PROMPT },
+      ]),
+    });
+    history.page.resolve();
+    expect(await pending).toBeNull();
+    expect(history.loadEarlier).toHaveBeenCalledTimes(1);
+
+    const nextPage = deferredPage();
+    history.loadEarlier.mockReturnValueOnce(nextPage.promise);
+    const nextKeypress = history.recall();
+    expect(history.loadEarlier).toHaveBeenCalledTimes(2);
+    history.update({ entries });
+    nextPage.resolve();
+    expect(await nextKeypress).toEqual({
+      position: { entryId: "m3", recalled: "third" },
+      prompt: "third",
+    });
+    expect(history.loadEarlier).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a failed page and allows a later recall to retry", async () => {
+    const history = pagedRecall();
+    const pending = history.recall();
+    history.page.reject(new Error("History unavailable"));
+    expect(await pending).toBeNull();
+    expect(history.loadEarlier).toHaveBeenCalledTimes(1);
+
+    const retryPage = deferredPage();
+    history.loadEarlier.mockReturnValueOnce(retryPage.promise);
+    const retry = history.recall();
+    history.update({ entries });
+    retryPage.resolve();
+    expect((await retry)?.prompt).toBe("second");
+    expect(history.loadEarlier).toHaveBeenCalledTimes(2);
   });
 });
