@@ -127,16 +127,23 @@ const pauseGit = Effect.fnUntraced(function* (
 });
 
 it.layer(layer)("Git bundle pack/apply", (it) => {
-  it.effect.each(["branch", "detached subdirectory"])(
+  it.effect.each(["branch", "detached subdirectory", "sparse checkout"])(
     "round-trips %s without changing either existing checkout",
     (mode) =>
       Effect.gen(function* () {
         const repo = yield* fixture;
         const { path, fs, sender, receiver, outDir, worktree } = repo;
         const handoff = yield* HandoffGit.HandoffGit;
+        if (mode === "sparse checkout") {
+          yield* fs.makeDirectory(path.join(sender, "excluded"));
+          yield* fs.writeFileString(path.join(sender, "excluded", "file"), "outside cone\n");
+          yield* git(sender, ["add", "."]);
+          yield* git(sender, ["commit", "-m", "outside cone"]);
+        }
         yield* editSender(sender);
         yield* git(sender, ["tag", branch]);
         if (mode === "detached subdirectory") yield* git(sender, ["checkout", "--detach"]);
+        if (mode === "sparse checkout") yield* git(sender, ["sparse-checkout", "set", "sub"]);
         if (mode === "branch") {
           yield* git(sender, ["config", "core.splitIndex", "true"]);
           yield* git(sender, ["config", "splitIndex.sharedIndexExpire", "now"]);
@@ -162,14 +169,14 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
                 }),
             );
             return yield* handoff.pack({
-              cwd: mode === "branch" ? sender : path.join(sender, "sub"),
+              cwd: mode === "detached subdirectory" ? path.join(sender, "sub") : sender,
               handoffId,
               outDir,
             });
           }),
         );
         assert.deepEqual(yield* repositoryState(sender), senderBefore);
-        assert.equal(packed.branch, mode === "branch" ? branch : null);
+        assert.equal(packed.branch, mode === "detached subdirectory" ? null : branch);
         yield* handoff.apply(applyInput(repo, packed));
         assert.equal(yield* git(worktree, ["rev-parse", "HEAD"]), senderBefore.head);
         assert.equal(yield* git(worktree, ["show", "HEAD:app.ts"]), "unpushed");
@@ -178,6 +185,12 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         assert.isFalse(yield* fs.exists(path.join(worktree, "old.ts")));
         assert.isFalse(yield* fs.exists(path.join(worktree, ".env")));
         assert.isFalse(yield* fs.exists(path.join(worktree, "settings.txt")));
+        if (mode === "sparse checkout") {
+          assert.equal(
+            yield* fs.readFileString(path.join(worktree, "excluded", "file")),
+            "outside cone\n",
+          );
+        }
         assert.equal(
           yield* fs.readFileString(path.join(worktree, "conf.local")),
           "force-staged work\n",
@@ -346,56 +359,38 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect.each(["submodule", "nested repository", "sparse checkout"])(
-    "refuses omitted work in a %s",
-    (kind) =>
-      Effect.gen(function* () {
-        const { path, fs, sender, origin, outDir } = yield* fixture;
-        const handoff = yield* HandoffGit.HandoffGit;
-        const nested = path.join(sender, "nested");
-        if (kind === "sparse checkout") {
-          yield* fs.makeDirectory(path.join(sender, "included"));
-          yield* fs.makeDirectory(path.join(sender, "excluded"));
-          yield* fs.writeFileString(path.join(sender, "included", "file"), "included\n");
-          yield* fs.writeFileString(path.join(sender, "excluded", "file"), "excluded\n");
-          yield* git(sender, ["add", "."]);
-          yield* git(sender, ["commit", "-m", "sparse fixture"]);
-          yield* git(sender, ["sparse-checkout", "set", "included"]);
-        } else if (kind === "submodule") {
-          yield* git(sender, [
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            origin,
-            "nested",
-          ]);
-          yield* git(sender, ["commit", "-am", "submodule"]);
-        } else {
-          yield* git(sender, ["clone", origin, nested]);
-        }
-        if (kind !== "sparse checkout") {
-          yield* fs.writeFileString(path.join(nested, "app.ts"), "uncommitted nested work\n");
-        }
-        const cwd = path.join(sender, "subdirectory");
-        yield* fs.makeDirectory(cwd);
-        const before = yield* repositoryState(sender);
-        const error = yield* handoff.pack({ cwd, handoffId, outDir }).pipe(Effect.flip);
-        assert.equal(error._tag, "HandoffGitStepError");
-        assert.include(
-          error.message,
-          kind === "sparse checkout"
-            ? "does not carry sparse checkouts"
-            : "does not carry submodules or nested repositories",
-        );
-        assert.deepEqual(yield* repositoryState(sender), before);
-        assert.deepEqual(yield* fs.readDirectory(outDir), []);
-        if (kind !== "sparse checkout")
-          assert.equal(
-            yield* fs.readFileString(path.join(nested, "app.ts")),
-            "uncommitted nested work\n",
-          );
-      }).pipe(Effect.scoped),
+  it.effect.each(["submodule", "nested repository"])("refuses omitted work in a %s", (kind) =>
+    Effect.gen(function* () {
+      const { path, fs, sender, origin, outDir } = yield* fixture;
+      const handoff = yield* HandoffGit.HandoffGit;
+      const nested = path.join(sender, "nested");
+      if (kind === "submodule") {
+        yield* git(sender, [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          origin,
+          "nested",
+        ]);
+        yield* git(sender, ["commit", "-am", "submodule"]);
+      } else {
+        yield* git(sender, ["clone", origin, nested]);
+      }
+      yield* fs.writeFileString(path.join(nested, "app.ts"), "uncommitted nested work\n");
+      const cwd = path.join(sender, "subdirectory");
+      yield* fs.makeDirectory(cwd);
+      const before = yield* repositoryState(sender);
+      const error = yield* handoff.pack({ cwd, handoffId, outDir }).pipe(Effect.flip);
+      assert.equal(error._tag, "HandoffGitStepError");
+      assert.include(error.message, "does not carry submodules or nested repositories");
+      assert.deepEqual(yield* repositoryState(sender), before);
+      assert.deepEqual(yield* fs.readDirectory(outDir), []);
+      assert.equal(
+        yield* fs.readFileString(path.join(nested, "app.ts")),
+        "uncommitted nested work\n",
+      );
+    }).pipe(Effect.scoped),
   );
 
   it.effect.skipIf(HostProcess.Platform.defaultValue() !== "linux")(

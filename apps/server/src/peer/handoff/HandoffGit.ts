@@ -77,7 +77,6 @@ export class HandoffGitStepError extends Schema.TaggedError<HandoffGitStepError>
         "gitlinks",
         "index-too-large",
         "invalid-path",
-        "sparse-checkout",
       ]),
     ),
     cause: Schema.optional(Schema.Defect()),
@@ -95,8 +94,6 @@ export class HandoffGitStepError extends Schema.TaggedError<HandoffGitStepError>
         return "This checkout has too many indexed files for Git handoff. Transfer it manually.";
       case "invalid-path":
         return "Git handoff requires UTF-8 names for indexed files. Rename them, then try again.";
-      case "sparse-checkout":
-        return "Git handoff does not carry sparse checkouts. Disable sparse checkout, then try again.";
       default:
         return `git ${this.step} failed.`;
     }
@@ -205,12 +202,6 @@ const make = Effect.gen(function* () {
   ) {
     if (!(yield* ok(input.cwd, ["rev-parse", "--verify", "HEAD"]))) {
       return yield* new HandoffNotARepositoryError({ cwd: input.cwd });
-    }
-    const sparse = yield* git(input.cwd, ["config", "--bool", "core.sparseCheckout"], {
-      allowNonZeroExit: true,
-    });
-    if (sparse.stdout.trim() === "true") {
-      return yield* new HandoffGitStepError({ step: "pack", reason: "sparse-checkout" });
     }
     const tip = yield* out(input.cwd, ["rev-parse", "HEAD"]);
     const branchName = yield* git(input.cwd, ["symbolic-ref", "--quiet", "HEAD"], {
