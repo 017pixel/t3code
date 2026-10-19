@@ -100,6 +100,19 @@ function visibleSnapshot(snapshot: AuthSnapshot, ownerSessionId: string): Provid
   };
 }
 
+// Antigravity's authenticate rejection is the only text that says why Google turned the
+// account down, but the same channel can echo callback URLs, tokens, paths, or emails.
+function safeRejectionReason(message: string): string | undefined {
+  const text = message.replace(/[\p{Cc}\s]+/gu, " ").trim();
+  const plainProse =
+    text.length > 0 &&
+    text.length <= 300 &&
+    /\p{L}/u.test(text) &&
+    /^[\p{L}\p{N} .,;:!?'"()-]+$/u.test(text) &&
+    !/\S{20,}|\d{6,}/.test(text);
+  return plainProse ? text : undefined;
+}
+
 function safeAuthFailure(cause: Cause.Cause<unknown>, usesBrowser: boolean): string {
   const error = Cause.findErrorOption(cause);
   if (Option.isSome(error)) {
@@ -118,6 +131,10 @@ function safeAuthFailure(cause: Cause.Cause<unknown>, usesBrowser: boolean): str
       }
       if (!usesBrowser && error.value.code === -32602) {
         return "Antigravity rejected the configured credentials. Check the provider settings.";
+      }
+      if (error.value.method === "authenticate") {
+        const reason = safeRejectionReason(error.value.errorMessage);
+        if (reason) return reason;
       }
     }
   }

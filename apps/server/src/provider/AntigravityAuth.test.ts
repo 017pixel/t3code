@@ -270,6 +270,52 @@ it.layer(NodeServices.layer)("AntigravityAuth", (it) => {
     }),
   );
 
+  it.effect("shows Antigravity's actionable sign-in rejection to the owner", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* harness.auth.controller.start(owner);
+      yield* phase(harness.auth, "waiting");
+      yield* Deferred.fail(
+        harness.authenticated,
+        new AcpErrors.AcpRequestError({
+          code: -32603,
+          errorMessage:
+            "Onboarding failed: User is ineligible for free-tier.\n  Reason: Your current account is not eligible for Antigravity. Try signing in with another personal Google account.\u0007 ",
+          method: "authenticate",
+        }),
+      );
+      const failed = yield* phase(harness.auth, "failed");
+      assert.equal(
+        failed.message,
+        "Onboarding failed: User is ineligible for free-tier. Reason: Your current account is not eligible for Antigravity. Try signing in with another personal Google account.",
+      );
+      yield* Deferred.await(harness.closed);
+    }),
+  );
+
+  it.effect.each([
+    { label: "a URL", errorMessage: `Sign-in failed at ${callbackUrl}` },
+    {
+      label: "a percent-encoded callback",
+      errorMessage: "Redirect to http%3A%2F%2F127.0.0.1 failed",
+    },
+    { label: "a long token", errorMessage: "Rejected key sk-123456789012345678901234567890" },
+    { label: "an email", errorMessage: "Account person@example.com is not eligible" },
+  ])("keeps the generic sign-in failure when the reason contains $label", ({ errorMessage }) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* harness.auth.controller.start(owner);
+      yield* phase(harness.auth, "waiting");
+      yield* Deferred.fail(
+        harness.authenticated,
+        new AcpErrors.AcpRequestError({ code: -32603, errorMessage, method: "authenticate" }),
+      );
+      const failed = yield* phase(harness.auth, "failed");
+      assert.equal(failed.message, "Google sign-in failed. Start sign-in again.");
+      yield* Deferred.await(harness.closed);
+    }),
+  );
+
   it.effect("accepts direct local or cached completion without a callback RPC", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ interactive: false });
