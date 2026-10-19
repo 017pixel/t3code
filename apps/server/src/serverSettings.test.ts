@@ -24,6 +24,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
@@ -98,6 +99,119 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("recovers a failed symlink target watcher and retries missed settings reads", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const sandbox = yield* fs.makeTempDirectoryScoped({ prefix: "settings-watch-recovery-" });
+      const first = path.join(sandbox, "first", "settings.json");
+      const second = path.join(sandbox, "second", "settings.json");
+      yield* fs.makeDirectory(path.dirname(first), { recursive: true });
+      yield* fs.makeDirectory(path.dirname(second), { recursive: true });
+      yield* fs.writeFileString(first, '{"responseStreamingMode":"turn"}');
+      yield* fs.writeFileString(second, '{"responseStreamingMode":"turn"}');
+      const attached = yield* Deferred.make<void>();
+      const disconnect = yield* Deferred.make<void>();
+      const disconnected = yield* Deferred.make<void>();
+      const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+      const changes: Array<ServerSettings> = [];
+      let settingsPath = "";
+      let failRead = false;
+      let failedReads = 0;
+      let recoveryAttachments = 0;
+      const unavailable = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "FileSystem",
+        method: "watch",
+        description: "test target watcher disconnected",
+      });
+      const controlled = FileSystem.make({
+        ...fs,
+        watch: (directory) => {
+          if (directory === path.dirname(first)) {
+            return Stream.unwrap(
+              Deferred.succeed(attached, undefined).pipe(
+                Effect.as(
+                  Stream.fromEffect(
+                    Deferred.await(disconnect).pipe(
+                      Effect.andThen(Deferred.succeed(disconnected, undefined)),
+                      Effect.andThen(Effect.fail(unavailable)),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }
+          if (directory === path.dirname(second)) {
+            return Stream.unwrap(
+              Effect.gen(function* () {
+                recoveryAttachments += 1;
+                yield* fs.writeFileString(second, '{"responseStreamingMode":"paragraph"}');
+                return Stream.fromQueue(events);
+              }),
+            );
+          }
+          return Stream.never;
+        },
+        readFileString: (file, encoding) =>
+          Effect.suspend(() => {
+            if ((file === settingsPath || file === second) && failRead) {
+              failRead = false;
+              failedReads += 1;
+              return Effect.fail(unavailable);
+            }
+            return fs.readFileString(file, encoding);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        settingsPath = config.settingsPath;
+        yield* fs.remove(settingsPath, { force: true });
+        yield* fs.symlink(first, settingsPath);
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const subscription = yield* service.subscribeChanges;
+        yield* subscription.pipe(
+          Stream.runForEach((change) =>
+            Effect.sync(() => {
+              changes.push(change);
+            }),
+          ),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* service.start;
+        yield* Deferred.await(attached);
+        yield* Deferred.succeed(disconnect, undefined);
+        yield* Deferred.await(disconnected);
+        yield* fs.remove(settingsPath);
+        yield* fs.symlink(second, settingsPath);
+        failRead = true;
+        yield* TestClock.adjust("1 minute");
+        assert.isAtLeast(
+          recoveryAttachments,
+          1,
+          "the failed inner watcher must re-resolve the link",
+        );
+        assert.equal(failedReads, 1);
+        assert.equal(
+          changes.at(-1)?.responseStreamingMode,
+          "paragraph",
+          "recovery must observe the edit made during lazy watch attachment",
+        );
+
+        yield* fs.writeFileString(second, '{"responseStreamingMode":"turn"}');
+        yield* Queue.offer(events, { _tag: "Update", path: second });
+        yield* TestClock.adjust("1 second");
+        assert.equal(changes.at(-1)?.responseStreamingMode, "turn");
+      }).pipe(
+        Effect.provide(
+          layerServerSettings().pipe(
+            Layer.provide(Layer.succeed(FileSystem.FileSystem, controlled)),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;
