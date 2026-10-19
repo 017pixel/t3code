@@ -92,6 +92,7 @@ import {
 } from "lucide-react";
 import {
   memo,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useReducer,
@@ -2524,8 +2525,8 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   resultId: string;
   searchMatch: EnvironmentThreadSearchMatch | null;
   searchQuery: string;
-  onHighlight: () => void;
-  onSelect: () => void;
+  onHighlight: (thread: SidebarThreadSummary) => void;
+  onSelect: (thread: SidebarThreadSummary) => void;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
 }) {
   const { thread } = props;
@@ -2605,8 +2606,8 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
               aria-current={accessibility.current}
               aria-describedby={`${props.resultId}-pr`}
               aria-label={accessibility.label}
-              onMouseMove={props.onHighlight}
-              onClick={props.onSelect}
+              onMouseMove={() => props.onHighlight(thread)}
+              onClick={() => props.onSelect(thread)}
               className={cn(
                 "group/sidebar-row group/v2-row flex min-h-9 w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1 text-left text-sm outline-none",
                 props.isHighlighted || props.isRouteActive
@@ -2686,6 +2687,26 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
     </li>
   );
 });
+
+function useSidebarThreadSearch(threads: readonly EnvironmentThreadShell[], query: string) {
+  const environmentIds = useConnectedEnvironmentIds();
+  const search = useThreadSearch(environmentIds, query);
+  const currentMatches = new Map(
+    search.matches.map((match) => [threadSearchMatchKey(match), match] as const),
+  );
+  const deferred = useDeferredValue({ query, matches: currentMatches });
+  const results =
+    deferred.query.trim().length === 0
+      ? []
+      : searchSidebarThreads(threads, deferred.query, new Set(deferred.matches.keys()));
+  return {
+    results,
+    query: deferred.query,
+    matches: deferred.matches,
+    currentMatches,
+    isPending: search.isPending,
+  };
+}
 
 export default function Sidebar() {
   const {
@@ -2812,9 +2833,10 @@ export default function Sidebar() {
   const [optimisticDrop, setOptimisticDrop] = useState<SidebarOptimisticDrop | null>(null);
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
-  const [searchHighlight, setSearchHighlight] = useState({ orderKey: "", index: 0 });
-  const searchEnvironmentIds = useConnectedEnvironmentIds();
-  const threadSearch = useThreadSearch(searchEnvironmentIds, threadSearchQuery);
+  const [searchHighlight, setSearchHighlight] = useState<{
+    query: string;
+    threadKey: string | null;
+  }>({ query: "", threadKey: null });
   const handleNewThreadRef = useRef(newThreadContext.handleNewThread);
   const queuePendingFileDrop = useSidebarPendingFileDropStore((s) => s.queuePendingFileDrop);
   const clearPendingFileDrop = useSidebarPendingFileDropStore((s) => s.clearPendingFileDrop);
@@ -3006,29 +3028,24 @@ export default function Sidebar() {
   });
 
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
-  const threadSearchMatchByKey = new Map(
-    threadSearch.matches.map((match) => [threadSearchMatchKey(match), match] as const),
-  );
-  const threadSearchResults = searchSidebarThreads(
-    searchableThreads,
-    threadSearchQuery,
-    new Set(threadSearchMatchByKey.keys()),
-  );
-  const threadSearchResultOrderKey = threadSearchResults
-    .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
-    .join("\0");
-
-  // The highlight belongs to one result list; a new list starts at the top.
+  const threadSearch = useSidebarThreadSearch(searchableThreads, threadSearchQuery);
+  const {
+    results: threadSearchResults,
+    matches: threadSearchMatchByKey,
+    query: deferredQuery,
+  } = threadSearch;
   const activeSearchResultIndex =
-    searchHighlight.orderKey === threadSearchResultOrderKey ? searchHighlight.index : 0;
-  const setActiveSearchResultIndex = (index: number | ((index: number) => number)) =>
-    setSearchHighlight((current) => {
-      const currentIndex = current.orderKey === threadSearchResultOrderKey ? current.index : 0;
-      return {
-        orderKey: threadSearchResultOrderKey,
-        index: typeof index === "function" ? index(currentIndex) : index,
-      };
-    });
+    searchHighlight.query === deferredQuery && searchHighlight.threadKey !== null
+      ? Math.max(
+          0,
+          threadSearchResults.findIndex(
+            (thread) => threadShellKey(thread) === searchHighlight.threadKey,
+          ),
+        )
+      : 0;
+  const highlightThreadSearchResult = useStableCallback((thread: SidebarThreadSummary) =>
+    setSearchHighlight({ query: deferredQuery, threadKey: threadShellKey(thread) }),
+  );
   const activeSearchResult = isSearchingThreads
     ? threadSearchResults[activeSearchResultIndex]
     : undefined;
@@ -3078,27 +3095,29 @@ export default function Sidebar() {
     });
   };
 
-  const handleThreadFileDrop = async (threadRef: ScopedThreadRef, files: File[]) => {
-    const dropId = queuePendingFileDrop({ threadRef, files });
-    const landedBefore =
-      router.buildLocation({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(threadRef),
-      }).pathname === router.state.location.pathname;
-    if (landedBefore) return;
-
-    try {
-      await navigateToThread(threadRef);
-      const landed =
+  const handleThreadFileDrop = useStableCallback(
+    async (threadRef: ScopedThreadRef, files: File[]) => {
+      const dropId = queuePendingFileDrop({ threadRef, files });
+      const landedBefore =
         router.buildLocation({
           to: "/$environmentId/$threadId",
           params: buildThreadRouteParams(threadRef),
         }).pathname === router.state.location.pathname;
-      if (!landed) clearPendingFileDrop(dropId);
-    } catch {
-      clearPendingFileDrop(dropId);
-    }
-  };
+      if (landedBefore) return;
+
+      try {
+        await navigateToThread(threadRef);
+        const landed =
+          router.buildLocation({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(threadRef),
+          }).pathname === router.state.location.pathname;
+        if (!landed) clearPendingFileDrop(dropId);
+      } catch {
+        clearPendingFileDrop(dropId);
+      }
+    },
+  );
 
   const navigateToDraft = (draftId: DraftId) => {
     clearSelection();
@@ -3110,12 +3129,12 @@ export default function Sidebar() {
 
   const clearThreadSearch = () => {
     setThreadSearchQuery("");
-    setActiveSearchResultIndex(0);
+    setSearchHighlight({ query: "", threadKey: null });
   };
-  const selectThreadSearchResult = (thread: EnvironmentThreadShell) => {
+  const selectThreadSearchResult = useStableCallback((thread: SidebarThreadSummary) => {
     clearThreadSearch();
     navigateToThread(scopeThreadRef(thread.environmentId, thread.id));
-  };
+  });
   const handleThreadSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === "Escape" && isSearchingThreads) {
@@ -3124,24 +3143,37 @@ export default function Sidebar() {
       clearThreadSearch();
       return;
     }
-    if (threadSearchResults.length === 0) return;
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActiveSearchResultIndex((index) => (index + 1) % threadSearchResults.length);
+    if (
+      !isSearchingThreads ||
+      (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Enter")
+    )
       return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveSearchResultIndex(
-        (index) => (index - 1 + threadSearchResults.length) % threadSearchResults.length,
-      );
-      return;
-    }
+    // Navigation must resolve the current input even while displayed results lag.
+    const results =
+      threadSearchQuery === deferredQuery && threadSearch.currentMatches === threadSearchMatchByKey
+        ? threadSearchResults
+        : searchSidebarThreads(
+            searchableThreads,
+            threadSearchQuery,
+            new Set(threadSearch.currentMatches.keys()),
+          );
+    if (results.length === 0) return;
+    event.preventDefault();
+    const currentIndex =
+      searchHighlight.query === threadSearchQuery && searchHighlight.threadKey !== null
+        ? Math.max(
+            0,
+            results.findIndex((thread) => threadShellKey(thread) === searchHighlight.threadKey),
+          )
+        : 0;
     if (event.key === "Enter") {
-      event.preventDefault();
-      const result = threadSearchResults[activeSearchResultIndex];
+      const result = results[currentIndex];
       if (result) selectThreadSearchResult(result);
+      return;
     }
+    const index =
+      (currentIndex + (event.key === "ArrowDown" ? 1 : results.length - 1)) % results.length;
+    setSearchHighlight({ query: threadSearchQuery, threadKey: threadShellKey(results[index]!) });
   };
 
   const startThreadRename = (threadRef: ScopedThreadRef, title: string) => {
@@ -4528,6 +4560,41 @@ export default function Sidebar() {
     shortcutLabelForCommand(keybindings, "chat.new") ??
     (projectGroups.length <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
+  const threadSearchRows = threadSearchResults.map((thread, index) => {
+    const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+    return (
+      <SidebarSearchResultRow
+        isSettled={settledThreadKeys.has(threadKey)}
+        key={threadKey}
+        thread={thread}
+        project={projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null}
+        projectDisplayName={
+          projectDisplayNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null
+        }
+        environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
+        environmentMachine={environmentMachineById.get(thread.environmentId) ?? "server"}
+        providerEntryByInstanceId={
+          providerEntriesByEnvironment.get(thread.environmentId) ?? EMPTY_PROVIDER_ENTRIES
+        }
+        isHighlighted={activeSearchResultIndex === index}
+        isRouteActive={routeThreadKey === threadKey}
+        resultId={`sidebar-thread-search-result-${index}`}
+        searchMatch={
+          threadSearchMatchByKey.get(
+            threadSearchMatchKey({
+              environmentId: thread.environmentId,
+              threadId: thread.id,
+            }),
+          ) ?? null
+        }
+        searchQuery={deferredQuery}
+        onHighlight={highlightThreadSearchResult}
+        onSelect={selectThreadSearchResult}
+        onFileDropThreads={handleThreadFileDrop}
+      />
+    );
+  });
+
   return (
     <>
       <ThreadContextDragGhost />
@@ -4673,7 +4740,7 @@ export default function Sidebar() {
               searchQuery={threadSearchQuery}
               onSearchQueryChange={(value) => {
                 setThreadSearchQuery(value);
-                setActiveSearchResultIndex(0);
+                setSearchHighlight({ query: value, threadKey: null });
               }}
               onSearchKeyDown={handleThreadSearchKeyDown}
               isSearching={isSearchingThreads}
@@ -4699,49 +4766,7 @@ export default function Sidebar() {
                   aria-label="Thread search results"
                   className="flex flex-col gap-px"
                 >
-                  {threadSearchResults.map((thread, index) => {
-                    const threadKey = scopedThreadKey(
-                      scopeThreadRef(thread.environmentId, thread.id),
-                    );
-                    return (
-                      <SidebarSearchResultRow
-                        isSettled={settledThreadKeys.has(threadKey)}
-                        key={threadKey}
-                        thread={thread}
-                        project={
-                          projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null
-                        }
-                        projectDisplayName={
-                          projectDisplayNameByKey.get(
-                            `${thread.environmentId}:${thread.projectId}`,
-                          ) ?? null
-                        }
-                        environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
-                        environmentMachine={
-                          environmentMachineById.get(thread.environmentId) ?? "server"
-                        }
-                        providerEntryByInstanceId={
-                          providerEntriesByEnvironment.get(thread.environmentId) ??
-                          EMPTY_PROVIDER_ENTRIES
-                        }
-                        isHighlighted={activeSearchResultIndex === index}
-                        isRouteActive={routeThreadKey === threadKey}
-                        resultId={`sidebar-thread-search-result-${index}`}
-                        searchMatch={
-                          threadSearchMatchByKey.get(
-                            threadSearchMatchKey({
-                              environmentId: thread.environmentId,
-                              threadId: thread.id,
-                            }),
-                          ) ?? null
-                        }
-                        searchQuery={threadSearchQuery}
-                        onHighlight={() => setActiveSearchResultIndex(index)}
-                        onSelect={() => selectThreadSearchResult(thread)}
-                        onFileDropThreads={handleThreadFileDrop}
-                      />
-                    );
-                  })}
+                  {threadSearchRows}
                 </ul>
               </TooltipProvider>
             ) : (
