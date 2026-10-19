@@ -76,6 +76,7 @@ const fixture = Effect.gen(function* () {
   yield* git(source, ["checkout", "--quiet", "-b", branch]);
   yield* write(source, "app.txt", "committed\n");
   yield* git(source, ["commit", "--quiet", "-am", "unpushed work"]);
+  yield* git(source, ["tag", branch]);
   yield* write(source, "app.txt", "staged\n");
   yield* git(source, ["add", "app.txt"]);
   yield* write(source, "app.txt", "unstaged\n");
@@ -189,7 +190,7 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect.each(["diverged", "checked-out"] as const)(
+  it.effect.each(["diverged", "checked-out", "corrupt-bundle"] as const)(
     "refuses a %s destination without overwriting work",
     (mode) =>
       Effect.gen(function* () {
@@ -200,6 +201,9 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
           handoffId: "refuse",
           outDir: f.outDir,
         });
+        if (mode === "corrupt-bundle") {
+          yield* f.fs.writeFileString(packed.bundlePath, "corrupted transfer\n");
+        }
         const base = (yield* git(f.receiver, ["rev-parse", "HEAD"])).trim();
         const destination =
           mode === "diverged"
@@ -233,10 +237,15 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
             handoffId: "refuse",
           })
           .pipe(Effect.scoped, Effect.flip);
-        assert.equal(
-          error._tag,
-          mode === "diverged" ? "HandoffBranchDivergedError" : "HandoffBranchCheckedOutError",
-        );
+        if (mode === "corrupt-bundle") {
+          assert.equal(error._tag, "HandoffGitStepError");
+          assert.propertyVal(error, "step", "bundle-read");
+        } else {
+          assert.equal(
+            error._tag,
+            mode === "diverged" ? "HandoffBranchDivergedError" : "HandoffBranchCheckedOutError",
+          );
+        }
         assert.deepEqual(yield* checkoutState(f.receiver), before);
         assert.equal(yield* refs(f.receiver), refsBefore);
         assert.equal(yield* git(f.receiver, ["worktree", "list", "--porcelain"]), worktreesBefore);

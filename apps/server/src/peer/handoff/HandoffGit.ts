@@ -116,6 +116,14 @@ const repositoryEnv = {
   GIT_CEILING_DIRECTORIES: undefined,
 } satisfies NodeJS.ProcessEnv;
 
+const nonInteractiveFetchEnv = Object.freeze({
+  GCM_INTERACTIVE: "never",
+  GIT_ASKPASS: "",
+  GIT_TERMINAL_PROMPT: "0",
+  SSH_ASKPASS: "",
+  SSH_ASKPASS_REQUIRE: "never",
+} satisfies NodeJS.ProcessEnv);
+
 const snapshotRef = (handoffId: string) => `refs/t3code/handoff/${handoffId}/snapshot`;
 
 const make = Effect.gen(function* () {
@@ -153,9 +161,14 @@ const make = Effect.gen(function* () {
         }
         const cwd = yield* out(input.cwd, ["rev-parse", "--show-toplevel"]);
         const tip = yield* out(cwd, ["rev-parse", "HEAD"]);
-        const head = yield* git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+        const head = yield* git(cwd, ["symbolic-ref", "--quiet", "HEAD"], {
           allowNonZeroExit: true,
         });
+        const headRef = head.stdout.trim();
+        const branch =
+          head.exitCode === 0 && headRef.startsWith("refs/heads/")
+            ? headRef.slice("refs/heads/".length)
+            : null;
         const directory = yield* fs
           .makeTempDirectoryScoped({ prefix: "t3-handoff-index-" })
           .pipe(
@@ -206,7 +219,7 @@ const make = Effect.gen(function* () {
         return {
           bundlePath,
           bundleBytes,
-          branch: head.exitCode === 0 ? head.stdout.trim() : null,
+          branch,
           tip,
           snapshot,
           baseRemoteUrl: remote.exitCode === 0 ? remote.stdout.trim() : null,
@@ -235,8 +248,14 @@ const make = Effect.gen(function* () {
 
     return yield* Effect.scoped(
       Effect.gen(function* () {
+        if (!(yield* ok(input.repoRoot, ["bundle", "list-heads", input.bundlePath]))) {
+          return yield* new HandoffGitStepError({ step: "bundle-read" });
+        }
         if (!(yield* ok(input.repoRoot, ["bundle", "verify", input.bundlePath]))) {
-          yield* git(input.repoRoot, ["fetch", "--quiet", "origin"], { allowNonZeroExit: true });
+          yield* git(input.repoRoot, ["fetch", "--quiet", "origin"], {
+            allowNonZeroExit: true,
+            env: nonInteractiveFetchEnv,
+          });
           if (!(yield* ok(input.repoRoot, ["bundle", "verify", input.bundlePath]))) {
             return yield* new HandoffMissingBaseError();
           }
