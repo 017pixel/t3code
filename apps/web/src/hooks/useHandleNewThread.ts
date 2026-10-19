@@ -43,6 +43,7 @@ import { useClientSettings } from "./useSettings";
 import { useThreadRouteTarget } from "./useThreadRouteTarget";
 
 interface NewThreadWorkspaceOptions {
+  workspaceDefaultsPending?: boolean;
   branch?: string | null;
   worktreePath?: string | null;
   envMode?: DraftThreadEnvMode;
@@ -74,6 +75,7 @@ export function useNewThreadHandler() {
       envMode?: DraftThreadEnvMode;
       startFromOrigin?: boolean;
       replace?: boolean;
+      deferWorkspaceDefaults?: boolean;
     },
   ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
     const projects = readProjects();
@@ -140,7 +142,9 @@ export function useNewThreadHandler() {
       });
     const resolveDefaultEnvMode = async (): Promise<DraftThreadEnvMode> => {
       const consultProjectFile =
-        project !== undefined && projectSettings.settings.defaultThreadEnvMode === null;
+        !options?.deferWorkspaceDefaults &&
+        project !== undefined &&
+        projectSettings.settings.defaultThreadEnvMode === null;
       const projectFile = consultProjectFile
         ? await readT3ProjectFile(project.environmentId, project.workspaceRoot)
         : null;
@@ -167,6 +171,8 @@ export function useNewThreadHandler() {
     const hasWorktreePathOption = options?.worktreePath !== undefined;
     const hasEnvModeOption = options?.envMode !== undefined;
     const hasStartFromOriginOption = options?.startFromOrigin !== undefined;
+    const hasExplicitWorkspaceOption =
+      hasBranchOption || hasWorktreePathOption || hasEnvModeOption || hasStartFromOriginOption;
     const storedDraftThread = getDraftSessionByLogicalProjectKey(logicalProjectKey);
     const storedDraftThreadRef = storedDraftThread
       ? scopeThreadRef(storedDraftThread.environmentId, storedDraftThread.threadId)
@@ -196,11 +202,12 @@ export function useNewThreadHandler() {
         const isDraftAlreadyOpen =
           currentRouteTarget?.kind === "draft" &&
           currentRouteTarget.draftId === emptyStoredDraftThread.draftId;
-        const hasExplicitWorkspaceOption =
-          hasBranchOption || hasWorktreePathOption || hasEnvModeOption || hasStartFromOriginOption;
         let workspaceContext: NewThreadWorkspaceOptions | null = null;
         if (hasExplicitWorkspaceOption) {
-          workspaceContext = pickExplicitWorkspaceOptions(options);
+          workspaceContext = {
+            ...pickExplicitWorkspaceOptions(options),
+            workspaceDefaultsPending: false,
+          };
         } else if (!isDraftAlreadyOpen) {
           const defaultEnvMode = await resolveDefaultEnvMode();
           if (abandonedSinceRequest()) {
@@ -232,6 +239,7 @@ export function useNewThreadHandler() {
             branch: null,
             worktreePath: null,
             envMode: defaultEnvMode,
+            workspaceDefaultsPending: options?.deferWorkspaceDefaults === true,
             startFromOrigin: resolveNewDraftStartFromOrigin({
               envMode: defaultEnvMode,
               newWorktreesStartFromOrigin: projectSettings.settings.newWorktreesStartFromOrigin,
@@ -300,13 +308,10 @@ export function useNewThreadHandler() {
       latestActiveDraftThread.promotedTo == null &&
       !composerDraftHasUserContent(getComposerDraft(currentRouteTarget.draftId))
     ) {
-      if (
-        hasBranchOption ||
-        hasWorktreePathOption ||
-        hasEnvModeOption ||
-        hasStartFromOriginOption
-      ) {
-        setDraftThreadContext(currentRouteTarget.draftId, pickExplicitWorkspaceOptions(options));
+      if (hasExplicitWorkspaceOption) {
+        setDraftThreadContext(currentRouteTarget.draftId, pickExplicitWorkspaceOptions(options), {
+          explicit: true,
+        });
       }
       setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, currentRouteTarget.draftId, {
         threadId: latestActiveDraftThread.threadId,
@@ -339,6 +344,11 @@ export function useNewThreadHandler() {
         racedDraft.draftId !== storedDraftThread?.draftId &&
         readThreadShell(scopeThreadRef(racedDraft.environmentId, racedDraft.threadId)) === null
       ) {
+        if (hasExplicitWorkspaceOption) {
+          setDraftThreadContext(racedDraft.draftId, pickExplicitWorkspaceOptions(options), {
+            explicit: true,
+          });
+        }
         setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, racedDraft.draftId, {
           threadId: racedDraft.threadId,
           createdAt: racedDraft.createdAt,
@@ -359,6 +369,7 @@ export function useNewThreadHandler() {
         branch: options?.branch ?? null,
         worktreePath: options?.worktreePath ?? null,
         envMode: initialEnvMode,
+        workspaceDefaultsPending: options?.deferWorkspaceDefaults === true,
         startFromOrigin:
           options?.startFromOrigin ??
           resolveNewDraftStartFromOrigin({

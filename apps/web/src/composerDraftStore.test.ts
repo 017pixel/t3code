@@ -5,8 +5,11 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import * as Schema from "effect/Schema";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/reactivity";
 import {
   defaultInstanceIdForDriver,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   MessageId,
   ProjectId,
@@ -1287,6 +1290,194 @@ describe("composerDraftStore project draft thread mapping", () => {
       URL.revokeObjectURL = originalRevokeObjectUrl;
     }
   });
+
+  it("rehydrates pending workspace defaults with typed content and an explicit model", () => {
+    const store = useComposerDraftStore.getState();
+    const chosenModel = modelSelection(CODEX_DRIVER, "gpt-5.2");
+    store.setProjectDraftThreadId(projectRef, draftId, {
+      threadId,
+      workspaceDefaultsPending: true,
+    });
+    store.setPrompt(draftId, "Keep this draft while connecting");
+    store.setModelSelection(draftId, chosenModel, { explicit: true });
+    store.setDraftThreadContext(draftId, { runtimeMode: "full-access" });
+    store.setDraftThreadContext(draftId, {
+      projectRef,
+      branch: "main",
+      envMode: "local",
+      environmentSelection: "auto",
+    });
+
+    const merge = useComposerDraftStore.persist.getOptions().merge!;
+    const hydrated = merge(
+      JSON.parse(
+        JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+      ),
+      useComposerDraftStore.getInitialState(),
+    );
+    useComposerDraftStore.setState(hydrated);
+
+    expect(store.getDraftSession(draftId)).toMatchObject({
+      workspaceDefaultsPending: true,
+      branch: "main",
+    });
+    expect(store.getComposerDraft(draftId)).toMatchObject({
+      prompt: "Keep this draft while connecting",
+      modelSelectionExplicit: true,
+      modelSelectionByProvider: { [CODEX_INSTANCE]: chosenModel },
+    });
+  });
+
+  it.each([
+    "defaults",
+    "explicit model",
+    "explicit workspace",
+    "automatic manual branch sync",
+    "manual same-value branch choice",
+  ] as const)(
+    "reconciles a pending draft when its project arrives after config: %s",
+    async (choice) => {
+      const defaults = await import("./lib/t3ProjectFileDefaults");
+      const entities = await import("./state/entities");
+      const session = await import("./state/session");
+      const queryRuntime = await import("@t3tools/client-runtime/state/runtime");
+      let finishRead!: (result: Awaited<ReturnType<typeof queryRuntime.executeAtomQuery>>) => void;
+      const pendingRead = new Promise<Awaited<ReturnType<typeof queryRuntime.executeAtomQuery>>>(
+        (resolve) => {
+          finishRead = resolve;
+        },
+      );
+      const readFile = vi.spyOn(queryRuntime, "executeAtomQuery").mockReturnValue(pendingRead);
+      const readScope = vi.spyOn(session, "readEnvironmentScope").mockReturnValue(true);
+      const { appAtomRegistry } = await import("./rpc/atomRegistry");
+      const defaultModel = modelSelection(CODEX_DRIVER, "gpt-5.4");
+      const chosenModel = modelSelection(CODEX_DRIVER, "gpt-5.2");
+      const readProject = vi.spyOn(entities, "readProject").mockReturnValue(null);
+      const readThreads = vi.spyOn(entities, "readThreadShells").mockReturnValue([]);
+      const readConfig = vi.spyOn(appAtomRegistry, "get").mockReturnValue({
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          defaultThreadEnvMode: choice === "defaults" ? "worktree" : null,
+          newWorktreesStartFromOrigin: true,
+          defaultModelSelection: defaultModel,
+        },
+        newProjectsRoot: "/scratch",
+      });
+      try {
+        const store = useComposerDraftStore.getState();
+        store.setProjectDraftThreadId(projectRef, draftId, {
+          threadId,
+          workspaceDefaultsPending: true,
+          ...(choice === "automatic manual branch sync" ||
+          choice === "manual same-value branch choice"
+            ? { environmentSelection: "manual" }
+            : {}),
+          ...(choice === "manual same-value branch choice" ? { branch: "main" } : {}),
+        });
+        store.setPrompt(draftId, "Keep typing before the project arrives");
+        await defaults.completeDraftWorkspaceDefaults(draftId);
+        expect(store.getDraftSession(draftId)).toMatchObject({ workspaceDefaultsPending: true });
+
+        readProject.mockReturnValue({
+          id: projectId,
+          environmentId: TEST_ENVIRONMENT_ID,
+          title: "Project",
+          workspaceRoot: "/repo",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        });
+        const completion = defaults.completeDraftWorkspaceDefaults(draftId);
+        if (choice === "explicit model") {
+          store.setModelSelection(draftId, chosenModel, { explicit: true });
+        } else if (choice === "explicit workspace") {
+          store.setDraftThreadContext(
+            draftId,
+            {
+              envMode: "worktree",
+              branch: "chosen-branch",
+              startFromOrigin: true,
+            },
+            { explicit: true },
+          );
+        } else if (choice === "manual same-value branch choice") {
+          store.setDraftThreadContext(
+            draftId,
+            {
+              projectRef,
+              branch: "main",
+              worktreePath: null,
+              envMode: "local",
+              startFromOrigin: false,
+              environmentSelection: "manual",
+            },
+            { explicit: true },
+          );
+        } else if (choice === "automatic manual branch sync") {
+          store.setDraftThreadContext(draftId, {
+            projectRef,
+            branch: "main",
+            worktreePath: null,
+            envMode: "local",
+            startFromOrigin: false,
+            environmentSelection: store.getDraftSession(draftId)?.environmentSelection ?? "auto",
+          });
+        }
+        const merge = useComposerDraftStore.persist.getOptions().merge!;
+        useComposerDraftStore.setState(
+          merge(
+            JSON.parse(
+              JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+            ),
+            useComposerDraftStore.getInitialState(),
+          ),
+        );
+        if (choice !== "defaults") {
+          expect(readFile).toHaveBeenCalledOnce();
+          expect(store.getDraftSession(draftId)?.workspaceDefaultsPending).toBe(true);
+        }
+        finishRead(
+          choice === "explicit workspace"
+            ? AsyncResult.failure(Cause.fail(new Error("File read failed")))
+            : AsyncResult.success({
+                relativePath: "t3.json",
+                contents: '{"defaultThreadEnvMode":"worktree"}',
+                byteLength: 35,
+                truncated: false,
+              }),
+        );
+        await completion;
+
+        expect(store.getDraftSession(draftId)).toMatchObject(
+          choice === "explicit workspace"
+            ? { envMode: "worktree", branch: "chosen-branch", startFromOrigin: true }
+            : choice === "manual same-value branch choice"
+              ? { envMode: "local", branch: "main", worktreePath: null, startFromOrigin: false }
+              : {
+                  envMode: "worktree",
+                  startFromOrigin: true,
+                  ...(choice === "automatic manual branch sync" ? { branch: "main" } : {}),
+                },
+        );
+        expect(store.getDraftSession(draftId)).not.toMatchObject({
+          workspaceDefaultsPending: true,
+        });
+        expect(store.getComposerDraft(draftId)?.prompt).toBe(
+          "Keep typing before the project arrives",
+        );
+        expect(store.getComposerDraft(draftId)?.modelSelectionByProvider[CODEX_INSTANCE]).toEqual(
+          choice === "explicit model" ? chosenModel : defaultModel,
+        );
+      } finally {
+        readProject.mockRestore();
+        readThreads.mockRestore();
+        readConfig.mockRestore();
+        readScope.mockRestore();
+        readFile.mockRestore();
+      }
+    },
+  );
 
   it("stores and reads project draft thread ids via actions", () => {
     const store = useComposerDraftStore.getState();

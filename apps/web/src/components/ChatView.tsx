@@ -354,7 +354,7 @@ import { useEnvironmentDisconnectDelay } from "../hooks/useEnvironmentDisconnect
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useEnvironmentQuery } from "../state/query";
-import { useEnvironmentScope } from "~/state/session";
+import { environmentSession, useEnvironmentScope } from "~/state/session";
 import {
   environmentServerConfigsAtom,
   primaryServerAvailableEditorsAtom,
@@ -365,6 +365,7 @@ import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";
 import { sourceControlEnvironment } from "../state/sourceControl";
+import { completeDraftWorkspaceDefaults } from "../lib/t3ProjectFileDefaults";
 import { useProjectClone } from "../state/projectClones";
 import { projectCloneDisplayName, projectCloneProgressSummary } from "@t3tools/contracts";
 import {
@@ -1118,6 +1119,7 @@ export default function ChatView(props: ChatViewProps) {
         ? store.getDraftSession(draftId)
         : null,
   );
+  const workspaceDefaultsPending = draftThread?.workspaceDefaultsPending === true;
   const serverThread = useQuietThreadShell(routeThreadRef);
   const routeThreadDetailRef = resolveThreadDetailRef(routeThreadRef, {
     shellExists: serverThread !== null,
@@ -1419,6 +1421,27 @@ export default function ChatView(props: ChatViewProps) {
     ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
     : null;
   const fallbackDraftProject = useProject(fallbackDraftProjectRef);
+  const liveDraftConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const draftSessionConfig = useAtomValue(environmentSession.initialConfigValueAtom(environmentId));
+  useEffect(() => {
+    if (
+      draftId === null ||
+      !workspaceDefaultsPending ||
+      !fallbackDraftProject ||
+      !canOperateThread ||
+      draftSessionConfig === null ||
+      liveDraftConfig === null
+    )
+      return;
+    void completeDraftWorkspaceDefaults(draftId);
+  }, [
+    draftId,
+    workspaceDefaultsPending,
+    fallbackDraftProject,
+    canOperateThread,
+    draftSessionConfig,
+    liveDraftConfig,
+  ]);
   const localDraftError = serverThread
     ? null
     : ((draftId ? localDraftErrorsByDraftId[draftId]?.message : null) ?? null);
@@ -2081,7 +2104,7 @@ export default function ChatView(props: ChatViewProps) {
     );
     const storedDraftSession = getDraftSessionByLogicalProjectKey(logicalProjectKey);
     if (storedDraftSession) {
-      setDraftThreadContext(storedDraftSession.draftId, input);
+      setDraftThreadContext(storedDraftSession.draftId, input, { explicit: true });
       setLogicalProjectDraftThreadId(
         logicalProjectKey,
         activeProjectRef,
@@ -2102,7 +2125,7 @@ export default function ChatView(props: ChatViewProps) {
 
     const activeDraftSession = routeKind === "draft" && draftId ? getDraftSession(draftId) : null;
     if (!isServerThread && activeDraftSession?.logicalProjectKey === logicalProjectKey && draftId) {
-      setDraftThreadContext(draftId, input);
+      setDraftThreadContext(draftId, input, { explicit: true });
       setLogicalProjectDraftThreadId(logicalProjectKey, activeProjectRef, draftId, {
         threadId: activeDraftSession.threadId,
         createdAt: activeDraftSession.createdAt,
@@ -2927,9 +2950,7 @@ export default function ChatView(props: ChatViewProps) {
     resourceKey: `git-status:${activeThreadKey ?? ""}:${gitStatusCwd ?? ""}`,
   });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const scriptKeybindings =
-    useAtomValue(serverEnvironment.configValueAtom(environmentId))?.keybindings ??
-    DEFAULT_RESOLVED_KEYBINDINGS;
+  const scriptKeybindings = liveDraftConfig?.keybindings ?? DEFAULT_RESOLVED_KEYBINDINGS;
   const availableEditors = useAtomValue(primaryServerAvailableEditorsAtom);
   const remoteOpenState = useRemoteOpenState(activeThread?.environmentId ?? environmentId);
   const showOpenInPicker = shouldShowOpenInPicker({
@@ -5962,6 +5983,12 @@ export default function ChatView(props: ChatViewProps) {
   ) => {
     e?.preventDefault();
     if (
+      draftId !== null &&
+      useComposerDraftStore.getState().getDraftSession(draftId)?.workspaceDefaultsPending
+    )
+      return;
+
+    if (
       usageLimitsOffered &&
       usageLimitsKey !== null &&
       !directAnnotation &&
@@ -7522,14 +7549,18 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (isLocalDraftThread) {
-      setDraftThreadContext(composerDraftTarget, {
-        envMode: mode,
-        startFromOrigin: resolveNewDraftStartFromOrigin({
+      setDraftThreadContext(
+        composerDraftTarget,
+        {
           envMode: mode,
-          newWorktreesStartFromOrigin: activeProjectSettings.settings.newWorktreesStartFromOrigin,
-        }),
-        ...(mode === "worktree" && draftThread?.worktreePath ? { worktreePath: null } : {}),
-      });
+          startFromOrigin: resolveNewDraftStartFromOrigin({
+            envMode: mode,
+            newWorktreesStartFromOrigin: activeProjectSettings.settings.newWorktreesStartFromOrigin,
+          }),
+          ...(mode === "worktree" && draftThread?.worktreePath ? { worktreePath: null } : {}),
+        },
+        { explicit: true },
+      );
     }
     scheduleComposerFocus();
   };
@@ -7625,9 +7656,13 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (isLocalDraftThread) {
-      setDraftThreadContext(composerDraftTarget, {
-        startFromOrigin: nextStartFromOrigin,
-      });
+      setDraftThreadContext(
+        composerDraftTarget,
+        {
+          startFromOrigin: nextStartFromOrigin,
+        },
+        { explicit: true },
+      );
     }
   };
 
@@ -8202,17 +8237,19 @@ export default function ChatView(props: ChatViewProps) {
                               sendDisabledReason={
                                 !canOperateThread
                                   ? "This connection cannot change threads."
-                                  : isEnvironmentChanging
-                                    ? "Preparing machine"
-                                    : isRevertingCheckpoint
-                                      ? "Rewinding conversation"
-                                      : feedbackUploading
-                                        ? "Sending feedback"
-                                        : threadDetailLoading
-                                          ? "Messages loading"
-                                          : worktreeSetupBlocksSend
-                                            ? "Preparing worktree"
-                                            : projectCloneSendBlockReason
+                                  : workspaceDefaultsPending
+                                    ? "Preparing workspace"
+                                    : isEnvironmentChanging
+                                      ? "Preparing machine"
+                                      : isRevertingCheckpoint
+                                        ? "Rewinding conversation"
+                                        : feedbackUploading
+                                          ? "Sending feedback"
+                                          : threadDetailLoading
+                                            ? "Messages loading"
+                                            : worktreeSetupBlocksSend
+                                              ? "Preparing worktree"
+                                              : projectCloneSendBlockReason
                               }
                               isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                               queuedRunsControl={queuedRunsControl}

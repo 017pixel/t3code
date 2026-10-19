@@ -6,7 +6,7 @@ const testState = vi.hoisted(() => {
   let projectFileRead = Promise.resolve<null>(null);
   let projectRemoved = false;
   let targetSettings = {
-    defaultThreadEnvMode: "local" as "local" | "worktree",
+    defaultThreadEnvMode: "local" as "local" | "worktree" | null,
     newWorktreesStartFromOrigin: false,
     defaultModelSelection: null,
     defaultRuntimeMode: "full-access" as RuntimeMode,
@@ -156,10 +156,9 @@ vi.mock("../composerDraftStore", () => {
 vi.mock("../lib/chatThreadActions", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/chatThreadActions")>()),
   hasExplicitComposerModelSelection: () => false,
-  resolveNewThreadModelSelectionOverride: () => null,
 }));
 vi.mock("../lib/t3ProjectFileDefaults", () => ({
-  readT3ProjectFile: () => testState.projectFileRead,
+  readT3ProjectFile: vi.fn(() => testState.projectFileRead),
 }));
 vi.mock("../lib/utils", () => ({
   newDraftId: () => "draft-delayed",
@@ -181,7 +180,7 @@ vi.mock("../state/entities", () => {
   return {
     readProject: () => (testState.projectRemoved ? null : project),
     readProjects: () => (testState.projectRemoved ? [] : [project]),
-    readThreadShell: () => null,
+    readThreadShell: vi.fn(() => null),
     readThreadShells: () => [],
     useProjects: () => [],
     useThread: () => null,
@@ -191,7 +190,7 @@ vi.mock("../state/server", () => ({
   environmentServerConfigsAtom: {},
   primaryServerSettingsAtom: "primary-settings",
 }));
-vi.mock("../threadRoutes", () => ({ resolveThreadRouteTarget: () => null }));
+vi.mock("../threadRoutes", () => ({ resolveThreadRouteTarget: vi.fn(() => null) }));
 vi.mock("../uiStateStore", () => ({
   legacyProjectCwdPreferenceKey: () => "remote-project",
   useUiStateStore: () => [],
@@ -199,6 +198,9 @@ vi.mock("../uiStateStore", () => ({
 vi.mock("./useSettings", () => ({ useClientSettings: () => ({}) }));
 
 import { useNewThreadHandler } from "./useHandleNewThread";
+import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
+import { readThreadShell } from "../state/entities";
+import { resolveThreadRouteTarget } from "../threadRoutes";
 
 describe.each([
   ["new", null],
@@ -209,9 +211,43 @@ describe.each([
       environmentId: "environment-ssh",
       promotedTo: null,
       threadId: "thread-existing",
+      workspaceDefaultsPending: true,
     },
   ],
 ])("useNewThreadHandler with a %s draft", (_, draft) => {
+  it("opens a cached landing draft without waiting for t3.json", async () => {
+    testState.reset(draft);
+    testState.targetSettings.defaultThreadEnvMode = null;
+    vi.mocked(readT3ProjectFile).mockClear();
+    const projectRef = {
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never;
+    const pendingOpen = useNewThreadHandler()(projectRef, {
+      replace: true,
+      deferWorkspaceDefaults: true,
+    });
+
+    try {
+      expect(readT3ProjectFile).not.toHaveBeenCalled();
+      const opened = await pendingOpen;
+      expect(opened).toEqual({
+        draftId: draft?.draftId ?? "draft-delayed",
+        threadId: draft?.threadId ?? "thread-delayed",
+      });
+      expect(testState.router.state.location.href).toBe(`/draft/${opened!.draftId}`);
+      expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+        "remote-project",
+        projectRef,
+        opened!.draftId,
+        expect.objectContaining({ workspaceDefaultsPending: true }),
+      );
+    } finally {
+      testState.completeProjectFileRead(null);
+      await pendingOpen;
+    }
+  });
+
   it.each(["approval-required", "auto-accept-edits", "auto", "full-access"] as const)(
     "uses the target environment's %s permissions for new threads",
     async (runtimeMode) => {
@@ -270,6 +306,14 @@ describe.each([
     "uses the target environment's start-from-origin default of %s",
     async (startFromOrigin) => {
       testState.reset(draft, { envMode: "worktree", startFromOrigin });
+      const carriedModel = { instanceId: "codex", model: "gpt-5.4", options: [] };
+      vi.mocked(resolveThreadRouteTarget).mockReturnValueOnce({
+        kind: "server",
+        threadRef: { environmentId: "environment-ssh", threadId: "thread-source" },
+      } as never);
+      vi.mocked(readThreadShell).mockReturnValueOnce({ modelSelection: carriedModel } as never);
+      vi.mocked(readT3ProjectFile).mockClear();
+      testState.draftStore.setModelSelection.mockClear();
       const openThread = useNewThreadHandler();
       const projectRef = {
         environmentId: "environment-ssh",
@@ -288,12 +332,26 @@ describe.each([
         "remote-project",
         projectRef,
         opened!.draftId,
-        expect.objectContaining({ envMode: "worktree", startFromOrigin }),
+        expect.objectContaining({
+          envMode: "worktree",
+          startFromOrigin,
+          workspaceDefaultsPending: false,
+        }),
       );
+      expect(testState.draftStore.setModelSelection).toHaveBeenCalledWith(
+        opened!.draftId,
+        carriedModel,
+        { replaceOptions: true },
+      );
+      expect(readT3ProjectFile).not.toHaveBeenCalled();
       if (draft) {
         expect(testState.draftStore.setDraftThreadContext).toHaveBeenCalledWith(
           draft.draftId,
-          expect.objectContaining({ envMode: "worktree", startFromOrigin }),
+          expect.objectContaining({
+            envMode: "worktree",
+            startFromOrigin,
+            workspaceDefaultsPending: false,
+          }),
         );
       }
     },
@@ -309,14 +367,41 @@ describe.each([
         projectId: "project-remote",
       } as never;
 
-      const opened = await openThread(projectRef, { envMode: "worktree", startFromOrigin });
+      const carriedModel = { instanceId: "codex", model: "gpt-5.4", options: [] };
+      vi.mocked(resolveThreadRouteTarget).mockReturnValueOnce({
+        kind: "server",
+        threadRef: { environmentId: "environment-ssh", threadId: "thread-source" },
+      } as never);
+      vi.mocked(readThreadShell).mockReturnValueOnce({ modelSelection: carriedModel } as never);
+      vi.mocked(readT3ProjectFile).mockClear();
+      testState.draftStore.setModelSelection.mockClear();
+      const envMode = startFromOrigin ? "worktree" : "local";
+      const workspace = {
+        branch: "feature",
+        worktreePath: null,
+        envMode,
+        startFromOrigin,
+      } as const;
+      const opened = await openThread(projectRef, workspace);
 
       expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
         "remote-project",
         projectRef,
         opened!.draftId,
-        expect.objectContaining({ envMode: "worktree", startFromOrigin }),
+        expect.objectContaining({ ...workspace, workspaceDefaultsPending: false }),
       );
+      if (draft) {
+        expect(testState.draftStore.setDraftThreadContext).toHaveBeenCalledWith(
+          draft.draftId,
+          expect.objectContaining({ ...workspace, workspaceDefaultsPending: false }),
+        );
+      }
+      expect(testState.draftStore.setModelSelection).toHaveBeenCalledWith(
+        opened!.draftId,
+        carriedModel,
+        { replaceOptions: true },
+      );
+      expect(readT3ProjectFile).not.toHaveBeenCalled();
     },
   );
 });
