@@ -39,8 +39,10 @@ export const PinnedGitHubCredential = Context.Reference<{
  * batch never mixes two credentials' lookups.
  */
 export const GitHubCredentialRepository = Context.Reference<{
+  readonly host: string;
   readonly repository: string;
   readonly credential: string | undefined;
+  readonly token: Redacted.Redacted<string> | undefined;
 } | null>("@t3tools/source-control-github/server/GitHubRequestPolicy/GitHubCredentialRepository", {
   defaultValue: () => null,
 });
@@ -286,9 +288,17 @@ export const make = Effect.gen(function* () {
       }
       return { token: pinned.token, fingerprint: pinned.credentialFingerprint };
     }
+    const selected = yield* GitHubCredentialRepository;
+    if (
+      selected?.host === normalized &&
+      selected.token !== undefined &&
+      selected.credential !== undefined
+    ) {
+      return { token: selected.token, fingerprint: selected.credential };
+    }
     const held = yield* credentials.get(
       normalized,
-      repository ?? (yield* GitHubCredentialRepository)?.repository ?? null,
+      repository ?? (selected?.host === normalized ? selected.repository : null),
     );
     return { token: held.token, fingerprint: held.fingerprint };
   });
@@ -305,14 +315,17 @@ export const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const repository = input.repository;
-      if (repository === null || (yield* GitHubCredentialRepository) !== null) {
+      const host = normalizeHost(input.host);
+      if (repository === null || (yield* GitHubCredentialRepository)?.host === host) {
         return yield* effect;
       }
-      const credential = yield* credentialScope(input.host, repository);
+      const held = yield* credential(host, repository).pipe(Effect.orElseSucceed(() => null));
       return yield* effect.pipe(
         Effect.provideService(GitHubCredentialRepository, {
+          host,
           repository,
-          credential: credential === "" ? undefined : credential,
+          credential: held?.fingerprint,
+          token: held?.token,
         }),
       );
     });
