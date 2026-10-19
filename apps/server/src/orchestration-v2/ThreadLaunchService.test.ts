@@ -124,6 +124,7 @@ const claudeAdapter = {
 
 interface HarnessOptions {
   readonly afterThreadCreate?: Effect.Effect<void>;
+  readonly beforeThreadClaim?: Effect.Effect<void>;
   readonly closeTerminal?: TerminalManager.TerminalManager["Service"]["close"];
   readonly adapters?: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>;
   readonly managedFolders?: Layer.Layer<ManagedProjectFolders.ManagedProjectFolders>;
@@ -230,7 +231,7 @@ function makeHarness(options: HarnessOptions = {}) {
       }),
   );
   const layerLaunchThreads =
-    options.afterThreadCreate === undefined
+    options.afterThreadCreate === undefined && options.beforeThreadClaim === undefined
       ? layerThreadManagement
       : Layer.effect(
           ThreadManagement.ThreadManagementService,
@@ -239,13 +240,17 @@ function makeHarness(options: HarnessOptions = {}) {
             return {
               ...threads,
               dispatch: (command: Parameters<typeof threads.dispatch>[0]) =>
-                threads
-                  .dispatch(command)
-                  .pipe(
-                    Effect.tap(() =>
-                      command.type === "thread.create" ? options.afterThreadCreate! : Effect.void,
-                    ),
+                (command.type === "thread.metadata.update" && command.expectedEmpty
+                  ? (options.beforeThreadClaim ?? Effect.void)
+                  : Effect.void
+                ).pipe(
+                  Effect.andThen(threads.dispatch(command)),
+                  Effect.tap(() =>
+                    command.type === "thread.create"
+                      ? (options.afterThreadCreate ?? Effect.void)
+                      : Effect.void,
                   ),
+                ),
             };
           }),
         ).pipe(Layer.provide(layerThreadManagement));
@@ -1648,6 +1653,106 @@ it.effect.each(["root", "worktree"] as const)(
       );
     }).pipe(Effect.provide(harness.layer));
   },
+);
+
+it.effect(
+  "rejects a fresh reuse claim when another client binds the empty draft to a checkout",
+  () =>
+    Effect.gen(function* () {
+      const claimEntered = yield* Deferred.make<void>();
+      const allowClaim = yield* Deferred.make<void>();
+      const harness = makeHarness({
+        beforeThreadClaim: Deferred.succeed(claimEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(allowClaim)),
+        ),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const input = {
+          ...launchInput({
+            command: "command:launch:concurrent-binding",
+            thread: "thread:launch:concurrent-binding",
+            message: "Use a new checkout",
+            workspace: { type: "worktree", baseRef: "main", branch: "requested-feature" },
+          }),
+          reuseExistingThread: true,
+        };
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${input.commandId}:create`),
+          threadId: input.threadId,
+          projectId,
+          title: "Unprepared draft",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "draft-branch",
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+
+        const launch = yield* launches.launch(input).pipe(Effect.result, Effect.forkScoped);
+        yield* Deferred.await(claimEntered);
+        // The second client commits after validation, before the launch claim reaches the orchestrator.
+        yield* threads.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make(`${input.commandId}:other-client`),
+          threadId: input.threadId,
+          branch: "other-feature",
+          worktreePath: "/repo-worktrees/other-feature",
+        });
+        yield* Deferred.succeed(allowClaim, undefined);
+        const result = yield* Fiber.join(launch);
+        if (Result.isSuccess(result)) {
+          yield* threads.streamStoredEventsFrom({ threadId: input.threadId }).pipe(
+            Stream.filter(
+              (stored) =>
+                stored.commandId === CommandId.make(`${input.commandId}:release`) &&
+                stored.event.type === "run.updated",
+            ),
+            Stream.runHead,
+          );
+        }
+        const current = yield* threads.getThreadProjection(input.threadId);
+        const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+        const claimReceipt = Option.getOrThrow(yield* receipts.getByCommandId(input.commandId));
+        assert.deepEqual(
+          {
+            accepted: Result.isSuccess(result),
+            claimStatus: claimReceipt.status,
+            messages: current.messages.map((message) => message.text),
+            runs: current.runs.map((run) => run.status),
+            setupPaths: harness.runSetup.mock.calls.map(([setup]) => setup.worktreePath),
+            createdWorktrees: harness.createWorktree.mock.calls.length,
+            checkpointCwds: current.checkpointScopes.map((scope) => scope.cwd),
+            branch: current.thread.branch,
+            worktreePath: current.thread.worktreePath,
+          },
+          {
+            accepted: false,
+            claimStatus: "rejected",
+            messages: [],
+            runs: [],
+            setupPaths: [],
+            createdWorktrees: 0,
+            checkpointCwds: [],
+            branch: "other-feature",
+            worktreePath: "/repo-worktrees/other-feature",
+          },
+        );
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) {
+          assert.equal(result.failure.operation, "update-thread");
+        }
+        assert.isEmpty(
+          yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:initial-message`)),
+        );
+        assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
+      }).pipe(Effect.provide(harness.layer));
+    }),
 );
 
 it.effect("preserves the draft branch and fetch diagnosis when worktree preparation fails", () => {
