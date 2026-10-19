@@ -3444,7 +3444,7 @@ function ChatMarkdown({
       onCopy={handleCopy}
     >
       <ChatMarkdownRendererContext value={componentState}>
-        <Suspense fallback={renderMarkdown(CHAT_MARKDOWN_RENDER_REHYPE_PLUGINS)}>
+        <Suspense fallback={renderMarkdown(CHAT_MARKDOWN_LITERAL_HTML_REHYPE_PLUGINS)}>
           <ChatMarkdownContent text={text} parseRawHtml={parseRawHtml} render={renderMarkdown} />
         </Suspense>
       </ChatMarkdownRendererContext>

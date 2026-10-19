@@ -90,6 +90,43 @@ function fileOptions(container: HTMLElement) {
 }
 
 describe("ChatMarkdown bare anchor placeholders", () => {
+  // Exercise the cold import before another render caches the raw HTML pipeline.
+  it("preserves paired HTML as text while loading, then renders sanitized content", async () => {
+    const parserReady = Promise.withResolvers<void>();
+    vi.doMock(import("@t3tools/shared/markdownRawPipeline"), async (original) => {
+      await parserReady.promise;
+      return original();
+    });
+    try {
+      const html =
+        '<details open onclick="alert(1)"><summary>More</summary>Details<script>alert(1)</script></details>';
+      const container = await renderText(
+        `Bare <a>label</a>, <a id="section"></a>, \`<A>\`, and [docs](https://example.com).\n\n${html}`,
+      );
+      expect(container.textContent).toContain(html);
+      expect(
+        container.querySelector("details, [data-markdown-details], script, [onclick]"),
+      ).toBeNull();
+
+      await act(async () => {
+        parserReady.resolve();
+        await vi.dynamicImportSettled();
+      });
+      await vi.waitFor(() => expect(linkTexts(container)).toEqual(["label", "", "docs"]));
+      expect(container.querySelector("code")?.textContent).toBe("<A>");
+      expect(container.querySelector("[data-markdown-details]")?.textContent).toContain("More");
+      expect(container.querySelector("[data-markdown-details]")?.textContent).toContain("Details");
+      expect(container.querySelector("script, [onclick]")).toBeNull();
+      expect(container.textContent).not.toContain("alert(1)");
+    } finally {
+      await act(async () => {
+        parserReady.resolve();
+        await vi.dynamicImportSettled();
+      });
+      vi.doUnmock(import("@t3tools/shared/markdownRawPipeline"));
+    }
+  });
+
   it.each(["<A>", "<a>", "<a >", "<a/>", "<A/>", "<a />"])(
     "preserves unmatched %s without linking later blocks",
     async (token) => {
@@ -126,15 +163,6 @@ describe("ChatMarkdown bare anchor placeholders", () => {
       expect(container.querySelectorAll("a")).toHaveLength(0);
     },
   );
-
-  it("preserves paired HTML anchors, details, markdown links, and inline code", async () => {
-    const container = await renderText(
-      'Bare <a>label</a>, <a id="section"></a>, `<A>`, and [docs](https://example.com).\n\n<details><summary>More</summary>Details</details>',
-    );
-    expect(linkTexts(container)).toEqual(["label", "", "docs"]);
-    expect(container.querySelector("code")?.textContent).toBe("<A>");
-    expect(container.querySelector("[data-markdown-details]")?.textContent).toContain("More");
-  });
 });
 
 describe("ChatMarkdown context references", () => {
