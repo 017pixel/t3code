@@ -85,6 +85,14 @@ If you do not want to answer, dismiss the question from its panel. Dismissing
 closes it without sending anything to Codex. This requires a Codex version that
 supports async questions.
 
+## Source citations
+
+Codex research responses can include numbered source citations. On web and desktop, select a
+citation to inspect its source IDs and any cited line ranges. Source IDs identify references in
+Codex's context; when no destination link is supplied, the details say the source URL is unavailable.
+
+Mobile and copied responses show readable source references with the same numbering.
+
 ## Approve app access
 
 Codex tools can request access to another app. Respond to the named app's request

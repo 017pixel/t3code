@@ -16,8 +16,7 @@ import { isAbsolutePath, resolveWorkspaceFilePath } from "@t3tools/shared/path";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 import { AuthFilesystemReadScope, AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import {
-  CHAT_MARKDOWN_REMARK_PLUGINS,
-  CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
+  chatMarkdownRemarkPlugins,
   CHAT_MARKDOWN_REHYPE_PLUGINS,
 } from "@t3tools/shared/markdownPipeline";
 import { useAtomValue } from "@effect/atom-react";
@@ -109,6 +108,8 @@ import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
+import { codexCitationFromHastProperties } from "@t3tools/shared/codexCitations";
+import { CodexCitationChip } from "./chat/CodexCitationChip";
 import { MarkdownThreadLink } from "./chat/MarkdownThreadLink";
 import { mathKind } from "@t3tools/shared/markdownMath";
 import remarkMath from "remark-math";
@@ -2849,6 +2850,14 @@ const CHAT_MARKDOWN_COMPONENTS = {
   h4: markdownHeadingRenderer(4),
   h5: markdownHeadingRenderer(5),
   h6: markdownHeadingRenderer(6),
+  span: function MarkdownSpan({ node, children, ...props }) {
+    const citation = codexCitationFromHastProperties(node?.properties);
+    return citation ? (
+      <CodexCitationChip citation={citation} />
+    ) : (
+      <span {...props}>{children}</span>
+    );
+  },
   div: function MarkdownDiv({ node, children, ...props }) {
     const { onUseArtifactTemplate } = use(ChatMarkdownRendererContext);
     const artifactTemplate = artifactTemplateFromHastProperties(node?.properties);
@@ -3475,7 +3484,7 @@ function ChatMarkdown({
     markdownRef.current = node;
   };
   const remarkPlugins = [
-    ...(lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS),
+    ...chatMarkdownRemarkPlugins({ isStreaming: props.isStreaming === true, lineBreaks }),
     ...extraRemarkPlugins,
     ...(incrementalParsing ? [createIncrementalMarkdownPlugin()] : []),
   ];

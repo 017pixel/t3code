@@ -849,6 +849,164 @@ describe("ChatMarkdown artifact-template cards", () => {
   });
 });
 
+describe("ChatMarkdown source citations", () => {
+  const marker = (...parts: string[]) => `\uE200cite\uE202${parts.join("\uE202")}\uE201`;
+
+  it("opens numbered source details by keyboard and keeps repeated opaque IDs and ranges honest", async () => {
+    const container = await renderText(
+      `First ${marker("L42")}.\n\nTogether ${marker("alpha__id__", "L42", "alpha__id__", "L8-L13")}. Again ${marker("alpha__id__")}.`,
+    );
+    const chips = [...container.querySelectorAll("button")];
+    expect(chips.map((chip) => chip.textContent)).toEqual(["1", "2, 1", "2"]);
+    expect(container.textContent).not.toContain("\uE200");
+    expect(container.querySelectorAll("a")).toHaveLength(0);
+
+    await userEvent.tab();
+    const single = page.getByRole("button", { name: "View source 1", exact: true });
+    await expect.element(single).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    const singleDetails = page.getByRole("dialog", { name: "Source 1", exact: true });
+    await expect.element(singleDetails).toBeVisible();
+    expect(singleDetails.element().textContent).toContain("L42");
+    expect(singleDetails.element().textContent).toMatch(/source URL unavailable/i);
+    expect(singleDetails.element().textContent).not.toContain("Lines");
+    expect(singleDetails.element().querySelectorAll("a")).toHaveLength(0);
+    await userEvent.keyboard("{Escape}");
+    await expect.element(singleDetails).not.toBeInTheDocument();
+    await expect.element(single).toHaveFocus();
+
+    const grouped = page.getByRole("button", { name: "View sources 2, 1", exact: true });
+    await userEvent.click(grouped);
+    const details = page.getByRole("dialog", { name: "Sources 2, 1", exact: true });
+    await expect.element(details).toBeVisible();
+    expect(details.element().textContent).toContain("alpha__id__");
+    expect(details.element().textContent).toContain("L42");
+    expect(details.element().textContent).toContain("L8-L13");
+    expect(details.element().textContent).toMatch(/source URL unavailable/i);
+    expect(details.element().querySelectorAll("a")).toHaveLength(0);
+    await userEvent.keyboard("{Escape}");
+    await expect.element(details).not.toBeInTheDocument();
+    await expect.element(grouped).toHaveFocus();
+    expect(chips.map((chip) => chip.textContent)).toEqual(["1", "2, 1", "2"]);
+  });
+
+  it("copies full references from number-only selections while clipping prose and unrelated card titles", async () => {
+    const container = await renderText(
+      `Outside before ${marker("turn0view0")} middle ${marker("turn0view0", "opaque-id", "L8-L13")} after outside.\n\n${ARTIFACT_TEMPLATE_DIRECTIVE.replace("Hello World", "Quarterly Report")}`,
+    );
+    const textNode = (within: Node, text: string) => {
+      const walker = document.createTreeWalker(within, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.textContent === text) return node as Text;
+      }
+      throw new Error(`Rendered text not found: ${text}`);
+    };
+    const copy = (start: Text, from: number, end: Text, to: number) => {
+      const range = document.createRange();
+      range.setStart(start, from);
+      range.setEnd(end, to);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const selected = selection.toString();
+      const clipboardData = new DataTransfer();
+      start.parentElement!.dispatchEvent(
+        new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData }),
+      );
+      expect(selection.toString()).toBe(selected);
+      const html = new DOMParser().parseFromString(clipboardData.getData("text/html"), "text/html");
+      expect(html.body.querySelectorAll("button")).toHaveLength(0);
+      return { text: clipboardData.getData("text/plain"), html: html.body.textContent };
+    };
+
+    const title = textNode(container, "Quarterly Report");
+    expect(copy(title, 10, title, title.length)).toEqual({ text: "Report", html: "Report" });
+
+    const single = buttonsLabelled(container, "View source 1");
+    const grouped = buttonsLabelled(container, "View sources 1, 2");
+    expect(single).toHaveLength(1);
+    expect(grouped).toHaveLength(1);
+    const singleLabel = textNode(single[0]!, "1");
+    const groupedLabel = textNode(grouped[0]!, "1, 2");
+    expect(copy(singleLabel, 0, singleLabel, singleLabel.length)).toEqual({
+      text: "\\[Source 1: turn0view0\\]",
+      html: "[Source 1: turn0view0]",
+    });
+    expect(copy(groupedLabel, 0, groupedLabel, groupedLabel.length)).toEqual({
+      text: "\\[Source 1: turn0view0; Source 2: opaque-id; L8-L13\\]",
+      html: "[Source 1: turn0view0; Source 2: opaque-id; L8-L13]",
+    });
+
+    const before = textNode(container, "Outside before ");
+    const after = textNode(container, " after outside.");
+    expect(copy(before, 8, before, 14)).toEqual({ text: "before", html: "before" });
+    expect(copy(before, 8, after, 6)).toEqual({
+      text: "before \\[Source 1: turn0view0\\] middle \\[Source 1: turn0view0; Source 2: opaque-id; L8-L13\\] after",
+      html: "before [Source 1: turn0view0] middle [Source 1: turn0view0; Source 2: opaque-id; L8-L13] after",
+    });
+    expect(single[0]!.textContent).toBe("1");
+    expect(grouped[0]!.textContent).toBe("1, 2");
+    window.getSelection()!.removeAllRanges();
+  });
+
+  it("hides only unfinished streaming tails, restores them when stopped, and preserves literal examples", async () => {
+    const complete = marker("turn0view0");
+    const partial = "\uE200cite\uE202next";
+    const example = marker("excluded");
+    const nonTail = "\uE200cite\uE202earlier";
+    const unknown = "\uE200chart";
+    const malformed = "\uE200cite\uE202two words\uE201";
+    for (const literalTail of [
+      unknown,
+      `\`\`\`text\n${partial}`,
+      `HTML <code>${partial}`,
+      `https://example.com/${partial}`,
+    ]) {
+      const container = await renderText(literalTail, { isStreaming: true });
+      expect(container.textContent).toContain(literalTail === unknown ? unknown : partial);
+      expect(buttonsLabelled(container, "View source 1")).toHaveLength(0);
+    }
+
+    const examples = [
+      `Inline \`${example}\` and [link ${example}](https://example.com).`,
+      `\`\`\`text\n${example}\n\`\`\``,
+      `HTML <code>${example}</code>.`,
+      `${nonTail}\n\nStill here. ${unknown} ${malformed}`,
+    ].join("\n\n");
+
+    for (const prefix of [
+      `Answer ${complete}. Next `,
+      `${examples}\n\n-       Answer ${complete}. Next `,
+    ]) {
+      const text = `${prefix}${partial}`;
+      const { container, rerender } = await render(
+        <ChatMarkdown cwd={undefined} text={text} isStreaming />,
+      );
+      expect.soft(container.textContent).not.toContain(partial);
+      expect.soft(buttonsLabelled(container, "View source 1")).toHaveLength(1);
+      if (prefix.includes(examples)) {
+        expect(container.querySelector("li")?.textContent).toContain("Answer ");
+        expect(container.querySelectorAll("pre")).toHaveLength(1);
+        expect(container.textContent?.split(example)).toHaveLength(5);
+        expect(container.textContent).toContain(nonTail);
+        expect(container.textContent).toContain(unknown);
+        expect(container.textContent).toContain(malformed);
+      }
+
+      await rerender(<ChatMarkdown cwd={undefined} text={text} isStreaming={false} />);
+      expect(container.textContent).toContain(partial);
+      expect.soft(buttonsLabelled(container, "View source 1")).toHaveLength(1);
+
+      await rerender(
+        <ChatMarkdown cwd={undefined} text={`${text}\uE201. Again ${complete}.`} isStreaming />,
+      );
+      expect.soft(buttonsLabelled(container, "View source 1")).toHaveLength(2);
+      expect.soft(buttonsLabelled(container, "View source 2")).toHaveLength(1);
+      expect(container.textContent).not.toContain(partial);
+    }
+  });
+});
+
 describe("ChatMarkdown headings", () => {
   it("exposes headings below the host heading without changing their tags", async () => {
     const container = await renderText("# Top\n\n## Section\n\n###### Fine print", {
