@@ -1,3 +1,11 @@
+import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
+import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { HttpServer } from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -3260,5 +3268,95 @@ it.effect.each(
           assert.equal(prepared.checkpointScopes[0]?.cwd, "/repo-worktrees/feature");
         }
       }).pipe(Effect.provide(Layer.merge(harness.layer, layerService)));
+    }),
+);
+
+const decodeMcpLaunchResult = Schema.decodeUnknownEffect(Schema.Struct({ threadId: ThreadId }));
+
+it.effect(
+  "MCP launch retries reuse the accepted thread and first run across session replacement",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const source = yield* launches.launch(
+          launchInput({
+            command: "mcp-retry-source",
+            thread: "mcp-retry-source",
+            message: "Start",
+          }),
+        );
+        const registry = yield* McpSessionRegistry.__testing.make({ now: () => 1_000 }).pipe(
+          Effect.provideService(HttpServer.HttpServer, {
+            address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
+            serve: () => Effect.void,
+          }),
+          Effect.provideService(ServerEnvironment.ServerEnvironment, {
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("mcp-retry")),
+            getDescriptor: Effect.die("unused"),
+          }),
+        );
+        const issue = Effect.fn(function* (
+          threadId = source.threadId,
+          providerInstanceId = modelSelection.instanceId,
+        ) {
+          const issued = yield* registry.issue({ threadId, providerInstanceId });
+          const scope = yield* registry.resolve(
+            issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+          );
+          assert.isDefined(scope);
+          return scope;
+        });
+        const toolkit = yield* ProjectToolkit.pipe(
+          Effect.provide(McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer)),
+        );
+        const launch = (scope: McpInvocationContext.McpInvocationScope, clientRequestId?: string) =>
+          toolkit
+            .handle("t3_thread_launch", {
+              title: "Retry target",
+              message: "Exactly one first message",
+              ...(clientRequestId === undefined ? {} : { clientRequestId }),
+            })
+            .pipe(
+              Stream.unwrap,
+              Stream.runCollect,
+              Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+              Effect.flatMap((responses) => decodeMcpLaunchResult(responses.at(-1)?.result)),
+            );
+        const before = yield* issue();
+        const first = yield* launch(before, "stable-launch");
+        yield* registry.revokeProviderSession(before.thread.providerSessionId);
+        const after = yield* issue();
+        assert.notEqual(before.thread.providerSessionId, after.thread.providerSessionId);
+        const retry = yield* launch(after, "stable-launch");
+        assert.equal(retry.threadId, first.threadId);
+        assert.notEqual(
+          (yield* issue(ThreadId.make("other-parent"))).requestNamespace,
+          after.requestNamespace,
+        );
+        assert.notEqual(
+          (yield* issue(source.threadId, ProviderInstanceId.make("other-codex"))).requestNamespace,
+          after.requestNamespace,
+        );
+        const projection = yield* threads.getThreadProjection(retry.threadId);
+        assert.lengthOf(projection.messages, 1);
+        assert.lengthOf(projection.runs, 1);
+        assert.equal(projection.messages[0]?.text, "Exactly one first message");
+        assert.notEqual((yield* launch(after, "another-launch")).threadId, first.threadId);
+        assert.notEqual((yield* launch(after)).threadId, (yield* launch(after)).threadId);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            harness.layer,
+            NodeServices.layer,
+            Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-launch-retry-" }).pipe(
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        ),
+      );
     }),
 );
