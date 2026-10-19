@@ -392,14 +392,12 @@ export class OrchestratorV2 extends Context.Service<OrchestratorV2, Orchestrator
   "t3/orchestration-v2/Orchestrator/OrchestratorV2",
 ) {}
 
-/** The runs whose restart continuation can still change `run`'s result: its task's runs, or all runs for the original task. */
+/** Shared results wait for the joined task, not unrelated later tasks. */
 function runsOfTask(
   runs: ReadonlyArray<OrchestrationV2Run>,
   run: OrchestrationV2Run,
 ): ReadonlyArray<OrchestrationV2Run> {
-  return run.delegatedTaskId === undefined
-    ? runs
-    : runs.filter((candidate) => candidate.delegatedTaskId === run.delegatedTaskId);
+  return runs.filter((candidate) => candidate.delegatedTaskId === run.delegatedTaskId);
 }
 
 /** Run ordinals can skip values: a queued run moves past newer runs when it starts. */
@@ -10266,9 +10264,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? options.task.id === forkedFrom.nodeId
             ? options.resultRun
             : undefined
-          : delegatedTaskResultRun(childControls, options.taskId);
+          : delegatedTaskResultRun(childControls, options.task.id);
       if (childRun === undefined) return;
-      const steered = taskRuns.length > 0 && !taskRuns.includes(childRun);
+      const steered = taskRuns.length > 0 && childRun.delegatedTaskId !== options.task.id;
       const outcome = runOutcome(childRun);
       const terminalStatus = delegatedTaskTerminalStatus(outcome);
       if (terminalStatus === null) {

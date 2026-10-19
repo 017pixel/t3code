@@ -219,12 +219,7 @@ export function subagentResultForRun(
   };
 }
 
-/**
- * The run whose outcome settles a delegated task. Promoting a queued follow-up
- * to Steer cancels its run and moves its message into the running turn, so the
- * task settles with that turn, or the restart continuation that resumed it,
- * instead of reading as stopped.
- */
+/** Promotion cancels the queued run; its moved message identifies the turn that now owns the work. */
 export function delegatedTaskResultRun(
   child: {
     readonly runs: OrchestrationV2ThreadProjection["runs"];
