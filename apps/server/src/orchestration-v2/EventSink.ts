@@ -3,7 +3,6 @@ import {
   EventId,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
-  type OrchestrationV2TurnItem,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
@@ -196,7 +195,6 @@ export class EventSinkV2 extends Context.Service<EventSinkV2, EventSinkV2Shape>(
   "t3/orchestration-v2/EventSink/EventSinkV2",
 ) {}
 
-/** Node and card statuses that still wait on their runtime request. */
 const OPEN_REQUEST_STATUSES: ReadonlySet<string> = new Set([
   "idle",
   "pending",
@@ -316,17 +314,22 @@ const layerBase: Layer.Layer<
         });
       });
 
-    // Adapters write a request, its node, and its card (turn item) as separate
-    // events, and the request is answerable once it is stored. An answer only
-    // settles the node and card its handler read. A node or card that arrives
-    // after its request settled is stored settled to match. A card stored after
-    // the handler read, while the request was still pending, is settled by the
-    // write that settles the request.
-    const settleAfterAnsweredRequests = Effect.fnUntraced(function* (
+    // Recheck in the write transaction: artifacts can arrive after resolution,
+    // or between the response handler reading its context and committing it.
+    const settleRequestArtifacts = Effect.fnUntraced(function* (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
     ) {
-      const requests = new Map<RuntimeRequestId, OrchestrationV2RuntimeRequest>();
-      const writtenCardRequestIds = new Set(
+      const requests = new Map(
+        events.flatMap((event) =>
+          event.type === "runtime-request.updated"
+            ? [[event.payload.id, event.payload] as const]
+            : [],
+        ),
+      );
+      const writtenNodes = new Set(
+        events.flatMap((event) => (event.type === "node.updated" ? [event.payload.id] : [])),
+      );
+      const writtenCards = new Set(
         events.flatMap((event) =>
           event.type === "turn-item.updated" &&
           (event.payload.type === "approval_request" || event.payload.type === "user_input_request")
@@ -334,52 +337,19 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
-      const requestFor = (
+      const requestFor = Effect.fnUntraced(function* (
         threadId: ThreadId,
         requestId: RuntimeRequestId,
-      ): Effect.Effect<
-        OrchestrationV2RuntimeRequest | null,
-        ProjectionStore.ProjectionStoreV2Error
-      > =>
-        Effect.suspend(() => {
-          const written = requests.get(requestId);
-          return written !== undefined
-            ? Effect.succeed(written)
-            : projectionStore.getRuntimeRequest(threadId, requestId).pipe(
-                Effect.map((stored) => stored ?? null),
-                // A thread created in this same write has no answered requests yet.
-                Effect.catchTags({
-                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
-                }),
-              );
-        });
-      // A question card answered without it carries the request's answers. The
-      // answer's attachments are not on the request, but an answer with
-      // attachments comes from a client that already showed the card.
-      const answeredQuestion = (
-        item: Extract<
-          OrchestrationV2TurnItem,
-          { readonly type: "approval_request" | "user_input_request" }
-        >,
-        request: OrchestrationV2RuntimeRequest,
-      ) =>
-        item.type !== "user_input_request" ||
-        item.questionAnswer !== undefined ||
-        request.answers === undefined
-          ? {}
-          : {
-              questionAnswer: {
-                requestId: item.requestId,
-                answers: request.answers,
-                attachmentsByQuestionId: {},
-                questionTextById: Object.fromEntries(
-                  item.questions.map((question) => [question.id, question.question]),
-                ),
-              },
-            };
-      // A request never reopens: a provider that asks again gets a new request id.
-      const settled = (request: OrchestrationV2RuntimeRequest | null) =>
-        request === null || request.status === "pending"
+      ) {
+        const written = requests.get(requestId);
+        if (written !== undefined) return written;
+        return yield* projectionStore.getRuntimeRequest(threadId, requestId).pipe(
+          // A thread created in this write has no stored requests yet.
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.undefined }),
+        );
+      });
+      const resolutionFor = (request: OrchestrationV2RuntimeRequest | undefined) =>
+        request === undefined || request.status === "pending"
           ? undefined
           : {
               status:
@@ -390,53 +360,63 @@ const layerBase: Layer.Layer<
                   : ("cancelled" as const),
               at: request.resolvedAt ?? request.createdAt,
             };
-      const normalized: Array<OrchestrationV2DomainEvent> = [];
+
+      const expanded: Array<OrchestrationV2DomainEvent> = [];
       for (const event of events) {
-        if (event.type === "runtime-request.updated") {
-          const request = event.payload;
-          requests.set(request.id, request);
-          normalized.push(event);
-          const resolution = settled(request);
-          if (resolution === undefined || writtenCardRequestIds.has(request.id)) continue;
-          const card = yield* projectionStore
-            .getRuntimeResponseContext(event.threadId, request.id)
-            .pipe(
-              Effect.map((context) => context.item),
-              Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.undefined }),
-            );
-          if (
-            (card?.type !== "approval_request" && card?.type !== "user_input_request") ||
-            !OPEN_REQUEST_STATUSES.has(card.status)
-          )
-            continue;
-          normalized.push({
+        expanded.push(event);
+        if (
+          event.type !== "runtime-request.updated" ||
+          event.payload.status === "pending" ||
+          (writtenNodes.has(event.payload.nodeId) && writtenCards.has(event.payload.id))
+        )
+          continue;
+        const context = yield* projectionStore
+          .getRuntimeResponseContext(event.threadId, event.payload.id)
+          .pipe(Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.undefined }));
+        const node = context?.node;
+        if (
+          node !== undefined &&
+          (node.kind === "approval_request" || node.kind === "user_input_request") &&
+          !writtenNodes.has(node.id) &&
+          OPEN_REQUEST_STATUSES.has(node.status)
+        ) {
+          expanded.push({
+            ...event,
+            id: EventId.make(`${event.id}:node`),
+            type: "node.updated",
+            runId: node.runId ?? undefined,
+            nodeId: node.id,
+            payload: node,
+          });
+        }
+        const card = context?.item;
+        if (
+          card !== undefined &&
+          (card.type === "approval_request" || card.type === "user_input_request") &&
+          !writtenCards.has(event.payload.id) &&
+          OPEN_REQUEST_STATUSES.has(card.status)
+        ) {
+          expanded.push({
+            ...event,
             id: EventId.make(`${event.id}:card`),
             type: "turn-item.updated",
-            threadId: event.threadId,
-            ...(card.runId === null ? {} : { runId: card.runId }),
-            ...(card.nodeId === null ? {} : { nodeId: card.nodeId }),
-            ...(event.driver === undefined ? {} : { driver: event.driver }),
-            ...(event.providerInstanceId === undefined
-              ? {}
-              : { providerInstanceId: event.providerInstanceId }),
-            occurredAt: event.occurredAt,
-            payload: {
-              ...card,
-              ...answeredQuestion(card, request),
-              status: resolution.status,
-              completedAt: resolution.at,
-              updatedAt: resolution.at,
-            },
+            runId: card.runId ?? undefined,
+            nodeId: card.nodeId ?? undefined,
+            payload: card,
           });
-          continue;
-        } else if (
+        }
+      }
+
+      const normalized: Array<OrchestrationV2DomainEvent> = [];
+      for (const event of expanded) {
+        if (
           event.type === "node.updated" &&
           (event.payload.kind === "approval_request" ||
             event.payload.kind === "user_input_request") &&
           event.payload.runtimeRequestId !== null &&
           OPEN_REQUEST_STATUSES.has(event.payload.status)
         ) {
-          const resolution = settled(
+          const resolution = resolutionFor(
             yield* requestFor(event.threadId, event.payload.runtimeRequestId),
           );
           if (resolution !== undefined) {
@@ -454,13 +434,28 @@ const layerBase: Layer.Layer<
         ) {
           const item = event.payload;
           const request = yield* requestFor(event.threadId, item.requestId);
-          const resolution = settled(request);
+          const resolution = resolutionFor(request);
           if (resolution !== undefined) {
             normalized.push({
               ...event,
               payload: {
                 ...item,
-                ...(request === null ? {} : answeredQuestion(item, request)),
+                // Attached answers come from a client that already has the card.
+                // Preserve those; only reconstruct answers when the card was absent.
+                ...(item.type === "user_input_request" &&
+                item.questionAnswer === undefined &&
+                request?.answers !== undefined
+                  ? {
+                      questionAnswer: {
+                        requestId: item.requestId,
+                        answers: request.answers,
+                        attachmentsByQuestionId: {},
+                        questionTextById: Object.fromEntries(
+                          item.questions.map((question) => [question.id, question.question]),
+                        ),
+                      },
+                    }
+                  : {}),
                 status: resolution.status,
                 completedAt: resolution.at,
                 updatedAt: resolution.at,
@@ -482,7 +477,7 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
-      return settleAfterAnsweredRequests(events).pipe(
+      return settleRequestArtifacts(events).pipe(
         Effect.flatMap((settled) =>
           Effect.forEach(
             settled,

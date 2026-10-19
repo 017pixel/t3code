@@ -3425,7 +3425,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
-  it.effect.each(["answer before artifacts", "card during answer"] as const)(
+  it.effect.each(["answer before artifacts", "artifacts during answer"] as const)(
     "settles request artifacts with %s",
     (order) =>
       Effect.gen(function* () {
@@ -3498,77 +3498,84 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           ["cancelled", "cancelled", undefined, "cancelled"],
           ["expired", "expired", undefined, "cancelled"],
         ] as const) {
-          const requestId = RuntimeRequestId.make(`${threadId}:${name}`);
-          const node = requestNode(requestId);
-          const request = pendingRequest(requestId);
-          const nodeEvent = event(`${name}:node`, {
-            type: "node.updated",
-            threadId,
-            nodeId: node.id,
-            payload: node,
-          });
-          const cardEvent = event(`${name}:card`, {
-            type: "turn-item.updated",
-            threadId,
-            nodeId: node.id,
-            payload: card(requestId),
-          });
-          yield* eventSink.write({
-            events: [
-              ...(order === "card during answer" ? [nodeEvent] : []),
-              event(`${name}:pending`, {
-                type: "runtime-request.updated",
-                threadId,
-                payload: request,
-              }),
-            ],
-          });
-          const responseContext = yield* projectionStore.getRuntimeResponseContext(
-            threadId,
-            requestId,
-          );
-          assert.isUndefined(responseContext.item);
-
-          // The response uses the context it read before the adapter stored its card.
-          if (order === "card during answer") {
-            yield* eventSink.write({ events: [cardEvent] });
-            assert.equal(
-              (yield* projectionStore.getRuntimeResponseContext(threadId, requestId)).item?.status,
-              "waiting",
+          for (const nodeBeforeRead of order === "artifacts during answer"
+            ? [true, false]
+            : [false]) {
+            const requestId = RuntimeRequestId.make(`${threadId}:${name}:${nodeBeforeRead}`);
+            const node = requestNode(requestId);
+            const request = pendingRequest(requestId);
+            const nodeEvent = event(`${requestId}:node`, {
+              type: "node.updated",
+              threadId,
+              nodeId: node.id,
+              payload: node,
+            });
+            const cardEvent = event(`${requestId}:card`, {
+              type: "turn-item.updated",
+              threadId,
+              nodeId: node.id,
+              payload: card(requestId),
+            });
+            yield* eventSink.write({
+              events: [
+                ...(nodeBeforeRead ? [nodeEvent] : []),
+                event(`${requestId}:pending`, {
+                  type: "runtime-request.updated",
+                  threadId,
+                  payload: request,
+                }),
+              ],
+            });
+            const responseContext = yield* projectionStore.getRuntimeResponseContext(
+              threadId,
+              requestId,
             );
+            assert.isUndefined(responseContext.item);
+
+            // The response uses its saved context, even if artifacts arrive before it commits.
+            if (order === "artifacts during answer") {
+              yield* eventSink.write({
+                events: [...(nodeBeforeRead ? [] : [nodeEvent]), cardEvent],
+              });
+              assert.equal(
+                (yield* projectionStore.getRuntimeResponseContext(threadId, requestId)).item
+                  ?.status,
+                "waiting",
+              );
+            }
+            const resolvedAt = DateTime.add(now, { seconds: 1 });
+            yield* eventSink.write({
+              events: [
+                event(`${requestId}:resolved`, {
+                  type: "runtime-request.updated",
+                  threadId,
+                  payload: { ...request, status, decision, resolvedAt },
+                }),
+                ...(responseContext.node === undefined
+                  ? []
+                  : [
+                      event(`${requestId}:node-settled`, {
+                        type: "node.updated",
+                        threadId,
+                        payload: {
+                          ...responseContext.node,
+                          status: expected,
+                          completedAt: resolvedAt,
+                        },
+                      }),
+                    ]),
+              ],
+            });
+            if (order === "answer before artifacts") {
+              yield* eventSink.write({ events: [nodeEvent] });
+              yield* eventSink.write({ events: [cardEvent] });
+            }
+            const settled = yield* projectionStore.getRuntimeResponseContext(threadId, requestId);
+            assert.equal(settled.node?.status, expected, name);
+            assert.equal(settled.item?.status, expected, name);
+            assert.deepEqual(settled.node?.completedAt, resolvedAt);
+            assert.deepEqual(settled.item?.completedAt, resolvedAt);
           }
-          const resolvedAt = DateTime.add(now, { seconds: 1 });
-          yield* eventSink.write({
-            events: [
-              event(`${name}:resolved`, {
-                type: "runtime-request.updated",
-                threadId,
-                payload: { ...request, status, decision, resolvedAt },
-              }),
-              ...(responseContext.node === undefined
-                ? []
-                : [
-                    event(`${name}:node-settled`, {
-                      type: "node.updated",
-                      threadId,
-                      payload: {
-                        ...responseContext.node,
-                        status: expected,
-                        completedAt: resolvedAt,
-                      },
-                    }),
-                  ]),
-            ],
-          });
-          if (order === "answer before artifacts") {
-            yield* eventSink.write({ events: [nodeEvent] });
-            yield* eventSink.write({ events: [cardEvent] });
-          }
-          const settled = yield* projectionStore.getRuntimeResponseContext(threadId, requestId);
-          assert.equal(settled.node?.status, expected, name);
-          assert.equal(settled.item?.status, expected, name);
-          assert.deepEqual(settled.node?.completedAt, resolvedAt);
-          assert.deepEqual(settled.item?.completedAt, resolvedAt);
         }
       }),
   );
