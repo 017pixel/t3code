@@ -53,9 +53,9 @@ const layerServerSettings = () =>
     ),
   );
 
-const layerServerSettingsWithSecrets = () =>
+const layerServerSettingsWithSecrets = (secretsLayer = ServerSecretStore.layer) =>
   ServerSettingsModule.layer.pipe(
-    Layer.provideMerge(ServerSecretStore.layer),
+    Layer.provideMerge(secretsLayer),
     Layer.provideMerge(Layer.fresh(SqlitePersistence.layerMemory)),
     Layer.provideMerge(
       Layer.fresh(
@@ -102,8 +102,28 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
 it.layer(NodeServices.layer)("server settings", (it) => {
   it.effect(
     "keeps MCP server secrets in the secret store for the environment and each project",
-    () =>
-      Effect.gen(function* () {
+    () => {
+      let secretWrites = 0;
+      let rejectWrites = false;
+      const secretsLayer = Layer.effect(
+        ServerSecretStore.ServerSecretStore,
+        Effect.map(ServerSecretStore.ServerSecretStore, (store) => ({
+          ...store,
+          set: (name, value) =>
+            Effect.suspend(() => {
+              secretWrites++;
+              return rejectWrites
+                ? Effect.fail(
+                    new ServerSecretStore.SecretStorePersistError({
+                      resource: name,
+                      cause: "Unrelated settings must not rewrite secrets.",
+                    }),
+                  )
+                : store.set(name, value);
+            }),
+        })),
+      ).pipe(Layer.provide(ServerSecretStore.layer));
+      return Effect.gen(function* () {
         const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
         const serverConfig = yield* ServerConfig.ServerConfig;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -121,7 +141,15 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           },
         });
 
+        const providerId = ProviderInstanceId.make("antigravity_secret_roundtrip");
         const saved = yield* serverSettings.updateSettings({
+          providerInstances: {
+            [providerId]: {
+              driver: ProviderDriverKind.make("antigravity"),
+              environment: [{ name: "PRIVATE_KEY", value: "provider-env-token", sensitive: true }],
+              config: { apiKey: "provider-config-token" },
+            },
+          },
           mcpServers: { supabase: stdio("env-token") },
           projectSettingsOverrides: {
             [projectId]: {
@@ -153,6 +181,25 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         assert.equal(envVars(forClient, "project")[0]?.value, "");
         assert.isTrue(envVars(forClient, "project")[0]?.valueRedacted);
 
+        secretWrites = 0;
+        rejectWrites = true;
+        const unrelated = yield* serverSettings.updateSettings({
+          continueThreadsAfterServerUpdate: false,
+        });
+        assert.isFalse(unrelated.continueThreadsAfterServerUpdate);
+        assert.equal(secretWrites, 0);
+        assert.equal(envVars(unrelated, "env")[0]?.value, "env-token");
+        assert.equal(envVars(unrelated, "project")[0]?.value, "project-token");
+        assert.equal(
+          unrelated.providerInstances[providerId]?.environment?.[0]?.value,
+          "provider-env-token",
+        );
+        assert.propertyVal(
+          unrelated.providerInstances[providerId]?.config,
+          "apiKey",
+          "provider-config-token",
+        );
+
         // Echoing the redacted server back (an edit that changed only args) keeps its secret.
         const echoed = forClient.mcpServers.supabase!;
         if (echoed.transport.type !== "stdio") throw new Error("Expected a stdio server");
@@ -175,6 +222,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           review: true,
         });
 
+        assert.equal(secretWrites, 0);
+        rejectWrites = false;
+
         // Removing the environment server drops its secret, not the project's.
         const removed = yield* serverSettings.updateSettings({ mcpServers: { supabase: null } });
         assert.isUndefined(removed.mcpServers.supabase);
@@ -184,7 +234,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         });
         assert.deepEqual(cleared.projectSettingsOverrides[projectId]?.mcpServers, {});
         assert.deepEqual(cleared.projectSettingsOverrides[projectId]?.disabledSkills, {});
-      }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+      }).pipe(Effect.provide(layerServerSettingsWithSecrets(secretsLayer)));
+    },
   );
 
   it.effect("rechecks settings authorization against the state being written", () =>

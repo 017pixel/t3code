@@ -874,11 +874,20 @@ const make = Effect.gen(function* () {
     | { readonly kind: "remove"; readonly operation: "remove-secret" | "remove-stale-secret" }
   );
 
-  const persistSettingsSecrets = (current: ServerSettings, next: ServerSettings) =>
+  const persistSettingsSecrets = (
+    current: ServerSettings,
+    materializedCurrent: ServerSettings,
+    next: ServerSettings,
+  ) =>
     Effect.sync(() => {
       const previous = new Map<string, SettingsSecret>();
       mapSettingsSecrets(current, (secret) => {
         previous.set(secret.secretName, secret);
+        return secret;
+      });
+      const materializedPrevious = new Map<string, SettingsSecret>();
+      mapSettingsSecrets(materializedCurrent, (secret) => {
+        materializedPrevious.set(secret.secretName, secret);
         return secret;
       });
       const changes: SecretChange[] = [];
@@ -897,8 +906,15 @@ const make = Effect.gen(function* () {
           changes.push({ ...metadata, kind: "remove", operation: "remove-secret" });
           return { value: secret.value, redacted: false };
         }
-        const old = previous.get(secret.sourceSecretName ?? secret.secretName);
-        const inlineValue = old?.sensitive && old.value.length > 0 ? old.value : undefined;
+        const sourceSecretName = secret.sourceSecretName ?? secret.secretName;
+        const moving = sourceSecretName !== secret.secretName;
+        const old = moving
+          ? materializedPrevious.get(sourceSecretName)
+          : previous.get(secret.secretName);
+        const inlineValue =
+          old?.sensitive && (moving || !old.redacted) && old.value.length > 0
+            ? old.value
+            : undefined;
         const value = secret.redacted ? inlineValue : secret.value;
         if (value === undefined) {
           nextSecretNames.add(secret.secretName);
@@ -1014,7 +1030,7 @@ const make = Effect.gen(function* () {
         const current = yield* getSettingsFromCache;
         const updated = yield* update(current);
         const materializedCurrent = yield* materializeSettingsSecrets(current);
-        const persisted = yield* persistSettingsSecrets(materializedCurrent, updated);
+        const persisted = yield* persistSettingsSecrets(current, materializedCurrent, updated);
         const next = yield* normalizeServerSettings(persisted.settings);
         const materialized = yield* Effect.uninterruptibleMask(() =>
           Effect.gen(function* () {
