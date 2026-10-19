@@ -361,16 +361,18 @@ bounded and offset-paginated. Deleted threads are never listed.
 ### `t3_thread_read`
 
 Reads the durable state, recent runs, and visible timeline of any thread in
-the environment by thread ID. A deleted thread returns `thread_not_found`. The
-default `messages` view returns user messages, assistant
-messages, and proposed plans. The `activity` view also returns summarized tool,
+the environment by thread ID. A deleted thread returns `thread_not_found`.
+Reads default to 20 items and the 5 newest runs on the first page. The default
+`messages` view returns user messages, assistant messages, and proposed plans.
+The `activity` view also returns summarized tool,
 reasoning, checkpoint, handoff, and runtime-request items. Item text is bounded
 per item (4,000 characters for messages, a 600-character preview for tool
 output, or an explicit `maxCharsPerItem`); a truncated item reports
 `nextTextOffset`, and re-reading it by `itemId` from that offset continues the
 same text until `nextTextOffset` is absent. `afterPosition` and `nextPosition`
-support incremental reads; later pages omit recent runs unless `runLimit` is
-given.
+support incremental reads; later pages return an empty `recentRuns` unless
+`runLimit` is given. Omitted item `visibility` means local, and omitted
+`sourceThreadId` means the read thread itself. Unset item metadata is omitted.
 
 Thread and message results include required `createdBy` and `creationSource`
 provenance. MCP-created threads and user-role messages use `createdBy: "agent"`
