@@ -193,6 +193,7 @@ export const make = Effect.gen(function* () {
           ...explicitBareRepositoryEnv({ ...process.env, ...input.env }, hostPlatform),
         },
         timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        ...(input.operation === CHECKPOINT_CAPTURE_OPERATION ? { forceKillAfter: "1 second" } : {}),
         maxOutputBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
         outputMode: input.outputMode ?? "truncate",
         truncatedMarker: input.appendTruncationMarker ? OUTPUT_TRUNCATED_MARKER : "",

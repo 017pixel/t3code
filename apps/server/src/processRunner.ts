@@ -22,6 +22,7 @@ export interface ProcessRunInput {
   readonly cwd?: string | undefined;
   readonly spawnCwd?: string | undefined;
   readonly timeout?: Duration.Input | undefined;
+  readonly forceKillAfter?: Duration.Input | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
   readonly stdin?: string | undefined;
   /** Receives every stdout chunk, including bytes beyond the buffered output limit. */
@@ -304,6 +305,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
             }
           : {}),
         shell: spawnCommand.shell,
+        ...(input.forceKillAfter !== undefined ? { forceKillAfter: input.forceKillAfter } : {}),
       }),
     )
     .pipe(
