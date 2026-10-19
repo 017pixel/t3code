@@ -370,7 +370,7 @@ export const layerWithOptions = (
                 Effect.as({
                   browser: false,
                   device: false,
-                  tools: { ...resolveAgentTools(settings, null), servers: [] },
+                  tools: resolveAgentTools({ ...settings, mcpServers: {} }, null),
                 }),
               ),
             ),

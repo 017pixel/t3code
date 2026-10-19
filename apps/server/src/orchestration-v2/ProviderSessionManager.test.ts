@@ -638,6 +638,7 @@ function runBrowserAccessScenario(input: {
   readonly createThread?: boolean;
   readonly projectExists?: boolean;
   readonly toolsOverride?: boolean;
+  readonly projectToolsOverride?: boolean;
   readonly disabledSkills?: ReadonlyArray<string>;
   readonly settingsUnavailable?: boolean;
 }) {
@@ -707,7 +708,7 @@ function runBrowserAccessScenario(input: {
                 projectSettingsOverrides: {
                   [projectId]: {
                     enableAgentBrowserAccess: input.projectOverride,
-                    ...(input.toolsOverride
+                    ...(input.toolsOverride && input.projectToolsOverride !== false
                       ? {
                           mcpServers: { docs: { enabled: false } },
                           disabledSkills: { review: true },
@@ -2044,17 +2045,33 @@ it.effect("ProviderSessionManagerV2 fails browser access closed for a missing pr
 
 it.effect("ProviderSessionManagerV2 fails browser access closed for a missing thread", () =>
   Effect.gen(function* () {
-    const captured = yield* runBrowserAccessScenario({
+    const environment = {
       enableAgentBrowserAccess: true,
       projectOverride: true,
+      disabledSkills: ["environment-off"],
+    };
+    const healthy = yield* runBrowserAccessScenario({
+      ...environment,
+      toolsOverride: true,
+      projectToolsOverride: false,
+    });
+    assert.deepEqual(
+      healthy?.tools?.servers.map((server) => server.name),
+      ["docs"],
+    );
+    assert.deepEqual(healthy?.tools?.disabledSkills, ["environment-off"]);
+    const captured = yield* runBrowserAccessScenario({
+      ...environment,
       createThread: false,
       toolsOverride: true,
-      disabledSkills: ["environment-off"],
     });
     assert.isDefined(captured);
     assert.equal(captured?.browserToolsAvailable, false);
     assert.deepEqual(captured?.tools?.disabledSkills, ["environment-off"]);
     assert.deepEqual(captured?.tools?.servers, []);
+    assert.notEqual(captured?.tools?.fingerprint, healthy?.tools?.fingerprint);
+    const withoutServers = yield* runBrowserAccessScenario(environment);
+    assert.deepEqual(captured?.tools, withoutServers?.tools);
   }),
 );
 
