@@ -5601,7 +5601,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         ) {
           yield* spawnAcpRuntime(
             threadId,
-            flavor.preferResumeSession === true ? resumeSessionId : undefined,
+            flavor.preferResumeSession === true && canResumeSession ? resumeSessionId : undefined,
           );
           yield* wireAcpRuntimeHandlers(runtime, yield* Ref.get(runtimeCallbackGeneration));
         });

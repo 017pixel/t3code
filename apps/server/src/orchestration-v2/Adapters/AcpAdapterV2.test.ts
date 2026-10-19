@@ -12222,9 +12222,13 @@ describe("AcpAdapterV2", () => {
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.effect.each(["failed", "unacknowledged"] as const)(
-    "recovers from %s cancellation and resumes the next turn on a fresh runtime",
-    (cancellation) =>
+  it.effect.each([
+    ["failed", "resume"],
+    ["unacknowledged", "resume"],
+    ["failed", "load-only"],
+  ] as const)(
+    "recovers from %s cancellation with %s support on a fresh runtime",
+    ([cancellation, sessionSupport]) =>
       Effect.gen(function* () {
         const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const path = yield* Path.Path;
@@ -12243,9 +12247,29 @@ describe("AcpAdapterV2", () => {
           protocolEvents,
           wrapRuntime: (runtime, ordinal) => {
             runtimeCount = ordinal;
+            const sessionRuntime =
+              sessionSupport === "load-only"
+                ? {
+                    ...runtime,
+                    start: () =>
+                      runtime.start().pipe(
+                        Effect.map((started) => ({
+                          ...started,
+                          initializeResult: {
+                            ...started.initializeResult,
+                            agentCapabilities: {
+                              ...started.initializeResult.agentCapabilities,
+                              loadSession: true,
+                              sessionCapabilities: {},
+                            },
+                          },
+                        })),
+                      ),
+                  }
+                : runtime;
             return ordinal === 1
               ? {
-                  ...runtime,
+                  ...sessionRuntime,
                   prompt: () =>
                     Deferred.succeed(promptStarted, undefined).pipe(Effect.andThen(Effect.never)),
                   cancel: Deferred.succeed(cancelAttempted, undefined).pipe(
@@ -12258,7 +12282,7 @@ describe("AcpAdapterV2", () => {
                     ),
                   ),
                 }
-              : runtime;
+              : sessionRuntime;
           },
         });
         const adapter = yield* makeAcpAdapterV2({
@@ -12335,7 +12359,11 @@ describe("AcpAdapterV2", () => {
         const methods = (yield* Queue.takeAll(protocolEvents))
           .filter((event) => event.direction === "outgoing")
           .map(rawProtocolMethod);
-        assert.notInclude(methods, "session/new");
+        if (sessionSupport === "load-only") {
+          assert.include(methods, "session/new");
+        } else {
+          assert.notInclude(methods, "session/new");
+        }
         assert.equal(methods.filter((method) => method === "session/resume").length, 1);
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
