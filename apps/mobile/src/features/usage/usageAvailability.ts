@@ -17,8 +17,7 @@ export function usageAvailability(
     ({ environmentId, summary }) => summary != null && !incompatibleIds.has(environmentId),
   );
   const isLoading = environments.some(
-    ({ summary, error, isConnected, canReadDiagnostics }) =>
-      summary == null && !error && isConnected !== false && canReadDiagnostics !== false,
+    ({ summary, error, isConnected }) => summary == null && !error && isConnected !== false,
   );
   const notices = environments.flatMap((environment) => {
     const { environmentId, label, summary, error, isConnected } = environment;
