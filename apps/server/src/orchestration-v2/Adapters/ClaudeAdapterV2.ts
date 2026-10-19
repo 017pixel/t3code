@@ -802,7 +802,7 @@ export const layerQueryRunner: Layer.Layer<
       const encodedOptions = yield* encodeClaudeHistoryOptions(options);
       return yield* spawner.string(
         ChildProcess.make(executablePath, [...args, method, sessionId, encodedOptions], {
-          env: environment,
+          env: { ...environment, ELECTRON_RUN_AS_NODE: "1" },
           extendEnv: false,
         }),
       );
@@ -9568,6 +9568,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       }).pipe(Effect.as(null)),
                   }),
                 );
+                if (
+                  sourceSessionId !== nativeThreadId &&
+                  resumableIds !== null &&
+                  resumableIds.length === 0
+                ) {
+                  return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                    driver: CLAUDE_PROVIDER,
+                    providerThreadId: rollbackInput.providerThread.id,
+                    cause: "Saved Claude rollback source session has no resumable messages.",
+                  });
+                }
                 // An empty initial lookup can mean the transcript was not found.
                 // Only a readable chain establishes that compaction hid the cursor.
                 if (
