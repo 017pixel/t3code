@@ -5,6 +5,10 @@ import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import {
   OrchestrationWorkflowFileError,
+  CommandId,
+  ProjectId,
+  ThreadId,
+  type OrchestrationV2GetWorkflowScriptInput,
   ProviderInstanceId,
   ProviderDriverKind,
 } from "@t3tools/contracts";
@@ -15,6 +19,9 @@ import { afterAll, assert } from "vite-plus/test";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { readWorkflowScript } from "./workflowScriptQuery.ts";
 import * as Settings from "../serverSettings.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as Layer from "effect/Layer";
 import * as NodePathService from "@effect/platform-node/NodePath";
 
@@ -57,7 +64,8 @@ const providerInstances = {
   },
   [ProviderInstanceId.make("claude-custom")]: {
     driver: ProviderDriverKind.make("claudeAgent"),
-    config: { homePath: customHome },
+    config: { homePath: NodePath.relative(process.cwd(), customHome) },
+    environment: [{ name: "CLAUDE_CONFIG_DIR", value: "ignored-config" }],
   },
   [ProviderInstanceId.make("claude-env")]: {
     driver: ProviderDriverKind.make("claudeAgent"),
@@ -68,6 +76,7 @@ const providerInstances = {
 effectIt.layer(
   Settings.layerTest({ providerInstances }).pipe(
     Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, home)),
+    Layer.provideMerge(Layer.succeed(HostProcess.Environment, {})),
     Layer.provideMerge(NodePathService.layer),
   ),
 )("workflow script containment", (effectIt) => {
@@ -108,6 +117,54 @@ effectIt.layer(
           }),
         ),
       ),
+  );
+
+  effectIt.effect("reads a relative Claude config from the thread checkout", () =>
+    Effect.gen(function* () {
+      const cwd = NodePath.join(sandbox, "checkout");
+      const relativeScript = NodePath.join(cwd, "claude-config", "projects", "test", "run.js");
+      NodeFS.mkdirSync(NodePath.dirname(relativeScript), { recursive: true });
+      NodeFS.writeFileSync(relativeScript, "thread workflow");
+      assert.notEqual(cwd, process.cwd());
+      const threadId = ThreadId.make("workflow-relative-home");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("workflow-relative-home:create"),
+        threadId,
+        projectId: ProjectId.make("workflow-project"),
+        title: "Workflow",
+        modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "default" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "feature",
+        worktreePath: cwd,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const input: OrchestrationV2GetWorkflowScriptInput = { threadId, scriptPath: relativeScript };
+      const result = yield* readWorkflowScript(input);
+      assert.equal(result.contents, "thread workflow");
+      assert.equal(result.truncated, false);
+    }).pipe(
+      Effect.provide(
+        ProviderReplayHarness.layerWithRegistry(
+          { name: "workflow-relative-home" },
+          ProviderAdapterRegistry.layerFromAdapters([]),
+          { runEffectWorker: false },
+        ),
+      ),
+      Effect.provide(
+        Settings.layerTest({
+          providerInstances: {
+            [ProviderInstanceId.make("claudeAgent")]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              environment: [{ name: "CLAUDE_CONFIG_DIR", value: "claude-config" }],
+            },
+          },
+        }),
+      ),
+    ),
   );
 
   effectIt.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
