@@ -2,8 +2,6 @@ import type { PullRequestReviewPosition, PullRequestReviewThread } from "@t3tool
 import type { NativeReviewDiffRow } from "../diffs/nativeReviewDiffSurface";
 import type { NativeReviewDiffData } from "../review/nativeReviewDiffAdapter";
 import type { PendingReviewComment } from "./pullRequestReviewDrafts";
-import { parseMarkdownDocument } from "../../lib/markdownDocument";
-import { pullRequestDescriptionContent } from "./pullRequestDescriptionContent";
 
 export function reviewPosition(row: NativeReviewDiffRow): PullRequestReviewPosition | null {
   if (row.kind !== "line") return null;
@@ -78,10 +76,7 @@ export function annotatePullRequestDiff(
         : lines.get(JSON.stringify([thread.path, thread.side, thread.line]));
     if (!anchor) continue;
     const first = thread.comments[0];
-    const preview =
-      first?.displayBody === undefined
-        ? (first?.body ?? "")
-        : pullRequestDescriptionContent(parseMarkdownDocument(first.displayBody)).preview;
+    const preview = first?.displayText ?? first?.body ?? "";
     attach(
       anchor,
       `discussion:${thread.id}`,

@@ -2078,6 +2078,7 @@ describe("mention display source", () => {
       ...TIMELINE_SOURCE.comments[0]!,
       body: "@{account-id}",
       displayBody: "@Alex Smith",
+      displayText: "@Alex Smith",
     };
     const untouched = { ...comment, id: "other" };
     const edited = editPullRequestThreadComment(
@@ -2087,10 +2088,15 @@ describe("mention display source", () => {
     );
     expect(edited[0]?.body).toBe("@{account-id} updated");
     expect(edited[0]?.displayBody).toBeUndefined();
+    expect(edited[0]?.displayText).toBeUndefined();
     const events = buildPullRequestTimeline({ ...TIMELINE_SOURCE, comments: edited });
     expect(events.find((event) => event.id === comment.id)?.body).toBe("@{account-id} updated");
     expect(events.find((event) => event.id === untouched.id)?.body).toBe("@Alex Smith");
     expect(edited[1]).toBe(untouched);
-    expect(comment).toMatchObject({ body: "@{account-id}", displayBody: "@Alex Smith" });
+    expect(comment).toMatchObject({
+      body: "@{account-id}",
+      displayBody: "@Alex Smith",
+      displayText: "@Alex Smith",
+    });
   });
 });

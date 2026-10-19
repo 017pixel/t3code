@@ -166,11 +166,12 @@ export function editPullRequestThreadComment<
     readonly id: string;
     readonly body: string;
     readonly displayBody?: string | undefined;
+    readonly displayText?: string | undefined;
   },
 >(comments: ReadonlyArray<T>, commentId: string, body: string): ReadonlyArray<T> {
   return comments.map((comment) => {
     if (comment.id !== commentId) return comment;
-    return { ...comment, body, displayBody: undefined };
+    return { ...comment, body, displayBody: undefined, displayText: undefined };
   });
 }
 

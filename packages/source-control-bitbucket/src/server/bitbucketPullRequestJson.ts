@@ -19,7 +19,7 @@ import { TrimmedNonEmptyString } from "@t3tools/contracts";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import { dedupeChecks } from "@t3tools/source-control-core/server/pullRequestChecks";
 
-import { bitbucketMentionDisplayBody } from "./bitbucketMentions.ts";
+import { bitbucketMentionDisplay } from "./bitbucketMentions.ts";
 
 /**
  * Bitbucket's enums are decoded as plain strings and normalized here, in the same tolerant
@@ -298,7 +298,7 @@ function toPullRequest(raw: Schema.Schema.Type<typeof RawPullRequestSchema>): Bi
     updatedAt: toIsoUtc(raw.updated_on),
     closedAt: raw.closed_on == null ? null : toIsoUtc(raw.closed_on),
     body: raw.description ?? "",
-    displayBody: bitbucketMentionDisplayBody(
+    displayBody: bitbucketMentionDisplay(
       raw.description ?? "",
       Option.getOrUndefined(
         Option.map(
@@ -306,7 +306,7 @@ function toPullRequest(raw: Schema.Schema.Type<typeof RawPullRequestSchema>): Bi
           (rendered) => rendered.description.html,
         ),
       ),
-    ),
+    )?.displayBody,
     reviewRequestLogins: reviewers.map((reviewer) => reviewer.login),
     reviewers,
     reviewerIds: (raw.reviewers ?? []).flatMap((reviewer) => trimmed(reviewer.uuid) ?? []),
@@ -457,7 +457,7 @@ export function buildReviewThreads(
         id: String(comment.id),
         author: toActor(comment.user),
         body: comment.content?.raw ?? "",
-        displayBody: bitbucketMentionDisplayBody(comment.content?.raw ?? "", comment.content?.html),
+        ...bitbucketMentionDisplay(comment.content?.raw ?? "", comment.content?.html),
         createdAt: toIsoUtc(comment.created_on),
         url: trimmed(comment.links?.html?.href),
       }));
@@ -486,7 +486,7 @@ export function decodeCommentsJson(raw: string): Result.Result<BitbucketComments
       kind: path === null ? "issue-comment" : "review-comment",
       author: toActor(comment.user),
       body,
-      displayBody: bitbucketMentionDisplayBody(body, comment.content?.html),
+      displayBody: bitbucketMentionDisplay(body, comment.content?.html)?.displayBody,
       createdAt: toIsoUtc(comment.created_on),
       url: trimmed(comment.links?.html?.href),
       path,

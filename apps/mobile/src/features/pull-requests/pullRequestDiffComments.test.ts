@@ -89,6 +89,32 @@ describe("PR comments in continuous native diffs", () => {
     ]);
     expect(annotated.commentTargetsByRowId).toBe(data.commentTargetsByRowId);
   });
+  it("substitutes mention labels while preserving the native row's authored source", () => {
+    const token = "@{account-id}";
+    const source = `See [design](https://example.test/spec) and \`${token}\`; <span title="literal">HTML</span> and \\_literal\\_. Ping `;
+    const comment = {
+      id: "comment",
+      author: null,
+      body: `${source}${token}`,
+      displayBody: `${source}@Alex\\_Smith \\& Co`,
+      displayText: `${source}@Alex_Smith & Co`,
+      createdAt: "2026-10-02T00:00:00Z",
+      updatedAt: null,
+      url: null,
+    };
+    const annotated = annotatePullRequestDiff(
+      data,
+      [{ ...thread, comments: [comment] }],
+      [],
+      "abc",
+    );
+    expect(annotated.rows.find((row) => row.id === "discussion:t")?.commentText).toBe(
+      `Discussion\n${source}@Alex_Smith & Co\n1 comments · Tap to open`,
+    );
+    expect(comment.body).toBe(`${source}${token}`);
+    expect(comment.displayText).toBe(`${source}@Alex_Smith & Co`);
+    expect(comment.displayBody).toBe(`${source}@Alex\\_Smith \\& Co`);
+  });
   it("does not guess positions for missing lines, notices, or binary files", () => {
     expect(reviewPosition(data.rows[0]!)).toBeNull();
     expect(reviewPosition(data.rows[1]!)).toEqual({ kind: "deleted", oldLine: 2 });

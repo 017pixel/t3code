@@ -409,11 +409,13 @@ describe("mention display bodies", () => {
       `\`\`\`text\n${token}\n\`\`\``,
       `    ${token}`,
       `\\${token}`,
+      "\\_literal\\_",
       `[${token}](https://example.com/${token})`,
       `<span title="${token}">${token}</span>`,
     ].join("\n\n");
     const body = `## Review\n\n**Thanks ${token}**\n\n${literals}\n\n> ${token}, ask @{unknown}.\n\n${token} <br> <span><em>${token}</em></span> ${token}`;
     const displayBody = `## Review\n\n**Thanks @Alex\\_Smith \\& Co**\n\n${literals}\n\n> @Alex\\_Smith \\& Co, ask @{unknown}.\n\n@Alex\\_Smith \\& Co <br> <span><em>${token}</em></span> @Alex\\_Smith \\& Co`;
+    const displayText = `## Review\n\n**Thanks @Alex_Smith & Co**\n\n${literals}\n\n> @Alex_Smith & Co, ask @{unknown}.\n\n@Alex_Smith & Co <br> <span><em>${token}</em></span> @Alex_Smith & Co`;
     const genericBody = `Returns Promise<void> now. Use <T> generics.\n\n${token}`;
     expect(
       expectSuccess(
@@ -475,10 +477,11 @@ describe("mention display bodies", () => {
       Schema.encodeSync(threadsCodec)(buildReviewThreads(decoded.entries)),
     );
     expect(threads.flatMap((thread) => thread.comments)).toMatchObject([
-      { body, displayBody },
+      { body, displayBody, displayText },
       { body: token },
     ]);
     expect(threads[1]?.comments[0]?.displayBody).toBeUndefined();
+    expect(threads[1]?.comments[0]?.displayText).toBeUndefined();
 
     const missingDescription = expectSuccess(
       decodePullRequestJson(JSON.stringify(pullRequest({ description: token }))),

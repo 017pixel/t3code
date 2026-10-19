@@ -80,7 +80,7 @@ function mentionLabels(html: string) {
   return labels;
 }
 
-export function bitbucketMentionDisplayBody(body: string, html: unknown) {
+export function bitbucketMentionDisplay(body: string, html: unknown) {
   if (typeof html !== "string" || !html || !body.includes("@{")) return undefined;
   const labels = mentionLabels(html);
   if (labels.size === 0) return undefined;
@@ -108,7 +108,7 @@ export function bitbucketMentionDisplayBody(body: string, html: unknown) {
         replacements.push({
           start: start + match.index,
           end: start + match.index + match[0].length,
-          label: label.replace(/[\\`*_{}[\]()<>!#|~&]/gu, "\\$&"),
+          label,
         });
       }
     }
@@ -117,12 +117,16 @@ export function bitbucketMentionDisplayBody(body: string, html: unknown) {
   visit(tree);
   if (replacements.length === 0) return undefined;
   const fragments: string[] = [];
+  const textFragments: string[] = [];
   let cursor = 0;
   for (const replacement of replacements) {
-    fragments.push(body.slice(cursor, replacement.start), replacement.label);
+    const source = body.slice(cursor, replacement.start);
+    fragments.push(source, replacement.label.replace(/[\\`*_{}[\]()<>!#|~&]/gu, "\\$&"));
+    textFragments.push(source, replacement.label);
     cursor = replacement.end;
   }
   fragments.push(body.slice(cursor));
+  textFragments.push(body.slice(cursor));
   const displayBody = fragments.join("");
-  return displayBody === body ? undefined : displayBody;
+  return displayBody === body ? undefined : { displayBody, displayText: textFragments.join("") };
 }
