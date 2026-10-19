@@ -7,6 +7,7 @@ import type { RpcSession } from "../rpc/session.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
+  AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
@@ -59,6 +60,32 @@ const setup = Effect.gen(function* () {
 });
 
 describe("command permissions", () => {
+  it.effect("requires the destination access grant to link or unlink environments", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        registry.set(
+          sessions(other),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthAccessWriteScope],
+            permissions: [AuthAccessWriteScope],
+          }),
+        );
+        for (const method of [WS_METHODS.peerLinksLink, WS_METHODS.peerLinksUnlink]) {
+          const access = createCommandPermissions(runtime, method);
+          expect(registry.get(access.permissionAtom(env))).toBe(false);
+          expect(yield* access.authorize(registry, env).pipe(Effect.flip)).toMatchObject({
+            requiredPermission: AuthAccessWriteScope,
+          });
+          expect(registry.get(access.permissionAtom(other))).toBe(true);
+          yield* access.authorize(registry, other);
+        }
+      }),
+    ),
+  );
+
   it.effect("requires the destination settings grant to run storage cleanup", () =>
     Effect.scoped(
       Effect.gen(function* () {

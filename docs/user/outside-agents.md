@@ -88,6 +88,26 @@ Any agent that supports remote MCP servers over HTTP with OAuth can connect. Giv
 it the MCP URL and choose OAuth, and the agent finds the sign-in settings itself.
 Agents without OAuth support cannot connect.
 
+## Link from another T3 Code environment
+
+On the host that will make requests, link the other environment with a pairing
+code from its **Settings → Connections** or `t3 auth pairing create`:
+
+```sh
+t3 environment link https://<environment-address> --pairing-code <code> --access approval-required
+```
+
+Use HTTPS, or HTTP over loopback or Tailscale. Plain HTTP LAN addresses are
+not supported. The link belongs to the host where you ran the command and
+appears on the peer as **T3 Code · <host label>**. Calls keep both the link's
+access ceiling and the calling agent's narrower modes.
+
+Use `t3 environment list` to check reachability and
+`t3 environment get <environment-id> --json` to read a stored link without
+contacting the peer. Run `t3 environment unlink <environment-id>` to forget it
+locally. To revoke its access on the peer, remove its session in that peer's
+Connections settings. After a link expires, link again with a new pairing code.
+
 ## Remove an agent
 
 Approved agents appear under **Settings → Connections** like other clients.

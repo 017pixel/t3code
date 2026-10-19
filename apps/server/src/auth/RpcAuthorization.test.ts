@@ -1,4 +1,8 @@
 import {
+  AuthAccessReadScope,
+  AuthAccessWriteScope,
+  EnvironmentId,
+  PeerLinkError,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -469,4 +473,70 @@ it.effect("denies manual cleanup before the handler without settings permission"
     });
     expect(handled).toBe(false);
   }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "peer links can be read with access:read, while linking and unlinking require access:write",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const tested = [
+          WS_METHODS.peerLinksList,
+          WS_METHODS.peerLinksGet,
+          WS_METHODS.peerLinksLink,
+          WS_METHODS.peerLinksUnlink,
+        ] as const;
+        const group = WsRpcGroup.omit(
+          ...[...WsRpcGroup.requests.keys()].filter(
+            (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
+              !(tested as ReadonlyArray<string>).includes(tag),
+          ),
+        );
+        const handled: Array<string> = [];
+        const handlers = group.toLayer({
+          [WS_METHODS.peerLinksList]: () => Effect.succeed({ links: [] }),
+          [WS_METHODS.peerLinksGet]: () => Effect.succeed(null),
+          [WS_METHODS.peerLinksLink]: () =>
+            Effect.sync(() => handled.push("link")).pipe(
+              Effect.andThen(
+                new PeerLinkError({ reason: "self", message: "That address is this environment." }),
+              ),
+            ),
+          [WS_METHODS.peerLinksUnlink]: () =>
+            Effect.sync(() => {
+              handled.push("unlink");
+              return { removed: true };
+            }),
+        });
+        const reader = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthAccessReadScope]))),
+        );
+        const peer = { environmentId: EnvironmentId.make("peer") };
+        const link = {
+          url: "http://127.0.0.1:1",
+          pairingCode: "test",
+          access: "read-only" as const,
+        };
+        expect(yield* reader[WS_METHODS.peerLinksList]({})).toEqual({ links: [] });
+        expect(yield* reader[WS_METHODS.peerLinksGet](peer)).toBeNull();
+        expect(yield* reader[WS_METHODS.peerLinksLink](link).pipe(Effect.flip)).toMatchObject({
+          requiredPermission: AuthAccessWriteScope,
+        });
+        expect(yield* reader[WS_METHODS.peerLinksUnlink](peer).pipe(Effect.flip)).toMatchObject({
+          requiredPermission: AuthAccessWriteScope,
+        });
+        expect(handled).toEqual([]);
+        const writer = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthAccessWriteScope]))),
+        );
+        expect(yield* writer[WS_METHODS.peerLinksLink](link).pipe(Effect.flip)).toMatchObject({
+          _tag: "PeerLinkError",
+        });
+        expect(yield* writer[WS_METHODS.peerLinksUnlink](peer)).toEqual({ removed: true });
+        expect(handled).toEqual(["link", "unlink"]);
+        expect(yield* writer[WS_METHODS.peerLinksGet](peer).pipe(Effect.flip)).toMatchObject({
+          requiredPermission: AuthAccessReadScope,
+        });
+      }),
+    ),
 );

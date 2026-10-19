@@ -149,6 +149,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       "server"`) and streams them over `/api/preview-stream`. Clients
       without a local browser runtime open server tabs here. */
   serverBrowser: Schema.optionalKey(Schema.Boolean),
+  /** Supports persistent outgoing peer links. */
+  peerLinks: Schema.optionalKey(Schema.Boolean),
+  /** Honors `T3-Mode-Limit`; peers require this before sending authenticated calls. */
+  mcpModeLimitHeader: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 
