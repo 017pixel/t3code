@@ -50,44 +50,64 @@ NodeFS.writeFileSync(envScript, "environment home");
 const customLink = NodePath.join(NodePath.dirname(customScript), "escape.js");
 if (symlinksSupported) NodeFS.symlinkSync(outside, customLink);
 
+const providerInstances = {
+  [ProviderInstanceId.make("claude-missing")]: {
+    driver: ProviderDriverKind.make("claudeAgent"),
+    config: { homePath: NodePath.join(sandbox, "missing") },
+  },
+  [ProviderInstanceId.make("claude-custom")]: {
+    driver: ProviderDriverKind.make("claudeAgent"),
+    config: { homePath: customHome },
+  },
+  [ProviderInstanceId.make("claude-env")]: {
+    driver: ProviderDriverKind.make("claudeAgent"),
+    environment: [{ name: "CLAUDE_CONFIG_DIR", value: envHome }],
+  },
+};
+
 effectIt.layer(
-  Settings.layerTest({
-    providerInstances: {
-      [ProviderInstanceId.make("claude-missing")]: {
-        driver: ProviderDriverKind.make("claudeAgent"),
-        config: { homePath: NodePath.join(sandbox, "missing") },
-      },
-      [ProviderInstanceId.make("claude-custom")]: {
-        driver: ProviderDriverKind.make("claudeAgent"),
-        config: { homePath: customHome },
-      },
-      [ProviderInstanceId.make("claude-env")]: {
-        driver: ProviderDriverKind.make("claudeAgent"),
-        environment: [{ name: "CLAUDE_CONFIG_DIR", value: envHome }],
-      },
-    },
-  }).pipe(
+  Settings.layerTest({ providerInstances }).pipe(
     Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, home)),
     Layer.provideMerge(NodePathService.layer),
   ),
 )("workflow script containment", (effectIt) => {
-  effectIt.effect("reads configured Claude homes while rejecting escapes", () =>
-    Effect.gen(function* () {
-      assert.equal(
-        (yield* readWorkflowScript({ scriptPath: customScript })).contents,
-        "custom home",
-      );
-      assert.equal(
-        (yield* readWorkflowScript({ scriptPath: envScript })).contents,
-        "environment home",
-      );
-      const escaped = yield* readWorkflowScript({ scriptPath: outside }).pipe(Effect.flip);
-      assert.equal(escaped.reason, "outside-root");
-      if (symlinksSupported) {
-        const linked = yield* readWorkflowScript({ scriptPath: customLink }).pipe(Effect.flip);
-        assert.equal(linked.reason, "outside-root");
-      }
-    }),
+  effectIt.effect.each(["valid", "malformed"] as const)(
+    "reads configured Claude homes while rejecting escapes with %s unrelated config",
+    (unrelatedConfig) =>
+      Effect.gen(function* () {
+        assert.equal(
+          (yield* readWorkflowScript({ scriptPath: customScript })).contents,
+          "custom home",
+        );
+        assert.equal(
+          (yield* readWorkflowScript({ scriptPath: envScript })).contents,
+          "environment home",
+        );
+        assert.equal(
+          (yield* readWorkflowScript({ scriptPath })).contents,
+          "export const meta = {};\n",
+        );
+        const escaped = yield* readWorkflowScript({ scriptPath: outside }).pipe(Effect.flip);
+        assert.equal(escaped.reason, "outside-root");
+        if (symlinksSupported) {
+          const linked = yield* readWorkflowScript({ scriptPath: customLink }).pipe(Effect.flip);
+          assert.equal(linked.reason, "outside-root");
+        }
+      }).pipe(
+        Effect.provide(
+          Settings.layerTest({
+            providerInstances: {
+              ...providerInstances,
+              [ProviderInstanceId.make("claude-unrelated")]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                enabled: false,
+                config:
+                  unrelatedConfig === "malformed" ? { autoCompactWindow: "not-a-number" } : {},
+              },
+            },
+          }),
+        ),
+      ),
   );
 
   effectIt.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
