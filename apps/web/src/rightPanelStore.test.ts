@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { type EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { useClosedViewStore } from "./closedViewStore";
@@ -28,6 +28,16 @@ beforeEach(() => {
     closeRevisionByThreadKey: {},
   });
 });
+
+async function reloadRightPanelStore() {
+  const { storage, name } = useRightPanelStore.persist.getOptions();
+  const persisted = await storage!.getItem(name!);
+  expect(persisted).not.toBeNull();
+  useRightPanelStore.setState(useRightPanelStore.getInitialState());
+  await storage!.setItem(name!, persisted!);
+  await useRightPanelStore.persist.rehydrate();
+  expect(useRightPanelStore.persist.hasHydrated()).toBe(true);
+}
 
 describe("rightPanelStore", () => {
   it("records single and bulk tab closes, newest first", () => {
@@ -208,7 +218,7 @@ describe("rightPanelStore", () => {
     },
   );
 
-  const completedDiff = { id: "diff", kind: "diff" } as const;
+  const completedDiff = { kind: "diff", turnId: RunId.make("turn-1") } as const;
   const linkedPullRequest = pullRequestSurface({
     projectId: "project-a",
     repository: "pingdotgg/t3code",
@@ -281,9 +291,15 @@ describe("rightPanelStore", () => {
     expect(
       store.openProactive(refA, { id: "pull-requests", kind: "pull-requests" }, revision),
     ).toBe(false);
-    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toBe(
-      chosen,
+    const { isOpen, activeSurfaceId, surfaces } = selectThreadRightPanelState(
+      useRightPanelStore.getState().byThreadKey,
+      refA,
     );
+    expect({ isOpen, activeSurfaceId, surfaces }).toEqual({
+      isOpen: chosen.isOpen,
+      activeSurfaceId: chosen.activeSurfaceId,
+      surfaces: chosen.surfaces,
+    });
   });
 
   it("allows automatic panels for a later turn after a manual choice", () => {
@@ -293,7 +309,127 @@ describe("rightPanelStore", () => {
     expect(store.openProactive(refA, completedDiff, firstTurnRevision)).toBe(false);
 
     const nextTurnRevision = store.getUserActionRevision(refA);
-    expect(store.openProactive(refA, completedDiff, nextTurnRevision)).toBe(true);
+    expect(
+      store.openProactive(
+        refA,
+        { ...completedDiff, turnId: RunId.make("turn-2") },
+        nextTurnRevision,
+      ),
+    ).toBe(true);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
+  });
+
+  it("offers each completed diff once across dismissal, panel changes, and reload", async () => {
+    const store = useRightPanelStore.getState();
+    expect(store.openProactive(refA, completedDiff, store.getUserActionRevision(refA))).toBe(true);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
+
+    store.close(refA);
+    await reloadRightPanelStore();
+    expect(store.openProactive(refA, completedDiff, store.getUserActionRevision(refA))).toBe(false);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+
+    store.open(refA, "files");
+    store.openFile(refA, "src/app.ts");
+    await reloadRightPanelStore();
+    expect(store.openProactive(refA, completedDiff, store.getUserActionRevision(refA))).toBe(false);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("file");
+
+    store.closeAllSurfaces(refA);
+    await reloadRightPanelStore();
+    expect(store.openProactive(refA, completedDiff, store.getUserActionRevision(refA))).toBe(false);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+
+    const otherEnvironment = scopeThreadRef("env-2" as EnvironmentId, refA.threadId);
+    for (const ref of [refB, otherEnvironment]) {
+      expect(store.openProactive(ref, completedDiff, store.getUserActionRevision(ref))).toBe(true);
+      expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, ref)).toBe("diff");
+    }
+
+    const nextTurn = { ...completedDiff, turnId: RunId.make("turn-2") };
+    expect(store.openProactive(refA, nextTurn, store.getUserActionRevision(refA))).toBe(true);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
+
+    const completedWhileOpen = { ...completedDiff, turnId: RunId.make("turn-3") };
+    const existingDiff = selectActiveRightPanelSurface(
+      useRightPanelStore.getState().byThreadKey,
+      refA,
+    );
+    expect(store.openProactive(refA, completedWhileOpen, store.getUserActionRevision(refA))).toBe(
+      false,
+    );
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual(
+      existingDiff,
+    );
+    store.closeSurface(refA, "diff");
+    await reloadRightPanelStore();
+    expect(store.openProactive(refA, completedWhileOpen, store.getUserActionRevision(refA))).toBe(
+      false,
+    );
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+
+    // A later storage migration must preserve the dismissal, just like an ordinary reload.
+    const { storage, name, version } = useRightPanelStore.persist.getOptions();
+    const persisted = await storage!.getItem(name!);
+    await storage!.setItem(name!, { ...persisted!, version: version! - 1 });
+    await reloadRightPanelStore();
+    expect(store.openProactive(refA, completedWhileOpen, store.getUserActionRevision(refA))).toBe(
+      false,
+    );
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+
+    expect(
+      store.openProactive(
+        refA,
+        { ...completedDiff, turnId: RunId.make("turn-4") },
+        store.getUserActionRevision(refA),
+      ),
+    ).toBe(true);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
+    store.closeSurface(refA, "diff");
+    store.open(refA, "diff");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
+  });
+
+  it("does not retry declined diff offers after manual choices or PR priority clear", async () => {
+    const store = useRightPanelStore.getState();
+    const revision = store.getUserActionRevision(refA);
+    store.openFile(refA, "src/app.ts");
+    expect(store.openProactive(refA, completedDiff, revision)).toBe(false);
+    await reloadRightPanelStore();
+    expect(store.openProactive(refA, completedDiff, store.getUserActionRevision(refA))).toBe(false);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("file");
+
+    store.closeAllSurfaces(refA);
+    expect(store.openProactive(refA, completedDiff, store.getUserActionRevision(refA))).toBe(false);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+
+    const nextTurn = { ...completedDiff, turnId: RunId.make("turn-2") };
+    store.openPullRequest(refA, linkedPullRequest);
+    expect(store.openProactive(refA, nextTurn, store.getUserActionRevision(refA))).toBe(false);
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual(
+      linkedPullRequest,
+    );
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+    ).toEqual([linkedPullRequest]);
+    await reloadRightPanelStore();
+    expect(store.openProactive(refA, nextTurn, store.getUserActionRevision(refA))).toBe(false);
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual(
+      linkedPullRequest,
+    );
+    store.closeSurface(refA, linkedPullRequest.id);
+    await reloadRightPanelStore();
+    expect(store.openProactive(refA, nextTurn, store.getUserActionRevision(refA))).toBe(false);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+
+    expect(
+      store.openProactive(
+        refA,
+        { ...completedDiff, turnId: RunId.make("turn-3") },
+        store.getUserActionRevision(refA),
+      ),
+    ).toBe(true);
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
   });
 
@@ -1086,10 +1222,6 @@ describe("rightPanelStore", () => {
   });
 
   it("keeps the page's panel tabs reachable when the set of connected servers changes", () => {
-    // The pull-requests page keys its one shared panel by a fixed sentinel environment, not by
-    // whichever capable server happens to sort first (see PULL_REQUESTS_PANEL_ENVIRONMENT_ID in
-    // _chat.pull-requests.tsx) — a server disconnecting must not move every open tab to a store
-    // key nobody wrote them under.
     const panelId = ThreadId.make("pull-requests-panel");
     const stableRef = scopeThreadRef("pull-requests-panel" as EnvironmentId, panelId);
     const fromServerA = {
@@ -1105,21 +1237,15 @@ describe("rightPanelStore", () => {
       number: 2,
     };
 
-    // Both servers connected: tabs from each open under the one stable ref.
     useRightPanelStore.getState().openPullRequest(stableRef, fromServerA);
     useRightPanelStore.getState().openPullRequest(stableRef, fromServerB);
 
-    // Server A disconnects. The stable ref does not depend on which servers remain connected, so
-    // the same lookup still finds both tabs.
     const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, stableRef);
     expect(state.surfaces.map((surface) => surface.id)).toEqual([
       pullRequestSurfaceId(fromServerA),
       pullRequestSurfaceId(fromServerB),
     ]);
 
-    // The bug this guards against: a ref keyed by the first capable environment instead of a
-    // fixed sentinel changes identity when that environment drops out, and a lookup under the new
-    // key finds nothing even though the tabs are still sitting under the old one.
     const refWhileBothConnected = scopeThreadRef("server-a" as EnvironmentId, panelId);
     const refAfterServerADisconnects = scopeThreadRef("server-b" as EnvironmentId, panelId);
     expect(refWhileBothConnected).not.toEqual(refAfterServerADisconnects);
@@ -1331,7 +1457,6 @@ describe("rightPanelStore", () => {
 
     store.reconcileBrowserSurfaces(refA, ["tab-a", "tab-b"]);
     expect(surfaceIds()).toEqual(["browser:tab-a", "terminal:term-1", "diff", "browser:tab-b"]);
-    // Reordering is not a choice about what the panel shows.
     expect(store.getUserActionRevision(refA)).toBe(revision);
   });
 });

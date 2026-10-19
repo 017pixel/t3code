@@ -260,7 +260,6 @@ const cleanupFixture = (
     yield* fs.makeDirectory(config.worktreesDir, { recursive: true });
     const worktree = `${config.worktreesDir}/feature`;
     yield* command(repo, ["worktree", "add", "-b", "feature", worktree]);
-    // worktreeOnDelete lets domain events request sweeps once a test calls activate.
     let settings: import("@t3tools/contracts").ServerSettings = {
       ...DEFAULT_SERVER_SETTINGS,
       storageCleanup,
@@ -307,14 +306,26 @@ const cleanupFixture = (
         getShellSnapshot: (input?: { location?: string }) =>
           Effect.sync(() => {
             snapshotReads++;
-            return { threads: input?.location === "archive" ? [] : threads };
+            const visible = threads.filter((thread) => thread.deletedAt === null);
+            return {
+              threads:
+                input?.location === "archive"
+                  ? []
+                  : visible.filter((thread) => thread.archivedAt === null),
+              archivedThreads:
+                input?.location === "active"
+                  ? []
+                  : visible.filter((thread) => thread.archivedAt !== null),
+            };
           }),
-        getThreadWorktreePaths: () =>
+        getThreadWorktreePaths: (input?: { includeArchived?: boolean }) =>
           Effect.sync(() =>
             threads.flatMap((thread) =>
-              thread.worktreePath === null
-                ? []
-                : [{ threadId: thread.id, worktreePath: thread.worktreePath }],
+              thread.deletedAt === null &&
+              (input?.includeArchived === true || thread.archivedAt === null) &&
+              thread.worktreePath !== null
+                ? [{ threadId: thread.id, worktreePath: thread.worktreePath }]
+                : [],
             ),
           ),
         getThreadShell: (threadId: ThreadId) =>
@@ -416,14 +427,12 @@ const cleanupFixture = (
       },
       fullStatusCalls: () => fullStatusCalls,
       snapshotReads: () => snapshotReads,
-      /** Starts the hourly sweep and the subscription to `domainEvents`, which wait until now. */
       activate: (domainEvents: Stream.Stream<OrchestrationV2DomainEvent>) => {
         events = domainEvents;
         return Deferred.succeed(activated, undefined);
       },
     };
   });
-/** The fixture, with the size walk of its worktree held until `resume` succeeds. */
 const pausedMeasurementFixture = (storageCleanup?: StorageCleanupSettings) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -1179,6 +1188,41 @@ describe("orphan worktree reports", () => {
 });
 
 describe("storage cleanup reports and local file policies", () => {
+  it.effect("automatically removes an eligible archived thread checkout", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture();
+        fixture.setThreads([
+          shell({
+            branch: "feature",
+            worktreePath: fixture.worktree,
+            archivedAt: at(-DAY_MS),
+          }),
+        ]);
+        yield* fixture.activate(Stream.empty);
+        const [report] = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        yield* fixture.service.drain;
+        expect(report).toMatchObject({
+          trigger: "automatic",
+          counts: { removed: 1, kept: 0, failed: 0 },
+          entries: [
+            {
+              threadId: "thread-1",
+              path: fixture.worktree,
+              outcome: "removed",
+              reason: "Inactive for 30 days",
+            },
+          ],
+        });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }),
+    ),
+  );
   it.live.each(["before-check", "while-measuring"] as const)(
     "keeps a worktree protected by a missing project root (%s)",
     (timing) =>
@@ -1267,6 +1311,18 @@ describe("storage cleanup reports and local file policies", () => {
         shell({ id: ThreadId.make("thread-2"), branch: "feature", worktreePath: worktree }),
       ],
     ],
+    [
+      "an archived thread starts using it",
+      (worktree: string) => [
+        shell({ branch: "feature", worktreePath: worktree }),
+        shell({
+          id: ThreadId.make("thread-2"),
+          branch: "feature",
+          worktreePath: worktree,
+          archivedAt: at(-DAY_MS),
+        }),
+      ],
+    ],
   ] as const)("keeps a worktree when %s during size measurement", ([, threadsWhileMeasuring]) =>
     runCleanupTest(
       Effect.gen(function* () {
@@ -1309,7 +1365,6 @@ describe("storage cleanup reports and local file policies", () => {
         Effect.gen(function* () {
           const fixture = yield* pausedMeasurementFixture();
           const handled = yield* Deferred.make<void>();
-          // 20 updates arrive while the first automatic sweep measures the worktree.
           yield* fixture.activate(
             Stream.fromEffect(Deferred.await(fixture.measuring)).pipe(
               Stream.flatMap(() => Stream.range(0, 19)),
@@ -1322,7 +1377,6 @@ describe("storage cleanup reports and local file policies", () => {
           yield* Deferred.await(handled);
           yield* Deferred.succeed(fixture.resume, undefined);
           yield* fixture.service.drain;
-          // One snapshot read per sweep.
           expect(fixture.snapshotReads()).toBe(sweeps);
         }),
       ),
@@ -1350,7 +1404,6 @@ describe("storage cleanup reports and local file policies", () => {
           bytes: null,
         });
         expect(walked.filter((directory) => directory.startsWith(root))).toEqual([]);
-        // The stored session stays ready after its runtime was released.
         fixture.setSessionLive(false);
         const removed = yield* fixture.service.runNow;
         expect(removed.entries[0]).toMatchObject({ outcome: "removed" });
@@ -1367,15 +1420,12 @@ describe("storage cleanup reports and local file policies", () => {
         const changed = { outcome: "kept", reason: "Repository or branch changed" };
         yield* command(worktree, ["checkout", "--detach"]);
         expect((yield* service.runNow).entries[0]).toMatchObject(changed);
-        // A branch that has no commit yet is still a different branch.
         yield* command(worktree, ["switch", "--orphan", "other"]);
         expect((yield* service.runNow).entries[0]).toMatchObject(changed);
-        // Status output reserves a leading "(" for a detached HEAD.
         yield* command(worktree, ["switch", "-c", "(feature)", "feature"]);
         setThreads([shell({ branch: "(feature)", worktreePath: worktree })]);
         expect((yield* service.runNow).entries[0]).toMatchObject(changed);
         setThreads([shell({ branch: "feature", worktreePath: worktree })]);
-        // Tags named after the branch or HEAD make Git's short names ambiguous.
         yield* command(worktree, ["tag", "feature", "feature"]);
         // Newer Git refuses to create a tag named HEAD, but still reads one.
         yield* command(worktree, ["update-ref", "refs/tags/HEAD", "refs/heads/feature"]);
@@ -1551,6 +1601,17 @@ describe("storage cleanup reports and local file policies", () => {
             shell({ id: ThreadId.make("thread-2"), branch: "feature", worktreePath: worktree }),
           ]);
           expect((yield* service.runNow).entries[0]?.reason).toBe("Shared by 2 threads");
+          setThreads([
+            shell({ branch: "feature", worktreePath: worktree }),
+            shell({
+              id: ThreadId.make("thread-2"),
+              branch: "feature",
+              worktreePath: worktree,
+              archivedAt: at(-DAY_MS),
+            }),
+          ]);
+          expect((yield* service.runNow).entries[0]?.reason).toBe("Shared by 2 threads");
+          expect(yield* fs.exists(worktree)).toBe(true);
           fixture.disable();
           expect((yield* service.runNow).entries).toEqual([]);
           yield* fs.remove(worktree, { recursive: true });
@@ -1659,7 +1720,6 @@ describe("settled worktree retention", () => {
         ...DEFAULT_SERVER_SETTINGS.storageCleanup,
         worktreeSettledAfterDays:
           scenario === "project-custom" || scenario === "inactive-settling" ? null : days,
-        // Another rule must not bypass the settle-script grace either.
         worktreeAfterDays: scenario === "inactive-settling" ? 1 : null,
       };
       fixture.setSettings({
