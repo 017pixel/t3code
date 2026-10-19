@@ -20,6 +20,7 @@ import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { readWorkflowScript } from "./workflowScriptQuery.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as Layer from "effect/Layer";
@@ -57,6 +58,35 @@ NodeFS.writeFileSync(envScript, "environment home");
 const customLink = NodePath.join(NodePath.dirname(customScript), "escape.js");
 if (symlinksSupported) NodeFS.symlinkSync(outside, customLink);
 
+const fixtureThreadId = ThreadId.make("workflow-script-fixture");
+const fixture = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("workflow-script-fixture:create"),
+      threadId: fixtureThreadId,
+      projectId: ProjectId.make("workflow-project"),
+      title: "Workflow",
+      modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "default" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: process.cwd(),
+      createdBy: "user",
+      creationSource: "web",
+    });
+  }),
+).pipe(
+  Layer.provideMerge(
+    ProviderReplayHarness.layerWithRegistry(
+      { name: "workflow-script-fixture" },
+      ProviderAdapterRegistry.layerFromAdapters([]),
+      { runEffectWorker: false },
+    ),
+  ),
+);
+
 const providerInstances = {
   [ProviderInstanceId.make("claude-missing")]: {
     driver: ProviderDriverKind.make("claudeAgent"),
@@ -78,6 +108,8 @@ effectIt.layer(
     Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, home)),
     Layer.provideMerge(Layer.succeed(HostProcess.Environment, {})),
     Layer.provideMerge(NodePathService.layer),
+    Layer.provideMerge(fixture),
+    Layer.provideMerge(Layer.mock(ProjectStore.ProjectStoreV2)({})),
   ),
 )("workflow script containment", (effectIt) => {
   effectIt.effect.each(["valid", "malformed"] as const)(
@@ -85,21 +117,29 @@ effectIt.layer(
     (unrelatedConfig) =>
       Effect.gen(function* () {
         assert.equal(
-          (yield* readWorkflowScript({ scriptPath: customScript })).contents,
+          (yield* readWorkflowScript({ threadId: fixtureThreadId, scriptPath: customScript }))
+            .contents,
           "custom home",
         );
         assert.equal(
-          (yield* readWorkflowScript({ scriptPath: envScript })).contents,
+          (yield* readWorkflowScript({ threadId: fixtureThreadId, scriptPath: envScript }))
+            .contents,
           "environment home",
         );
         assert.equal(
-          (yield* readWorkflowScript({ scriptPath })).contents,
+          (yield* readWorkflowScript({ threadId: fixtureThreadId, scriptPath })).contents,
           "export const meta = {};\n",
         );
-        const escaped = yield* readWorkflowScript({ scriptPath: outside }).pipe(Effect.flip);
+        const escaped = yield* readWorkflowScript({
+          threadId: fixtureThreadId,
+          scriptPath: outside,
+        }).pipe(Effect.flip);
         assert.equal(escaped.reason, "outside-root");
         if (symlinksSupported) {
-          const linked = yield* readWorkflowScript({ scriptPath: customLink }).pipe(Effect.flip);
+          const linked = yield* readWorkflowScript({
+            threadId: fixtureThreadId,
+            scriptPath: customLink,
+          }).pipe(Effect.flip);
           assert.equal(linked.reason, "outside-root");
         }
       }).pipe(
@@ -173,14 +213,16 @@ effectIt.layer(
       Effect.gen(function* () {
         const fifo = NodePath.join(root, "pipe.js");
         NodeChildProcess.execFileSync("mkfifo", [fifo]);
-        const error = yield* Effect.flip(readWorkflowScript({ scriptPath: fifo }));
+        const error = yield* Effect.flip(
+          readWorkflowScript({ threadId: fixtureThreadId, scriptPath: fifo }),
+        );
         assert.equal(error.reason, "not-regular-file");
       }),
   );
 
   effectIt.effect("serves a real script under the projects root", () =>
     Effect.gen(function* () {
-      const result = yield* readWorkflowScript({ scriptPath });
+      const result = yield* readWorkflowScript({ threadId: fixtureThreadId, scriptPath });
       assert.include(result.contents, "export const meta");
       assert.equal(result.truncated, false);
     }),
@@ -188,13 +230,20 @@ effectIt.layer(
 
   effectIt.effect("rejects relative and non-js paths", () =>
     Effect.gen(function* () {
-      const relative = yield* Effect.exit(readWorkflowScript({ scriptPath: "run.js" }));
+      const relative = yield* Effect.exit(
+        readWorkflowScript({ threadId: fixtureThreadId, scriptPath: "run.js" }),
+      );
       assert.equal(relative._tag, "Failure");
       const nonJs = yield* Effect.exit(
-        readWorkflowScript({ scriptPath: scriptPath.replace(".js", ".ts") }),
+        readWorkflowScript({
+          threadId: fixtureThreadId,
+          scriptPath: scriptPath.replace(".js", ".ts"),
+        }),
       );
       assert.equal(nonJs._tag, "Failure");
-      const error = yield* Effect.flip(readWorkflowScript({ scriptPath: "run.js" }));
+      const error = yield* Effect.flip(
+        readWorkflowScript({ threadId: fixtureThreadId, scriptPath: "run.js" }),
+      );
       assert.equal(error._tag, "OrchestrationGetWorkflowScriptError");
       assert.equal(error.scriptPath, "run.js");
       assert.equal(error.reason, "invalid-path");
@@ -207,10 +256,12 @@ effectIt.layer(
     "rejects paths outside the root and symlink escapes",
     () =>
       Effect.gen(function* () {
-        const escaped = yield* Effect.exit(readWorkflowScript({ scriptPath: outside }));
+        const escaped = yield* Effect.exit(
+          readWorkflowScript({ threadId: fixtureThreadId, scriptPath: outside }),
+        );
         assert.equal(escaped._tag, "Failure");
         const sneaky = yield* Effect.exit(
-          readWorkflowScript({ scriptPath: link }).pipe(
+          readWorkflowScript({ threadId: fixtureThreadId, scriptPath: link }).pipe(
             Effect.flip,
             Effect.map((error) => error.reason),
           ),
