@@ -2,6 +2,7 @@ import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -1067,6 +1068,45 @@ it.effect.each(["read", "decode"] as const)(
       if (stage === "read") assert.strictEqual(error.cause, cause);
       else assert.propertyVal(error.cause, "_tag", "SchemaError");
     }),
+);
+
+it.effect("times out linked subjects while account resolution is blocked", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const released = yield* Deferred.make<void>();
+    let restAttempts = 0;
+    const { layer } = harness({
+      remotes: "",
+      credential: () =>
+        Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() => Deferred.succeed(released, undefined)),
+        ),
+      api: {
+        rest: () =>
+          Effect.sync(() => {
+            restAttempts++;
+            return restResponse({ title: "Pairing expiry", body: "Preserve remote access" });
+          }),
+      },
+    });
+    const provider = yield* GitHubSourceControlProvider.make.pipe(Effect.provide(layer));
+    const lookup = provider.resolveLink?.({
+      cwd: "/repo",
+      url: new URL("https://github.com/owner/repo/issues/42"),
+    });
+    assert.ok(lookup);
+    const pending = yield* lookup.pipe(Effect.flip, Effect.forkChild);
+    yield* Deferred.await(started);
+    yield* TestClock.adjust("3 seconds");
+    assert.strictEqual(restAttempts, 0);
+    assert.isDefined(pending.pollUnsafe(), "resolveLink must finish within three seconds");
+    const error = yield* Fiber.join(pending);
+    assert.strictEqual(error._tag, "SourceControlProviderError");
+    assert.strictEqual(error.operation, "resolveLink");
+    assert.strictEqual(error.cwd, "/repo");
+    assert.isTrue(yield* Deferred.isDone(released));
+  }),
 );
 
 const multiAccountStatus = (extra: ReadonlyArray<Record<string, unknown>> = []) =>
