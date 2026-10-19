@@ -15,6 +15,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
+import * as Queue from "effect/Queue";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as TestClock from "effect/testing/TestClock";
 import type {
@@ -525,6 +526,7 @@ function fakeProvider(
 
 function makeService(input: {
   readonly settings?: ServerSettings;
+  readonly settingsChanges?: Stream.Stream<ServerSettings>;
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly providers: ReadonlyArray<PullRequestProviderApi>;
   readonly resolveHandle?: SourceControlProviderRegistry.SourceControlProviderRegistry["Service"]["resolveHandle"];
@@ -537,6 +539,7 @@ function makeService(input: {
       Layer.mergeAll(
         Layer.mock(ServerSettingsService.ServerSettingsService)({
           getSettings: Effect.succeed(input.settings ?? DEFAULT_SERVER_SETTINGS),
+          subscribeChanges: Effect.succeed(input.settingsChanges ?? Stream.empty),
         }),
         Layer.succeed(
           PullRequestProviderRegistry.PullRequestProviderRegistry,
@@ -1422,7 +1425,12 @@ it.effect("routing verifies the current account on the requested host without ca
       providers: [
         fakeProvider(SourceControlProviderKind.make("github"), {
           getRoutingIdentity: (input) => {
-            assert.deepStrictEqual(input, { cwd: "/a", host: "github.example.test" });
+            // The repository names whose account to verify, on a host with one per owner.
+            assert.deepStrictEqual(input, {
+              cwd: "/a",
+              host: "github.example.test",
+              repository: "acme/web",
+            });
             return Effect.succeed({
               viewer,
               accountId: viewer === "first-account" ? "123" : "456",
@@ -1672,13 +1680,14 @@ it.effect("keeps branch deletion on the credential that passed source repository
     const credentials = Layer.succeed(
       GitHubCredentials.GitHubCredentials,
       GitHubCredentials.GitHubCredentials.of({
-        get: (host) =>
+        get: (host, repository) =>
           Effect.sync(() => ({
             host,
-            token: Redacted.make(activeToken),
+            token: Redacted.make(repository === "acme/web" ? activeToken : "host-account"),
             source: "gh" as const,
             fingerprint: `${host}:${activeToken}`,
           })),
+        accountFor: () => Effect.succeed(undefined),
         invalidate: () => Effect.void,
       }),
     );
@@ -1752,7 +1761,7 @@ it.effect("keeps branch deletion on the credential that passed source repository
       Effect.provide(
         GitHubPullRequestApi.layer.pipe(
           // GraphQL reads go over `http` too, through the same credential and quota as REST.
-          Layer.provide(
+          Layer.provideMerge(
             GitHubRest.layer.pipe(
               Layer.provideMerge(Layer.mergeAll(credentials, http)),
               Layer.provideMerge(GitHubQuota.layer),
@@ -3967,6 +3976,311 @@ it.effect("shares one cold viewer lookup across distinct concurrent lists", () =
 
     assert.strictEqual(viewerCalls, 1);
     assert.strictEqual(listCalls, 3);
+  }),
+);
+
+it.effect("reads each repository as the account its scope names", () =>
+  Effect.gen(function* () {
+    const viewerAsked: Array<string | undefined> = [];
+    const searches: Array<{ readonly viewer: string; readonly repositories: string }> = [];
+    const statsAsked: Array<ReadonlyArray<string>> = [];
+    // Two tokens belong to the personal login; they must still use separate batches.
+    const accountOf = (repository: string | undefined) =>
+      repository === "acme/web" || repository === "acme-labs/api" ? "work" : "personal";
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        project({ id: "p2", title: "api", workspaceRoot: "/b", repository: "acme-labs/api" }),
+        project({ id: "p3", title: "docs", workspaceRoot: "/c", repository: "acme/docs" }),
+        project({ id: "p4", title: "blog", workspaceRoot: "/d", repository: "me/blog" }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          // The host's own account is the empty scope.
+          credentialScope: ({ repository }) =>
+            Effect.succeed(
+              repository === "acme/docs"
+                ? "docs-token"
+                : accountOf(repository) === "work"
+                  ? "work"
+                  : "",
+            ),
+          getViewer: (input) =>
+            Effect.sync(() => {
+              viewerAsked.push(input.repository);
+              return accountOf(input.repository);
+            }),
+          listChangeRequestsAcross: (input) =>
+            Effect.sync(() => {
+              searches.push({
+                viewer: input.viewer,
+                repositories: input.repositories.toSorted().join(","),
+              });
+              return {
+                items: input.repositories.map((repository, index) => ({
+                  ...batchedChangeRequest(index + 1, repository, "2026-07-02T00:00:00Z"),
+                  author: { login: accountOf(repository), name: null, avatarUrl: null },
+                })),
+                truncated: false,
+              };
+            }),
+          listChangeRequestStats: (input) =>
+            Effect.sync(() => {
+              statsAsked.push(input.changeRequests.map((entry) => entry.repository));
+              return [];
+            }),
+        }),
+      ],
+    });
+
+    const result = yield* service.list({ state: "open", involvement: "all" });
+    assert.strictEqual(viewerAsked.length, 3);
+    // Each account's repositories share one search, whoever owns them.
+    assert.deepStrictEqual(
+      searches.toSorted((left, right) => left.viewer.localeCompare(right.viewer)),
+      [
+        { viewer: "personal", repositories: "acme/docs" },
+        { viewer: "personal", repositories: "me/blog" },
+        { viewer: "work", repositories: "acme-labs/api,acme/web" },
+      ],
+    );
+    // Every row names who it was read as, so each is "authored" by its own account.
+    assert.deepStrictEqual(
+      result.entries
+        .map((entry) => `${entry.repository} ${entry.viewer} ${entry.author?.login}`)
+        .toSorted(),
+      [
+        "acme-labs/api work work",
+        "acme/docs personal personal",
+        "acme/web work work",
+        "me/blog personal personal",
+      ],
+    );
+    assert.strictEqual(result.providers.length, 1);
+    assert.strictEqual(result.providers[0]?.configured, true);
+
+    yield* service.listStats({
+      refs: result.entries.map(({ projectId, repository, number }) => ({
+        projectId,
+        repository,
+        number,
+      })),
+    });
+    assert.deepStrictEqual(statsAsked.map((repositories) => repositories.toSorted()).toSorted(), [
+      ["acme-labs/api", "acme/web"],
+      ["acme/docs"],
+      ["me/blog"],
+    ]);
+  }),
+);
+
+it.effect("reads an open pull request again once an account choice changes", () =>
+  Effect.gen(function* () {
+    let viewers = 0;
+    let previews = 0;
+    let summaries = 0;
+    // The account the repository resolves to, as GitHub reads it from the same settings.
+    let account = "";
+    const changes = yield* Queue.unbounded<ServerSettings>();
+    const service = yield* makeService({
+      settingsChanges: Stream.fromQueue(changes),
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          credentialScope: () => Effect.sync(() => account),
+          getViewer: () =>
+            Effect.sync(() => {
+              viewers++;
+              return account || "personal";
+            }),
+          getChangeRequestPreview: () =>
+            Effect.sync(() => {
+              previews += 1;
+              return { ...changeRequest(1, "2026-07-02T00:00:00Z"), title: account || "personal" };
+            }),
+          getChangeRequestSummary: () =>
+            Effect.sync(() => {
+              summaries += 1;
+              return { ...changeRequest(1, "2026-07-02T00:00:00Z"), title: account || "personal" };
+            }),
+        }),
+      ],
+    });
+    const ref = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+    const read = Effect.suspend(() =>
+      Effect.all([
+        service.list({ state: "open", involvement: "all" }),
+        service.preview(ref),
+        service.summary(ref, { recoverTransientFailure: false }),
+      ]),
+    );
+
+    yield* read;
+    yield* read;
+    assert.deepStrictEqual([viewers, previews, summaries], [1, 1, 1]);
+    const refreshed = yield* service.subscribeRefreshes.pipe(
+      Stream.runHead,
+      Effect.forkChild({ startImmediately: true }),
+    );
+
+    account = "work";
+    yield* Queue.offer(changes, {
+      ...DEFAULT_SERVER_SETTINGS,
+      sourceControlHosts: {
+        github: { hosts: { "github.com": { enabled: true, owners: { acme: "work" } } } },
+      },
+    });
+    yield* Fiber.join(refreshed);
+    const [, preview, summary] = yield* read;
+    assert.strictEqual(preview.title, "work");
+    assert.strictEqual(summary.title, "work");
+    assert.deepStrictEqual([viewers, previews, summaries], [2, 2, 2]);
+  }),
+);
+
+it.effect("leaves only the repositories of an account that cannot be read unavailable", () =>
+  Effect.gen(function* () {
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        project({ id: "p2", title: "blog", workspaceRoot: "/b", repository: "me/blog" }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          credentialScope: ({ repository }) =>
+            Effect.succeed(repository.startsWith("acme/") ? "work" : ""),
+          getViewer: (input) =>
+            input.repository?.startsWith("acme/")
+              ? Effect.fail(
+                  new PullRequestProviderError({
+                    provider: SourceControlProviderKind.make("github"),
+                    operation: "getViewer",
+                    reason: "unauthenticated",
+                    detail: "No GitHub credential for work.",
+                  }),
+                )
+              : Effect.succeed("personal"),
+          listChangeRequestsAcross: (input) =>
+            Effect.succeed({
+              items: input.repositories.map((repository) =>
+                batchedChangeRequest(1, repository, "2026-07-02T00:00:00Z"),
+              ),
+              truncated: false,
+            }),
+        }),
+      ],
+    });
+
+    const result = yield* service.list({ state: "open", involvement: "all" });
+    assert.deepStrictEqual(
+      result.entries.map((entry) => entry.repository),
+      ["me/blog"],
+    );
+    assert.deepStrictEqual(
+      result.errors.map((error) => error.message),
+      ["acme/web could not be read."],
+    );
+    assert.strictEqual(result.providers[0]?.configured, true);
+  }),
+);
+
+it.effect("rechecks an empty search after switching the repository account", () =>
+  Effect.gen(function* () {
+    let account = "personal";
+    const changes = yield* Queue.unbounded<ServerSettings>();
+    const service = yield* makeService({
+      settingsChanges: Stream.fromQueue(changes),
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          credentialScope: () => Effect.sync(() => account),
+          getViewer: () => Effect.sync(() => account),
+          listChangeRequestsAcross: () =>
+            Effect.sync(() => ({
+              items:
+                account === "personal"
+                  ? [batchedChangeRequest(1, "acme/web", "2026-07-02T00:00:00Z")]
+                  : [],
+              truncated: false,
+            })),
+          listChangeRequests: () =>
+            Effect.succeed({
+              items: [changeRequest(2, "2026-07-02T00:00:00Z")],
+              truncated: false,
+              continues: false,
+            }),
+        }),
+      ],
+    });
+    const list = Effect.suspend(() => service.list({ state: "open", involvement: "all" }));
+    assert.deepStrictEqual(
+      (yield* list).entries.map((entry) => entry.number),
+      [1],
+    );
+    const refreshed = yield* service.subscribeRefreshes.pipe(
+      Stream.runHead,
+      Effect.forkChild({ startImmediately: true }),
+    );
+    account = "work";
+    yield* Queue.offer(changes, {
+      ...DEFAULT_SERVER_SETTINGS,
+      sourceControlHosts: {
+        github: { hosts: { "github.com": { enabled: true, owners: { acme: "work" } } } },
+      },
+    });
+    yield* Fiber.join(refreshed);
+    assert.deepStrictEqual(
+      (yield* list).entries.map((entry) => [entry.number, entry.viewer]),
+      [[2, "work"]],
+    );
+  }),
+);
+
+it.effect("bounds simultaneous credential lookups for a large project list", () =>
+  Effect.gen(function* () {
+    let active = 0;
+    let peak = 0;
+    const projects = Array.from({ length: 40 }, (_, index) =>
+      project({
+        id: `p${index}`,
+        title: `Project ${index}`,
+        workspaceRoot: `/w/${index}`,
+        repository: `owner-${index}/web`,
+      }),
+    );
+    const pending = yield* Queue.unbounded<Deferred.Deferred<void>>();
+    yield* Stream.fromQueue(pending).pipe(
+      Stream.runForEach((ready) => Deferred.succeed(ready, undefined)),
+      Effect.forkScoped,
+    );
+    const service = yield* makeService({
+      projects,
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          credentialScope: () =>
+            Effect.gen(function* () {
+              active++;
+              peak = Math.max(peak, active);
+              const ready = yield* Deferred.make<void>();
+              yield* Queue.offer(pending, ready);
+              yield* Deferred.await(ready);
+              active--;
+              return "account";
+            }),
+          listChangeRequestsAcross: ({ repositories }) =>
+            Effect.succeed({
+              items: repositories.map((repository) =>
+                batchedChangeRequest(1, repository, "2026-07-02T00:00:00Z"),
+              ),
+              truncated: false,
+            }),
+        }),
+      ],
+    });
+    const result = yield* service.list({ state: "open", involvement: "all", limit: 100 });
+    assert.strictEqual(result.entries.length, projects.length);
+    assert.isBelow(peak, projects.length);
+    assert.strictEqual(active, 0);
   }),
 );
 

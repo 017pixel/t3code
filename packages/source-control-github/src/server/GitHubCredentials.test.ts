@@ -18,15 +18,20 @@ const TOKEN_VARIABLES = [
   "GITHUB_ENTERPRISE_TOKEN",
 ] as const;
 
-const hostSettings = (
-  hosts: Record<string, { readonly account?: string; readonly enabled?: boolean }>,
-) =>
+type HostChoice = {
+  readonly account?: string;
+  readonly enabled?: boolean;
+  readonly owners?: Record<string, string>;
+  readonly repositories?: Record<string, string>;
+};
+
+const hostSettings = (hosts: Record<string, HostChoice>) =>
   Object.fromEntries(
     Object.entries(hosts).map(([host, choice]) => [host, { enabled: true, ...choice }]),
   );
 
 function harness(
-  hosts: Record<string, { readonly account?: string; readonly enabled?: boolean }> = {},
+  hosts: Record<string, HostChoice> = {},
   signedOut: ReadonlyArray<string> = [],
   tokens: Record<string, string> = {},
 ) {
@@ -109,10 +114,16 @@ describe("GitHubCredentials", () => {
 
   it.effect("lets an environment token win over a pinned account, as gh does", () => {
     vi.stubEnv("GH_TOKEN", "from-env");
-    const { layer, calls } = harness({ "github.com": { account: "work" } });
+    const { layer, calls } = harness({
+      "github.com": {
+        account: "personal",
+        owners: { acme: "work" },
+        repositories: { "acme/web": "docs" },
+      },
+    });
     return Effect.gen(function* () {
       const credentials = yield* GitHubCredentials.GitHubCredentials;
-      const credential = yield* credentials.get("github.com");
+      const credential = yield* credentials.get("github.com", "acme/web");
       expect(Redacted.value(credential.token)).toBe("from-env");
       expect(credential.source).toBe("env");
       expect(calls).toEqual([]);
@@ -146,6 +157,36 @@ describe("GitHubCredentials", () => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect(
+    "resolves repository, owner, host and active credentials in order, skipping stale rules",
+    () => {
+      const { layer } = harness(
+        {
+          "github.com": {
+            account: "personal",
+            owners: { acme: "work", departed: "gone" },
+            repositories: { "acme/handbook": "docs", "acme/legacy": "gone" },
+          },
+          "ghe.example.test": { account: "gone", owners: { acme: "gone" } },
+        },
+        ["gone"],
+      );
+      return Effect.gen(function* () {
+        const credentials = yield* GitHubCredentials.GitHubCredentials;
+        const tokenFor = (host: string, repository: string) =>
+          credentials
+            .get(host, repository)
+            .pipe(Effect.map((credential) => Redacted.value(credential.token)));
+        expect(yield* tokenFor("GitHub.com", "Acme/Handbook")).toBe("token-for-docs");
+        expect(yield* tokenFor("github.com", "acme/web")).toBe("token-for-work");
+        expect(yield* tokenFor("github.com", "acme/legacy")).toBe("token-for-work");
+        expect(yield* tokenFor("github.com", "departed/web")).toBe("token-for-personal");
+        expect(yield* tokenFor("github.com", "other/web")).toBe("token-for-personal");
+        expect(yield* tokenFor("ghe.example.test", "acme/web")).toBe("active-token");
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
   it.effect("falls back to the active login when the pinned one is no longer signed in", () => {
     const { layer, calls } = harness({ "github.com": { account: "gone" } }, ["gone"]);
     return Effect.gen(function* () {
@@ -160,10 +201,14 @@ describe("GitHubCredentials", () => {
 
   it.effect("uses a token saved in Settings before GH_TOKEN and gh", () => {
     vi.stubEnv("GH_TOKEN", "env-token");
-    const { layer, calls } = harness({}, [], { "github.com": "saved-token" });
+    const { layer, calls } = harness(
+      { "github.com": { owners: { acme: "work" }, repositories: { "acme/web": "docs" } } },
+      [],
+      { "github.com": "saved-token" },
+    );
     return Effect.gen(function* () {
       const credentials = yield* GitHubCredentials.GitHubCredentials;
-      const credential = yield* credentials.get("github.com");
+      const credential = yield* credentials.get("github.com", "acme/web");
       expect(Redacted.value(credential.token)).toBe("saved-token");
       expect(credential.source).toBe("settings");
       expect(calls).toEqual([]);
