@@ -140,8 +140,10 @@ describe("resolveProviderInstanceAccentColor", () => {
   const defaultCodex = { instanceId: ProviderInstanceId.make("codex"), driver: codex };
   const personal = { instanceId: ProviderInstanceId.make("codex_personal"), driver: codex };
 
-  it("prefers a valid explicit color and ignores an invalid one", () => {
+  it("prefers an explicit color and restores automatic color when cleared or invalid", () => {
     const siblings = [defaultCodex, personal];
+    const automaticColor = resolveProviderInstanceAccentColor(personal, siblings);
+    expect(automaticColor).toMatch(/^#[0-9a-f]{6}$/);
     expect(
       resolveProviderInstanceAccentColor({ ...personal, accentColor: "#ff8800" }, siblings),
     ).toBe("#ff8800");
@@ -150,7 +152,10 @@ describe("resolveProviderInstanceAccentColor", () => {
     ).toBe("#112233");
     expect(
       resolveProviderInstanceAccentColor({ ...personal, accentColor: "orange" }, siblings),
-    ).toBe(resolveProviderInstanceAccentColor(personal, siblings));
+    ).toBe(automaticColor);
+    expect(resolveProviderInstanceAccentColor({ ...personal, accentColor: "" }, siblings)).toBe(
+      automaticColor,
+    );
     expect(
       resolveProviderInstanceAccentColor({ ...defaultCodex, accentColor: "orange" }, siblings),
     ).toBeUndefined();

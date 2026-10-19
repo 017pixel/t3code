@@ -107,7 +107,7 @@ function ProviderCustomColorPicker(props: {
                   onClick={props.onClear}
                 >
                   <XIcon className="size-3.5" aria-hidden />
-                  Clear color
+                  {props.placeholderColor ? "Use automatic color" : "Clear color"}
                 </Button>
               }
             />
@@ -118,10 +118,6 @@ function ProviderCustomColorPicker(props: {
   );
 }
 
-/**
- * `placeholderColor` is the automatic color shown while no explicit value is
- * set; clearing an explicit value falls back to it rather than to no color.
- */
 export function ProviderAccentColorPicker(props: {
   readonly displayName: string;
   readonly value: string | undefined;

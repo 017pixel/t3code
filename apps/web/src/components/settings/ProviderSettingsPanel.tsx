@@ -961,10 +961,7 @@ export function EnvironmentProviderSettings({
         readOnly={readOnly}
         canWriteSettings={canWriteSettings}
         liveProvider={serverProviders.find((candidate) => candidate.instanceId === row.instanceId)}
-        autoAccentColor={resolveProviderInstanceAccentColor(
-          { instanceId: row.instanceId, driver: row.driver, accentColor: undefined },
-          serverProviders,
-        )}
+        autoAccentColor={resolveProviderInstanceAccentColor(row, rows)}
         isUpdateDispatching={updatingProviderInstanceIds.has(row.instanceId)}
         showProjectOverride={showProjectOverride}
         projectOverrideValue={
