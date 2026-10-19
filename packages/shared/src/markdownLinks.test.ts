@@ -505,6 +505,11 @@ describe("thread-evidenced file candidates", () => {
       "cd ../meeting/raw && ls",
       'cat "/notes/meeting 42/transcript.md"',
       'type "C:\\Work\\Docs\\Guide.md"',
+      'cd "\\\\server\\share" && cat docs\\guide.md',
+      "/bin/bash -lc 'cd ../wrapped-app && cat src/wrapped.ts'",
+      "/bin/bash -lc 'cat /repos/app-b/src/api/rules/categories.ts'",
+      'git commit -m "fix: update /repos/app-b/src/api/rules/categories.ts"',
+      "echo 'see /repos/app-b/src/api/rules/categories.ts'",
       "cd /other | cat pipe/file.ts",
       "cd /other & cat background/file.ts",
       "cd /other || cat failure/file.ts",
@@ -528,9 +533,15 @@ describe("thread-evidenced file candidates", () => {
         "/repos/meeting/raw",
         "/notes/meeting 42/transcript.md",
         "C:\\Work\\Docs\\Guide.md",
+        "\\\\server\\share\\docs\\guide.md",
+        "/repos/wrapped-app/src/wrapped.ts",
+        "/repos/app-b/src/api/rules/categories.ts",
       ]),
     );
     expect(paths).not.toContain("/repos/app b/src/local.ts");
+    expect(
+      resolveThreadFilePathCandidate("rules/categories.ts", cwd, createThreadFilePathIndex(paths)),
+    ).toBe("/repos/app-b/src/api/rules/categories.ts");
     expect(
       paths.filter(
         (path) =>

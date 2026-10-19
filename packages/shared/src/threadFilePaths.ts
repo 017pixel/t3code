@@ -37,23 +37,28 @@ function parentPath(path: string): string | null {
 function resolveOperand(path: string, cwd: string | null): string | null {
   if (!LITERAL_PATH_PATTERN.test(path) || path.startsWith("-")) return null;
   if (isAbsolutePath(path)) return path;
+  if (path.split(/[/\\]/).some((segment) => segment.trim() !== segment)) return null;
   if (cwd === null || !isAbsolutePath(cwd)) return null;
   const windows = isWindowsAbsolutePath(cwd);
   if (!windows && path.includes("\\")) return null;
   const normalized = cwd.replaceAll("\\", "/");
-  const root = normalized.match(windows ? /^(?:[A-Za-z]:\/|\/\/[^/]+\/[^/]+\/)/ : /^\//)?.[0];
+  const root = normalized.match(windows ? /^(?:[A-Za-z]:\/|\/\/[^/]+\/[^/]+(?:\/|$))/ : /^\//)?.[0];
   if (!root) return null;
   const segments = normalized.slice(root.length).split("/").filter(Boolean);
   for (const segment of path.replaceAll("\\", "/").split("/")) {
     if (segment === "..") segments.pop();
     else if (segment !== "" && segment !== ".") segments.push(segment);
   }
-  const resolved = `${root}${segments.join("/")}`;
+  const resolved = `${root.endsWith("/") ? root : `${root}/`}${segments.join("/")}`;
   return windows ? resolved.replaceAll("/", "\\") : resolved;
 }
 
 // Unsupported shell syntax discards command evidence instead of guessing its cwd.
 function commandPaths(input: string, cwd: string | null): string[] {
+  const shell = input.match(
+    /^(?:\/(?:usr\/)?bin\/)?(?:sh|bash|zsh)\s+-(?:c|lc)\s+(?:"([^"]*)"|'([^']*)')\s*$/,
+  );
+  if (shell) input = shell[1] ?? shell[2]!;
   if (/[|`$*?()<>#{}]/.test(input) || /(^|[^&])&([^&]|$)/.test(input)) return [];
   if (/\\[\s"']/.test(input)) return [];
   const tokens = /[ \t\r]+|&&|[;\n]|"[^"\n]*"|'[^'\n]*'|[^\s;&"']+/gy;
