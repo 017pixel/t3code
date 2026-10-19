@@ -442,12 +442,7 @@ export class GitHubPullRequestApi extends Context.Service<
       readonly filters?: PullRequestListFilters | undefined;
     }) => Effect.Effect<GitHubPullRequestSearchBatch, GitHubPullRequestApiError>;
 
-    /**
-     * Whether GitHub's search index covers each repository. One it skips answers every search
-     * with nothing, so a repository is covered when it has no pull requests or search finds any
-     * of them. The two counts are not compared exactly, since the index can lag a fresh pull
-     * request. A repository that cannot be read is reported as not covered.
-     */
+    /** Whether search indexes each repository, including empty repositories. */
     readonly searchCoverage: (input: {
       readonly cwd: string;
       readonly host: string;
@@ -457,7 +452,6 @@ export class GitHubPullRequestApi extends Context.Service<
       GitHubPullRequestApiError
     >;
 
-    /** The line counts the search leaves out, for rows already on the page. */
     readonly listPullRequestStats: (input: {
       readonly cwd: string;
       readonly host: string;
@@ -1660,7 +1654,6 @@ export const make = Effect.gen(function* () {
   const stackMembershipResolver = GraphQLResolver.aliased(client.PullRequestStackMembership, {
     batchKey: GitHubGraphQlClient.batchKey,
   }).pipe(RequestResolver.batchN(STAT_ALIASES_PER_REQUEST));
-  // Every repository a listing's search said nothing about, one alias each, in one request.
   const searchCoverageResolver = GraphQLResolver.aliased(client.PullRequestSearchCoverage, {
     batchKey: GitHubGraphQlClient.batchKey,
   }).pipe(RequestResolver.batchN(STAT_ALIASES_PER_REQUEST));
@@ -1901,12 +1894,10 @@ export const make = Effect.gen(function* () {
                 covered: total !== undefined && (total === 0 || result.search.issueCount > 0),
               };
             }),
-            // A repository GitHub cannot find or will not show (a SAML-gated org, a disabled
-            // repository) is not one search can be trusted about. Only its own alias says so, so
-            // the rest of the batch still answers.
-            Effect.catchIf(isGraphQlClientError, () =>
-              Effect.succeed({ repository, covered: false }),
-            ),
+            // An unreadable alias must not discard coverage answers for the other repositories.
+            Effect.catchTags({
+              GraphQLClientError: () => Effect.succeed({ repository, covered: false }),
+            }),
           );
         },
         { concurrency: "unbounded" },
