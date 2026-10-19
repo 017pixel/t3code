@@ -14,16 +14,14 @@ query ActorAvatars($ids: [ID!]!) {
   }
 }
 
-# A check context of the head commit. `isRequired` is asked for on github.com only (`$required`):
-# an older Enterprise server may not know it, and an unknown field fails the whole read.
-fragment CheckContext on StatusCheckRollupContext {
+# Enterprise documents use only these fields; directives cannot hide unknown schema fields.
+fragment CheckContextFields on StatusCheckRollupContext {
   ... on StatusContext {
     context
     state
     targetUrl
     createdAt
     description
-    isRequired(pullRequestNumber: $number) @include(if: $required)
   }
   ... on CheckRun {
     name
@@ -32,7 +30,6 @@ fragment CheckContext on StatusCheckRollupContext {
     startedAt
     completedAt
     detailsUrl
-    isRequired(pullRequestNumber: $number) @include(if: $required)
     checkSuite {
       workflowRun {
         workflow {
@@ -41,6 +38,21 @@ fragment CheckContext on StatusCheckRollupContext {
       }
     }
   }
+}
+
+# Required-check metadata is selected only by github.com operations.
+fragment RequiredCheckContext on StatusCheckRollupContext {
+  ... on StatusContext {
+    isRequired(pullRequestNumber: $number) @include(if: $required)
+  }
+  ... on CheckRun {
+    isRequired(pullRequestNumber: $number) @include(if: $required)
+  }
+}
+
+fragment CheckContext on StatusCheckRollupContext {
+  ...CheckContextFields
+  ...RequiredCheckContext
 }
 
 fragment PullRequestCoreFields on Repository {
@@ -123,7 +135,7 @@ fragment PullRequestCoreFields on Repository {
           statusCheckRollup {
             contexts(first: 100) {
               nodes {
-                ...CheckContext
+                ...CheckContextFields
               }
               pageInfo {
                 hasNextPage
@@ -157,6 +169,19 @@ query PullRequestCore(
           }
         }
       }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  ...RequiredCheckContext
+                }
+              }
+            }
+          }
+        }
+      }
       viewerCanUpdateBranch
       baseRef {
         compare(headRef: $headRef) {
@@ -167,14 +192,20 @@ query PullRequestCore(
   }
 }
 
-query PullRequestCoreEnterprise(
-  $owner: String!
-  $name: String!
-  $number: Int!
-  $required: Boolean!
-) {
+fragment PullRequestLiveBase on PullRequest {
+  baseRef {
+    target {
+      oid
+    }
+  }
+}
+
+query PullRequestCoreEnterprise($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     ...PullRequestCoreFields
+    pullRequest(number: $number) {
+      ...PullRequestLiveBase
+    }
   }
 }
 
@@ -196,6 +227,36 @@ query PullRequestCheckContexts(
               contexts(first: 100, after: $after) {
                 nodes {
                   ...CheckContext
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+query PullRequestCheckContextsEnterprise(
+  $owner: String!
+  $name: String!
+  $number: Int!
+  $after: String
+) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100, after: $after) {
+                nodes {
+                  ...CheckContextFields
                 }
                 pageInfo {
                   hasNextPage
@@ -547,7 +608,7 @@ query PullRequestActionStateEnterprise($owner: String!, $name: String!, $number:
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       ...PullRequestActionFields
-      baseRefOid
+      ...PullRequestLiveBase
     }
   }
 }

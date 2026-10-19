@@ -51,9 +51,11 @@ import {
 import type {
   ActorAvatars,
   CheckContext,
+  CheckContextFields,
   LabelCandidates,
   PullRequestActivity,
   PullRequestCheckContexts,
+  PullRequestCheckContextsEnterprise,
   PullRequestCore,
   PullRequestCoreEnterprise,
   PullRequestFilesViewed,
@@ -1152,7 +1154,7 @@ export function toPullRequestCore(
                 viewerCanUpdate: pr.viewerCanUpdateBranch,
               }
           : {
-              // Enterprise cannot report the comparison; the action compares before mutating.
+              // The API fills freshness using REST; fork maintainer-edit grants are not inferred.
               behindBy: null,
               viewerCanUpdate:
                 toCanWrite(pr.headRepository?.viewerPermission) && pr.headRef !== null,
@@ -1246,7 +1248,9 @@ export function toPullRequestActivityPage(
 /** A check context as the rollup reports it; opaque outside this module. */
 export type GitHubCheckContext = CheckFields;
 
-function toCheckContexts(nodes: ReadonlyArray<CheckContext>): ReadonlyArray<GitHubCheckContext> {
+function toCheckContexts(
+  nodes: ReadonlyArray<CheckContext | CheckContextFields>,
+): ReadonlyArray<GitHubCheckContext> {
   return nodes.map((check) =>
     check.__typename === "CheckRun"
       ? { ...check, workflowName: check.checkSuite.workflowRun?.workflow.name ?? null }
@@ -1255,7 +1259,9 @@ function toCheckContexts(nodes: ReadonlyArray<CheckContext>): ReadonlyArray<GitH
 }
 
 /** One page of the head commit's check contexts; null for a pull request GitHub did not find. */
-export function toPullRequestCheckContextsPage(result: PullRequestCheckContexts.Result): {
+export function toPullRequestCheckContextsPage(
+  result: PullRequestCheckContexts.Result | PullRequestCheckContextsEnterprise.Result,
+): {
   readonly headSha: string;
   readonly contexts: ReadonlyArray<GitHubCheckContext>;
   readonly nextCursor: string | null;
