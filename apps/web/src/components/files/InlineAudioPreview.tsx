@@ -28,7 +28,10 @@ export function InlineAudioPreview(props: {
     const element = container.current;
     if (!element) return;
     const observer = new IntersectionObserver((entries) => {
-      setVisible(entries.some((entry) => entry.isIntersecting));
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setVisible(true);
+        observer.disconnect();
+      }
     });
     observer.observe(element);
     return () => observer.disconnect();
