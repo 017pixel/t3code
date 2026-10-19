@@ -1,4 +1,4 @@
-import { sanitizeDocumentHtml } from "./DocumentPages";
+import DocumentPages, { sanitizeDocumentHtml } from "./DocumentPages";
 import { EnvironmentId } from "@t3tools/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -118,6 +118,41 @@ describe("attachment HTML preview recovery", () => {
 });
 
 describe("document output sanitization", () => {
+  it("fits saved HTML outputs to their content and resizes when the content changes", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <DocumentPages html="<table><tr><td>42</td></tr></table>" name="Output" output />,
+        );
+      });
+      const frame = container.querySelector("iframe")!;
+      await vi.waitFor(() => {
+        expect(frame.contentDocument?.querySelector("td")?.textContent).toBe("42");
+        expect(frame.clientHeight).toBeGreaterThan(32);
+        expect(frame.clientHeight).toBeLessThan(120);
+      });
+      const initialHeight = frame.clientHeight;
+      await act(async () => {
+        root.render(
+          <DocumentPages html={"<p>More saved output</p>".repeat(10)} name="Output" output />,
+        );
+      });
+      await vi.waitFor(() => {
+        expect(frame.contentDocument?.querySelectorAll("p")).toHaveLength(10);
+        expect(frame.clientHeight).toBeGreaterThan(initialHeight);
+        expect(frame.contentDocument!.body.scrollHeight).toBeLessThanOrEqual(frame.clientHeight);
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("preserves table content and raster data while removing scripts and network resources", () => {
     const html = sanitizeDocumentHtml(
       '<script>alert(1)</script><style>@import "https://example.com/style.css";</style><iframe src="https://example.com"></iframe><img src="https://example.com/tracker.png" onerror="alert(1)"><img src="data:image/png;base64,iVBORw0KGgo="><table><tr><td>Research</td></tr></table><a href="https://example.com">Results</a>',

@@ -254,6 +254,9 @@ describe("document preview contents", () => {
               cell_type: "code",
               source: ["print(42)"],
               outputs: [
+                { output_type: "stream", text: ["\n  "] },
+                { output_type: "display_data", data: {} },
+                { data: { "text/html": [""] } },
                 { output_type: "stream", text: ["42\n"] },
                 { data: { "text/html": ["<b>Results</b>"], "text/plain": ["Results"] } },
               ],

@@ -340,23 +340,25 @@ export function openNotebook(bytes: ArrayBuffer): OfficeWorkerResult {
     return {
       kind: cell.cell_type === "markdown" ? "markdown" : cell.cell_type === "code" ? "code" : "raw",
       source: notebookText(cell.source),
-      outputs: outputs.map((value) => {
-        const output = record(value);
-        const data = record(output.data);
-        for (const mime of ["image/png", "image/jpeg", "image/gif", "image/webp"]) {
-          if (data[mime]) {
-            const base64 = notebookText(data[mime], 4 * 1024 * 1024).replaceAll(/\s/g, "");
-            if (/^[a-z\d+/]*={0,2}$/i.test(base64))
-              return { kind: "image" as const, text: `data:${mime};base64,${base64}` };
+      outputs: outputs
+        .map((value) => {
+          const output = record(value);
+          const data = record(output.data);
+          for (const mime of ["image/png", "image/jpeg", "image/gif", "image/webp"]) {
+            if (data[mime]) {
+              const base64 = notebookText(data[mime], 4 * 1024 * 1024).replaceAll(/\s/g, "");
+              if (/^[a-z\d+/]*={0,2}$/i.test(base64))
+                return { kind: "image" as const, text: `data:${mime};base64,${base64}` };
+            }
           }
-        }
-        if (data["text/html"])
-          return { kind: "html" as const, text: notebookText(data["text/html"]) };
-        return {
-          kind: "text" as const,
-          text: notebookText(output.text ?? data["text/plain"] ?? output.traceback),
-        };
-      }),
+          if (data["text/html"])
+            return { kind: "html" as const, text: notebookText(data["text/html"]) };
+          return {
+            kind: "text" as const,
+            text: notebookText(output.text ?? data["text/plain"] ?? output.traceback),
+          };
+        })
+        .filter((output) => output.text.trim().length > 0),
     };
   });
   return { type: "notebook", language, cells };

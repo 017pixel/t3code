@@ -27,6 +27,19 @@ function inertNotebookMarkdown() {
   };
 }
 const NOTEBOOK_PLUGINS = [inertNotebookMarkdown];
+
+function NotebookSource(props: { readonly name: string; readonly text: string }) {
+  const [height, setHeight] = useState(Math.min(360, props.text.split("\n").length * 20 + 16));
+  const measure = (node: HTMLElement) => {
+    setHeight(Math.min(360, Math.ceil(node.getBoundingClientRect().height)));
+  };
+  return (
+    <div className="flex min-h-0 flex-col" style={{ height }}>
+      <ReadOnlySourcePreview {...props} onPostRender={measure} />
+    </div>
+  );
+}
+
 export default function NotebookPreview(props: {
   readonly notebook: Extract<OfficeWorkerResult, { type: "notebook" }>;
 }) {
@@ -53,19 +66,12 @@ export default function NotebookPreview(props: {
                   extraRemarkPlugins={NOTEBOOK_PLUGINS}
                   className="px-4 py-3"
                 />
-              ) : (
-                <div
-                  className="flex min-h-24 flex-col"
-                  style={{
-                    height: Math.min(360, Math.max(96, (cell.source.split("\n").length + 1) * 22)),
-                  }}
-                >
-                  <ReadOnlySourcePreview
-                    name={`cell.${cell.kind === "code" ? (({ python: "py", javascript: "js", typescript: "ts", julia: "jl" } as Record<string, string>)[props.notebook.language] ?? props.notebook.language) : "txt"}`}
-                    text={cell.source}
-                  />
-                </div>
-              )}
+              ) : cell.source.trim() ? (
+                <NotebookSource
+                  name={`cell.${cell.kind === "code" ? (({ python: "py", javascript: "js", typescript: "ts", julia: "jl" } as Record<string, string>)[props.notebook.language] ?? props.notebook.language) : "txt"}`}
+                  text={cell.source}
+                />
+              ) : null}
               {cell.outputs.map((output, outputIndex) => (
                 <div key={outputIndex} className="border-t border-border/60">
                   {output.kind === "html" ? (
