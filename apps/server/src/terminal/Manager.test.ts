@@ -1288,6 +1288,42 @@ it.layer(
     }),
   );
 
+  it.effect(
+    "checks fresh terminal activity and keeps the restart window closed on inspection failure",
+    () =>
+      Effect.gen(function* () {
+        let output = "  9000  1 bash";
+        let fails = false;
+        const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+          run: () =>
+            Effect.succeed({
+              stdout: output,
+              stderr: "",
+              code: ChildProcessSpawner.ExitCode(fails ? 1 : 0),
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+              stdoutInvalidUtf8: false,
+              stderrInvalidUtf8: false,
+            }),
+        };
+        const { manager } = yield* createManager(5, { subprocessPollIntervalMs: 60_000 }).pipe(
+          Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+          Effect.provide(layerWithHostPlatform("linux")),
+        );
+        expect(yield* manager.hasBusyTerminals).toBe(false);
+        yield* manager.open(openInput());
+        fails = true;
+        expect(yield* manager.hasBusyTerminals).toBe(true);
+        fails = false;
+        expect(yield* manager.hasBusyTerminals).toBe(false);
+        output += "\n  100  9000 vim";
+        expect(yield* manager.hasBusyTerminals).toBe(true);
+        output = "  9000  1 bash";
+        expect(yield* manager.hasBusyTerminals).toBe(false);
+      }),
+  );
+
   it("calculates snapshot failure backoff and success reset delays", () => {
     assert.equal(TerminalManager.subprocessSnapshotPollDelayMs(1_000, 0), 1_000);
     assert.equal(TerminalManager.subprocessSnapshotPollDelayMs(1_000, 1), 2_000);

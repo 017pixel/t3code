@@ -2496,15 +2496,28 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     ),
   );
 
-  const hasBusyTerminals = readManagerState.pipe(
-    Effect.map((state) =>
-      [...state.sessions.values()].some(
-        (session) =>
-          session.status === "starting" ||
-          (session.status === "running" && session.hasRunningSubprocess),
-      ),
-    ),
-  );
+  const hasBusyTerminals = Effect.gen(function* () {
+    const sessions = [...(yield* readManagerState).sessions.values()];
+    if (sessions.some((session) => session.status === "starting")) return true;
+    const running = sessions.filter((session) => session.status === "running");
+    if (running.length === 0) return false;
+    // A cached idle result must not let a restart kill a command started since the last poll.
+    const inspection = yield* acquireSubprocessInspector.pipe(Effect.option);
+    if (Option.isNone(inspection) || !inspection.value.snapshotSucceeded) return true;
+    const { inspector } = inspection.value;
+    for (const session of running) {
+      if (
+        session.pid === null ||
+        (yield* inspector(session.pid).pipe(
+          Effect.map((result) => result.hasRunningSubprocess),
+          Effect.orElseSucceed(() => true),
+        ))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  });
 
   let subprocessSnapshotFailureCount = 0;
   yield* Effect.forever(

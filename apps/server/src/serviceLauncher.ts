@@ -387,9 +387,9 @@ async function runtimeExists(baseDir: string, version: string): Promise<boolean>
 
 /**
  * Removes completed runtimes nothing can return to, so unattended updates do
- * not fill the disk. The launcher's own version stays because the service unit
- * names that executable; the active version, the version an update came from,
- * and a pending target stay because recovery may start them.
+ * not fill the disk. Keep both the running launcher and a deferred CLI/service
+ * install, which may name different executables. Recovery also needs the active
+ * version, the version an update came from, and a pending target.
  */
 export async function pruneServiceRuntimes(
   baseDir: string,
@@ -398,6 +398,13 @@ export async function pruneServiceRuntimes(
 ): Promise<void> {
   const keep = new Set([state.activeVersion]);
   if (launcherVersion !== undefined) keep.add(launcherVersion);
+  const installedVersion = await NodeFSP.readFile(restartPendingPath(baseDir), "utf8").catch(
+    (error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    },
+  );
+  if (installedVersion !== undefined) keep.add(installedVersion.trim());
   if (state.update !== undefined) {
     keep.add(state.update.fromVersion);
     if (state.update.status === "pending") keep.add(state.update.targetVersion);
@@ -770,7 +777,7 @@ export class Launcher {
 
   async #pruneRuntimes(): Promise<void> {
     try {
-      // The unit's ExecStart names a specific runtime/versions/<v>/t3.
+      // The running launcher can predate a deferred CLI/service install.
       const executableDir = NodePath.dirname(await NodeFSP.realpath(process.execPath));
       // Both sides resolved: a symlinked home would otherwise hide the launcher's own runtime.
       const versionsDir = await NodeFSP.realpath(
@@ -800,7 +807,7 @@ export class Launcher {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): Promise<void> {
-    if (this.#child !== child || this.#stopping) return;
+    if (this.#child !== child || this.#stopping || this.#stopRequested) return;
     this.#child = null;
     if (code === STATE_DIR_OWNED_EXIT_CODE) {
       await this.#idleWhileStateDirOwned();

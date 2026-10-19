@@ -36,6 +36,7 @@ interface HarnessOptions {
   readonly managed?: boolean;
   readonly preflight?: "ready" | "blocked";
   readonly beforeDownload?: Effect.Effect<void>;
+  readonly beforePreflight?: Effect.Effect<void>;
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly orchestrationProtocol?: number;
   readonly lastOutcome?: ServiceLauncherClient.ServiceLauncherClient["Service"]["lastOutcome"];
@@ -104,6 +105,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           };
         }
         order.push("preflight");
+        if (options.beforePreflight) yield* options.beforePreflight;
         const result =
           options.preflight === "blocked"
             ? { status: "blocked", version: release.version, reason: "local update required" }
@@ -539,7 +541,11 @@ it.layer(NodeServices.layer)("server self update", (it) => {
 
 const backgroundUpdates = (
   harness: Effect.Success<ReturnType<typeof makeHarness>>,
-  options: { readonly open: { value: boolean }; readonly automaticUpdates?: boolean },
+  options: {
+    readonly open: { value: boolean };
+    readonly automaticUpdates?: boolean;
+    readonly beforeLock?: Effect.Effect<void>;
+  },
 ) => {
   const held: string[] = [];
   const windows: Array<{ readonly restartsServer?: boolean } | undefined> = [];
@@ -553,6 +559,7 @@ const backgroundUpdates = (
         ServerConfig.layer(harness.serverConfig),
         ServerSettings.layerTest({ automaticUpdates: options.automaticUpdates ?? true }),
         Layer.mock(UpdateWindow.UpdateWindow)({
+          isOpen: () => Effect.sync(() => options.open.value),
           runIfOpen: (effect, windowOptions) =>
             Effect.suspend(() => {
               windows.push(windowOptions);
@@ -563,7 +570,11 @@ const backgroundUpdates = (
           tryRun: (key, run) =>
             Effect.acquireUseRelease(
               Effect.sync(() => void held.push(key)),
-              () => run(() => Effect.void).pipe(Effect.map(Option.some)),
+              () =>
+                (options.beforeLock ?? Effect.void).pipe(
+                  Effect.andThen(run(() => Effect.void)),
+                  Effect.map(Option.some),
+                ),
               () => Effect.sync(() => void held.pop()),
             ),
         }),
@@ -574,6 +585,75 @@ const backgroundUpdates = (
 };
 
 it.layer(NodeServices.layer)("background server updates", (it) => {
+  it.effect.each(["lock", "preflight"] as const)(
+    "postpones a restart when the window closes during %s and retries the staged target",
+    (during) =>
+      Effect.gen(function* () {
+        const accepted = yield* Deferred.make<void>();
+        const open = { value: false };
+        let preflights = 0;
+        let closeAtLock = during === "lock";
+        const harness = yield* makeHarness({
+          beforePreflight: Effect.sync(() => {
+            if (++preflights === 2 && during === "preflight") open.value = false;
+          }),
+          requestUpdate: () => Deferred.succeed(accepted, undefined).pipe(Effect.as("launcher-id")),
+        });
+        const updates = backgroundUpdates(harness, {
+          open,
+          beforeLock: Effect.sync(() => {
+            if (closeAtLock) open.value = false;
+            closeAtLock = false;
+          }),
+        });
+        const pass = yield* updates.pass;
+        yield* pass;
+        open.value = true;
+        yield* pass.pipe(Effect.raceFirst(Deferred.await(accepted)));
+        expect(yield* Deferred.isDone(accepted)).toBe(false);
+        expect(updates.held).toEqual([]);
+        open.value = true;
+        const handoff = yield* Effect.forkChild(pass, { startImmediately: true });
+        yield* Deferred.await(accepted);
+        expect(updates.held).toEqual(["server-restart"]);
+        expect(harness.order.filter((step) => step === "download")).toHaveLength(1);
+        while (handoff.pollUnsafe() === undefined) {
+          yield* TestClock.adjust(Duration.minutes(1));
+        }
+        yield* Fiber.join(handoff);
+      }),
+  );
+
+  it.effect.each(["download", "protocol"] as const)(
+    "drops the old staged release when its replacement fails %s",
+    (failure) =>
+      Effect.gen(function* () {
+        const accepted = yield* Deferred.make<void>();
+        const release = { version: "1.1.0" };
+        const options = {
+          release,
+          orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION,
+          beforeDownload: Effect.sync(() => {
+            if (failure === "download" && release.version === "1.2.0") {
+              throw new Error("download failed");
+            }
+          }),
+          requestUpdate: () => Deferred.succeed(accepted, undefined).pipe(Effect.as("launcher-id")),
+        };
+        const harness = yield* makeHarness(options);
+        const open = { value: false };
+        const pass = yield* backgroundUpdates(harness, { open }).pass;
+        yield* pass;
+        release.version = "1.2.0";
+        if (failure === "protocol") options.orchestrationProtocol += 1;
+        yield* TestClock.adjust(Duration.hours(1));
+        yield* pass;
+        open.value = true;
+        yield* pass.pipe(Effect.raceFirst(Deferred.await(accepted)));
+        expect(yield* Deferred.isDone(accepted)).toBe(false);
+      }),
+  );
+
   it.effect("stages once, waits for the update window, then hands off under the restart lock", () =>
     Effect.gen(function* () {
       const accepted = yield* Deferred.make<void>();

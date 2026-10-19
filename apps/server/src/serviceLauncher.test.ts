@@ -281,6 +281,43 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
+  it.effect("does not schedule a crash restart after a stop is requested by the child exit", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-exit-stop-" });
+      yield* writeFakeRuntime(
+        fs,
+        path,
+        path.join(root, "runtime", "versions", "1.0.0"),
+        'process.on("message", () => process.exit(1));\nsetInterval(() => {}, 1_000);\n',
+      );
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      yield* Effect.addFinalizer(() => Effect.sync(() => vi.useRealTimers()));
+      const launcher = new Launcher(root, {
+        protocol: SERVICE_LAUNCHER_PROTOCOL,
+        activeVersion: "1.0.0",
+      });
+      yield* Effect.addFinalizer(() => Effect.promise(() => launcher.stop("SIGTERM")));
+      const before = spawnedChildren.length;
+      const running = launcher.run();
+      yield* Effect.promise(() =>
+        vi.waitFor(() => assert.equal(spawnedChildren.length, before + 1)),
+      );
+      const child = spawnedChildren.at(-1)!;
+      const stopped = Promise.withResolvers<void>();
+      child.once("exit", () => {
+        launcher.stop("SIGTERM").then(stopped.resolve, stopped.reject);
+      });
+      child.send({ type: "test-exit" });
+      yield* Effect.promise(() => stopped.promise);
+      yield* Effect.promise(() => running);
+      assert.equal(vi.getTimerCount(), 0);
+      yield* Effect.promise(() => vi.advanceTimersByTimeAsync(30_000));
+      assert.equal(spawnedChildren.length, before + 1);
+    }),
+  );
+
   it.effect("commits only after the trial reports prepared", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -770,7 +807,12 @@ setInterval(() => {}, 1_000);
         Effect.forEach(versions, (version) => writeFakeRuntime(fs, path, versionDir(version), ""));
       // A directory without the completion marker is a staging in progress.
       yield* fs.makeDirectory(versionDir("0.4.0"), { recursive: true });
-      yield* seed(["0.5.0", "0.6.0", "0.7.0", "1.0.0", "1.1.0"]);
+      yield* seed(["0.5.0", "0.6.0", "0.7.0", "0.8.0", "1.0.0", "1.1.0"]);
+      // The running launcher is 0.6.0, but a deferred CLI update repointed the unit to 0.8.0.
+      yield* fs.writeFileString(
+        path.join(root, "runtime", SERVICE_RESTART_PENDING_FILE),
+        "0.8.0\n",
+      );
 
       yield* Effect.promise(() =>
         pruneServiceRuntimes(
@@ -788,7 +830,7 @@ setInterval(() => {}, 1_000);
           "0.6.0",
         ),
       );
-      assert.deepEqual(yield* remaining, ["0.4.0", "0.6.0", "0.7.0", "1.0.0"]);
+      assert.deepEqual(yield* remaining, ["0.4.0", "0.6.0", "0.7.0", "0.8.0", "1.0.0"]);
 
       yield* seed(["0.5.0", "1.1.0"]);
       yield* Effect.promise(() =>
@@ -808,7 +850,7 @@ setInterval(() => {}, 1_000);
           "0.6.0",
         ),
       );
-      assert.deepEqual(yield* remaining, ["0.4.0", "0.6.0", "1.0.0", "1.1.0"]);
+      assert.deepEqual(yield* remaining, ["0.4.0", "0.6.0", "0.8.0", "1.0.0", "1.1.0"]);
     }),
   );
 

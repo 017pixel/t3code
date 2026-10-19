@@ -4,8 +4,8 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
 /**
- * Counts work a server restart would lose: a project clone or a thread's
- * workspace setup. `UpdateWindow` keeps restarts out while the count is above zero.
+ * Counts work a server restart would lose: project clones, workspace setup,
+ * and review guides. `UpdateWindow` keeps restarts out while the count is above zero.
  */
 export class RestartWork extends Context.Service<
   RestartWork,

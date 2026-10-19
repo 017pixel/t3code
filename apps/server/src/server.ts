@@ -1084,7 +1084,7 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(AgentScopeLive.layer),
       // Provider installs and turn starts coordinate with every T3 server on the host.
       Layer.provideMerge(ProviderInstallLock.layer),
-      // One counter for the clone tracker, thread launches, and the update window.
+      // One counter for clones, thread launches, review guides, and the update window.
       Layer.provideMerge(RestartWork.layer),
       Layer.provideMerge(layerPlatformServices),
     );

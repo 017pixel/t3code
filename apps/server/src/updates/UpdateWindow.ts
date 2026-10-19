@@ -52,7 +52,7 @@ const make = Effect.gen(function* () {
       if (Duration.isLessThan(yield* backgroundPolicy.sinceLastClientInteraction, QUIET_PERIOD)) {
         return false;
       }
-      // Preparing, starting, running, or waiting on an approval or question.
+      // Includes native background work that outlives its parent run.
       const activeThreadIds = yield* projections.getRecoveryThreadIds("active-work").pipe(
         Effect.tapError((cause) =>
           Effect.logWarning("Update window could not read active runs", { cause }),

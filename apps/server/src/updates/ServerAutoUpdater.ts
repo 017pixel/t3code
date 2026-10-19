@@ -1,4 +1,4 @@
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { ORCHESTRATION_PROTOCOL_VERSION, ServerSelfUpdateError } from "@t3tools/contracts";
 import { cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
@@ -73,6 +73,7 @@ export const makeUpdatePass = () =>
         return;
       }
       if (targetVersion === staged) return;
+      staged = undefined;
       yield* Effect.logInfo("Staging a background server update", { targetVersion });
       const { orchestrationProtocol } = yield* selfUpdate.stage(targetVersion);
       if (orchestrationProtocol !== ORCHESTRATION_PROTOCOL_VERSION) {
@@ -88,15 +89,27 @@ export const makeUpdatePass = () =>
 
     const handOff = (targetVersion: string) =>
       Effect.gen(function* () {
-        // The setting may have been turned off while waiting for the window.
-        if (!(yield* enabled)) return;
+        const canRestart = enabled.pipe(
+          Effect.flatMap((on) =>
+            on
+              ? updateWindow.isOpen({ restartsServer: true, ignoreInstallLocks: true })
+              : Effect.succeed(false),
+          ),
+        );
+        if (!(yield* canRestart)) return;
+        yield* Effect.logInfo("Installing a background server update", { targetVersion });
+        yield* selfUpdate.update({ targetVersion }, (stage) =>
+          Effect.gen(function* () {
+            // Preflight can take 30 seconds; work may have started under the restart lock.
+            if (stage === "installing" && !(yield* canRestart)) {
+              return yield* new ServerSelfUpdateError({
+                reason: "The background update window closed before the restart.",
+              });
+            }
+          }),
+        );
         staged = undefined;
         skipped.add(targetVersion);
-        yield* Effect.logInfo("Installing a background server update", { targetVersion });
-        yield* selfUpdate.update({ targetVersion }).pipe(
-          // Refused before the handoff (say, a manual update in progress): stage again next check.
-          Effect.tapError(() => Effect.sync(() => skipped.delete(targetVersion))),
-        );
         // The launcher stops this server after accepting. Held until then, a turn
         // cannot start in the gap, but not forever if the launcher never does.
         yield* Effect.sleep(HANDOFF_TIMEOUT);

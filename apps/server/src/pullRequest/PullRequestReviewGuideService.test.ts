@@ -24,6 +24,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as RestartWork from "../updates/RestartWork.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as PullRequestReviewGuideService from "./PullRequestReviewGuideService.ts";
@@ -158,6 +159,7 @@ const makeLayer = (input: {
   readonly identity?: typeof ACME_APP;
 }) =>
   PullRequestReviewGuideService.layer.pipe(
+    Layer.provideMerge(RestartWork.layer),
     Layer.provide(
       Layer.effect(
         PullRequestReviewGuides.PullRequestReviewGuideRepository,
@@ -603,6 +605,8 @@ it.layer(layerBase, { excludeTestServices: true })("PullRequestReviewGuideServic
         );
 
         const started = yield* service.generate(reference);
+        const restartWork = Context.get(context, RestartWork.RestartWork);
+        assert.strictEqual(yield* restartWork.count, 1);
         assert.strictEqual(started.run?._tag, "Running");
         assert.strictEqual(started.guide, null);
         assert.isTrue(started.started);
@@ -616,6 +620,7 @@ it.layer(layerBase, { excludeTestServices: true })("PullRequestReviewGuideServic
           Effect.retry(Schedule.spaced("20 millis")),
         );
         const observed = yield* Effect.raceFirst(Deferred.await(seen), failedRun);
+        assert.strictEqual(yield* restartWork.count, 1);
         assert.strictEqual(observed.head, repositories.headSha);
         assert.strictEqual(observed.changed, "feature.txt");
         assert.strictEqual(observed.input.baseBranch, "stack-base");
@@ -630,6 +635,7 @@ it.layer(layerBase, { excludeTestServices: true })("PullRequestReviewGuideServic
         const joined = yield* service.generate(reference);
         assert.strictEqual(joined.run, started.run);
         assert.isFalse(joined.started);
+        assert.strictEqual(yield* restartWork.count, 1);
 
         yield* Deferred.succeed(finish, undefined);
         yield* Deferred.await(stored);
@@ -651,6 +657,7 @@ it.layer(layerBase, { excludeTestServices: true })("PullRequestReviewGuideServic
         assert.isFalse(yield* fs.exists(observed.input.cwd));
         const worktrees = yield* git(repositories.workspace, ["worktree", "list", "--porcelain"]);
         assert.notInclude(worktrees, observed.input.cwd);
+        assert.strictEqual(yield* restartWork.count, 0);
       }),
     ),
   );
