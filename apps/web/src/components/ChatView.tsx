@@ -4009,10 +4009,7 @@ export default function ChatView(props: ChatViewProps) {
   // re-pins on its own (independent of the refs), so the timeline needs a
   // render-visible flag to switch it off once the user scrolls away.
   const [timelineLiveFollowEnabled, setTimelineLiveFollowEnabled] = useState(true);
-  const isTimelineFollowingEnd = useCallback(
-    () => timelineScrollModeRef.current === "following-end",
-    [],
-  );
+  const isTimelineFollowingEnd = () => timelineScrollModeRef.current === "following-end";
   const pendingTimelineAnchorRef = useRef<MessageId | null>(null);
   const positionedTimelineAnchorRef = useRef<MessageId | null>(null);
   const settledTimelineAnchorRef = useRef<MessageId | null>(null);

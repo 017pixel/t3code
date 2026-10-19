@@ -68,6 +68,8 @@ import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
 import Migration0063 from "./Migrations/063_DropUnusedV1Projections.ts";
 import Migration0064 from "./Migrations/064_CanonicalizeThreadPullRequestLinks.ts";
 
+import Migration0065 from "./Migrations/065_ProjectionThreadSweepIndexes.ts";
+
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
@@ -134,6 +136,7 @@ export const migrationEntries = [
   [62, "ThreadFailureLookupIndex", Migration0062],
   [63, "DropUnusedV1Projections", Migration0063],
   [64, "CanonicalizeThreadPullRequestLinks", Migration0064],
+  [65, "ProjectionThreadSweepIndexes", Migration0065],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -178,8 +181,17 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
       return [];
     const recordedName = recordedNames.get(id);
     if (recordedName === name) return [];
-    // Migration 63 repairs the index skipped by older sweep builds at id 62.
-    if (id === 62 && recordedName === "ProjectionThreadSweepIndexes") return [];
+    // Migration 65 repairs main's effects skipped by published perf migration ids.
+    if (
+      (id === 62 &&
+        (recordedName === "ProjectionThreadSweepIndexes" ||
+          recordedName === "ProjectionThreadReadPayload")) ||
+      (id === 63 &&
+        (recordedName === "ProjectionThreadSweepIndexes" ||
+          recordedName === "ProjectionThreadReadPayload")) ||
+      (id === 64 && recordedName === "ProjectionThreadReadPayload")
+    )
+      return [];
     return [`${id}_${name} (recorded: ${recordedName ?? "nothing"})`];
   });
   if (skipped.length === 0) return;

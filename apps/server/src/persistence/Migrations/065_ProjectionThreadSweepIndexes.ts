@@ -1,5 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
+import DropUnusedV1Projections from "./063_DropUnusedV1Projections.ts";
+import CanonicalizeThreadPullRequestLinks from "./064_CanonicalizeThreadPullRequestLinks.ts";
 
 /**
  * Background sweeps (settlement, pull request sync, the shell reads behind pull request
@@ -12,6 +14,9 @@ import * as SqlClient from "effect/sql/SqlClient";
  * spell each expression exactly as it is here, or SQLite parses the payload again.
  */
 export default Effect.gen(function* () {
+  // Published perf builds used ids 63/64, so the migrator skips main's effects there.
+  yield* DropUnusedV1Projections;
+  yield* CanonicalizeThreadPullRequestLinks;
   const sql = yield* SqlClient.SqlClient;
   // Development builds of this change created an index of the same name over copied columns.
   // Replace it so every database gets this definition.
@@ -34,13 +39,6 @@ export default Effect.gen(function* () {
       provider_instance_id
     )
     WHERE deleted_at IS NULL AND archived_at IS NULL
-  `;
-  // Usage-limit recovery only concerns threads whose latest run failed; this finds the few
-  // threads with any failed run without reading the rest.
-  yield* sql`
-    CREATE INDEX IF NOT EXISTS orchestration_v2_projection_runs_failed_idx
-    ON orchestration_v2_projection_runs(thread_id)
-    WHERE status = 'failed'
   `;
   // Older sweep builds recorded id 62, so they skip main's failed-error index migration.
   yield* sql`
