@@ -56,6 +56,7 @@ const fixture = Effect.gen(function* () {
   const path = yield* Path.Path;
   const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-handoff-git-" });
   const origin = path.join(root, "origin.git");
+  const backup = path.join(root, "backup.git");
   const source = path.join(root, "source");
   const receiver = path.join(root, "receiver");
   const outDir = path.join(root, "out");
@@ -63,7 +64,9 @@ const fixture = Effect.gen(function* () {
   const write = (cwd: string, name: string, text: string) =>
     fs.writeFileString(path.join(cwd, name), text);
   yield* git(root, ["init", "--quiet", "--bare", "--initial-branch=main", origin]);
+  yield* git(root, ["init", "--quiet", "--bare", "--initial-branch=main", backup]);
   yield* git(root, ["clone", "--quiet", origin, source]);
+  yield* git(source, ["remote", "add", "backup", backup]);
   yield* fs.makeDirectory(path.join(source, "packages"));
   yield* write(source, "app.txt", "base\n");
   yield* write(source, "deleted.txt", "keep until deleted\n");
@@ -76,6 +79,7 @@ const fixture = Effect.gen(function* () {
   yield* git(source, ["checkout", "--quiet", "-b", branch]);
   yield* write(source, "app.txt", "committed\n");
   yield* git(source, ["commit", "--quiet", "-am", "unpushed work"]);
+  yield* git(source, ["push", "--quiet", "backup", branchRef]);
   yield* git(source, ["tag", branch]);
   yield* write(source, "app.txt", "staged\n");
   yield* git(source, ["add", "app.txt"]);

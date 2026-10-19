@@ -197,7 +197,7 @@ const make = Effect.gen(function* () {
           git(cwd, ["update-ref", "-d", ref, snapshot]).pipe(Effect.ignore),
         );
         const bundlePath = path.resolve(input.outDir, `${input.handoffId}.bundle`);
-        yield* git(cwd, ["bundle", "create", bundlePath, ref, "--not", "--remotes"]);
+        yield* git(cwd, ["bundle", "create", bundlePath, ref, "--not", "--remotes=origin"]);
         const bundleBytes = Number(
           (yield* fs
             .stat(bundlePath)
