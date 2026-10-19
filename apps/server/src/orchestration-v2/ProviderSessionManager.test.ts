@@ -5123,6 +5123,91 @@ it.effect("reuses an idle writer only after a proven refusal before native relea
   }),
 );
 
+it.effect("reuses the same writer after a plain detach refuses ongoing background work", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const background = yield* Ref.make(true);
+    const refusedThread = yield* Ref.make<OrchestrationV2ProviderThread | undefined>(undefined);
+    const attempts = yield* Ref.make(0);
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("refused-detached-writer");
+      const peer = ThreadId.make("refused-detach-peer");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: peer, now }),
+        ],
+      });
+      const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+      const runtime = yield* manager.open(input);
+      yield* manager.open({ ...input, threadId: peer });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* Ref.set(refusedThread, providerThread);
+      yield* runtime.resumeThread({ ...input, providerThread });
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
+      });
+      // Detach may surface the refusal or retain the writer silently; either
+      // way the unchanged owner must be usable while the command keeps running.
+      yield* manager.detach({ threadId, providerSessionId }).pipe(Effect.exit);
+      assert.isAbove(yield* Ref.get(attempts), 0);
+      assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
+      const reopened = yield* manager.open(input);
+      assert.strictEqual(reopened, runtime);
+      assert.isTrue(yield* reopened.hasPendingBackgroundWorkForThread!(providerThread));
+      const resumed = yield* reopened.resumeThread({ ...input, providerThread });
+      assert.deepEqual(resumed.nativeThreadRef, providerThread.nativeThreadRef);
+      assert.isTrue(yield* reopened.hasPendingBackgroundWorkForThread!(providerThread));
+      const final = yield* Ref.get(state);
+      assert.equal(final.resumeCount, 1, "the native writer is already loaded");
+      assert.deepEqual(final.unloadedNativeThreadIds, []);
+      assert.equal(final.openCount, 1);
+      assert.equal(final.closeCount, 0, "the pooled process and peer must survive");
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 600_000,
+          capabilities: CodexProviderCapabilitiesV2,
+          hasPendingBackgroundWork: Ref.get(background),
+          hasPendingBackgroundWorkForThread: Ref.get(background),
+          beforeUnload: Effect.gen(function* () {
+            yield* Ref.update(attempts, (n) => n + 1);
+            const thread = yield* Ref.get(refusedThread);
+            if (thread === undefined) return yield* Effect.die("Missing loaded writer fixture");
+            if (yield* Ref.get(background)) {
+              return yield* new ProviderAdapter.ProviderAdapterThreadUnloadRefusedError({
+                driver: CODEX_DRIVER,
+                providerThreadId: thread.id,
+              });
+            }
+          }),
+        }),
+      ),
+    );
+  }),
+);
+
 it.effect("retains a failed detached writer for retry while its pooled peer remains alive", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
