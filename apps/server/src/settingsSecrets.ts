@@ -1,4 +1,5 @@
 import {
+  type McpServerProjectOverride,
   AntigravitySettings,
   ClaudeSettings,
   CodexSettings,
@@ -35,10 +36,11 @@ const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url
 
 export interface SettingsSecret {
   readonly secretName: string;
-  readonly kind: "field" | "environment";
+  readonly kind: "field" | "environment" | "mcp";
   readonly value: string;
   readonly redacted: boolean;
   readonly sensitive: boolean;
+  readonly sourceSecretName?: string;
   readonly providerInstanceId?: string;
   readonly environmentVariable?: string;
 }
@@ -142,5 +144,67 @@ export function mapSettingsSecrets(
     ]),
   ) as ServerSettings["usageLimitSources"];
 
-  return { ...settings, providerInstances, sourceControlHosts, usageLimitSources };
+  const mapServers = <Entry extends McpServerProjectOverride>(
+    servers: Readonly<Record<string, Entry>>,
+    owner: string,
+  ) =>
+    Object.fromEntries(
+      Object.entries(servers).map(([server, entry]) => {
+        const transport = entry.transport;
+        if (transport === undefined) return [server, entry];
+        const kind = transport.type === "stdio" ? "env" : "header";
+        const name = (server: string, variable: string) =>
+          `mcp-${owner}-${encode(server)}-${kind}-${encode(variable)}`;
+        const variables = (transport.type === "stdio" ? transport.env : transport.headers).map(
+          (variable) => {
+            const { valueRedacted: _redacted, storedAs, ...rest } = variable;
+            const result = map({
+              secretName: name(server, variable.name),
+              ...(storedAs === undefined
+                ? {}
+                : { sourceSecretName: name(storedAs.server, storedAs.variable) }),
+              kind: "mcp",
+              value: variable.value,
+              redacted: variable.valueRedacted === true && variable.value.length === 0,
+              sensitive: variable.sensitive,
+            });
+            return {
+              ...rest,
+              value: result.value,
+              ...(result.redacted ? { valueRedacted: true } : {}),
+            };
+          },
+        );
+        return [
+          server,
+          {
+            ...entry,
+            transport:
+              transport.type === "stdio"
+                ? { ...transport, env: variables }
+                : { ...transport, headers: variables },
+          },
+        ];
+      }),
+    ) as Record<string, Entry>;
+  const mcpServers = mapServers(settings.mcpServers, "env");
+  const projectSettingsOverrides = Object.fromEntries(
+    Object.entries(settings.projectSettingsOverrides).map(([id, overrides]) => [
+      id,
+      {
+        ...overrides,
+        ...(overrides.mcpServers === undefined
+          ? {}
+          : { mcpServers: mapServers(overrides.mcpServers, `project-${encode(id)}`) }),
+      },
+    ]),
+  );
+  return {
+    ...settings,
+    providerInstances,
+    sourceControlHosts,
+    usageLimitSources,
+    mcpServers,
+    projectSettingsOverrides,
+  };
 }

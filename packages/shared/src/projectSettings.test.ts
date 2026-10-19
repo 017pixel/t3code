@@ -1,5 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  type McpServerConfig,
+  type ServerSettings,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   ProjectId,
   ProviderDriverKind,
@@ -508,4 +510,87 @@ it("inherits branch naming defaults and applies project overrides independently"
     },
   });
   expect(resolveProjectSettings(cleared, projectId).settings.branchNamingMode).toBe("static");
+});
+
+const linear: McpServerConfig = {
+  enabled: true,
+  transport: { type: "http", url: "https://mcp.linear.app/mcp", headers: [] },
+};
+const supabase: McpServerConfig = {
+  enabled: true,
+  transport: {
+    type: "stdio",
+    command: "npx",
+    args: ["-y", "@supabase/mcp-server-supabase"],
+    env: [{ name: "SUPABASE_ACCESS_TOKEN", value: "env-token", sensitive: true }],
+  },
+};
+
+describe("project tools overrides", () => {
+  it("merges servers per name so environment servers still reach the project", () => {
+    const projectSupabase: McpServerConfig = {
+      enabled: true,
+      transport: { type: "stdio", command: "npx", args: ["--project-ref", "project-db"], env: [] },
+    };
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      mcpServers: { linear, supabase, sentry: linear },
+      projectSettingsOverrides: {
+        [projectId]: {
+          mcpServers: {
+            // Replaces the environment's server of the same name.
+            supabase: projectSupabase,
+            // Switches an inherited server off without restating it.
+            sentry: { enabled: false },
+            // A switch for a server the environment no longer has is ignored,
+            // including names an object inherits.
+            removed: { enabled: true },
+            constructor: { enabled: true },
+            playwright: {
+              enabled: true,
+              transport: { type: "stdio", command: "npx", args: ["@playwright/mcp"], env: [] },
+            },
+          },
+        },
+      },
+    } satisfies ServerSettings;
+
+    const resolved = resolveProjectSettings(settings, projectId);
+
+    expect(resolved.sources.mcpServers).toBe("project");
+    expect(resolved.settings.mcpServers).toEqual({
+      linear,
+      supabase: projectSupabase,
+      sentry: { ...linear, enabled: false },
+      playwright: {
+        enabled: true,
+        transport: { type: "stdio", command: "npx", args: ["@playwright/mcp"], env: [] },
+      },
+    });
+  });
+
+  it("turns skills off and back on per project over the environment list", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      disabledSkills: ["grill-me", "Prepare-PR"],
+      projectSettingsOverrides: {
+        [projectId]: { disabledSkills: { "prepare-pr": false, "expo-deployment": true } },
+      },
+    } satisfies ServerSettings;
+
+    expect(resolveProjectSettings(settings, projectId).settings.disabledSkills).toEqual([
+      "expo-deployment",
+      "grill-me",
+    ]);
+    expect(
+      resolveProjectSettings(
+        applyServerSettingsPatch(settings, { projectSettingsOverrides: { [projectId]: null } }),
+        projectId,
+      ).settings.disabledSkills,
+    ).toEqual(settings.disabledSkills);
+    expect(resolveProjectSettings(settings, null).settings.disabledSkills).toEqual([
+      "grill-me",
+      "Prepare-PR",
+    ]);
+  });
 });

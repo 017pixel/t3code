@@ -5,6 +5,7 @@ import {
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
+  ProjectId,
   ProviderInstanceId,
   ThreadId,
   AuthOrchestrationOperateScope,
@@ -321,6 +322,110 @@ describe("settings mutation authorization", () => {
       ).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
       expect(handled).toBe(1);
     }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "allows inherited Tools switches and unchanged secrets, but protects executable changes",
+    () =>
+      Effect.gen(function* () {
+        const projectId = ProjectId.make("project-tools");
+        const stored = {
+          enabled: true,
+          transport: {
+            type: "http" as const,
+            url: "https://example.com/mcp",
+            headers: [
+              {
+                name: "Authorization",
+                value: "secret-token",
+                sensitive: true,
+                valueRedacted: true,
+              },
+            ],
+          },
+        };
+        const echoed = {
+          ...stored,
+          transport: {
+            ...stored.transport,
+            headers: [{ name: "Authorization", value: "", sensitive: true, valueRedacted: true }],
+          },
+        };
+        let handled = 0;
+        let observed = 0;
+        const client = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              group.toLayerHandler(WS_METHODS.serverUpdateSettings, () =>
+                Effect.sync(() => {
+                  handled++;
+                  return DEFAULT_SERVER_SETTINGS;
+                }),
+              ),
+              RpcAuthorization.layer(
+                [AuthSettingsWriteScope],
+                () =>
+                  Effect.sync(() => {
+                    observed++;
+                  }),
+                Effect.succeed({
+                  projectSettingsOverrides: { [projectId]: { mcpServers: { docs: stored } } },
+                }),
+              ),
+            ),
+          ),
+        );
+        yield* client[WS_METHODS.serverUpdateSettings]({
+          patch: {
+            disabledSkills: ["review"],
+            projectSettingsOverrides: {
+              [projectId]: {
+                mcpServers: { docs: echoed, inherited: { enabled: false } },
+                disabledSkills: { review: false },
+              },
+            },
+          },
+        });
+        expect(handled).toBe(1);
+        expect(observed).toBe(1);
+        const deniedPatches = [
+          { mcpServers: { docs: stored } },
+          { mcpServers: { docs: null } },
+          { projectSettingsOverrides: { [projectId]: null } },
+          { projectSettingsOverrides: { [projectId]: { disabledSkills: { review: true } } } },
+          {
+            projectSettingsOverrides: {
+              [projectId]: {
+                mcpServers: {
+                  docs: {
+                    ...echoed,
+                    transport: { ...echoed.transport, url: "https://changed.example/mcp" },
+                  },
+                },
+              },
+            },
+          },
+          {
+            projectSettingsOverrides: {
+              [projectId]: {
+                mcpServers: {
+                  added: {
+                    enabled: true,
+                    transport: { type: "stdio" as const, command: "node", args: [], env: [] },
+                  },
+                },
+              },
+            },
+          },
+        ];
+        for (const patch of deniedPatches) {
+          expect(
+            yield* client[WS_METHODS.serverUpdateSettings]({ patch }).pipe(Effect.flip),
+          ).toMatchObject({ requiredPermission: AuthProvidersManageScope });
+        }
+        expect(handled).toBe(1);
+        expect(observed).toBe(1);
+      }).pipe(Effect.scoped),
   );
 
   it.effect("does not let a settings grant create or remove providers", () =>

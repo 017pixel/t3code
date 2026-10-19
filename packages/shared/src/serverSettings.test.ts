@@ -1,5 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  type McpServerConfig,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -1145,5 +1146,39 @@ describe("synchronized model preferences", () => {
       favorites: [],
       providerModelPreferences: {},
     });
+  });
+});
+
+describe("MCP server patches", () => {
+  const linear: McpServerConfig = {
+    enabled: true,
+    transport: { type: "http", url: "https://mcp.linear.app/mcp", headers: [] },
+  };
+  const supabase: McpServerConfig = {
+    enabled: true,
+    transport: {
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "@supabase/mcp-server-supabase"],
+      env: [{ name: "SUPABASE_ACCESS_TOKEN", value: "env-token", sensitive: true }],
+    },
+  };
+
+  it("replaces one server at a time and removes it with null", () => {
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      mcpServers: { linear, supabase, retained: linear },
+    };
+    const switched: McpServerConfig = {
+      enabled: true,
+      transport: { type: "http", url: "https://example.com/mcp", headers: [] },
+    };
+
+    const next = applyServerSettingsPatch(current, {
+      mcpServers: { supabase: switched, linear: null },
+    });
+
+    // A stdio server edited into an http one keeps no stdio fields.
+    expect(next.mcpServers).toEqual({ supabase: switched, retained: linear });
   });
 });

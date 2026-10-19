@@ -1203,3 +1203,24 @@ describe("server model preferences", () => {
     });
   });
 });
+
+describe("Tools settings wire format", () => {
+  it("round-trips sparse tools settings and rejects overwriting T3's own server", () => {
+    const server = {
+      enabled: true,
+      transport: { type: "http", url: "https://example.com/mcp", headers: [] },
+    };
+    const input = {
+      mcpServers: { docs: server },
+      disabledSkills: ["review"],
+      projectSettingsOverrides: {
+        project: { mcpServers: { docs: { enabled: false } }, disabledSkills: { review: false } },
+      },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(decodeServerSettings({})).toMatchObject({ mcpServers: {}, disabledSkills: [] });
+    expect(() => decodeServerSettingsPatch({ mcpServers: { "t3-code": server } })).toThrow();
+    expect(() => decodeServerSettings({ mcpServers: { "t3-code": server } })).toThrow();
+  });
+});

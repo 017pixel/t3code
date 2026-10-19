@@ -629,7 +629,12 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const pending: SettingsSecret[] = [];
       mapSettingsSecrets(settings, (secret) => {
-        if (secret.kind === "field" && !secret.redacted && secret.value.length > 0) {
+        if (
+          (secret.kind === "field" || secret.kind === "mcp") &&
+          secret.sensitive &&
+          !secret.redacted &&
+          secret.value.length > 0
+        ) {
           pending.push(secret);
         }
         return secret;
@@ -833,7 +838,7 @@ const make = Effect.gen(function* () {
           secret.sensitive && secret.redacted
             ? (storedSecrets.get(secret.secretName) ?? "")
             : secret.value,
-        redacted: secret.sensitive && secret.kind === "environment" && secret.redacted,
+        redacted: secret.sensitive && secret.kind !== "field" && secret.redacted,
       }));
     });
 
@@ -886,9 +891,8 @@ const make = Effect.gen(function* () {
           changes.push({ ...metadata, kind: "remove", operation: "remove-secret" });
           return { value: secret.value, redacted: false };
         }
-        const old = previous.get(secret.secretName);
-        const inlineValue =
-          old?.sensitive && !old.redacted && old.value.length > 0 ? old.value : undefined;
+        const old = previous.get(secret.sourceSecretName ?? secret.secretName);
+        const inlineValue = old?.sensitive && old.value.length > 0 ? old.value : undefined;
         const value = secret.redacted ? inlineValue : secret.value;
         if (value === undefined) {
           nextSecretNames.add(secret.secretName);
@@ -1003,7 +1007,8 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const current = yield* getSettingsFromCache;
         const updated = yield* update(current);
-        const persisted = yield* persistSettingsSecrets(current, updated);
+        const materializedCurrent = yield* materializeSettingsSecrets(current);
+        const persisted = yield* persistSettingsSecrets(materializedCurrent, updated);
         const next = yield* normalizeServerSettings(persisted.settings);
         const materialized = yield* Effect.uninterruptibleMask(() =>
           Effect.gen(function* () {
