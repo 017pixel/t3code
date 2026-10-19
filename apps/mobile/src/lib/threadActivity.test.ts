@@ -841,7 +841,7 @@ describe("buildThreadFeed", () => {
     ).toBe(false);
   });
 
-  it("keeps opening and final assistant messages around the first hidden work", () => {
+  it("keeps assistant text before and between tools visible while folding work and reasoning", () => {
     const opening = {
       ...assistantMessage("2026-06-20T00:00:01.500Z"),
       id: TurnItemId.make("item-opening"),
@@ -859,7 +859,17 @@ describe("buildThreadFeed", () => {
       projected(opening, 1),
       projected(command(), 2),
       projected(middle, 3),
-      projected(assistantMessage(), 4),
+      projected({ ...command("2026-06-20T00:00:02.600Z"), id: TurnItemId.make("item-build") }, 4),
+      projected(
+        {
+          ...base("item-reasoning", "2026-06-20T00:00:02.700Z", 5),
+          type: "reasoning",
+          text: "Checking the build output.",
+          streaming: false,
+        },
+        5,
+      ),
+      projected(assistantMessage(), 6),
     ]);
     const latestRun = {
       runId,
@@ -873,24 +883,40 @@ describe("buildThreadFeed", () => {
       "message-user",
       "message-opening",
       "run-fold:run-1",
+      "message-middle",
       "message-assistant",
     ]);
     expect(collapsed[1]).toMatchObject({ message: { text: opening.text } });
+    expect(collapsed[3]).toMatchObject({ message: { id: middle.messageId, text: middle.text } });
     expect(collapsed[2]).toMatchObject({
       type: "run-fold",
       createdAt: "2026-06-20T00:00:02.000Z",
       label: "Worked for 2.0s",
     });
 
-    const expanded = deriveThreadFeedPresentation(feed, latestRun, new Set([runId]));
+    const expanded = deriveThreadFeedPresentation(
+      feed,
+      latestRun,
+      new Set([runId]),
+      new Set(["work-group:local:thread-1:item-build"]),
+    );
     expect(expanded.map((entry) => entry.type)).toEqual([
       "message",
       "message",
       "run-fold",
       "activity-group",
       "message",
+      "work-toggle",
+      "activity-group",
       "message",
     ]);
+    expect(
+      expanded.flatMap((entry) =>
+        entry.type === "activity-group"
+          ? entry.activities.map((activity) => activity.projectedItem.item.type)
+          : [],
+      ),
+    ).toEqual(["command_execution", "command_execution", "reasoning"]);
     expect(expanded[4]).toMatchObject({ message: { id: middle.messageId, text: middle.text } });
   });
 
