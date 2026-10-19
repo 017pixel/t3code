@@ -5,12 +5,15 @@ import {
   type ComponentProps,
   type SyntheticEvent,
 } from "react";
+import { isHeicImageFile } from "../../lib/imageCompression";
 
 type AttachmentImageProps = ComponentProps<"img"> & { name: string; mimeType?: string | undefined };
 
 export function AttachmentImage({ name, mimeType, ...props }: AttachmentImageProps) {
   const fallback =
-    /\.(tiff?|hei[cf])$/i.test(name) || /^image\/(tiff|hei[cf])$/i.test(mimeType ?? "");
+    isHeicImageFile({ name, type: mimeType ?? "" }) ||
+    /\.tiff?$/i.test(name) ||
+    /^image\/tiff$/i.test(mimeType ?? "");
   return fallback ? (
     <DecodedImage key={props.src} {...props} name={name} mimeType={mimeType} />
   ) : (

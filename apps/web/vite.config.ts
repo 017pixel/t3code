@@ -284,6 +284,16 @@ export default defineConfig(() => {
       emptyOutDir: true,
       manifest: true,
       sourcemap: buildSourcemap,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            // Preview imports must not fold shared file icons back into main.
+            groups: [
+              { name: "PierreEntryIcon", test: /\/components\/chat\/PierreEntryIcon\.tsx$/ },
+            ],
+          },
+        },
+      },
     },
     worker: { format: "es" },
     test: {

@@ -1,56 +1,17 @@
-import { lazy, Suspense, useState } from "react";
-import { AttachmentImage } from "../media/AttachmentImage";
+import { lazy, Suspense } from "react";
 
-import { FileSurfaceFailure } from "./fileSurfaceChrome";
+import { FileSurfaceLoading } from "./fileSurfaceChrome";
 
-const ExpandedImageDialog = lazy(() =>
-  import("~/components/chat/ExpandedImageDialog").then((module) => ({
-    default: module.ExpandedImageDialog,
-  })),
-);
+const PreviewImageContent = lazy(() => import("./PreviewImageContent"));
 
 export function PreviewImage(props: {
   readonly src: string;
   readonly name: string;
   readonly mimeType?: string;
 }) {
-  const [failed, setFailed] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  if (failed) return <FileSurfaceFailure message="Unable to load image." />;
   return (
-    <>
-      <button
-        type="button"
-        aria-label={`Zoom ${props.name}`}
-        className="flex min-h-0 flex-1 cursor-zoom-in items-center justify-center overflow-hidden p-4"
-        onClick={() => setExpanded(true)}
-      >
-        <AttachmentImage
-          name={props.name}
-          mimeType={props.mimeType}
-          src={props.src}
-          alt={props.name}
-          className="max-h-full max-w-full object-contain"
-          onError={() => setFailed(true)}
-        />
-      </button>
-      {expanded ? (
-        <Suspense>
-          <ExpandedImageDialog
-            preview={{
-              images: [
-                {
-                  src: props.src,
-                  name: props.name,
-                  ...(props.mimeType ? { mimeType: props.mimeType } : {}),
-                },
-              ],
-              index: 0,
-            }}
-            onClose={() => setExpanded(false)}
-          />
-        </Suspense>
-      ) : null}
-    </>
+    <Suspense fallback={<FileSurfaceLoading />}>
+      <PreviewImageContent {...props} />
+    </Suspense>
   );
 }
