@@ -2466,10 +2466,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       const liveSelectionChanges: Array<unknown> = [];
       const continuationRequests: Array<ProviderContinuationRequests.ProviderContinuationRequest> =
         [];
-      const nativeTaskEndReceipts =
-        yield* Queue.unbounded<
-          Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "subagent.native-task-ended" }>
-        >();
       const continuationReceipts =
         yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
       const terminalReceipts =
@@ -2585,9 +2581,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         Stream.runForEach((event) =>
           Effect.gen(function* () {
             events.push(event);
-            if (event.type === "subagent.native-task-ended")
-              yield* Queue.offer(nativeTaskEndReceipts, event);
-            if (event.type === "subagent.updated") yield* Queue.offer(subagentReceipts, event);
+            if (event.type === "subagent.updated") {
+              yield* Queue.offer(subagentReceipts, event);
+            }
             if (event.type === "turn.terminal") {
               yield* Queue.offer(terminalReceipts, event);
             }
@@ -2629,7 +2625,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         events,
         terminalReceipts,
         subagentReceipts,
-        nativeTaskEndReceipts,
         systemNoticeReceipts,
         getOpenedOptions: () => openedOptions,
         terminalEvents,
@@ -10602,136 +10597,136 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect(
-    "routes a stopped task missing from the process registry to durable reconciliation",
-    () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const harness = yield* makeWakeHarness;
-          yield* harness.runtime.startTurn(
-            makeClaudeTestTurnInput({
-              threadId: harness.threadId,
-              providerThread: harness.providerThread,
-              now: yield* DateTime.now,
-              attemptId: RunAttemptId.make("attempt-orphan-stopped"),
-              text: "Continue",
-              attachments: [],
-            }),
-          );
-          yield* harness.offerAndWait(wakeTurnInit);
-          yield* harness.offerAndWait(
-            claudeSdkFrame({
-              type: "user",
-              isSynthetic: true,
-              parent_tool_use_id: null,
-              session_id: WAKE_NATIVE_SESSION,
-              uuid: "00000000-0000-4000-8000-000000000990",
-              message: {
-                role: "user",
-                content:
-                  "<task-notification><task-id>old-task</task-id><status>stopped</status><summary>Previous session ended</summary></task-notification>",
-              },
-            }),
-          );
-          const ended = yield* Queue.take(harness.nativeTaskEndReceipts);
-          assert.equal(ended.nativeTaskId, "old-task");
-          assert.equal(ended.threadId, harness.threadId);
-          assert.equal(ended.status, "cancelled");
-          assert.equal(ended.result, "Previous session ended");
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
-      ),
-  );
-
-  it.effect("settles synthetic stopped transcript notifications", () =>
+  it.effect("preserves transcript receipt source frames and excludes known shell tasks", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make("attempt-transcript-stopped"),
-            text: "Delegate",
-            attachments: [],
-          }),
-        );
-        yield* harness.offerAndWait(
-          makeSubagentTaskStartedFrame({
-            taskId: "old-task",
-            toolUseId: "old-tool",
-            uuid: "00000000-0000-4000-8000-000000000991",
-          }),
-        );
-        yield* Queue.take(harness.subagentReceipts);
-        const frame = claudeSdkFrame({
-          type: "user",
-          isSynthetic: true,
-          parent_tool_use_id: null,
-          session_id: WAKE_NATIVE_SESSION,
-          uuid: "00000000-0000-4000-8000-000000000992",
-          message: {
-            role: "user",
-            content:
-              "<task-notification><task-id>old-task</task-id><status>stopped</status><summary>Previous session ended</summary></task-notification>",
-          },
-        });
-        assert.lengthOf(
-          ClaudeAdapterV2.claudeTranscriptTaskNotifications({
-            ...frame,
-            isSynthetic: false,
-          } as SDKMessage),
-          0,
-        );
-        yield* harness.offerAndWait(frame);
-        const ended = yield* Queue.take(harness.subagentReceipts);
-        assert.equal(ended.subagent.status, "cancelled");
-        assert.equal(ended.subagent.result, "Previous session ended");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-    ),
-  );
-
-  it.effect("keeps the transcript task notification frame itself in normal handling", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const harness = yield* makeWakeHarness;
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make("attempt-transcript-still-routed"),
-            text: "Continue",
-            attachments: [],
-          }),
-        );
-        yield* harness.offerAndWait(turnOneResult);
-        yield* Queue.take(harness.terminalReceipts);
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        yield* harness.offerAndWait(
+        const objective = "all tests pass";
+        const receiptText = (taskId: string) =>
+          `<task-notification><task-id>${taskId}</task-id><status>stopped</status><summary>Previous session ended</summary></task-notification>`;
+        const transcript = (taskId: string, uuid: string) =>
           claudeSdkFrame({
             type: "user",
             isSynthetic: true,
             parent_tool_use_id: null,
             session_id: WAKE_NATIVE_SESSION,
-            uuid: "00000000-0000-4000-8000-000000000993",
+            uuid,
+            message: { role: "user", content: receiptText(taskId) },
+          });
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: {
+              ...harness.providerThread,
+              goal: { objective, status: "active", checks: 0 },
+            },
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("transcript-source"),
+            text: "Continue",
+            attachments: [],
+          }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            ...transcript("old-task", "goal-receipt"),
+            user_message_uuid: harness.promptUuid(0),
             message: {
               role: "user",
-              content:
-                "<task-notification><task-id>old-task</task-id><status>stopped</status><summary>Previous session ended</summary></task-notification>",
+              content: `Stop hook feedback:\n[${objective}]: One test still fails.\n${receiptText("old-task")}`,
             },
           }),
         );
-        // The raw frame still buffers as wake evidence; only the synthesized
-        // receipt is new handling, nothing on the source frame is dropped.
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            ...transcript("old-task", "user-quoted-receipt"),
+            isSynthetic: false,
+          }),
+        );
+        yield* harness.offerAndWait(wakeTaskStarted);
+        yield* harness.offerAndWait(transcript(WAKE_TASK_ID, "shell-receipt"));
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            ...wakeTaskStarted,
+            task_id: "other-shell",
+            tool_use_id: "other-shell-tool",
+            uuid: "other-shell-start",
+          }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: "other-shell",
+            status: "stopped",
+            summary: "Shell ended",
+            session_id: WAKE_NATIVE_SESSION,
+            uuid: "shell-sdk-receipt",
+          }),
+        );
+        yield* harness.offerAndWait(turnOneResult);
+        yield* Queue.take(harness.terminalReceipts);
+        assert.deepEqual(
+          harness.events.flatMap((event) =>
+            event.type === "subagent.native-task-ended" ? [event.nativeTaskId] : [],
+          ),
+          ["old-task"],
+        );
+        assert.isTrue(
+          harness.events.some(
+            (event) =>
+              event.type === "provider_thread.updated" && event.providerThread.goal?.checks === 1,
+          ),
+        );
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("transcript-echo"),
+            text: "Continue again",
+            attachments: [],
+            providerTurnOrdinal: 2,
+          }),
+        );
+        const readThrough = Effect.fnUntraced(function* (uuid: string) {
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "informational",
+              level: "warning",
+              content: uuid,
+              uuid,
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* Queue.take(harness.systemNoticeReceipts);
+        });
+        const hasReply = () =>
+          harness.events.some(
+            (event) =>
+              event.type === "message.updated" &&
+              event.message.text === "Echo released this reply.",
+          );
+        yield* harness.offerAndWait(
+          makeAssistantTextFrame({
+            uuid: "held-reply",
+            text: "Echo released this reply.",
+          }),
+        );
+        yield* readThrough("before-echo");
+        assert.isFalse(hasReply());
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            ...transcript("echo-task", "echo-receipt"),
+            user_message_uuid: harness.promptUuid(1),
+          }),
+        );
+        yield* readThrough("after-echo");
+        assert.isTrue(hasReply());
+        yield* harness.offerAndWait(makeResultFrame({ uuid: "echo-result", result: "" }));
+        yield* Queue.take(harness.terminalReceipts);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        yield* harness.offerAndWait(transcript("another-old-task", "idle-receipt"));
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
