@@ -3846,3 +3846,139 @@ it.effect.each(["write-failure", "replayed-receipt"] as const)(
       }).pipe(Effect.provide(harness.layer));
     }),
 );
+
+it.effect("reconciles a partially published branch after a transient rollback write failure", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const git = yield* GitVcsDriver.GitVcsDriver;
+    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "branch-compensation-" });
+    const command = (args: string[]) => git.execute({ operation: "launch-test", cwd, args });
+    yield* command(["init", "-b", "t3/abcd1234"]);
+    yield* command([
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.test",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "initial",
+    ]);
+    const started = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+    const publicationFailures = yield* Queue.unbounded<void>();
+    const rollbackFailed = yield* Deferred.make<void>();
+    let publishedThreadId: ThreadId | undefined;
+    let failRollback = true;
+    const harness = makeHarness({
+      renameBranch: git.renameBranch,
+      git: { localStatus: git.status },
+      generateBranchName: () =>
+        Effect.fiber.pipe(
+          Effect.tap((fiber) => Deferred.succeed(started, fiber)),
+          Effect.as({ branch: "generated-branch" }),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadIds = [ThreadId.make("branch-sharer-a"), ThreadId.make("branch-sharer-b")];
+      for (const threadId of threadIds) {
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create:${threadId}`),
+          threadId,
+          projectId,
+          title: "Shared checkout",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "t3/abcd1234",
+          worktreePath: cwd,
+          createdBy: "user",
+          creationSource: "web",
+        });
+      }
+      const namingLayer = Layer.fresh(BranchNaming.layer).pipe(
+        Layer.provide(
+          Layer.succeed(Orchestrator.OrchestratorV2, {
+            ...orchestrator,
+            dispatch: (input) =>
+              Effect.gen(function* () {
+                if (input.type === "thread.metadata.update") {
+                  if (input.branch === "generated-branch" && publishedThreadId !== undefined) {
+                    yield* Queue.offer(publicationFailures, undefined);
+                    return yield* new Orchestrator.OrchestratorDispatchError({
+                      commandId: input.commandId,
+                      commandType: input.type,
+                      cause: "publication unavailable",
+                    });
+                  }
+                  if (input.branch === "t3/abcd1234" && failRollback) {
+                    failRollback = false;
+                    yield* Deferred.succeed(rollbackFailed, undefined);
+                    return yield* new Orchestrator.OrchestratorDispatchError({
+                      commandId: input.commandId,
+                      commandType: input.type,
+                      cause: "transient rollback write failure",
+                    });
+                  }
+                }
+                const result = yield* orchestrator.dispatch(input);
+                if (
+                  input.type === "thread.metadata.update" &&
+                  input.branch === "generated-branch"
+                ) {
+                  publishedThreadId = input.threadId;
+                }
+                return result;
+              }),
+          }),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const naming = yield* BranchNaming.TemporaryBranchNaming;
+        yield* naming.schedule({
+          threadId: threadIds[0]!,
+          projectId,
+          commandId: CommandId.make("partial-publication:accepted"),
+          branch: "t3/abcd1234",
+          worktreePath: cwd,
+          message: { text: "Implement the editor", attachments: [] },
+        });
+        const fiber = yield* Deferred.await(started);
+        for (let attempt = 0; attempt < 3; attempt++) {
+          yield* Queue.take(publicationFailures);
+          if (attempt < 2) yield* TestClock.adjust("100 millis");
+        }
+        yield* Deferred.await(rollbackFailed);
+        assert.isDefined(publishedThreadId);
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.await(fiber);
+        const branch = yield* git.resolveBranchName(cwd, "HEAD");
+        assert.equal(branch, "t3/abcd1234");
+        const generatedRef = yield* command([
+          "show-ref",
+          "--verify",
+          "refs/heads/generated-branch",
+        ]).pipe(Effect.result);
+        assert.equal(generatedRef._tag, "Failure");
+        const branches = yield* Effect.forEach(threadIds, (threadId) =>
+          threads
+            .getThreadProjection(threadId)
+            .pipe(Effect.map((projection) => projection.thread.branch)),
+        );
+        assert.deepEqual(branches, [branch, branch]);
+      }).pipe(Effect.provide(namingLayer));
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(
+    Effect.provide(
+      GitVcsDriver.layer.pipe(
+        Layer.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "branch-compensation-git-" }),
+        ),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
