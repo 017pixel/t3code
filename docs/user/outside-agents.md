@@ -88,6 +88,44 @@ Any agent that supports remote MCP servers over HTTP with OAuth can connect. Giv
 it the MCP URL and choose OAuth, and the agent finds the sign-in settings itself.
 Agents without OAuth support cannot connect.
 
+## Link from another T3 Code environment
+
+On the host that will make requests, link the other environment with a pairing
+code from its **Settings → Connections** or `t3 auth pairing create`:
+
+```sh
+t3 environment link https://<environment-address> --pairing-code <code> --access approval-required
+```
+
+Use HTTPS, or HTTP with a loopback address, a Tailscale `.ts.net` name, or a
+Tailscale IPv6 address. Plain HTTP LAN and Tailscale IPv4 addresses are not
+supported. The link belongs to the host where you ran the command and
+appears on the peer as **T3 Code · <host label>**. Calls keep both the link's
+access ceiling and the calling agent's narrower modes.
+
+Use `t3 environment list` to check reachability and
+`t3 environment get <environment-id> --json` to read a stored link without
+contacting the peer. Run `t3 environment unlink <environment-id>` to forget it
+locally. To revoke its access on the peer, remove its session in that peer's
+Connections settings. After a link expires, link again with a new pairing code.
+
+Agents can call `t3_environment_links`, then pass a listed `environmentId` to
+tools that accept it. Projects, threads, runs, providers and models must come
+from that destination; supply thread or project IDs explicitly. This includes
+project creation, thread launch/read/send/wait, queues, pending requests and
+ordinary scheduling. `delegate_task` stays local.
+
+Remote launches cannot carry attachments. Remote schedules cannot use a
+`signature.secretRef` created here; configure signed webhooks from a thread
+in the destination instead. Waits use requests of at most 50 seconds and keep
+following the originally selected run.
+
+`t3_thread_interrupt` with `stop:true` also holds the queue, ends pull request
+watches and stops delegated work. A partial retry can hold the current queue
+and end current watches on the original still-current run; it does not stop
+later-created runs or descendants. `interrupt_requested` confirms acceptance,
+not termination. Older peers that ignore `stop` only interrupt the run.
+
 ## Remove an agent
 
 Approved agents appear under **Settings → Connections** like other clients.

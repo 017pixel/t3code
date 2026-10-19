@@ -39,33 +39,21 @@ const hasScheduleSecretRef = Schema.is(
 
 type Scope = McpInvocationContext.McpInvocationScope;
 
-/**
- * Runs T3 MCP tools in a linked environment for an agent here. The tool's own
- * declaration checks the agent here first; the linked environment then holds
- * the call to the link's access, narrowed to the agent's modes, which every
- * forwarded call carries.
- */
 export class PeerForwarding extends Context.Service<
   PeerForwarding,
   {
-    /**
-     * Runs `tool` in the linked environment `environmentId` with `params`. A
-     * `t3_thread_wait` goes in pieces short enough to survive any route.
-     */
     readonly call: <T extends Tool.Any>(
       scope: Scope,
       tool: T,
       environmentId: EnvironmentId,
       params: Tool.Parameters<T>,
     ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
-    /** The environments this one links to, as an agent sees them. */
     readonly links: (
       scope: Scope,
     ) => Effect.Effect<OrchestratorMcpEnvironmentLinksResult, OrchestratorMcpFailure>;
   }
 >()("t3/peer/PeerForwarding") {}
 
-/** The linked environment a call names, or nothing when it names this one. */
 export const remoteTarget = (scope: Scope, environmentId: EnvironmentId | undefined) =>
   environmentId === scope.environmentId ? undefined : environmentId;
 
@@ -98,7 +86,6 @@ const make = Effect.gen(function* () {
       Effect.orDie,
     );
 
-  /** Tool and contract schemas are plain data: they encode and decode without services. */
   const forward = <A>(
     scope: Scope,
     toolName: string,

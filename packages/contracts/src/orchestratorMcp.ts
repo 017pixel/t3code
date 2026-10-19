@@ -26,6 +26,7 @@ import {
 } from "./scheduledTask.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { PullRequestState } from "./pullRequest.ts";
+import { PeerLinkStatus } from "./peerLink.ts";
 import {
   ThreadLinkedPullRequest,
   ThreadPullRequestKey,
@@ -543,8 +544,7 @@ export type OrchestratorMcpCapabilitiesInput = typeof OrchestratorMcpCapabilitie
 export const OrchestratorMcpEnvironmentLink = Schema.Struct({
   environmentId: EnvironmentId,
   label: Schema.String,
-  /** Whether it answered just now. An expired link must be linked again there. */
-  status: Schema.Literals(["reachable", "unreachable", "expired"]),
+  status: PeerLinkStatus,
   /** The most the linked environment lets this one's agents do there. */
   access: AuthMcpClientAccess,
   expiresAt: IsoDateTime,

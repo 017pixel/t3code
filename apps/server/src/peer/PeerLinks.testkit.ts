@@ -8,11 +8,14 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import type * as McpSchema from "effect/ai/McpSchema";
 import * as Ref from "effect/Ref";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
@@ -29,6 +32,10 @@ import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
+
+const decodeMcpRequest = Schema.decodeUnknownEffect(
+  Schema.Struct({ method: Schema.String, id: Schema.optional(Schema.Number) }),
+);
 
 class PeerTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.metadata)
@@ -58,8 +65,16 @@ export const servePeer = <E, R>(
 ) =>
   Effect.gen(function* () {
     const descriptor = yield* Ref.make(initial);
+    const alternateDescriptor = yield* Ref.make(initial);
     const bearers = yield* Ref.make<ReadonlyArray<string>>([]);
     const probes = yield* Ref.make(0);
+    const redirects = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
+    const redirectedBodies = yield* Ref.make<ReadonlyArray<string>>([]);
+    const toolResult = yield* Ref.make<McpSchema.CallToolResult | null>(null);
+    const sse = yield* Ref.make(false);
+    const replies = yield* Ref.make<ReadonlyMap<string, { status: number; body: unknown }>>(
+      new Map(),
+    );
     const layerEnvironment = Layer.succeed(ServerEnvironment.ServerEnvironment, {
       getEnvironmentId: Ref.get(descriptor).pipe(Effect.map((current) => current.environmentId)),
       getDescriptor: Ref.get(descriptor),
@@ -73,18 +88,58 @@ export const servePeer = <E, R>(
       Layer.fresh,
       Layer.build,
     );
+    // Every bearer B receives, on any route, so a test can show one was never sent.
     const layerRecordBearers = HttpRouter.middleware(
       (httpEffect) =>
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           if (request.url.startsWith("/.well-known/t3/environment")) {
             yield* Ref.update(probes, (count) => count + 1);
+            if (request.headers.host?.startsWith("localhost:")) {
+              if (yield* Ref.get(sse)) {
+                return HttpServerResponse.text(
+                  [
+                    'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"result":"notification"}}',
+                    "",
+                    'data: {"jsonrpc":"2.0","id":999,"error":{"code":-1,"message":"other request"}}',
+                    "",
+                    'data: {"jsonrpc":"2.0",',
+                    'data: "id":' + rpc.id + ',"result":' + JSON.stringify(result) + "}",
+                    "",
+                    "",
+                  ].join("\r\n"),
+                  { contentType: "text/event-stream" },
+                );
+              }
+              return HttpServerResponse.jsonUnsafe(yield* Ref.get(alternateDescriptor));
+            }
+          }
+          const redirect = (yield* Ref.get(redirects)).get(request.url);
+          if (redirect !== undefined) {
+            return HttpServerResponse.redirect(redirect, { status: 307 });
+          }
+          if (request.url === "/redirect-target") {
+            const body = yield* request.text;
+            yield* Ref.update(redirectedBodies, (bodies) => [...bodies, body]);
+            return HttpServerResponse.empty({ status: 400 });
           }
           const authorization = request.headers.authorization;
           if (authorization !== undefined) {
             yield* Ref.update(bearers, (seen) => [...seen, authorization]);
           }
-          return yield* httpEffect;
+          const reply = (yield* Ref.get(replies)).get(request.url);
+          if (reply !== undefined)
+            return HttpServerResponse.jsonUnsafe(reply.body, { status: reply.status });
+          const response = yield* httpEffect;
+          // Keep real authentication and dispatch, but exercise richer peer wire results.
+          const result = yield* Ref.get(toolResult);
+          if (result !== null && request.url === "/mcp" && response.status === 200) {
+            const rpc = yield* decodeMcpRequest(yield* request.json);
+            if (rpc.method === "tools/call") {
+              return HttpServerResponse.jsonUnsafe({ jsonrpc: "2.0", id: rpc.id, result });
+            }
+          }
+          return response;
         }),
       { global: true },
     );
@@ -108,31 +163,26 @@ export const servePeer = <E, R>(
       Layer.provide(layerEnvironment),
       Layer.provide(Layer.succeedContext(authContext)),
     );
-    // Fresh, so the peer never shares a toolkit or MCP server with the
-    // environment that links to it in the same test.
+    // Keep the peer's toolkit and MCP server separate from the linking environment.
     yield* HttpRouter.serve(layerRoutes, { disableListenLog: true, disableLogger: true }).pipe(
       Layer.fresh,
       Layer.build,
     );
     const address = (yield* HttpServer.HttpServer).address;
     if (address._tag === "UnixPathAddress") return yield* Effect.die("expected a TCP address");
-    const url = `http://127.0.0.1:${address.port}`;
-    const auth = Context.get(authContext, EnvironmentAuth.EnvironmentAuth);
     return {
-      url,
-      auth,
+      url: `http://127.0.0.1:${address.port}`,
+      auth: Context.get(authContext, EnvironmentAuth.EnvironmentAuth),
       descriptor,
+      alternateDescriptor,
       bearers,
+      toolResult,
+      sse,
+      replies,
+      redirects,
+      redirectedBodies,
       /** How often its descriptor was asked for, as a probe of whether it answers. */
       probes,
-      /** The sessions linking created there, which its Connections lists. */
-      linkedSessions: auth
-        .listSessions()
-        .pipe(
-          Effect.map((sessions) =>
-            sessions.filter((session) => session.client.label?.startsWith("T3 Code · ")),
-          ),
-        ),
     };
   });
 

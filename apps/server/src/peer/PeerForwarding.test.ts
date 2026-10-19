@@ -13,6 +13,7 @@ import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import { McpSchema, McpServer } from "effect/ai";
 
@@ -120,6 +121,7 @@ const boxThreads = (seen: Ref.Ref<Seen>) => {
 /** B launches whatever it is asked to, and records it. */
 const boxLaunches = (seen: Ref.Ref<Seen>) =>
   Layer.mock(ThreadLaunch.ThreadLaunchService)({
+    getAcceptedLaunch: () => Effect.succeed(Option.none()),
     launch: (input) =>
       Ref.update(seen, (current) => ({ ...current, launches: [...current.launches, input] })).pipe(
         Effect.as({
@@ -359,6 +361,18 @@ it.effect("an agent here works on a linked environment's threads within its own 
         `thread.stop ${boxThread}`,
         `delegated-tasks.stop ${boxThread}`,
       ]);
+
+      yield* Ref.set(
+        b.descriptor,
+        descriptorOf("environment-box", "Box", {
+          mcpModeLimitHeader: false,
+        }),
+      );
+      const incompatible = yield* a.call("thread:laptop-full", "t3_environment_links", {});
+      expect(incompatible.isError).toBe(false);
+      expect(incompatible.structuredContent).toMatchObject({
+        links: [{ environmentId: box.environmentId, status: "incompatible" }],
+      });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
