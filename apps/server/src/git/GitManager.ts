@@ -149,6 +149,11 @@ export class GitManager extends Context.Service<
       input: { readonly cwd: string; readonly branch: string },
       options?: { readonly refresh?: boolean; readonly freshGitState?: boolean },
     ) => Effect.Effect<GitBranchPullRequest | null, GitManagerServiceError>;
+    readonly branchSupersededPullRequest: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+      readonly pullRequest: { readonly number: number; readonly url: string };
+    }) => Effect.Effect<boolean, GitManagerServiceError>;
     readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -1266,7 +1271,7 @@ export const make = Effect.gen(function* () {
   );
   const getPrLookup = (key: string) => detachStackFrame(Cache.get(prLookupCache, key));
   interface LastKnownPr {
-    readonly pr: ReturnType<typeof toStatusPr> | null;
+    readonly pr: PullRequestInfo | null;
     readonly upstreamRef: string | null;
     readonly headBranch: string;
     readonly remoteName: string | null;
@@ -1288,7 +1293,7 @@ export const make = Effect.gen(function* () {
   const resolveLastKnownPr = (
     branchKey: string,
     current: Pick<LastKnownPr, "upstreamRef" | "headBranch" | "remoteName" | "headRemoteUrlKey">,
-  ): ReturnType<typeof toStatusPr> | null => {
+  ): PullRequestInfo | null => {
     const lastKnown = lastKnownPrByBranchKey.get(branchKey);
     if (!lastKnown) return null;
     if (lastKnown.headBranch !== current.headBranch) {
@@ -1314,6 +1319,37 @@ export const make = Effect.gen(function* () {
     }
     return lastKnown.pr;
   };
+  const branchMovedPastPullRequest = Effect.fn("branchMovedPastPullRequest")(function* (
+    cwd: string,
+    branch: string,
+    pr: {
+      readonly state: PullRequestInfo["state"];
+      readonly headSha?: string | null | undefined;
+    },
+  ) {
+    const headSha = pr.headSha?.trim().toLowerCase() ?? "";
+    if (pr.state === "open" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(headSha)) return false;
+    // The local ref must be fresh even when the host candidate was previously hidden.
+    // A deleted branch has no tip; another local or remote ref cannot stand in for it.
+    return yield* Effect.gen(function* () {
+      const tip = yield* gitCore.execute({
+        operation: "GitManager.branchMovedPastPullRequest.tip",
+        cwd,
+        args: ["rev-parse", "--verify", "--end-of-options", `refs/heads/${branch}^{commit}`],
+        timeoutMs: 5_000,
+      });
+      const tipOid = tip.stdout.trim().toLowerCase();
+      if (tipOid === headSha) return false;
+      const ancestry = yield* gitCore.execute({
+        operation: "GitManager.branchMovedPastPullRequest.ancestor",
+        cwd,
+        args: ["merge-base", "--is-ancestor", headSha, tipOid],
+        allowNonZeroExit: true,
+        timeoutMs: 5_000,
+      });
+      return ancestry.exitCode === 0;
+    }).pipe(Effect.orElseSucceed(() => false));
+  });
   const lookupStatusPr = Effect.fn("lookupStatusPr")(function* (
     cwd: string,
     details: {
@@ -1336,19 +1372,21 @@ export const make = Effect.gen(function* () {
         yield* Cache.invalidate(prLookupCache, cacheKey);
       }
     }
+    const visiblePr = Effect.fnUntraced(function* (pr: PullRequestInfo | null) {
+      if (
+        pr === null ||
+        (details.isDefaultBranch && pr.state !== "open") ||
+        (yield* branchMovedPastPullRequest(cwd, details.branch, pr))
+      ) {
+        return null;
+      }
+      return toStatusPr(pr);
+    });
     return yield* getPrLookup(cacheKey).pipe(
-      Effect.map(({ latest, headContext }) => {
-        if (!latest) return { pr: null, headContext };
-        // Merged/closed matches are usually reverse-merge history, not the thread's PR context.
-        if (details.isDefaultBranch && latest.state !== "open") {
-          return { pr: null, headContext };
-        }
-        return { pr: toStatusPr(latest), headContext };
-      }),
-      Effect.tap(({ pr, headContext }) =>
+      Effect.tap(({ latest, headContext }) =>
         Effect.sync(() =>
           rememberLastKnownPr(branchKey, {
-            pr,
+            pr: latest,
             upstreamRef: details.upstreamRef,
             headBranch: headContext.headBranch,
             remoteName: headContext.remoteName,
@@ -1356,7 +1394,7 @@ export const make = Effect.gen(function* () {
           }),
         ),
       ),
-      Effect.map(({ pr }) => pr),
+      Effect.flatMap(({ latest }) => visiblePr(latest)),
       Effect.catch((error) => {
         const fallback = lastKnownPrByBranchKey.get(branchKey)?.pr
           ? resolveLookupHeadContext(cwd, details).pipe(
@@ -1388,6 +1426,7 @@ export const make = Effect.gen(function* () {
               : {}),
           }),
           Effect.andThen(fallback),
+          Effect.flatMap(visiblePr),
         );
       }),
     );
@@ -2690,12 +2729,52 @@ export const make = Effect.gen(function* () {
       refresh,
       freshGitState,
     });
-    if (pullRequest === null || pullRequest.state === "open" || freshGitState) return pullRequest;
-    return yield* lookupBranchPullRequest(cacheCwd, branch, {
-      refresh: false,
-      freshGitState: true,
-    });
+    if (pullRequest === null || pullRequest.state === "open") return pullRequest;
+    const current = freshGitState
+      ? pullRequest
+      : yield* lookupBranchPullRequest(cacheCwd, branch, {
+          refresh: false,
+          freshGitState: true,
+        });
+    return current !== null && (yield* branchMovedPastPullRequest(cacheCwd, branch, current))
+      ? null
+      : current;
   });
+  const branchSupersededPullRequest: GitManager["Service"]["branchSupersededPullRequest"] =
+    Effect.fn("branchSupersededPullRequest")(function* ({ cwd, branch, pullRequest }) {
+      const provider = yield* sourceControlProvider(cwd);
+      const saved = toPullRequestInfo(
+        yield* provider.getChangeRequest({ cwd, reference: pullRequest.url }),
+      );
+      if (
+        saved.state === "open" ||
+        saved.number !== pullRequest.number ||
+        pullRequestRepositoryKey(saved.url) !== pullRequestRepositoryKey(pullRequest.url)
+      ) {
+        return false;
+      }
+      const remoteName = yield* gitCore.readConfigValue(cwd, `branch.${branch}.remote`);
+      const mergeRef = yield* gitCore.readConfigValue(cwd, `branch.${branch}.merge`);
+      const defaultBranch = yield* gitCore.resolveDefaultBranchName(cwd, remoteName ?? "origin");
+      const { headContext, lookup } = yield* resolveLookupHeadContext(cwd, {
+        branch,
+        upstreamRef:
+          remoteName !== null && mergeRef !== null
+            ? `${remoteName}/${mergeRef.replace(/^refs\/heads\//, "")}`
+            : null,
+        defaultBranch,
+      });
+      const repositoryKey = headContext.targetRemoteUrlKey ?? headContext.headRemoteUrlKey;
+      if (
+        !lookup ||
+        repositoryKey === null ||
+        repositoryKey !== pullRequestRepositoryKey(saved.url) ||
+        !matchesBranchHeadContext(saved, headContext)
+      ) {
+        return false;
+      }
+      return yield* branchMovedPastPullRequest(cwd, branch, saved);
+    });
   const invalidateLocalStatus: GitManager["Service"]["invalidateLocalStatus"] = Effect.fn(
     "invalidateLocalStatus",
   )(function* (cwd) {
@@ -3289,6 +3368,7 @@ export const make = Effect.gen(function* () {
     remoteStatus,
     status,
     branchPullRequest,
+    branchSupersededPullRequest,
     invalidateLocalStatus,
     invalidateRemoteStatus,
     invalidateStatus,
