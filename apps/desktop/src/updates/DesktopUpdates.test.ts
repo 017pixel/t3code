@@ -751,6 +751,7 @@ describe("DesktopUpdates", () => {
 
   it.effect("keeps windows and restarts backends when quitAndInstall fails", () => {
     const harness = makeHarness({
+      platform: "win32",
       quitAndInstall: Effect.fail(
         new ElectronUpdater.ElectronUpdaterQuitAndInstallError({
           channel: "latest",
@@ -766,12 +767,17 @@ describe("DesktopUpdates", () => {
         const desktopState = yield* DesktopState.DesktopState;
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+        yield* updates.download;
+        assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), true);
         harness.emit("update-downloaded", { version: "1.2.4" });
         yield* flushCallbacks;
 
         const result = yield* updates.install;
         assert.isTrue(result.accepted);
         assert.isFalse(yield* Ref.get(desktopState.quitting));
+        assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), false);
         assert.deepEqual(harness.installSteps, ["quitAndInstall", "startBackend"]);
         assert.equal(harness.updateRestartMarkers.size, 0);
         assert.equal(harness.installRecords.size, 0);
@@ -1148,6 +1154,9 @@ describe("DesktopUpdates background downloads", () => {
             yield* updates.check("manual");
             assert.equal((yield* updates.getState).availableVersion, "1.2.5");
             assert.isNull((yield* updates.getState).downloadedVersion);
+            yield* TestClock.adjust(Duration.minutes(4));
+            assert.equal(harness.checkCount(), 2);
+            assert.equal(harness.downloadCount(), 1);
             assert.equal(writeFileSyncMock.mock.calls.length, 0);
           }),
         ).pipe(Effect.provide(harness.layer));

@@ -20,9 +20,9 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
   },
 }));
 
-const { appEvents } = await vi.hoisted(async () => {
+const { appEvents, createWindowEvents } = await vi.hoisted(async () => {
   const { EventEmitter } = await import("node:events");
-  return { appEvents: new EventEmitter() };
+  return { appEvents: new EventEmitter(), createWindowEvents: () => new EventEmitter() };
 });
 
 vi.mock("electron-updater", () => ({
@@ -120,6 +120,24 @@ describe("ElectronUpdater", () => {
         appEvents.emit("quit", {}, exitCode);
         assert.equal(recordInstall.mock.calls.length, expectedRecords);
       }
+    }).pipe(Effect.provide(ElectronUpdater.layer)),
+  );
+
+  it.effect("does not install or rearm during Windows shutdown", () =>
+    Effect.gen(function* () {
+      const updater = yield* ElectronUpdater.ElectronUpdater;
+      const recordInstall = vi.fn();
+      const windowEvents = createWindowEvents();
+      yield* updater.onInstallOnAppQuit(recordInstall);
+      appEvents.emit("browser-window-created", {}, windowEvents);
+      yield* updater.setAutoInstallOnAppQuit(true);
+      windowEvents.emit("query-session-end", {});
+      assert.isFalse(autoUpdaterMock.autoInstallOnAppQuit);
+      yield* updater.setAutoInstallOnAppQuit(true);
+      appEvents.emit("quit", {}, 0);
+      assert.isFalse(autoUpdaterMock.autoInstallOnAppQuit);
+      assert.equal(recordInstall.mock.calls.length, 0);
+      assert.equal(appEvents.listenerCount("browser-window-created"), 0);
     }).pipe(Effect.provide(ElectronUpdater.layer)),
   );
 

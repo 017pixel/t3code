@@ -24,9 +24,6 @@ export function shouldShowDesktopUpdateCheckIcon({
   isChecking,
   prefersReducedMotion,
 }: {
-  /** An update is available, downloading, or downloaded. Background downloads
-      start while the check animation is still latched, and the spinner would
-      hide their progress. */
   readonly hasUpdateAction: boolean;
   readonly isAnimationLatched: boolean;
   readonly isChecking: boolean;
