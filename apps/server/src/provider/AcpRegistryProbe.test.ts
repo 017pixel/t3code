@@ -469,6 +469,7 @@ describe("ACP Registry probe", () => {
                   T3_ACP_COMMAND_ADVERTISEMENT_DELAY_MS: "25",
                   T3_ACP_REQUEST_LOG_PATH: requestLogPath,
                   T3_ACP_LEGACY_TERMINAL_AUTH: "1",
+                  T3_ACP_AUTH_METHOD_ID: "mock-login",
                   T3_ACP_SESSION_LIFECYCLE: "1",
                 },
               },
@@ -517,6 +518,9 @@ describe("ACP Registry probe", () => {
           );
           expect(result.probe.authMethods.some((method) => method.type === "terminal")).toBe(false);
         }
+        expect(result.probe.authMethods).toContainEqual(
+          expect.objectContaining({ id: "mock-login", type: "agent" }),
+        );
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
