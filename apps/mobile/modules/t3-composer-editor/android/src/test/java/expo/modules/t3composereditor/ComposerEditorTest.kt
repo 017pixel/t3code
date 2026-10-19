@@ -3,6 +3,8 @@ package expo.modules.t3composereditor
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.text.InputType
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -16,7 +18,7 @@ import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], manifest = Config.NONE)
-class ComposerPasteTest {
+class ComposerEditorTest {
   private val context = RuntimeEnvironment.getApplication()
   private val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
   private val editor = SelectionAwareEditText(context).apply {
@@ -119,5 +121,89 @@ class ComposerPasteTest {
     assertFalse(pasteAsText())
     assertEquals("unchanged", editor.text.toString())
     assertNull(intercepted)
+  }
+
+  private fun submissionEditor(sends: MutableList<Boolean>) = SelectionAwareEditText(context).apply {
+    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+    setText("draft")
+    setSelection(length())
+    submitEnabled = true
+    submitListener = { sends += it }
+  }
+
+  private fun SelectionAwareEditText.pressReturn(
+    modifiers: Int = 0,
+    repeats: Int = 0,
+    deviceId: Int = 1,
+    flags: Int = 0,
+  ) {
+    val down = KeyEvent(
+      0, 0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER,
+      0, modifiers, deviceId, 0, flags,
+    )
+    dispatchKeyEvent(down)
+    repeat(repeats) { dispatchKeyEvent(KeyEvent.changeTimeRepeat(down, 0, it + 1)) }
+    dispatchKeyEvent(KeyEvent.changeAction(down, KeyEvent.ACTION_UP))
+  }
+
+  @Test
+  fun hardwareReturnSendsOnceWithAnAlternateAndANewlineChord() {
+    val sends = mutableListOf<Boolean>()
+    val editor = submissionEditor(sends)
+
+    editor.pressReturn(repeats = 2)
+    editor.pressReturn(KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON)
+    editor.pressReturn(KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON)
+
+    assertEquals(listOf(false, true), sends)
+    assertEquals("draft\n", editor.text.toString())
+  }
+
+  @Test
+  fun newlineSettingKeepsReturnForEditingAndCtrlForSubmission() {
+    val sends = mutableListOf<Boolean>()
+    val editor = submissionEditor(sends).apply { returnSends = false }
+
+    editor.pressReturn()
+    assertEquals(emptyList<Boolean>(), sends)
+    assertEquals("draft\n", editor.text.toString())
+
+    editor.pressReturn(KeyEvent.META_CTRL_ON)
+    editor.pressReturn(KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON)
+    assertEquals(listOf(false, true), sends)
+    assertEquals("draft\n", editor.text.toString())
+  }
+
+  @Test
+  fun softKeyboardReturnStillEditsWhenHardwareReturnSends() {
+    val sends = mutableListOf<Boolean>()
+    val editor = submissionEditor(sends)
+
+    editor.pressReturn(deviceId = KeyCharacterMap.VIRTUAL_KEYBOARD)
+    editor.pressReturn(flags = KeyEvent.FLAG_SOFT_KEYBOARD)
+
+    assertEquals(emptyList<Boolean>(), sends)
+    assertEquals("draft\n\n", editor.text.toString())
+  }
+
+  @Test
+  fun unavailableSubmissionFallsThroughToEditing() {
+    val sends = mutableListOf<Boolean>()
+    val editor = submissionEditor(sends).apply { submitEnabled = false }
+
+    editor.pressReturn()
+    assertEquals(emptyList<Boolean>(), sends)
+    assertEquals("draft\n", editor.text.toString())
+
+    editor.submitEnabled = true
+    editor.submitListener = null
+    editor.pressReturn()
+    assertEquals(emptyList<Boolean>(), sends)
+    assertEquals("draft\n\n", editor.text.toString())
+
+    editor.submitListener = { sends += it }
+    editor.readOnly = true
+    editor.pressReturn()
+    assertEquals(emptyList<Boolean>(), sends)
   }
 }
