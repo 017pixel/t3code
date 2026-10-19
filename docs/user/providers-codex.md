@@ -37,8 +37,10 @@ symlinks, including dangling or orphaned sidecar links, until you recover the
 data and manually remove those links.
 
 For accounts connected through T3 Code, generated shadow homes normally live at
-`~/.t3/userdata/providers/codex/<provider-instance-id>/shadow`. On the environment's
-machine, list the account directories with:
+`~/.t3/userdata/providers/codex/<provider-instance-id>/shadow` on macOS and Linux,
+or `%USERPROFILE%\.t3\userdata\providers\codex\<provider-instance-id>\shadow` on
+Windows. On the environment's macOS or Linux machine, list the account directories
+with:
 
 ```bash
 ls -d ~/.t3/userdata/providers/codex/*/shadow

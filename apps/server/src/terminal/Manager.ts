@@ -1364,6 +1364,27 @@ interface TerminalManagerOptions {
   >;
 }
 
+const pathsReferToSameDirectory = Effect.fnUntraced(function* (left: string, right: string) {
+  if (left === right) return true;
+  const fs = yield* FileSystem.FileSystem;
+  // An unavailable unused home cannot add a launch gate. Unknown identity still inspects.
+  const [leftInfo, rightInfo] = yield* Effect.all([
+    fs.stat(left).pipe(Effect.option),
+    fs.stat(right).pipe(Effect.option),
+  ]);
+  return (
+    Option.isSome(leftInfo) &&
+    Option.isSome(rightInfo) &&
+    leftInfo.value.type === "Directory" &&
+    rightInfo.value.type === "Directory" &&
+    Option.isSome(leftInfo.value.ino) &&
+    Option.isSome(rightInfo.value.ino) &&
+    leftInfo.value.ino.value > 0 &&
+    leftInfo.value.dev === rightInfo.value.dev &&
+    leftInfo.value.ino.value === rightInfo.value.ino.value
+  );
+});
+
 export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
   "terminal.resolveProviderInstanceTerminalEnvironment",
 )(function* (input: {
@@ -1442,30 +1463,17 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
               : input.cwd + "/" + selected;
         if (
           recoveryLayout.mode === "authOverlay" &&
-          selectedPath === recoveryLayout.effectiveHomePath
+          recoveryLayout.effectiveHomePath &&
+          (yield* pathsReferToSameDirectory(selectedPath, recoveryLayout.effectiveHomePath))
+        ) {
+          resolved = withCodexSqliteHome(recoveryLayout, resolved);
+          return;
+        }
+        if (
+          layout.mode === "direct" &&
+          (yield* pathsReferToSameDirectory(selectedPath, layout.sharedHomePath))
         )
           return;
-        if (layout.mode === "direct") {
-          if (selectedPath === layout.sharedHomePath) return;
-          const fs = yield* FileSystem.FileSystem;
-          // An unavailable unused shared home cannot add a launch gate. Unknown identity still inspects.
-          const [selectedInfo, sharedInfo] = yield* Effect.all([
-            fs.stat(selectedPath).pipe(Effect.option),
-            fs.stat(layout.sharedHomePath).pipe(Effect.option),
-          ]);
-          if (
-            Option.isSome(selectedInfo) &&
-            Option.isSome(sharedInfo) &&
-            selectedInfo.value.type === "Directory" &&
-            sharedInfo.value.type === "Directory" &&
-            Option.isSome(selectedInfo.value.ino) &&
-            Option.isSome(sharedInfo.value.ino) &&
-            selectedInfo.value.ino.value > 0 &&
-            selectedInfo.value.dev === sharedInfo.value.dev &&
-            selectedInfo.value.ino.value === sharedInfo.value.ino.value
-          )
-            return;
-        }
         yield* inspectCodexShadowSqlite({
           ...layout,
           mode: "authOverlay",
