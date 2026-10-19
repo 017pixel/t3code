@@ -44,7 +44,7 @@ function htmlContentRanges(body: string, tree: MarkdownNode) {
   const visit = (node: DefaultTreeAdapterTypes.Node) => {
     const location = "tagName" in node ? node.sourceCodeLocation : undefined;
     const start = location?.startTag?.endOffset;
-    const end = location?.endTag?.startOffset ?? location?.endOffset;
+    const end = location?.endTag?.startOffset;
     if (start !== undefined && end !== undefined && end > start) {
       ranges.push({ start, end });
       return;

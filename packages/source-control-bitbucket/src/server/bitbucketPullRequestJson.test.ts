@@ -414,6 +414,19 @@ describe("mention display bodies", () => {
     ].join("\n\n");
     const body = `## Review\n\n**Thanks ${token}**\n\n${literals}\n\n> ${token}, ask @{unknown}.\n\n${token} <br> <span><em>${token}</em></span> ${token}`;
     const displayBody = `## Review\n\n**Thanks @Alex\\_Smith \\& Co**\n\n${literals}\n\n> @Alex\\_Smith \\& Co, ask @{unknown}.\n\n@Alex\\_Smith \\& Co <br> <span><em>${token}</em></span> @Alex\\_Smith \\& Co`;
+    const genericBody = `Returns Promise<void> now. Use <T> generics.\n\n${token}`;
+    expect(
+      expectSuccess(
+        decodePullRequestJson(
+          JSON.stringify(
+            pullRequest({ description: genericBody, rendered: { description: { html } } }),
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      body: genericBody,
+      displayBody: "Returns Promise<void> now. Use <T> generics.\n\n@Alex\\_Smith \\& Co",
+    });
     const pr = expectSuccess(
       decodePullRequestJson(
         JSON.stringify(pullRequest({ description: body, rendered: { description: { html } } })),
