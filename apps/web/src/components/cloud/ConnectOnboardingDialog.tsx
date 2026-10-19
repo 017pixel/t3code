@@ -44,7 +44,6 @@ function ConfiguredConnectOnboardingDialog() {
   const [optOutState, setOptOutState] = useLocalStorage(
     CONNECT_ONBOARDING_OPT_OUT_STORAGE_KEY,
     EMPTY_CONNECT_ONBOARDING_OPT_OUT_STATE,
-    consumeConnectOnboardingAuthPending,
     ConnectOnboardingOptOutSchema,
   );
 
@@ -75,8 +74,8 @@ function ConfiguredConnectOnboardingDialog() {
   const [dontShowAgain, setDontShowAgain] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
   const [prefilledFromLinkState, setPrefilledFromLinkState] = useState(false);
-  // undefined until auth first settles, so the account already signed in at load
-  // never reads as a fresh sign-in.
+  // An account restored at load only requests onboarding after an explicit
+  // sign-in; Clerk Electron reloads the renderer when auth completes.
   const [observedAccount, setObservedAccount] = useState<string | null | undefined>(undefined);
 
   if (step === "publish" && sessionScopesKnown && !showPublishStep && !isApplying) {
