@@ -79,6 +79,7 @@ private val CTRL_SHIFT_COMMANDS = mapOf(
   KeyEvent.KEYCODE_T to "terminal",
   KeyEvent.KEYCODE_R to "review",
   KeyEvent.KEYCODE_C to "copyThreadReference",
+  KeyEvent.KEYCODE_H to "cycleHost",
 )
 
 /**

@@ -67,14 +67,11 @@ export interface ComposerEditorProps {
   readonly onBlur?: () => void;
   /** Hardware-keyboard Return behavior. Soft keyboards always insert a newline. */
   readonly enterBehavior?: ComposerEnterBehavior;
-  /** Shortcut-HUD title for the primary send chord. iOS only. */
   readonly submitTitle?: string;
-  /** Shortcut-HUD title for the Command-modified send chord. iOS only. */
   readonly alternateSubmitTitle?: string;
   /**
-   * Hardware keyboard submission. `alternate` is true for the Command-modified
-   * chord (Ctrl on Android), which sends using the opposite of the configured
-   * follow-up behavior.
+   * `alternate` is true for the Command-modified chord (Ctrl on Android), which
+   * sends using the opposite of the configured follow-up behavior.
    */
   readonly onSubmit?: (alternate: boolean) => void;
 }
