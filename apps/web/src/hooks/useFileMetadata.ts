@@ -8,20 +8,20 @@ import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
 import { FileMetadataThreadContext } from "./FileMetadataThreadProvider";
 
-export function useFileMetadata(
+export function useFileMetadataQuery(
   environmentId: EnvironmentId | null | undefined,
-  path: string,
+  path: string | null,
   cwd?: string,
 ) {
   const canRead = useEnvironmentScope(environmentId ?? null, AuthFilesystemReadScope);
   const threadRef = useContext(FileMetadataThreadContext);
-  const hostPath = splitFilePathPosition(path).path;
+  const hostPath = splitFilePathPosition(path ?? "").path;
   const targetPath = normalizeProjectPathForComparison(
     hostPath.startsWith("~/") || !cwd ? hostPath : resolvePathLinkTarget(hostPath, cwd),
   );
   const absolute = isAbsolutePath(targetPath) || targetPath.startsWith("~/");
   return useEnvironmentQuery(
-    environmentId && canRead && absolute && targetPath.length <= 512
+    path !== null && environmentId && canRead && absolute && targetPath.length <= 512
       ? projectEnvironment.fileMetadata({
           environmentId,
           input: {
@@ -30,5 +30,13 @@ export function useFileMetadata(
           },
         })
       : null,
-  ).data;
+  );
+}
+
+export function useFileMetadata(
+  environmentId: EnvironmentId | null | undefined,
+  path: string,
+  cwd?: string,
+) {
+  return useFileMetadataQuery(environmentId, path, cwd).data;
 }

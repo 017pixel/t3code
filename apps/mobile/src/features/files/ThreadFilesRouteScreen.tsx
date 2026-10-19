@@ -56,6 +56,7 @@ import { WorkspaceFilePreviewError } from "./WorkspaceFilePreviewError";
 import { WorkspaceFileVideoPreview } from "./WorkspaceFileVideoPreview";
 import { WorkspaceFileWebPreview } from "./WorkspaceFileWebPreview";
 import {
+  isAbsolutePath,
   basename,
   fileHeaderSubtitle,
   isAudioPreviewFile,
@@ -203,7 +204,7 @@ function defaultViewMode(path: string | null): FileViewMode {
     (isWorkspaceBrowserPreviewPath(path) ||
       isWorkspaceImagePreviewPath(path) ||
       isVideoPreviewFile(path) ||
-      isAudioPreviewFile(path))
+      isAudioPreviewFile(basename(path)))
     ? "preview"
     : "source";
 }
@@ -232,11 +233,11 @@ function FileContent(props: {
   const columnMetrics = useNativeColumnLayoutMetrics();
   const reservedHeaderInset =
     Platform.OS === "ios" && props.truncated ? (columnMetrics?.safeArea.top ?? insets.top) : 0;
-  const isMarkdown = isMarkdownPreviewFile(props.relativePath);
+  const isMarkdown = isMarkdownPreviewFile(basename(props.relativePath));
   const isBrowserFile = isWorkspaceBrowserPreviewPath(props.relativePath);
   const isImageFile = isWorkspaceImagePreviewPath(props.relativePath);
   const isVideoFile = isVideoPreviewFile(props.relativePath);
-  const isAudioFile = isAudioPreviewFile(props.relativePath);
+  const isAudioFile = isAudioPreviewFile(basename(props.relativePath));
   const needsAssetUrl =
     isVideoFile ||
     isAudioFile ||
@@ -273,7 +274,7 @@ function FileContent(props: {
   }
 
   if (props.activeMode === "preview" && isImageFile) {
-    if (isSvgImagePreviewFile(props.relativePath)) {
+    if (isSvgImagePreviewFile(basename(props.relativePath))) {
       return <WorkspaceFileWebPreview uri={props.previewUri} />;
     }
     return (
@@ -582,9 +583,21 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   const params = props.route.params;
   const relativePath = normalizeRoutePath(params.path);
   const targetLine = normalizeRouteLine(firstRouteParam(params.line));
-  const { cwd, environmentId, projectName, selectedThread, threadId } = useThreadFilesWorkspace(
-    props.route.params,
-  );
+  const {
+    cwd: workspaceCwd,
+    environmentId,
+    projectName,
+    selectedThread,
+    threadId,
+  } = useThreadFilesWorkspace(props.route.params);
+  const cwd =
+    workspaceCwd ??
+    (relativePath && isAbsolutePath(relativePath)
+      ? relativePath.slice(
+          0,
+          Math.max(relativePath.lastIndexOf("/"), relativePath.lastIndexOf("\\")) + 1,
+        )
+      : null);
   const [modeOverride, setModeOverride] = useState<{
     readonly path: string;
     readonly mode: FileViewMode;
@@ -593,14 +606,15 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   const previewKey = JSON.stringify([environmentId, cwd, relativePath, previewRevision]);
   const [fullScreenPreview, setFullScreenPreview] = useState<FilePreviewSource | null>(null);
   const isVideoFile = relativePath !== null && isVideoPreviewFile(relativePath);
-  const isAudioFile = relativePath !== null && !isVideoFile && isAudioPreviewFile(relativePath);
+  const isAudioFile =
+    relativePath !== null && !isVideoFile && isAudioPreviewFile(basename(relativePath));
   const isBrowserFile =
     relativePath !== null && !isVideoFile && isWorkspaceBrowserPreviewPath(relativePath);
   const isImageFile =
     relativePath !== null && !isVideoFile && isWorkspaceImagePreviewPath(relativePath);
   const canPreview =
     relativePath !== null &&
-    (isMarkdownPreviewFile(relativePath) ||
+    (isMarkdownPreviewFile(basename(relativePath)) ||
       isBrowserFile ||
       isImageFile ||
       isVideoFile ||
@@ -666,7 +680,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
     relativePath !== null &&
     !isVideoFile &&
     !isAudioFile &&
-    (resolvedActiveMode === "source" || isMarkdownPreviewFile(relativePath));
+    (resolvedActiveMode === "source" || isMarkdownPreviewFile(basename(relativePath)));
   const fileAccessSession = useEnvironmentQuery(
     environmentId !== null ? environmentSession.sessionStateAtom(environmentId) : null,
   );
@@ -795,7 +809,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
             onPress: () => copyTextWithHaptic(fileData.contents),
           } as const)
         : null,
-      isPdfFile({ name: relativePath }) && previewUri !== null
+      isPdfFile({ name: basename(relativePath) }) && previewUri !== null
         ? ({
             id: "open-pdf",
             title: "Open PDF",

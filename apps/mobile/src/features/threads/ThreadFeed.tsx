@@ -1,3 +1,4 @@
+import { ThreadFileLinksContext, useThreadFileLinks } from "./useThreadFileLinks";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
 import { ThreadMarkdownVideo, ThreadMediaVisibleContext } from "./ThreadMarkdownVideo";
@@ -1738,16 +1739,21 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
+  const fileLinks = useThreadFileLinks(
+    { environmentId: props.environmentId, threadId: props.threadId },
+    props.workspaceRoot ?? null,
+  );
   const fileShareSourceIdentifier = useId();
-  const shareFileChip = useFileChipShare(
+  const { share: shareFileChip, cancel: cancelFileShare } = useFileChipShare(
     props.environmentId,
     props.threadId,
     fileShareSourceIdentifier,
+    fileLinks.scope,
   );
   useEffect(() => {
     setExpandedVideo(null);
     setExpandedFile(null);
-  }, [props.environmentId, props.threadId, props.contentPresentation.kind]);
+  }, [props.environmentId, props.threadId, props.contentPresentation.kind, fileLinks.scope]);
   const horizontalPadding = props.layoutVariant === "split" ? 20 : 16;
   const contentLeftInset = props.contentSideInsets?.left ?? 0;
   const contentRightInset = props.contentSideInsets?.right ?? 0;
@@ -1787,6 +1793,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const screenColor = theme["--color-screen"];
   const userBubbleColor = theme["--color-user-bubble"];
   const onMarkdownLinkPress = (href: string, imageEmbed = false) => {
+    fileLinks.supersede();
+    cancelFileShare();
     const linkedThreadId = parseThreadLinkHref(href);
     if (linkedThreadId) {
       navigation.navigate("Thread", {
@@ -1852,32 +1860,42 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     threadId: props.threadId,
     workspaceRoot: props.workspaceRoot ?? null,
   });
+  const performFileAction = (href: string, actionId: string) => {
+    fileLinks.supersede();
+    cancelFileShare();
+    const target = resolveFileChipTarget(href, props.workspaceRoot);
+    if (!target) return;
+    switch (actionId as FileChipAction) {
+      case "copy-full-path":
+        if (target.fullPath) copyTextWithHaptic(target.fullPath);
+        return;
+      case "copy-relative-path":
+        if (target.relativePath) copyTextWithHaptic(target.relativePath);
+        return;
+      case "open-file":
+        onMarkdownLinkPress(href);
+        return;
+      case "save":
+        shareFileChip(target);
+        return;
+    }
+  };
   const markdownLinkHandlers: MarkdownLinkHandlers = {
     onLinkPress: onMarkdownLinkPress,
     onImagePress: (href) => onMarkdownLinkPress(href, true),
     resolveImageSource,
     fileContextMenu: (href) => {
       const target = resolveFileChipTarget(href, props.workspaceRoot);
-      return target ? fileChipMenu(target) : undefined;
+      if (!target) return undefined;
+      const isCurrent = fileLinks.capture();
+      return {
+        ...fileChipMenu(target),
+        onAction: (actionId) => {
+          if (isCurrent()) performFileAction(href, actionId);
+        },
+      };
     },
-    onFileContextMenuAction: (href, actionId) => {
-      const target = resolveFileChipTarget(href, props.workspaceRoot);
-      if (!target) return;
-      switch (actionId as FileChipAction) {
-        case "copy-full-path":
-          if (target.fullPath) copyTextWithHaptic(target.fullPath);
-          return;
-        case "copy-relative-path":
-          if (target.relativePath) copyTextWithHaptic(target.relativePath);
-          return;
-        case "open-file":
-          onMarkdownLinkPress(href);
-          return;
-        case "save":
-          shareFileChip(target);
-          return;
-      }
-    },
+    onFileContextMenuAction: performFileAction,
   };
   const renderMarkdownImage: MarkdownImageRenderer = (image) => {
     const media = resolveMarkdownMediaPreview(image.href, {
@@ -1977,6 +1995,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   // Include turn completion so unchanged message rows reveal their footer and spacing
   // even when the final message update arrives before the turn settles.
   const listAppearanceData = {
+    fileLinks,
     worktreeSetup: props.worktreeSetup,
     setupWorkingStartedAt: props.setupWorkingStartedAt,
     dispatchingMessageId: props.dispatchingMessageId,
@@ -2355,52 +2374,54 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         threadId={props.threadId}
         workspaceRoot={props.workspaceRoot}
       >
-        <ThreadMediaVisibility>
-          {renderFeedEntry(info, {
-            environmentId: props.environmentId,
-            dispatchingMessageId: props.dispatchingMessageId,
-            onEditPendingMessage: props.onEditPendingMessage,
-            onUseArtifactTemplate: props.onUseArtifactTemplate,
-            threadId: props.threadId,
-            copiedRowId,
-            expandedWorkRows,
-            workRowSizing,
-            workGroupScrollPositions,
-            terminalAssistantMessageIds,
-            unsettledTurnId,
-            failedRunIds,
-            onCopyWorkRow,
-            onToggleWorkGroup,
-            onToggleWorkRow,
-            onToggleTurnFold,
-            onPressPreview,
-            onPressVideo,
-            markdownLinkHandlers,
-            renderMarkdownImage,
-            renderViewedImage,
-            renderReasoning,
-            iconSubtleColor,
-            screenColor,
-            userBubbleColor,
-            markdownStyles,
-            reviewCommentColors,
-            reviewCommentBubbleWidth,
-            themeAppearance,
-            duoColumns,
-            userBubbleMaxWidth,
-            markdownContentWidth,
-            contentWidth,
-            threadTitle: props.threadTitle,
-            skills: props.skills,
-            workspaceRoot: props.workspaceRoot,
-            workflowOpening,
-          })}
-          {props.worktreeSetup && info.index === setupAnchorIndex ? (
-            <WorktreeSetupCard key={props.threadId} {...props.worktreeSetup} />
-          ) : props.setupWorkingStartedAt && info.index === setupAnchorIndex ? (
-            <WorktreeWorkingHeader startedAt={props.setupWorkingStartedAt} />
-          ) : null}
-        </ThreadMediaVisibility>
+        <ThreadFileLinksContext value={fileLinks}>
+          <ThreadMediaVisibility>
+            {renderFeedEntry(info, {
+              environmentId: props.environmentId,
+              dispatchingMessageId: props.dispatchingMessageId,
+              onEditPendingMessage: props.onEditPendingMessage,
+              onUseArtifactTemplate: props.onUseArtifactTemplate,
+              threadId: props.threadId,
+              copiedRowId,
+              expandedWorkRows,
+              workRowSizing,
+              workGroupScrollPositions,
+              terminalAssistantMessageIds,
+              unsettledTurnId,
+              failedRunIds,
+              onCopyWorkRow,
+              onToggleWorkGroup,
+              onToggleWorkRow,
+              onToggleTurnFold,
+              onPressPreview,
+              onPressVideo,
+              markdownLinkHandlers,
+              renderMarkdownImage,
+              renderViewedImage,
+              renderReasoning,
+              iconSubtleColor,
+              screenColor,
+              userBubbleColor,
+              markdownStyles,
+              reviewCommentColors,
+              reviewCommentBubbleWidth,
+              themeAppearance,
+              duoColumns,
+              userBubbleMaxWidth,
+              markdownContentWidth,
+              contentWidth,
+              threadTitle: props.threadTitle,
+              skills: props.skills,
+              workspaceRoot: props.workspaceRoot,
+              workflowOpening,
+            })}
+            {props.worktreeSetup && info.index === setupAnchorIndex ? (
+              <WorktreeSetupCard key={props.threadId} {...props.worktreeSetup} />
+            ) : props.setupWorkingStartedAt && info.index === setupAnchorIndex ? (
+              <WorktreeWorkingHeader startedAt={props.setupWorkingStartedAt} />
+            ) : null}
+          </ThreadMediaVisibility>
+        </ThreadFileLinksContext>
       </MessageImageGalleryScope>
     </Animated.View>
   );

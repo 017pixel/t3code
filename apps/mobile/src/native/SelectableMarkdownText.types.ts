@@ -54,11 +54,13 @@ export interface MarkdownFileContextMenuAction {
 }
 
 export interface MarkdownFileContextMenu {
+  readonly onAction?: (actionId: string) => void;
   readonly title?: string;
   readonly actions: ReadonlyArray<MarkdownFileContextMenuAction>;
 }
 
 export interface MarkdownLinkCustomization {
+  readonly plain?: boolean;
   readonly iconTintColor?: string;
   readonly color?: string;
   readonly label?: string;

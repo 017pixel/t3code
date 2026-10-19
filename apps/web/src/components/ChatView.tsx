@@ -1,3 +1,4 @@
+import { useThreadFilePathIndex } from "../threadFilePathsContext";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
@@ -2925,6 +2926,10 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: activeThread?.worktreePath ?? null,
       })
     : null;
+  const threadFilePaths = useThreadFilePathIndex(
+    serverVisibleTurnItems.map(({ item }) => item),
+    gitCwd,
+  );
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
     gitStatusCwd === null
@@ -7959,6 +7964,7 @@ export default function ChatView(props: ChatViewProps) {
             </div>
             <div className="relative flex min-h-0 flex-1 flex-col bg-background">
               <MessagesTimeline
+                threadFilePaths={paintOnlyDisplayedTimeline ? null : threadFilePaths}
                 citationRequest={paintOnlyDisplayedTimeline ? null : citationRequest}
                 citationHistoryLoading={threadDetailLoading}
                 {...(!paintOnlyDisplayedTimeline
@@ -8650,7 +8656,7 @@ export default function ChatView(props: ChatViewProps) {
   return (
     <FileMetadataThreadProvider
       threadRef={activeThreadRef}
-      cwd={activeWorkspaceRoot}
+      cwd={gitCwd ?? undefined}
       checkpoints={serverProjection?.checkpoints}
     >
       {content}

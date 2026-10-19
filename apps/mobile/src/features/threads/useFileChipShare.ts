@@ -2,7 +2,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 
 import { downloadAndShareAttachment } from "../../lib/attachmentDownload";
 import { assetEnvironment } from "../../state/assets";
@@ -14,6 +14,7 @@ export function useFileChipShare(
   environmentId: EnvironmentId,
   threadId: ThreadId,
   sourceIdentifier: string,
+  scope?: unknown,
 ) {
   const connection = usePreparedConnection(environmentId);
   const httpBaseUrl = Option.isSome(connection) ? connection.value.httpBaseUrl : null;
@@ -26,7 +27,15 @@ export function useFileChipShare(
     connectionRef.current = httpBaseUrl;
   }, [httpBaseUrl]);
   const requestRef = useRef<AbortController | null>(null);
-  useEffect(() => () => requestRef.current?.abort(), []);
+  useLayoutEffect(
+    () => () => requestRef.current?.abort(),
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A delayed download belongs to the menu opening scope.
+    [environmentId, threadId, connection, scope],
+  );
+  const cancel = () => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  };
 
   const share = useCallback(
     (target: FileChipTarget) => {
@@ -65,5 +74,5 @@ export function useFileChipShare(
     },
     [createUrl, environmentId, sourceIdentifier, threadId],
   );
-  return share;
+  return { share, cancel };
 }

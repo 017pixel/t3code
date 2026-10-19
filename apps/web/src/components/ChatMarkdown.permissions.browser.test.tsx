@@ -1,21 +1,35 @@
+import { RegistryContext } from "@effect/atom-react";
 import {
+  AuthFilesystemReadScope,
   AuthOrchestrationOperateScope,
   EnvironmentId,
   ProjectId,
   ThreadId,
   type AuthEnvironmentScope,
   type EditorId,
+  type FilesystemEntryMetadata,
+  type ScopedThreadRef,
   type ThreadLinkedPullRequest,
 } from "@t3tools/contracts";
-import { AsyncResult } from "effect/reactivity";
-import { act } from "react";
+import {
+  createThreadFilePathIndex,
+  type ThreadFilePathIndex,
+} from "@t3tools/shared/threadFilePaths";
+import { searchableMessageSegments } from "@t3tools/shared/threadFindText";
+import * as Cause from "effect/Cause";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 import { useRightPanelStore } from "../rightPanelStore";
+import { FileMetadataThreadContext } from "../hooks/FileMetadataThreadProvider";
+import { ThreadFilePathsContext } from "../threadFilePathsContext";
+import { FileMarkdownPreview } from "./files/FileMarkdownPreview";
 
 const state = vi.hoisted(() => ({
   allowed: true,
+  canRead: true,
   listeners: new Set<() => void>(),
   openEditor: vi.fn(),
   updateMetadata: vi.fn(),
@@ -45,10 +59,15 @@ vi.mock(import("../state/session"), async (original) => {
   const { useSyncExternalStore } = await import("react");
   const readEnvironmentScope = (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>
     id !== null &&
+    (scope !== AuthFilesystemReadScope || state.canRead) &&
     (scope !== AuthOrchestrationOperateScope || id !== threadRef.environmentId || state.allowed);
   return {
     ...(await original()),
     readEnvironmentScope,
+    usePreparedConnection: (() => ({
+      _tag: "Some",
+      value: { httpBaseUrl: "https://host.test" },
+    })) as never,
     useEnvironmentScope: (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>
       useSyncExternalStore(
         (listener) => {
@@ -70,6 +89,21 @@ vi.mock(import("../state/server"), async (original) => {
     environmentServerConfigsAtom: Atom.make(
       () => new Map([[threadRef.environmentId, serverConfig]]),
     ) as never,
+  };
+});
+// Replace only the transport-owned result; the metadata hook and query subscription stay real.
+vi.mock(import("../state/projects"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    projectEnvironment: {
+      ...actual.projectEnvironment,
+      fileMetadata: (target) =>
+        metadataAtom(target.input.path, {
+          environmentId: target.environmentId,
+          threadId: target.input.threadId,
+        }),
+    },
   };
 });
 vi.mock(import("../state/entities"), async (original) => ({
@@ -132,9 +166,30 @@ const serverConfig = {
 };
 const roots: Root[] = [];
 let container: HTMLDivElement;
+let registry: AtomRegistry.AtomRegistry;
+const metadataResults = Atom.family((_key: string) =>
+  Atom.make<AsyncResult.AsyncResult<FilesystemEntryMetadata | null, Error>>(
+    AsyncResult.initial(true),
+  ).pipe(Atom.keepAlive),
+);
+function metadataAtom(
+  path: string,
+  owner: { environmentId: EnvironmentId; threadId?: ThreadId | undefined } = threadRef,
+) {
+  return metadataResults(JSON.stringify([owner.environmentId, owner.threadId, path]));
+}
+async function settleMetadata(
+  path: string,
+  result: AsyncResult.AsyncResult<FilesystemEntryMetadata | null, Error>,
+  owner: ScopedThreadRef = threadRef,
+) {
+  await act(async () => registry.set(metadataAtom(path, owner), result));
+}
 
 beforeEach(() => {
   state.allowed = true;
+  state.canRead = true;
+  registry = AtomRegistry.make();
   state.listeners.clear();
   state.linkedPullRequest = null;
   state.openEditor.mockReset().mockResolvedValue(AsyncResult.success(undefined));
@@ -151,18 +206,35 @@ beforeEach(() => {
 
 afterEach(async () => {
   for (const root of roots.splice(0)) await act(async () => root.unmount());
+  registry.dispose();
   document.body.replaceChildren();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
-async function renderMarkdown(text: string) {
+function createTestRoot() {
   container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
   roots.push(root);
-  await act(async () =>
-    root.render(<ChatMarkdown cwd="/work" threadRef={threadRef} text={text} />),
-  );
+  return async (
+    children: ReactNode,
+    index: ThreadFilePathIndex | null = null,
+    owner: ScopedThreadRef = threadRef,
+  ) => {
+    await act(async () =>
+      root.render(
+        <RegistryContext.Provider value={registry}>
+          <FileMetadataThreadContext value={owner}>
+            <ThreadFilePathsContext value={index}>{children}</ThreadFilePathsContext>
+          </FileMetadataThreadContext>
+        </RegistryContext.Provider>,
+      ),
+    );
+  };
+}
+
+async function renderMarkdown(text: string) {
+  await createTestRoot()(<ChatMarkdown cwd="/work" threadRef={threadRef} text={text} />);
 }
 
 function anchor() {
@@ -293,3 +365,186 @@ it.each(["link-to-thread", "unlink-from-thread"])(
     );
   },
 );
+
+it("uses a verified thread file for actions, preserves searchable labels, and restores a root file that appears", async () => {
+  const candidate = "/other/checkout/docs/readme.md";
+  const text = "[Readme](docs/readme.md:12:3) and `test/readme.md`";
+  await createTestRoot()(
+    <ChatMarkdown cwd="/work" threadRef={threadRef} text={text} />,
+    createThreadFilePathIndex([candidate]),
+  );
+  const normalText = container.textContent;
+  const indexedText = (
+    searchableMessageSegments({ role: "assistant", text, streaming: false }, "/work") ?? []
+  ).join(" ");
+  expect(normalText).toContain("work/docs");
+  expect(normalText).toContain("work/test");
+  const expectPanel = async (path: string) => {
+    state.openFile.mockClear();
+    await act(async () => anchor().click());
+    expect(state.openFile).toHaveBeenCalledExactlyOnceWith(threadRef, path, 12);
+    expect(container.textContent).toBe(normalText);
+    for (const chip of container.querySelectorAll(".chat-markdown-file-link")) {
+      expect(indexedText).toContain(chip.textContent);
+    }
+  };
+
+  await expectPanel("docs/readme.md");
+  await settleMetadata("/work/docs/readme.md", AsyncResult.success(null));
+  await expectPanel("docs/readme.md");
+  await settleMetadata(candidate, AsyncResult.success(null));
+  await expectPanel("docs/readme.md");
+  await settleMetadata(candidate, AsyncResult.failure(Cause.fail(new Error("Metadata failed"))));
+  await expectPanel("docs/readme.md");
+  await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
+  await expectPanel(candidate);
+
+  state.choose.mockResolvedValue("copy-full");
+  await openContextMenu();
+  expect(state.copy).toHaveBeenLastCalledWith(`${candidate}:12:3`);
+  state.choose.mockResolvedValue("open");
+  await openContextMenu();
+  expect(state.openEditor).toHaveBeenLastCalledWith({
+    environmentId: threadRef.environmentId,
+    input: { cwd: `${candidate}:12:3`, editor: "vscode" },
+  });
+  state.choose.mockResolvedValue("reveal");
+  await openContextMenu();
+  expect(state.openEditor).toHaveBeenLastCalledWith({
+    environmentId: threadRef.environmentId,
+    input: { cwd: candidate, editor: "file-manager", reveal: true },
+  });
+  expect(state.search).not.toHaveBeenCalled();
+
+  await settleMetadata("/work/docs/readme.md", AsyncResult.success({ kind: "file" }));
+  await expectPanel("docs/readme.md");
+  state.choose.mockResolvedValue("copy-full");
+  await openContextMenu();
+  expect(state.copy).toHaveBeenLastCalledWith("/work/docs/readme.md:12:3");
+});
+
+it("does not treat pending, failed, existing, or disabled root metadata as missing", async () => {
+  const candidate = "/other/docs/guide.md";
+  await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
+  await createTestRoot()(
+    <ChatMarkdown cwd="/work" threadRef={threadRef} text="`docs/guide.md`" />,
+    createThreadFilePathIndex([candidate]),
+  );
+  const rootResults: Array<AsyncResult.AsyncResult<FilesystemEntryMetadata | null, Error>> = [
+    AsyncResult.initial<FilesystemEntryMetadata | null, Error>(true),
+    AsyncResult.waiting(AsyncResult.success(null)),
+    AsyncResult.failure(Cause.fail(new Error("Disconnected or denied"))),
+    AsyncResult.success({ kind: "file" }),
+  ];
+  for (const rootResult of rootResults) {
+    await settleMetadata("/work/docs/guide.md", rootResult);
+    state.openFile.mockClear();
+    await act(async () => anchor().click());
+    expect(state.openFile).toHaveBeenCalledExactlyOnceWith(threadRef, "docs/guide.md", undefined);
+  }
+  await act(async () => {
+    state.canRead = false;
+    for (const listener of state.listeners) listener();
+  });
+  await settleMetadata("/work/docs/guide.md", AsyncResult.success(null));
+  state.openFile.mockClear();
+  await act(async () => anchor().click());
+  expect(state.openFile).toHaveBeenCalledExactlyOnceWith(threadRef, "docs/guide.md", undefined);
+  await act(async () => {
+    state.canRead = true;
+    for (const listener of state.listeners) listener();
+  });
+  await act(async () => anchor().click());
+  expect(state.openFile).toHaveBeenLastCalledWith(threadRef, candidate, undefined);
+});
+
+it("verifies a rootless candidate before opening its literal path and position", async () => {
+  const candidate = "/outside/read%20 #?/docs/guide.ts";
+  await createTestRoot()(
+    <ChatMarkdown
+      cwd={undefined}
+      threadRef={threadRef}
+      text="[Read the file](docs/guide.ts:12:3)"
+    />,
+    createThreadFilePathIndex([candidate]),
+  );
+  expect(container.textContent).toBe("Read the file");
+  await settleMetadata(candidate, AsyncResult.success(null));
+  expect(container.textContent).toBe("Read the file");
+  expect(state.openFile).not.toHaveBeenCalled();
+  await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
+  await act(async () => anchor().click());
+  expect(state.openFile).toHaveBeenCalledExactlyOnceWith(threadRef, candidate, 12);
+  state.choose.mockResolvedValue("copy-full");
+  await openContextMenu();
+  expect(state.copy).toHaveBeenLastCalledWith(`${candidate}:12:3`);
+});
+
+it("discards verification from a previous thread, environment, root, or evidence scope", async () => {
+  const candidate = "/other/docs/guide.md";
+  const index = createThreadFilePathIndex([candidate]);
+  const render = createTestRoot();
+  await render(<ChatMarkdown cwd="/work" threadRef={threadRef} text="`docs/guide.md`" />, index);
+  const incoming = {
+    environmentId: EnvironmentId.make("incoming"),
+    threadId: ThreadId.make("next"),
+  };
+  await render(
+    <ChatMarkdown cwd="/work" threadRef={incoming} text="`docs/guide.md`" />,
+    index,
+    incoming,
+  );
+  await settleMetadata("/work/docs/guide.md", AsyncResult.success(null));
+  await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
+  await act(async () => anchor().click());
+  expect(state.openFile).toHaveBeenLastCalledWith(incoming, "docs/guide.md", undefined);
+  await settleMetadata("/work/docs/guide.md", AsyncResult.success(null), incoming);
+  await settleMetadata(candidate, AsyncResult.success({ kind: "file" }), incoming);
+  await act(async () => anchor().click());
+  expect(state.openFile).toHaveBeenLastCalledWith(incoming, candidate, undefined);
+
+  await render(
+    <ChatMarkdown cwd="/new-root" threadRef={incoming} text="`docs/guide.md`" />,
+    index,
+    incoming,
+  );
+  await act(async () => anchor().click());
+  expect(state.openFile).toHaveBeenLastCalledWith(incoming, "docs/guide.md", undefined);
+  await settleMetadata("/new-root/docs/guide.md", AsyncResult.success(null), incoming);
+  await act(async () => anchor().click());
+  expect(state.openFile).toHaveBeenLastCalledWith(incoming, candidate, undefined);
+  await render(
+    <ChatMarkdown cwd="/new-root" threadRef={incoming} text="`docs/guide.md`" />,
+    null,
+    incoming,
+  );
+  await act(async () => anchor().click());
+  expect(state.openFile).toHaveBeenLastCalledWith(incoming, "docs/guide.md", undefined);
+});
+
+it("keeps file-preview links document-relative even when its directory equals the thread root", async () => {
+  const candidate = "/other/docs/guide.md";
+  await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
+  await settleMetadata("/work/docs/guide.md", AsyncResult.success(null));
+  await settleMetadata("/work/nested/docs/guide.md", AsyncResult.success(null));
+  const render = createTestRoot();
+  for (const relativePath of ["README.md", "nested/README.md"]) {
+    await render(
+      <FileMarkdownPreview
+        cwd="/work"
+        relativePath={relativePath}
+        text="[Guide](docs/guide.md)"
+        threadRef={threadRef}
+        workspaceMutationId={null}
+      />,
+      createThreadFilePathIndex([candidate]),
+    );
+    state.openFile.mockClear();
+    await act(async () => anchor().click());
+    expect(state.openFile).toHaveBeenCalledExactlyOnceWith(
+      threadRef,
+      relativePath === "README.md" ? "docs/guide.md" : "nested/docs/guide.md",
+      undefined,
+    );
+  }
+});

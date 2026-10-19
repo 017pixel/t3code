@@ -1,3 +1,4 @@
+import { fileBasename } from "@t3tools/shared/path";
 import type {
   AssetCreateUrlResult,
   AssetResource,
@@ -33,7 +34,7 @@ import {
 } from "./browserDefaults";
 
 export const isBrowserPreviewFile = (path: string): boolean =>
-  /\.(?:html?|pdf)$/i.test(path.split(/[?#]/, 1)[0] ?? "");
+  /\.(?:html?|pdf)$/i.test(fileBasename(path).split(/[?#]/, 1)[0] ?? "");
 
 export class BrowserPreviewUnavailableError extends Data.TaggedError(
   "BrowserPreviewUnavailableError",

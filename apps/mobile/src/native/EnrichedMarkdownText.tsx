@@ -1,3 +1,4 @@
+import { useThreadFileBindings } from "../features/threads/useThreadFileLinks";
 import { decodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import {
   collectComposerContextReferences,
@@ -165,7 +166,12 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
         : assets,
     );
   }, []);
-  const { linkVariants, linkPillContent } = useEnrichedLinkVariants(documentAssets, props);
+  const fileBindings = useThreadFileBindings(documentAssets);
+  const { linkVariants, linkPillContent } = useEnrichedLinkVariants(documentAssets, {
+    ...props,
+    linkCustomization: (url) =>
+      fileBindings.unverifiedRootless(url) ? { plain: true } : props.linkCustomization?.(url),
+  });
   const linkRecognition = useMemo(
     () => ({
       text: enrichedSkillLinkRegex(props.skills) ?? undefined,
@@ -196,7 +202,10 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
                 documentAssets.filter((asset) => asset.kind === "link").map((asset) => asset.url),
               ),
             ].map((url) => {
-              const menu = fileContextMenu?.(url) ?? {
+              const shown = fileBindings.href(url);
+              const menu = (fileBindings.unverifiedRootless(url)
+                ? { title: url, actions: [{ id: "enriched-copy-link", title: "Copy link" }] }
+                : fileContextMenu?.(shown)) ?? {
                 title: url,
                 actions: [
                   { id: "enriched-open-link", title: "Open link" },
@@ -204,18 +213,24 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
                   { id: "enriched-share-link", title: "Share link" },
                 ],
               };
+              // Native dispatches through the latest callback table. An obsolete menu
+              // must lose its dispatch key rather than inherit another file or scope.
+              const identity = enrichedLinkVariantPattern(
+                JSON.stringify([fileBindings.menuKey, shown, menu.title, menu.actions]),
+              );
               return [
-                enrichedLinkVariantPattern(url),
+                `${enrichedLinkVariantPattern(url)}(?=${identity}|$)`,
                 menu.actions.map((action) => ({
                   text: action.title,
                   disabled: "disabled" in action && action.disabled,
-                  onPress: () => performMenuAction(url, action.id),
+                  onPress: () =>
+                    menu.onAction ? menu.onAction(action.id) : performMenuAction(shown, action.id),
                 })),
               ];
             }),
           )
         : undefined,
-    [documentAssets, fileContextMenu, onLinkPress, performMenuAction],
+    [documentAssets, fileContextMenu, onLinkPress, performMenuAction, fileBindings],
   );
   const selectionClipboard = useMemo(() => {
     const fragment = decodeComposerContextFragment(props.contextClipboardFragment);
@@ -249,33 +264,40 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const renderMedia = useCallback(
     (asset: MarkdownMediaAsset) =>
       renderImage?.({
-        href: asset.url,
+        href: fileBindings.href(asset.url),
         alt: asset.altText || null,
         title: asset.title || null,
       }) ?? null,
-    [renderImage],
+    [renderImage, fileBindings],
   );
   const resolveNativeImageSource = useCallback(
-    (asset: MarkdownMediaAsset) =>
-      resolveImageSource?.({
-        href: asset.url,
+    async (asset: MarkdownMediaAsset) => {
+      const isCurrent = fileBindings.capture();
+      const source = await resolveImageSource?.({
+        href: fileBindings.href(asset.url),
         alt: asset.altText || null,
         title: asset.title || null,
-      }) ?? null,
-    [resolveImageSource],
+      });
+      if (!isCurrent()) throw new Error("Markdown image request is obsolete");
+      return source ?? null;
+    },
+    [resolveImageSource, fileBindings],
   );
   const renderMarkdown = (openAndroidMenu?: () => void) => {
     const onLinkLongPress =
       Platform.OS === "android" && props.fileContextMenu
         ? ({ url }: { url: string }) => {
-            const menu = props.fileContextMenu?.(url) ?? {
+            const shown = fileBindings.href(url);
+            const menu = (fileBindings.unverifiedRootless(url)
+              ? { title: url, actions: [{ id: "enriched-copy-link", title: "Copy link" }] }
+              : props.fileContextMenu?.(shown)) ?? {
               title: url,
               actions: [
                 { id: "enriched-open-link", title: "Open link" },
                 { id: "enriched-copy-link", title: "Copy link" },
               ],
             };
-            setActiveMenu({ url, menu });
+            setActiveMenu({ url: shown, menu });
             openAndroidMenu?.();
           }
         : undefined;
@@ -297,7 +319,10 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
           resolveImageSource={resolveImageSource ? resolveNativeImageSource : undefined}
           onImagePress={
             props.onImagePress || props.onLinkPress
-              ? ({ url }) => (props.onImagePress ?? props.onLinkPress)?.(url)
+              ? ({ url }) => {
+                  if (!fileBindings.unverifiedRootless(url))
+                    (props.onImagePress ?? props.onLinkPress)?.(fileBindings.href(url));
+                }
               : undefined
           }
           linkRecognition={linkRecognition}
@@ -315,7 +340,14 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
           enableTaskListItemToggle={false}
           enableCodeBlockWrapToggle
           spoilerOverlay="solid"
-          onLinkPress={props.onLinkPress ? ({ url }) => props.onLinkPress?.(url) : undefined}
+          onLinkPress={
+            props.onLinkPress
+              ? ({ url }) => {
+                  if (!fileBindings.unverifiedRootless(url))
+                    props.onLinkPress?.(fileBindings.href(url));
+                }
+              : undefined
+          }
           onLinkLongPress={onLinkLongPress}
           linkContextMenuItems={linkContextMenuItems}
           linkPillContent={linkPillContent}
@@ -336,7 +368,8 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
         })) ?? []
       }
       onPressAction={({ nativeEvent }) => {
-        if (activeMenu) performMenuAction(activeMenu.url, nativeEvent.event);
+        if (activeMenu?.menu.onAction) activeMenu.menu.onAction(nativeEvent.event);
+        else if (activeMenu) performMenuAction(activeMenu.url, nativeEvent.event);
       }}
       style={{ flexShrink: 1, minWidth: 0 }}
     >

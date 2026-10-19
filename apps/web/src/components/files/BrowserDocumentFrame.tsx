@@ -1,3 +1,4 @@
+import { fileBasename } from "@t3tools/shared/path";
 import { useAtomValue } from "@effect/atom-react";
 import {
   type KeybindingCommand,
@@ -59,7 +60,7 @@ const HTML_RENDER_SHORTCUT_COMMANDS: ReadonlySet<KeybindingCommand> = new Set([
 ]);
 
 export const isPdfPreviewFile = (path: string): boolean =>
-  /\.pdf$/i.test(path.split(/[?#]/, 1)[0] ?? "");
+  /\.pdf$/i.test(fileBasename(path).split(/[?#]/, 1)[0] ?? "");
 
 /**
  * HTML runs in a sandboxed frame with an opaque origin, so a page cannot reach

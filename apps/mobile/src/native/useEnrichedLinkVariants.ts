@@ -21,6 +21,7 @@ function presentation(
   props: Pick<SelectableMarkdownTextProps, "linkCustomization" | "skills" | "textStyle">,
 ) {
   const custom = props.linkCustomization?.(url);
+  if (custom?.plain) return undefined;
   if (custom) return custom;
   const context = enrichedContextLinkPresentation(url);
   if (context) return { color: context.color, icon: markdownFileIconSource(context.icon) };

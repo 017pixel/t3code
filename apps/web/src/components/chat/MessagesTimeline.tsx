@@ -1,3 +1,6 @@
+import { FileMetadataThreadContext } from "../../hooks/FileMetadataThreadProvider";
+import { ThreadFilePathsContext } from "../../threadFilePathsContext";
+import type { ThreadFilePathIndex } from "@t3tools/shared/threadFilePaths";
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { shallow } from "zustand/vanilla/shallow";
 import {
@@ -313,6 +316,7 @@ import {
 } from "../../reviewCommentContext";
 
 interface TimelineRowSharedState {
+  threadFilePaths: ThreadFilePathIndex | null;
   citationRequest: AssistantCitationTarget | null;
   listRef: React.RefObject<LegendListRef | null>;
   timestampFormat: TimestampFormat;
@@ -442,6 +446,7 @@ export interface MessagesTimelineHistoryControls {
 }
 
 interface MessagesTimelineProps {
+  threadFilePaths?: ThreadFilePathIndex | null;
   citationRequest?: AssistantCitationRequest | null;
   citationHistoryLoading?: boolean;
   onCiteAssistantText?: (
@@ -578,6 +583,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   routeThreadKey,
   displayThreadKey,
   paintOnly = false,
+  threadFilePaths = null,
   onOpenTurnDiff,
   onOpenThread,
   parentThreadLink = null,
@@ -1253,6 +1259,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   }, [timelineViewportElement, rows.length, reportContentOverflow, chatWidth]);
 
   const sharedState: TimelineRowSharedState = {
+    threadFilePaths: paintOnly ? null : threadFilePaths,
     citationRequest: readyCitationRequest,
     listRef,
     timestampFormat,
@@ -1429,11 +1436,15 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // sharedState to the rows that stay.
   const renderItem = ({ item }: { item: MessagesTimelineRow }) => (
     <TimelineRowCtx value={sharedState}>
-      <div className="messages-timeline-row-frame">
-        <div className="chat-content-lane overflow-x-clip" data-timeline-root="true">
-          <TimelineRowContent row={item} />
-        </div>
-      </div>
+      <FileMetadataThreadContext value={sharedState.threadRef}>
+        <ThreadFilePathsContext value={sharedState.threadFilePaths}>
+          <div className="messages-timeline-row-frame">
+            <div className="chat-content-lane overflow-x-clip" data-timeline-root="true">
+              <TimelineRowContent row={item} />
+            </div>
+          </div>
+        </ThreadFilePathsContext>
+      </FileMetadataThreadContext>
     </TimelineRowCtx>
   );
   const listExtraData = { identity: listIdentityKey, rowCount: rows.length, sharedState };

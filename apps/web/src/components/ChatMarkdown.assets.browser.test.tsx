@@ -1,12 +1,23 @@
 import { RegistryContext } from "@effect/atom-react";
-import { type AssetCreateUrlResult, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import {
+  AuthFilesystemReadScope,
+  type AssetCreateUrlResult,
+  type AuthEnvironmentScope,
+  type FilesystemEntryMetadata,
+  EnvironmentId,
+  ThreadId,
+} from "@t3tools/contracts";
+import { createThreadFilePathIndex } from "@t3tools/shared/threadFilePaths";
 import * as Effect from "effect/Effect";
-import { AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
-const mint = vi.hoisted(() => vi.fn<() => Promise<AssetCreateUrlResult>>());
+import { FileMetadataThreadContext } from "../hooks/FileMetadataThreadProvider";
+import { ThreadFilePathsContext } from "../threadFilePathsContext";
+
+const mint = vi.hoisted(() => vi.fn<(target: string) => Promise<AssetCreateUrlResult>>());
 // Atoms derived from the server config run in the real registry over a missing config.
 vi.mock(import("../state/server"), async (original) => {
   const actual = await original();
@@ -21,8 +32,8 @@ vi.mock(import("../state/server"), async (original) => {
 vi.mock(import("../state/assets"), async (original) => {
   const actual = await original();
   const { Atom } = await import("effect/reactivity");
-  const family = Atom.family((_key: string) =>
-    Atom.make(Effect.tryPromise(() => mint())).pipe(Atom.keepAlive),
+  const family = Atom.family((key: string) =>
+    Atom.make(Effect.tryPromise(() => mint(key))).pipe(Atom.keepAlive),
   );
   return {
     ...actual,
@@ -32,14 +43,29 @@ vi.mock(import("../state/assets"), async (original) => {
     },
   };
 });
+vi.mock(import("../state/projects"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    projectEnvironment: {
+      ...actual.projectEnvironment,
+      fileMetadata: (target) =>
+        metadataResults(
+          JSON.stringify([target.environmentId, target.input.threadId, target.input.path]),
+        ),
+    },
+  };
+});
 vi.mock(import("../state/filesystem"), async (original) => ({
   ...(await original()),
   useFilesystemReadAccess: () => ({ canReadFiles: true, isPending: false, error: null }),
 }));
 vi.mock(import("../state/session"), async (original) => ({
   ...(await original()),
-  readEnvironmentScope: () => false,
-  useEnvironmentScope: () => false,
+  readEnvironmentScope: (_id: unknown, scope: AuthEnvironmentScope) =>
+    allowMetadata && scope === AuthFilesystemReadScope,
+  useEnvironmentScope: (_id: unknown, scope: AuthEnvironmentScope) =>
+    allowMetadata && scope === AuthFilesystemReadScope,
   readPreparedConnection: (() => ({ httpBaseUrl: "https://host.test" })) as never,
   usePreparedConnection: (() => ({
     _tag: "Some",
@@ -51,6 +77,15 @@ import ChatMarkdown from "./ChatMarkdown";
 
 const roots: Root[] = [];
 let registry: AtomRegistry.AtomRegistry;
+let allowMetadata = false;
+const metadataResults = Atom.family((_key: string) =>
+  Atom.make<AsyncResult.AsyncResult<FilesystemEntryMetadata | null, Error>>(
+    AsyncResult.initial(true),
+  ),
+);
+function metadataAtom(path: string) {
+  return metadataResults(JSON.stringify([threadRef.environmentId, threadRef.threadId, path]));
+}
 
 const imageUrl = (version: string) =>
   `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>#${version}`;
@@ -62,6 +97,7 @@ const assetResult = (version: string): AssetCreateUrlResult => ({
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   registry = AtomRegistry.make();
+  allowMetadata = false;
   mint.mockReset().mockResolvedValue(assetResult("updated"));
 });
 afterEach(async () => {
@@ -197,3 +233,48 @@ it.each(["initial", "refresh"] as const)(
     expect(mint).toHaveBeenCalledTimes(callsBeforeEdits + 1);
   },
 );
+
+it("loads both embedded media and its chip from the verified file in the originating environment", async () => {
+  allowMetadata = true;
+  const candidate = "/outside/shot%20 #?/screens/diagram.png";
+  const rootPath = "/repo/screens/diagram.png";
+  mint.mockImplementation(async (target) =>
+    assetResult(target.includes(candidate) ? "candidate" : "root"),
+  );
+  registry.set(metadataAtom(rootPath), AsyncResult.success(null));
+  const onImageExpand = vi.fn();
+  const { container, render } = createTestRoot();
+  await render(
+    <FileMetadataThreadContext value={threadRef}>
+      <ThreadFilePathsContext value={createThreadFilePathIndex([candidate])}>
+        <ChatMarkdown
+          cwd="/repo"
+          threadRef={threadRef}
+          text="![Diagram](screens/diagram.png)\n\n[Open](screens/diagram.png)"
+          onImageExpand={onImageExpand}
+        />
+      </ThreadFilePathsContext>
+    </FileMetadataThreadContext>,
+  );
+  expect(renderedImage(container)).not.toBe(imageUrl("candidate"));
+  await act(async () =>
+    registry.set(metadataAtom(candidate), AsyncResult.success({ kind: "file" })),
+  );
+  expect(renderedImage(container)).toBe(imageUrl("candidate"));
+  const expectedRequest = {
+    environmentId: threadRef.environmentId,
+    input: { resource: { _tag: "media-file", threadId: threadRef.threadId, path: candidate } },
+  };
+  expect(JSON.parse(mint.mock.lastCall![0])).toEqual(expectedRequest);
+
+  mint.mockClear();
+  const link = container.querySelector<HTMLAnchorElement>("a.chat-markdown-file-link");
+  expect(link).not.toBeNull();
+  await act(async () => link!.click());
+  expect(JSON.parse(mint.mock.lastCall![0])).toEqual(expectedRequest);
+  expect(onImageExpand).toHaveBeenCalledWith(
+    expect.objectContaining({
+      images: expect.arrayContaining([expect.objectContaining({ src: imageUrl("candidate") })]),
+    }),
+  );
+});

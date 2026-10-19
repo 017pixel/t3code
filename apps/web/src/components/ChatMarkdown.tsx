@@ -1,8 +1,11 @@
+import { ThreadFilePathsContext } from "../threadFilePathsContext";
+import { useThreadFilePath } from "../hooks/useThreadFilePath";
 import { MarkdownFindContext, findRevealRef } from "./chat/markdownFindContext";
 import {
   buildFileLinkParentSuffixByPath,
   fileLinkLabel,
   resolvePathLinkTarget,
+  splitFilePathPosition,
 } from "@t3tools/shared/fileLinks";
 import {
   isWindowsDrivePathHref,
@@ -10,8 +13,9 @@ import {
   extractInlineCodeSpans,
   extractMarkdownLinkHrefs,
   inlineCodeFilePathCandidate,
+  resolveThreadFilePathCandidate,
 } from "@t3tools/shared/markdownLinks";
-import { isAbsolutePath, resolveWorkspaceFilePath } from "@t3tools/shared/path";
+import { fileBasename, isAbsolutePath, resolveWorkspaceFilePath } from "@t3tools/shared/path";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 import { AuthFilesystemReadScope, AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import {
@@ -167,6 +171,7 @@ import {
   serializeTableElementToMarkdown,
 } from "../markdown-clipboard";
 import {
+  buildFileLinkMetaFromTarget,
   resolveInlineCodeFileLinkMeta,
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
@@ -285,7 +290,7 @@ export function shouldUseMarkdownFileBrowserPrimaryAction(input: {
 }): boolean {
   return (
     input.canOpenInBrowser &&
-    (shouldOpenMarkdownFileLinkInBrowserByDefault(input.iconPath) ||
+    (shouldOpenMarkdownFileLinkInBrowserByDefault(fileBasename(input.iconPath)) ||
       (!input.canOpenInEditor && !input.canOpenInPanel))
   );
 }
@@ -1203,6 +1208,7 @@ function UncachedShikiCodeBlock({
 
 interface MarkdownFileLinkProps {
   environmentId: EnvironmentId | null;
+  captureActionScope: () => () => boolean;
   href: string;
   targetPath: string;
   iconPath: string;
@@ -1940,6 +1946,7 @@ function MarkdownExternalLinkContent({
 
 const MarkdownFileLink = memo(function MarkdownFileLink({
   environmentId,
+  captureActionScope,
   href,
   targetPath,
   iconPath,
@@ -2124,6 +2131,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     const api = readLocalApi();
     if (!api) return;
 
+    const isCurrent = captureActionScope();
     try {
       const clicked = await api.contextMenu.show(
         [
@@ -2139,6 +2147,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         position,
       );
 
+      if (!isCurrent()) return;
+      if (clicked !== null) claimWorkspaceBasenameLookup();
       if (clicked === "preview-media") {
         onOpenMedia?.();
         return;
@@ -2212,6 +2222,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
+                claimWorkspaceBasenameLookup();
                 if (onOpen && shouldOpenMarkdownFileLinkInEditor(event)) {
                   handleOpenInEditor();
                   return;
@@ -2266,6 +2277,7 @@ function areMarkdownFileLinkPropsEqual(
   next: Readonly<MarkdownFileLinkProps>,
 ): boolean {
   return (
+    previous.captureActionScope === next.captureActionScope &&
     previous.href === next.href &&
     previous.targetPath === next.targetPath &&
     previous.iconPath === next.iconPath &&
@@ -2349,14 +2361,27 @@ function useChatMarkdownState({
   const { resolvedTheme } = useTheme();
   const markdownRef = useRef<HTMLDivElement>(null);
   const mediaRequestId = useRef(0);
+  const actionScopeVersion = useRef(0);
+  const captureActionScope = () => {
+    const version = actionScopeVersion.current;
+    return () => actionScopeVersion.current === version;
+  };
+  const cancelFileRequests = () => {
+    mediaRequestId.current++;
+    actionScopeVersion.current++;
+  };
+  const threadFilePaths = use(ThreadFilePathsContext);
+  const connection = usePreparedConnection(
+    threadRef?.environmentId ?? explicitEnvironmentId ?? null,
+  );
   // A preview opened from another thread or workspace never carries over.
-  const mediaScopeKey = [
+  const mediaScopeKey = JSON.stringify([
     threadRef?.environmentId,
     threadRef?.threadId,
     explicitEnvironmentId,
     cwd,
     imageBaseDir,
-  ].join("\u0000");
+  ]);
   // Tagged with the scope it was opened in: a request from the previous scope can
   // resolve before the effect cleanup below invalidates it, and must stay hidden.
   const [localMedia, setLocalMedia] = useState<{
@@ -2378,9 +2403,10 @@ function useChatMarkdownState({
   useLayoutEffect(
     () => () => {
       mediaRequestId.current += 1;
+      actionScopeVersion.current += 1;
     },
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Leaving the scope invalidates media requests still loading for it.
-    [mediaScopeKey],
+    [mediaScopeKey, threadFilePaths, connection],
   );
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
@@ -2410,6 +2436,7 @@ function useChatMarkdownState({
     clickedImage?: HTMLImageElement | null,
   ) => {
     const requestId = ++mediaRequestId.current;
+    const isLatest = claimWorkspaceBasenameLookup();
     void resolveMarkdownMediaPreview({
       source,
       resolvedFilePath,
@@ -2425,7 +2452,7 @@ function useChatMarkdownState({
         : undefined,
     }).then(
       (preview) => {
-        if (preview && mediaRequestId.current === requestId) {
+        if (preview && mediaRequestId.current === requestId && isLatest()) {
           const selected = preview.images[preview.index];
           expandMedia(
             selected && selected.type !== "video" && markdownRef.current
@@ -2435,7 +2462,7 @@ function useChatMarkdownState({
         }
       },
       (error: unknown) => {
-        if (mediaRequestId.current !== requestId) return;
+        if (mediaRequestId.current !== requestId || !isLatest()) return;
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -2607,13 +2634,19 @@ function useChatMarkdownState({
         ),
       );
     }
+    const isCurrent = captureActionScope();
+    const isLatest = claimWorkspaceBasenameLookup();
     return openFileInPreview({
       threadRef,
       filePath: path,
       workspaceRoot: cwd,
       httpBaseUrl: preparedConnection.httpBaseUrl,
       createAssetUrl,
-      openPreview,
+      openPreview: async (input) => {
+        if (!isCurrent() || !isLatest()) return AsyncResult.failure<never>(Cause.interrupt(0));
+        const result = await openPreview(input);
+        return isCurrent() && isLatest() ? result : AsyncResult.failure<never>(Cause.interrupt(0));
+      },
     });
   };
   const findWorkspaceFileMatch = async (fileLinkMeta: MarkdownFileLinkMeta) => {
@@ -2659,6 +2692,7 @@ function useChatMarkdownState({
     // Claimed on every open so a synchronous one supersedes a lookup already
     // in flight.
     const isLatestLookup = claimWorkspaceBasenameLookup();
+    const isCurrent = captureActionScope();
     const openAt = (path: string) =>
       useRightPanelStore.getState().openFile(threadRef, path, fileLinkMeta.line);
     if (
@@ -2672,19 +2706,25 @@ function useChatMarkdownState({
     }
     void (async () => {
       const match = await findWorkspaceFileMatch(fileLinkMeta);
-      if (!isLatestLookup()) return;
+      if (!isLatestLookup() || !isCurrent()) return;
       openAt(match ?? panelPath);
     })();
   };
   const revealMarkdownFileInFileManager = async (fileLinkMeta: MarkdownFileLinkMeta) => {
+    const isLatest = claimWorkspaceBasenameLookup();
+    const isCurrent = captureActionScope();
     const match = await findWorkspaceFileMatch(fileLinkMeta);
     const filePath = match && cwd ? resolvePathLinkTarget(match, cwd) : fileLinkMeta.filePath;
-    return revealFileInFileManager(filePath);
+    return isCurrent() && isLatest()
+      ? revealFileInFileManager(filePath)
+      : AsyncResult.failure(Cause.interrupt(0));
   };
   const fileLinkChip = (
     fileLinkMeta: MarkdownFileLinkMeta,
     copyMarkdown: string,
     mediaSource?: string,
+    displayMeta = fileLinkMeta,
+    verified = false,
   ) => {
     const mediaPath = mediaSource ?? fileLinkMeta.filePath;
     const canPreviewMedia =
@@ -2697,6 +2737,7 @@ function useChatMarkdownState({
 
     return (
       <MarkdownFileLink
+        captureActionScope={captureActionScope}
         environmentId={environmentId}
         href={fileLinkMeta.targetPath}
         targetPath={fileLinkMeta.targetPath}
@@ -2706,7 +2747,7 @@ function useChatMarkdownState({
         line={fileLinkMeta.line}
         label={fileLinkLabel(
           {
-            path: fileLinkMeta.filePath,
+            path: displayMeta.filePath,
             ...(fileLinkMeta.line !== undefined ? { line: fileLinkMeta.line } : {}),
             ...(fileLinkMeta.column !== undefined ? { column: fileLinkMeta.column } : {}),
           },
@@ -2716,7 +2757,12 @@ function useChatMarkdownState({
         theme={resolvedTheme}
         threadRef={threadRef}
         {...(canUseShellActions ? { onOpen: openInPreferredEditor } : {})}
-        onOpenInPanel={(path) => openFileInPanel(fileLinkMeta, path)}
+        onOpenInPanel={
+          verified
+            ? (path, line) =>
+                threadRef && useRightPanelStore.getState().openFile(threadRef, path, line)
+            : (path) => openFileInPanel(fileLinkMeta, path)
+        }
         onOpenMedia={
           threadRef && canPreviewMedia
             ? () => openMarkdownMedia(mediaPath, fileLinkMeta.filePath)
@@ -2725,7 +2771,10 @@ function useChatMarkdownState({
         openInEditorMenuLabel={preferredEditorMenuLabel}
         onReveal={
           canUseShellActions && revealInFileManagerLabel !== undefined
-            ? () => revealMarkdownFileInFileManager(fileLinkMeta)
+            ? () =>
+                verified
+                  ? revealFileInFileManager(fileLinkMeta.filePath)
+                  : revealMarkdownFileInFileManager(fileLinkMeta)
             : undefined
         }
         revealLabel={revealInFileManagerLabel}
@@ -2742,6 +2791,7 @@ function useChatMarkdownState({
   };
 
   const componentState = {
+    cancelFileRequests,
     canOperateHost,
     canOperatePreview,
     cwd,
@@ -2806,6 +2856,40 @@ function markdownHeadingRenderer(level: 1 | 2 | 3 | 4 | 5 | 6) {
       />
     );
   };
+}
+
+function ThreadFileLinkChip(props: {
+  href: string;
+  meta: MarkdownFileLinkMeta | null;
+  copyMarkdown: string;
+  fallback: ReactNode;
+  prefix?: ReactNode;
+}) {
+  const { cwd, environmentId, fileLinkChip, cancelFileRequests } = use(ChatMarkdownRendererContext);
+  const selected = useThreadFilePath(props.href, cwd, environmentId);
+  useLayoutEffect(
+    () => () => cancelFileRequests(),
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A changed selected path invalidates delayed actions for the old target.
+    [selected, cancelFileRequests],
+  );
+  const meta = selected
+    ? { ...buildFileLinkMetaFromTarget(selected, cwd), workspaceLookupPath: null }
+    : props.meta;
+  if (!meta) return props.fallback;
+  const chip = fileLinkChip(
+    meta,
+    props.copyMarkdown,
+    props.href,
+    props.meta ?? meta,
+    selected !== null,
+  );
+  return props.prefix ? (
+    <span data-markdown-copy={props.copyMarkdown}>
+      {props.prefix} {chip}
+    </span>
+  ) : (
+    chip
+  );
 }
 
 // Keep component types stable when streaming changes the message state.
@@ -2920,10 +3004,10 @@ const CHAT_MARKDOWN_COMPONENTS = {
       resolveThreadPullRequest,
       pullRequestsEnabled,
       updateThreadPullRequestLink,
-      fileLinkChip,
       renderContextReference,
     } = use(ChatMarkdownRendererContext);
     const text = use(ChatMarkdownTextContext);
+    const filePaths = use(ThreadFilePathsContext);
     const citation = href ? parseAssistantCitationHref(href) : null;
     if (citation) return <AssistantCitationChip citation={citation} />;
     const linkedThreadId = href ? parseThreadLinkHref(href) : null;
@@ -2949,7 +3033,10 @@ const CHAT_MARKDOWN_COMPONENTS = {
       ? (markdownFileLinkMetaByHref.get(normalizedHref) ??
         resolveMarkdownFileLinkMeta(normalizedHref, cwd, imageBaseDir ?? cwd))
       : null;
-    if (!fileLinkMeta) {
+    if (
+      !fileLinkMeta &&
+      !(filePaths && resolveThreadFilePathCandidate(normalizedHref, cwd, filePaths))
+    ) {
       const faviconHost = resolveExternalWebLinkHost(href);
       const hasText = hastHasText(node);
       const pullRequestAutolink = String(
@@ -3161,30 +3248,34 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const copyMarkdown =
       source.startsWith("[") && source.includes("](")
         ? source
-        : `[${(label || fileLinkMeta.basename).replace(/[\\[\]]/g, "\\$&")}](${normalizedHref})`;
-    const chip = fileLinkChip(fileLinkMeta, copyMarkdown, normalizedHref);
-    return isMarkdownFileLinkLabel(label, normalizedHref) ? (
-      chip
-    ) : (
-      <span data-markdown-copy={copyMarkdown}>
-        {children} {chip}
-      </span>
+        : `[${(label || fileLinkMeta?.basename || normalizedHref).replace(/[\\[\]]/g, "\\$&")}](${normalizedHref})`;
+    return (
+      <ThreadFileLinkChip
+        href={normalizedHref}
+        meta={fileLinkMeta}
+        copyMarkdown={copyMarkdown}
+        fallback={children}
+        prefix={isMarkdownFileLinkLabel(label, normalizedHref) ? null : children}
+      />
     );
   },
   code: function MarkdownCode({ node, children, className, ...props }) {
-    const { cwd, imageBaseDir, inlineCodeFileLinkMetaByText, fileLinkChip } = use(
-      ChatMarkdownRendererContext,
-    );
+    const { cwd, imageBaseDir, inlineCodeFileLinkMetaByText } = use(ChatMarkdownRendererContext);
+    const filePaths = use(ThreadFilePathsContext);
     if (node?.properties?.dataInlineCode != null) {
       const codeText = nodeToPlainText(children);
       const fileLinkMeta =
         inlineCodeFileLinkMetaByText.get(codeText.trim()) ??
         resolveInlineCodeFileLinkMeta(codeText, cwd, imageBaseDir ?? cwd);
-      if (fileLinkMeta) {
-        return fileLinkChip(
-          fileLinkMeta,
-          `\`${codeText}\``,
-          inlineCodeFilePathCandidate(codeText) ?? codeText.trim(),
+      const href = inlineCodeFilePathCandidate(codeText) ?? codeText.trim();
+      if (fileLinkMeta || (filePaths && resolveThreadFilePathCandidate(href, cwd, filePaths))) {
+        return (
+          <ThreadFileLinkChip
+            href={href}
+            meta={fileLinkMeta}
+            copyMarkdown={`\`${codeText}\``}
+            fallback={<code {...props}>{children}</code>}
+          />
         );
       }
     }
@@ -3205,6 +3296,11 @@ const CHAT_MARKDOWN_COMPONENTS = {
       workspaceMutationId,
       renderContextReference,
     } = use(ChatMarkdownRendererContext);
+    const selected = useThreadFilePath(
+      String(node?.properties?.dataLocalSrc ?? src ?? ""),
+      cwd,
+      environmentId,
+    );
     const imageExpand = use(MarkdownLinkContext) ? undefined : expandMedia;
     const contextReference = typeof src === "string" ? parseComposerContextHref(src) : null;
     if (contextReference) {
@@ -3228,7 +3324,9 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const copyMarkdown = markdownImageCopy(altText, srcString, authoredTitle);
     const { className, style: _style, width, height, ...imageProps } = props;
     const authoredSizeStyle = authoredImageSizeStyle(width, height);
-    const imageSource = classifyMarkdownImageSource(classifiedSrc, imageBaseDir ?? cwd);
+    const imageSource = selected
+      ? { _tag: "WorkspaceFile" as const, path: splitFilePathPosition(selected).path }
+      : classifyMarkdownImageSource(classifiedSrc, imageBaseDir ?? cwd);
     const kind = mediaKindFromPath(classifiedSrc) ?? "image";
     const directUri = imageSource._tag === "Direct" ? imageSource.uri : null;
     const githubMediaUrl =

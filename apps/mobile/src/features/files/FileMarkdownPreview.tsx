@@ -1,3 +1,4 @@
+import { ThreadFileLinksContext } from "../threads/useThreadFileLinks";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { resolveMobileMarkdownMediaSource } from "../../lib/markdownMediaSource";
@@ -197,14 +198,16 @@ export function FileMarkdownPreview(props: {
       }
     >
       <View className="mx-auto w-full max-w-[760px]">
-        <SelectableMarkdownText
-          markdown={props.markdown}
-          onLinkPress={onLinkPress}
-          renderImage={renderImage}
-          resolveImageSource={resolveImageSource}
-          onImagePress={onImagePress}
-          textStyle={styles.nativeTextStyle}
-        />
+        <ThreadFileLinksContext value={null}>
+          <SelectableMarkdownText
+            markdown={props.markdown}
+            onLinkPress={onLinkPress}
+            renderImage={renderImage}
+            resolveImageSource={resolveImageSource}
+            onImagePress={onImagePress}
+            textStyle={styles.nativeTextStyle}
+          />
+        </ThreadFileLinksContext>
         <FilePreviewModal source={expandedFile} onRequestClose={() => setExpandedFile(null)} />
         <VideoPreviewModal source={expandedVideo} onRequestClose={() => setExpandedVideo(null)} />
       </View>

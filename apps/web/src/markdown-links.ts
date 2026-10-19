@@ -85,7 +85,7 @@ export function resolveMarkdownFileLinkMeta(
   };
 }
 
-function buildFileLinkMetaFromTarget(targetPath: string, cwd?: string) {
+export function buildFileLinkMetaFromTarget(targetPath: string, cwd?: string) {
   const { path, line, column } = splitFilePathPosition(targetPath);
   return {
     filePath: path,
