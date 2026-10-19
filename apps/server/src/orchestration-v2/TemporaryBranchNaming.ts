@@ -2,6 +2,7 @@ import { CommandId, ThreadId, type ChatAttachment, type ProjectId } from "@t3too
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -27,7 +28,6 @@ type NamingInput = {
   readonly message: {
     readonly text: string;
     readonly attachments: ReadonlyArray<ChatAttachment>;
-    readonly context?: string;
   };
 };
 
@@ -83,7 +83,6 @@ const make = Effect.gen(function* () {
         cwd,
         message: input.message.text,
         attachments: input.message.attachments,
-        ...(input.message.context ? { context: input.message.context } : {}),
         modelSelection,
       });
       const sharing = (branch: string) =>
@@ -150,9 +149,29 @@ const make = Effect.gen(function* () {
               newBranch: oldBranch,
               exactName: true,
             });
-            for (const thread of yield* sharing(renamed.branch)) {
-              yield* update(thread.id, renamed.branch, oldBranch, "branch-rollback");
-            }
+            // Git is already restored; retry only metadata reads and guarded writes.
+            yield* Effect.gen(function* () {
+              const visited = new Set<ThreadId>();
+              while (true) {
+                const remaining = yield* sharing(renamed.branch);
+                if (remaining.length === 0) break;
+                for (const thread of remaining) {
+                  if (visited.has(thread.id))
+                    return yield* new BranchMetadataPublicationStalled({ threadId: thread.id });
+                  visited.add(thread.id);
+                  yield* update(thread.id, renamed.branch, oldBranch, "branch-rollback");
+                }
+              }
+            }).pipe(
+              Effect.retry({
+                while: (error) => error._tag !== "BranchMetadataPublicationStalled",
+                schedule: Schedule.exponential("100 millis").pipe(
+                  Schedule.modifyDelay(({ duration }) =>
+                    Effect.succeed(Math.min(Duration.toMillis(duration), 5000)),
+                  ),
+                ),
+              }),
+            );
             return yield* Effect.failCause(cause);
           }),
         ),
