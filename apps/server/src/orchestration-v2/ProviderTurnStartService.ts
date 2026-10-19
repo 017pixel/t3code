@@ -595,6 +595,15 @@ export const layer: Layer.Layer<
           });
           return undefined;
         });
+      const isNativeAccountTransfer = (target: OrchestrationV2Run) => {
+        const previous = projection.runs.findLast(
+          (source) =>
+            source.ordinal < target.ordinal &&
+            source.providerThreadId === target.providerThreadId &&
+            source.startedAt !== null,
+        );
+        return previous !== undefined && previous.providerInstanceId !== target.providerInstanceId;
+      };
       let effectiveHandoffs = handoffs;
       const loadedProviderThread = yield* Effect.gen(function* () {
         if (nativeForkTransfer !== undefined) {
@@ -679,17 +688,22 @@ export const layer: Layer.Layer<
           return resumed.success;
         }
 
-        if (session.driver === "codex") {
-          // A transcript summary cannot recover native Codex context. Preserve
-          // the reference so retries keep resuming the same conversation.
+        if (
+          session.driver === "codex" &&
+          !uncertainDelivery &&
+          (isNativeAccountTransfer(run) ||
+            (resumed.failure._tag === "ProviderAdapterResumeThreadError" &&
+              resumed.failure.preserveNativeThread === true))
+        ) {
+          // A portable handoff cannot repair native account ownership or an
+          // unresolved writer. Ambiguous injection instead needs a fresh thread.
           if (input.willRetry === true) return yield* resumed.failure;
           yield* settleStartFailure({
             signal: "provider-native-resume-failure",
             title: "Codex native conversation could not resume",
             error: resumed.failure,
-            message: uncertainDelivery
-              ? "Codex history delivery was not acknowledged. Check the native history before retrying. The saved native conversation has been preserved."
-              : "Codex could not resume the saved native conversation. Check account access, the shared Codex home, and other writers before retrying. The saved native conversation has been preserved.",
+            message:
+              "Codex could not resume the saved native conversation. Check account access, the shared Codex home, and other writers before retrying. The saved native conversation has been preserved.",
           });
           return undefined;
         }
@@ -1075,6 +1089,14 @@ export const layer: Layer.Layer<
           source.ordinal < run.ordinal &&
           source.providerThreadId === providerThread.id &&
           (source.status === "failed" || source.status === "interrupted") &&
+          // A refused account load never sent its prompt to the native conversation.
+          // Recovery resumes that conversation with the new request alone.
+          !(
+            session.driver === "codex" &&
+            sameNativeThread &&
+            source.startedAt === null &&
+            isNativeAccountTransfer(source)
+          ) &&
           !deliveredAttemptIds.has(source.activeAttemptId),
       );
       const missedRunIds = new Set(missedRuns.map((source) => source.id));

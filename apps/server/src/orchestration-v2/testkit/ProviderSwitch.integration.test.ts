@@ -194,7 +194,13 @@ function makeTestAdapter(input: {
                 (input.failResumeOnce !== undefined &&
                   (yield* Ref.getAndSet(input.failResumeOnce, false)))
               )
-                return yield* unimplemented(input.driver, "simulated native resume failure");
+                return yield* new ProviderAdapter.ProviderAdapterResumeThreadError({
+                  driver: input.driver,
+                  providerSessionId: sessionInput.providerSessionId,
+                  providerThreadId: providerThread.id,
+                  preserveNativeThread: input.driver === CODEX_DRIVER,
+                  cause: "simulated native resume failure",
+                });
               return providerThread;
             }),
           ...(input.injectedHistory === undefined
