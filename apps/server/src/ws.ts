@@ -21,6 +21,7 @@ import { rpcInitialItems } from "./rpcInitialItems.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import { subscribeCodexAuthCallback } from "./provider/CodexAuthCallback.ts";
 import {
+  type ServerSettings as ServerSettingsValue,
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AcpRegistryOperationError,
   CommandId,
@@ -2360,9 +2361,20 @@ const layerWsRpc = (
                 )
               : undefined;
             const nextPatch = { ...patch, ...(deviceHosts ? { deviceHosts } : {}) };
+            const authorize = (current: ServerSettingsValue) =>
+              RpcAuthorization.authorizeSettingsUpdate(
+                currentSession.scopes,
+                nextPatch,
+                current,
+                providerInstanceMutation,
+              );
             const settings = yield* providerInstanceMutation === undefined
-              ? serverSettings.updateSettings(nextPatch)
-              : serverSettings.updateProviderInstance(providerInstanceMutation, nextPatch);
+              ? serverSettings.updateSettings(nextPatch, authorize)
+              : serverSettings.updateProviderInstance(
+                  providerInstanceMutation,
+                  nextPatch,
+                  authorize,
+                );
             return ServerSettings.redactServerSettingsForClient(settings);
           }),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,

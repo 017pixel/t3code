@@ -386,13 +386,18 @@ describe("settings mutation authorization", () => {
             },
           },
         });
-        expect(handled).toBe(1);
-        expect(observed).toBe(1);
+        yield* client[WS_METHODS.serverUpdateSettings]({
+          patch: {
+            projectSettingsOverrides: { [projectId]: { continueThreadsAfterServerUpdate: false } },
+          },
+        });
+        expect(handled).toBe(2);
+        expect(observed).toBe(2);
         const deniedPatches = [
           { mcpServers: { docs: stored } },
           { mcpServers: { docs: null } },
           { projectSettingsOverrides: { [projectId]: null } },
-          { projectSettingsOverrides: { [projectId]: { disabledSkills: { review: true } } } },
+          { projectSettingsOverrides: { [projectId]: { mcpServers: {} } } },
           {
             projectSettingsOverrides: {
               [projectId]: {
@@ -423,8 +428,8 @@ describe("settings mutation authorization", () => {
             yield* client[WS_METHODS.serverUpdateSettings]({ patch }).pipe(Effect.flip),
           ).toMatchObject({ requiredPermission: AuthProvidersManageScope });
         }
-        expect(handled).toBe(1);
-        expect(observed).toBe(1);
+        expect(handled).toBe(2);
+        expect(observed).toBe(2);
       }).pipe(Effect.scoped),
   );
 

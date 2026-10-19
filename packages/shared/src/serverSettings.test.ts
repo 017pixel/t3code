@@ -653,7 +653,7 @@ describe("serverSettings helpers", () => {
     });
   });
 
-  it("keeps a project's providerInstances override when a patch entry omits the key", () => {
+  it("keeps a project's newer overrides when a patch entry omits the key", () => {
     const instanceId = ProviderInstanceId.make("codex_work");
     const projectId = ProjectId.make("project-a");
     const current = {
@@ -662,6 +662,8 @@ describe("serverSettings helpers", () => {
         [projectId]: {
           newWorktreesStartFromOrigin: true,
           providerInstances: { [instanceId]: { enabled: false } },
+          mcpServers: { docs: { enabled: false } },
+          disabledSkills: { review: true },
         },
       },
     };
@@ -675,10 +677,12 @@ describe("serverSettings helpers", () => {
     expect(patched.projectSettingsOverrides[projectId]).toEqual({
       newWorktreesStartFromOrigin: false,
       providerInstances: { [instanceId]: { enabled: false } },
+      mcpServers: { docs: { enabled: false } },
+      disabledSkills: { review: true },
     });
   });
 
-  it("clears a project's providerInstances override when a patch entry sends an empty map", () => {
+  it("clears a project's newer overrides when a patch entry sends an empty map", () => {
     const instanceId = ProviderInstanceId.make("codex_work");
     const projectId = ProjectId.make("project-a");
     const current = {
@@ -687,19 +691,28 @@ describe("serverSettings helpers", () => {
         [projectId]: {
           newWorktreesStartFromOrigin: true,
           providerInstances: { [instanceId]: { enabled: false } },
+          mcpServers: { docs: { enabled: false } },
+          disabledSkills: { review: true },
         },
       },
     };
 
     const patched = applyServerSettingsPatch(current, {
       projectSettingsOverrides: {
-        [projectId]: { newWorktreesStartFromOrigin: true, providerInstances: {} },
+        [projectId]: {
+          newWorktreesStartFromOrigin: true,
+          providerInstances: {},
+          mcpServers: {},
+          disabledSkills: {},
+        },
       },
     });
 
     expect(patched.projectSettingsOverrides[projectId]).toEqual({
       newWorktreesStartFromOrigin: true,
       providerInstances: {},
+      mcpServers: {},
+      disabledSkills: {},
     });
   });
 

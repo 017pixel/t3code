@@ -256,13 +256,7 @@ function mergeSettingsEntries<Value>(
   return Object.fromEntries(next);
 }
 
-/**
- * `projectSettingsOverrides` entries otherwise replace whole (see the field's
- * doc comment in contracts), but `providerInstances` was added after clients
- * already round-trip a project's entry on every edit. A client built before
- * that addition sends an entry that never mentions the key, and a whole replace
- * would silently wipe it.
- */
+// Preserve fields added after clients began round-tripping whole project entries.
 function mergeProjectSettingsOverridesPatch(
   current: Readonly<Record<string, ProjectSettingsOverrides>>,
   patch: Readonly<Record<string, ProjectSettingsOverrides | null>>,
@@ -273,12 +267,14 @@ function mergeProjectSettingsOverridesPatch(
       next.delete(projectId);
       continue;
     }
-    const storedProviderInstances = current[projectId]?.providerInstances;
+    const stored = current[projectId];
     next.set(projectId, {
       ...entry,
-      ...(Object.hasOwn(entry, "providerInstances") || storedProviderInstances === undefined
-        ? {}
-        : { providerInstances: storedProviderInstances }),
+      ...Object.fromEntries(
+        (["providerInstances", "mcpServers", "disabledSkills"] as const).flatMap((key) =>
+          Object.hasOwn(entry, key) || stored?.[key] === undefined ? [] : [[key, stored[key]]],
+        ),
+      ),
     });
   }
   return Object.fromEntries(next);

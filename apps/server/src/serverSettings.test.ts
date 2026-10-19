@@ -1,3 +1,5 @@
+import { AuthSettingsWriteScope, AuthProvidersManageScope } from "@t3tools/contracts";
+import { authorizeSettingsUpdate } from "./auth/RpcAuthorization.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -122,7 +124,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const saved = yield* serverSettings.updateSettings({
           mcpServers: { supabase: stdio("env-token") },
           projectSettingsOverrides: {
-            [projectId]: { mcpServers: { supabase: stdio("project-token") } },
+            [projectId]: {
+              mcpServers: { supabase: stdio("project-token") },
+              disabledSkills: { review: true },
+            },
           },
         });
         // The server reads real values.
@@ -162,11 +167,82 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         });
         assert.equal(envVars(yield* serverSettings.getSettings, "env")[0]?.value, "env-token");
 
+        const oldClientEdit = yield* serverSettings.updateSettings({
+          projectSettingsOverrides: { [projectId]: { continueThreadsAfterServerUpdate: false } },
+        });
+        assert.equal(envVars(oldClientEdit, "project")[0]?.value, "project-token");
+        assert.deepEqual(oldClientEdit.projectSettingsOverrides[projectId]?.disabledSkills, {
+          review: true,
+        });
+
         // Removing the environment server drops its secret, not the project's.
         const removed = yield* serverSettings.updateSettings({ mcpServers: { supabase: null } });
         assert.isUndefined(removed.mcpServers.supabase);
         assert.equal(envVars(removed, "project")[0]?.value, "project-token");
+        const cleared = yield* serverSettings.updateSettings({
+          projectSettingsOverrides: { [projectId]: { mcpServers: {}, disabledSkills: {} } },
+        });
+        assert.deepEqual(cleared.projectSettingsOverrides[projectId]?.mcpServers, {});
+        assert.deepEqual(cleared.projectSettingsOverrides[projectId]?.disabledSkills, {});
       }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
+  it.effect("rechecks settings authorization against the state being written", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsModule.ServerSettingsService;
+      const projectId = ProjectId.make("authorization-race");
+      const server = (url: string) => ({
+        enabled: true,
+        transport: { type: "http" as const, url, headers: [] },
+      });
+      yield* settings.updateSettings({
+        projectSettingsOverrides: {
+          [projectId]: { mcpServers: { docs: server("https://old.example") } },
+        },
+      });
+      const stalePatch = {
+        projectSettingsOverrides: (yield* settings.getSettings).projectSettingsOverrides,
+      };
+      yield* authorizeSettingsUpdate(
+        [AuthSettingsWriteScope],
+        stalePatch,
+        yield* settings.getSettings,
+      );
+      // A provider manager commits after the request's initial authorization.
+      yield* settings.updateSettings({
+        projectSettingsOverrides: {
+          [projectId]: { mcpServers: { docs: server("https://new.example") } },
+        },
+      });
+      const denied = yield* settings
+        .updateSettings(stalePatch, (current) =>
+          authorizeSettingsUpdate([AuthSettingsWriteScope], stalePatch, current),
+        )
+        .pipe(Effect.flip);
+      assert.equal(denied._tag, "EnvironmentAuthorizationError");
+      assert.deepEqual(
+        (yield* settings.getSettings).projectSettingsOverrides[projectId]?.mcpServers?.docs,
+        server("https://new.example"),
+      );
+
+      const mutation = {
+        operation: "upsert" as const,
+        instanceId: ProviderInstanceId.make("acpRegistry_guard"),
+        instance: {
+          driver: ProviderDriverKind.make("acpRegistry"),
+          displayName: "Guard",
+          config: { agentId: "guard", distribution: "auto" },
+        },
+      };
+      const patch = { continueThreadsAfterServerUpdate: false };
+      const atomicDenied = yield* settings
+        .updateProviderInstance(mutation, patch, (current) =>
+          authorizeSettingsUpdate([AuthProvidersManageScope], patch, current, mutation),
+        )
+        .pipe(Effect.flip);
+      assert.equal(atomicDenied._tag, "EnvironmentAuthorizationError");
+      assert.isUndefined((yield* settings.getSettings).providerInstances[mutation.instanceId]);
+    }).pipe(Effect.provide(layerServerSettings())),
   );
 
   it.effect("moves an MCP secret when its server or variable is renamed", () =>

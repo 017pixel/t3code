@@ -1562,6 +1562,7 @@ export function requiredScopesForServerSettingsPatch(
     Object.entries(patch.projectSettingsOverrides ?? {}).some(([projectId, entry]) => {
       const previous = current?.projectSettingsOverrides[projectId as ProjectId]?.mcpServers ?? {};
       if (
+        (entry === null || entry.mcpServers !== undefined) &&
         Object.entries(previous).some(
           ([name, server]) =>
             server.transport !== undefined && entry?.mcpServers?.[name]?.transport === undefined,

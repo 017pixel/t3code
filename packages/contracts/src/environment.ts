@@ -108,6 +108,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       nothing; clients hide it instead of sending a patch that goes nowhere.
    */
   projectProviderInstanceOverrides: Schema.optionalKey(Schema.Boolean),
+  /** Shared MCP configuration and environment/project skill switches. */
+  agentTools: Schema.optionalKey(Schema.Boolean),
   threadSnooze: Schema.optionalKey(Schema.Boolean),
   /** Absent on servers from
       before environment themes shipped, which never emit the events -- so a

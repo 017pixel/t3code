@@ -230,17 +230,31 @@ const SettingsUpdate = Schema.Struct({
   providerInstanceMutation: Schema.optionalKey(ProviderInstanceMutation),
 });
 
+const decodeSettingsUpdate = Schema.decodeUnknownSync(SettingsUpdate);
+
 const requiredScopesForSettingsUpdate = (
-  payload: unknown,
+  input: typeof SettingsUpdate.Type,
   current?: Pick<ServerSettings, "projectSettingsOverrides">,
 ) => {
-  const input = Schema.decodeUnknownSync(SettingsUpdate)(payload);
   const scopes = requiredScopesForServerSettingsPatch(input.patch, current);
   if (input.providerInstanceMutation === undefined) return scopes;
   // An atomic provider mutation carries an empty patch unless it also changes settings.
   return Object.values(input.patch).every((value) => value === undefined)
     ? [AuthProvidersManageScope]
     : [...new Set([...scopes, AuthProvidersManageScope])];
+};
+
+export const authorizeSettingsUpdate = (
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  patch: ServerSettingsPatch,
+  current: ServerSettings,
+  providerInstanceMutation?: ProviderInstanceMutation,
+) => {
+  const missing = requiredScopesForSettingsUpdate(
+    { patch, ...(providerInstanceMutation === undefined ? {} : { providerInstanceMutation }) },
+    current,
+  ).find((scope) => !scopes.includes(scope));
+  return missing === undefined ? Effect.void : Effect.fail(rpcAuthorizationError(missing));
 };
 
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
@@ -264,7 +278,7 @@ const requiredScopesForRpcCall = (
     ];
   }
   if (method === WS_METHODS.serverUpdateSettings)
-    return requiredScopesForSettingsUpdate(payload, current);
+    return requiredScopesForSettingsUpdate(decodeSettingsUpdate(payload), current);
   if (method === WS_METHODS.projectsMutate) {
     return requiredScopesForProjectMutation(decodeProjectMutation(payload));
   }
