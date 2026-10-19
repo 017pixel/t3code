@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   UsageDay,
+  USAGE_CONTRACT_VERSION,
   type UsageSource,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
@@ -92,6 +93,38 @@ const setup = Effect.gen(function* () {
       },
     },
   };
+});
+
+const setupArchivedCodex = Effect.gen(function* () {
+  const fixture = yield* setup;
+  const codexHome = NodePath.join(fixture.home, "codex");
+  const sessions = NodePath.join(codexHome, "sessions");
+  const archived = NodePath.join(codexHome, "archived_sessions");
+  const copied = NodePath.join(sessions, "copied.jsonl");
+  const rollout = (sessionId: string, outputTokens: number) =>
+    [
+      { type: "session_meta", payload: { id: sessionId } },
+      { type: "turn_context", payload: { model: "gpt-6-astra" } },
+      {
+        type: "event_msg",
+        timestamp: "2026-08-01T10:00:00Z",
+        payload: {
+          type: "token_count",
+          info: { last_token_usage: { input_tokens: 0, output_tokens: outputTokens } },
+        },
+      },
+    ]
+      .map((line) => encodeUnknownJsonString(line))
+      .join("\n") + "\n";
+  yield* Effect.promise(async () => {
+    await NodeFSP.mkdir(sessions, { recursive: true });
+    await NodeFSP.mkdir(archived, { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(sessions, "live.jsonl"), rollout("live", 10));
+    await NodeFSP.writeFile(NodePath.join(archived, "old.jsonl"), rollout("old", 20));
+    await NodeFSP.writeFile(copied, rollout("copy", 40));
+    await NodeFSP.copyFile(copied, NodePath.join(archived, "copied.jsonl"));
+  });
+  return { ...fixture, codexHome, archived, copied };
 });
 
 const layerCursorUsageAccounts = <E, R>(
@@ -1500,6 +1533,86 @@ describe("UsageService", () => {
           ),
         );
       }).pipe(Effect.scoped),
+  );
+
+  it.live("counts archived Codex rollouts once, including one copied to both directories", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setupArchivedCodex;
+      yield* Effect.gen(function* () {
+        const service = yield* UsageService.make;
+        const summary = yield* service.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(summary), 70);
+      }).pipe(Effect.provide(layerService({ prefix: "usage-codex-archived", home, settings })));
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("merges complete Codex usage over a newer partial cache after archiving a rollout", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-08-02T12:00:00Z"));
+      const { home, settings, codexHome, archived, copied } = yield* setupArchivedCodex;
+      yield* Effect.gen(function* () {
+        const cached = yield* UsageService.make;
+        const before = yield* cached.readSummary(WINDOW);
+        yield* cached.awaitPersisted;
+        yield* Effect.promise(() => NodeFSP.unlink(copied));
+
+        const complete = yield* Effect.gen(function* () {
+          const cold = yield* UsageService.make;
+          const summary = yield* cold.readSummary(WINDOW);
+          yield* cold.awaitPersisted;
+          return summary;
+        }).pipe(Effect.provide(layerService({ prefix: "usage-codex-cold", home, settings })));
+
+        yield* Effect.promise(async () => {
+          await NodeFSP.rm(archived, { recursive: true });
+          await NodeFSP.writeFile(archived, "not a directory");
+        });
+        yield* TestClock.adjust(Duration.seconds(1));
+        const partial = yield* cached.readSummary(WINDOW);
+        const merged = mergeUsage(
+          [
+            {
+              environmentId: EnvironmentId.make("partial"),
+              label: "newer cached scan",
+              summary: partial,
+            },
+            {
+              environmentId: EnvironmentId.make("complete"),
+              label: "older complete scan",
+              summary: complete,
+            },
+          ],
+          USAGE_CONTRACT_VERSION,
+        );
+        assert.strictEqual(merged.outputTokens, 70);
+        assert.strictEqual(merged.sessions, 3);
+        assert.deepStrictEqual(merged.contributingEnvironments, [EnvironmentId.make("complete")]);
+        assert.deepStrictEqual(merged.contractMismatches, []);
+        assert.strictEqual(totalOutputTokens(complete), 70);
+        assert.strictEqual(totalOutputTokens(partial), 70);
+        assert.isAbove(Date.parse(partial.readAt), Date.parse(complete.readAt));
+
+        const sources = before.sources.filter((source) => source.fingerprint.provider === "codex");
+        assert.strictEqual(sources.length, 1);
+        const fingerprint = sources[0]!.fingerprint;
+        assert.strictEqual(fingerprint.resolvedHomePath, codexHome);
+        for (const [summary, status] of [
+          [complete, "ok"],
+          [partial, "partial"],
+        ] as const) {
+          assert.deepStrictEqual(
+            summary.sources
+              .filter((source) => source.fingerprint.provider === "codex")
+              .map((source) => ({ fingerprint: source.fingerprint, status: source.status })),
+            [{ fingerprint, status }],
+          );
+          assert.deepStrictEqual(
+            [...new Set(summary.buckets.map((bucket) => bucket.sourcePath))],
+            [codexHome],
+          );
+        }
+      }).pipe(Effect.provide(layerService({ prefix: "usage-codex-cached", home, settings })));
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
   it.live(
