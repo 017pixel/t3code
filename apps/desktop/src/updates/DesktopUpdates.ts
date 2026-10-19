@@ -357,6 +357,9 @@ export const make = Effect.gen(function* () {
   // Versions whose download failed. Pollers skip them: they run every few
   // minutes, so a persistent failure would otherwise redownload forever.
   const failedDownloads = new Set<string>();
+  // The installer electron-updater runs on quit. A later manual check can clear
+  // `downloadedVersion` while that installer stays queued and armed.
+  let quitInstallVersion: string | null = null;
   const notAppliedVersionRef = yield* Ref.make(Option.none<string>());
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
@@ -554,6 +557,7 @@ export const make = Effect.gen(function* () {
         environment.platform !== "darwin" && !isDebPackage,
       );
       yield* electronUpdater.downloadUpdate;
+      quitInstallVersion = state.availableVersion;
       return { accepted: true, completed: true };
     }).pipe(
       Effect.catchTags({
@@ -1105,7 +1109,8 @@ export const make = Effect.gen(function* () {
       // Register before downloading: electron-updater adds its synchronous
       // installer to this same event only after a download completes.
       yield* electronUpdater.onInstallOnAppQuit(() => {
-        const { downloadedVersion } = Effect.runSync(Ref.get(updateStateRef));
+        const downloadedVersion =
+          quitInstallVersion ?? Effect.runSync(Ref.get(updateStateRef)).downloadedVersion;
         if (downloadedVersion === null) return;
         try {
           NodeFS.mkdirSync(updateRestartMarkerDir, { recursive: true });
