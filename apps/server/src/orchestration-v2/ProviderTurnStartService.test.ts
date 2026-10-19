@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  EventId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -12,7 +13,9 @@ import {
   ProviderSetupError,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
+  TurnItemId,
   ProjectId,
   type OrchestrationV2ThreadProjection,
   OrchestrationV2DomainEvent,
@@ -33,10 +36,12 @@ import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -288,6 +293,10 @@ function makeLocalCommandHarness(input: {
   readonly interruptRunBeforeOpenFailure?: boolean;
   readonly writeFailure?: unknown;
   readonly failReadsAfterRunning?: boolean;
+  readonly persistence?: {
+    readonly sink: EventSink.EventSinkV2Shape;
+    readonly store: ProjectionStore.ProjectionStoreV2Shape;
+  };
 }) {
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
@@ -625,7 +634,9 @@ function makeLocalCommandHarness(input: {
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
           prepareProviderHandoff: () => Effect.die("history read must fail first"),
         }),
-        Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+        input.persistence === undefined
+          ? Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent })
+          : Layer.succeed(EventSink.EventSinkV2, input.persistence.sink),
         IdAllocator.layer,
         layerWorktreeLocation(input.worktreesDir),
         input.fileSystem === undefined
@@ -639,26 +650,28 @@ function makeLocalCommandHarness(input: {
           getById: () =>
             Effect.succeed(Option.some({ workspaceRoot: "/tmp/native-account-project" } as never)),
         }),
-        Layer.mock(ProjectionStore.ProjectionStoreV2)({
-          getThreadRecords,
-          getTurnStartContext,
-          getRuntimeRecoveryProjection: () =>
-            Effect.as(failReadIfRunning, {
-              ...projection,
-              hasConversation: projection.messages.some(
-                (m) =>
-                  m.role === "user" &&
-                  (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
-              ),
-            }),
-          getTurnStartHistory: () =>
-            Effect.fail(
-              new ProjectionStore.ProjectionStoreReadError({
-                threadId,
-                cause: input.historyReadFailureAfterFallback,
-              }),
-            ),
-        }),
+        input.persistence === undefined
+          ? Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getThreadRecords,
+              getTurnStartContext,
+              getRuntimeRecoveryProjection: () =>
+                Effect.as(failReadIfRunning, {
+                  ...projection,
+                  hasConversation: projection.messages.some(
+                    (m) =>
+                      m.role === "user" &&
+                      (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
+                  ),
+                }),
+              getTurnStartHistory: () =>
+                Effect.fail(
+                  new ProjectionStore.ProjectionStoreReadError({
+                    threadId,
+                    cause: input.historyReadFailureAfterFallback,
+                  }),
+                ),
+            })
+          : Layer.succeed(ProjectionStore.ProjectionStoreV2, input.persistence.store),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open }),
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
@@ -1154,3 +1167,263 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+const layerFailureDatabase = SqlitePersistence.layerMemory;
+const layerFailureStores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
+  Layer.provideMerge(layerFailureDatabase),
+);
+const layerFailurePersistence = EventSink.layer.pipe(Layer.provideMerge(layerFailureStores));
+
+const persistedStartFailure = Effect.gen(function* () {
+  const sink = yield* EventSink.EventSinkV2;
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const seed = makeLocalCommandHarness({ text: "Continue" }).projection();
+  const run = seed.runs[0]!;
+  const root = seed.nodes[0]!;
+  const threadId = run.threadId;
+  const now = run.requestedAt;
+  let sequence = 0;
+  const write = <Type extends OrchestrationV2DomainEvent["type"]>(
+    type: Type,
+    payload: Extract<OrchestrationV2DomainEvent, { type: Type }>["payload"],
+  ) =>
+    sink.write({
+      events: [
+        {
+          id: EventId.make(`inherited:${++sequence}`),
+          type,
+          threadId,
+          occurredAt: now,
+          payload,
+        } as OrchestrationV2DomainEvent,
+      ],
+    });
+  yield* write("thread.created", {
+    ...seed.thread,
+    createdBy: "user",
+    creationSource: "web",
+    title: "Restart failure",
+    providerInstanceId: run.providerInstanceId,
+    modelSelection: run.modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    lastVisitedAt: null,
+    deletedAt: null,
+  });
+  yield* write("run.created", run);
+  yield* write("run-attempt.created", {
+    ...seed.attempts[0]!,
+    attemptOrdinal: 2,
+    reason: "steering_restart",
+  });
+  yield* write("node.updated", root);
+  yield* write("provider-thread.updated", seed.providerThreads[0]!);
+  yield* write("message.updated", seed.messages[0]!);
+  yield* write("checkpoint-scope.created", seed.checkpointScopes[0]!);
+  const requestId = RuntimeRequestId.make("inherited-approval");
+  const approval = {
+    ...root,
+    id: NodeId.make("inherited-approval"),
+    parentNodeId: root.id,
+    kind: "approval_request" as const,
+    status: "waiting" as const,
+    countsForRun: false,
+    checkpointScopeId: null,
+    runtimeRequestId: requestId,
+  };
+  const request = {
+    id: requestId,
+    nodeId: approval.id,
+    providerTurnId: null,
+    nativeRequestRef: null,
+    kind: "command" as const,
+    status: "pending" as const,
+    responseCapability: {
+      type: "live" as const,
+      providerSessionId: seed.providerThreads[0]!.providerSessionId!,
+    },
+    createdAt: now,
+    resolvedAt: null,
+  };
+  const item = {
+    id: TurnItemId.make("inherited-approval"),
+    threadId,
+    runId: run.id,
+    nodeId: approval.id,
+    providerThreadId: root.providerThreadId,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 1,
+    title: "Run tests?",
+    status: "waiting" as const,
+    startedAt: now,
+    completedAt: null,
+    updatedAt: now,
+    type: "approval_request" as const,
+    requestId,
+    requestKind: "command" as const,
+  };
+  const message = {
+    ...seed.messages[0]!,
+    id: MessageId.make("inherited-reply"),
+    role: "assistant" as const,
+    createdBy: "agent" as const,
+    creationSource: "provider" as const,
+    text: "Partial",
+    streaming: true,
+  };
+  const subagent = {
+    id: NodeId.make("inherited-subagent"),
+    threadId,
+    runId: run.id,
+    parentNodeId: root.id,
+    origin: "provider_native" as const,
+    createdBy: "agent" as const,
+    driver: seed.providerThreads[0]!.driver,
+    providerInstanceId: run.providerInstanceId,
+    providerThreadId: null,
+    childThreadId: null,
+    nativeTaskRef: null,
+    prompt: "Inspect files",
+    title: null,
+    model: null,
+    status: "running" as const,
+    result: null,
+    startedAt: now,
+    completedAt: null,
+    updatedAt: now,
+  };
+  yield* write("node.updated", approval);
+  yield* write("runtime-request.updated", request);
+  yield* write("turn-item.updated", item);
+  yield* write("message.updated", message);
+  yield* write("message.updated", { ...message, id: MessageId.make("inherited-finished-reply") });
+  yield* write("subagent.updated", subagent);
+  yield* write("node.updated", {
+    ...root,
+    id: subagent.id,
+    parentNodeId: root.id,
+    kind: "subagent",
+    status: "running",
+    countsForRun: false,
+    checkpointScopeId: null,
+  });
+  const unreadable = {
+    ...store,
+    getThreadRecords: (id, fields, filter) =>
+      fields.length === 0
+        ? store.getThreadRecords(id, fields, filter)
+        : Effect.fail(
+            new ProjectionStore.ProjectionStoreReadError({
+              threadId,
+              cause: "inherited records unavailable",
+            }),
+          ),
+  } satisfies ProjectionStore.ProjectionStoreV2Shape;
+  const start = (
+    options: {
+      readonly beforeCommit?: Effect.Effect<unknown, EventSink.EventSinkV2Error>;
+      readonly readFailure?: "collection" | "reconciliation";
+    } = {},
+  ) =>
+    Effect.gen(function* () {
+      const commitSink =
+        options.readFailure === "reconciliation"
+          ? yield* EventSink.EventSinkV2.pipe(
+              Effect.provide(EventSink.layer),
+              Effect.provideService(ProjectionStore.ProjectionStoreV2, unreadable),
+            )
+          : sink;
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        ensureThreadFailure: new Error("Replacement thread cannot load"),
+        persistence: {
+          store: options.readFailure === "collection" ? unreadable : store,
+          sink: {
+            ...commitSink,
+            writeIfRunCurrent: (input) =>
+              (options.beforeCommit ?? Effect.void).pipe(
+                Effect.andThen(commitSink.writeIfRunCurrent(input)),
+              ),
+          },
+        },
+      });
+      yield* harness.start;
+      return yield* store.getThreadProjection(threadId);
+    });
+  return { run, root, now, request, approval, item, message, subagent, write, start };
+});
+
+effectIt.effect(
+  "settles inherited work without overwriting answers or newer provider content",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* persistedStartFailure;
+      const { now, request, approval, item, message, subagent, write } = fixture;
+      const result = yield* fixture.start({
+        beforeCommit: Effect.gen(function* () {
+          // These writes land after collection, before the real SQLite guarded commit.
+          yield* write("runtime-request.updated", {
+            ...request,
+            status: "resolved",
+            decision: "accept",
+            resolvedAt: now,
+          });
+          yield* write("node.updated", { ...approval, status: "completed", completedAt: now });
+          yield* write("turn-item.updated", { ...item, status: "completed", completedAt: now });
+          yield* write("message.updated", { ...message, text: "Latest partial text" });
+          yield* write("message.updated", {
+            ...message,
+            id: MessageId.make("inherited-finished-reply"),
+            text: "Final answer",
+            streaming: false,
+          });
+          yield* write("subagent.updated", {
+            ...subagent,
+            progress: "Read 12 files",
+            providerThreadId: ProviderThreadId.make("native-progress-thread"),
+          });
+        }),
+      });
+      expect(result.runs[0]?.status).toBe("failed");
+      expect(result.runtimeRequests).toMatchObject([{ status: "resolved", decision: "accept" }]);
+      expect(result.nodes.find(({ id }) => id === approval.id)?.status).toBe("completed");
+      expect(result.turnItems.find(({ id }) => id === item.id)?.status).toBe("completed");
+      expect(
+        result.messages.find(({ id }) => id === MessageId.make("inherited-finished-reply")),
+      ).toMatchObject({ text: "Final answer", streaming: false });
+      expect(result.messages.find(({ id }) => id === message.id)).toMatchObject({
+        text: "Latest partial text",
+        streaming: false,
+      });
+      expect(result.subagents).toMatchObject([
+        { status: "failed", progress: "Read 12 files", providerThreadId: "native-progress-thread" },
+      ]);
+    }).pipe(Effect.provide(Layer.fresh(layerFailurePersistence))),
+);
+
+effectIt.effect.each(["collection", "reconciliation"] as const)(
+  "still fails the run, attempt and root when inherited %s reads fail",
+  (readFailure) =>
+    Effect.gen(function* () {
+      const fixture = yield* persistedStartFailure;
+      const result = yield* fixture.start({ readFailure });
+      expect(result.runs[0]).toMatchObject({ status: "failed", startedAt: null });
+      expect(result.attempts[0]).toMatchObject({ status: "failed", startedAt: null });
+      expect(result.nodes.find(({ id }) => id === fixture.root.id)).toMatchObject({
+        status: "failed",
+        startedAt: null,
+      });
+      expect(result.turnItems.find(({ type }) => type === "error")).toMatchObject({
+        failure: { message: "Replacement thread cannot load" },
+      });
+    }).pipe(Effect.provide(Layer.fresh(layerFailurePersistence))),
+);
