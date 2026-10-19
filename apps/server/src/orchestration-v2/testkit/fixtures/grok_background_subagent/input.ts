@@ -8,13 +8,8 @@ export const GROK_BACKGROUND_SUBAGENT_STEER_PROMPT = "Reply exactly STEER_DONE."
 const GROK_SUBAGENT_WAKE_LABEL =
   "notification:session/update:agent_message_chunk:subagent-completed-00000000-0000-4000-8000-000000000002";
 
-// The root prompt settles while the subagent still runs. Run 1 completes with
-// its reply and the subagent carries over, so a message queued behind it
-// starts at once (run 2), and a steer aimed at it starts a new turn (run 3)
-// instead of superseding its finished reply. The queued and steered prompts
-// are hand-written in the recorded Grok 1.0.41 shape between the subagent's
-// own frames (#17159). Grok's reply to the finished subagent replays as a
-// continuation run (run 4), like Claude and Codex background wakes.
+// The queued and steered exchanges are synthetic, based on the recorded Grok
+// 1.0.41 second-prompt exchange in message_steering.
 export function grokBackgroundSubagentInput(): OrchestratorFixtureInput {
   return {
     steps: [

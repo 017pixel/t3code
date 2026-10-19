@@ -24,13 +24,6 @@ function runAssistantTexts(
   );
 }
 
-// A background subagent outlives its root turn. Grok ends it only with the
-// root-session `subagent_finished` notification: the spawn tool completed at
-// launch and nothing names the subagent done in text. Run 1 completes with its
-// reply while the subagent runs on (#17159): the thread waits on the subagent,
-// a queued message starts at once, and a steer starts a new turn instead of
-// superseding the finished reply. Grok's own reply to the finished subagent
-// (its `subagent-completed-*` wake) is a provider continuation.
 export function assertGrokBackgroundSubagentOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,

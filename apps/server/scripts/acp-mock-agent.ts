@@ -836,6 +836,9 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const cancelledSessionId = String(sessionId ?? "mock-session-1");
       cancelledSessions.add(cancelledSessionId);
+      if (holdFirstGenericPromptUntilCancel) {
+        yield* Deferred.succeed(nativeCancelRequested, undefined);
+      }
       if (exitOnCancel) {
         return yield* Effect.sync(() => process.exit(0));
       }
@@ -1990,9 +1993,7 @@ const program = Effect.gen(function* () {
           });
         }
         if (holdFirstGenericPromptUntilCancel && promptCount === 1) {
-          while (!cancelledSessions.has(requestedSessionId)) {
-            yield* Effect.sleep("25 millis");
-          }
+          yield* Deferred.await(nativeCancelRequested);
           cancelledSessions.delete(requestedSessionId);
           return yield* finishPrompt(requestedSessionId, "cancelled");
         }
