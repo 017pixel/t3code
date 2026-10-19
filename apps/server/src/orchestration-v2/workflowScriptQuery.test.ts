@@ -188,21 +188,21 @@ effectIt.layer(
       assert.equal(result.truncated, false);
     }).pipe(
       Effect.provide(
-        ProviderReplayHarness.layerWithRegistry(
-          { name: "workflow-relative-home" },
-          ProviderAdapterRegistry.layerFromAdapters([]),
-          { runEffectWorker: false },
-        ),
-      ),
-      Effect.provide(
-        Settings.layerTest({
-          providerInstances: {
-            [ProviderInstanceId.make("claudeAgent")]: {
-              driver: ProviderDriverKind.make("claudeAgent"),
-              environment: [{ name: "CLAUDE_CONFIG_DIR", value: "claude-config" }],
+        Layer.mergeAll(
+          ProviderReplayHarness.layerWithRegistry(
+            { name: "workflow-relative-home" },
+            ProviderAdapterRegistry.layerFromAdapters([]),
+            { runEffectWorker: false },
+          ),
+          Settings.layerTest({
+            providerInstances: {
+              [ProviderInstanceId.make("claudeAgent")]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                environment: [{ name: "CLAUDE_CONFIG_DIR", value: "claude-config" }],
+              },
             },
-          },
-        }),
+          }),
+        ),
       ),
     ),
   );
