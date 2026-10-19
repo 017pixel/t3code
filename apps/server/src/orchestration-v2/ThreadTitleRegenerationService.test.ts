@@ -13,6 +13,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -49,6 +50,9 @@ const adapter = {
 function makeHarness(
   options: {
     readonly generateTitle?: TextGeneration.TextGeneration["Service"]["generateThreadTitle"];
+    readonly wrapThreads?: (
+      threads: ThreadManagement.ThreadManagementService["Service"],
+    ) => ThreadManagement.ThreadManagementService["Service"];
   } = {},
 ) {
   const layerDatabase = SqlitePersistence.layerMemory;
@@ -89,10 +93,17 @@ function makeHarness(
           : Option.none(),
       ),
   });
+  const layerTitleThreads =
+    options.wrapThreads === undefined
+      ? layerThreadManagement
+      : Layer.effect(
+          ThreadManagement.ThreadManagementService,
+          Effect.map(ThreadManagement.ThreadManagementService, options.wrapThreads),
+        ).pipe(Layer.provide(layerThreadManagement));
   const layerTitleRegeneration = ThreadTitleRegeneration.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        layerThreadManagement,
+        layerTitleThreads,
         layerProjectedProjects,
         Layer.mock(TextGeneration.TextGeneration)({ generateThreadTitle }),
         layerServerSettings,
@@ -520,170 +531,294 @@ it.effect.each(["success", "exhausted", "stale", "interrupted"] as const)(
     }),
 );
 
-it.effect.each(["after-initial", "before-initial", "manual-before", "manual-during"] as const)(
-  "refines a generic initial title once with assistant context: %s",
-  (timing) =>
-    Effect.gen(function* () {
-      const initialStarted = yield* Deferred.make<void>();
-      const releaseInitial = yield* Deferred.make<void>();
-      const refinementStarted = yield* Deferred.make<void>();
-      const releaseRefinement = yield* Deferred.make<void>();
-      let generations = 0;
-      const harness = makeHarness({
-        generateTitle: () =>
-          Effect.gen(function* () {
-            generations += 1;
-            if (generations === 1) {
-              yield* Deferred.succeed(initialStarted, undefined);
-              if (timing === "before-initial") yield* Deferred.await(releaseInitial);
-              return { title: "Investigate issue", needsRefinement: true };
-            }
-            yield* Deferred.succeed(refinementStarted, undefined);
-            if (timing === "manual-during") yield* Deferred.await(releaseRefinement);
-            return { title: "Fix SQLite checkpoint contention", needsRefinement: true };
-          }),
+it.effect.each([
+  "after-initial",
+  "before-initial",
+  "manual-before",
+  "manual-during",
+  "manual-at-dispatch",
+] as const)("refines a generic initial title once with assistant context: %s", (timing) =>
+  Effect.gen(function* () {
+    const initialStarted = yield* Deferred.make<void>();
+    const releaseInitial = yield* Deferred.make<void>();
+    const refinementStarted = yield* Deferred.make<void>();
+    const releaseRefinement = yield* Deferred.make<void>();
+    let generations = 0;
+    const harness = makeHarness({
+      ...(timing === "manual-at-dispatch"
+        ? {
+            wrapThreads: (threads: ThreadManagement.ThreadManagementService["Service"]) => ({
+              ...threads,
+              dispatch: (command: Parameters<typeof threads.dispatch>[0]) =>
+                command.type === "thread.metadata.update" &&
+                command.regenerateTitle &&
+                command.expectedTitle !== undefined
+                  ? threads
+                      .dispatch({
+                        type: "thread.metadata.update",
+                        commandId: CommandId.make("command:title:rename-before-cas"),
+                        threadId: command.threadId,
+                        title: "My chosen title",
+                      })
+                      .pipe(Effect.andThen(threads.dispatch(command)))
+                  : threads.dispatch(command),
+            }),
+          }
+        : {}),
+      generateTitle: () =>
+        Effect.gen(function* () {
+          generations += 1;
+          if (generations === 1) {
+            yield* Deferred.succeed(initialStarted, undefined);
+            if (timing === "before-initial") yield* Deferred.await(releaseInitial);
+            return { title: "Investigate issue", needsRefinement: true };
+          }
+          yield* Deferred.succeed(refinementStarted, undefined);
+          if (timing === "manual-during") yield* Deferred.await(releaseRefinement);
+          return { title: "Fix SQLite checkpoint contention", needsRefinement: true };
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const service = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+      const sink = yield* EventSink.EventSinkV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = yield* createThread({
+        command: "command:title:refinement:create",
+        thread: "thread:title:refinement",
       });
-      yield* Effect.gen(function* () {
+      const messageId = MessageId.make("message:title:refinement");
+      yield* threads.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("command:title:refinement:message"),
+        threadId,
+        messageId,
+        text: "Please investigate this issue",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const requestId = yield* armRegeneration({
+        command: "command:title:refinement:initial",
+        threadId,
+      });
+      const initial = yield* service
+        .execute({
+          threadId,
+          requestId,
+          kind: { type: "initial", messageId },
+        })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(initialStarted);
+      const completeRun = Effect.gen(function* () {
+        const projection = yield* threads.getThreadProjection(threadId);
+        const run = projection.runs[0]!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:title:refinement:assistant"),
+              type: "message.updated",
+              threadId,
+              runId: run.id,
+              nodeId: run.rootNodeId ?? undefined,
+              occurredAt: now,
+              payload: {
+                id: MessageId.make("message:title:refinement:assistant"),
+                threadId,
+                runId: run.id,
+                nodeId: run.rootNodeId,
+                role: "assistant",
+                text: "SQLite checkpoints contend with the long running read transaction.",
+                attachments: [],
+                streaming: false,
+                createdBy: "agent",
+                creationSource: "provider",
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+            {
+              id: EventId.make("event:title:refinement:completed"),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              nodeId: run.rootNodeId ?? undefined,
+              occurredAt: now,
+              payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+            },
+          ],
+        });
+      });
+      const rename = () =>
+        threads.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("command:title:refinement:manual"),
+          threadId,
+          title: "My chosen title",
+        });
+      if (timing === "before-initial") {
+        yield* completeRun;
+        yield* Deferred.succeed(releaseInitial, undefined);
+      }
+      yield* Fiber.join(initial);
+      if (timing === "manual-before") yield* rename();
+      if (timing !== "before-initial") yield* completeRun;
+      yield* TestClock.adjust("1 second");
+
+      const marker = (yield* threads.getThreadProjection(threadId)).thread.titleRegeneration;
+      if (marker !== null && marker !== undefined) {
+        const effects = yield* outbox.listByCommandId(marker.requestId);
+        const refinement = effects.find(
+          (effect) => effect.request.type === "thread-title.generate",
+        );
+        assert.isDefined(refinement, "refinement must be persisted for effect execution");
+        const execution = yield* service
+          .execute({
+            threadId,
+            requestId: marker.requestId,
+            kind: { type: "regenerate" },
+          })
+          .pipe(Effect.forkScoped);
+        if (timing === "manual-during") {
+          yield* Deferred.await(refinementStarted);
+          yield* rename();
+          yield* Deferred.succeed(releaseRefinement, undefined);
+        }
+        yield* Fiber.join(execution);
+      }
+      const result = yield* threads.getThreadProjection(threadId);
+      assert.equal(
+        result.thread.title,
+        timing.startsWith("manual") ? "My chosen title" : "Fix SQLite checkpoint contention",
+      );
+      assert.equal(
+        generations,
+        timing === "manual-before" || timing === "manual-at-dispatch" ? 1 : 2,
+      );
+      if (generations === 2) {
+        assert.include(
+          harness.generateThreadTitle.mock.calls[1]![0]!.message,
+          "SQLite checkpoints",
+        );
+      }
+      assert.isNotOk(result.thread.titleRegeneration);
+      const completed = result.runs[0]!;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:title:refinement:completion-replayed"),
+            type: "run.updated",
+            threadId,
+            runId: completed.id,
+            nodeId: completed.rootNodeId ?? undefined,
+            occurredAt: yield* DateTime.now,
+            payload: completed,
+          },
+        ],
+      });
+      yield* TestClock.adjust("1 minute");
+      assert.isNotOk((yield* threads.getThreadProjection(threadId)).thread.titleRegeneration);
+      assert.equal(
+        generations,
+        timing === "manual-before" || timing === "manual-at-dispatch" ? 1 : 2,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect.each(["failed", "archived", "deleted", "expired", "server-close"] as const)(
+  "releases the pending title refinement waiter when %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const attached = yield* Deferred.make<void>();
+      const released = yield* Deferred.make<void>();
+      const stop = yield* Deferred.make<void>();
+      let opened = 0;
+      let closed = 0;
+      const harness = makeHarness({
+        generateTitle: () => Effect.succeed({ title: "Investigate issue", needsRefinement: true }),
+        wrapThreads: (threads) => ({
+          ...threads,
+          streamStoredEventsFrom: (input) =>
+            Stream.unwrap(
+              Effect.acquireRelease(
+                Effect.sync(() => {
+                  opened++;
+                  if (opened === 4) Deferred.doneUnsafe(attached, Effect.void);
+                }),
+                () =>
+                  Effect.sync(() => {
+                    closed++;
+                    if (closed === 4) Deferred.doneUnsafe(released, Effect.void);
+                  }),
+              ).pipe(Effect.as(threads.streamStoredEventsFrom(input))),
+            ),
+        }),
+      });
+      const server = yield* Effect.gen(function* () {
         const threads = yield* ThreadManagement.ThreadManagementService;
         const service = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
         const sink = yield* EventSink.EventSinkV2;
-        const outbox = yield* EffectOutbox.EffectOutboxV2;
         const threadId = yield* createThread({
-          command: "command:title:refinement:create",
-          thread: "thread:title:refinement",
+          command: "command:lifecycle:create",
+          thread: "thread:lifecycle",
         });
-        const messageId = MessageId.make("message:title:refinement");
-        yield* threads.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make("command:title:refinement:message"),
+        yield* dispatchUserMessage({
+          command: "command:lifecycle:message",
           threadId,
-          messageId,
-          text: "Please investigate this issue",
-          attachments: [],
-          modelSelection,
-          dispatchMode: { type: "start_immediately" },
-          createdBy: "user",
-          creationSource: "web",
+          text: "Investigate",
         });
         const requestId = yield* armRegeneration({
-          command: "command:title:refinement:initial",
+          command: "command:lifecycle:initial",
           threadId,
         });
-        const initial = yield* service
-          .execute({
-            threadId,
-            requestId,
-            kind: { type: "initial", messageId },
-          })
-          .pipe(Effect.forkScoped);
-        yield* Deferred.await(initialStarted);
-        const completeRun = Effect.gen(function* () {
-          const projection = yield* threads.getThreadProjection(threadId);
-          const run = projection.runs[0]!;
+        yield* service.execute({
+          threadId,
+          requestId,
+          kind: { type: "initial", messageId: MessageId.make("command:lifecycle:message:message") },
+        });
+        yield* Deferred.await(attached);
+        if (ending === "server-close") {
+          yield* Deferred.succeed(stop, undefined);
+          return yield* Effect.never;
+        } else if (ending === "expired") {
+          yield* TestClock.adjust("30 minutes");
+        } else if (ending === "failed") {
+          const run = (yield* threads.getThreadProjection(threadId)).runs[0]!;
           const now = yield* DateTime.now;
           yield* sink.write({
             events: [
               {
-                id: EventId.make("event:title:refinement:assistant"),
-                type: "message.updated",
-                threadId,
-                runId: run.id,
-                nodeId: run.rootNodeId ?? undefined,
-                occurredAt: now,
-                payload: {
-                  id: MessageId.make("message:title:refinement:assistant"),
-                  threadId,
-                  runId: run.id,
-                  nodeId: run.rootNodeId,
-                  role: "assistant",
-                  text: "SQLite checkpoints contend with the long running read transaction.",
-                  attachments: [],
-                  streaming: false,
-                  createdBy: "agent",
-                  creationSource: "provider",
-                  createdAt: now,
-                  updatedAt: now,
-                },
-              },
-              {
-                id: EventId.make("event:title:refinement:completed"),
+                id: EventId.make("event:lifecycle:failed"),
                 type: "run.updated",
                 threadId,
                 runId: run.id,
-                nodeId: run.rootNodeId ?? undefined,
                 occurredAt: now,
-                payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+                payload: { ...run, status: "failed", completedAt: now },
               },
             ],
           });
-        });
-        const rename = () =>
-          threads.dispatch({
-            type: "thread.metadata.update",
-            commandId: CommandId.make("command:title:refinement:manual"),
+        } else {
+          yield* threads.dispatch({
+            type: ending === "archived" ? "thread.archive" : "thread.delete",
+            commandId: CommandId.make("command:lifecycle:end"),
             threadId,
-            title: "My chosen title",
           });
-        if (timing === "before-initial") {
-          yield* completeRun;
-          yield* Deferred.succeed(releaseInitial, undefined);
         }
-        yield* Fiber.join(initial);
-        if (timing === "manual-before") yield* rename();
-        if (timing !== "before-initial") yield* completeRun;
-        yield* TestClock.adjust("1 second");
-
-        const marker = (yield* threads.getThreadProjection(threadId)).thread.titleRegeneration;
-        if (marker !== null && marker !== undefined) {
-          const effects = yield* outbox.listByCommandId(marker.requestId);
-          const refinement = effects.find(
-            (effect) => effect.request.type === "thread-title.generate",
-          );
-          assert.isDefined(refinement, "refinement must be persisted for effect execution");
-          const execution = yield* service
-            .execute({
-              threadId,
-              requestId: marker.requestId,
-              kind: { type: "regenerate" },
-            })
-            .pipe(Effect.forkScoped);
-          if (timing === "manual-during") {
-            yield* Deferred.await(refinementStarted);
-            yield* rename();
-            yield* Deferred.succeed(releaseRefinement, undefined);
-          }
-          yield* Fiber.join(execution);
-        }
-        const result = yield* threads.getThreadProjection(threadId);
-        assert.equal(
-          result.thread.title,
-          timing.startsWith("manual") ? "My chosen title" : "Fix SQLite checkpoint contention",
-        );
-        assert.equal(generations, timing === "manual-before" ? 1 : 2);
-        if (generations === 2) {
-          assert.include(
-            harness.generateThreadTitle.mock.calls[1]![0]!.message,
-            "SQLite checkpoints",
-          );
-        }
-        assert.isNotOk(result.thread.titleRegeneration);
-        const completed = result.runs[0]!;
-        yield* sink.write({
-          events: [
-            {
-              id: EventId.make("event:title:refinement:completion-replayed"),
-              type: "run.updated",
-              threadId,
-              runId: completed.id,
-              nodeId: completed.rootNodeId ?? undefined,
-              occurredAt: yield* DateTime.now,
-              payload: completed,
-            },
-          ],
-        });
-        yield* TestClock.adjust("1 minute");
-        assert.isNotOk((yield* threads.getThreadProjection(threadId)).thread.titleRegeneration);
-        assert.equal(generations, timing === "manual-before" ? 1 : 2);
-      }).pipe(Effect.provide(harness.layer));
+        yield* Deferred.await(released);
+        if (ending !== "deleted")
+          assert.isNotOk((yield* threads.getThreadProjection(threadId)).thread.titleRegeneration);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped, Effect.forkScoped);
+      if (ending === "server-close") {
+        yield* Deferred.await(stop);
+        yield* Fiber.interrupt(server);
+      } else yield* Fiber.join(server);
+      yield* Deferred.await(released);
+      assert.equal(opened, 4);
+      assert.equal(closed, 4);
+      assert.equal(harness.generateThreadTitle.mock.calls.length, 1);
     }),
 );
