@@ -39,6 +39,7 @@ import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenance
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeTargetedProviderUpdateAction,
+  resolveLatestProviderUpdateAction,
   resolveLatestProviderVersion,
   type ProviderMaintenanceCommandAction,
 } from "@t3tools/provider-core/server/maintenanceResolver";
@@ -617,7 +618,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                 (SELF_UPDATING_LOCK_KEY.test(freshUpdate.lockKey) ? freshUpdate : null))
               : targetVersion !== undefined
                 ? pinnedCommand
-                : freshUpdate;
+                : resolveLatestProviderUpdateAction(fresh, candidateVersion);
             const incompatible =
               advisory?.status === "broken" || advisory?.status === "unsupported";
             const rejected = background
