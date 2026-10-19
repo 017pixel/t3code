@@ -96,9 +96,10 @@ const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const limits = yield* callerLimits(scope);
-      const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
-        params,
-      ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
+      const jsonParameters = Schema.toCodecJson(parameters as Schema.Encoder<unknown>);
+      const encoded = (yield* Schema.encodeUnknownEffect(jsonParameters)(params).pipe(
+        Effect.mapError(unavailable),
+      )) as Record<string, unknown>;
       const { environmentId: _target, ...args } = encoded;
       // A pending upload lives here, so it cannot go with the call.
       if (Array.isArray(args.attachments) && args.attachments.length > 0) {
@@ -125,7 +126,7 @@ const make = Effect.gen(function* () {
         tool: toolName,
         arguments: args,
         limits,
-        success: success as Schema.Decoder<A>,
+        success: Schema.toCodecJson(success as Schema.Decoder<A>),
       });
     });
 

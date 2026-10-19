@@ -1025,9 +1025,31 @@ it.effect("a partial delegated Stop retries only the original children that fail
     const parentThreadId = ThreadId.make("thread:stop-partial");
     yield* createWatchingThread(parentThreadId, 6);
     yield* send(parentThreadId, "work", "start_immediately");
+    const rootRefused = yield* threads
+      .dispatch({
+        type: "thread.stop",
+        commandId: CommandId.make("stop-root-above-limit"),
+        threadId: parentThreadId,
+      })
+      .pipe(
+        Effect.provideService(DispatchModeLimit, {
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+        }),
+        Effect.exit,
+      );
+    assert.isTrue(Exit.isFailure(rootRefused));
+    assert.deepEqual((yield* threadState(parentThreadId)).runs, ["starting"]);
     const blockedChild = yield* delegate(parentThreadId, "default task");
     const advancedChild = yield* delegate(parentThreadId, "default task that advances");
     const stoppedChild = yield* delegate(parentThreadId, "plan task");
+    const blockedGrandchild = yield* delegate(stoppedChild, "broader grandchild");
+    yield* orchestrator.dispatch({
+      type: "thread.runtime-mode.set",
+      commandId: CommandId.make("approval-child"),
+      threadId: stoppedChild,
+      runtimeMode: "approval-required",
+    });
     yield* orchestrator.dispatch({
       type: "thread.interaction-mode.set",
       commandId: CommandId.make("plan-child"),
@@ -1038,7 +1060,7 @@ it.effect("a partial delegated Stop retries only the original children that fail
     yield* orchestrator.dispatch({ type: "thread.stop", commandId, threadId: parentThreadId });
     const walked = yield* threads.stopDelegatedTasks({ threadId: parentThreadId, commandId }).pipe(
       Effect.provideService(DispatchModeLimit, {
-        runtimeMode: "full-access",
+        runtimeMode: "approval-required",
         interactionMode: "plan",
       }),
       Effect.exit,
@@ -1046,6 +1068,7 @@ it.effect("a partial delegated Stop retries only the original children that fail
     assert.isTrue(Exit.isFailure(walked));
     assert.deepEqual((yield* threadState(stoppedChild)).runs, ["interrupted"]);
     assert.deepEqual((yield* threadState(blockedChild)).runs, ["starting"]);
+    assert.deepEqual((yield* threadState(blockedGrandchild)).runs, ["starting"]);
 
     yield* orchestrator.dispatch({
       type: "thread.stop",
@@ -1059,6 +1082,7 @@ it.effect("a partial delegated Stop retries only the original children that fail
     const newChild = yield* delegate(parentThreadId, "new child");
     yield* threads.stopDelegatedTasks({ threadId: parentThreadId, commandId });
     assert.deepEqual((yield* threadState(blockedChild)).runs, ["interrupted"]);
+    assert.deepEqual((yield* threadState(blockedGrandchild)).runs, ["interrupted"]);
     assert.deepEqual((yield* threadState(stoppedChild)).runs, ["interrupted", "starting"]);
     assert.deepEqual((yield* threadState(advancedChild)).runs, ["interrupted", "starting"]);
     assert.deepEqual((yield* threadState(newChild)).runs, ["starting"]);

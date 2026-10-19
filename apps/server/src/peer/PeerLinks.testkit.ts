@@ -9,7 +9,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import type * as McpSchema from "effect/ai/McpSchema";
+import * as McpSchema from "effect/ai/McpSchema";
 import * as Ref from "effect/Ref";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -36,6 +36,7 @@ import * as PeerMcpClient from "./PeerMcpClient.ts";
 const decodeMcpRequest = Schema.decodeUnknownEffect(
   Schema.Struct({ method: Schema.String, id: Schema.optional(Schema.Number) }),
 );
+const encodeToolResult = Schema.encodeSync(Schema.fromJsonString(McpSchema.CallToolResult));
 
 class PeerTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.metadata)
@@ -96,21 +97,6 @@ export const servePeer = <E, R>(
           if (request.url.startsWith("/.well-known/t3/environment")) {
             yield* Ref.update(probes, (count) => count + 1);
             if (request.headers.host?.startsWith("localhost:")) {
-              if (yield* Ref.get(sse)) {
-                return HttpServerResponse.text(
-                  [
-                    'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"result":"notification"}}',
-                    "",
-                    'data: {"jsonrpc":"2.0","id":999,"error":{"code":-1,"message":"other request"}}',
-                    "",
-                    'data: {"jsonrpc":"2.0",',
-                    'data: "id":' + rpc.id + ',"result":' + JSON.stringify(result) + "}",
-                    "",
-                    "",
-                  ].join("\r\n"),
-                  { contentType: "text/event-stream" },
-                );
-              }
               return HttpServerResponse.jsonUnsafe(yield* Ref.get(alternateDescriptor));
             }
           }
@@ -136,6 +122,21 @@ export const servePeer = <E, R>(
           if (result !== null && request.url === "/mcp" && response.status === 200) {
             const rpc = yield* decodeMcpRequest(yield* request.json);
             if (rpc.method === "tools/call") {
+              if (yield* Ref.get(sse)) {
+                return HttpServerResponse.text(
+                  [
+                    'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"result":"notification"}}',
+                    "",
+                    'data: {"jsonrpc":"2.0","id":999,"error":{"code":-1,"message":"other request"}}',
+                    "",
+                    'data: {"jsonrpc":"2.0",',
+                    'data: "id":' + rpc.id + ',"result":' + encodeToolResult(result) + "}",
+                    "",
+                    "",
+                  ].join("\r\n"),
+                  { contentType: "text/event-stream" },
+                );
+              }
               return HttpServerResponse.jsonUnsafe({ jsonrpc: "2.0", id: rpc.id, result });
             }
           }

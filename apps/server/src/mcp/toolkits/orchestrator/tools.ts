@@ -231,10 +231,10 @@ const ThreadReadTool = Tool.make("t3_thread_read", {
 export const ThreadUpdateTool = Tool.make("t3_thread_update", {
   description:
     "Update metadata for a thread. Omit threadId to update this thread. Use action='rename' with title, action='regenerate_title' with no extra field, action='link_pull_request' with pullRequest, or action='unlink_pull_request'. Workspace and branch changes are intentionally not supported. clientRequestId makes retries idempotent.",
-  parameters: Schema.Struct({
-    environmentId: OrchestratorMcpEnvironmentTarget,
-    ...ThreadMetadataMcpUpdateInput.fields,
-  }),
+  parameters: ThreadMetadataMcpUpdateInput.mapFields(
+    (fields) => ({ environmentId: OrchestratorMcpEnvironmentTarget, ...fields }),
+    { unsafePreserveChecks: true },
+  ),
   success: ThreadMetadataMcpUpdateResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",

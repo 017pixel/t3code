@@ -1,5 +1,7 @@
+import { EnvironmentId } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import { Tool } from "effect/ai";
+import * as Schema from "effect/Schema";
 
 import {
   CreateThreadsTool,
@@ -88,5 +90,14 @@ describe("orchestrator MCP tool guidance", () => {
       "clientRequestId",
     ]);
     assert.include(ThreadUpdateTool.description ?? "", "Workspace and branch changes");
+    const decode = Schema.decodeUnknownSync(ThreadUpdateTool.parametersSchema);
+    assert.throws(() => decode({ action: "regenerate_title", title: "Requested title" }));
+    assert.throws(() => decode({ action: "rename" }));
+    const environmentId = EnvironmentId.make("peer-environment");
+    assert.deepEqual(decode({ action: "rename", title: "Requested title", environmentId }), {
+      action: "rename",
+      title: "Requested title",
+      environmentId,
+    });
   });
 });
