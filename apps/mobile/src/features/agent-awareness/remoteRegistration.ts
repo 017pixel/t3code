@@ -94,6 +94,9 @@ const registeredActivityPushTokens = new Map<string, number>();
 // A failed read keeps the current account's last rows, but must not leave the
 // widget claiming the user is signed out or showing a previous account.
 let widgetShowsCurrentAccount = false;
+// Refreshes can overlap (sign-in, foreground, retry); only the newest read may
+// repaint, so a slow older response never overwrites newer rows.
+let widgetSnapshotReads = 0;
 let androidDeviceReplayedAt: number | null = null;
 let pushTokenSubscription: { remove: () => void } | null = null;
 let appStateSubscription: { remove: () => void } | null = null;
@@ -917,6 +920,7 @@ export function __resetAgentAwarenessRemoteRegistrationForTest(): void {
   registeredActivityPushTokens.clear();
   activityPushTokenLocks.clear();
   widgetShowsCurrentAccount = false;
+  widgetSnapshotReads = 0;
 }
 
 export function unregisterAgentAwarenessDeviceForCurrentUser(
@@ -1059,12 +1063,19 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
     }
 
     // The home-screen widget has no push path of its own, so every foreground
-    // refresh repaints it from one snapshot read. Returns false once the account
-    // changed during the read, so a stale result is never shown or primed.
+    // refresh repaints it from one snapshot read. Yields undefined once the
+    // account changed or a newer read started, so a stale result is never
+    // shown or primed.
     const identity = relayTokenProviderIdentity;
-    const repaintWidget = (snapshot: RelayAgentActivitySnapshotResponse | null): boolean => {
-      if (!relayTokenProvider || relayTokenProviderIdentity !== identity) {
-        return false;
+    const refreshWidget = Effect.gen(function* () {
+      const read = ++widgetSnapshotReads;
+      const snapshot = yield* readAgentActivitySnapshot();
+      if (
+        read !== widgetSnapshotReads ||
+        !relayTokenProvider ||
+        relayTokenProviderIdentity !== identity
+      ) {
+        return undefined;
       }
       if (snapshot) {
         widgetShowsCurrentAccount = true;
@@ -1072,8 +1083,8 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
       } else if (!widgetShowsCurrentAccount) {
         publishWidget({ kind: "unavailable" });
       }
-      return true;
-    };
+      return { snapshot };
+    });
 
     let activities = yield* Effect.try({
       try: () => getAgentLiveActivities(),
@@ -1108,10 +1119,11 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
     // remote-starts one (background push-to-start wakes proved too unreliable
     // to hand the token over).
     if (!hadActivities) {
-      const snapshot = yield* readAgentActivitySnapshot();
-      if (!repaintWidget(snapshot)) {
+      const widgetRead = yield* refreshWidget;
+      if (!widgetRead) {
         return;
       }
+      const { snapshot } = widgetRead;
       const preferences = yield* Effect.tryPromise({
         try: () => loadPreferences(),
         catch: (cause) =>
@@ -1185,7 +1197,7 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
     // An existing card keeps its push token registered without waiting on the
     // relay; the widget still repaints afterwards.
     if (hadActivities) {
-      repaintWidget(yield* readAgentActivitySnapshot());
+      yield* refreshWidget;
     }
   });
 }

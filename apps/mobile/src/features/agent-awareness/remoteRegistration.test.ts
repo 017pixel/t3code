@@ -1382,6 +1382,34 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }).pipe(Effect.provide(relay));
     });
 
+    it.effect("keeps the newest rows when an older overlapping read finishes last", () =>
+      Effect.gen(function* () {
+        const newer = { ...aggregate, activeCount: 2 };
+        const olderRequested = yield* Deferred.make<void>();
+        const olderResponse = yield* Deferred.make<{ readonly aggregate: typeof aggregate }>();
+        let reads = 0;
+        const relay = fakeRelay(() => {
+          reads++;
+          return reads === 1
+            ? Deferred.succeed(olderRequested, undefined).pipe(
+                Effect.andThen(Deferred.await(olderResponse)),
+              )
+            : Effect.succeed({ aggregate: newer });
+        });
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
+
+        const older = yield* Effect.forkChild(
+          refreshActiveLiveActivityRemoteRegistration().pipe(Effect.provide(relay)),
+        );
+        yield* Deferred.await(olderRequested);
+        yield* refreshActiveLiveActivityRemoteRegistration().pipe(Effect.provide(relay));
+        yield* Deferred.succeed(olderResponse, { aggregate });
+        yield* Fiber.join(older);
+
+        expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "snapshot", aggregate: newer });
+      }),
+    );
+
     it("shows the signed-out state after cloud sign-out", () => {
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
 
