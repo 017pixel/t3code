@@ -114,6 +114,9 @@ function makeTestAdapter(input: {
   >;
   readonly failedRunOrdinals?: ReadonlySet<number>;
   readonly interruptedRunOrdinals?: ReadonlySet<number>;
+  readonly eventsBeforeTurn?: (
+    input: ProviderAdapter.ProviderAdapterV2TurnInput,
+  ) => ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
   readonly holdRunOrdinal?: number;
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
@@ -251,6 +254,8 @@ function makeTestAdapter(input: {
                     : { nativeThreadHasTurns: turnInput.nativeThreadHasTurns }),
                 },
               ]);
+              for (const event of input.eventsBeforeTurn?.(turnInput) ?? [])
+                yield* PubSub.publish(events, event);
               if (
                 turnInput.runOrdinal === (input.holdRunOrdinal ?? 1) &&
                 input.holdFirstTurn !== undefined
@@ -1843,6 +1848,76 @@ describe("orchestration v2 provider switching", () => {
           ...CodexProviderCapabilitiesV2,
           canConsumeHandoffSummaries: false,
         };
+        const childId = ThreadId.make("thread:queued-account-switch:child");
+        const childProviderId = ProviderThreadId.make(
+          "provider-thread:queued-account-switch:child",
+        );
+        const childEvents = (
+          turn: ProviderAdapter.ProviderAdapterV2TurnInput,
+        ): ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event> => {
+          const at = turn.providerThread.updatedAt;
+          const providerTurn = {
+            id: ProviderTurnId.make(`native-child-turn:${turn.runOrdinal}`),
+            providerThreadId: childProviderId,
+            nodeId: turn.rootNodeId,
+            runAttemptId: null,
+            nativeTurnRef: {
+              driver: CODEX_DRIVER,
+              nativeId: `native-child-turn:${turn.runOrdinal}`,
+              strength: "strong" as const,
+            },
+            ordinal: 1,
+            startedAt: at,
+          };
+          return [
+            {
+              type: "app_thread.created",
+              driver: CODEX_DRIVER,
+              appThread: {
+                ...turn.appThread,
+                id: childId,
+                activeProviderThreadId: childProviderId,
+                lineage: {
+                  ...turn.appThread.lineage,
+                  parentThreadId: turn.threadId,
+                  relationshipToParent: "subagent",
+                },
+              },
+            },
+            {
+              type: "provider_thread.updated",
+              driver: CODEX_DRIVER,
+              providerThread: {
+                ...turn.providerThread,
+                id: childProviderId,
+                appThreadId: childId,
+                nativeThreadRef: {
+                  driver: CODEX_DRIVER,
+                  nativeId: "shared-native-child",
+                  strength: "strong",
+                },
+              },
+            },
+            {
+              type: "provider_turn.updated",
+              driver: CODEX_DRIVER,
+              threadId: childId,
+              providerTurn: { ...providerTurn, status: "running", completedAt: null },
+            },
+            {
+              type: "provider_turn.updated",
+              driver: CODEX_DRIVER,
+              threadId: childId,
+              providerTurn: { ...providerTurn, status: "completed", completedAt: at },
+            },
+            {
+              type: "provider_turn.updated",
+              driver: CODEX_DRIVER,
+              threadId: childId,
+              providerTurn: { ...providerTurn, status: "completed", completedAt: at },
+            },
+          ];
+        };
         const adapters = [
           makeTestAdapter({
             instanceId: CODEX_MODEL_SELECTION.instanceId,
@@ -1851,6 +1926,7 @@ describe("orchestration v2 provider switching", () => {
             modelSelection: CODEX_MODEL_SELECTION,
             responseByRunOrdinal: {},
             capturedTurns,
+            eventsBeforeTurn: childEvents,
             holdFirstTurn: started,
           }),
           makeTestAdapter({
@@ -1860,6 +1936,7 @@ describe("orchestration v2 provider switching", () => {
             modelSelection: alternateSelection,
             responseByRunOrdinal: { 2: "Alternate account complete" },
             capturedTurns,
+            eventsBeforeTurn: childEvents,
           }),
         ];
         const layerRegistry = Layer.succeed(
@@ -1976,6 +2053,18 @@ describe("orchestration v2 provider switching", () => {
             (providerThread) => providerThread.id === delivered.runs[1]?.providerThreadId,
           )?.nativeThreadRef;
           assert.deepEqual(targetNativeRef, sourceNativeRef);
+          const restoredChild = yield* orchestrator.getThreadProjection(childId);
+          assert.deepEqual(
+            restoredChild.providerTurns.map((turn) => [
+              turn.nativeTurnRef?.nativeId,
+              turn.ordinal,
+              turn.status,
+            ]),
+            [
+              ["native-child-turn:1", 1, "completed"],
+              ["native-child-turn:2", 2, "completed"],
+            ],
+          );
           return delivered;
         }).pipe(
           Effect.provide(

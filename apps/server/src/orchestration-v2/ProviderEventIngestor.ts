@@ -576,7 +576,26 @@ export const layer: Layer.Layer<
                   })),
                 ];
           }
-          case "provider_turn.updated":
+          case "provider_turn.updated": {
+            let providerTurn = input.event.providerTurn;
+            if (input.event.threadId !== undefined && providerTurn.runAttemptId === null) {
+              const { providerTurns } = yield* projections.getThreadRecords(input.event.threadId, [
+                "providerTurns",
+              ]);
+              const existing = providerTurns.find(({ id }) => id === providerTurn.id);
+              const previousOrdinal = providerTurns.reduce(
+                (last, turn) =>
+                  turn.providerThreadId === providerTurn.providerThreadId
+                    ? Math.max(last, turn.ordinal)
+                    : last,
+                0,
+              );
+              // A restored native child starts a new process-local counter.
+              providerTurn = {
+                ...providerTurn,
+                ordinal: existing?.ordinal ?? Math.max(providerTurn.ordinal, previousOrdinal + 1),
+              };
+            }
             return [
               ...(["completed", "interrupted", "failed", "cancelled"].includes(
                 input.event.providerTurn.status,
@@ -590,10 +609,11 @@ export const layer: Layer.Layer<
               yield* makeDomainEvent(input, {
                 type: "provider-turn.updated",
                 ...(input.event.threadId === undefined ? {} : { threadId: input.event.threadId }),
-                payload: input.event.providerTurn,
-                nodeId: input.event.providerTurn.nodeId,
+                payload: providerTurn,
+                nodeId: providerTurn.nodeId,
               }),
             ];
+          }
           case "node.updated":
             // Adapters send an unchanged node again with each text delta. Compare with the
             // stored node, not the last one sent, because the server also writes nodes.
