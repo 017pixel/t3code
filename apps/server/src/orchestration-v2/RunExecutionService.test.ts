@@ -1834,7 +1834,7 @@ it.effect("releases an inherited background item when its native task receipt se
         },
       ],
       {
-        keepEventStreamOpen: true,
+        requireCloseAfterEvents: true,
         loadInheritedBackgroundTurnItems: () =>
           Effect.succeed([
             {
@@ -4411,6 +4411,7 @@ function runBackgroundItemScenario(
   makeEvents: (ids: BackgroundScenarioIds) => ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
   options?: {
     readonly keepEventStreamOpen?: boolean;
+    readonly requireCloseAfterEvents?: boolean;
     readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
       ReadonlyArray<RunExecutionService.InheritedBackgroundTurnItemRoute>
     >;
@@ -4425,6 +4426,7 @@ function runBackgroundItemScenario(
     const providerInstanceId = ProviderInstanceId.make("codex");
     const observed = yield* Ref.make<ReadonlyArray<string>>([]);
     const ingestionDone = yield* Deferred.make<void>();
+    const eventsExhausted = yield* Deferred.make<void>();
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -4452,6 +4454,9 @@ function runBackgroundItemScenario(
             ingestNormalized: (input) =>
               Effect.gen(function* () {
                 const event = input.event;
+                if (event.type === "subagent.native-task-ended") {
+                  yield* Ref.update(observed, (current) => [...current, "receipt-ingested-twice"]);
+                }
                 if (event.type === "turn_item.updated") {
                   yield* Ref.update(observed, (current) => [
                     ...current,
@@ -4485,9 +4490,18 @@ function runBackgroundItemScenario(
             const events = Stream.fromIterable(makeEvents(ids));
             return {
               events:
-                options?.keepEventStreamOpen === true
-                  ? events.pipe(Stream.concat(Stream.never))
-                  : events,
+                options?.requireCloseAfterEvents === true
+                  ? events.pipe(
+                      Stream.concat(
+                        Stream.fromEffect(Deferred.succeed(eventsExhausted, undefined)).pipe(
+                          Stream.drain,
+                        ),
+                      ),
+                      Stream.concat(Stream.never),
+                    )
+                  : options?.keepEventStreamOpen === true
+                    ? events.pipe(Stream.concat(Stream.never))
+                    : events,
               close: Deferred.succeed(ingestionDone, undefined),
             };
           }),
@@ -4540,8 +4554,16 @@ function runBackgroundItemScenario(
       });
     }).pipe(Effect.provide(layerTest));
 
-    const closed = yield* Deferred.await(ingestionDone).pipe(Effect.timeoutOption("2 seconds"));
-    assert.isTrue(Option.isSome(closed), "event ingestion fiber did not finish");
+    if (options?.requireCloseAfterEvents) {
+      const closed = yield* Effect.race(
+        Deferred.await(ingestionDone).pipe(Effect.as(true)),
+        Deferred.await(eventsExhausted).pipe(Effect.as(false)),
+      );
+      assert.isTrue(closed, "native receipt did not release the inherited stream");
+    } else {
+      const closed = yield* Deferred.await(ingestionDone).pipe(Effect.timeoutOption("2 seconds"));
+      assert.isTrue(Option.isSome(closed), "event ingestion fiber did not finish");
+    }
     return yield* Ref.get(observed);
   });
 }
