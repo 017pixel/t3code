@@ -278,6 +278,7 @@ const make = Effect.gen(function* () {
         threadId,
       )("Only an empty active thread in the target project can change workspace during launch.");
     }
+    return projection.thread;
   });
 
   const checkWorktreeBase: ThreadLaunchService["Service"]["checkWorktreeBase"] = Effect.fn(
@@ -908,9 +909,10 @@ const make = Effect.gen(function* () {
           }
         }
 
-        if (input.reuseExistingThread === true && Option.isNone(launchReceipt)) {
-          yield* validateReusableThread(input, candidateThreadId);
-        }
+        const reusableThread =
+          input.reuseExistingThread === true && Option.isNone(launchReceipt)
+            ? yield* validateReusableThread(input, candidateThreadId)
+            : undefined;
 
         const workspaceStrategy: ThreadLaunchWorkspaceStrategy =
           input.workspaceStrategy.type === "root" && Option.isNone(launchReceipt)
@@ -931,6 +933,8 @@ const make = Effect.gen(function* () {
         const initialBranch = workspaceStrategy.branch ?? null;
         const initialWorktreePath =
           workspaceStrategy.type === "existing_worktree" ? workspaceStrategy.worktreePath : null;
+        // Unprepared drafts keep their branch selection until preparation succeeds;
+        // a fresh claim must replace an existing checkout binding.
         const claimDispatch =
           input.reuseExistingThread === true
             ? threads.dispatch({
@@ -938,9 +942,10 @@ const make = Effect.gen(function* () {
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 expectedEmpty: true,
-                ...(initialWorktreePath === null
-                  ? {}
-                  : { branch: initialBranch, worktreePath: initialWorktreePath }),
+                ...(initialWorktreePath !== null ||
+                (reusableThread !== undefined && reusableThread.worktreePath !== null)
+                  ? { branch: initialBranch, worktreePath: initialWorktreePath }
+                  : {}),
               })
             : threads.dispatch({
                 type: "thread.create",
