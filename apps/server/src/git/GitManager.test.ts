@@ -1974,7 +1974,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         ]) {
           const url = `https://github.com/${saved.repository}/pull/${saved.number}`;
-          const { manager } = yield* makeManager({
+          const { manager, ghCalls } = yield* makeManager({
             ghScenario: {
               prListByHeadSelector: {
                 [branch]: encodeCliJson([
@@ -2009,6 +2009,18 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
               pullRequest: { number: saved.number, url },
             });
           results.push({ name: saved.name, superseded: yield* superseded() });
+          if (saved.name === "older number at current head") {
+            expect(
+              yield* Effect.all([superseded(), superseded(), superseded()], {
+                concurrency: "unbounded",
+              }),
+            ).toEqual([false, false, false]);
+            const savedReads = () => ghCalls.filter((call) => call.startsWith("pr view ")).length;
+            expect(savedReads()).toBe(1);
+            yield* TestClock.adjust(Duration.minutes(5));
+            expect(yield* superseded()).toBe(false);
+            expect(savedReads()).toBe(2);
+          }
           if (saved.name === "newer number already outgrown") {
             yield* runGit(repoDir, ["reset", "--hard", released]);
             expect(yield* superseded()).toBe(false);

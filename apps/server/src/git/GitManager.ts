@@ -2740,12 +2740,28 @@ export const make = Effect.gen(function* () {
       ? null
       : current;
   });
+  const savedPullRequestCache = yield* Cache.makeWith(
+    (key: string) => {
+      const [cwd = "", reference = ""] = key.split("\u0000");
+      return sourceControlProvider(cwd).pipe(
+        Effect.flatMap((provider) => provider.getChangeRequest({ cwd, reference })),
+        Effect.map(toPullRequestInfo),
+      );
+    },
+    {
+      capacity: PR_LOOKUP_CACHE_CAPACITY,
+      timeToLive: (exit) =>
+        Exit.isFailure(exit)
+          ? PR_LOOKUP_FAILURE_BASE_TTL
+          : exit.value.state === "open"
+            ? PR_LOOKUP_CACHE_TTL
+            : PR_LOOKUP_NO_OPEN_PR_CACHE_TTL,
+    },
+  );
   const branchSupersededPullRequest: GitManager["Service"]["branchSupersededPullRequest"] =
     Effect.fn("branchSupersededPullRequest")(function* ({ cwd, branch, pullRequest }) {
-      const provider = yield* sourceControlProvider(cwd);
-      const saved = toPullRequestInfo(
-        yield* provider.getChangeRequest({ cwd, reference: pullRequest.url }),
-      );
+      const cacheCwd = yield* normalizeStatusCacheKey(cwd);
+      const saved = yield* Cache.get(savedPullRequestCache, `${cacheCwd}\u0000${pullRequest.url}`);
       if (
         saved.state === "open" ||
         saved.number !== pullRequest.number ||
