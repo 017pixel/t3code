@@ -215,6 +215,8 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
       },
     })
     .pipe(
+      // Claims allocate new attachment ids on every attempt; bind the request before remapping them.
+      Effect.provideService(ThreadLaunch.LaunchRequest, input),
       Effect.tap((result) =>
         releaseUnusedClaims(
           claimed.claimedPaths,
@@ -228,6 +230,7 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
         // Project/receipt reads precede message dispatch. The create-thread error
         // also wraps post-message projection reads, so its tag alone is not proof.
         const notAccepted =
+          error.operation === "validate-intent" ||
           error.operation === "resolve-project" ||
           error.operation === "read-receipt" ||
           ((error.operation === "create-thread" || error.operation === "dispatch-message") &&

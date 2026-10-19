@@ -180,6 +180,7 @@ function makeHarness(options: HarnessOptions = {}) {
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
   const layerExternalServices = Layer.mergeAll(
+    NodeCrypto.layer,
     WorktreeSetupTracker.layer,
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(TerminalManager.TerminalManager)({ close: closeTerminal }),
@@ -2426,7 +2427,7 @@ it.effect("schedules an accepted preparing message exactly once across concurren
         text: "Resume preparation",
         attachments: [],
         modelSelection: input.modelSelection,
-        dispatchMode: { type: "defer_start" },
+        dispatchMode: { type: "defer_start", workspaceStrategy: input.workspaceStrategy },
         createdBy: input.createdBy,
         creationSource: input.creationSource,
       });

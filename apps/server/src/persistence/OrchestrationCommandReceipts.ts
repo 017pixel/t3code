@@ -21,6 +21,7 @@ export const OrchestrationCommandReceipt = Schema.Struct({
   resultSequence: NonNegativeInt,
   status: Schema.Literals(["accepted", "rejected"]),
   error: Schema.NullOr(Schema.String),
+  launchIntentFingerprint: Schema.optional(Schema.String),
 });
 export type OrchestrationCommandReceipt = typeof OrchestrationCommandReceipt.Type;
 
@@ -64,7 +65,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at,
           result_sequence,
           status,
-          error
+          error,
+          launch_intent_fingerprint
         )
         VALUES (
           ${receipt.commandId},
@@ -74,7 +76,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           ${receipt.acceptedAt},
           ${receipt.resultSequence},
           ${receipt.status},
-          ${receipt.error}
+          ${receipt.error},
+          ${receipt.launchIntentFingerprint ?? null}
         )
         ON CONFLICT (command_id)
         DO UPDATE SET
@@ -84,13 +87,17 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at = excluded.accepted_at,
           result_sequence = excluded.result_sequence,
           status = excluded.status,
-          error = excluded.error
+          error = excluded.error,
+          launch_intent_fingerprint = excluded.launch_intent_fingerprint
       `,
   });
 
   const findReceiptByCommandId = SqlSchema.findOneOption({
     Request: GetByCommandIdInput,
-    Result: OrchestrationCommandReceipt,
+    Result: OrchestrationCommandReceipt.mapFields((fields) => ({
+      ...fields,
+      launchIntentFingerprint: Schema.NullOr(Schema.String),
+    })),
     execute: ({ commandId }) =>
       sql`
         SELECT
@@ -101,7 +108,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at AS "acceptedAt",
           result_sequence AS "resultSequence",
           status,
-          error
+          error,
+          launch_intent_fingerprint AS "launchIntentFingerprint"
         FROM orchestration_command_receipts
         WHERE command_id = ${commandId}
       `,
@@ -124,7 +132,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
         accepted_at,
         result_sequence,
         status,
-        error
+        error,
+        launch_intent_fingerprint
       )
       VALUES (
         ${receipt.commandId},
@@ -134,7 +143,8 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
         ${receipt.acceptedAt},
         ${receipt.resultSequence},
         ${receipt.status},
-        ${receipt.error}
+        ${receipt.error},
+        ${receipt.launchIntentFingerprint ?? null}
       )
       ON CONFLICT(command_id) DO NOTHING
       RETURNING command_id
@@ -149,6 +159,12 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
     input,
   ) =>
     findReceiptByCommandId(input).pipe(
+      Effect.map(
+        Option.map(({ launchIntentFingerprint, ...receipt }) => ({
+          ...receipt,
+          ...(launchIntentFingerprint === null ? {} : { launchIntentFingerprint }),
+        })),
+      ),
       Effect.mapError(
         toPersistenceSqlError("OrchestrationCommandReceiptRepository.getByCommandId:query"),
       ),

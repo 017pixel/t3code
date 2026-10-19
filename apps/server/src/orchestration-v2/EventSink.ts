@@ -559,9 +559,15 @@ const layerBase: Layer.Layer<
     const commitCommandEffect = Effect.fn("orchestrationV2.EventSink.commitCommand")(function* (
       input: Parameters<EventSinkV2Shape["commitCommand"]>[0],
     ) {
+      const launchIntent = yield* CommandReceiptStore.LaunchIntent;
+      const launchMetadata =
+        launchIntent?.commandId === input.commandId
+          ? { launchIntentFingerprint: launchIntent.fingerprint }
+          : {};
       const result = yield* commitThenPublish(
         Effect.gen(function* () {
           const reserved = yield* commandReceipts.insertIfAbsent({
+            ...launchMetadata,
             commandId: input.commandId,
             threadId: input.threadId,
             commandType: input.commandType,
@@ -589,6 +595,7 @@ const layerBase: Layer.Layer<
           yield* applyStoredEvents(storedEvents);
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
+            ...launchMetadata,
             commandId: input.commandId,
             threadId: input.threadId,
             commandType: input.commandType,

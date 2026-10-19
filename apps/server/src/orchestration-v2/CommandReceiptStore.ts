@@ -48,8 +48,14 @@ export const CommandReceiptV2 = Schema.Struct({
   resultSequence: NonNegativeInt,
   status: CommandReceiptV2Status,
   error: Schema.NullOr(Schema.String),
+  launchIntentFingerprint: Schema.optional(Schema.String),
 });
 export type CommandReceiptV2 = typeof CommandReceiptV2.Type;
+
+// Only the matching launch claim carries this metadata into its receipt transaction.
+export const LaunchIntent = Context.Reference<
+  { readonly commandId: CommandId; readonly fingerprint: string } | undefined
+>("t3/orchestration-v2/CommandReceiptStore/LaunchIntent", { defaultValue: () => undefined });
 
 export const ProjectCommandReceiptV2 = Schema.Struct({
   commandId: CommandId,
@@ -108,6 +114,9 @@ function fromApplicationReceipt(receipt: OrchestrationCommandReceipts.Orchestrat
     resultSequence: receipt.resultSequence,
     status: receipt.status,
     error: receipt.error,
+    ...(receipt.launchIntentFingerprint === undefined
+      ? {}
+      : { launchIntentFingerprint: receipt.launchIntentFingerprint }),
   });
 }
 
@@ -124,6 +133,9 @@ function toApplicationReceipt(
     resultSequence: receipt.resultSequence,
     status: receipt.status,
     error: receipt.error,
+    ...("launchIntentFingerprint" in receipt
+      ? { launchIntentFingerprint: receipt.launchIntentFingerprint }
+      : {}),
   };
 }
 
