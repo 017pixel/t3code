@@ -884,6 +884,39 @@ describe("findings that cannot be attached", () => {
     expect(handoff.prompt).not.toContain("No unresolved review findings");
   });
 
+  it("excludes GitLab approval history from findings while keeping authored approval remarks", () => {
+    const approval: PullRequestComment = {
+      ...review,
+      reviewState: "APPROVED",
+      body: "approved this merge request",
+    };
+    const withdrawal: PullRequestComment = {
+      ...review,
+      id: "r2",
+      reviewState: "DISMISSED",
+      body: "unapproved this merge request",
+    };
+    const gitlab = {
+      ...base,
+      provider: SourceControlProviderKind.make("gitlab"),
+      url: "https://gitlab.com/acme/web/-/merge_requests/42",
+      comments: [approval, withdrawal],
+    };
+    const handoff = buildFixFindingsHandoff(gitlab);
+
+    expect(handoff.prompt).toContain("No unresolved review findings were returned");
+    expect(handoff.prompt).not.toContain(approval.body);
+    expect(handoff.prompt).not.toContain(withdrawal.body);
+    expect(handoff.reviewComments).toEqual([]);
+
+    const github = {
+      ...base,
+      provider: SourceControlProviderKind.make("github"),
+      comments: [{ ...approval, body: review.body }],
+    };
+    expect(buildFixFindingsHandoff(github).prompt).toContain(review.body);
+  });
+
   it("carries a host's line comments when it reports no threads at all", () => {
     const handoff = buildFixFindingsHandoff({
       ...base,
