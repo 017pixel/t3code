@@ -145,12 +145,12 @@ const androidSdk = Effect.gen(function* () {
     const emulator = yield* exists(
       path.join(root, "emulator", windows ? "emulator.exe" : "emulator"),
     );
-    if (!explicit && !adb && !emulator) return null;
     const avdmanager = yield* exists(
       path.join(root, "cmdline-tools", "latest", "bin", avdmanagerBinary),
     );
     const legacyAvdmanager =
       !avdmanager && (yield* exists(path.join(root, "tools", "bin", avdmanagerBinary)));
+    if (!explicit && !adb && !emulator && !avdmanager && !legacyAvdmanager) return null;
     return { root, adb, emulator, avdmanager, legacyAvdmanager };
   });
   const candidates = explicit
@@ -163,13 +163,24 @@ const androidSdk = Effect.gen(function* () {
           "Android",
           "Sdk",
         ),
+        ...(platform === "darwin"
+          ? [
+              "/opt/homebrew/share/android-commandlinetools",
+              "/usr/local/share/android-commandlinetools",
+            ]
+          : []),
       ];
+  // A partial SDK (e.g. Android Studio's default install without the emulator) must not hide a
+  // complete one later in the list; the first partial root is kept so diagnostics name a real directory.
+  let fallback: Effect.Success<ReturnType<typeof inspect>> = null;
   for (const root of candidates) {
     const sdk = yield* inspect(root);
-    if (sdk) return sdk;
+    if (!sdk) continue;
+    if (sdk.adb && sdk.emulator && sdk.avdmanager) return sdk;
+    fallback ??= sdk;
   }
   // PATH entries can be slow to stat (network shares), so only consult them after the standard locations miss.
-  if (!explicit) {
+  if (!explicit && !fallback) {
     const searchPath = environment.PATH ?? environment.Path ?? "";
     for (const directory of searchPath.split(windows ? ";" : ":")) {
       if (!directory) continue;
@@ -180,7 +191,15 @@ const androidSdk = Effect.gen(function* () {
       if (sdk) return sdk;
     }
   }
-  return { root: null, adb: false, emulator: false, avdmanager: false, legacyAvdmanager: false };
+  return (
+    fallback ?? {
+      root: null,
+      adb: false,
+      emulator: false,
+      avdmanager: false,
+      legacyAvdmanager: false,
+    }
+  );
 });
 
 const deviceHostEnvironment = (
@@ -193,6 +212,7 @@ const deviceHostEnvironment = (
     ? {
         ...environment,
         ANDROID_HOME: sdkRoot,
+        ANDROID_SDK_ROOT: sdkRoot,
         PATH: [
           path.join(sdkRoot, "platform-tools"),
           path.join(sdkRoot, "emulator"),
