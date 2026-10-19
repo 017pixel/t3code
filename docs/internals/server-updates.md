@@ -93,8 +93,15 @@ or that recovery closed on the cut turn. Message-capable questions stay answerab
 they do not block. Delivery also stops after three consecutive continuations in one
 `restartContinuationOfRunId` chain, so a turn that crashes the server cannot loop. Stable
 command and message IDs prevent duplicate submissions after an outbox retry. Codex
-resumes without adding provider prompt text unless the turn lost background work;
+resumes without adding provider prompt text unless the turn lost background work or steering;
 other adapters receive the continuation message through their normal turn path.
+
+Recovery records undelivered steering before retiring its process-bound effects. The
+continuation carries its text, attachments, and expanded context. If another restart
+cuts delivery, it follows the continuation chain back to those recorded message IDs.
+As with background notes, a completed provider turn proves acceptance; an ambiguous
+delivery can be repeated. Codex retries an empty continuation rejected with `EmptyInput`
+only when its goal is still active, using the continuation prompt as input.
 
 Delegated tasks (`delegate_task` child threads) are reconciled as their own threads,
 never as the parent's background work. The orchestrator settles child results and

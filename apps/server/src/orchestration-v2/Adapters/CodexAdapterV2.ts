@@ -3126,16 +3126,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (attachmentPath === null) {
               return yield* toProtocolError(`Invalid attachment id '${attachment.id}'`);
             }
-            const bytes = yield* fileSystem
-              .readFile(attachmentPath)
+            yield* fileSystem
+              .access(attachmentPath)
               .pipe(
                 Effect.mapError((cause) =>
-                  toProtocolError(`Failed to read attachment '${attachment.id}'.`, cause),
+                  toProtocolError(`Failed to access attachment '${attachment.id}'.`, cause),
                 ),
               );
             return {
-              type: "image" as const,
-              url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+              type: "localImage" as const,
+              path: attachmentPath,
             } satisfies CodexSchema.V2TurnStartParams__UserInput;
           });
 
@@ -6622,11 +6622,34 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 : null;
             if (goalCommand !== null) return runGoalCommand(turnInput, goalCommand);
             return Effect.gen(function* () {
-              yield* startNativeTurn(
-                turnInput,
+              const input =
                 turnInput.restartContinuationOfRunId === undefined
                   ? yield* toCodexInput(turnInput)
-                  : [],
+                  : [];
+              yield* startNativeTurn(turnInput, input).pipe(
+                Effect.catchTags({
+                  CodexAppServerRequestError: (cause) => {
+                    if (
+                      input.length !== 0 ||
+                      cause.code !== -32603 ||
+                      cause.errorMessage !== "failed to submit turn input: EmptyInput"
+                    )
+                      return Effect.fail(cause);
+                    return Effect.gen(function* () {
+                      const current = yield* client
+                        .request("thread/goal/get", {
+                          threadId: yield* getNativeThreadId(turnInput.providerThread),
+                        })
+                        .pipe(Effect.orElseSucceed(() => null));
+                      if (
+                        current?.goal?.status !== "active" ||
+                        turnInput.message.text.trim() === ""
+                      )
+                        return yield* Effect.fail(cause);
+                      yield* startNativeTurn(turnInput, yield* toCodexInput(turnInput));
+                    });
+                  },
+                }),
               );
             }).pipe(
               Effect.mapError(

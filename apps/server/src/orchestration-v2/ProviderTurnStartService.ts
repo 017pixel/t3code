@@ -50,6 +50,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import { restartPendingMessageIds } from "./RestartSteering.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -931,18 +932,32 @@ export const layer: Layer.Layer<
       const routableSubagents = projection.subagents.filter((subagent) =>
         RunExecutionService.canRouteRelatedSubagent(subagent.status),
       );
-      const userText = projectComposerContextForProvider({
-        text: message.text,
-        records: message.context?.records ?? [],
-      });
-      // Delivered once: this run's provider turn marks the work as told. A
-      // restart continuation is prompted by its own text or resumes natively.
-      const noteContinuation = isRestartNoteContinuation(
-        run,
-        projection.runs,
-        projection.providerTurns,
-        projection.attempts,
+      const continuationSource = projection.runs.find(
+        (source) => source.id === run.restartContinuationOfRunId,
       );
+      const steeringContinuation =
+        continuationSource !== undefined &&
+        restartPendingMessageIds(
+          continuationSource,
+          projection.runs,
+          projection.providerTurns,
+          projection.attempts,
+        ).length > 0;
+      // Carried messages were expanded individually before joining; projecting
+      // again would rewrite literal context links inside their captured payloads.
+      const userText = steeringContinuation
+        ? message.text
+        : projectComposerContextForProvider({
+            text: message.text,
+            records: message.context?.records ?? [],
+          });
+      const promptedContinuation =
+        isRestartNoteContinuation(
+          run,
+          projection.runs,
+          projection.providerTurns,
+          projection.attempts,
+        ) || steeringContinuation;
       const restartCancelledWork = pendingRestartCancelledBackgroundWork({
         runs: projection.runs,
         providerTurns: projection.providerTurns,
@@ -1152,7 +1167,7 @@ export const layer: Layer.Layer<
             .join("\n\n");
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
           yield* start({
-            ...(noteContinuation ? promptedInput : turnInput),
+            ...(promptedContinuation ? promptedInput : turnInput),
             message: {
               ...turnInput.message,
               text: context === "" ? userText : `${context}\n\nUser message:\n${userText}`,
@@ -1199,7 +1214,7 @@ export const layer: Layer.Layer<
         effectiveHandoffs.length === 0 &&
         missedItems.length === 0 &&
         restartNote === "" &&
-        !noteContinuation
+        !promptedContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
       return runExecution.startRootRun({

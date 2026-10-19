@@ -149,7 +149,13 @@ const cancelledItem = (
 ): OrchestrationV2ThreadProjection["turnItems"][number] =>
   item.type === "secret_request" && item.secretStatus === "pending"
     ? { ...item, status: "cancelled", secretStatus: "cancelled", completedAt: now, updatedAt: now }
-    : { ...item, status: "cancelled", completedAt: now, updatedAt: now };
+    : {
+        ...item,
+        status: "cancelled",
+        completedAt: now,
+        updatedAt: now,
+        ...("streaming" in item ? { streaming: false } : {}),
+      };
 
 function latestStartedRun(
   projection: ProjectionStore.ProjectionRuntimeRecoveryState,
@@ -353,6 +359,14 @@ export const make = Effect.gen(function* () {
         });
       }
       for (const run of runs) {
+        const pendingMessageIds = [
+          ...new Set([
+            ...(run.restartPendingMessageIds ?? []),
+            ...(projection.pendingSteering ?? [])
+              .filter((steer) => steer.runId === run.id)
+              .map((steer) => steer.messageId),
+          ]),
+        ];
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -360,7 +374,15 @@ export const make = Effect.gen(function* () {
           runId: run.id,
           providerInstanceId: run.providerInstanceId,
           occurredAt: now,
-          payload: { ...run, status: "cancelled", queuePosition: null, completedAt: now },
+          payload: {
+            ...run,
+            status: "cancelled",
+            queuePosition: null,
+            completedAt: now,
+            ...(pendingMessageIds.length === 0
+              ? {}
+              : { restartPendingMessageIds: pendingMessageIds }),
+          },
         });
         for (const attempt of projection.attempts.filter(
           (candidate) =>

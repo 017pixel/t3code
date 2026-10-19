@@ -1,5 +1,6 @@
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   CommandId,
   latestProviderTurnForAttempt,
@@ -15,6 +16,7 @@ import type { ProjectionRuntimeRecoveryState } from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { isNativeMaintenanceCommand } from "./CommandPolicy.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { restartPendingMessageIds } from "./RestartSteering.ts";
 import {
   awaitingProviderThreadId,
   cancelledRosterTaskWork,
@@ -242,11 +244,17 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       });
       return;
     }
+    const pendingMessageIds = restartPendingMessageIds(
+      source,
+      projection.runs,
+      projection.providerTurns,
+      projection.attempts,
+    );
     const sourceRecords = yield* threads.getThreadRecords(
       input.threadId,
       ["messages", "turnItems"],
       {
-        messageIds: [source.userMessageId],
+        messageIds: [source.userMessageId, ...pendingMessageIds],
         turnItemRunIds: [source.id],
         turnItemTypes: ["run_interrupt_request"],
       },
@@ -261,6 +269,18 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       (message) => message.id === source.userMessageId,
     );
     if (sourceMessage !== undefined && isNativeMaintenanceCommand(sourceMessage)) return;
+    const pendingMessages = pendingMessageIds.flatMap((id) =>
+      sourceRecords.messages.filter((message) => message.id === id),
+    );
+    const prompt = [
+      CONTINUE_PROMPT,
+      ...pendingMessages.map((message) =>
+        projectComposerContextForProvider({
+          text: message.text,
+          records: message.context?.records ?? [],
+        }),
+      ),
+    ].join("\n\n");
     const note = restartContinuationNote(
       source,
       projection.runs,
@@ -271,10 +291,10 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       note.work.length === 0 ? undefined : restartCancelledBackgroundWorkNote(note.work);
     const text =
       noteText === undefined
-        ? CONTINUE_PROMPT
-        : note.settled
+        ? prompt
+        : note.settled && pendingMessages.length === 0
           ? noteText
-          : `${noteText}\n\n${CONTINUE_PROMPT}`;
+          : `${noteText}\n\n${prompt}`;
     yield* threads
       .dispatch({
         type: "message.dispatch",
@@ -282,15 +302,19 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         threadId: input.threadId,
         messageId,
         text,
-        notification: {
-          source: { kind: "system" },
-          outcome: "updated",
-          summary: note.settled
-            ? "T3 Code restarted and stopped background work"
-            : "T3 Code restarted and resumed this turn",
-          detail: text,
-        },
-        attachments: [],
+        ...(pendingMessages.length === 0
+          ? {
+              notification: {
+                source: { kind: "system" as const },
+                outcome: "updated" as const,
+                summary: note.settled
+                  ? "T3 Code restarted and stopped background work"
+                  : "T3 Code restarted and resumed this turn",
+                detail: text,
+              },
+            }
+          : {}),
+        attachments: pendingMessages.flatMap((message) => message.attachments),
         modelSelection: source.modelSelection,
         dispatchMode: { type: "start_immediately" },
         createdBy: "agent",
