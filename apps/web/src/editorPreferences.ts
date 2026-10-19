@@ -43,24 +43,20 @@ export class PreferredEditorUnavailableError extends Schema.TaggedError<Preferre
   }
 }
 
-/**
- * The remembered editor when it is available, else the first available one.
- * Callers order `availableEditors` by preference (the server's PATH probe
- * follows the EDITORS catalog; the browser remote list leads with VS Code).
- */
 export function usePreferredEditor(availableEditors: ReadonlyArray<EditorId>) {
   const [lastEditor, setLastEditor] = useLocalStorage(LAST_EDITOR_KEY, null, EditorId);
 
   const effectiveEditor =
-    lastEditor && availableEditors.includes(lastEditor) ? lastEditor : (availableEditors[0] ?? null);
+    lastEditor && availableEditors.includes(lastEditor)
+      ? lastEditor
+      : (availableEditors[0] ?? null);
 
   return [effectiveEditor, setLastEditor] as const;
 }
 
 function resolveAndPersistPreferredEditor(availableEditors: readonly EditorId[]): EditorId | null {
-  const availableEditorIds = new Set(availableEditors);
   const stored = getLocalStorageItem(LAST_EDITOR_KEY, EditorId);
-  if (stored && availableEditorIds.has(stored)) return stored;
+  if (stored && availableEditors.includes(stored)) return stored;
   const editor = availableEditors[0] ?? null;
   if (editor) setLocalStorageItem(LAST_EDITOR_KEY, editor, EditorId);
   return editor;

@@ -130,20 +130,13 @@ export function useRemoteOpenState(environmentId: EnvironmentId | null): RemoteO
   return useRemoteOpenResolution(environmentId).state;
 }
 
-/**
- * Editors offered in remote-link mode. The desktop app probes the machine the
- * renderer runs on. A browser cannot, so it offers every remote-capable
- * editor and remembers the pick; VS Code leads as the default.
- */
-export const BROWSER_REMOTE_EDITORS: ReadonlyArray<EditorId> = [
+// Browsers cannot probe installed editors; offer all remote choices with VS Code as the default.
+const BROWSER_REMOTE_EDITORS: ReadonlyArray<EditorId> = [
   "vscode",
   ...REMOTE_CAPABLE_EDITOR_IDS.filter((id) => id !== "vscode"),
 ];
 
-/**
- * Desktop fallback when the probe fails, finds nothing, or is missing from an
- * older desktop shell (the bridge contract documents VS Code only there).
- */
+// Older desktop bridges without a probe support only the VS Code fallback.
 const REMOTE_FALLBACK_EDITORS: ReadonlyArray<EditorId> = ["vscode"];
 
 let cachedProbedEditors: ReadonlyArray<EditorId> | null = null;

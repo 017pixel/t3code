@@ -80,6 +80,22 @@ it("keeps the stored available editor for an authorized launch", async () => {
   expect(state.setPreference).not.toHaveBeenCalled();
 });
 
+it("launches and remembers the first available editor when the saved choice is unavailable", async () => {
+  state.allowed.add(secondary);
+  state.getPreference.mockReturnValue("zed");
+  const open = useOpenInPreferredEditor(secondary, ["vscode", "cursor"]);
+  expect(await open("/work")).toMatchObject({ _tag: "Success", value: "vscode" });
+  expect(state.run).toHaveBeenCalledExactlyOnceWith({
+    environmentId: secondary,
+    input: { cwd: "/work", editor: "vscode" },
+  });
+  expect(state.setPreference).toHaveBeenCalledExactlyOnceWith(
+    "t3code:last-editor",
+    "vscode",
+    expect.anything(),
+  );
+});
+
 it("returns the existing failures for a missing environment or editor", async () => {
   state.allowed.add(secondary);
   expect((await useOpenInPreferredEditor(null, ["vscode"])("/work"))._tag).toBe("Failure");
