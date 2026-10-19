@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  canCompleteThreadWorkGroupAppend,
   resolveThreadFeedLiveFollow,
   resolveThreadFeedSubmissionAnchor,
   resolveThreadWorkGroupInitialScroll,
@@ -46,6 +47,7 @@ describe("tool-group append following", () => {
     scrollOffset: 33,
     detailsChanged: false,
     userScrolling: false,
+    followPending: false,
   };
 
   it("follows a new call when the reader was at the end", () => {
@@ -66,6 +68,41 @@ describe("tool-group append following", () => {
     ).toBe(true);
   });
 
+  it("keeps following consecutive appends while the native scroll offset is still catching up", () => {
+    const firstAppend = {
+      ...atEnd,
+      previousContentHeight: 259,
+      contentHeight: 287,
+      scrollOffset: 3.2,
+    };
+    const followPending = shouldFollowThreadWorkGroupAppend(firstAppend);
+    expect(followPending).toBe(true);
+
+    const nextAppend = {
+      ...firstAppend,
+      previousRows: appendedRows,
+      rows: [...appendedRows, { id: "next-call" }],
+      previousContentHeight: 287,
+      contentHeight: 316,
+      followPending,
+    };
+    expect(shouldFollowThreadWorkGroupAppend({ ...nextAppend, followPending: false })).toBe(false);
+    expect(shouldFollowThreadWorkGroupAppend(nextAppend)).toBe(true);
+  });
+
+  it("cancels pending following for manual scrolling, detail changes, or changes to existing calls", () => {
+    const pendingAppend = { ...atEnd, followPending: true };
+    const cancellations = [
+      { userScrolling: true },
+      { detailsChanged: true },
+      { rows: [{ id: "replacement" }, ...appendedRows.slice(1)] },
+      { rows: previousRows.slice(0, -1) },
+    ];
+    for (const changes of cancellations) {
+      expect(shouldFollowThreadWorkGroupAppend({ ...pendingAppend, ...changes })).toBe(false);
+    }
+  });
+
   it.each([
     { name: "reading earlier calls", changes: { scrollOffset: 20 } },
     { name: "dragging before leaving the edge", changes: { userScrolling: true } },
@@ -79,6 +116,44 @@ describe("tool-group append following", () => {
     },
   ])("does not steal the reader's position when $name", ({ changes }) => {
     expect(shouldFollowThreadWorkGroupAppend({ ...atEnd, ...changes })).toBe(false);
+  });
+});
+
+describe("tool-group pending append readiness", () => {
+  const firstAppend = {
+    targetContentHeight: 259,
+    nativeContentHeight: 259.2,
+    targetViewportHeight: 256,
+    measuredViewportHeight: 231.47,
+    userScrolling: false,
+  };
+  const secondAppend = {
+    ...firstAppend,
+    targetContentHeight: 287,
+    measuredViewportHeight: 256,
+  };
+
+  it("waits for both the viewport and native content before following consecutive appends", () => {
+    expect(canCompleteThreadWorkGroupAppend(firstAppend)).toBe(false);
+    expect(canCompleteThreadWorkGroupAppend({ ...firstAppend, measuredViewportHeight: 256 })).toBe(
+      true,
+    );
+
+    // At the height cap, matching viewport geometry does not mean native content has grown.
+    expect(canCompleteThreadWorkGroupAppend(secondAppend)).toBe(false);
+    expect(canCompleteThreadWorkGroupAppend({ ...secondAppend, nativeContentHeight: 287.47 })).toBe(
+      true,
+    );
+  });
+
+  it("does not complete an append while the reader scrolls, even after native geometry catches up", () => {
+    expect(
+      canCompleteThreadWorkGroupAppend({
+        ...secondAppend,
+        nativeContentHeight: 287.47,
+        userScrolling: true,
+      }),
+    ).toBe(false);
   });
 });
 

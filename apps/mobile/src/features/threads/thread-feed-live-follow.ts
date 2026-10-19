@@ -36,6 +36,7 @@ export function shouldFollowThreadWorkGroupAppend(input: {
   readonly scrollOffset: number;
   readonly detailsChanged: boolean;
   readonly userScrolling: boolean;
+  readonly followPending: boolean;
 }) {
   return (
     !input.detailsChanged &&
@@ -43,7 +44,28 @@ export function shouldFollowThreadWorkGroupAppend(input: {
     input.contentHeight > input.previousContentHeight &&
     input.rows.length > input.previousRows.length &&
     input.previousRows.every((row, index) => row.id === input.rows[index]?.id) &&
-    input.previousContentHeight - input.viewportHeight - input.scrollOffset <= 1
+    (input.followPending ||
+      input.previousContentHeight - input.viewportHeight - input.scrollOffset <= 1)
+  );
+}
+
+export function canCompleteThreadWorkGroupAppend(input: {
+  readonly targetContentHeight: number;
+  readonly nativeContentHeight: number;
+  readonly targetViewportHeight: number;
+  readonly measuredViewportHeight: number;
+  readonly userScrolling: boolean;
+}) {
+  return (
+    !input.userScrolling &&
+    [
+      input.targetContentHeight,
+      input.nativeContentHeight,
+      input.targetViewportHeight,
+      input.measuredViewportHeight,
+    ].every((height) => Number.isFinite(height) && height > 0) &&
+    Math.abs(input.nativeContentHeight - input.targetContentHeight) <= 1 &&
+    Math.abs(input.measuredViewportHeight - input.targetViewportHeight) <= 1
   );
 }
 

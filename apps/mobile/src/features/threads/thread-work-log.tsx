@@ -73,6 +73,7 @@ import {
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { useTurnItemDetail } from "../../state/queries";
 import {
+  canCompleteThreadWorkGroupAppend,
   resolveThreadWorkGroupInitialScroll,
   shouldFollowThreadWorkGroupAppend,
   type ThreadWorkGroupScrollPosition,
@@ -573,7 +574,13 @@ function ThreadWorkGroupList(props: {
   const listRef = useRef<LegendListRef>(null);
   const loadedRef = useRef(false);
   const userScrollingRef = useRef(false);
-  const pendingAppendHeightRef = useRef<number | null>(null);
+  const pendingAppendRef = useRef<{
+    contentHeight: number;
+    viewportHeight: number;
+    requested: boolean;
+  } | null>(null);
+  const nativeContentHeightRef = useRef(0);
+  const measuredViewportHeightRef = useRef(0);
   const previousContent = useRef({
     rows: props.activities,
     height: Math.max(estimatedRowsHeight, initialPosition?.contentHeight ?? 0),
@@ -612,22 +619,30 @@ function ThreadWorkGroupList(props: {
       contentHeight: state.contentLength,
     });
   };
-  const finishPendingAppend = () => {
-    const targetHeight = pendingAppendHeightRef.current;
-    const state = listRef.current?.getState();
+  const requestPendingAppend = () => {
+    const pending = pendingAppendRef.current;
+    const list = listRef.current;
+    // JS sizing can advance before native content and viewport geometry catch up.
     if (
-      targetHeight !== null &&
-      state &&
-      !userScrollingRef.current &&
-      Math.abs(state.scrollLength - targetHeight) <= 1
+      pending !== null &&
+      !pending.requested &&
+      list !== null &&
+      canCompleteThreadWorkGroupAppend({
+        targetContentHeight: pending.contentHeight,
+        nativeContentHeight: nativeContentHeightRef.current,
+        targetViewportHeight: pending.viewportHeight,
+        measuredViewportHeight: measuredViewportHeightRef.current,
+        userScrolling: userScrollingRef.current,
+      })
     ) {
-      pendingAppendHeightRef.current = null;
-      void listRef.current?.scrollToEnd({ animated: false });
+      // The public request queues work; native arrival settles the intent.
+      pending.requested = true;
+      void list.scrollToEnd({ animated: false });
     }
   };
   // LegendList notifies from child layout effects. Effect Events see the
   // committed rows before those effects run, unlike a parent layout-effect ref.
-  const onContentSizeChange = useEffectEvent((nextHeight: number) => {
+  const onComputedContentSizeChange = useEffectEvent((nextHeight: number) => {
     const previous = previousContent.current;
     const detailsChanged = previous.expandedRows !== props.expandedRows;
     const followAppend =
@@ -641,6 +656,7 @@ function ThreadWorkGroupList(props: {
         scrollOffset: scrollOffset.value,
         detailsChanged,
         userScrolling: userScrollingRef.current,
+        followPending: pendingAppendRef.current !== null,
       });
     previousContent.current = {
       rows: props.activities,
@@ -653,13 +669,25 @@ function ThreadWorkGroupList(props: {
         : { height: nextHeight, rowCount: props.activities.length },
     );
     if (followAppend) {
-      pendingAppendHeightRef.current = Math.min(nextHeight, WORK_GROUP_MAX_HEIGHT);
+      pendingAppendRef.current = {
+        contentHeight: nextHeight,
+        viewportHeight: Math.min(nextHeight, WORK_GROUP_MAX_HEIGHT),
+        requested: false,
+      };
     } else if (detailsChanged || userScrollingRef.current || previous.rows !== props.activities) {
-      pendingAppendHeightRef.current = null;
-    } else if (pendingAppendHeightRef.current !== null) {
-      pendingAppendHeightRef.current = Math.min(nextHeight, WORK_GROUP_MAX_HEIGHT);
+      pendingAppendRef.current = null;
+    } else if (
+      pendingAppendRef.current !== null &&
+      (pendingAppendRef.current.contentHeight !== nextHeight ||
+        pendingAppendRef.current.viewportHeight !== Math.min(nextHeight, WORK_GROUP_MAX_HEIGHT))
+    ) {
+      pendingAppendRef.current = {
+        contentHeight: nextHeight,
+        viewportHeight: Math.min(nextHeight, WORK_GROUP_MAX_HEIGHT),
+        requested: false,
+      };
     }
-    finishPendingAppend();
+    requestPendingAppend();
     rememberPosition();
   });
   // The native ScrollView reports its content size a frame or more after
@@ -671,9 +699,9 @@ function ThreadWorkGroupList(props: {
     const list = listRef.current;
     if (!list) return;
     const unsubscribe = list.getState().listen("totalSize", () => {
-      onContentSizeChange(list.getState().contentLength);
+      onComputedContentSizeChange(list.getState().contentLength);
     });
-    onContentSizeChange(list.getState().contentLength);
+    onComputedContentSizeChange(list.getState().contentLength);
     return unsubscribe;
   }, []);
   const getFixedItemSize = (row: ThreadFeedActivity, index: number) =>
@@ -704,23 +732,50 @@ function ThreadWorkGroupList(props: {
         extraData={props.renderRow}
         renderItem={renderItem}
         sharedValues={sharedValues}
-        onLayout={finishPendingAppend}
+        onLayout={(event) => {
+          measuredViewportHeightRef.current = event.nativeEvent.layout.height;
+          requestPendingAppend();
+        }}
+        onContentSizeChange={(_width, height) => {
+          nativeContentHeightRef.current = height;
+          requestPendingAppend();
+        }}
         onLoad={() => {
           loadedRef.current = true;
           setRestoringPosition(false);
           rememberPosition();
         }}
-        onScroll={rememberPosition}
+        onScroll={(event) => {
+          const pending = pendingAppendRef.current;
+          const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+          if (
+            pending !== null &&
+            canCompleteThreadWorkGroupAppend({
+              targetContentHeight: pending.contentHeight,
+              nativeContentHeight: contentSize.height,
+              targetViewportHeight: pending.viewportHeight,
+              measuredViewportHeight: layoutMeasurement.height,
+              userScrolling: userScrollingRef.current,
+            }) &&
+            Number.isFinite(contentOffset.y) &&
+            Math.abs(
+              contentOffset.y - Math.max(0, contentSize.height - layoutMeasurement.height),
+            ) <= 1
+          ) {
+            pendingAppendRef.current = null;
+          }
+          rememberPosition();
+        }}
         onScrollBeginDrag={() => {
           userScrollingRef.current = true;
-          pendingAppendHeightRef.current = null;
+          pendingAppendRef.current = null;
         }}
         onScrollEndDrag={() => {
           userScrollingRef.current = false;
         }}
         onMomentumScrollBegin={() => {
           userScrollingRef.current = true;
-          pendingAppendHeightRef.current = null;
+          pendingAppendRef.current = null;
         }}
         onMomentumScrollEnd={() => {
           userScrollingRef.current = false;
