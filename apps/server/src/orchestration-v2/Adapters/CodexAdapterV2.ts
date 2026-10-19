@@ -1189,7 +1189,6 @@ interface CodexSubagentThreadContext {
   readonly ordinal: number;
   readonly nativeTurnIds: Set<string>;
   initialPromptEmitted: boolean;
-  ordinalHistoryOwner?: string;
   startedAt: DateTime.Utc;
   readonly turnItemId: OrchestrationV2TurnItem["id"];
   readonly turnItemOrdinal: number;
@@ -1342,15 +1341,6 @@ export function codexThreadRuntimeParams(input: {
 
 const decodeCodexResumeMetadata = Schema.decodeUnknownEffect(
   Schema.Struct({ thread: Schema.Struct({ id: Schema.String, updatedAt: Schema.Number }) }),
-);
-
-const decodeCodexChildTurnHistory = Schema.decodeUnknownEffect(
-  Schema.Struct({
-    thread: Schema.Struct({
-      id: Schema.String,
-      turns: Schema.Array(Schema.Struct({ id: Schema.String })),
-    }),
-  }),
 );
 
 const CodexChildSelection = Schema.Struct({
@@ -2617,6 +2607,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ) =>
           Effect.gen(function* () {
             if (subagent.nativeTurnIds.has(turn.nativeTurnId)) return;
+            subagent.nativeTurnIds.add(turn.nativeTurnId);
             const parentNativeThreadId = yield* getNativeThreadId(
               subagent.parentContext.providerThread,
             );
@@ -2663,31 +2654,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               driver: CODEX_PROVIDER,
               nativeTurnId: turn.nativeTurnId,
             });
-            let minimumOrdinal = 1;
-            if (
-              subagent.parentContext.providerTurnOrdinal > 1 &&
-              subagent.ordinalHistoryOwner !== subagent.parentContext.nativeTurnId
-            ) {
-              // Another account process may have advanced this child's history.
-              const nativeThreadId = yield* getNativeThreadId(subagent.providerThread);
-              const history = yield* ancestryReadPermit.withPermit(
-                client.raw
-                  .request("thread/read", { threadId: nativeThreadId, includeTurns: true })
-                  .pipe(Effect.flatMap(decodeCodexChildTurnHistory), Effect.timeout("5 seconds")),
-              );
-              if (history.thread.id !== nativeThreadId)
-                return yield* toProtocolError(
-                  "Codex returned history for a different child thread.",
-                );
-              const index = history.thread.turns.findIndex(({ id }) => id === turn.nativeTurnId);
-              minimumOrdinal = index < 0 ? history.thread.turns.length + 1 : index + 1;
-              subagent.ordinalHistoryOwner = subagent.parentContext.nativeTurnId;
-            }
             const providerTurnOrdinal = yield* nextProviderTurnOrdinal(
               subagent.providerThread.id,
-              minimumOrdinal,
+              1,
             );
-            subagent.nativeTurnIds.add(turn.nativeTurnId);
             const providerNodeId =
               providerTurnOrdinal === 1
                 ? subagent.childRootNodeId
