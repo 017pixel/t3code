@@ -659,14 +659,18 @@ export const layer = Layer.effect(
         ),
       );
 
-    const markRunning = (id: ScheduledTaskId, startedAtIso: string) =>
+    const markRunning = (
+      id: ScheduledTaskId,
+      expectedProjectId: ScheduledTask["projectId"],
+      startedAtIso: string,
+    ) =>
       sql<{ task_id: string }>`
         UPDATE scheduled_tasks
         SET updated_at = ${startedAtIso},
             last_run_at = ${startedAtIso},
             last_run_status = 'running',
             last_run_error = NULL
-        WHERE task_id = ${id}
+        WHERE task_id = ${id} AND project_id = ${expectedProjectId}
         RETURNING task_id
       `.pipe(
         Effect.mapError((cause) =>
@@ -795,7 +799,7 @@ export const layer = Layer.effect(
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
         }
 
-        yield* markRunning(active.id, startedAtIso);
+        yield* markRunning(active.id, active.projectId, startedAtIso);
         reservedAt = startedAtIso;
         yield* notifyChanged;
 
