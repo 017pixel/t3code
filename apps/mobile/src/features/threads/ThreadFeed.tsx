@@ -103,6 +103,7 @@ import { useResolveClassNames } from "uniwind";
 import { useFilePreviewGallery, FilePreviewGallery } from "../../components/FilePreviewGallery";
 import { assetImageSource } from "../../lib/assetImageSource";
 import { composerImageGallery } from "../../lib/composerImageGallery";
+import { isFileBackedComposerAttachment } from "../../lib/composerImages";
 import { messageImageGallery } from "./messageImageGallery";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
 import { isPdfFile } from "../../lib/filePreview";
@@ -1232,7 +1233,9 @@ function renderFeedEntry(
                     props.onPressPreview({
                       kind: "image",
                       name: attachment.name,
-                      uri: attachment.dataUrl ?? attachment.previewUri,
+                      ...(isFileBackedComposerAttachment(attachment)
+                        ? { attachment }
+                        : { uri: attachment.dataUrl ?? attachment.previewUri }),
                       gallery: composerImageGallery(entry.pendingMessage?.attachments ?? []),
                     })
                   }
