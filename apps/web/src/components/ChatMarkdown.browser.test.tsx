@@ -1,9 +1,10 @@
+import { loadRehypeRaw } from "@t3tools/shared/markdownPipeline";
 import { EnvironmentId } from "@t3tools/contracts";
 import { searchableMessageSegments } from "@t3tools/shared/threadFindText";
 import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { MarkdownFindContext } from "./chat/markdownFindContext";
@@ -45,6 +46,8 @@ vi.mock(import("./chat/MermaidDiagram"), async (original) => ({
 import ChatMarkdown from "./ChatMarkdown";
 
 const roots: Root[] = [];
+
+beforeAll(() => loadRehypeRaw());
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -769,7 +772,7 @@ describe("ChatMarkdown thread find", () => {
 
     await show("Needle");
     await frame();
-    expect(diagrams()).toBe(2);
+    await vi.waitFor(() => expect(diagrams()).toBe(2));
     await show("Alpha");
     await frame();
     await frame();

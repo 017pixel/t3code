@@ -1,3 +1,4 @@
+import { loadRehypeRaw } from "@t3tools/shared/markdownPipeline";
 import { RegistryProvider } from "@effect/atom-react";
 import {
   ApprovalRequestId,
@@ -10,7 +11,7 @@ import {
 import type { LegendListRef } from "@legendapp/list/react";
 import { act, createRef, Profiler, useState, type ComponentProps, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
@@ -146,6 +147,8 @@ function longText(tail = "deep hidden detail only after expand") {
 
 const roots: Root[] = [];
 let container: HTMLDivElement;
+
+beforeAll(() => loadRehypeRaw());
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
