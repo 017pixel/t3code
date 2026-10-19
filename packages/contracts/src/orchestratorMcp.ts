@@ -34,6 +34,7 @@ import {
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   OrchestrationV2ImportedMessage,
+  OrchestrationV2ImportedMessages,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
@@ -555,7 +556,7 @@ export const OrchestratorMcpThreadImportInput = Schema.Struct({
   interactionMode: Schema.optional(ProviderInteractionMode),
   worktreePath: Schema.optional(TrimmedNonEmptyString),
   branch: Schema.optional(TrimmedNonEmptyString),
-  messages: Schema.Array(OrchestratorMcpImportedMessage).check(Schema.isMaxLength(2_000)),
+  messages: OrchestrationV2ImportedMessages,
   continuationPrompt: Schema.optional(OrchestratorMcpPrompt),
 });
 export type OrchestratorMcpThreadImportInput = typeof OrchestratorMcpThreadImportInput.Type;

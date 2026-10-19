@@ -1,10 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
+import { OrchestrationV2Command } from "./orchestrationV2.ts";
 import {
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpThreadImportInput,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadListInput,
   OrchestratorMcpThreadReadInput,
@@ -15,6 +17,10 @@ import {
 const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
+const decodeThreadImportInput = Schema.decodeUnknownSync(OrchestratorMcpThreadImportInput);
+const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+const decodeThreadImportInputResult = Schema.decodeUnknownResult(OrchestratorMcpThreadImportInput);
+const decodeCommandResult = Schema.decodeUnknownResult(OrchestrationV2Command);
 const decodeThreadInterruptInput = Schema.decodeUnknownSync(OrchestratorMcpThreadInterruptInput);
 const decodeThreadListInput = Schema.decodeUnknownSync(OrchestratorMcpThreadListInput);
 const decodeThreadReadInput = Schema.decodeUnknownSync(OrchestratorMcpThreadReadInput);
@@ -22,6 +28,65 @@ const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSend
 const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
 
 describe("orchestrator MCP contracts", () => {
+  it.each(["malformed timestamp", "total text over 2,000,000 characters"])(
+    "rejects imported history with %s at MCP and native command boundaries",
+    (violation) => {
+      const text = "x".repeat(200_000);
+      const messages = Array.from({ length: 10 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        text,
+        createdAt: `2026-10-06T10:0${index}:00.000Z`,
+      }));
+      const request = {
+        source: {
+          environmentId: "environment:source",
+          threadId: "thread:source",
+          handoffId: "handoff:one",
+        },
+        projectId: "project:import",
+        title: "Continue the investigation",
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        messages,
+      };
+      const command = {
+        type: "thread.create",
+        commandId: "command:import",
+        threadId: "thread:import",
+        projectId: request.projectId,
+        title: request.title,
+        modelSelection: request.modelSelection,
+        createdBy: "agent",
+        creationSource: "mcp",
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        importedConversation: { messages },
+      };
+
+      expect(decodeThreadImportInput(request).messages).toEqual(messages);
+      expect(decodeCommand(command)).toMatchObject({ importedConversation: { messages } });
+
+      const invalidMessages =
+        violation === "malformed timestamp"
+          ? [{ role: "user", text: "Earlier question", createdAt: "not-a-date" }]
+          : [...messages, { role: "user", text: "x", createdAt: "2026-10-06T10:10:00.000Z" }];
+      const mcp = decodeThreadImportInputResult({
+        ...request,
+        messages: invalidMessages,
+      });
+      const native = decodeCommandResult({
+        ...command,
+        importedConversation: { messages: invalidMessages },
+      });
+
+      expect({ mcp: mcp._tag, native: native._tag }).toEqual({
+        mcp: "Failure",
+        native: "Failure",
+      });
+    },
+  );
+
   it("accepts explicit worktree isolation and keeps shared delegation as the default", () => {
     expect(decodeDelegateTaskInput({ task: "Review changes" }).isolation).toBeUndefined();
     expect(

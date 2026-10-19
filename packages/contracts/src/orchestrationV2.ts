@@ -1,5 +1,7 @@
 import { OrchestrationMessageContext } from "./composerContext.ts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
 import * as SchemaGetter from "effect/SchemaGetter";
@@ -2568,9 +2570,23 @@ export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJs
 export const OrchestrationV2ImportedMessage = Schema.Struct({
   role: Schema.Literals(["user", "assistant"]),
   text: Schema.String.check(Schema.isMaxLength(200_000)),
-  createdAt: IsoDateTime,
+  createdAt: IsoDateTime.check(
+    Schema.makeFilter(
+      (value) =>
+        Option.isSome(DateTime.make(value)) || "Imported message timestamp must be parseable.",
+    ),
+  ),
 });
 export type OrchestrationV2ImportedMessage = typeof OrchestrationV2ImportedMessage.Type;
+
+export const OrchestrationV2ImportedMessages = Schema.Array(OrchestrationV2ImportedMessage).check(
+  Schema.isMaxLength(2_000),
+  Schema.makeFilter(
+    (messages) =>
+      messages.reduce((total, message) => total + message.text.length, 0) <= 2_000_000 ||
+      "Imported message text must not exceed 2,000,000 UTF-16 code units in total.",
+  ),
+);
 
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
@@ -2588,7 +2604,7 @@ export const OrchestrationV2Command = Schema.Union([
     linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
     importedConversation: Schema.optional(
       Schema.Struct({
-        messages: Schema.Array(OrchestrationV2ImportedMessage).check(Schema.isMaxLength(2_000)),
+        messages: OrchestrationV2ImportedMessages,
         continuationPrompt: Schema.optional(
           TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)),
         ),
