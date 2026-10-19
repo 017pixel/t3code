@@ -1615,6 +1615,94 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
+  it.live("merges a v6 Codex cache once after its configured home symlink is removed", () =>
+    Effect.gen(function* () {
+      const { home, settings, codexHome, archived } = yield* setupArchivedCodex;
+      const alias = NodePath.join(home, "codex-alias");
+      yield* Effect.promise(async () => {
+        await NodeFSP.rm(archived, { recursive: true });
+        await NodeFSP.symlink(codexHome, alias, "junction");
+      });
+
+      const retained = yield* Effect.gen(function* () {
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const cachePath = NodePath.join(stateDir, "usage-scan-cache-v5.json");
+        const first = yield* UsageService.make;
+        yield* first.readSummary(WINDOW);
+        yield* first.awaitPersisted;
+
+        yield* Effect.promise(async () => {
+          const document = decodeUnknownJsonString(
+            await NodeFSP.readFile(cachePath, "utf8"),
+          ) as Record<string, unknown>;
+          const sessions = await NodeFSP.realpath(NodePath.join(alias, "sessions"));
+          const stats = await NodeFSP.stat(sessions);
+          // v6 used the same file format, but saved only the sessions root, not the Codex home.
+          await NodeFSP.writeFile(
+            cachePath,
+            encodeUnknownJsonString({
+              ...document,
+              sources: {
+                ["codex\0" + NodePath.join(alias, "sessions")]: {
+                  dir: sessions,
+                  volumeId: `${stats.dev}:${stats.ino}`,
+                },
+              },
+            }),
+          );
+          await NodeFSP.unlink(alias);
+        });
+
+        return yield* (yield* UsageService.make).readSummary(WINDOW);
+      }).pipe(
+        Effect.provide(
+          layerService({
+            prefix: "usage-codex-v6-alias",
+            home,
+            settings: {
+              providerInstances: {
+                ...settings.providerInstances,
+                [ProviderInstanceId.make("codex")]: {
+                  driver: ProviderDriverKind.make("codex"),
+                  config: { homePath: alias },
+                },
+              },
+            },
+          }),
+        ),
+      );
+      const canonical = yield* Effect.gen(function* () {
+        return yield* (yield* UsageService.make).readSummary(WINDOW);
+      }).pipe(Effect.provide(layerService({ prefix: "usage-codex-canonical", home, settings })));
+      assert.strictEqual(totalOutputTokens(retained), 50);
+      assert.strictEqual(totalOutputTokens(canonical), 50);
+      const canonicalSource = canonical.sources.find(
+        (entry) => entry.fingerprint.provider === "codex",
+      )!;
+      assert.isNotEmpty(canonicalSource.fingerprint.volumeId);
+      const merged = mergeUsage(
+        [
+          { environmentId: EnvironmentId.make("retained"), label: "retained", summary: retained },
+          {
+            environmentId: EnvironmentId.make("canonical"),
+            label: "canonical",
+            summary: canonical,
+          },
+        ],
+        USAGE_CONTRACT_VERSION,
+      );
+      assert.deepStrictEqual(
+        {
+          outputTokens: merged.outputTokens,
+          sessions: merged.sessions,
+          fingerprint: retained.sources.find((entry) => entry.fingerprint.provider === "codex")
+            ?.fingerprint,
+        },
+        { outputTokens: 50, sessions: 2, fingerprint: canonicalSource.fingerprint },
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live(
     "upgrades a v4 cache: reprices live Codex tiers, keeps deleted rollouts, leaves v4 intact",
     () =>
