@@ -150,6 +150,7 @@ const make = Effect.gen(function* () {
       readonly env?: NodeJS.ProcessEnv;
       readonly allowNonZeroExit?: boolean;
       readonly maxOutputBytes?: number;
+      readonly stdin?: string;
     } = {},
   ) =>
     processes
@@ -164,6 +165,7 @@ const make = Effect.gen(function* () {
           ? {}
           : { allowNonZeroExit: options.allowNonZeroExit }),
         ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
+        ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
       })
       .pipe(
         Effect.mapError(
@@ -203,8 +205,37 @@ const make = Effect.gen(function* () {
         prefix: "t3-handoff-index-",
       })
       .pipe(Effect.mapError((cause) => new HandoffGitStepError({ step: "read-tree", cause })));
-    const env = { GIT_INDEX_FILE: path.join(indexDir, "index"), ...IDENTITY };
+    const env = {
+      GIT_INDEX_FILE: path.join(indexDir, "index"),
+      ...IDENTITY,
+      ...VcsProcess.gitConfigEnv(process.env, "core.splitIndex", "false", process.platform),
+    };
     yield* git(input.cwd, ["read-tree", tip], { env });
+    const ignored = yield* git(
+      input.cwd,
+      [
+        "ls-files",
+        "--cached",
+        "--stage",
+        "--ignored",
+        "--exclude-standard",
+        "--full-name",
+        "-z",
+        "--",
+        ":/",
+      ],
+      { maxOutputBytes: 16 * 1024 * 1024 },
+    );
+    if (ignored.stdoutTruncated) {
+      return yield* new HandoffGitStepError({ step: "pack", reason: "index-too-large" });
+    }
+    // Force-staged ignored files are work; seed only their entries without copying index flags.
+    if (ignored.stdout !== "") {
+      yield* git(input.cwd, ["update-index", "-z", "--index-info"], {
+        env,
+        stdin: ignored.stdout,
+      });
+    }
     // The root pathspec includes edits above cwd without touching the sender index.
     yield* git(input.cwd, ["add", "--all", "--", ":/"], { env });
     const entries = yield* git(input.cwd, ["ls-files", "--stage", "-z", "--", ":/"], {

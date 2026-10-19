@@ -48,7 +48,7 @@ const fixture = Effect.gen(function* () {
   yield* git(root, ["clone", origin, sender]);
   yield* fs.writeFileString(path.join(sender, "app.ts"), "initial\n");
   yield* fs.writeFileString(path.join(sender, "old.ts"), "delete me\n");
-  yield* fs.writeFileString(path.join(sender, ".gitignore"), ".env\n");
+  yield* fs.writeFileString(path.join(sender, ".gitignore"), ".env\n*.local\n");
   yield* git(sender, ["add", "."]);
   yield* git(sender, ["commit", "-m", "base"]);
   yield* git(sender, ["push", "origin", "main"]);
@@ -70,6 +70,8 @@ const editSender = Effect.fnUntraced(function* (sender: string) {
   yield* fs.makeDirectory(path.join(sender, "sub"));
   yield* fs.writeFileString(path.join(sender, "sub", "new.ts"), "untracked\n");
   yield* fs.writeFileString(path.join(sender, ".env"), "SECRET=private\n");
+  yield* fs.writeFileString(path.join(sender, "conf.local"), "force-staged work\n");
+  yield* git(sender, ["add", "-f", "conf.local"]);
 });
 
 const repositoryState = Effect.fnUntraced(function* (cwd: string) {
@@ -127,6 +129,11 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         yield* editSender(sender);
         yield* git(sender, ["tag", branch]);
         if (mode === "detached subdirectory") yield* git(sender, ["checkout", "--detach"]);
+        if (mode === "branch") {
+          yield* git(sender, ["config", "core.splitIndex", "true"]);
+          yield* git(sender, ["config", "splitIndex.sharedIndexExpire", "now"]);
+          yield* git(sender, ["update-index", "--split-index"]);
+        }
         yield* fs.writeFileString(path.join(receiver, "app.ts"), "receiver work\n");
         const senderBefore = yield* repositoryState(sender);
         const receiverBefore = yield* repositoryState(receiver);
@@ -162,6 +169,10 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         assert.equal(yield* fs.readFileString(path.join(worktree, "sub", "new.ts")), "untracked\n");
         assert.isFalse(yield* fs.exists(path.join(worktree, "old.ts")));
         assert.isFalse(yield* fs.exists(path.join(worktree, ".env")));
+        assert.equal(
+          yield* fs.readFileString(path.join(worktree, "conf.local")),
+          "force-staged work\n",
+        );
         assert.equal(
           yield* git(worktree, ["status", "--porcelain"]),
           " M app.ts\n D old.ts\n?? sub/",
