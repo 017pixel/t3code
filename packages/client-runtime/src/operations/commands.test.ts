@@ -79,6 +79,7 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly projection?: OrchestrationV2ThreadProjection;
   readonly projectionRequests?: ThreadId[];
   readonly advertiseServerResolvedCommandContext?: boolean;
+  readonly threadForkFromItem?: boolean;
 }) {
   const client = {
     [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
@@ -126,6 +127,9 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
       environment: {
         capabilities: {
           repositoryIdentity: true,
+          ...(input.threadForkFromItem === undefined
+            ? {}
+            : { threadForkFromItem: input.threadForkFromItem }),
           ...(input.advertiseServerResolvedCommandContext === false
             ? {}
             : { serverResolvedCommandContext: true }),
@@ -149,6 +153,53 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("V2 environment commands", () => {
+  it.effect.each([undefined, false, true])(
+    "sends an item cut only when the destination advertises threadForkFromItem=%s",
+    (threadForkFromItem) =>
+      Effect.gen(function* () {
+        const commands: OrchestrationV2Command[] = [];
+        const supervisor = yield* makeSupervisor({
+          commands,
+          projects: [],
+          ...(threadForkFromItem === undefined ? {} : { threadForkFromItem }),
+        });
+        const provide = Effect.provideService(
+          EnvironmentSupervisor.EnvironmentSupervisor,
+          supervisor,
+        );
+        const input = {
+          commandId: CommandId.make("fork-response"),
+          sourceThreadId: v2ThreadId,
+          targetThreadId: ThreadId.make("response-fork"),
+          runId: RunId.make("run-1"),
+        };
+        const result = yield* forkThreadFromRun({
+          ...input,
+          turnItemId: TurnItemId.make("response"),
+        }).pipe(provide, Effect.exit);
+        if (threadForkFromItem === true) {
+          expect(result._tag).toBe("Success");
+          expect(commands).toMatchObject([
+            {
+              type: "thread.fork",
+              sourcePoint: { type: "turn_item", runId: input.runId, turnItemId: "response" },
+            },
+          ]);
+        } else {
+          expect(result._tag).toBe("Failure");
+          expect(commands).toEqual([]);
+        }
+        commands.length = 0;
+        yield* forkThreadFromRun(input).pipe(provide);
+        expect(commands).toMatchObject([
+          {
+            type: "thread.fork",
+            sourcePoint: { type: "run", runId: input.runId },
+          },
+        ]);
+      }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
   it.effect("routes projects through the event-sourced project transport", () =>
     Effect.gen(function* () {
       const projects: ProjectMutation[] = [];

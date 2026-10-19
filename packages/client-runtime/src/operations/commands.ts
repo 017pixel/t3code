@@ -25,6 +25,7 @@ import {
   type RuntimeRequestId,
   type ThreadId,
   type ThreadEnvMode,
+  type TurnItemId,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -33,7 +34,7 @@ import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 
-import { getInitialServerConfig, request } from "../rpc/client.ts";
+import { EnvironmentRpcUnavailableError, getInitialServerConfig, request } from "../rpc/client.ts";
 
 interface CommandMetadata {
   readonly commandId?: CommandId;
@@ -210,6 +211,8 @@ export interface ForkThreadFromRunInput extends CommandMetadata {
   readonly sourceThreadId: ThreadId;
   readonly targetThreadId: ThreadId;
   readonly runId: RunId;
+  /** Retains a response boundary even when an inherited cut looks like the run end. */
+  readonly turnItemId?: TurnItemId;
   readonly title?: string;
 }
 
@@ -938,6 +941,15 @@ export const stopThreadSession = Effect.fn("EnvironmentCommands.stopThreadSessio
 export const forkThreadFromRun = Effect.fn("EnvironmentCommands.forkThreadFromRun")(function* (
   input: ForkThreadFromRunInput,
 ) {
+  if (input.turnItemId !== undefined) {
+    const config = yield* getInitialServerConfig();
+    if (config.environment.capabilities.threadForkFromItem !== true) {
+      return yield* new EnvironmentRpcUnavailableError({
+        environmentId: config.environment.environmentId,
+        message: "Update the destination server to fork this response.",
+      });
+    }
+  }
   return yield* dispatch({
     type: "thread.fork",
     commandId: yield* allocateCommandId(input),
@@ -945,7 +957,10 @@ export const forkThreadFromRun = Effect.fn("EnvironmentCommands.forkThreadFromRu
     creationSource: input.creationSource ?? "web",
     sourceThreadId: input.sourceThreadId,
     targetThreadId: input.targetThreadId,
-    sourcePoint: { type: "run", runId: input.runId },
+    sourcePoint:
+      input.turnItemId === undefined
+        ? { type: "run", runId: input.runId }
+        : { type: "turn_item", runId: input.runId, turnItemId: input.turnItemId },
     ...(input.title === undefined ? {} : { title: input.title }),
   });
 });

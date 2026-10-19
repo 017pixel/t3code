@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import {
+  MessageId,
+  RunId,
+  ThreadId,
+  TurnItemId,
+  type OrchestrationV2AppThread,
+  type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2ThreadProjection,
+} from "@t3tools/contracts";
+import { v2Now, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
+import * as threadWorkflows from "./threadWorkflows.ts";
 
 import {
   canDetachThreadProviderSession,
@@ -421,4 +431,67 @@ describe("thread workflows", () => {
       expect(resolveLatestMergeBackRun(projection)).toBeNull();
     },
   );
+});
+
+describe("response fork boundaries", () => {
+  const runId = RunId.make("steered-run");
+  const cutId = TurnItemId.make("response-cut");
+  const projectedItem: OrchestrationV2ProjectedTurnItem = {
+    position: 1,
+    visibility: "inherited",
+    sourceThreadId: v2ThreadId,
+    sourceItemId: cutId,
+    item: {
+      id: cutId,
+      threadId: v2ThreadId,
+      runId,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 2,
+      status: "completed",
+      title: null,
+      startedAt: v2Now,
+      completedAt: v2Now,
+      updatedAt: v2Now,
+      type: "assistant_message",
+      messageId: MessageId.make("response"),
+      text: "Before the steer",
+      streaming: false,
+    },
+  };
+
+  it.each([
+    ["interrupted", true],
+    ["failed", false],
+  ] as const)("allows a %s reply to fork: %s", (status, allowed) => {
+    expect(
+      canForkProjectedAssistantItem({
+        projectedItem: { ...projectedItem, item: { ...projectedItem.item, status } },
+      }),
+    ).toBe(allowed);
+  });
+
+  it("retains the original cut through forks while leaving an ordinary final-response fork at its run", () => {
+    const firstFork = ThreadId.make("first-fork");
+    const secondFork = ThreadId.make("second-fork");
+    const ancestry = new Map<ThreadId, OrchestrationV2AppThread["forkedFrom"]>([
+      [v2ThreadId, null],
+      [firstFork, { type: "run", threadId: v2ThreadId, runId, throughTurnItemId: cutId }],
+      [secondFork, { type: "run", threadId: firstFork, runId }],
+    ]);
+    const cutFor = (threadId: ThreadId, midRun: boolean) =>
+      threadWorkflows.forkCutTurnItemId({
+        projectedItem,
+        threadId,
+        midRun,
+        readForkedFrom: (id: ThreadId) => ancestry.get(id),
+      });
+    expect(cutFor(v2ThreadId, false)).toBeUndefined();
+    expect(cutFor(v2ThreadId, true)).toBe(cutId);
+    expect(cutFor(firstFork, false)).toBe(cutId);
+    expect(cutFor(secondFork, false)).toBe(cutId);
+  });
 });

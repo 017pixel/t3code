@@ -5699,3 +5699,62 @@ describe("timeline end and minimap geometry", () => {
     }
   });
 });
+
+it.each([false, true])(
+  "keeps the last response before a steer forkable (later reply: %s)",
+  (hasLaterReply) => {
+    const runId = RunId.make("steered-response-run");
+    const timelineEntries: TimelineEntry[] = (
+      [
+        { id: "prompt", role: "user", inputIntent: "turn_start" },
+        { id: "commentary", role: "assistant" },
+        { id: "cut", role: "assistant" },
+        { id: "steer", role: "user", inputIntent: "steer" },
+        ...(hasLaterReply ? [{ id: "reply", role: "assistant" } as const] : []),
+      ] as const
+    ).map((entry, index) => {
+      const { id, role } = entry;
+      const inputIntent = "inputIntent" in entry ? entry.inputIntent : undefined;
+      const createdAt = `2026-10-01T00:00:0${index}Z`;
+      return {
+        id,
+        kind: "message",
+        createdAt,
+        message: {
+          id: MessageId.make(id),
+          runId,
+          role,
+          text: id,
+          ...(inputIntent === undefined ? {} : { inputIntent }),
+          createdAt,
+          updatedAt: createdAt,
+          streaming: false,
+        },
+      };
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries,
+      expandedRunIds: new Set([runId]),
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    const responses = rows.filter(
+      (row) => row.kind === "message" && row.message.role === "assistant",
+    );
+    expect(responses).toMatchObject([
+      { id: "commentary", showAssistantMeta: false, showAssistantCopyButton: false },
+      { id: "cut", showAssistantMeta: true, showAssistantCopyButton: true, assistantMidRun: true },
+      ...(hasLaterReply
+        ? [
+            {
+              id: "reply",
+              showAssistantMeta: true,
+              showAssistantCopyButton: true,
+              assistantMidRun: false,
+            },
+          ]
+        : []),
+    ]);
+  },
+);

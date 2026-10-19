@@ -35,13 +35,18 @@ import {
   type RunId,
   ThreadId,
   type ToolActivityIcon,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { environmentThreadDetails } from "../../state/threads";
+import { serverEnvironment } from "../../state/server";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
-import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  canForkProjectedAssistantItem,
+  forkCutTurnItemId,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-execution";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import {
@@ -182,7 +187,7 @@ import { HtmlRenderFrame } from "./HtmlRenderFrame";
 import { McpAppFrame } from "./McpAppFrame";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { useFileContextMenuHandler } from "../../fileContextMenu";
-import { useProject, useThreadShell } from "../../state/entities";
+import { readThreadShell, useProject, useThreadShell } from "../../state/entities";
 import {
   CHAT_TIMELINE_ANCHOR_OFFSET,
   readTimelinePosition,
@@ -337,6 +342,7 @@ interface TimelineRowSharedState {
   onForkFromRun: (input: {
     readonly sourceThreadId: ThreadId;
     readonly runId: RunId;
+    readonly turnItemId?: TurnItemId;
   }) => Promise<void>;
   onRollbackCheckpoint: (input: {
     readonly checkpointId: string;
@@ -481,6 +487,7 @@ interface MessagesTimelineProps {
   onForkFromRun: (input: {
     readonly sourceThreadId: ThreadId;
     readonly runId: RunId;
+    readonly turnItemId?: TurnItemId;
   }) => Promise<void>;
   onRollbackCheckpoint: (input: {
     readonly checkpointId: string;
@@ -2643,6 +2650,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             className="mt-1.5"
             projectedItem={row.projectedItem}
             message={row.message}
+            midRun={row.assistantMidRun === true}
             showCopyButton={row.showAssistantCopyButton}
             copyStreaming={row.assistantCopyStreaming}
           />
@@ -2654,8 +2662,10 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
 function AssistantForkButton({
   projectedItem,
+  midRun,
 }: {
   readonly projectedItem: NonNullable<Extract<TimelineRow, { kind: "message" }>["projectedItem"]>;
+  readonly midRun: boolean;
 }) {
   const ctx = use(TimelineRowCtx);
   const [busy, setBusy] = useState(false);
@@ -2664,10 +2674,29 @@ function AssistantForkButton({
     sourceThreadId: projectedItem.sourceThreadId,
     sourceItemId: projectedItem.sourceItemId,
   });
-  const canFork = canForkProjectedAssistantItem({
-    projectedItem,
-    capabilities: support.providerSession?.capabilities,
-  });
+  const serverConfig = useAtomValue(
+    serverEnvironment.configValueAtom(ctx.activeThreadEnvironmentId),
+  );
+  const threadRef = ctx.threadRef;
+  const turnItemId =
+    threadRef === null
+      ? midRun
+        ? projectedItem.item.id
+        : undefined
+      : forkCutTurnItemId({
+          projectedItem,
+          midRun,
+          threadId: threadRef.threadId,
+          readForkedFrom: (threadId) =>
+            readThreadShell(scopeThreadRef(threadRef.environmentId, threadId))?.forkedFrom,
+        });
+  const supportsItemFork = serverConfig?.environment.capabilities.threadForkFromItem === true;
+  const canFork =
+    (turnItemId === undefined || supportsItemFork) &&
+    canForkProjectedAssistantItem({
+      projectedItem,
+      capabilities: support.providerSession?.capabilities,
+    });
 
   if (!canFork || projectedItem.item.runId === null) return null;
   const runId = projectedItem.item.runId;
@@ -2684,7 +2713,11 @@ function AssistantForkButton({
             onClick={() => {
               setBusy(true);
               void ctx
-                .onForkFromRun({ sourceThreadId: projectedItem.sourceThreadId, runId })
+                .onForkFromRun({
+                  sourceThreadId: projectedItem.sourceThreadId,
+                  runId,
+                  ...(turnItemId === undefined ? {} : { turnItemId }),
+                })
                 .finally(() => setBusy(false));
             }}
             aria-label="Fork from this response"
@@ -2709,6 +2742,7 @@ function AssistantMetaTimelineRow({
         className="mt-0.5"
         projectedItem={row.projectedItem}
         message={row.message}
+        midRun={row.assistantMidRun === true}
         showCopyButton={row.showAssistantCopyButton}
         copyStreaming={row.assistantCopyStreaming}
         alwaysVisible
@@ -2721,6 +2755,7 @@ function AssistantMessageMeta({
   className,
   projectedItem,
   message,
+  midRun,
   showCopyButton,
   copyStreaming,
   alwaysVisible = false,
@@ -2728,6 +2763,7 @@ function AssistantMessageMeta({
   className?: string;
   projectedItem?: Extract<TimelineRow, { kind: "message" }>["projectedItem"];
   message: ChatMessage;
+  midRun: boolean;
   showCopyButton: boolean;
   copyStreaming: boolean;
   alwaysVisible?: boolean;
@@ -2755,7 +2791,7 @@ function AssistantMessageMeta({
         streaming={copyStreaming}
       />
       {projectedItem?.item.type === "assistant_message" ? (
-        <AssistantForkButton projectedItem={projectedItem} />
+        <AssistantForkButton projectedItem={projectedItem} midRun={midRun} />
       ) : null}
       {!message.streaming && (
         <Tooltip>

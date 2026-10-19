@@ -18,7 +18,10 @@ import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
-import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  canForkProjectedAssistantItem,
+  forkCutTurnItemId,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import type { WorkflowOpening } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   type OrchestrationMessageContext,
@@ -174,6 +177,7 @@ import {
 } from "../../lib/markdownLinks";
 import {
   failedFeedRunIds,
+  terminalFeedAssistantMessageIds,
   deriveThreadFeedPresentation,
   threadFeedRunIsUnsettled,
   isContextCompactionActivityGroup,
@@ -217,6 +221,8 @@ import { useThreadSelection } from "../../state/use-thread-selection";
 import { composerDocumentAttachmentRecord } from "../../lib/composerContext";
 import * as Option from "effect/Option";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { useAtomValue } from "@effect/atom-react";
+import { serverEnvironment } from "../../state/server";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { ThreadWorkflowOpening, useWorkflowOpening } from "./thread-workflow-opening";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -361,8 +367,10 @@ function UserMessageCopyButton(props: {
 
 function AssistantForkButton(props: {
   readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
   readonly iconColor: ColorValue;
   readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+  readonly midRun: boolean;
   readonly sourceTitle: string;
 }) {
   const support = useV2ItemSupport({
@@ -373,10 +381,23 @@ function AssistantForkButton(props: {
   const forkFromRun = useAtomCommand(threadEnvironment.forkFromRun, "fork from response");
   const navigation = useNavigation();
   const [busy, setBusy] = useState(false);
-  const canFork = canForkProjectedAssistantItem({
+  const serverConfig = useAtomValue(serverEnvironment.configValueAtom(props.environmentId));
+  const turnItemId = forkCutTurnItemId({
     projectedItem: props.projectedItem,
-    capabilities: support.providerSession?.capabilities,
+    midRun: props.midRun,
+    threadId: props.threadId,
+    readForkedFrom: (threadId) =>
+      appAtomRegistry.get(
+        environmentThreadShells.threadShellAtom(scopeThreadRef(props.environmentId, threadId)),
+      )?.forkedFrom,
   });
+  const supportsItemFork = serverConfig?.environment.capabilities.threadForkFromItem === true;
+  const canFork =
+    (turnItemId === undefined || supportsItemFork) &&
+    canForkProjectedAssistantItem({
+      projectedItem: props.projectedItem,
+      capabilities: support.providerSession?.capabilities,
+    });
   const runId = props.projectedItem.item.runId;
 
   if (!canFork || runId === null) return null;
@@ -396,6 +417,7 @@ function AssistantForkButton(props: {
             sourceThreadId: props.projectedItem.sourceThreadId,
             targetThreadId,
             runId,
+            ...(turnItemId === undefined ? {} : { turnItemId }),
             title: `${props.sourceTitle} fork`,
             creationSource: "mobile",
           },
@@ -983,7 +1005,7 @@ function renderFeedEntry(
     readonly expandedWorkRows: Record<string, boolean>;
     readonly workRowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
     readonly workGroupScrollPositions: Map<string, ThreadWorkGroupScrollPosition>;
-    readonly terminalAssistantMessageIds: ReadonlySet<string>;
+    readonly terminalAssistantMessageIds: ReturnType<typeof terminalFeedAssistantMessageIds>;
     readonly unsettledTurnId: RunId | null;
     readonly failedRunIds: ReadonlySet<RunId>;
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
@@ -1152,7 +1174,7 @@ function renderFeedEntry(
       message.runId === props.unsettledTurnId;
     const showAssistantMeta =
       message.role === "assistant" &&
-      props.terminalAssistantMessageIds.has(message.id) &&
+      props.terminalAssistantMessageIds.terminalIds.has(message.id) &&
       !assistantTurnStillInProgress &&
       !message.streaming;
 
@@ -1424,8 +1446,10 @@ function renderFeedEntry(
             {message.projectedItem ? (
               <AssistantForkButton
                 environmentId={props.environmentId}
+                threadId={props.threadId}
                 iconColor={iconSubtleColor}
                 projectedItem={message.projectedItem}
+                midRun={props.terminalAssistantMessageIds.midRunIds.has(message.id)}
                 sourceTitle={props.threadTitle}
               />
             ) : null}
@@ -2123,15 +2147,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     { anchorOffset: anchorTopInset + CHAT_LIST_ANCHOR_OFFSET },
   );
   const failedRunIds = failedFeedRunIds(props.feed, props.latestRun);
-  const terminalAssistantMessageIds = (() => {
-    const terminalIdsByTurn = new Map<RunId, string>();
-    for (const entry of props.feed) {
-      if (entry.type === "message" && entry.message.role === "assistant" && entry.message.runId) {
-        terminalIdsByTurn.set(entry.message.runId, entry.message.id);
-      }
-    }
-    return new Set(terminalIdsByTurn.values());
-  })();
+  const terminalAssistantMessageIds = terminalFeedAssistantMessageIds(props.feed);
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = props.latestRun;

@@ -1052,6 +1052,33 @@ export function failedFeedRunIds(
   return failed;
 }
 
+// A steer ends a response even when no assistant reply follows it.
+export function terminalFeedAssistantMessageIds(feed: ReadonlyArray<ThreadFeedEntry>) {
+  const lastBySegment = new Map<
+    string,
+    { readonly runId: RunId; readonly segment: number; readonly id: string }
+  >();
+  const segmentByRun = new Map<RunId, number>();
+  for (const entry of feed) {
+    if (entry.type !== "message" || !entry.message.runId) continue;
+    const runId = entry.message.runId;
+    const segment = segmentByRun.get(runId) ?? 0;
+    if (entry.message.role === "user") {
+      segmentByRun.set(runId, segment + 1);
+      continue;
+    }
+    lastBySegment.set(`${runId}:${segment}`, { runId, segment, id: entry.message.id });
+  }
+  const terminals = [...lastBySegment.values()];
+  const terminalIds = new Set(terminals.map((terminal) => terminal.id));
+  const midRunIds = new Set(
+    terminals
+      .filter((terminal) => terminal.segment < (segmentByRun.get(terminal.runId) ?? 0))
+      .map((terminal) => terminal.id),
+  );
+  return { terminalIds, midRunIds };
+}
+
 function deriveThreadFeedRunFolds(
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,

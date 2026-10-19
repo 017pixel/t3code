@@ -23,6 +23,7 @@ import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-mes
 import { summarizeToolGroup } from "@t3tools/client-runtime/work-log/presentation";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
+import * as threadActivity from "./threadActivity";
 
 import {
   workEntryRowLabel,
@@ -2908,3 +2909,33 @@ describe("MCP apps", () => {
     expect(feed("running").some((candidate) => candidate.type === "mcp-app")).toBe(false);
   });
 });
+
+it.each([false, true])(
+  "offers the last response before a steer as an item cut (later reply: %s)",
+  (hasLaterReply) => {
+    const response = (id: string, ordinal: number) => ({
+      ...assistantMessage(),
+      id: TurnItemId.make(id),
+      messageId: MessageId.make(id),
+      ordinal,
+    });
+    const feed = buildThreadFeed(
+      [
+        userMessage(),
+        response("commentary", 1),
+        response("cut", 2),
+        {
+          ...userMessage("2026-06-20T00:00:04.000Z"),
+          id: TurnItemId.make("steer"),
+          messageId: MessageId.make("steer"),
+          inputIntent: "steer" as const,
+          ordinal: 3,
+        },
+        ...(hasLaterReply ? [response("reply", 4)] : []),
+      ].map((item, position) => projected(item, position)),
+    );
+    const { terminalIds, midRunIds } = threadActivity.terminalFeedAssistantMessageIds(feed);
+    expect([...terminalIds]).toEqual(hasLaterReply ? ["cut", "reply"] : ["cut"]);
+    expect([...midRunIds]).toEqual(["cut"]);
+  },
+);
