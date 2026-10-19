@@ -388,7 +388,11 @@ describe("composer file attachments", () => {
       );
       expect(result).toEqual({
         attachments: [
-          expect.objectContaining({ type: "image", dataUrl: "data:image/png;base64,YWJj" }),
+          expect.objectContaining({
+            type: "image",
+            fileUri: "file:///documents/t3-composer-attachments/attachment-id-photo.png",
+            previewUri: "file:///documents/t3-composer-attachments/attachment-id-photo.png",
+          }),
           {
             id: "attachment-id",
             type: "file",

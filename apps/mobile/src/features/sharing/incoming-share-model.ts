@@ -395,41 +395,66 @@ export async function buildIncomingShareDraft(input: {
       continue;
     }
 
+    const name = resolved?.originalName ?? fallbackName(uri, index, mimeType);
+    let persistedImageUri: string | undefined;
+    let retainedImageUri: string | undefined;
     try {
       const sharedBase64 = await input.fileReader.readBase64(uri);
-      // Rendered from the bytes already read, since the provider's file may not be readable
-      // by the native image loader.
+      // Render from bytes because the native loader may not support the provider URI.
       const fitted = await fitComposerImage({
         uri: `data:${mimeType};base64,${sharedBase64}`,
         mimeType,
         base64: sharedBase64,
       });
       const base64 = fitted?.base64 ?? sharedBase64;
-      const sizeBytes = fitted
-        ? estimateBase64ByteSize(base64)
-        : (resolved?.contentSize ?? estimateBase64ByteSize(base64));
-      if (sizeBytes <= 0 || sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-        warnings.push(
-          `'${resolved?.originalName ?? fallbackName(uri, index, mimeType)}' exceeds the 10 MB attachment limit.`,
-        );
+      const decodedSize = estimateBase64ByteSize(base64);
+      if (decodedSize <= 0 || decodedSize > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+        warnings.push(`'${name}' exceeds the 10 MB attachment limit.`);
         continue;
       }
+      if (input.fileReader.persistFile) {
+        persistedImageUri = await input.fileReader.persistFile(fitted?.uri ?? uri, name);
+        const sizeBytes = (await input.fileReader.readSize?.(persistedImageUri)) ?? null;
+        if (sizeBytes === null || sizeBytes <= 0) {
+          warnings.push(`'${name}' is empty or could not be read.`);
+          continue;
+        }
+        if (sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+          warnings.push(fileAttachmentTooLargeMessage(name, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES));
+          continue;
+        }
+        attachments.push({
+          id: `${input.id}:image:${index}`,
+          type: "image",
+          name,
+          mimeType,
+          sizeBytes,
+          fileUri: persistedImageUri,
+          previewUri: persistedImageUri,
+        });
+        retainedImageUri = persistedImageUri;
+        continue;
+      }
+      const sizeBytes = decodedSize;
       const dataUrl = `data:${mimeType};base64,${base64}`;
       attachments.push({
         id: `${input.id}:image:${index}`,
         type: "image",
-        name: resolved?.originalName ?? fallbackName(uri, index, mimeType),
+        name,
         mimeType,
         sizeBytes,
         dataUrl,
-        // The share provider's file is temporary. A data-backed preview keeps
-        // the composer valid after its source file and App Group entry are gone.
         previewUri: dataUrl,
       });
     } catch {
-      warnings.push(`Could not read '${fallbackName(uri, index, mimeType)}'.`);
+      warnings.push(`Could not read '${name}'.`);
     } finally {
-      await releaseOwnedFiles(input.fileReader, [uri, payload.value]);
+      await releaseOwnedFiles(
+        input.fileReader,
+        [uri, payload.value, persistedImageUri].filter(
+          (candidate) => candidate !== retainedImageUri,
+        ),
+      );
     }
   }
 

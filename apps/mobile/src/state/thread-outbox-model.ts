@@ -29,7 +29,7 @@ import type { DraftComposerAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { resolveProviderInteractionMode } from "./legacy-plan-mode";
 
-// v4 stores image bytes in owned files instead of inline data URLs.
+// v4 file-backed writes require native baselines with embedded readers and storage guards.
 const THREAD_OUTBOX_SCHEMA_VERSION = 4;
 const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
 

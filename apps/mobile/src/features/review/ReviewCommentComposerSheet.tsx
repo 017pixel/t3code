@@ -168,6 +168,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
       text: formatReviewCommentContext(target, commentText),
       attachments: attachmentsRef.current,
     });
+    scheduleUnusedComposerAttachmentCleanup(attachmentsRef.current);
     replaceAttachments([]);
     dismissComposer();
   }, [commentText, dismissComposer, environmentId, replaceAttachments, target, threadId]);
