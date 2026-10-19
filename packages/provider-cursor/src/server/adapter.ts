@@ -81,6 +81,14 @@ export const CURSOR_DRIVER_KIND = CursorAgentSdk.CURSOR_PROVIDER;
 export const CURSOR_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CURSOR_DRIVER_KIND);
 const DEFAULT_CURSOR_SETTINGS = Schema.decodeSync(CursorSettings)({});
 
+const CURSOR_COMPACTION_PROMPT = `T3 Code is compacting this conversation into a fresh Cursor agent. Write a dense continuation summary that will be the new agent's only conversation history.
+Preserve the user's goals and preferences, standing instructions, decisions and their reasons, relevant files and code state, changes already made, verification results, open tasks, and any unresolved risks. Include exact paths and identifiers needed to continue. Distinguish completed work from pending work.
+Do not use tools, change files, or continue the task. Return only the summary.`;
+
+const CURSOR_COMPACTION_SEED = `T3 Code restored this conversation from a compaction summary. Treat the summary as prior conversation context, preserving its instructions and pending work. Do not use tools, change files, or continue the task yet. Reply only with "Context restored." and wait for the next user message.
+
+`;
+
 export const CursorProviderCapabilitiesV2 = {
   sessions: {
     supportsMultipleProviderThreadsPerSession: false,
@@ -863,6 +871,10 @@ interface ActiveCursorTurn {
   readonly assistant: ActiveCursorTextStream;
   readonly assistantReply: CursorTransportFailure;
   readonly reasoning: ActiveCursorTextStream;
+  readonly compaction?: {
+    text: string;
+    seedRun: CursorAgentSdk.CursorAgentSdkRun | null;
+  };
   interrupted: boolean;
   finalized: boolean;
 }
@@ -1905,6 +1917,14 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           if (context.finalized) {
             return;
           }
+          // Compaction runs persist in Cursor, but must not become chat messages or tool rows.
+          if (context.compaction !== undefined) {
+            if (update.type === "text-delta") {
+              context.compaction.text += update.text;
+              context.assistantReply.push(update.text);
+            }
+            return;
+          }
           switch (update.type) {
             case "text-delta":
               context.assistantReply.push(update.text);
@@ -1994,6 +2014,43 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           completedAt: input.completedAt,
         });
 
+        const emitCompaction = Effect.fnUntraced(function* (
+          context: ActiveCursorTurn,
+          status: OrchestrationV2TurnItem["status"],
+        ) {
+          const now = yield* DateTime.now;
+          const nativeItemId = `${context.run.runId}:compaction`;
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            turnItem: {
+              id: idAllocator.derive.turnItemFromProviderItem({
+                driver: CursorAgentSdk.CURSOR_PROVIDER,
+                nativeItemId,
+              }),
+              threadId: context.input.threadId,
+              runId: context.input.runId,
+              nodeId: context.input.rootNodeId,
+              providerThreadId: context.input.providerThread.id,
+              providerTurnId: context.providerTurnId,
+              nativeItemRef: {
+                driver: CursorAgentSdk.CURSOR_PROVIDER,
+                nativeId: nativeItemId,
+                strength: "weak",
+              },
+              parentItemId: null,
+              ordinal: yield* resolveItemOrdinal(context, nativeItemId),
+              type: "compaction",
+              driver: CursorAgentSdk.CURSOR_PROVIDER,
+              status,
+              title: status === "completed" ? "Context compacted" : "Compacting context",
+              startedAt: context.startedAt,
+              completedAt: status === "running" ? null : now,
+              updatedAt: now,
+            },
+          });
+        });
+
         const finalizeTurn = Effect.fnUntraced(function* (input: {
           readonly context: ActiveCursorTurn;
           readonly status: Extract<
@@ -2002,12 +2059,20 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           >;
           readonly failure?: OrchestrationV2ProviderFailure;
           readonly threadDisposition?: "reusable" | "broken";
+          readonly replacement?: CursorLiveAgent;
         }) {
           if (input.context.finalized) {
             return;
           }
           input.context.finalized = true;
           const completedAt = yield* DateTime.now;
+          const replacement = input.status === "completed" ? input.replacement : undefined;
+          if (replacement !== undefined) {
+            const previous = yield* Ref.getAndSet(liveAgent, replacement);
+            if (previous !== null) {
+              yield* previous.session.close.pipe(Effect.ignore);
+            }
+          }
           for (const tool of input.context.tools.values()) {
             yield* emitToolArtifacts({
               active: tool,
@@ -2028,6 +2093,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           }
           yield* completeReasoning(input.context);
           yield* completeAssistant(input.context);
+          if (input.context.compaction !== undefined) {
+            yield* emitCompaction(input.context, input.status);
+          }
           yield* emitProviderEvent({
             type: "provider_turn.updated",
             driver: CursorAgentSdk.CURSOR_PROVIDER,
@@ -2042,6 +2110,16 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             driver: CursorAgentSdk.CURSOR_PROVIDER,
             providerThread: {
               ...input.context.input.providerThread,
+              ...(replacement === undefined
+                ? {}
+                : {
+                    nativeThreadRef: {
+                      driver: CursorAgentSdk.CURSOR_PROVIDER,
+                      nativeId: replacement.nativeThreadId,
+                      strength: "strong" as const,
+                    },
+                    nativeConversationHeadRef: null,
+                  }),
               providerSessionId: session.id,
               status: "active",
               firstRunOrdinal:
@@ -2111,6 +2189,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           readonly modelSelection: ModelSelection;
           readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
           readonly agentId?: string;
+          readonly staged?: boolean;
         }) {
           const existing = yield* Ref.get(liveAgent);
           if (
@@ -2120,7 +2199,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           ) {
             return existing;
           }
-          if (existing !== null) {
+          if (existing !== null && openInput.staged !== true) {
             yield* existing.session.close.pipe(Effect.ignore);
             yield* Ref.set(liveAgent, null);
           }
@@ -2143,7 +2222,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             nativeThreadId: sdkSession.agentId,
             session: sdkSession,
           } satisfies CursorLiveAgent;
-          yield* Ref.set(liveAgent, next);
+          if (openInput.staged !== true) {
+            yield* Ref.set(liveAgent, next);
+          }
           return next;
         });
 
@@ -2153,9 +2234,6 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           mcpServers: Record<string, McpServerConfig> | undefined,
         ) {
           const rawText = turnInput.message.text;
-          if (rawText.trim() === "/compress" && turnInput.message.attachments.length === 0) {
-            return "/compress";
-          }
           if (hasCursorSkillMention(rawText) && cursorSkillNames === undefined) {
             const skills = yield* discoverCursorSkills(
               turnInput.runtimePolicy.cwd ?? undefined,
@@ -2225,6 +2303,86 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               } satisfies SDKUserMessage);
         });
 
+        const seedCompaction = Effect.fnUntraced(function* (
+          context: ActiveCursorTurn,
+          summary: string,
+        ) {
+          if (context.interrupted || context.finalized) {
+            yield* finalizeTurn({ context, status: "interrupted" });
+            return;
+          }
+          yield* Effect.acquireUseRelease(
+            openAgent({
+              operation: "create",
+              staged: true,
+              threadId: context.input.threadId,
+              modelSelection: context.input.modelSelection,
+              runtimePolicy: context.input.runtimePolicy,
+            }),
+            (replacement) =>
+              Effect.gen(function* () {
+                if (context.interrupted || context.finalized) {
+                  yield* finalizeTurn({ context, status: "interrupted" });
+                  return;
+                }
+                const reply = new CursorTransportFailure();
+                const seedRun = yield* replacement.session
+                  .send({
+                    message: t3OrchestrationPromptForFirstRun({
+                      prompt: `${CURSOR_COMPACTION_SEED}${summary}\n\n${buildRuntimeInstructions({ harness: "Cursor", model: context.input.modelSelection.model })}`,
+                      runOrdinal: 1,
+                      hasT3Mcp: (yield* mcpSessions.read(context.input.threadId)) !== undefined,
+                    }),
+                    options: {
+                      model: cursorSdkModelSelection(context.input.modelSelection),
+                      mode:
+                        context.input.runtimePolicy.interactionMode === "plan" ? "plan" : "agent",
+                    },
+                    onDelta: (update) =>
+                      Effect.sync(() => {
+                        if (update.type === "text-delta") reply.push(update.text);
+                      }),
+                  })
+                  .pipe(
+                    Effect.mapError(classifyCursorModelRejection(context.input.modelSelection)),
+                  );
+                context.compaction!.seedRun = seedRun;
+                if (context.interrupted || context.finalized) {
+                  yield* seedRun.cancel;
+                }
+                const result = yield* seedRun.wait;
+                if (result.result !== undefined) reply.push(result.result);
+                const failure = reply.failure;
+                const status = failure === undefined ? terminalStatus(context, result) : "failed";
+                yield* finalizeTurn({
+                  context,
+                  status,
+                  replacement,
+                  ...(status === "failed"
+                    ? {
+                        failure:
+                          failure === undefined
+                            ? makeProviderFailure({
+                                cause: result.error,
+                                message: result.error?.message,
+                                class: "provider_error",
+                              })
+                            : makeProviderFailure({ cause: failure, class: "transport_error" }),
+                      }
+                    : {}),
+                });
+              }),
+            (replacement) =>
+              Ref.get(liveAgent).pipe(
+                Effect.flatMap((current) =>
+                  current === replacement
+                    ? Effect.void
+                    : replacement.session.close.pipe(Effect.ignore),
+                ),
+              ),
+          );
+        });
+
         const startTurn = Effect.fn("CursorAdapterV2.startTurn")(
           function* (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) {
             const current = yield* Ref.get(activeTurn);
@@ -2243,7 +2401,22 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               runtimePolicy: turnInput.runtimePolicy,
             });
             const mcpServers = cursorMcpServers(yield* mcpSessions.read(turnInput.threadId));
-            const message = yield* resolveUserMessage(turnInput, mcpServers);
+            const isCompaction =
+              ["/compact", "/compress"].includes(turnInput.message.text.trim()) &&
+              turnInput.message.attachments.length === 0;
+            const message = yield* resolveUserMessage(
+              isCompaction
+                ? {
+                    ...turnInput,
+                    message: {
+                      ...turnInput.message,
+                      text: CURSOR_COMPACTION_PROMPT,
+                      attachments: [],
+                    },
+                  }
+                : turnInput,
+              mcpServers,
+            );
             const pendingUpdates: Array<InteractionUpdate> = [];
             let context: ActiveCursorTurn | null = null;
             // MCP send overrides replace the ambient servers loaded when the agent opens.
@@ -2288,6 +2461,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                 current: null,
                 nextSegment: 0,
               },
+              ...(isCompaction ? { compaction: { text: "", seedRun: null } } : {}),
               interrupted: false,
               finalized: false,
             };
@@ -2311,6 +2485,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                 updatedAt: startedAt,
               },
             });
+            if (isCompaction) {
+              yield* emitCompaction(context, "running");
+            }
             for (const update of pendingUpdates) {
               yield* handleInteractionUpdate(context, update);
             }
@@ -2318,6 +2495,43 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             yield* sdkRun.wait.pipe(
               Effect.flatMap((result) =>
                 Effect.gen(function* () {
+                  if (context?.compaction !== undefined) {
+                    if (result.result !== undefined) context.assistantReply.push(result.result);
+                    const failure = context.assistantReply.failure;
+                    const status =
+                      failure === undefined ? terminalStatus(context, result) : "failed";
+                    if (status !== "completed") {
+                      yield* finalizeTurn({
+                        context,
+                        status,
+                        ...(status === "failed"
+                          ? {
+                              failure:
+                                failure === undefined
+                                  ? makeProviderFailure({
+                                      cause: result.error,
+                                      message: result.error?.message,
+                                      class: "provider_error",
+                                    })
+                                  : makeProviderFailure({
+                                      cause: failure,
+                                      class: "transport_error",
+                                    }),
+                            }
+                          : {}),
+                      });
+                      return;
+                    }
+                    const summary = result.result?.trim() || context.compaction.text.trim();
+                    if (summary.length === 0) {
+                      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: CursorAgentSdk.CURSOR_PROVIDER,
+                        detail: "Cursor compaction returned an empty continuation summary.",
+                      });
+                    }
+                    yield* seedCompaction(context, summary);
+                    return;
+                  }
                   if (
                     context !== null &&
                     context.assistant.nextSegment === 0 &&
@@ -2492,7 +2706,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           compactThread: (turnInput) =>
             startTurn({
               ...turnInput,
-              message: { ...turnInput.message, text: "/compress" },
+              message: { ...turnInput.message, text: "/compact", attachments: [] },
             }),
           steerTurn: (turnInput) =>
             Effect.fail(
@@ -2511,8 +2725,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                   detail: `Cursor provider turn ${turnInput.providerTurnId} is not active.`,
                 });
               }
+              if (context.finalized) return;
               context.interrupted = true;
-              yield* context.run.cancel;
+              yield* (context.compaction?.seedRun ?? context.run).cancel;
               const stopped = yield* Deferred.await(context.completed).pipe(
                 Effect.timeoutOption("10 seconds"),
               );
@@ -2563,10 +2778,16 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               const messages = yield* agent.session.listMessages;
               const now = yield* DateTime.now;
               const threadId = snapshotInput.providerThread.appThreadId ?? input.threadId;
+              let hiddenCompactionRun = false;
               const projectedMessages: Array<OrchestrationV2ConversationMessage> = messages.flatMap(
                 (message) => {
                   const text = textFromAgentMessage(message);
-                  if (text.length === 0) {
+                  if (message.type === "user") {
+                    hiddenCompactionRun =
+                      text.includes(CURSOR_COMPACTION_PROMPT) ||
+                      text.includes(CURSOR_COMPACTION_SEED);
+                  }
+                  if (hiddenCompactionRun || text.length === 0) {
                     return [];
                   }
                   return [

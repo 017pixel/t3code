@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import type { InteractionUpdate } from "@cursor/sdk";
+import type { AgentMessage, InteractionUpdate } from "@cursor/sdk";
 import {
   EnvironmentId,
   MessageId,
@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import { CursorSettings } from "../settings.ts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -363,7 +364,7 @@ describe("CursorAdapterV2", () => {
     ),
   );
 
-  it.effect("fails standalone SDK transport diagnostics and sends compaction as /compress", () =>
+  it.effect("fails standalone SDK transport diagnostics", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-v2-errors-" });
@@ -480,8 +481,200 @@ describe("CursorAdapterV2", () => {
         assert.equal(first.value.failure?.class, "transport_error");
       }
 
-      assert.isDefined(runtime.compactThread);
-      yield* runtime.compactThread!({
+      assert.lengthOf(sentMessages, 1);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+      ),
+    ),
+  );
+
+  it.effect.each([
+    "success",
+    "streamed-summary",
+    "literal",
+    "plan",
+    "summary-error",
+    "empty-summary",
+    "summary-wait-error",
+    "summary-diagnostic",
+    "create-error",
+    "seed-send-error",
+    "seed-wait-error",
+    "seed-error",
+    "seed-diagnostic",
+    "interrupt-summary",
+    "interrupt-seed",
+    "interrupt-create",
+    "interrupt-seed-send",
+  ] as const)("compacts Cursor conversations: %s", (scenario) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-v2-compact-" });
+      const instanceId = ProviderInstanceId.make("cursor");
+      const threadId = ThreadId.make("cursor-compact-thread");
+      const modelSelection = { instanceId, model: "composer-2.5" };
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: scenario === "plan" ? "plan" : "default",
+        cwd: workspace,
+      });
+      const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      yield* mcpSessions.set({
+        environmentId: EnvironmentId.make("cursor-compact-environment"),
+        threadId,
+        providerSessionId: "cursor-compact-session",
+        providerInstanceId: instanceId,
+        endpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer synthetic-cursor-token",
+        browserToolsAvailable: true,
+      });
+      const opens: Array<CursorAgentSdk.CursorAgentSdkOpenInput> = [];
+      const sent: Array<{ agentId: string; text: string; mode: string | undefined }> = [];
+      const closed: Array<string> = [];
+      const stored = new Map<string, Array<AgentMessage>>();
+      const reachedInterrupt = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      const replacementClosed = yield* Deferred.make<void>();
+      const summary =
+        "Goal: fix compaction. Files: adapter.ts. Pending: verify restart. Preference: lowercase.";
+      const diagnostic = "Error: RetriableError: WritableIterable is closed";
+      let creates = 0;
+      const sdkError = new CursorAgentSdk.CursorAgentSdkRunnerError({
+        method: "compaction",
+        cause: new Error("compaction failed"),
+      });
+      const adapter = yield* makeCursorAdapterV2({
+        instanceId,
+        settings: yield* decodeCursorSettings({}),
+        environment: { HOME: workspace },
+      }).pipe(
+        Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+          assertComplete: Effect.void,
+          open: (openInput) =>
+            Effect.gen(function* () {
+              opens.push(openInput);
+              if (openInput.operation === "create") creates += 1;
+              if (creates === 2 && scenario === "create-error") return yield* sdkError;
+              if (creates === 2 && scenario === "interrupt-create") {
+                yield* Deferred.succeed(reachedInterrupt, undefined);
+                yield* Deferred.await(cancelled);
+              }
+              const agentId = openInput.agentId ?? (creates === 1 ? "old-agent" : "new-agent");
+              const messages = stored.get(agentId) ?? [];
+              stored.set(agentId, messages);
+              return {
+                agentId,
+                listMessages: Effect.succeed(messages),
+                close: Effect.gen(function* () {
+                  closed.push(agentId);
+                  if (agentId === "new-agent")
+                    yield* Deferred.succeed(replacementClosed, undefined);
+                }),
+                send: (sendInput) =>
+                  Effect.gen(function* () {
+                    const text =
+                      typeof sendInput.message === "string"
+                        ? sendInput.message
+                        : sendInput.message.text;
+                    sent.push({ agentId, text, mode: sendInput.options?.mode });
+                    const phase =
+                      sent.length === 1
+                        ? "summary"
+                        : agentId === "new-agent" && sent.length === 2
+                          ? "seed"
+                          : "next";
+                    const runId = `run-${phase}`;
+                    messages.push({
+                      type: "user",
+                      uuid: `${runId}-user`,
+                      agent_id: agentId,
+                      message: text,
+                    });
+                    if (phase === "seed") {
+                      assert.notInclude(closed, "old-agent");
+                      assert.include(text, summary);
+                      assert.include(text, "<t3_code_orchestration_instructions>");
+                      if (scenario === "seed-send-error") return yield* sdkError;
+                      if (scenario === "interrupt-seed-send") {
+                        yield* Deferred.succeed(reachedInterrupt, undefined);
+                        yield* Deferred.await(cancelled);
+                      }
+                    }
+                    const reply =
+                      phase === "summary"
+                        ? scenario === "empty-summary"
+                          ? ""
+                          : scenario === "summary-diagnostic"
+                            ? diagnostic
+                            : summary
+                        : phase === "seed"
+                          ? scenario === "seed-diagnostic"
+                            ? diagnostic
+                            : "Context restored."
+                          : "Continuing the task.";
+                    if (phase !== "next") {
+                      yield* sendInput.onDelta!({
+                        type: "thinking-delta",
+                        text: "hidden reasoning",
+                      }).pipe(Effect.orDie);
+                    }
+                    yield* sendInput.onDelta!({ type: "text-delta", text: reply }).pipe(
+                      Effect.orDie,
+                    );
+                    return {
+                      agentId,
+                      runId,
+                      cancel: Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid),
+                      wait: Effect.gen(function* () {
+                        if (scenario === `interrupt-${phase}`) {
+                          yield* Deferred.succeed(reachedInterrupt, undefined);
+                          yield* Deferred.await(cancelled);
+                          return { id: runId, status: "cancelled" as const };
+                        }
+                        if (scenario === `${phase}-wait-error`) return yield* sdkError;
+                        messages.push({
+                          type: "assistant",
+                          uuid: `${runId}-assistant`,
+                          agent_id: agentId,
+                          message: reply,
+                        });
+                        return {
+                          id: runId,
+                          status:
+                            scenario === `${phase}-error`
+                              ? ("error" as const)
+                              : ("finished" as const),
+                          ...(scenario === "streamed-summary" && phase === "summary"
+                            ? {}
+                            : { result: reply }),
+                          ...(scenario === `${phase}-error`
+                            ? { error: { message: "compaction failed" } }
+                            : {}),
+                        };
+                      }),
+                    };
+                  }),
+              } satisfies CursorAgentSdk.CursorAgentSdkSession;
+            }),
+        }),
+        Effect.provide(TestProviderHost.layer({ cwd: workspace })),
+      );
+      const sessionInput = {
+        threadId,
+        providerSessionId: ProviderSessionId.make("cursor-compact-session"),
+        modelSelection,
+        runtimePolicy,
+      };
+      const runtime = yield* adapter.openSession(sessionInput);
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = yield* DateTime.now;
+      const turnInput: ProviderAdapter.ProviderAdapterV2TurnInput = {
         threadId,
         providerThread,
         modelSelection,
@@ -491,20 +684,137 @@ describe("CursorAdapterV2", () => {
         providerTurnOrdinal: 2,
         attemptId: RunAttemptId.make("cursor-compact-attempt"),
         rootNodeId: NodeId.make("cursor-compact-root"),
-        appThread,
+        appThread: {
+          id: threadId,
+          projectId: ProjectId.make("cursor-compact-project"),
+          createdBy: "user",
+          creationSource: "web",
+          title: "Cursor compaction",
+          providerInstanceId: instanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: runtimePolicy.interactionMode,
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: providerThread.id,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
         message: {
           messageId: MessageId.make("cursor-compact-message"),
           createdBy: "user",
           creationSource: "web",
-          text: "ignored by compactThread",
+          text: scenario === "literal" ? "/compress" : "/compact",
           attachments: [],
         },
-      });
-      yield* runtime.events.pipe(
-        Stream.filter((event) => event.type === "turn.terminal"),
-        Stream.runHead,
+      };
+      if (scenario === "literal") yield* runtime.startTurn(turnInput);
+      else yield* runtime.compactThread!(turnInput);
+      if (scenario.startsWith("interrupt-")) {
+        yield* Deferred.await(reachedInterrupt);
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        yield* runtime.interruptTurn({
+          providerThread,
+          providerTurnId: ids.derive.providerTurn({
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            nativeTurnId: "run-summary",
+          }),
+        });
+      }
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
       );
-      assert.equal(sentMessages[1], "/compress");
+      const success = ["success", "streamed-summary", "literal", "plan"].includes(scenario);
+      const status = success
+        ? "completed"
+        : scenario.startsWith("interrupt-")
+          ? "interrupted"
+          : "failed";
+      assert.equal(events.at(-1)?.type, "turn.terminal");
+      const terminal = events.findLast((event) => event.type === "turn.terminal");
+      assert.equal(terminal?.status, status);
+      assert.equal(events.filter((event) => event.type === "message.updated").length, 0);
+      const items = events
+        .filter((event) => event.type === "turn_item.updated")
+        .map((event) => event.turnItem);
+      assert.deepEqual(
+        items.map((item) => [item.type, item.status]),
+        [
+          ["compaction", "running"],
+          ["compaction", status],
+        ],
+      );
+      assert.equal(items[0]?.id, items[1]?.id);
+      assert.notProperty(items[1], "beforeTokenCount");
+      assert.notProperty(items[1], "afterTokenCount");
+      const rebound = events.findLast(
+        (event) => event.type === "provider_thread.updated",
+      )?.providerThread;
+      assert.isDefined(rebound);
+      assert.equal(rebound!.id, providerThread.id);
+      assert.equal(rebound!.nativeThreadRef?.nativeId, success ? "new-agent" : "old-agent");
+      assert.include(sent[0]!.text, "dense continuation summary");
+      if (success) {
+        assert.deepEqual(
+          opens.map((entry) => entry.operation),
+          ["create", "create"],
+        );
+        assert.deepEqual(opens[1]!.options, opens[0]!.options);
+        assert.isDefined(opens[1]!.options.mcpServers?.["t3-code"]);
+        assert.deepEqual(
+          sent.map((entry) => entry.agentId),
+          ["old-agent", "new-agent"],
+        );
+        assert.equal(sent[1]?.mode, scenario === "plan" ? "plan" : "agent");
+        assert.include(closed, "old-agent");
+        assert.notInclude(closed, "new-agent");
+        assert.equal(items[1]?.title, "Context compacted");
+        const reopened = yield* adapter.openSession(sessionInput);
+        const resumed = yield* reopened.resumeThread({ providerThread: rebound! });
+        assert.equal(opens.at(-1)?.agentId, "new-agent");
+        const snapshot = yield* reopened.readThreadSnapshot({ providerThread: resumed });
+        assert.deepEqual(snapshot.messages, []);
+        assert.include(stored.get("new-agent")![0]!.message, summary);
+        yield* reopened.startTurn({
+          ...turnInput,
+          providerThread: resumed,
+          message: { ...turnInput.message, text: "continue" },
+        });
+        const nextEvents = yield* reopened.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        assert.equal(sent.at(-1)?.agentId, "new-agent");
+        assert.equal(
+          nextEvents.findLast((event) => event.type === "message.updated")?.message.text,
+          "Continuing the task.",
+        );
+        const nextSnapshot = yield* reopened.readThreadSnapshot({ providerThread: resumed });
+        assert.lengthOf(nextSnapshot.messages, 2);
+      } else {
+        assert.notInclude(closed, "old-agent");
+        if (stored.has("new-agent")) {
+          yield* Deferred.await(replacementClosed);
+          assert.include(closed, "new-agent");
+        }
+        yield* runtime.startTurn({
+          ...turnInput,
+          message: { ...turnInput.message, text: "continue" },
+        });
+        yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+        assert.equal(sent.at(-1)?.agentId, "old-agent");
+      }
     }).pipe(
       Effect.scoped,
       Effect.provide(
