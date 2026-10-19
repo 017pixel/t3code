@@ -41,7 +41,7 @@ import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 import { FolderTree, Globe2, WrapTextIcon } from "lucide-react";
 import { Code2, Eye, Table2 } from "lucide";
 import * as Schema from "effect/Schema";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import { useAssetUrlRefresh, useAssetUrlState } from "~/assets/assetUrls";
@@ -433,6 +433,14 @@ function useFileLineReveal(
 ): FilePostRender {
   const revealRequestId = revealRequest?.id ?? 0;
   const [revealStates] = useState(() => new WeakMap<HTMLElement, FileRevealState>());
+  const rememberScroll = useRef<(() => void) | null>(null);
+  useLayoutEffect(
+    () => () => {
+      // Read before descendant refs tear down Pierre and clamp the viewport.
+      rememberScroll.current?.();
+    },
+    [],
+  );
 
   return (fileContainer, instance, phase) => {
     if (scrollKey === null) return;
@@ -487,7 +495,9 @@ function useFileLineReveal(
         fileScrollPosition(scrollKey).top = scrollContainer.scrollTop;
       };
       scrollContainer.addEventListener("scroll", remember, { passive: true });
+      rememberScroll.current = remember;
       state.stopTrackingScroll = () => {
+        if (rememberScroll.current === remember) rememberScroll.current = null;
         scrollContainer.removeEventListener("scroll", remember);
       };
     }
@@ -524,6 +534,8 @@ function useFileLineReveal(
     };
 
     const guardScrollTarget = (resolveTarget: () => number | null) => {
+      const initialTop = resolveTarget();
+      if (initialTop !== null) scrollContainer.scrollTop = initialTop;
       let framesLeft = REVEAL_GUARD_FRAMES;
       let guardFrameId: number | null = null;
       const cancelGuard = () => {
@@ -593,6 +605,7 @@ function useFileLineReveal(
         updateFileLinkReveal(fileContainer, line);
 
         scrollContainer.scrollTop = targetTop;
+        fileScrollPosition(scrollKey).top = scrollContainer.scrollTop;
         handledFileReveals.add(revealRequest);
         guardScrollTarget(() => resolveScrollTarget(line));
       });
@@ -931,6 +944,37 @@ function EditableFileSurface({
   );
 }
 
+function FileSourceSurface({
+  scrollKey,
+  readOnly,
+  revealLine,
+  revealRequest,
+  ...props
+}: Omit<EditableFileSurfaceProps, "onPostRender" | "revealRequestId"> & {
+  scrollKey: string | null;
+  readOnly: boolean;
+  revealLine: number | null;
+  revealRequest: FilePreviewPanelProps["revealRequest"];
+}) {
+  const onPostRender = useFileLineReveal(scrollKey, revealLine, revealRequest);
+  return readOnly ? (
+    <SourceFilePreview
+      name={props.relativePath}
+      text={props.contents}
+      cacheKey={projectFileCacheKey(props.cwd, props.relativePath, props.contents)}
+      onPostRender={onPostRender}
+    />
+  ) : (
+    <DiffWorkerPoolProvider>
+      <EditableFileSurface
+        {...props}
+        revealRequestId={revealRequest?.id ?? 0}
+        onPostRender={onPostRender}
+      />
+    </DiffWorkerPoolProvider>
+  );
+}
+
 function RenderedMarkdownSurface({
   environmentId,
   cwd,
@@ -1161,13 +1205,6 @@ export default function FilePreviewPanel({
       : relativePath && attachment === undefined
         ? resolvePathLinkTarget(relativePath, cwd)
         : null;
-  const onFilePostRender = useFileLineReveal(
-    absolutePath === null
-      ? null
-      : JSON.stringify([environmentId, threadRef.threadId, absolutePath]),
-    revealLine,
-    revealRequest,
-  );
   useWorkspaceMutationRefresh({
     enabled:
       attachment === undefined &&
@@ -1450,29 +1487,26 @@ export default function FilePreviewPanel({
                 text={file.data.contents}
                 delimiter={tableDelimiter}
               />
-            ) : file.data.truncated || isHostFile || !canWriteFiles ? (
-              <SourceFilePreview
-                name={relativePath}
-                text={file.data.contents}
-                cacheKey={projectFileCacheKey(cwd, relativePath, file.data.contents)}
-                onPostRender={onFilePostRender}
-              />
             ) : (
-              <DiffWorkerPoolProvider>
-                <EditableFileSurface
-                  key={`${relativePath}:${resolvedTheme}`}
-                  environmentId={environmentId}
-                  cwd={cwd}
-                  relativePath={relativePath}
-                  composerDraftTarget={composerDraftTarget}
-                  contents={file.data.contents}
-                  resolvedTheme={resolvedTheme}
-                  revealRequestId={revealRequestId}
-                  wordWrap={wordWrap}
-                  onPostRender={onFilePostRender}
-                  onPendingChange={onPendingChange}
-                />
-              </DiffWorkerPoolProvider>
+              <FileSourceSurface
+                key={`${relativePath}:${resolvedTheme}:${file.data.truncated || isHostFile || !canWriteFiles ? `readonly:${file.data.contents.length}` : "editable"}`}
+                scrollKey={
+                  absolutePath === null
+                    ? null
+                    : JSON.stringify([environmentId, threadRef.threadId, absolutePath])
+                }
+                readOnly={file.data.truncated || isHostFile || !canWriteFiles}
+                environmentId={environmentId}
+                cwd={cwd}
+                relativePath={relativePath}
+                composerDraftTarget={composerDraftTarget}
+                contents={file.data.contents}
+                resolvedTheme={resolvedTheme}
+                revealLine={revealLine}
+                revealRequest={revealRequest}
+                wordWrap={wordWrap}
+                onPendingChange={onPendingChange}
+              />
             )
           ) : null}
         </div>

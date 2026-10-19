@@ -1,5 +1,5 @@
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
-import { act, memo } from "react";
+import { act, memo, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -51,19 +51,27 @@ vi.mock(import("~/browser/previewRuntime"), async (original) => ({
 }));
 vi.mock(import("./projectFilesQueryState"), async (original) => ({
   ...(await original()),
-  useProjectFileQuery: (_environmentId, _cwd, relativePath) => ({
-    data: {
-      relativePath: relativePath ?? "",
-      contents: source,
-      byteLength: source.length,
-      truncated: false,
-    },
-    error: null,
-    readError: null,
-    isNotFile: false,
-    isPending: false,
-    refresh: () => undefined,
-  }),
+  useProjectFileQuery: (_environmentId, _cwd, relativePath) => {
+    const contents =
+      relativePath === "short.ts"
+        ? "export const short = 1;"
+        : relativePath === "second.ts"
+          ? source.split("\n").slice(0, 300).join("\n")
+          : source;
+    return {
+      data: {
+        relativePath: relativePath ?? "",
+        contents,
+        byteLength: contents.length,
+        truncated: false,
+      },
+      error: null,
+      readError: null,
+      isNotFile: false,
+      isPending: false,
+      refresh: () => undefined,
+    };
+  },
 }));
 vi.mock(import("./useFileSaveCoordinator"), () => ({
   useFileSaveCoordinator: () => ({ change: () => undefined }),
@@ -229,55 +237,57 @@ describe("file editor scroll across panel navigation", () => {
     act(async () => {
       const surface = activeSurface(ref);
       root.render(
-        <RightPanelSurfaceContent
-          surface={surface}
-          activeSurfaceId={surface?.id ?? null}
-          threadRef={ref}
-          environmentId={ref.environmentId}
-          visible
-          composerDraftTarget={ref}
-          keybindings={keybindings}
-          configuredPreviewUrls={[]}
-          workspaceMutationId={null}
-          getShortcutContext={() => ({
-            terminalFocus: false,
-            terminalOpen: false,
-            previewFocus: false,
-            previewOpen: false,
-            isWeb: true,
-            isDesktop: false,
-          })}
-          onSendAnnotation={noop}
-          onCloseSurface={noop}
-          terminal={{
-            launchContext: null,
-            focusRequestId: 0,
-            keybindings,
-            onAddTerminalContext: noop,
-            onSplitTerminal: noop,
-            onSplitTerminalVertical: noop,
-            onNewTerminal: noop,
-            onActiveTerminalChange: noop,
-            onCloseTerminal: noop,
-          }}
-          pullRequest={{
-            capabilityKnown: false,
-            supported: false,
-            projectId: null,
-            pullRequests: [],
-            linkedPullRequest: null,
-            branchPullRequest: null,
-            onBack: undefined,
-          }}
-          files={{
-            projectName: "repo",
-            workspaceRoot: cwd,
-            availableEditors: [],
-            pendingSurfaceIds: new Set(),
-            onOpenFile: noop,
-            onPendingChange: noop,
-          }}
-        />,
+        <StrictMode>
+          <RightPanelSurfaceContent
+            surface={surface}
+            activeSurfaceId={surface?.id ?? null}
+            threadRef={ref}
+            environmentId={ref.environmentId}
+            visible
+            composerDraftTarget={ref}
+            keybindings={keybindings}
+            configuredPreviewUrls={[]}
+            workspaceMutationId={null}
+            getShortcutContext={() => ({
+              terminalFocus: false,
+              terminalOpen: false,
+              previewFocus: false,
+              previewOpen: false,
+              isWeb: true,
+              isDesktop: false,
+            })}
+            onSendAnnotation={noop}
+            onCloseSurface={noop}
+            terminal={{
+              launchContext: null,
+              focusRequestId: 0,
+              keybindings,
+              onAddTerminalContext: noop,
+              onSplitTerminal: noop,
+              onSplitTerminalVertical: noop,
+              onNewTerminal: noop,
+              onActiveTerminalChange: noop,
+              onCloseTerminal: noop,
+            }}
+            pullRequest={{
+              capabilityKnown: false,
+              supported: false,
+              projectId: null,
+              pullRequests: [],
+              linkedPullRequest: null,
+              branchPullRequest: null,
+              onBack: undefined,
+            }}
+            files={{
+              projectName: "repo",
+              workspaceRoot: cwd,
+              availableEditors: [],
+              pendingSurfaceIds: new Set(),
+              onOpenFile: noop,
+              onPendingChange: noop,
+            }}
+          />
+        </StrictMode>,
       );
     });
 
@@ -286,10 +296,10 @@ describe("file editor scroll across panel navigation", () => {
     expect(element).not.toBeNull();
     return element!;
   };
-  const editorReady = () =>
+  const editorReady = (minScrollHeight = 10_000) =>
     vi.waitFor(
       () => {
-        expect(scroller().scrollHeight).toBeGreaterThan(10_000);
+        expect(scroller().scrollHeight).toBeGreaterThan(minScrollHeight);
         expect(
           container
             .querySelector("diffs-container")
@@ -332,26 +342,56 @@ describe("file editor scroll across panel navigation", () => {
     await expectLineVisible(120, "initial reveal");
     await scrollTo(8_000);
 
-    panels.openFile(thread, "second.ts");
+    panels.openFile(thread, "short.ts");
     await show();
-    await editorReady();
-    await scrollTo(3_000);
+    await editorReady(0);
+    expect(scroller().scrollHeight).toBe(scroller().clientHeight);
     panels.activateSurface(thread, "file:first.ts");
     await show();
     await editorReady();
     await expectPosition(8_000);
 
-    panels.open(thread, "diff");
+    await act(async () => {
+      scroller().scrollTop = 7_000;
+      panels.openFile(thread, "second.ts");
+      // Commit the switch before the browser delivers the queued scroll event.
+      await show();
+    });
+    await editorReady(4_000);
+    await scrollTo(3_000);
+    panels.activateSurface(thread, "file:first.ts");
     await show();
+    await editorReady();
+    await expectPosition(7_000);
+
+    await act(async () => {
+      scroller().dispatchEvent(new WheelEvent("wheel", { deltaY: 1, bubbles: true }));
+      scroller().scrollTop = 6_000;
+      panels.open(thread, "diff");
+      await show();
+    });
     await vi.waitFor(() => expect(container.textContent).toContain("Changes"));
     panels.activateSurface(thread, "file:first.ts");
     await show();
     await editorReady();
-    await expectPosition(8_000);
+    await expectPosition(6_000);
     panels.activateSurface(thread, "file:second.ts");
     await show();
-    await editorReady();
+    await editorReady(4_000);
     await expectPosition(3_000);
+
+    await act(async () => {
+      scroller().dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
+      scroller().scrollTop = 0;
+      panels.activateSurface(thread, "file:first.ts");
+      await show();
+    });
+    await editorReady();
+    await expectPosition(6_000);
+    panels.activateSurface(thread, "file:second.ts");
+    await show();
+    await editorReady(4_000);
+    await expectPosition(0);
   });
 
   it("keeps the same file independent across threads, environments and workspace roots", async () => {
