@@ -101,9 +101,7 @@ function getProviderFailedUpdateTitle(
     : `${providerName} update failed`;
 }
 
-export function isProviderUpdateCandidate(
-  provider: ServerProvider,
-): provider is ProviderUpdateCandidate {
+function isProviderUpdateCandidate(provider: ServerProvider): provider is ProviderUpdateCandidate {
   return (
     provider.enabled &&
     provider.compatibilityAdvisory?.latestVersionStatus !== "broken" &&
