@@ -74,9 +74,43 @@ function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   return remotes;
 }
 
+function withRepositoryPath(remoteUrl: string, repository: string): string | null {
+  if (
+    !/^[\w.-]+\/[\w.-]+$/u.test(repository) ||
+    repository.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+  if (remoteUrl.includes("://")) {
+    try {
+      const url = new URL(remoteUrl);
+      if (!url.hostname) return null;
+      const suffix = /\.git\/?$/i.test(url.pathname) ? ".git" : "";
+      url.pathname = `/${repository}${suffix}`;
+      return url.toString();
+    } catch {
+      return null;
+    }
+  }
+  const prefix = /^([^/:\s]+:)/u.exec(remoteUrl)?.[1];
+  return prefix ? `${prefix}${repository}${/\.git\/?$/i.test(remoteUrl) ? ".git" : ""}` : null;
+}
+
 function pickPrimaryRemote(
   remotes: ReadonlyMap<string, string>,
+  resolved: string,
 ): { readonly remoteName: string; readonly remoteUrl: string } | null {
+  // gh stores `base` for the marked remote, or OWNER/REPO for a parent with no remote.
+  for (const line of resolved.split("\n")) {
+    const match = /^remote\.(.+)\.gh-resolved\s+(\S+)$/u.exec(line.trim());
+    const remoteName = match?.[1];
+    const repository = match?.[2];
+    const markedUrl = remoteName ? remotes.get(remoteName) : undefined;
+    if (!remoteName || !repository || !markedUrl) continue;
+    const remoteUrl = repository === "base" ? markedUrl : withRepositoryPath(markedUrl, repository);
+    if (remoteUrl) return { remoteName, remoteUrl };
+  }
+
   for (const preferredRemoteName of ["upstream", "origin"] as const) {
     const remoteUrl = remotes.get(preferredRemoteName);
     if (remoteUrl) {
@@ -178,7 +212,19 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
   }
 
   const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
-  const remote = pickPrimaryRemote(remotes);
+  const resolvedResult = yield* processRunner
+    .run({
+      command: "git",
+      args: ["-C", cacheKey, "config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
+      env: explicitBareRepositoryEnv(process.env, yield* HostProcess.Platform),
+      timeoutBehavior: "timedOutResult",
+    })
+    .pipe(Effect.option);
+  const resolved =
+    resolvedResult._tag === "Some" && resolvedResult.value.code === 0
+      ? resolvedResult.value.stdout
+      : "";
+  const remote = pickPrimaryRemote(remotes, resolved);
   return remote
     ? buildRepositoryIdentity({ ...remote, originUrl: remotes.get("origin"), rootPath: cacheKey })
     : null;

@@ -53,7 +53,9 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
           return {
             stdout: input.args.includes("rev-parse")
               ? `${rootPath}\n`
-              : `origin\t${remoteUrl} (fetch)\n`,
+              : input.args.includes("remote")
+                ? `origin\t${remoteUrl} (fetch)\n`
+                : "",
             stderr: "",
             code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
@@ -94,6 +96,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
     return Effect.gen(function* () {
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const first = yield* resolver.resolve("/repo/packages/web");
+      const initialCallCount = calls.length;
       rootPath = "/repo/packages/web";
       // Longer than the one-minute cadence of the background sweeps.
       yield* TestClock.adjust(Duration.minutes(10));
@@ -102,7 +105,8 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       expect(first?.canonicalKey).toBe("github.com/t3tools/t3code");
       expect(second).toEqual(first);
       expect(refinements).toBe(1);
-      expect(calls).toEqual([
+      expect(calls).toHaveLength(initialCallCount);
+      expect(calls.filter((args) => !args.includes("config"))).toEqual([
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo", "remote", "-v"],
       ]);
@@ -110,7 +114,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       const refreshed = yield* resolver.resolve("/repo/packages/web", { refresh: true });
       expect(refreshed?.rootPath).toBe("/repo/packages/web");
       expect(yield* resolver.resolve("/repo/packages/web")).toEqual(refreshed);
-      expect(calls.slice(2)).toEqual([
+      expect(calls.slice(initialCallCount).filter((args) => !args.includes("config"))).toEqual([
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo/packages/web", "remote", "-v"],
       ]);
@@ -143,7 +147,9 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
               ? failed
                 ? ""
                 : "/repo\n"
-              : "origin\tgit@github.com:T3Tools/t3code.git (fetch)\n",
+              : input.args.includes("remote")
+                ? "origin\tgit@github.com:T3Tools/t3code.git (fetch)\n"
+                : "",
             stderr: failed ? "temporary Git failure" : "",
             code: ChildProcessSpawner.ExitCode(failed ? 1 : 0),
             timedOut: false,
@@ -167,7 +173,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       yield* TestClock.adjust(Duration.minutes(1));
       const recovered = yield* resolver.resolve("/repo/packages/web");
       expect(recovered?.rootPath).toBe("/repo");
-      expect(calls).toEqual([
+      expect(calls.filter((args) => !args.includes("config"))).toEqual([
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo", "remote", "-v"],
@@ -337,6 +343,74 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
         displayName: "julius/t3code-fork",
       });
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
+  );
+
+  it.effect(
+    "refreshes the gh default remote and restores upstream when the preference is removed",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const cwd = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-repository-identity-gh-default-test-",
+        });
+
+        yield* git(cwd, ["init"]);
+        yield* git(cwd, ["remote", "add", "origin", "git@github.com:julius/t3code-fork.git"]);
+        yield* git(cwd, ["remote", "add", "upstream", "git@github.com:T3Tools/t3code.git"]);
+
+        const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+        const upstream = yield* resolver.resolve(cwd);
+        expect(upstream?.canonicalKey).toBe("github.com/t3tools/t3code");
+        expect(upstream?.origin).toEqual({
+          canonicalKey: "github.com/julius/t3code-fork",
+          displayName: "julius/t3code-fork",
+        });
+
+        yield* git(cwd, ["config", "remote.origin.gh-resolved", "base"]);
+        expect(yield* resolver.resolve(cwd)).toEqual(upstream);
+
+        const selected = yield* resolver.resolve(cwd, { refresh: true });
+        expect(selected?.canonicalKey).toBe("github.com/julius/t3code-fork");
+        expect(selected?.locator.remoteName).toBe("origin");
+        expect(selected?.origin).toBeUndefined();
+        expect(yield* resolver.resolve(cwd)).toEqual(selected);
+
+        yield* git(cwd, ["config", "--unset", "remote.origin.gh-resolved"]);
+        expect(yield* resolver.resolve(cwd)).toEqual(selected);
+        expect(yield* resolver.resolve(cwd, { refresh: true })).toEqual(upstream);
+      }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
+  );
+
+  it.effect(
+    "resolves a gh default parent on the marked remote's host while retaining the fork origin",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const cwd = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-repository-identity-gh-parent-test-",
+        });
+
+        yield* git(cwd, ["init"]);
+        yield* git(cwd, [
+          "remote",
+          "add",
+          "origin",
+          "git@github.example.com:julius/t3code-fork.git",
+        ]);
+        yield* git(cwd, ["config", "remote.origin.gh-resolved", "T3Tools/t3code"]);
+
+        const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+        const identity = yield* resolver.resolve(cwd);
+
+        expect(identity?.canonicalKey).toBe("github.example.com/t3tools/t3code");
+        expect(identity?.displayName).toBe("T3Tools/t3code");
+        expect(identity?.owner).toBe("T3Tools");
+        expect(identity?.name).toBe("t3code");
+        expect(identity?.origin).toEqual({
+          canonicalKey: "github.example.com/julius/t3code-fork",
+          displayName: "julius/t3code-fork",
+        });
+      }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 
   it.effect("uses the last remote path segment as the repository name for nested groups", () =>
