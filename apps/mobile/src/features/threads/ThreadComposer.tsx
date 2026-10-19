@@ -58,9 +58,6 @@ import {
   useComposerDraft,
 } from "../../state/use-composer-drafts";
 import { appAtomRegistry } from "../../state/atom-registry";
-import { threadEnvironment } from "../../state/threads";
-import { useAtomCommand } from "../../state/use-atom-command";
-import { useThreadQueueWorkflow } from "./ThreadQueueControl";
 import type { ComposerDocumentAttachment } from "../../lib/composerContext";
 import { useProject, useThreadShells } from "../../state/entities";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -165,6 +162,8 @@ export interface ThreadComposerProps {
   readonly onNativePasteText: (paste: ComposerTextPaste) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
+  /** Present while the thread's queue is held. */
+  readonly onResumeQueue: (() => Promise<void>) | null;
   readonly onSendMessage: (followUp?: ActiveTurnComposerAction) => Promise<MessageId | null>;
   readonly onShowUsageLimits: (report: UsageLimitsReport | null) => void;
   readonly canSwitchProvider: boolean;
@@ -360,23 +359,14 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     (queuedEdit?.existingAttachments.length ?? 0) > 0;
   const stripAttachments = composerStripAttachments(draftAttachments);
   const showStopAction = !hasContent && props.canStopThread && queuedEdit === null;
-  // A stop or a restart holds the queue, completion wakes included, until it
-  // is resumed; the queue sheet lists only the user's own messages.
-  const queueWorkflow = useThreadQueueWorkflow({
-    environmentId: props.environmentId,
-    threadId: props.selectedThread.id,
-  });
-  const resumeQueue = useAtomCommand(threadEnvironment.resumeThreadQueue, "resume queue");
+  const onResumeQueue = props.onResumeQueue;
   const [resumingQueue, setResumingQueue] = useState(false);
   const showResumeAction =
-    !hasContent && !showStopAction && queuedEdit === null && queueWorkflow?.isHeld === true;
+    !hasContent && !showStopAction && queuedEdit === null && onResumeQueue !== null;
   const handleResumeQueue = async () => {
-    if (resumingQueue) return;
+    if (resumingQueue || onResumeQueue === null) return;
     setResumingQueue(true);
-    await resumeQueue({
-      environmentId: props.environmentId,
-      input: { threadId: props.selectedThread.id },
-    });
+    await onResumeQueue();
     setResumingQueue(false);
   };
 

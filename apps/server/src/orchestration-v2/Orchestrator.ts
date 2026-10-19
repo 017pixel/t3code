@@ -4989,12 +4989,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // without a worktree. It waits, held, like the messages queued before the
       // failure, instead of starting in the project checkout.
       const latestRun = latestExecutedRun(projection.runs);
-      const worktreeMissingRun =
-        activeRun === undefined &&
-        dispatchMode.type === "queue_after_active" &&
+      const worktreeSetupFailed =
         (latestRun?.status === "failed" || latestRun?.status === "interrupted") &&
         latestRun.workspacePreparation?.type === "worktree" &&
-        projection.thread.worktreePath === null
+        projection.thread.worktreePath === null;
+      const worktreeMissingRun =
+        activeRun === undefined && dispatchMode.type === "queue_after_active" && worktreeSetupFailed
           ? latestRun
           : undefined;
       const queueBehindRun = activeRun ?? worktreeMissingRun;
@@ -5006,15 +5006,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const shouldQueue = queueBehindRun !== undefined && startsOrQueuesRun;
       // A message the user sends from a client means they are back, so what a
       // stop or a restart held follows it rather than waiting for a Resume.
-      // Continuations the server sends for them (after a usage limit or a
-      // restart) are not them coming back. Starting the queue still re-holds
-      // it for a failed provider or a usage limit; a missing worktree keeps its
-      // hold, since its messages would start in the project checkout.
+      // Continuations and scheduled tasks the server sends for them are not
+      // them coming back. Starting the queue still re-holds it for a failed
+      // provider or a usage limit; a queue held after worktree setup failed
+      // keeps its hold, since its messages would start in the project checkout.
       const sentByUserFromClient =
         command.createdBy === "user" &&
-        (command.creationSource === "web" || command.creationSource === "mobile");
+        (command.creationSource === "web" || command.creationSource === "mobile") &&
+        command.scheduledTaskId === undefined;
       const heldRunsToRelease =
-        sentByUserFromClient && startsOrQueuesRun && worktreeMissingRun === undefined
+        sentByUserFromClient && startsOrQueuesRun && !worktreeSetupFailed
           ? projection.runs.filter((run) => run.status === "queued" && run.queueHeld === true)
           : [];
       const releasedAt = yield* DateTime.now;

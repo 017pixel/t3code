@@ -1751,8 +1751,25 @@ it.effect.each(["failed", "interrupted"] as const)(
       });
       assert.equal(queued.delivery, "queued");
       const projection = yield* threads.getThreadProjection(launched.threadId);
-      assert.equal(projection.runs.at(-1)?.status, "queued");
-      assert.equal(projection.runs.at(-1)?.queueHeld, true);
+      const held = projection.runs.at(-1)!;
+      assert.equal(held.status, "queued");
+      assert.equal(held.queueHeld, true);
+
+      // A message the user starts does not release it: the held message would
+      // run after it in the project checkout.
+      yield* threads.sendToThread({
+        projectId,
+        commandId: CommandId.make(`command:launch:late-queued-follow-up-${ending}:start`),
+        threadId: launched.threadId,
+        messageId: MessageId.make(`message:launch:late-queued-follow-up-${ending}:start`),
+        text: "Sent after setup",
+        attachments: [],
+        mode: "auto",
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const after = yield* threads.getThreadProjection(launched.threadId);
+      assert.isTrue(after.runs.find((run) => run.id === held.id)?.queueHeld);
     }).pipe(Effect.provide(harness.layer));
   },
 );
