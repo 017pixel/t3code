@@ -608,7 +608,17 @@ const make = (options?: StartupOptions) =>
           : importPendingTranscripts
       ).pipe(forkParked);
 
-      yield* forkBackground(recordStartupHeartbeat.pipe(Effect.ignoreCause({ log: true })));
+      yield* forkBackground(
+        Effect.gen(function* () {
+          yield* Effect.logDebug("startup phase: recording startup heartbeat");
+          yield* recordStartupHeartbeat.pipe(
+            Effect.withSpan("server.startup.heartbeat.record", {
+              attributes: { "startup.phase": "heartbeat.record" },
+            }),
+            Effect.ignoreCause({ log: true }),
+          );
+        }),
+      );
       yield* forkParked(
         Effect.gen(function* () {
           if (serverConfig.startupPresentation === "headless") {
