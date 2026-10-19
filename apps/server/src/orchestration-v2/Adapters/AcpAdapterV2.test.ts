@@ -378,6 +378,7 @@ function makeMockRuntime(input: {
     | Readonly<Record<string, string>>
     | ((runtimeOrdinal: number) => Readonly<Record<string, string>>);
   readonly protocolEvents?: Queue.Queue<EffectAcpProtocol.AcpProtocolLogEvent>;
+  readonly resumeMethod?: AcpSessionRuntime.AcpSessionRuntimeOptions["resumeMethod"];
   readonly cancelBehavior?: AcpSessionRuntime.AcpSessionRuntimeOptions["cancelBehavior"];
   readonly ownDescendantProcessGroups?: boolean;
   readonly ownDetachedProcessGroup?: boolean;
@@ -416,6 +417,7 @@ function makeMockRuntime(input: {
       const context = yield* Layer.build(
         AcpSessionRuntime.layer({
           ...runtimeInput,
+          ...(input.resumeMethod === undefined ? {} : { resumeMethod: input.resumeMethod }),
           ...(input.cancelBehavior === undefined ? {} : { cancelBehavior: input.cancelBehavior }),
           ...(input.ownDetachedProcessGroup === undefined
             ? {}
@@ -3529,6 +3531,115 @@ describe("AcpAdapterV2", () => {
 
       assert.equal(runtime.providerSession.status, "ready");
     }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.effect.each(["load", "resume-switched", "resume-initial"] as const)(
+    "hydrates explicit ACP history once after %s activation",
+    (mode) =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const instanceId = ProviderInstanceId.make("acp-test");
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            preferResumeSession: mode !== "load",
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner,
+              mockAgentPath,
+              protocolEvents,
+              resumeMethod: mode === "load" ? "load" : "resume",
+              environment: {
+                T3_ACP_EMIT_LOAD_REPLAY: "1",
+                T3_ACP_PROMPT_RESPONSE_TEXT: "first reply",
+              },
+            }),
+          },
+          selfInvocation,
+        });
+        const threadId = ThreadId.make("thread-acp-history");
+        const modelSelection = { instanceId, model: "default" };
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("session-acp-history"),
+          modelSelection,
+          runtimePolicy,
+          ...(mode === "resume-initial" ? { initialNativeThreadId: "mock-session-saved" } : {}),
+        });
+        let providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        if (mode !== "resume-initial") {
+          yield* runtime.startTurn(
+            makeTurnInput({
+              threadId,
+              providerThread,
+              instanceId,
+              runtimePolicy,
+              now: yield* DateTime.now,
+            }),
+          );
+          yield* runtime.events.pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.runHead,
+          );
+          yield* Queue.clear(protocolEvents);
+          providerThread = {
+            ...providerThread,
+            nativeThreadRef: {
+              driver: ACP_TEST_DRIVER,
+              nativeId: "mock-session-saved",
+              strength: "strong",
+            },
+          };
+          yield* runtime.resumeThread({ providerThread, modelSelection, runtimePolicy });
+        }
+        const activationEvents = (yield* Queue.clear(protocolEvents)).filter(
+          (event) =>
+            event.direction === "outgoing" && rawProtocolMethod(event) === "session/resume",
+        );
+        assert.lengthOf(activationEvents, 1);
+        assert.deepEqual(
+          rawProtocolRequestParam(activationEvents[0]!, "replayFrom"),
+          mode === "load" ? { type: "start" } : undefined,
+        );
+
+        const first = yield* runtime.readThreadSnapshot({ providerThread });
+        assert.includeMembers(
+          first.messages.map((message) => message.text),
+          ["replay", "replayed assistant text"],
+        );
+        const historyRequests = (yield* Queue.clear(protocolEvents)).filter(
+          (event) =>
+            event.direction === "outgoing" && rawProtocolMethod(event) === "session/resume",
+        );
+        assert.equal(historyRequests.length, mode === "load" ? 0 : 1);
+        if (historyRequests[0]) {
+          assert.deepEqual(rawProtocolRequestParam(historyRequests[0], "replayFrom"), {
+            type: "start",
+          });
+        }
+        const second = yield* runtime.readThreadSnapshot({ providerThread });
+        assert.deepEqual(second.messages, first.messages);
+        assert.notInclude(
+          (yield* Queue.clear(protocolEvents)).map(rawProtocolMethod),
+          "session/resume",
+        );
+      }).pipe(Effect.provide(layerTest), Effect.scoped, TestClock.withLive),
   );
 
   it.effect("reconfigures a loaded ACP session from its own active setup metadata", () =>
