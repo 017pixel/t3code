@@ -516,6 +516,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       >();
       const pendingPrompts = new Map<string, PendingPiPrompt>();
       const sessionApprovals = new Set<string>();
+      let lifecycleInFlight = false;
       // Answering a dialog and terminalizing a turn both publish lifecycle
       // events. Pi can settle immediately after `extension_ui_response`, so
       // serialize the two paths to stop `turn.terminal` from overtaking the
@@ -640,7 +641,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       };
 
       const lifecycleRequest = (record: PiRpcRecord) =>
-        request(record, PI_SESSION_TIMEOUT_MS).pipe(
+        Effect.suspend(() => {
+          sessionApprovals.clear();
+          lifecycleInFlight = true;
+          return request(record, PI_SESSION_TIMEOUT_MS);
+        }).pipe(
           // A local timeout does not cancel Pi's lifecycle hook. Retire the
           // process before fallback can race its eventual switch/new-session.
           Effect.tapError((error) =>
@@ -655,6 +660,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               connection.terminate.pipe(Effect.andThen(Effect.fail(error))),
           }),
           Effect.onInterrupt(() => connection.terminate),
+          Effect.ensuring(Effect.sync(() => (lifecycleInFlight = false))),
         );
 
       const tokenUsageFromStats = (
@@ -2205,7 +2211,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               ? { type: "switch_session", sessionPath: resumeId }
               : { type: "new_session" },
           );
-          sessionApprovals.clear();
           if (recordField(result, "cancelled") === true) {
             return yield* protocolError("A Pi extension cancelled the session switch");
           }
@@ -2755,7 +2760,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             if (pendingPrompts.get(String(requestInput.requestId)) !== pending) return;
             pendingPrompts.delete(String(requestInput.requestId));
             if (pending.expirationFiber !== null) yield* Fiber.interrupt(pending.expirationFiber);
-            if (pending.method === "confirm" && requestInput.decision === "acceptForSession") {
+            if (
+              pending.method === "confirm" &&
+              requestInput.decision === "acceptForSession" &&
+              !lifecycleInFlight
+            ) {
               sessionApprovals.add(pending.approvalKey);
             }
             const resolvedAt = yield* DateTime.now;
@@ -2911,7 +2920,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               (barrier) =>
                 Effect.gen(function* () {
                   const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
-                  sessionApprovals.clear();
                   if (recordField(forkData, "cancelled") === true)
                     return yield* protocolError("A Pi extension cancelled the session fork");
                   const forkState = yield* request({ type: "get_state" }).pipe(

@@ -3204,7 +3204,8 @@ describe("PiAdapterV2", () => {
       "revokes grants answered during a %s lifecycle hook",
       (boundary) =>
         Effect.gen(function* () {
-          const { fake, runtime, providerThread, grant, askAgain } = yield* setup;
+          const { fake, runtime, providerThread, takeEvent, takeApproval, grant, askAgain } =
+            yield* setup;
           const command = boundary === "switch" ? "switch_session" : "fork";
           fake.deferNextLifecycle(command);
           const operation = yield* (
@@ -3234,6 +3235,24 @@ describe("PiAdapterV2", () => {
           ).pipe(Effect.forkScoped);
           const request = yield* fake.takeRequest(command);
           yield* grant;
+          assert.equal(yield* askAgain, "pending");
+          const destination = yield* takeEvent(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "approval_request" &&
+              event.turnItem.nativeItemRef?.nativeId === "ask-again",
+          );
+          if (
+            destination.type !== "turn_item.updated" ||
+            destination.turnItem.type !== "approval_request"
+          )
+            return;
+          yield* runtime.respondToRuntimeRequest({
+            requestId: destination.turnItem.requestId,
+            decision: "acceptForSession",
+          });
+          assert.equal((yield* fake.takeRequest("extension_ui_response"))["confirmed"], true);
+          assert.equal((yield* takeApproval).status, "resolved");
           fake.queueState({ sessionFile: "/fake/other.jsonl" });
           yield* fake.emit({
             type: "response",
