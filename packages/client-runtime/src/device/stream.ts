@@ -359,7 +359,6 @@ export function createDeviceStreamClient(
   let configuring = false;
   let pendingPackets: (ReturnType<typeof parseSemuPacket> & { isKey: boolean })[] = [];
   let pendingBytes = 0;
-  let keyframeRequested = false;
   let mjpeg = false;
   let generation = 0;
   let decoderEpoch = 0;
@@ -511,11 +510,17 @@ export function createDeviceStreamClient(
     pendingBytes = 0;
   };
 
+  const cancelKeyframeRequest = () => {
+    const retry = retryTimers.get("video");
+    if (retry !== undefined) clearTimeout(retry);
+    retryTimers.delete("video");
+  };
+
   const closeDecoder = () => {
     decoderEpoch++;
     configuring = false;
     clearPendingPackets();
-    keyframeRequested = false;
+    if (platform === "android") cancelKeyframeRequest();
     try {
       videoDecoder?.close();
     } catch {}
@@ -609,16 +614,20 @@ export function createDeviceStreamClient(
         }),
       );
       timestamp += FRAME_DURATION_US;
+      if (platform === "android" && isKey) cancelKeyframeRequest();
     } catch {
       recoverDecoder();
     }
   };
 
   const requestKeyframe = () => {
-    if (!keyframeRequested && platform === "android" && socket?.readyState === WebSocket.OPEN) {
-      keyframeRequested = true;
-      socket.send(JSON.stringify({ type: "reset-video", ack: false }));
-    }
+    if (platform !== "android") return;
+    // The hub silently coalesces resets for 500 ms after client-open or a prior reset.
+    scheduleRetry("video", () => {
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "reset-video", ack: false }));
+      }
+    });
   };
 
   const queueAndroidPacket = (packet: ReturnType<typeof parseSemuPacket>, isKey: boolean) => {
@@ -633,6 +642,7 @@ export function createDeviceStreamClient(
       requestKeyframe();
       return;
     }
+    if (isKey) cancelKeyframeRequest();
     pendingPackets.push({ ...packet, isKey });
     pendingBytes += packet.data.byteLength;
   };
@@ -946,7 +956,6 @@ export function createDeviceStreamClient(
         (packet.isKey && (!videoDecoder || videoDecoder.state !== "configured"));
       const scanned = needsScan ? scanAccessUnit(packet.data) : null;
       const isKey = packet.isKey ?? scanned?.isKey ?? false;
-      if (isKey) keyframeRequested = false;
       if (configuring) {
         queueAndroidPacket(packet, isKey);
         return;
@@ -964,7 +973,7 @@ export function createDeviceStreamClient(
             if (!configured) return;
             const packets = pendingPackets;
             clearPendingPackets();
-            if (packets.length === 0 && !isKey) requestKeyframe();
+            if (packets.length === 0) requestKeyframe();
             for (const pending of packets) {
               if (!isCurrent()) break;
               decode(pending.isKey, pending.data, pending.timestamp);
