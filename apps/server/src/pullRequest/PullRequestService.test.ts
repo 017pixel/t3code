@@ -28,6 +28,9 @@ import type { ServerSettings } from "@t3tools/contracts";
 import * as ServerSettingsService from "../serverSettings.ts";
 import { PullRequestOperationError } from "@t3tools/contracts";
 
+import { refreshPushedPullRequests } from "../git/refreshPushedPullRequests.ts";
+import * as OrchestratorV2 from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.ts";
@@ -4404,6 +4407,58 @@ it.effect("coalesces turn bursts for 30 seconds without delaying explicit refres
     yield* Fiber.join(refreshed);
     yield* service.list({ state: "open" });
     assert.strictEqual(hostCalls, 4);
+  }),
+);
+
+it.effect("refreshes the all-projects listing immediately after a push within a turn window", () =>
+  Effect.gen(function* () {
+    let hostCalls = 0;
+    let pushed = false;
+    const web = project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" });
+    const service = yield* makeService({
+      projects: [web],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          listChangeRequests: () => {
+            hostCalls += 1;
+            return Effect.succeed({
+              items: pushed ? [changeRequest(42, "2026-07-02T00:00:00Z")] : [],
+              truncated: false,
+              continues: false,
+            });
+          },
+        }),
+      ],
+    });
+
+    yield* service.list({ state: "open" });
+    yield* service.refreshAfterTurn(web.id);
+    yield* service.list({ state: "open" });
+    assert.strictEqual(hostCalls, 2);
+
+    yield* TestClock.adjust("10 seconds");
+    assert.deepStrictEqual((yield* service.list({ state: "open" })).entries, []);
+    assert.strictEqual(hostCalls, 2);
+
+    pushed = true;
+    yield* refreshPushedPullRequests(
+      { cwd: web.workspaceRoot, projectId: web.id },
+      { push: { status: "pushed" } },
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(PullRequestService.PullRequestService, service),
+          Layer.mock(OrchestratorV2.OrchestratorV2)({}),
+          Layer.mock(ProjectStore.ProjectStoreV2)({}),
+        ),
+      ),
+    );
+    const result = yield* service.list({ state: "open" });
+    assert.strictEqual(hostCalls, 3);
+    assert.deepStrictEqual(
+      result.entries.map(({ number }) => number),
+      [42],
+    );
   }),
 );
 
