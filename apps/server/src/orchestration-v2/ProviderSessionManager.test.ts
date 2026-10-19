@@ -638,6 +638,7 @@ function runBrowserAccessScenario(input: {
   readonly createThread?: boolean;
   readonly projectExists?: boolean;
   readonly toolsOverride?: boolean;
+  readonly disabledSkills?: ReadonlyArray<string>;
   readonly settingsUnavailable?: boolean;
 }) {
   return Effect.gen(function* () {
@@ -692,6 +693,7 @@ function runBrowserAccessScenario(input: {
               })
             : ServerSettings.layerTest({
                 enableAgentBrowserAccess: input.enableAgentBrowserAccess,
+                disabledSkills: input.disabledSkills ?? [],
                 ...(input.toolsOverride
                   ? {
                       mcpServers: {
@@ -2046,9 +2048,13 @@ it.effect("ProviderSessionManagerV2 fails browser access closed for a missing th
       enableAgentBrowserAccess: true,
       projectOverride: true,
       createThread: false,
+      toolsOverride: true,
+      disabledSkills: ["environment-off"],
     });
     assert.isDefined(captured);
     assert.equal(captured?.browserToolsAvailable, false);
+    assert.deepEqual(captured?.tools?.disabledSkills, ["environment-off"]);
+    assert.deepEqual(captured?.tools?.servers, []);
   }),
 );
 
