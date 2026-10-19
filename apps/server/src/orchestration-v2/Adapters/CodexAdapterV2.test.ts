@@ -3518,6 +3518,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       siblingState: "completed",
     },
     {
+      scenario: "user-interrupted sibling before the second is cut",
+      restarts: 2,
+      completed: true,
+      files: true,
+      siblingState: "interrupted",
+    },
+    {
       scenario: "two recovered siblings with the second held after another crash",
       restarts: 2,
       completed: true,
@@ -3559,8 +3566,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             }),
         );
         const completeTurns: Array<
-          (turnId: string) => Effect.Effect<void, CodexError.CodexAppServerError>
+          (
+            turnId: string,
+            status?: "completed" | "interrupted",
+          ) => Effect.Effect<void, CodexError.CodexAppServerError>
         > = [];
+        const interrupts: Array<unknown> = [];
         const sent: Array<unknown> = [];
         let sessions = 0;
         const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
@@ -3623,7 +3634,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                           }),
                         };
                       })
-                    : client.request(method, params)) as typeof client.request;
+                    : method === "turn/interrupt"
+                      ? Effect.gen(function* () {
+                          interrupts.push(params);
+                          yield* completeTurns.at(-1)!("turn-" + sent.length, "interrupted");
+                          return {};
+                        })
+                      : client.request(method, params)) as typeof client.request;
                 const handleServerNotification: typeof client.handleServerNotification = (
                   method,
                   handler,
@@ -3632,10 +3649,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                     Effect.tap(() =>
                       method === "turn/completed"
                         ? Effect.sync(() => {
-                            completeTurns.push((turnId) =>
+                            completeTurns.push((turnId, status = "completed") =>
                               handler({
                                 threadId: nativeThreadId,
-                                turn: makeCodexReplayTurn({ id: turnId, status: "completed" }),
+                                turn: makeCodexReplayTurn({ id: turnId, status }),
                               } as Parameters<typeof handler>[0]),
                             );
                           })
@@ -3871,9 +3888,40 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   [MessageId.make(name + ":steer-0"), MessageId.make(name + ":steer-1")],
                 );
                 assert.lengthOf(sent, 1);
-                if (siblingState === "completed") {
+                if (siblingState !== "queued") {
                   yield* worker.drain();
-                  yield* finishLatestTurn;
+                  if (siblingState === "interrupted") {
+                    yield* orchestrator.streamStoredEventsFrom({ threadId }).pipe(
+                      Stream.filter(
+                        ({ event }) =>
+                          event.type === "provider-turn.updated" &&
+                          event.runId === split.runs[1]!.id &&
+                          event.payload.status === "running",
+                      ),
+                      Stream.take(1),
+                      Stream.runDrain,
+                    );
+                    yield* orchestrator.dispatch({
+                      type: "run.interrupt",
+                      commandId: CommandId.make(name + ":interrupt"),
+                      threadId,
+                      runId: split.runs[1]!.id,
+                    });
+                    yield* worker.drain();
+                    yield* orchestrator.streamStoredEventsFrom({ threadId }).pipe(
+                      Stream.filter(
+                        ({ event }) =>
+                          event.type === "provider-turn.updated" &&
+                          event.runId === split.runs[1]!.id &&
+                          event.payload.status === "interrupted",
+                      ),
+                      Stream.take(1),
+                      Stream.runDrain,
+                    );
+                    assert.deepEqual(interrupts, [{ threadId: nativeThreadId, turnId: "turn-2" }]);
+                  } else {
+                    yield* finishLatestTurn;
+                  }
                   const secondStarted = yield* orchestrator
                     .streamStoredEventsFrom({ threadId })
                     .pipe(
@@ -3891,8 +3939,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   yield* worker.drain();
                   yield* Fiber.join(secondStarted);
                   const running = yield* orchestrator.getThreadProjection(threadId);
-                  assert.equal(running.runs[1]?.status, "completed");
-                  assert.equal(running.providerTurns[1]?.status, "completed");
+                  assert.equal(running.runs[1]?.status, siblingState);
+                  assert.equal(running.runs[2]?.status, "running");
+                  assert.equal(running.providerTurns[1]?.status, siblingState);
                   assert.equal(running.providerTurns[2]?.status, "running");
                   assert.lengthOf(sent, 3);
                 }
@@ -3910,9 +3959,17 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 yield* worker.drain();
                 if (siblingState) {
                   const projection = yield* orchestrator.getThreadProjection(threadId);
+                  if (siblingState === "interrupted") {
+                    assert.equal(projection.runs[1]?.status, "interrupted");
+                    assert.equal(projection.runs[2]?.status, "cancelled");
+                    assert.equal(
+                      projection.runs.at(-1)?.restartContinuationOfRunId,
+                      projection.runs[2]?.id,
+                    );
+                  }
                   const delivered = yield* decodeCodexTurnInput(sent.at(-1));
                   const outbound = JSON.stringify(delivered.input);
-                  const carried = siblingState === "completed" ? 1 : 0;
+                  const carried = siblingState === "queued" ? 0 : 1;
                   const excluded = 1 - carried;
                   if (siblingState === "queued") {
                     const queued = projection.runs.find(
