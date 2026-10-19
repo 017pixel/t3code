@@ -52,6 +52,7 @@ const fixture = Effect.gen(function* () {
   yield* git(root, ["clone", origin, sender]);
   yield* fs.writeFileString(path.join(sender, "app.ts"), "initial\n");
   yield* fs.writeFileString(path.join(sender, "old.ts"), "delete me\n");
+  yield* fs.writeFileString(path.join(sender, "settings.txt"), "public configuration\n");
   yield* fs.writeFileString(path.join(sender, ".gitignore"), ".env\n*.local\n");
   yield* git(sender, ["add", "."]);
   yield* git(sender, ["commit", "-m", "base"]);
@@ -76,6 +77,9 @@ const editSender = Effect.fnUntraced(function* (sender: string) {
   yield* fs.writeFileString(path.join(sender, ".env"), "SECRET=private\n");
   yield* fs.writeFileString(path.join(sender, "conf.local"), "force-staged work\n");
   yield* git(sender, ["add", "-f", "conf.local"]);
+  yield* git(sender, ["rm", "--cached", "settings.txt"]);
+  yield* fs.writeFileString(path.join(sender, ".gitignore"), ".env\n*.local\nsettings.txt\n");
+  yield* fs.writeFileString(path.join(sender, "settings.txt"), "private configuration\n");
 });
 
 const repositoryState = Effect.fnUntraced(function* (cwd: string) {
@@ -173,13 +177,14 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         assert.equal(yield* fs.readFileString(path.join(worktree, "sub", "new.ts")), "untracked\n");
         assert.isFalse(yield* fs.exists(path.join(worktree, "old.ts")));
         assert.isFalse(yield* fs.exists(path.join(worktree, ".env")));
+        assert.isFalse(yield* fs.exists(path.join(worktree, "settings.txt")));
         assert.equal(
           yield* fs.readFileString(path.join(worktree, "conf.local")),
           "force-staged work\n",
         );
         assert.equal(
           yield* git(worktree, ["status", "--porcelain"]),
-          " M app.ts\n D old.ts\n?? sub/",
+          " M .gitignore\n M app.ts\n D old.ts\n D settings.txt\n?? sub/",
         );
         const receiverAfter = yield* repositoryState(receiver);
         assert.deepEqual({ ...receiverAfter, refs: receiverBefore.refs }, receiverBefore);
@@ -227,47 +232,47 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect.each(["new branch", "fast-forward", "concurrent branch move"])(
-    "rolls back a failed post-checkout hook: %s",
-    (mode) =>
-      Effect.gen(function* () {
-        const repo = yield* fixture;
-        const { path, fs, sender, receiver, outDir, worktree } = repo;
-        const handoff = yield* HandoffGit.HandoffGit;
-        yield* editSender(sender);
-        const packed = yield* handoff.pack({ cwd: sender, handoffId, outDir });
-        if (mode === "fast-forward") yield* git(receiver, ["branch", branch]);
-        const before = yield* git(receiver, ["show-ref"]);
-        const worktrees = yield* git(receiver, ["worktree", "list", "--porcelain"]);
-        if (mode === "fast-forward") {
-          yield* fs.makeDirectory(worktree);
-          yield* fs.writeFileString(path.join(worktree, "keep.txt"), "existing work\n");
-          const error = yield* handoff.apply(applyInput(repo, packed)).pipe(Effect.flip);
-          assert.equal(error._tag, "HandoffGitStepError");
-          assert.equal(yield* git(receiver, ["show-ref"]), before);
-          assert.equal(yield* git(receiver, ["worktree", "list", "--porcelain"]), worktrees);
-          assert.equal(
-            yield* fs.readFileString(path.join(worktree, "keep.txt")),
-            "existing work\n",
-          );
-          yield* fs.remove(worktree, { recursive: true });
-        }
-        const moved = yield* git(receiver, ["rev-parse", "main"]);
-        const hook = path.join(receiver, ".git", "hooks", "post-checkout");
-        yield* fs.writeFileString(
-          hook,
-          `#!/bin/sh\n${mode === "concurrent branch move" ? `git update-ref refs/heads/${branch} ${moved}\n` : ""}exit 1\n`,
-        );
-        yield* fs.chmod(hook, 0o755);
+  it.effect.each([
+    "new branch",
+    "fast-forward",
+    "concurrent branch move",
+    "successful concurrent branch move",
+  ])("rolls back an invalid checkout: %s", (mode) =>
+    Effect.gen(function* () {
+      const repo = yield* fixture;
+      const { path, fs, sender, receiver, outDir, worktree } = repo;
+      const handoff = yield* HandoffGit.HandoffGit;
+      yield* editSender(sender);
+      const packed = yield* handoff.pack({ cwd: sender, handoffId, outDir });
+      if (mode === "fast-forward") yield* git(receiver, ["branch", branch]);
+      const before = yield* git(receiver, ["show-ref"]);
+      const worktrees = yield* git(receiver, ["worktree", "list", "--porcelain"]);
+      if (mode === "fast-forward") {
+        yield* fs.makeDirectory(worktree);
+        yield* fs.writeFileString(path.join(worktree, "keep.txt"), "existing work\n");
         const error = yield* handoff.apply(applyInput(repo, packed)).pipe(Effect.flip);
         assert.equal(error._tag, "HandoffGitStepError");
-        if (mode === "concurrent branch move")
-          assert.equal(yield* git(receiver, ["rev-parse", branch]), moved);
-        else assert.equal(yield* git(receiver, ["show-ref"]), before);
-        assert.equal(yield* git(receiver, ["for-each-ref", "refs/t3code"]), "");
+        assert.equal(yield* git(receiver, ["show-ref"]), before);
         assert.equal(yield* git(receiver, ["worktree", "list", "--porcelain"]), worktrees);
-        assert.isFalse(yield* fs.exists(worktree));
-      }).pipe(Effect.scoped),
+        assert.equal(yield* fs.readFileString(path.join(worktree, "keep.txt")), "existing work\n");
+        yield* fs.remove(worktree, { recursive: true });
+      }
+      const moved = yield* git(receiver, ["rev-parse", "main"]);
+      const hook = path.join(receiver, ".git", "hooks", "post-checkout");
+      yield* fs.writeFileString(
+        hook,
+        `#!/bin/sh\n${mode.includes("concurrent branch move") ? `git update-ref refs/heads/${branch} ${moved}\n` : ""}exit ${mode === "successful concurrent branch move" ? 0 : 1}\n`,
+      );
+      yield* fs.chmod(hook, 0o755);
+      const error = yield* handoff.apply(applyInput(repo, packed)).pipe(Effect.flip);
+      assert.equal(error._tag, "HandoffGitStepError");
+      if (mode.includes("concurrent branch move"))
+        assert.equal(yield* git(receiver, ["rev-parse", branch]), moved);
+      else assert.equal(yield* git(receiver, ["show-ref"]), before);
+      assert.equal(yield* git(receiver, ["for-each-ref", "refs/t3code"]), "");
+      assert.equal(yield* git(receiver, ["worktree", "list", "--porcelain"]), worktrees);
+      assert.isFalse(yield* fs.exists(worktree));
+    }).pipe(Effect.scoped),
   );
 
   it.effect.each(["new branch", "fast-forward"])("rolls back a cancelled apply: %s", (mode) =>
@@ -341,38 +346,56 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect.each(["submodule", "nested repository"])("refuses omitted work in a %s", (kind) =>
-    Effect.gen(function* () {
-      const { path, fs, sender, origin, outDir } = yield* fixture;
-      const handoff = yield* HandoffGit.HandoffGit;
-      const nested = path.join(sender, "nested");
-      if (kind === "submodule") {
-        yield* git(sender, [
-          "-c",
-          "protocol.file.allow=always",
-          "submodule",
-          "add",
-          origin,
-          "nested",
-        ]);
-        yield* git(sender, ["commit", "-am", "submodule"]);
-      } else {
-        yield* git(sender, ["clone", origin, nested]);
-      }
-      yield* fs.writeFileString(path.join(nested, "app.ts"), "uncommitted nested work\n");
-      const cwd = path.join(sender, "subdirectory");
-      yield* fs.makeDirectory(cwd);
-      const before = yield* repositoryState(sender);
-      const error = yield* handoff.pack({ cwd, handoffId, outDir }).pipe(Effect.flip);
-      assert.equal(error._tag, "HandoffGitStepError");
-      assert.include(error.message, "does not carry submodules or nested repositories");
-      assert.deepEqual(yield* repositoryState(sender), before);
-      assert.deepEqual(yield* fs.readDirectory(outDir), []);
-      assert.equal(
-        yield* fs.readFileString(path.join(nested, "app.ts")),
-        "uncommitted nested work\n",
-      );
-    }).pipe(Effect.scoped),
+  it.effect.each(["submodule", "nested repository", "sparse checkout"])(
+    "refuses omitted work in a %s",
+    (kind) =>
+      Effect.gen(function* () {
+        const { path, fs, sender, origin, outDir } = yield* fixture;
+        const handoff = yield* HandoffGit.HandoffGit;
+        const nested = path.join(sender, "nested");
+        if (kind === "sparse checkout") {
+          yield* fs.makeDirectory(path.join(sender, "included"));
+          yield* fs.makeDirectory(path.join(sender, "excluded"));
+          yield* fs.writeFileString(path.join(sender, "included", "file"), "included\n");
+          yield* fs.writeFileString(path.join(sender, "excluded", "file"), "excluded\n");
+          yield* git(sender, ["add", "."]);
+          yield* git(sender, ["commit", "-m", "sparse fixture"]);
+          yield* git(sender, ["sparse-checkout", "set", "included"]);
+        } else if (kind === "submodule") {
+          yield* git(sender, [
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            origin,
+            "nested",
+          ]);
+          yield* git(sender, ["commit", "-am", "submodule"]);
+        } else {
+          yield* git(sender, ["clone", origin, nested]);
+        }
+        if (kind !== "sparse checkout") {
+          yield* fs.writeFileString(path.join(nested, "app.ts"), "uncommitted nested work\n");
+        }
+        const cwd = path.join(sender, "subdirectory");
+        yield* fs.makeDirectory(cwd);
+        const before = yield* repositoryState(sender);
+        const error = yield* handoff.pack({ cwd, handoffId, outDir }).pipe(Effect.flip);
+        assert.equal(error._tag, "HandoffGitStepError");
+        assert.include(
+          error.message,
+          kind === "sparse checkout"
+            ? "does not carry sparse checkouts"
+            : "does not carry submodules or nested repositories",
+        );
+        assert.deepEqual(yield* repositoryState(sender), before);
+        assert.deepEqual(yield* fs.readDirectory(outDir), []);
+        if (kind !== "sparse checkout")
+          assert.equal(
+            yield* fs.readFileString(path.join(nested, "app.ts")),
+            "uncommitted nested work\n",
+          );
+      }).pipe(Effect.scoped),
   );
 
   it.effect.skipIf(HostProcess.Platform.defaultValue() !== "linux")(

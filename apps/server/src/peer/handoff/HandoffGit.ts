@@ -77,6 +77,7 @@ export class HandoffGitStepError extends Schema.TaggedError<HandoffGitStepError>
         "gitlinks",
         "index-too-large",
         "invalid-path",
+        "sparse-checkout",
       ]),
     ),
     cause: Schema.optional(Schema.Defect()),
@@ -93,7 +94,9 @@ export class HandoffGitStepError extends Schema.TaggedError<HandoffGitStepError>
       case "index-too-large":
         return "This checkout has too many indexed files for Git handoff. Transfer it manually.";
       case "invalid-path":
-        return "Git handoff requires UTF-8 names for force-staged ignored files. Rename them, then try again.";
+        return "Git handoff requires UTF-8 names for indexed files. Rename them, then try again.";
+      case "sparse-checkout":
+        return "Git handoff does not carry sparse checkouts. Disable sparse checkout, then try again.";
       default:
         return `git ${this.step} failed.`;
     }
@@ -203,6 +206,12 @@ const make = Effect.gen(function* () {
     if (!(yield* ok(input.cwd, ["rev-parse", "--verify", "HEAD"]))) {
       return yield* new HandoffNotARepositoryError({ cwd: input.cwd });
     }
+    const sparse = yield* git(input.cwd, ["config", "--bool", "core.sparseCheckout"], {
+      allowNonZeroExit: true,
+    });
+    if (sparse.stdout.trim() === "true") {
+      return yield* new HandoffGitStepError({ step: "pack", reason: "sparse-checkout" });
+    }
     const tip = yield* out(input.cwd, ["rev-parse", "HEAD"]);
     const branchName = yield* git(input.cwd, ["symbolic-ref", "--quiet", "HEAD"], {
       allowNonZeroExit: true,
@@ -221,33 +230,23 @@ const make = Effect.gen(function* () {
       ...IDENTITY,
       ...VcsProcess.gitConfigEnv(process.env, "core.splitIndex", "false", platform),
     };
-    yield* git(input.cwd, ["read-tree", tip], { env });
-    const ignored = yield* git(
+    const staged = yield* git(
       input.cwd,
-      [
-        "ls-files",
-        "--cached",
-        "--stage",
-        "--ignored",
-        "--exclude-standard",
-        "--full-name",
-        "-z",
-        "--",
-        ":/",
-      ],
+      ["ls-files", "--cached", "--stage", "--full-name", "-z", "--", ":/"],
       { maxOutputBytes: 16 * 1024 * 1024 },
     );
-    if (ignored.stdoutTruncated) {
+    if (staged.stdoutTruncated) {
       return yield* new HandoffGitStepError({ step: "pack", reason: "index-too-large" });
     }
-    if (ignored.stdoutInvalidUtf8) {
+    if (staged.stdoutInvalidUtf8) {
       return yield* new HandoffGitStepError({ step: "pack", reason: "invalid-path" });
     }
-    // Force-staged ignored files are work; seed only their entries without copying index flags.
-    if (ignored.stdout !== "") {
+    // Preserve tracked paths and staged deletions without copying flags that can hide edits.
+    yield* git(input.cwd, ["read-tree", "--empty"], { env });
+    if (staged.stdout !== "") {
       yield* git(input.cwd, ["update-index", "-z", "--index-info"], {
         env,
-        stdin: ignored.stdout,
+        stdin: staged.stdout,
       });
     }
     // The root pathspec includes edits above cwd without touching the sender index.
@@ -429,6 +428,9 @@ const make = Effect.gen(function* () {
     yield* git(worktreePath, ["checkout", "--no-overlay", input.snapshot, "--", "."]);
     // Restore the index without resetting a branch another process may have moved.
     yield* git(worktreePath, ["read-tree", input.tip]);
+    if ((yield* out(worktreePath, ["rev-parse", "HEAD"])) !== input.tip) {
+      return yield* new HandoffGitStepError({ step: "worktree" });
+    }
     return { branch };
   }, Effect.scoped);
 
