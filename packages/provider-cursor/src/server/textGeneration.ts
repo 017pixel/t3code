@@ -1,4 +1,3 @@
-import * as NodeOS from "node:os";
 import * as FileSystem from "effect/FileSystem";
 
 import type { AgentOptions, RunResult } from "@cursor/sdk";
@@ -13,6 +12,7 @@ import * as TextGenerationOperations from "@t3tools/provider-core/server/textGen
 import { cursorSdkModelSelection } from "./sdkModel.ts";
 import type { CursorAuth } from "./auth.ts";
 import * as CursorSdk from "./CursorSdk.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const CURSOR_TIMEOUT_MS = 180_000;
 
@@ -47,10 +47,6 @@ function cursorSandboxUnsupported(cause: unknown): boolean {
   return false;
 }
 
-/**
- * Build a Cursor text-generation closure bound to a specific `CursorSettings`
- * payload. See `makeCodexAdapter` for the overall per-instance rationale.
- */
 export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(function* (
   cursorSettings: CursorSettings,
   environment?: NodeJS.ProcessEnv,
@@ -58,7 +54,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
   withAccess?: CursorAuth["withAccess"],
 ) {
   const fs = yield* FileSystem.FileSystem;
-  const { Agent } = yield* CursorSdk.CursorSdk;
+  const { Agent, SqliteLocalAgentStore } = yield* CursorSdk.CursorSdk;
   const resolvedEnvironment = environment ?? process.env;
 
   const resolveCursorApiKey = (operation: TextGenerationOperations.Operation) =>
@@ -83,14 +79,13 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       return apiKey;
     });
 
-  // Ignores `cwd`: the agent runs in an empty temp directory, away from the project.
   const runCursorJson: TextGenerationOperations.Runner = (input) => {
     const { operation, prompt, modelSelection } = input;
     return Effect.gen(function* () {
       const apiKey = yield* resolveCursorApiKey(operation);
       // The SDK loads sandbox.json independently of settingSources and lets it
       // expand the writable paths. Its public API cannot override that policy.
-      if (yield* fs.exists(`${NodeOS.homedir()}/.cursor/sandbox.json`)) {
+      if (yield* fs.exists(`${yield* HostProcess.HomeDirectory}/.cursor/sandbox.json`)) {
         return yield* new TextGenerationError({
           operation,
           detail:
@@ -98,12 +93,21 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
         });
       }
       const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cursor-text-" });
+      // The SDK keeps SQLite handles open after `agent.close()` and only releases
+      // them from a store the caller disposes. Its state lives outside `cwd` so the
+      // agent's workspace stays empty.
+      const stateRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cursor-text-state-" });
+      const store = yield* Effect.acquireRelease(
+        Effect.tryPromise(() => SqliteLocalAgentStore.open({ workspaceRef: cwd, stateRoot })),
+        (store) => Effect.tryPromise(() => store.dispose()).pipe(Effect.ignore({ log: true })),
+      );
       const agentOptions = {
         apiKey,
         mode: "plan",
         model: cursorSdkModelSelection(modelSelection),
         local: {
           cwd,
+          store,
           autoReview: false,
           sandboxOptions: { enabled: true },
           settingSources: [],
@@ -129,8 +133,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
         );
 
       const request = Effect.gen(function* () {
-        // Prefer the sandbox. When the SDK refuses it, the empty temp directory
-        // and empty setting sources still keep this run off the user's project.
+        // When the SDK refuses it, the empty temp directory and empty setting
+        // sources still keep this run off the user's project.
         const agent = yield* Effect.acquireRelease(
           createCursorAgent(true).pipe(
             Effect.catchIf(cursorSandboxUnsupported, () => createCursorAgent(false)),
@@ -184,6 +188,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
 
       return yield* TextGenerationOperations.decodeJsonReply(input, "Cursor SDK", rawResult);
     }).pipe(
+      // Scope this call inside `withAccess`, so sign-out closes the agent before its store.
+      Effect.scoped,
       (effect) => (withAccess ? withAccess(effect) : effect),
       Effect.scoped,
       Effect.mapError((cause) =>
@@ -198,5 +204,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     );
   };
 
-  return TextGenerationOperations.fromRunner("CursorTextGeneration", runCursorJson);
+  return TextGenerationOperations.fromRunner(
+    "CursorTextGeneration",
+    TextGenerationOperations.withoutInvestigation("Cursor", runCursorJson),
+  );
 });

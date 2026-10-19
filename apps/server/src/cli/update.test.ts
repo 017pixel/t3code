@@ -10,12 +10,7 @@ import * as Path from "effect/Path";
 import { Command } from "effect/cli";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import { afterEach, vi } from "vite-plus/test";
-import {
-  HostProcessEnvironment,
-  HostProcessInvokedAs,
-  HostProcessPlatform,
-  HostProcessWorkingDirectory,
-} from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as BootService from "../cloud/bootService.ts";
@@ -46,7 +41,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NetService.layer))("t3 update discov
         "--channel",
         "stable",
       ]).pipe(
-        Effect.provideService(HostProcessEnvironment, {
+        Effect.provideService(HostProcess.Environment, {
           T3CODE_RELEASE_BASE_URL: " http://127.0.0.1:4321/releases/ ",
         }),
         Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
@@ -104,7 +99,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
 
       assert.deepStrictEqual(Option.getOrUndefined(repointed), launcher);
       assert.equal(yield* fs.readLink(launcher), newExe);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("leaves a plain copy or a foreign symlink alone", () =>
@@ -116,7 +111,6 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       const copy = path.join(root, "copy/t3");
       const foreign = path.join(root, "foreign/t3");
       const elsewhere = path.join(root, "elsewhere/t3");
-      // Another install's versions tree: same shape, different home.
       const otherHome = path.join(root, "other/runtime/versions/1.0.0/t3");
       const otherLauncher = path.join(root, "other/bin/t3");
       for (const file of [newExe, copy, elsewhere, otherHome]) {
@@ -138,7 +132,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       }
       assert.equal(yield* fs.readLink(foreign), elsewhere);
       assert.equal(yield* fs.readLink(otherLauncher), otherHome);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("finds the launcher a bare command name resolved to on PATH", () =>
@@ -151,26 +145,26 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       yield* fs.writeFileString(launcher, "");
 
       const bare = yield* resolveLauncherPath.pipe(
-        Effect.provideService(HostProcessInvokedAs, "t3"),
-        Effect.provideService(HostProcessEnvironment, {
+        Effect.provideService(HostProcess.InvokedAs, "t3"),
+        Effect.provideService(HostProcess.Environment, {
           PATH: `${path.join(root, "missing")}:${path.join(root, "bin")}`,
         }),
-        Effect.provideService(HostProcessWorkingDirectory, root),
+        Effect.provideService(HostProcess.WorkingDirectory, root),
       );
       const relative = yield* resolveLauncherPath.pipe(
-        Effect.provideService(HostProcessInvokedAs, "./bin/t3"),
-        Effect.provideService(HostProcessEnvironment, { PATH: "" }),
-        Effect.provideService(HostProcessWorkingDirectory, root),
+        Effect.provideService(HostProcess.InvokedAs, "./bin/t3"),
+        Effect.provideService(HostProcess.Environment, { PATH: "" }),
+        Effect.provideService(HostProcess.WorkingDirectory, root),
       );
       const absent = yield* resolveLauncherPath.pipe(
-        Effect.provideService(HostProcessInvokedAs, "t3"),
-        Effect.provideService(HostProcessEnvironment, { PATH: path.join(root, "missing") }),
-        Effect.provideService(HostProcessWorkingDirectory, root),
+        Effect.provideService(HostProcess.InvokedAs, "t3"),
+        Effect.provideService(HostProcess.Environment, { PATH: path.join(root, "missing") }),
+        Effect.provideService(HostProcess.WorkingDirectory, root),
       );
 
       assert.equal(bare, launcher);
       assert.equal(relative, launcher);
       assert.equal(absent, undefined);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 });

@@ -1,11 +1,3 @@
-/**
- * CursorDriver — `ProviderDriver` for the Cursor Agent SDK runtime.
- *
- * Provider status, model discovery, orchestration, and text generation use the
- * official Cursor SDK with an instance browser login or CURSOR_API_KEY.
- *
- * @module provider/Drivers/CursorDriver
- */
 import { ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
 import { CursorSettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
@@ -41,6 +33,9 @@ import { makeCursorAuth } from "./auth.ts";
 import * as CursorCredentialStore from "./credentialStore.ts";
 import * as CursorAgentSdk from "./CursorAgentSdk.ts";
 import * as CursorSdk from "./CursorSdk.ts";
+import * as CursorKeychain from "./CursorKeychain.ts";
+import * as CursorUsageAccounts from "./CursorUsageAccounts.ts";
+
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
 const isSdkRunnerError = Schema.is(CursorAgentSdk.CursorAgentSdkRunnerError);
 
@@ -57,9 +52,14 @@ export type CursorDriverEnv =
   | Path.Path
   | HttpClient.HttpClient
   | CursorSdk.CursorSdk
-  | ProviderHost.ProviderHost;
+  | ProviderHost.ProviderHost
+  | CursorKeychain.CursorKeychain;
 
-export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
+export const CursorDriver: ProviderDriver<
+  CursorSettings,
+  CursorDriverEnv,
+  CursorUsageAccounts.CursorUsageAccounts
+> = {
   driverKind: DRIVER_KIND,
   metadata: {
     displayName: "Cursor",
@@ -67,14 +67,30 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
   },
   configSchema: CursorSettings,
   defaultConfig: (): CursorSettings => decodeCursorSettings({}),
+  usage: {
+    kind: "scan",
+    provider: "cursor",
+    scan: ({ settings, windowStartMs, retentionCutoffMs, awaitRefresh }) =>
+      CursorUsageAccounts.CursorUsageAccounts.pipe(
+        Effect.flatMap((accounts) =>
+          accounts.scan({
+            keychainUsageEnabled: settings.cursorKeychainUsageEnabled,
+            windowStartMs,
+            retentionCutoffMs,
+            awaitRefresh,
+          }),
+        ),
+      ),
+  },
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const host = yield* ProviderHost.ProviderHost;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
+      const keychain = yield* CursorKeychain.CursorKeychain;
       const sdkRunner = yield* CursorAgentSdk.CursorAgentSdkRunner;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -221,6 +237,7 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         Effect.provideService(HttpClient.HttpClient, httpClient),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
+        Effect.provideService(CursorKeychain.CursorKeychain, keychain),
         Effect.map(stampSnapshot),
         Effect.provide(CursorSdkCatalog.layer),
       );

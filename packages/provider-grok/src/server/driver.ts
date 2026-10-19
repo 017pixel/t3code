@@ -19,6 +19,7 @@ import {
   checkGrokProviderStatus,
   enrichGrokSnapshot,
 } from "./status.ts";
+import { grokUsageReader } from "./usage.ts";
 import { readGrokAccount } from "./usageLimits.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
@@ -30,10 +31,12 @@ import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIden
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { discoverGrokSkills } from "./skills.ts";
 import {
+  homebrewOwnershipFromCommandPath,
   makeCachedProviderMaintenanceResolution,
   makeManualOnlyProviderMaintenanceCapabilities,
   makeProviderMaintenanceCapabilities,
   type ProviderMaintenanceCapabilitiesResolver,
+  resolveHomebrewProviderMaintenance,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "@t3tools/provider-core/server/maintenanceResolver";
 import {
@@ -49,26 +52,43 @@ const DRIVER_KIND = ProviderDriverKind.make("grok");
 const GROK_NPM_PACKAGE = "@xai-official/grok";
 // `grok update` finds the installer that owns the binary itself, so the
 // resolved executable is its own updater. It installs under `GROK_HOME`, so it
-// runs with the instance's environment. No executable means nothing to update,
-// not "whatever is on PATH".
+// runs with the instance's environment. The exception is a Homebrew cask
+// (normally `grok-build`), which brew upgrades and versions: `grok update` would install
+// a second copy beside it, so a cask its brew cannot vouch for stays manual.
 const UPDATE: ProviderMaintenanceCapabilitiesResolver = {
-  resolve: (context) =>
-    Effect.succeed(
-      context
-        ? makeProviderMaintenanceCapabilities({
-            provider: DRIVER_KIND,
-            packageName: GROK_NPM_PACKAGE,
-            updateExecutable: context.resolvedCommandPath,
-            updateArgs: ["update"],
-            updateLockKey: "grok",
-            platform: context.platform,
-            env: context.env,
-          })
-        : makeManualOnlyProviderMaintenanceCapabilities({
-            provider: DRIVER_KIND,
-            packageName: GROK_NPM_PACKAGE,
-          }),
-    ),
+  resolve: Effect.fn("resolveGrokMaintenance")(function* (context) {
+    if (!context) {
+      return makeManualOnlyProviderMaintenanceCapabilities({
+        provider: DRIVER_KIND,
+        packageName: GROK_NPM_PACKAGE,
+      });
+    }
+    const homebrew = homebrewOwnershipFromCommandPath(context.realCommandPath);
+    // Only a cask is Grok's: a formula keg such as `node` holding an npm global is not.
+    if (homebrew?.kind === "cask") {
+      return (
+        (yield* resolveHomebrewProviderMaintenance(
+          { provider: DRIVER_KIND, packageName: GROK_NPM_PACKAGE },
+          homebrew,
+          context,
+        )) ??
+        makeManualOnlyProviderMaintenanceCapabilities({
+          provider: DRIVER_KIND,
+          packageName: GROK_NPM_PACKAGE,
+          installPath: context.realCommandPath,
+        })
+      );
+    }
+    return makeProviderMaintenanceCapabilities({
+      provider: DRIVER_KIND,
+      packageName: GROK_NPM_PACKAGE,
+      updateExecutable: context.resolvedCommandPath,
+      updateArgs: ["update"],
+      updateLockKey: "grok",
+      platform: context.platform,
+      env: context.env,
+    });
+  }),
 };
 
 export type GrokDriverEnv =
@@ -82,7 +102,7 @@ export type GrokDriverEnv =
   | Path.Path
   | ProviderEventLoggers.ProviderEventLoggers;
 
-export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
+export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv, Path.Path> = {
   driverKind: DRIVER_KIND,
   metadata: {
     displayName: "Grok",
@@ -90,6 +110,7 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
   },
   configSchema: GrokSettings,
   defaultConfig: (): GrokSettings => decodeGrokSettings({}),
+  usage: grokUsageReader,
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const crypto = yield* Crypto.Crypto;
@@ -100,7 +121,7 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
       const path = yield* Path.Path;
       const host = yield* ProviderHost.ProviderHost;
       const { cwd } = host.paths;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
