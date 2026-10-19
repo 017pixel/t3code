@@ -452,7 +452,7 @@ available.
 - `apps/desktop/src/main.ts` only wires the updater layers into the desktop runtime.
 - Update UX:
   - Background checks run on startup delay + interval.
-  - Updates found by the startup and interval checks download automatically and install when the app quits. `.deb` installs are never armed for quit, because dpkg asks for a password.
+  - Updates found by the startup and interval checks download automatically and install when the app quits. macOS and `.deb` installs are never armed for quit: Squirrel.Mac stages an armed update irreversibly, and dpkg asks for a password. They wait for **Install**. A version whose install did not apply is not downloaded again in the background.
   - A manual check only reports; the update button downloads, then restarts to install right away.
 - Provider: GitHub Releases (`provider: github`) configured at build time.
 - Repository slug source:

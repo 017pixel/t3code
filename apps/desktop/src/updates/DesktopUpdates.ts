@@ -613,6 +613,9 @@ export const make = Effect.gen(function* () {
       if (!(yield* checkForUpdates(reason)) || (yield* Ref.get(desktopState.quitting))) return;
       const version = (yield* Ref.get(updateStateRef)).availableVersion;
       if (version === null || failedDownloads.has(version)) return;
+      // A version whose install did not apply waits for a manual retry, as on main.
+      const notApplied = yield* Ref.get(notAppliedVersionRef);
+      if (Option.isSome(notApplied) && notApplied.value === version) return;
       yield* downloadAvailableUpdate;
     },
   );
