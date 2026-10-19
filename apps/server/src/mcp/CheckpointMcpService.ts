@@ -272,6 +272,23 @@ const make = Effect.gen(function* () {
         );
       }
       const selected = ordered.slice(cursor, cursor + limit);
+      const selectedScopeIds = new Set(selected.map((checkpoint) => checkpoint.scopeId));
+      const isolationByScope = new Map(
+        yield* Effect.forEach(
+          projection.checkpointScopes.filter((candidate) => selectedScopeIds.has(candidate.id)),
+          (scopeSummary) =>
+            isCheckpointRestoreIsolated(projection.thread, scopeSummary, {
+              fileSystem,
+              path,
+              projects,
+              projections,
+            }).pipe(
+              Effect.orElseSucceed(() => false),
+              Effect.map((isolated) => [scopeSummary.id, isolated] as const),
+            ),
+          { concurrency: 4 },
+        ),
+      );
       const checkpoints = yield* Effect.forEach(
         selected,
         (checkpoint) =>
@@ -287,15 +304,7 @@ const make = Effect.gen(function* () {
                 scope: scopeSummary,
                 refAvailable: availability.refAvailable,
               });
-              if (
-                scopeSummary !== undefined &&
-                !(yield* isCheckpointRestoreIsolated(projection.thread, scopeSummary, {
-                  fileSystem,
-                  path,
-                  projects,
-                  projections,
-                }).pipe(Effect.orElseSucceed(() => false)))
-              )
+              if (scopeSummary !== undefined && isolationByScope.get(scopeSummary.id) !== true)
                 blockers.push("shared_workspace");
               return {
                 checkpointId: checkpoint.id,

@@ -161,6 +161,10 @@ This removes the selected message and later conversation from the active thread
 and provider history. It does not undo external actions or separate provider
 memory. The action is available only when the provider supports rewind.
 
+Agents can inspect durable file checkpoints with `t3_checkpoint_list` and page through
+their patches with `t3_checkpoint_diff`. Checkpoints report whether their stored files
+are still available and whether the current provider can restore the conversation.
+
 ## Prompt stash
 
 On web and desktop, press `Cmd+S` on macOS or `Ctrl+S` on Windows and Linux to save
@@ -344,7 +348,3 @@ including filenames or folders containing `#` or `?`.
 
 On mobile, select a PDF attachment or link to open it. iOS uses the native viewer;
 Android opens a compatible installed file viewer.
-
-Agents can inspect durable file checkpoints with `t3_checkpoint_list` and page through
-their patches with `t3_checkpoint_diff`. Checkpoints report whether their stored files
-are still available and whether the current provider can restore the conversation.
