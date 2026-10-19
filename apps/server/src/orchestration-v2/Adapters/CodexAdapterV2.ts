@@ -1829,6 +1829,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         );
         const turnWaiters = yield* Ref.make(new Map<string, Deferred.Deferred<void, never>>());
         const subagentThreads = yield* Ref.make(new Map<string, CodexSubagentThreadContext>());
+        const appOwnedThreadIds = new Set<string>();
         const subagentSelections = new Map<string, Omit<ModelSelection, "instanceId">>();
         const pendingSubagentTurns = yield* Ref.make(
           new Map<string, ReadonlyArray<PendingCodexSubagentTurnStarted>>(),
@@ -6474,6 +6475,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   }),
                 ),
               ),
+              Effect.tap((response) =>
+                Effect.sync(() => appOwnedThreadIds.add(response.thread.id)),
+              ),
               Effect.map((response): OrchestrationV2ProviderThread =>
                 providerThreadFromCodexThread({
                   appThreadId: threadInput.threadId,
@@ -6533,6 +6537,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
                 Effect.flatMap(decodeCodexResumeMetadata),
               );
+              appOwnedThreadIds.add(response.thread.id);
               return {
                 ...threadInput.providerThread,
                 providerSessionId: input.providerSessionId,
@@ -6676,17 +6681,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   }),
               ),
             ),
-          // Each native subagent has its own subscription and MCP servers;
-          // release the whole subtree even if an unsubscribe fails.
+          // Independently opened app threads own their subtree and unload it themselves.
+          // Attempt every remaining unsubscribe even if an earlier one fails.
           unloadThread: (unloadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
+              appOwnedThreadIds.delete(nativeThreadId);
               const nativeThreadIds = new Set([nativeThreadId]);
               for (const [threadId, subagent] of yield* Ref.get(subagentThreads)) {
+                if (appOwnedThreadIds.has(threadId)) continue;
                 let parent: ActiveCodexTurnContext | undefined = subagent.parentContext;
                 while (parent !== undefined) {
                   if (parent.providerThread.id === unloadInput.providerThread.id) {
                     nativeThreadIds.add(threadId);
+                    break;
+                  }
+                  const parentNativeThreadId = parent.providerThread.nativeThreadRef?.nativeId;
+                  if (parentNativeThreadId != null && appOwnedThreadIds.has(parentNativeThreadId)) {
                     break;
                   }
                   parent = parent.subagent?.parentContext;
