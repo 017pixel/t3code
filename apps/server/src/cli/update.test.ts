@@ -27,7 +27,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
         const executable = '#!/bin/sh\nprintf \'[%s]\\n\' "$0" "$@"\n';
         const args = ["two words", "it's quoted", "", "*", "$HOME"];
         const entry = (version: number) => path.join(versionsDir, `${version}.0.0/t3`);
-        for (const file of [entry(1), entry(2), entry(3), entry(4)]) {
+        for (const file of [entry(1), entry(2), entry(3), entry(4), entry(5)]) {
           yield* fs.makeDirectory(path.dirname(file), { recursive: true });
           yield* fs.writeFileString(file, executable, { mode: 0o755 });
         }
@@ -58,6 +58,27 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
           assert.equal(yield* fs.readFileString(entry(version - 1)), executable);
           assert.equal(yield* fs.readLink(alias), launcher);
         }
+
+        const customLauncher = path.join(root, "custom/bin/t3");
+        yield* fs.makeDirectory(path.dirname(customLauncher), { recursive: true });
+        const oldLauncher = yield* fs.readFileString(launcher);
+        yield* fs.writeFileString(customLauncher, oldLauncher, { mode: 0o755 });
+        const repointed = yield* repointLauncher({
+          launchedAs: entry(4),
+          versionsDir,
+          targetEntryPath: entry(5),
+        }).pipe(
+          Effect.provideService(HostProcess.Environment, {
+            HOME: home,
+            PATH: `${path.dirname(customLauncher)}:${path.dirname(launcher)}`,
+          }),
+        );
+        assert.equal(Option.getOrUndefined(repointed), customLauncher);
+        assert.equal(yield* fs.readFileString(launcher), oldLauncher);
+        assert.equal(
+          yield* spawner.string(ChildProcess.make(customLauncher, args, { cwd: root })),
+          [entry(5), ...args].map((arg) => `[${arg}]\n`).join(""),
+        );
       }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 

@@ -232,12 +232,11 @@ export const findPosixLauncher = Effect.fn("cli.update.find_posix_launcher")(fun
 
   const expected = posixLauncherScript(input.launchedAs);
   const expectedSize = BigInt(Buffer.byteLength(expected));
-  const installBinDir =
-    environment["T3CODE_INSTALL_BIN_DIR"] ||
-    (environment["HOME"] ? path.join(environment["HOME"], ".local", "bin") : "");
-  const candidates = [installBinDir, ...(environment["PATH"] ?? "").split(":")].filter(
-    (entry) => entry.trim().length > 0,
-  );
+  const candidates = [
+    environment["T3CODE_INSTALL_BIN_DIR"] ?? "",
+    ...(environment["PATH"] ?? "").split(":"),
+    environment["HOME"] ? path.join(environment["HOME"], ".local", "bin") : "",
+  ].filter((entry) => entry.trim().length > 0);
   for (const directory of candidates) {
     // Rewrite the real script, preserving aliases that link to it.
     const launcherPath = yield* fs.realPath(path.join(directory, "t3")).pipe(Effect.option);
