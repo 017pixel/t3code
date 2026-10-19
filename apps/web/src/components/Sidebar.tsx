@@ -2705,6 +2705,7 @@ function useSidebarThreadSearch(threads: readonly EnvironmentThreadShell[], quer
     matches: deferred.matches,
     currentMatches,
     isPending: search.isPending,
+    isStale: deferred.query !== query || deferred.matches !== currentMatches,
   };
 }
 
@@ -3149,14 +3150,13 @@ export default function Sidebar() {
     )
       return;
     // Navigation must resolve the current input even while displayed results lag.
-    const results =
-      threadSearchQuery === deferredQuery && threadSearch.currentMatches === threadSearchMatchByKey
-        ? threadSearchResults
-        : searchSidebarThreads(
-            searchableThreads,
-            threadSearchQuery,
-            new Set(threadSearch.currentMatches.keys()),
-          );
+    const results = !threadSearch.isStale
+      ? threadSearchResults
+      : searchSidebarThreads(
+          searchableThreads,
+          threadSearchQuery,
+          new Set(threadSearch.currentMatches.keys()),
+        );
     if (results.length === 0) return;
     event.preventDefault();
     const currentIndex =
@@ -4776,7 +4776,7 @@ export default function Sidebar() {
               >
                 {threadSearch.isPending
                   ? "Searching thread messages…"
-                  : deferredQuery !== threadSearchQuery
+                  : threadSearch.isStale
                     ? "Searching threads…"
                     : "No threads found"}
               </p>
