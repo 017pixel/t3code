@@ -4,6 +4,7 @@ import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import * as NodeFSP from "node:fs/promises";
 import {
   AssetAccessError,
+  AssetResource,
   AssetPreviewTypeValidationError,
   ThreadId,
   TurnItemId,
@@ -21,12 +22,14 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { HttpClient, HttpClientResponse, HttpServerResponse } from "effect/http";
 import { vi } from "vite-plus/test";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
@@ -48,6 +51,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const layerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-asset-access-test-",
 });
+const decodeAssetResource = Schema.decodeUnknownSync(AssetResource);
 const screenshotPng = new Uint8Array(24);
 screenshotPng.set([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
@@ -1514,6 +1518,73 @@ describe("AssetAccess", () => {
         const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(AssetAccessError))(error);
         expect(encoded).not.toContain(url);
       }
+
+      const authorizations: Array<string | undefined> = [];
+      const mediaHttpClient = HttpClient.make((request) => {
+        authorizations.push(request.headers.authorization);
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(null, { headers: { "content-type": "image/png" } }),
+          ),
+        );
+      });
+      const processLayer = Layer.mock(ProcessRunner.ProcessRunner)({
+        run: ({ args }) =>
+          Effect.succeed({
+            stdout: args.includes("rev-parse")
+              ? "/repo\n"
+              : args.includes("remote")
+                ? "origin\thttps://github.com/workspace/app.git (fetch)\n"
+                : "",
+            stderr: "",
+            code: ChildProcessSpawner.ExitCode(0),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          }),
+      });
+      const accounts = Layer.mergeAll(
+        Layer.effect(
+          RepositoryIdentityResolver.RepositoryIdentityResolver,
+          RepositoryIdentityResolver.make(),
+        ).pipe(Layer.provide(processLayer)),
+        Layer.mock(GitHubCredentials.GitHubCredentials)({
+          get: (host, repository) =>
+            repository === "dependency/library" || repository === "workspace/app"
+              ? Effect.succeed({
+                  host,
+                  token: Redacted.make(
+                    repository === "dependency/library" ? "dependency-token" : "workspace-token",
+                  ),
+                  source: "gh" as const,
+                  fingerprint: repository,
+                })
+              : Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host })),
+        }),
+      );
+
+      for (const repository of [undefined, "dependency/library"]) {
+        const resource = decodeAssetResource({
+          _tag: "github-media",
+          cwd: "/repo",
+          url: "https://github.com/user-attachments/assets/1a1842fb-6383-492f-873c-57aa0033fa6c",
+          ...(repository === undefined ? {} : { repository }),
+        });
+        const issued = yield* issueAssetUrl({ resource });
+        const asset = yield* resolve(issued.relativeUrl);
+        if (asset?.kind !== "github-media") throw new Error("Expected signed GitHub media");
+        if (repository !== undefined) expect.soft(asset).toMatchObject({ repository });
+        const response = yield* githubMediaResponse(asset, {}).pipe(
+          Effect.provide(accounts),
+          Effect.provideService(HttpClient.HttpClient, mediaHttpClient),
+          Effect.provideService(HostProcess.Environment, {}),
+        );
+        expect(response.status).toBe(200);
+      }
+      expect(authorizations).toEqual(["Bearer workspace-token", "Bearer dependency-token"]);
     }).pipe(Effect.provide(layerTest)),
   );
 });
