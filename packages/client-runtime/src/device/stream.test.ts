@@ -215,20 +215,31 @@ describe("native device stream transport", () => {
   );
 });
 
+function semuPacket(version: 1 | 2, isKey: boolean, timestamp: number, payload: ArrayBuffer) {
+  const headerBytes = version === 1 ? 16 : 24;
+  const buffer = new ArrayBuffer(headerBytes + payload.byteLength);
+  const view = new DataView(buffer);
+  view.setUint32(0, 0x53454d55);
+  view.setUint8(4, version);
+  view.setUint8(5, isKey ? 1 : 0);
+  view.setBigUint64(8, BigInt(timestamp));
+  if (version === 2) view.setBigUint64(16, 1_700_000_000_123_456n);
+  new Uint8Array(buffer).set(new Uint8Array(payload), headerBytes);
+  return buffer;
+}
+
 describe("serve-emu frames", () => {
-  it("strips the SEMU header and reads the keyframe flag and timestamp", () => {
-    const buffer = new ArrayBuffer(16 + 3);
-    const view = new DataView(buffer);
-    view.setUint32(0, 0x53454d55);
-    view.setUint8(4, 1);
-    view.setUint8(5, 1);
-    view.setBigUint64(8, 123456n);
-    new Uint8Array(buffer).set([7, 8, 9], 16);
-    const packet = parseSemuPacket(buffer);
-    expect(packet.isKey).toBe(true);
-    expect(packet.timestamp).toBe(123456);
-    expect(Array.from(packet.data)).toEqual([7, 8, 9]);
-  });
+  it.each([1, 2] as const)(
+    "strips the SEMU v%i header and reads the keyframe flag and timestamp",
+    (version) => {
+      const packet = parseSemuPacket(
+        semuPacket(version, true, 123456, Uint8Array.of(7, 8, 9).buffer),
+      );
+      expect(packet.isKey).toBe(true);
+      expect(packet.timestamp).toBe(123456);
+      expect(Array.from(packet.data)).toEqual([7, 8, 9]);
+    },
+  );
 
   it("treats a frame without the header as raw data", () => {
     const packet = parseSemuPacket(new Uint8Array([0, 0, 1, 0x65]).buffer);
@@ -397,7 +408,7 @@ function recoveryFixture(platform: "ios" | "android" = "ios", preferMjpeg = true
     close() {
       this.state = "closed";
     }
-    decode = vi.fn();
+    decode = vi.fn<(chunk: EncodedVideoChunkInit) => void>();
     readonly callbacks: { output: (frame: VideoFrame) => void; error: () => void };
     constructor(callbacks: { output: (frame: VideoFrame) => void; error: () => void }) {
       this.callbacks = callbacks;
@@ -405,7 +416,12 @@ function recoveryFixture(platform: "ios" | "android" = "ios", preferMjpeg = true
     }
   }
   vi.stubGlobal("VideoDecoder", Decoder);
-  vi.stubGlobal("EncodedVideoChunk", vi.fn());
+  vi.stubGlobal(
+    "EncodedVideoChunk",
+    vi.fn(function (init: EncodedVideoChunkInit) {
+      return { ...init };
+    }),
+  );
   const videoBodies: ReadableStreamDefaultController<Uint8Array>[] = [];
   const signals: AbortSignal[] = [];
   const fetch = vi.fn((url: string, init: RequestInit) => {
@@ -493,30 +509,113 @@ describe("Android keyframe handshake", () => {
     JSON.stringify({ type: "video-session", size: { width, height } });
   const delta = new Uint8Array([0, 0, 0, 1, 0x41, 0x9a, 0x02]).buffer;
 
-  it("paints the first SPS/IDR without resetting the encoder for intervening deltas", async () => {
-    const { client, sockets, decoders, events, decodedFrame, drawImage, sps } = recoveryFixture(
-      "android",
-      false,
+  it("paints the first SPS/IDR and preserves intervening deltas without resetting the encoder", async () => {
+    const { client, sockets, decoders, events, decodedFrame, drawImage, Decoder, sps } =
+      recoveryFixture("android", false);
+    let resolveSupport!: (support: { supported: boolean }) => void;
+    Decoder.isConfigSupported.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSupport = resolve;
+        }),
     );
     client.start();
     const socket = sockets[0]!;
     socket.onopen?.();
     socket.onmessage?.({ data: videoSession(576, 1280) });
-    socket.onmessage?.({ data: sps });
-    socket.onmessage?.({ data: delta });
+    socket.onmessage?.({ data: semuPacket(2, true, 123456, sps) });
+    socket.onmessage?.({ data: semuPacket(2, false, 140123, delta) });
     await vi.advanceTimersByTimeAsync(0);
-
+    expect(decoders).toHaveLength(0);
     expect(socket.send).not.toHaveBeenCalled();
-    expect(decoders[0]!.decode).toHaveBeenCalledOnce();
-    expect(EncodedVideoChunk).toHaveBeenCalledWith({
-      type: "key",
-      timestamp: 0,
-      data: new Uint8Array(sps),
-    });
+
+    resolveSupport({ supported: true });
+    await vi.advanceTimersByTimeAsync(0);
+    const nextDelta = Uint8Array.of(0, 0, 0, 1, 0x41, 0x9a, 0x03).buffer;
+    socket.onmessage?.({ data: semuPacket(2, false, 156790, nextDelta) });
+    expect(decoders[0]!.decode.mock.calls).toEqual([
+      [{ type: "key", timestamp: 123456, data: new Uint8Array(sps) }],
+      [{ type: "delta", timestamp: 140123, data: new Uint8Array(delta) }],
+      [{ type: "delta", timestamp: 156790, data: new Uint8Array(nextDelta) }],
+    ]);
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(decoders[0]!.reset).not.toHaveBeenCalled();
     expect(drawImage).not.toHaveBeenCalled();
     decodedFrame();
     expect(drawImage).toHaveBeenCalledOnce();
     expect(events.onStatus).toHaveBeenLastCalledWith("streaming", undefined);
+    client.stop();
+  });
+
+  it("replaces pending frames with the newest keyframe during a same-size restart", async () => {
+    const { client, sockets, decoders, Decoder, sps } = recoveryFixture("android", false);
+    let resolveSupport!: (support: { supported: boolean }) => void;
+    Decoder.isConfigSupported.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSupport = resolve;
+        }),
+    );
+    client.start();
+    const socket = sockets[0]!;
+    socket.onopen?.();
+    socket.onmessage?.({ data: videoSession(576, 1280) });
+    socket.onmessage?.({ data: semuPacket(1, true, 900000, sps) });
+    socket.onmessage?.({ data: semuPacket(1, false, 916667, delta) });
+    socket.onmessage?.({ data: videoSession(576, 1280) });
+    const replacementKey = Uint8Array.of(...new Uint8Array(sps), 0xbb).buffer;
+    socket.onmessage?.({ data: semuPacket(1, true, 0, replacementKey) });
+    socket.onmessage?.({ data: semuPacket(1, false, 16667, delta) });
+    resolveSupport({ supported: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(decoders).toHaveLength(1);
+    expect(decoders[0]!.decode.mock.calls).toEqual([
+      [{ type: "key", timestamp: 0, data: new Uint8Array(replacementKey) }],
+      [{ type: "delta", timestamp: 16667, data: new Uint8Array(delta) }],
+    ]);
+    expect(decoders[0]!.reset).not.toHaveBeenCalled();
+    expect(socket.send).not.toHaveBeenCalled();
+    client.stop();
+  });
+
+  it("requests one fresh keyframe after pending video overflows and resumes from it", async () => {
+    const { client, sockets, decoders, Decoder, sps } = recoveryFixture("android", false);
+    let resolveSupport!: (support: { supported: boolean }) => void;
+    Decoder.isConfigSupported.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSupport = resolve;
+        }),
+    );
+    client.start();
+    const socket = sockets[0]!;
+    socket.onopen?.();
+    socket.onmessage?.({ data: videoSession(576, 1280) });
+    socket.onmessage?.({ data: semuPacket(1, true, 0, sps) });
+    // A stalled support probe must not retain an entire 128 MiB video backlog.
+    const largeDelta = new Uint8Array(256 * 1024);
+    largeDelta.set(new Uint8Array(delta));
+    for (let index = 1; index <= 512; index++) {
+      socket.onmessage?.({ data: semuPacket(1, false, index * 16667, largeDelta.buffer) });
+    }
+    resolveSupport({ supported: true });
+    await vi.advanceTimersByTimeAsync(0);
+    socket.onmessage?.({ data: semuPacket(1, false, 9_000_000, delta) });
+    expect.soft(decoders.flatMap((decoder) => decoder.decode.mock.calls)).toEqual([]);
+    expect
+      .soft(socket.send.mock.calls.map(([message]) => JSON.parse(message as string)))
+      .toEqual([{ type: "reset-video", ack: false }]);
+
+    socket.onmessage?.({ data: videoSession(576, 1280) });
+    socket.onmessage?.({ data: semuPacket(1, true, 0, sps) });
+    await vi.advanceTimersByTimeAsync(0);
+    socket.onmessage?.({ data: semuPacket(1, false, 16667, delta) });
+    expect(decoders.flatMap((decoder) => decoder.decode.mock.calls)).toEqual([
+      [{ type: "key", timestamp: 0, data: new Uint8Array(sps) }],
+      [{ type: "delta", timestamp: 16667, data: new Uint8Array(delta) }],
+    ]);
+    expect(socket.send).toHaveBeenCalledOnce();
     client.stop();
   });
 
@@ -574,16 +673,19 @@ describe("Android keyframe handshake", () => {
     const socket = sockets[0]!;
     socket.onopen?.();
     socket.onmessage?.({ data: videoSession(576, 1280) });
-    socket.onmessage?.({ data: sps });
+    socket.onmessage?.({ data: semuPacket(1, true, 900000, sps) });
+    socket.onmessage?.({ data: semuPacket(1, false, 916667, delta) });
     socket.onmessage?.({ data: videoSession(1280, 576) });
     resolveSupport({ supported: true });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(decoders).toHaveLength(0);
-    socket.onmessage?.({ data: sps });
+    socket.onmessage?.({ data: semuPacket(1, true, 0, sps) });
     await vi.advanceTimersByTimeAsync(0);
     expect(decoders).toHaveLength(1);
-    expect(decoders[0]!.decode).toHaveBeenCalledOnce();
+    expect(decoders[0]!.decode.mock.calls).toEqual([
+      [{ type: "key", timestamp: 0, data: new Uint8Array(sps) }],
+    ]);
     decodedFrame();
     expect(drawImage).toHaveBeenCalledOnce();
     expect(socket.send).not.toHaveBeenCalled();
