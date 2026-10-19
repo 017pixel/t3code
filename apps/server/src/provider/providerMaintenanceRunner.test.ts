@@ -1362,6 +1362,102 @@ describe("ProviderInstallLock", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect.each(["contents", "mtime", "reappeared"] as const)(
+    "abandons an age takeover after its predecessor changes (%s)",
+    (change) =>
+      Effect.gen(function* () {
+        const { home, directory } = yield* withHome;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const previous = `${lockFile(directory, "k")}.1`;
+        const contents = `${process.pid}\npaused-owner`;
+        yield* fileSystem.makeDirectory(directory, { recursive: true });
+        yield* fileSystem.writeFileString(previous, contents);
+        yield* fileSystem.utimes(previous, 0, 0);
+        yield* TestClock.adjust(Duration.hours(1));
+        let inspected = false;
+        const lock = yield* Effect.service(ProviderInstallLock.ProviderInstallLock).pipe(
+          Effect.provide(ProviderInstallLock.layer),
+          Effect.provideService(
+            FileSystem.FileSystem,
+            FileSystem.FileSystem.of({
+              ...fileSystem,
+              stat: (file) => {
+                if (file !== previous || change !== "reappeared" || inspected) {
+                  return fileSystem.stat(file);
+                }
+                inspected = true;
+                return fileSystem.remove(file).pipe(Effect.andThen(fileSystem.stat(file)));
+              },
+              link: (from, to) =>
+                fileSystem.link(from, to).pipe(
+                  Effect.andThen(
+                    change === "mtime"
+                      ? fileSystem.utimes(previous, 3600, 3600)
+                      : fileSystem.writeFileString(previous, `${process.pid}\nresumed-owner`).pipe(
+                          // A contents change must fence even if timestamp precision hides it.
+                          Effect.andThen(fileSystem.utimes(previous, 0, 0)),
+                        ),
+                  ),
+                ),
+            }),
+          ),
+          Effect.provideService(HostProcess.Environment, { XDG_CACHE_HOME: home }),
+        );
+        assert.deepStrictEqual(
+          yield* lock.tryRun("k", () => Effect.die("must not install")),
+          Option.none(),
+        );
+        assert.deepStrictEqual(yield* fileSystem.readDirectory(directory), ["k.lock.1"]);
+        assert.strictEqual(
+          yield* fileSystem.readFileString(previous),
+          change === "mtime" ? contents : `${process.pid}\nresumed-owner`,
+        );
+        if (change === "mtime") {
+          assert.isTrue(yield* lock.anyHeld);
+          assert.deepStrictEqual(yield* lock.tryRun("k", () => Effect.void), Option.none());
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not skip a resumed owner after another successor abandons its generation", () =>
+    Effect.gen(function* () {
+      const { home, directory, first } = yield* withHome;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const resumed = `${lockFile(directory, "k")}.1`;
+      const abandoned = `${lockFile(directory, "k")}.2`;
+      yield* fileSystem.makeDirectory(directory, { recursive: true });
+      yield* fileSystem.writeFileString(resumed, `${process.pid}\nresumed-owner`);
+      yield* fileSystem.writeFileString(abandoned, "released\nabandoning-successor");
+      assert.isTrue(yield* first.anyHeld);
+      yield* fileSystem.writeFileString(abandoned, `${process.pid}\nabandoning-successor`);
+      let snapshotted = false;
+      const lock = yield* Effect.service(ProviderInstallLock.ProviderInstallLock).pipe(
+        Effect.provide(ProviderInstallLock.layer),
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.FileSystem.of({
+            ...fileSystem,
+            readDirectory: (file) =>
+              fileSystem.readDirectory(file).pipe(
+                Effect.tap(() => {
+                  if (snapshotted) return Effect.void;
+                  snapshotted = true;
+                  return fileSystem.remove(abandoned);
+                }),
+              ),
+          }),
+        ),
+        Effect.provideService(HostProcess.Environment, { XDG_CACHE_HOME: home }),
+      );
+      assert.deepStrictEqual(
+        yield* lock.tryRun("k", () => Effect.die("must not install")),
+        Option.none(),
+      );
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(directory), ["k.lock.1"]);
+      assert.isTrue(yield* lock.anyHeld);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("reclaims a lock left by a process that is gone", () =>
     Effect.gen(function* () {
       const { directory, first, second } = yield* withHome;
