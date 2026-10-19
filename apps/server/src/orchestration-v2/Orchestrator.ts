@@ -113,6 +113,7 @@ import {
   emptyProjection,
   threadShellFromProjection,
   ProjectionStoreV2,
+  isTurnItemAtOrBeforeRun,
   type ProjectionRecordField,
   type ProjectionTimelinePage,
   type ProjectionTimelinePageOptions,
@@ -5888,14 +5889,37 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const portableForkItems =
         !requiresPortableFork || sourceProjection === null || sourceRun === null
           ? []
-          : yield* readHandoffItems(sourceProjection.thread.id, [
-              ...sourceProjection.runs
-                .filter((run) => run.ordinal <= sourceRun.ordinal)
-                .map((run) => run.id),
-              ...(sourceProjection.thread.historyOrigin === "v1_import" ? [null] : []),
-            ]);
+          : yield* projectionStore.getThreadProjection(sourceProjection.thread.id).pipe(
+              Effect.map((sourceHistory) => {
+                const runOrdinalById = new Map(
+                  sourceHistory.runs.map((run) => [run.id, run.ordinal]),
+                );
+                // Inherited rows already respect the source fork's own boundary.
+                return sourceHistory.visibleTurnItems
+                  .map((row) => row.item)
+                  .filter(
+                    (item) =>
+                      item.threadId !== sourceHistory.thread.id ||
+                      isTurnItemAtOrBeforeRun({
+                        historyOrigin: sourceHistory.thread.historyOrigin,
+                        itemRunId: item.runId,
+                        runOrdinalById,
+                        sourceRunOrdinal: sourceRun.ordinal,
+                      }),
+                  );
+              }),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestratorProjectionError({ threadId: sourceProjection.thread.id, cause }),
+              ),
+            );
       const cutItemId = pendingForkTransfer?.sourcePoint.turnItemId;
-      const cutItem = portableForkItems.find((item) => item.id === cutItemId);
+      const cutItem = portableForkItems.find(
+        (item) =>
+          item.id === cutItemId &&
+          item.threadId === sourceProjection?.thread.id &&
+          item.runId === sourceRun?.id,
+      );
       if (requiresPortableFork && cutItemId !== undefined && cutItem === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,

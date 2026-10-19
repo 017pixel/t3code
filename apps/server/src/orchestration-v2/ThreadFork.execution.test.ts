@@ -408,15 +408,16 @@ const decodeForkInput = Schema.decodeUnknownEffect(
 );
 
 const responseForkCases = [
-  { ...forkCases[0]!, replyStatus: "completed" as const },
-  { ...forkCases[3]!, replyStatus: "completed" as const },
-  { ...forkCases[0]!, replyStatus: "interrupted" as const },
-  { ...forkCases[0]!, replyStatus: "failed" as const },
+  { ...forkCases[0]!, replyStatus: "completed" as const, ancestry: "root" },
+  { ...forkCases[0]!, replyStatus: "completed" as const, ancestry: "fork with a local run" },
+  { ...forkCases[3]!, replyStatus: "completed" as const, ancestry: "root" },
+  { ...forkCases[0]!, replyStatus: "interrupted" as const, ancestry: "root" },
+  { ...forkCases[0]!, replyStatus: "failed" as const, ancestry: "root" },
 ];
 
 it.effect.each(responseForkCases)(
-  "bounds a $driver fork at a $replyStatus response before a steer",
-  ({ driver, instanceId, modelSelection, layer, replyStatus }) =>
+  "bounds a $driver fork at a $replyStatus response before a steer ($ancestry)",
+  ({ driver, instanceId, modelSelection, layer, replyStatus, ancestry }) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const eventSink = yield* EventSink.EventSinkV2;
@@ -742,6 +743,66 @@ it.effect.each(responseForkCases)(
       assert.include(context, "INCLUDED_PROMPT");
       assert.include(context, "INCLUDED_RESPONSE");
       assert.notInclude(context, "EXCLUDED");
+
+      if (ancestry === "root") return;
+
+      const localRun = continued.runs[0]!;
+      const localItems = items.slice(0, 4).map((item) => ({
+        ...item,
+        id: TurnItemId.make(`local-${item.id}`),
+        threadId: targetThreadId,
+        runId: localRun.id,
+        providerThreadId: localRun.providerThreadId,
+        messageId: MessageId.make(`local-${item.messageId}`),
+        text: item.text.replace("INCLUDED", "LOCAL"),
+      }));
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("local-run-completed"),
+            type: "run.updated",
+            threadId: targetThreadId,
+            runId: localRun.id,
+            occurredAt: now,
+            payload: { ...localRun, status: "completed", completedAt: now },
+          },
+          ...localItems.map((item) => ({
+            id: EventId.make(item.id),
+            type: "turn-item.updated" as const,
+            threadId: targetThreadId,
+            runId: localRun.id,
+            occurredAt: now,
+            payload: item,
+          })),
+        ],
+      });
+      const grandchildId = ThreadId.make("local-response-fork");
+      yield* orchestrator.dispatch({
+        type: "thread.fork",
+        commandId: CommandId.make("fork-local-response"),
+        sourceThreadId: targetThreadId,
+        targetThreadId: grandchildId,
+        sourcePoint: {
+          type: "turn_item",
+          runId: localRun.id,
+          turnItemId: localItems[1]!.id,
+        },
+        createdBy: "user",
+        creationSource: "mcp",
+      });
+      yield* continueFork(grandchildId);
+      const grandchild = yield* orchestrator.getThreadProjection(grandchildId);
+      assert.lengthOf(grandchild.contextHandoffs, 1);
+      const grandchildHandoff = grandchild.contextHandoffs[0]!;
+      const grandchildContext = [
+        grandchildHandoff.summaryText,
+        ...(grandchildHandoff.history?.messages.map((message) => message.text) ?? []),
+      ].join("\n");
+      assert.include(grandchildContext, "LOCAL_PROMPT");
+      assert.include(grandchildContext, "LOCAL_RESPONSE");
+      assert.notInclude(grandchildContext, "EXCLUDED");
+      assert.include(grandchildContext, "INCLUDED_PROMPT");
+      assert.include(grandchildContext, "INCLUDED_RESPONSE");
     }).pipe(
       Effect.provide(
         Layer.merge(layer, ProjectStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
