@@ -40,7 +40,6 @@ import * as GitHubRest from "@t3tools/source-control-github/server/GitHubRest";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
 import * as GitHubMediaFetch from "./GitHubMediaFetch.ts";
-import { githubMediaResponse } from "./GitHubMediaFetch.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -228,7 +227,9 @@ const makeSsoMediaFixture = (
   );
   const layer = GitHubMediaFetch.layer.pipe(Layer.provide(externals));
   const read = Effect.fnUntraced(function* (headers: Record<string, string> = {}) {
-    const response = HttpServerResponse.toWeb(yield* githubMediaResponse(asset, headers));
+    const response = HttpServerResponse.toWeb(
+      yield* GitHubMediaFetch.githubMediaResponse(asset, headers),
+    );
     expect(response.status).toBe(headers.range ? 206 : 200);
     expect(response.headers.get("content-type")).toBe("video/mp4");
     expect(response.headers.get("content-length")).toBe(headers.range ? "4" : "10");
@@ -309,9 +310,9 @@ describe("AssetAccess", () => {
         cwd: "/repo",
         expiresAt: Number.MAX_SAFE_INTEGER,
       };
-      expect((yield* githubMediaResponse(asset, {})).status).toBe(404);
-      expect((yield* githubMediaResponse(asset, {})).status).toBe(200);
-      expect((yield* githubMediaResponse(asset, {})).status).toBe(200);
+      expect((yield* GitHubMediaFetch.githubMediaResponse(asset, {})).status).toBe(404);
+      expect((yield* GitHubMediaFetch.githubMediaResponse(asset, {})).status).toBe(200);
+      expect((yield* GitHubMediaFetch.githubMediaResponse(asset, {})).status).toBe(200);
       expect(lookups).toBe(3);
       expect(authorizations).toEqual([undefined, "Bearer signed-in", "Bearer signed-in"]);
     }).pipe(
@@ -394,12 +395,18 @@ describe("AssetAccess", () => {
     {
       name: "legacy upload repository",
       url: "https://github.com/enterprise/private/assets/123/old-client",
+      repository: "personal/unrelated",
       checkout: "personal/unrelated",
       resolves: false,
     },
-  ])("loads uploads without PR context using $name", ({ url, checkout, resolves }) => {
+  ])("loads uploads using $name", ({ url, repository, checkout, resolves }) => {
     const fixture = makeSsoMediaFixture(
-      { url, cwd: "/old-client", expiresAt: Number.MAX_SAFE_INTEGER },
+      {
+        url,
+        cwd: "/old-client",
+        ...(repository ? { repository } : {}),
+        expiresAt: Number.MAX_SAFE_INTEGER,
+      },
       checkout,
     );
     return Effect.gen(function* () {

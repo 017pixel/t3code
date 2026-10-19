@@ -196,13 +196,10 @@ const make = Effect.gen(function* () {
         );
       let repository: string | undefined;
       if (attachment && credential !== null) {
-        repository = asset.repository;
+        repository = /^\/([^/]+\/[^/]+)\/assets\//u.exec(target.pathname)?.[1] ?? asset.repository;
         if (repository === undefined) {
-          repository = /^\/([^/]+\/[^/]+)\/assets\//u.exec(target.pathname)?.[1];
-          if (repository === undefined) {
-            const identity = yield* identities.resolve(asset.cwd);
-            repository = /^github\.com\/([^/]+\/[^/]+)$/u.exec(identity?.canonicalKey ?? "")?.[1];
-          }
+          const identity = yield* identities.resolve(asset.cwd);
+          repository = /^github\.com\/([^/]+\/[^/]+)$/u.exec(identity?.canonicalKey ?? "")?.[1];
         }
       }
       // An unusable explicit context must not fall back to an unrelated checkout.

@@ -432,7 +432,12 @@ export const layerAssetRoute = HttpRouter.add(
     }
     if (asset.kind === "github-media") {
       return yield* GitHubMediaFetch.githubMediaResponse(asset, request.headers).pipe(
-        Effect.tapError(() => Effect.logWarning("Failed to fetch GitHub media.")),
+        Effect.tapError((cause) =>
+          Effect.logWarning("Failed to fetch GitHub media.", {
+            upstream_host: new URL(asset.url).hostname,
+            domain_error_tag: cause._tag,
+          }),
+        ),
         Effect.orElseSucceed(() =>
           HttpServerResponse.empty({
             status: 502,
