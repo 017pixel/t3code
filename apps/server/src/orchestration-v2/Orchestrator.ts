@@ -9724,35 +9724,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const latestRun = projection.runs.findLast((run) => run.status !== "queued");
       if (command.throughSequence !== undefined && latestRun !== undefined) {
-        // A child Stop may have failed before committing its receipt. Retrying
-        // it must not reach a run that started after the parent's original Stop.
-        const hadStarted = yield* eventSink
+        // A queued run already belonged to Stop even if it started before the delegated walk.
+        const existed = yield* eventSink
           .read({
             threadId: command.threadId,
             throughSequence: command.throughSequence,
             eventType: "run.created",
           })
           .pipe(
-            Stream.concat(
-              eventSink.read({
-                threadId: command.threadId,
-                throughSequence: command.throughSequence,
-                eventType: "run.updated",
-              }),
-            ),
             Stream.runFold(
               () => false,
-              (found, stored) =>
-                found ||
-                ((stored.event.type === "run.created" || stored.event.type === "run.updated") &&
-                  stored.event.runId === latestRun.id &&
-                  stored.event.payload.status !== "queued"),
+              (found, stored) => found || stored.event.runId === latestRun.id,
             ),
             Effect.mapError(
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
-        if (!hadStarted) return undefined;
+        if (!existed) return undefined;
+        // Partial retries keep queue/watch changes thread-wide while the original run is current.
       }
       const target =
         projection.runs.findLast(
@@ -11420,7 +11409,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // A settle that ended nothing still records its receipt: a replayed Stop
       // effect then finds it instead of settling work that appeared since.
       const resultSequence = yield* Effect.gen(function* () {
-        const sequence = yield* eventSink.latestSequence({ threadId: commandThreadId(command) });
+        // Internal Stop receipts also bound other threads; client commands keep their thread cursor.
+        const sequence = yield* eventSink.latestSequence(
+          command.type === "thread.stop" ? undefined : { threadId: commandThreadId(command) },
+        );
         yield* commandReceipts.insertIfAbsent({
           commandId: command.commandId,
           threadId: commandThreadId(command),
