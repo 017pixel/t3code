@@ -160,6 +160,15 @@ const make = Effect.gen(function* () {
       const file = path.join(directory, `${encodeURIComponent(lockKey)}.lock`);
       const owner = yield* crypto.randomUUIDv4().pipe(Effect.mapError(toLockError));
       const contents = `${process.pid}\n${owner}`;
+      // Written aside and renamed over the lock, so a failed write (disk full)
+      // leaves the previous complete record instead of an empty, held file.
+      const replace = (next: string) => {
+        const temporary = `${file}.${owner}.tmp`;
+        return fileSystem.writeFileString(temporary, next).pipe(
+          Effect.andThen(fileSystem.rename(temporary, file)),
+          Effect.onError(() => fileSystem.remove(temporary, { force: true }).pipe(Effect.ignore)),
+        );
+      };
       return yield* Effect.acquireUseRelease(
         acquire(file, contents).pipe(
           Effect.mapError(toLockError),
@@ -177,9 +186,7 @@ const make = Effect.gen(function* () {
             ? Effect.succeedNone
             : run((pid) =>
                 Ref.update(ownerState, (state) => ({ ...state, pid })).pipe(
-                  Effect.andThen(
-                    fileSystem.writeFileString(file, `${process.pid} ${pid}\n${owner}`),
-                  ),
+                  Effect.andThen(replace(`${process.pid} ${pid}\n${owner}`)),
                   Effect.andThen(
                     Ref.set(ownerState, { pid, contents: `${process.pid} ${pid}\n${owner}` }),
                   ),
@@ -199,7 +206,7 @@ const make = Effect.gen(function* () {
                     if ((yield* fileSystem.readFileString(file)) !== state.contents) return;
                     // Once `run` ends, only a surviving detached installer keeps the lock held.
                     if (state.pid !== undefined && isPidAlive(state.pid)) {
-                      yield* fileSystem.writeFileString(file, `${state.pid}\n${owner}`);
+                      yield* replace(`${state.pid}\n${owner}`);
                     } else {
                       yield* fileSystem.remove(file, { force: true });
                     }
