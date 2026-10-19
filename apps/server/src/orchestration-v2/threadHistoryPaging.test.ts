@@ -853,7 +853,7 @@ describe("threadHistoryPaging", () => {
     );
   });
 
-  it("keeps agent-only turns visible when checkpoint file lists fill the byte budget", () => {
+  it("keeps agent-only turns visible and defers checkpoint files outside the final viewport", () => {
     const items = Array.from({ length: 3 }, (_, turn) => {
       const first = makeRow(turn * 5);
       const prompt = {
@@ -861,6 +861,7 @@ describe("threadHistoryPaging", () => {
         item: {
           ...first.item,
           type: "user_message" as const,
+          runId: RunId.make(`run-${turn}`),
           createdBy: "agent" as const,
           creationSource: "provider" as const,
           inputIntent: "turn_start" as const,
@@ -869,13 +870,20 @@ describe("threadHistoryPaging", () => {
           attachments: [],
         },
       } as OrchestrationV2ProjectedTurnItem;
-      return [prompt, ...Array.from({ length: 4 }, (_, index) => makeRow(turn * 5 + index + 1))];
+      return [
+        prompt,
+        ...Array.from({ length: 4 }, (_, index) => {
+          const row = makeRow(turn * 5 + index + 1);
+          return { ...row, item: { ...row.item, runId: prompt.item.runId } };
+        }),
+      ];
     }).flat();
-    const files = Array.from(
-      { length: 15_000 },
-      (_, index) =>
-        `work/ws-${index % 40}/.jj/repo/store/extra/${index.toString(16).padStart(40, "0")}`,
-    );
+    const files = Array.from({ length: 15_000 }, (_, index) => ({
+      path: `work/ws-${index % 40}/.jj/repo/store/extra/${index.toString(16).padStart(40, "0")}`,
+      kind: "modified" as const,
+      additions: 1,
+      deletions: 0,
+    }));
     const projection = {
       ...makeProjection(items),
       checkpoints: [{ id: "checkpoint-1", files }],
@@ -886,6 +894,56 @@ describe("threadHistoryPaging", () => {
     expect(bounded.projection.visibleTurnItems).toHaveLength(items.length);
     expect(bounded.hasMoreHistory).toBe(false);
     expect(bounded.payloadBudgetExceeded).toBe(true);
+    expect(bounded.projection.checkpoints).toEqual(projection.checkpoints);
+
+    const viewportItems = items.map((row) =>
+      row.item.type === "command_execution"
+        ? { ...row, item: { ...row.item, output: "x".repeat(50_000) } }
+        : row,
+    );
+    const viewportFiles = files.slice(0, 1_500);
+    const viewportProjection = {
+      ...makeProjection(viewportItems),
+      runs: [0, 1, 2, 3].map((index) => ({
+        id: `run-${index}`,
+        status: index === 3 ? "running" : "completed",
+      })),
+      checkpoints: [
+        ...[0, 1, 2, 3].map((index) => ({
+          id: `checkpoint-${index}`,
+          runId: `run-${index}`,
+          nodeId: null,
+          status: "ready",
+          files: index === 3 ? files.slice(0, 1) : viewportFiles,
+        })),
+        ...["pending", "capturing"].map((status) => ({
+          id: `checkpoint-${status}`,
+          runId: null,
+          nodeId: null,
+          status,
+          files: files.slice(0, 1),
+        })),
+      ],
+    } as unknown as typeof projection;
+    const viewport = buildBoundedThreadProjection({
+      projection: viewportProjection,
+      snapshotSequence: 1,
+      viewportWindow: true,
+    });
+    expect(viewport.projection.visibleTurnItems.length).toBeLessThan(viewportItems.length);
+    expect(new Set(viewport.projection.visibleTurnItems.map((row) => row.item.runId))).toEqual(
+      new Set([RunId.make("run-1"), RunId.make("run-2")]),
+    );
+    expect.soft(viewport.projection.checkpoints[0]?.files).toHaveLength(0);
+    expect.soft(viewport.projection.checkpoints[0]?.deferredFileCount).toBe(viewportFiles.length);
+    expect(viewport.projection.checkpoints.slice(1)).toEqual(
+      viewportProjection.checkpoints.slice(1),
+    );
+    expect
+      .soft(Buffer.byteLength(JSON.stringify(viewport.projection), "utf8"))
+      .toBeLessThanOrEqual(THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes);
+    expect.soft(viewport.payloadBudgetExceeded).toBe(false);
+    expect(viewportProjection.checkpoints[0]?.files).toEqual(viewportFiles);
   });
 
   it("keeps paged historical plan detail in the turn item and only status in its artifact", () => {
