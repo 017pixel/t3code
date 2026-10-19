@@ -99,6 +99,10 @@ const serveB = (initial: ExecutionEnvironmentDescriptor) =>
     const redirects = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
     const redirectedBodies = yield* Ref.make<ReadonlyArray<string>>([]);
     const toolResult = yield* Ref.make<McpSchema.CallToolResult | null>(null);
+    const sse = yield* Ref.make(false);
+    const replies = yield* Ref.make<ReadonlyMap<string, { status: number; body: unknown }>>(
+      new Map(),
+    );
     const layerEnvironment = Layer.succeed(ServerEnvironment.ServerEnvironment, {
       getEnvironmentId: Ref.get(descriptor).pipe(Effect.map((current) => current.environmentId)),
       getDescriptor: Ref.get(descriptor),
@@ -136,12 +140,30 @@ const serveB = (initial: ExecutionEnvironmentDescriptor) =>
           if (authorization !== undefined) {
             yield* Ref.update(bearers, (seen) => [...seen, authorization]);
           }
+          const reply = (yield* Ref.get(replies)).get(request.url);
+          if (reply !== undefined)
+            return HttpServerResponse.jsonUnsafe(reply.body, { status: reply.status });
           const response = yield* httpEffect;
           // Keep real authentication and dispatch, but exercise richer peer wire results.
           const result = yield* Ref.get(toolResult);
           if (result !== null && request.url === "/mcp" && response.status === 200) {
             const rpc = yield* decodeMcpRequest(yield* request.json);
             if (rpc.method === "tools/call") {
+              if (yield* Ref.get(sse)) {
+                return HttpServerResponse.text(
+                  [
+                    'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"result":"notification"}}',
+                    "",
+                    'data: {"jsonrpc":"2.0","id":999,"error":{"code":-1,"message":"other request"}}',
+                    "",
+                    'data: {"jsonrpc":"2.0",',
+                    'data: "id":' + rpc.id + ',"result":' + JSON.stringify(result) + "}",
+                    "",
+                    "",
+                  ].join("\r\n"),
+                  { contentType: "text/event-stream" },
+                );
+              }
               return HttpServerResponse.jsonUnsafe({ jsonrpc: "2.0", id: rpc.id, result });
             }
           }
@@ -204,6 +226,8 @@ const serveB = (initial: ExecutionEnvironmentDescriptor) =>
       alternateDescriptor,
       bearers,
       toolResult,
+      sse,
+      replies,
       redirects,
       redirectedBodies,
       /** How often its descriptor was asked for, as a probe of whether it answers. */
@@ -215,6 +239,7 @@ const serveB = (initial: ExecutionEnvironmentDescriptor) =>
 const makeA = (
   descriptor: ExecutionEnvironmentDescriptor,
   afterSecretWrite: Effect.Effect<void> = Effect.void,
+  beforeSecretRemove: Effect.Effect<void, ServerSecretStore.SecretStoreError> = Effect.void,
 ) =>
   Effect.gen(function* () {
     const secretReads = yield* Ref.make(0);
@@ -225,6 +250,7 @@ const makeA = (
         return ServerSecretStore.ServerSecretStore.of({
           ...secrets,
           set: (name, value) => secrets.set(name, value).pipe(Effect.andThen(afterSecretWrite)),
+          remove: (name) => beforeSecretRemove.pipe(Effect.andThen(secrets.remove(name))),
           get: (name) =>
             Ref.update(secretReads, (count) => count + 1).pipe(Effect.andThen(secrets.get(name))),
         });
@@ -289,7 +315,29 @@ it.effect("links, reads and forgets a peer while preserving access limits and re
   Effect.scoped(
     Effect.gen(function* () {
       const b = yield* serveB(box);
-      const a = yield* makeA(laptop);
+      const removal = yield* Ref.make<"fail" | "pause" | null>(null);
+      const removalEntered = yield* Deferred.make<void>();
+      const allowRemoval = yield* Deferred.make<void>();
+      const a = yield* makeA(
+        laptop,
+        Effect.void,
+        Ref.get(removal).pipe(
+          Effect.flatMap((action) =>
+            action === "fail"
+              ? Effect.fail(
+                  new ServerSecretStore.SecretStoreRemoveError({
+                    resource: "test credential",
+                    cause: new Error("removal failed"),
+                  }),
+                )
+              : action === "pause"
+                ? Deferred.succeed(removalEntered, undefined).pipe(
+                    Effect.andThen(Deferred.await(allowRemoval)),
+                  )
+                : Effect.void,
+          ),
+        ),
+      );
 
       const refused = yield* a.links
         .link({ url: b.url, pairingCode: "not-a-code", access: "auto" })
@@ -332,6 +380,31 @@ it.effect("links, reads and forgets a peer while preserving access limits and re
       const notFound = yield* probe(a, undefined, "refuse").pipe(Effect.flip);
       expect(notFound).toMatchObject({ code: "thread_not_found", message: "No such thread." });
 
+      const names = yield* a.secretNames;
+      const beforeUnlink = yield* a.links.get(box.environmentId);
+      yield* Ref.set(removal, "fail");
+      expect((yield* a.links.unlink(box.environmentId).pipe(Effect.flip)).reason).toBe("storage");
+      expect(yield* a.links.get(box.environmentId)).toEqual(beforeUnlink);
+      expect(yield* a.secretNames).toEqual(names);
+      expect(yield* probe(a)).toEqual({ caller: "T3 Code · Laptop", modes: "auto/default" });
+
+      yield* Ref.set(removal, "pause");
+      const unlinking = yield* a.links.unlink(box.environmentId).pipe(Effect.forkScoped);
+      yield* Deferred.await(removalEntered);
+      yield* Ref.set(removal, null);
+      const newPairing = yield* b.auth.issuePairingCredential();
+      const relinked = yield* a.links.link({
+        url: b.url,
+        pairingCode: newPairing.credential,
+        access: "approval-required",
+      });
+      yield* Deferred.succeed(allowRemoval, undefined);
+      expect(yield* Fiber.join(unlinking)).toBe(false);
+      expect(yield* a.links.get(box.environmentId)).toEqual(Option.some(relinked));
+      expect(yield* probe(a)).toEqual({
+        caller: "T3 Code · Laptop",
+        modes: "approval-required/default",
+      });
       expect(yield* a.links.unlink(box.environmentId)).toBe(true);
       expect(yield* a.links.unlink(box.environmentId)).toBe(false);
       expect(yield* a.links.get(box.environmentId)).toEqual(Option.none());
@@ -340,7 +413,7 @@ it.effect("links, reads and forgets a peer while preserving access limits and re
       yield* Ref.set(b.bearers, []);
       expect((yield* probe(a).pipe(Effect.flip)).code).toBe("invalid_request");
       expect(yield* Ref.get(b.bearers)).toHaveLength(0);
-      expect(yield* linkedSessions(b)).toHaveLength(1);
+      expect(yield* linkedSessions(b)).toHaveLength(2);
     }),
   ).pipe(Effect.provide(Layer.merge(NodeHttpServer.layerTest, NodeServices.layer))),
 );
@@ -506,6 +579,51 @@ it.effect(
           .pipe(Effect.flip);
         expect(lanAlternate.message).toContain("plain http");
 
+        for (const url of [
+          "file://username:password@example.test/path?token=private",
+          "http://username:password@192.168.1.20:3773/path?token=private",
+        ]) {
+          const invalid = yield* a.links
+            .link({ url, pairingCode: "unused", access: "auto" })
+            .pipe(Effect.flip);
+          expect(invalid.message).not.toMatch(/username|password|private|example\.test/);
+        }
+        yield* Ref.set(b.descriptor, box);
+        const peerText = "PRIVATE-PEER-RESPONSE\n".repeat(200);
+        for (const [path, body, message] of [
+          [
+            "/oauth/mcp/register",
+            { error: "invalid_client_metadata", error_description: peerText },
+            "The peer refused to register this environment. Check its connection settings.",
+          ],
+          [
+            "/oauth/mcp/decision",
+            { _tag: "AuthMcpApprovalError", message: peerText },
+            "The peer refused link approval. Check the pairing code and try again.",
+          ],
+          [
+            "/oauth/mcp/token",
+            { error: "invalid_grant", error_description: peerText },
+            "The peer refused the sign-in token. Create a new pairing code and try again.",
+          ],
+          [
+            "/oauth/mcp/decision",
+            { redirectTo: "http://localhost/?error_description=" + encodeURIComponent(peerText) },
+            "The peer did not approve the link. Check the pairing code and try again.",
+          ],
+        ] as const) {
+          yield* Ref.set(
+            b.replies,
+            new Map([[path, { status: "redirectTo" in body ? 200 : 400, body }]]),
+          );
+          const code = yield* b.auth.issuePairingCredential();
+          const failed = yield* a.links
+            .link({ url: b.url, pairingCode: code.credential, access: "auto" })
+            .pipe(Effect.flip);
+          expect(failed.reason).toBe("pairing_rejected");
+          expect(failed.message).toBe(message);
+        }
+        yield* Ref.set(b.replies, new Map());
         yield* Ref.set(b.descriptor, laptop);
         const self = yield* a.links
           .link({ url: b.url, pairingCode: pairing.credential, access: "auto" })
@@ -544,6 +662,8 @@ it.effect(
             ],
           }),
         );
+        expect(yield* probe(a)).toEqual(result);
+        yield* Ref.set(b.sse, true);
         expect(yield* probe(a)).toEqual(result);
 
         yield* Ref.set(
