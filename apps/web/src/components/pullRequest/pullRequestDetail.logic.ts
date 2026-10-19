@@ -742,6 +742,7 @@ export function handoffReviewComments(
  * and check output are attacker-controlled on public repositories.
  */
 export function buildFixFindingsHandoff(input: {
+  readonly provider?: PullRequestDetail["provider"];
   readonly number: number;
   readonly title: string;
   readonly url: string;
@@ -760,11 +761,18 @@ export function buildFixFindingsHandoff(input: {
     input.reviewThreads.flatMap((thread) => thread.comments.map((comment) => comment.id)),
   );
   const unattachable = input.comments
-    .filter(
-      (comment) =>
+    .filter((comment) => {
+      const outcome = pullRequestReviewOutcome(comment.reviewState);
+      return (
         (comment.kind === "review" || comment.kind === "review-comment") &&
-        !attached.has(comment.id),
-    )
+        !attached.has(comment.id) &&
+        !(
+          input.provider === "gitlab" &&
+          comment.kind === "review" &&
+          (outcome === "approved" || outcome === "dismissed")
+        )
+      );
+    })
     .flatMap((comment) => {
       const body = visibleBody(comment.body);
       if (body === null) return [];

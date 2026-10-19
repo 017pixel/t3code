@@ -1381,6 +1381,7 @@ export function PullRequestDetailPanel({
     void startHandoff(
       "findings",
       buildFixFindingsHandoff({
+        provider: detail.provider,
         number: detail.number,
         title: detail.title,
         url: detail.url,
