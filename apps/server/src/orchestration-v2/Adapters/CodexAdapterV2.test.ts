@@ -5996,15 +5996,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   it.effect("settles a failed root without waiting for subagents that keep running", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const harness = yield* makeCodexReplayHarness(failedRootLiveChildTranscript);
+        const childTurnCompleted = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(failedRootLiveChildTranscript, (event) =>
+          event.type === "provider_turn.updated" &&
+          event.providerTurn.nativeTurnRef?.nativeId === INTERRUPT_CHILD_NATIVE_TURN &&
+          event.providerTurn.status === "completed"
+            ? Deferred.succeed(childTurnCompleted, undefined)
+            : Effect.void,
+        );
         const now = yield* DateTime.now;
-        const childTurnCompleted = () =>
-          harness.events.some(
-            (event) =>
-              event.type === "provider_turn.updated" &&
-              event.threadId !== harness.threadId &&
-              event.providerTurn.status === "completed",
-          );
 
         yield* harness.runtime.startTurn(
           makeCodexTestTurnInput({
@@ -6015,16 +6015,22 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             text: INTERRUPT_PROMPT,
           }),
         );
-        yield* awaitUntil(() => harness.terminalEvents().length === 1, "failed root terminal");
+        yield* harness.firstTerminal;
 
         const terminal = harness.terminalEvents()[0];
         assert.equal(terminal?.status, "failed");
         assert.isTrue(terminal?.status === "failed" && terminal.childTurnsContinue === true);
-        assert.isFalse(childTurnCompleted(), "the subagent is still running");
+        assert.isFalse(yield* Deferred.isDone(childTurnCompleted), "the subagent is still running");
+        assert.isTrue(
+          yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
+        );
 
         yield* TestClock.adjust("30 seconds");
-        yield* awaitUntil(childTurnCompleted, "subagent turn completion");
+        yield* Deferred.await(childTurnCompleted);
         assert.lengthOf(harness.terminalEvents(), 1);
+        assert.isFalse(
+          yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
+        );
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
