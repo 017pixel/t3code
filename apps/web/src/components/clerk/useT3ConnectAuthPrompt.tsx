@@ -4,10 +4,10 @@ import { markConnectOnboardingAuthPending } from "../../cloud/connectOnboarding"
 import { isElectron } from "../../env";
 import { resolveClerkSignInProps } from "./authRedirect";
 
-export function useT3ConnectAuthPrompt() {
+export function useT3ConnectAuthPrompt({ requestOnboarding = true } = {}) {
   const clerk = useClerk();
   const openAuthPrompt = () => {
-    markConnectOnboardingAuthPending();
+    if (requestOnboarding) markConnectOnboardingAuthPending();
     clerk.openSignIn(resolveClerkSignInProps(window.location.href, isElectron));
   };
   return { authPrompt: null, openAuthPrompt };

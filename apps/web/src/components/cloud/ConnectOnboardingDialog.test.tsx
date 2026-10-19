@@ -170,6 +170,14 @@ describe("ConnectOnboardingDialog auth lifecycle", () => {
     },
   );
 
+  it("does not open another onboarding dialog after welcome handles sign-in", () => {
+    hooks.render(() => useT3ConnectAuthPrompt({ requestOnboarding: false })).openAuthPrompt();
+    expect(state.openSignIn).toHaveBeenCalledOnce();
+    hooks.reset();
+    signIn();
+    expect(renderDialog().open).toBe(false);
+  });
+
   it("keeps a restored session closed through incomplete auth snapshots", () => {
     state.auth = { isLoaded: false, isSignedIn: true, userId: null };
     expect(renderDialog().open).toBe(false);
