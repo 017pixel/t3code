@@ -1,4 +1,9 @@
-import { ProviderDriverKind, type CodexSettings } from "@t3tools/contracts";
+import {
+  ProviderDriverKind,
+  type CodexSettings,
+  type ProviderInstanceEnvironment,
+} from "@t3tools/contracts";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -31,6 +36,50 @@ const KNOWN_SHARED_DIRECTORIES = [
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 // Finder maintains metadata separately for each directory, including shadow homes.
 const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp", ".DS_Store"]);
+const SQLITE_ENTRY_NAME = /\.sqlite(?:-(?:wal|shm|journal))?$/iu;
+
+function normalizeCodexEnvironment(environment: NodeJS.ProcessEnv, platform: NodeJS.Platform) {
+  if (platform !== "win32") return environment;
+  return Object.fromEntries(
+    Object.entries(environment).map(([key, value]) => [
+      ["CODEX_HOME", "CODEX_SQLITE_HOME"].includes(key.toUpperCase()) ? key.toUpperCase() : key,
+      value,
+    ]),
+  );
+}
+
+export const mergeCodexEnvironment = Effect.fn("mergeCodexEnvironment")(function* (
+  environment: ProviderInstanceEnvironment | undefined,
+  ...sources: readonly NodeJS.ProcessEnv[]
+) {
+  const platform = yield* HostProcess.Platform;
+  // Normalize each source before merging so property insertion order cannot reverse precedence.
+  const base: NodeJS.ProcessEnv = {};
+  for (const source of sources.length ? sources : [yield* HostProcess.Environment]) {
+    Object.assign(base, normalizeCodexEnvironment(source, platform));
+  }
+  return yield* mergeProviderInstanceEnvironment(
+    environment?.map((variable) => ({
+      ...variable,
+      name:
+        platform === "win32" &&
+        ["CODEX_HOME", "CODEX_SQLITE_HOME"].includes(variable.name.toUpperCase())
+          ? variable.name.toUpperCase()
+          : variable.name,
+    })),
+    base,
+  );
+});
+
+export function withCodexSqliteHome(
+  layout: CodexHomeLayout,
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  // Codex's sqlite_home config still takes precedence over this environment default.
+  return layout.mode === "authOverlay"
+    ? { ...environment, CODEX_SQLITE_HOME: environment.CODEX_SQLITE_HOME ?? layout.sharedHomePath }
+    : environment;
+}
 // Codex creates these runtime locks itself when it starts in a shadow home before the shared
 // home has one. They guard shared state, so a local copy is replaced with the shared link.
 const REPLACEABLE_SHARED_RUNTIME_ENTRIES = new Set(["mcp-oauth-locks", ".sqlite-maintenance.lock"]);
@@ -111,6 +160,18 @@ export class CodexShadowHomeEntryConflictError extends Schema.TaggedError<CodexS
   }
 }
 
+export const CODEX_SQLITE_RECOVERY_GUIDANCE =
+  "Codex SQLite recovery is required. Stop all Codex processes using the shared or shadow home, back up and checkpoint or recover any shadow WAL/journal data, then remove only the old shadow SQLite symlinks. Do not delete real SQLite files or sidecars.";
+
+export class CodexShadowHomeSqliteRecoveryRequiredError extends Schema.TaggedError<CodexShadowHomeSqliteRecoveryRequiredError>()(
+  "CodexShadowHomeSqliteRecoveryRequiredError",
+  { ...CodexShadowHomeContext, entryName: Schema.String, linkPath: Schema.String },
+) {
+  override get message(): string {
+    return CODEX_SQLITE_RECOVERY_GUIDANCE;
+  }
+}
+
 export class CodexShadowHomePrivateEntrySymlinkError extends Schema.TaggedError<CodexShadowHomePrivateEntrySymlinkError>()(
   "CodexShadowHomePrivateEntrySymlinkError",
   {
@@ -129,6 +190,7 @@ export const CodexShadowHomeError = Schema.Union([
   CodexShadowHomePathConflictError,
   CodexShadowHomeEntryConflictError,
   CodexShadowHomePrivateEntrySymlinkError,
+  CodexShadowHomeSqliteRecoveryRequiredError,
 ]);
 export type CodexShadowHomeError = typeof CodexShadowHomeError.Type;
 
@@ -318,6 +380,49 @@ const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsP
   },
 );
 
+export const inspectCodexShadowSqlite = Effect.fn("inspectCodexShadowSqlite")(function* (
+  layout: CodexHomeLayout,
+) {
+  const effectiveHomePath = layout.effectiveHomePath;
+  if (layout.mode !== "authOverlay" || !effectiveHomePath) return;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const entries = yield* fileSystem.readDirectory(effectiveHomePath).pipe(
+    Effect.catchTags({
+      PlatformError: (cause) =>
+        cause.reason._tag === "NotFound"
+          ? Effect.succeed<string[]>([])
+          : new CodexShadowHomeFileSystemError({
+              sharedHomePath: layout.sharedHomePath,
+              effectiveHomePath,
+              operation: "readDirectory",
+              path: effectiveHomePath,
+              cause,
+            }),
+    }),
+  );
+  for (const entryName of entries) {
+    if (!SQLITE_ENTRY_NAME.test(entryName)) continue;
+    // path.join would collapse symlink/.. before the filesystem traverses it.
+    const linkPath =
+      effectiveHomePath + (effectiveHomePath.endsWith(path.sep) ? "" : path.sep) + entryName;
+    const state = yield* readLinkState({
+      fileSystem,
+      sharedHomePath: layout.sharedHomePath,
+      effectiveHomePath,
+      entryName,
+      linkPath,
+    });
+    if (state._tag === "Symlink")
+      return yield* new CodexShadowHomeSqliteRecoveryRequiredError({
+        sharedHomePath: layout.sharedHomePath,
+        effectiveHomePath,
+        entryName,
+        linkPath,
+      });
+  }
+});
+
 export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome")(function* (
   layout: CodexHomeLayout,
 ) {
@@ -333,6 +438,8 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+
+  yield* inspectCodexShadowSqlite(layout);
 
   const makeDirectory = (directoryPath: string) =>
     fileSystem.makeDirectory(directoryPath, { recursive: true }).pipe(
@@ -373,7 +480,11 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
   );
   const entries = new Set<string>(KNOWN_SHARED_DIRECTORIES);
   for (const entryName of sharedEntryNames) {
-    if (!PRIVATE_ENTRY_NAMES.has(entryName) && !SHADOW_LOCAL_ENTRY_NAMES.has(entryName)) {
+    if (
+      !PRIVATE_ENTRY_NAMES.has(entryName) &&
+      !SHADOW_LOCAL_ENTRY_NAMES.has(entryName) &&
+      !SQLITE_ENTRY_NAME.test(entryName)
+    ) {
       entries.add(entryName);
     }
   }

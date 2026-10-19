@@ -105,7 +105,10 @@ import {
   toMcpElicitationResponse,
 } from "../../provider/CodexMcpElicitation.ts";
 import {
+  CODEX_SQLITE_RECOVERY_GUIDANCE,
   materializeCodexShadowHome,
+  mergeCodexEnvironment,
+  withCodexSqliteHome,
   resolveCodexHomeLayout,
 } from "../../provider/Drivers/CodexHomeLayout.ts";
 import {
@@ -114,7 +117,6 @@ import {
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
@@ -1585,7 +1587,10 @@ export const createCodexAdapterV2 = (
           new ProviderAdapterDriverCreateError({
             driver: CODEX_DRIVER_KIND,
             instanceId,
-            detail: "Failed to materialize the Codex shadow home.",
+            detail:
+              cause._tag === "CodexShadowHomeSqliteRecoveryRequiredError"
+                ? CODEX_SQLITE_RECOVERY_GUIDANCE
+                : "Failed to prepare Codex shadow home.",
             cause,
           }),
       ),
@@ -1601,7 +1606,10 @@ export const createCodexAdapterV2 = (
     return yield* makeCodexAdapterV2({
       instanceId,
       settings,
-      environment: yield* mergeProviderInstanceEnvironment(environment, hostEnvironment),
+      environment: withCodexSqliteHome(
+        homeLayout,
+        yield* mergeCodexEnvironment(environment, hostEnvironment),
+      ),
       clientFactory,
       crypto,
       fileSystem,

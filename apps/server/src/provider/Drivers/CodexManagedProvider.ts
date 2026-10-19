@@ -17,12 +17,15 @@ import {
   probeCodexSkillsForCwd,
 } from "../CodexProvider.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import {
   type ProviderDriverCreateInput,
   type ProviderInstance,
 } from "@t3tools/provider-core/server/driver";
-import { codexContinuationIdentity } from "./CodexHomeLayout.ts";
+import {
+  CODEX_SQLITE_RECOVERY_GUIDANCE,
+  codexContinuationIdentity,
+  mergeCodexEnvironment,
+} from "./CodexHomeLayout.ts";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 import { HttpClient } from "effect/http";
 const DRIVER = ProviderDriverKind.make("codex");
@@ -40,7 +43,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
     instanceId,
     enabled,
     config,
-    environment: yield* mergeProviderInstanceEnvironment(input.environment),
+    environment: yield* mergeCodexEnvironment(input.environment),
   });
   const continuationIdentity = codexContinuationIdentity(runtime.homeLayout);
   const stamp = withInstanceIdentity({
@@ -163,7 +166,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
             : {}),
         }),
       ),
-      Effect.catch(() =>
+      Effect.catch((cause) =>
         runtime.auth.read.pipe(
           Effect.orElseSucceed(() => Option.none()),
           Effect.map((current) => ({
@@ -188,7 +191,10 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
             ...(Option.isSome(current) && current.value.scopes.includes("chatgpt.tokens.use.direct")
               ? { usageLimits }
               : {}),
-            message: "Could not check Codex right now. Retry, or reconnect in provider settings.",
+            message:
+              cause._tag === "ProviderSetupError" && cause.operation === "runtime"
+                ? cause.detail
+                : "Could not check Codex right now. Retry, or reconnect in provider settings.",
           })),
         ),
       ),
@@ -236,7 +242,10 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
         new ProviderDriverError({
           driver: DRIVER,
           instanceId,
-          detail: "Failed to build Codex orchestration adapter.",
+          detail:
+            cause.detail === CODEX_SQLITE_RECOVERY_GUIDANCE
+              ? CODEX_SQLITE_RECOVERY_GUIDANCE
+              : "Failed to build Codex orchestration adapter.",
           cause,
         }),
     ),
@@ -255,6 +264,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
           new TextGenerationError({
             operation,
             detail: "detail" in cause ? cause.detail : "Codex text generation failed.",
+            cause,
           }),
       ),
     );

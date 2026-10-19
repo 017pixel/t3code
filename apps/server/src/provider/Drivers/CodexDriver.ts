@@ -31,7 +31,6 @@ import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 import { applyCodexModelCatalog } from "../codexModelCatalog.ts";
 import type { ProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeCachedProviderMaintenanceResolution,
@@ -46,7 +45,10 @@ import {
 } from "@t3tools/provider-core/server/snapshotSettings";
 import {
   codexContinuationIdentity,
+  CODEX_SQLITE_RECOVERY_GUIDANCE,
   materializeCodexShadowHome,
+  mergeCodexEnvironment,
+  withCodexSqliteHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
 import { makeManagedCodexProvider } from "./CodexManagedProvider.ts";
@@ -125,8 +127,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
       const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
       const modelCatalog = yield* ModelCatalog.ModelCatalog;
       const currentCatalog = modelCatalog.current(DRIVER_KIND);
-      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
       const homeLayout = yield* resolveCodexHomeLayout(config);
+      const processEnv = withCodexSqliteHome(homeLayout, yield* mergeCodexEnvironment(environment));
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -141,7 +143,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
             new ProviderDriverError({
               driver: DRIVER_KIND,
               instanceId,
-              detail: cause.message,
+              detail:
+                cause._tag === "CodexShadowHomeSqliteRecoveryRequiredError"
+                  ? CODEX_SQLITE_RECOVERY_GUIDANCE
+                  : "Failed to prepare Codex shadow home.",
               cause,
             }),
         ),
@@ -182,7 +187,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
             new ProviderDriverError({
               driver: DRIVER_KIND,
               instanceId,
-              detail: "Failed to build Codex orchestration adapter.",
+              detail:
+                cause.detail === CODEX_SQLITE_RECOVERY_GUIDANCE
+                  ? CODEX_SQLITE_RECOVERY_GUIDANCE
+                  : "Failed to build Codex orchestration adapter.",
               cause,
             }),
         ),

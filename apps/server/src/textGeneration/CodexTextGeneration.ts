@@ -245,7 +245,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       const resolved = resolveRuntime
         ? yield* resolveRuntime.pipe(
             Effect.mapError(
-              (cause) => new TextGenerationError({ operation, detail: cause.detail }),
+              (cause) => new TextGenerationError({ operation, detail: cause.detail, cause }),
             ),
           )
         : undefined;
