@@ -2,7 +2,9 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { beforeEach, vi } from "vite-plus/test";
 
-const { autoUpdaterMock } = vi.hoisted(() => ({
+const { autoUpdaterMock, appOnceMock } = vi.hoisted(() => ({
+  appOnceMock:
+    vi.fn<(eventName: string, listener: (event: unknown, exitCode: number) => void) => void>(),
   autoUpdaterMock: {
     allowDowngrade: false,
     allowPrerelease: false,
@@ -23,11 +25,13 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
 vi.mock("electron-updater", () => ({
   autoUpdater: autoUpdaterMock,
 }));
+vi.mock("electron", () => ({ app: { once: appOnceMock } }));
 
 import * as ElectronUpdater from "./ElectronUpdater.ts";
 
 describe("ElectronUpdater", () => {
   beforeEach(() => {
+    appOnceMock.mockReset();
     autoUpdaterMock.allowDowngrade = false;
     autoUpdaterMock.allowPrerelease = false;
     autoUpdaterMock.autoDownload = true;
@@ -96,6 +100,26 @@ describe("ElectronUpdater", () => {
       );
       assert.notInclude(error.message, cause.message);
     }).pipe(Effect.provide(ElectronUpdater.layer)),
+  );
+
+  it.effect(
+    "keeps the install-on-quit callback after scope closure and checks the final flag",
+    () =>
+      Effect.gen(function* () {
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        const listener = vi.fn();
+        yield* Effect.scoped(updater.onInstallOnAppQuit(listener));
+        const quit = appOnceMock.mock.calls[0]?.[1];
+        assert.isDefined(quit);
+        quit?.({}, 1);
+        assert.equal(listener.mock.calls.length, 0);
+        yield* updater.setAutoInstallOnAppQuit(false);
+        quit?.({}, 0);
+        assert.equal(listener.mock.calls.length, 0);
+        yield* updater.setAutoInstallOnAppQuit(true);
+        quit?.({}, 0);
+        assert.equal(listener.mock.calls.length, 1);
+      }).pipe(Effect.provide(ElectronUpdater.layer)),
   );
 
   it.effect("sets full changelog mode", () =>

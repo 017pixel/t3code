@@ -43,6 +43,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   let downloadCount = 0;
   let allowDowngrade = false;
   let fullChangelog = false;
+  let installOnAppQuit: (() => void) | undefined;
   const autoInstallOnAppQuitCalls: boolean[] = [];
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
@@ -75,6 +76,10 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     setAutoInstallOnAppQuit: (value) =>
       Effect.sync(() => {
         autoInstallOnAppQuitCalls.push(value);
+      }),
+    onInstallOnAppQuit: (listener) =>
+      Effect.sync(() => {
+        installOnAppQuit = listener;
       }),
     setChannel: () => Effect.void,
     setAllowPrerelease: () => Effect.void,
@@ -291,9 +296,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
         0,
       ),
     sentStates,
-    emit: (eventName: string, payload?: unknown) => {
+    emit: (eventName: string, ...args: ReadonlyArray<unknown>) => {
+      if (eventName === "quit" && args[1] === 0 && autoInstallOnAppQuitCalls.at(-1)) {
+        installOnAppQuit?.();
+      }
       for (const listener of listeners.get(eventName) ?? []) {
-        listener(payload);
+        listener(...args);
       }
     },
   };

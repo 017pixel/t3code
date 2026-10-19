@@ -37,7 +37,8 @@ and how many can resume afterwards. See **Continue threads after restarts**
 below.
 
 The desktop app downloads its own updates in the background and installs them
-when you quit. Linux `.deb` updates ask for your password, so they wait until
+when you quit, except on macOS, where you choose **Install** to apply them.
+Linux `.deb` updates ask for your password, so they wait until
 you choose **Install**.
 
 ## Before you update

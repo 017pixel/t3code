@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Electron's final quit event cannot await asynchronous filesystem writes.
+import * as NodeFS from "node:fs";
 import {
   DESKTOP_UPDATE_RESTART_MARKER_FILE,
   DesktopUpdateChannelSchema,
@@ -546,9 +548,11 @@ export const make = Effect.gen(function* () {
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
       );
       yield* logUpdaterInfo("downloading update");
-      // electron-updater reads this flag when the download completes. A .deb
-      // install asks for a password, so it waits for an explicit Install.
-      yield* electronUpdater.setAutoInstallOnAppQuit(!isDebPackage);
+      // Squirrel stages macOS updates irreversibly when this flag is true.
+      // Keep staging behind Install; .deb installs also need an explicit action.
+      yield* electronUpdater.setAutoInstallOnAppQuit(
+        environment.platform !== "darwin" && !isDebPackage,
+      );
       yield* electronUpdater.downloadUpdate;
       return { accepted: true, completed: true };
     }).pipe(
@@ -1095,6 +1099,24 @@ export const make = Effect.gen(function* () {
 
       yield* electronUpdater.setAutoDownload(false);
       yield* electronUpdater.setAutoInstallOnAppQuit(false);
+      // Register before downloading: electron-updater adds its synchronous
+      // installer to this same event only after a download completes.
+      yield* electronUpdater.onInstallOnAppQuit(() => {
+        const { downloadedVersion } = Effect.runSync(Ref.get(updateStateRef));
+        if (downloadedVersion === null) return;
+        try {
+          NodeFS.mkdirSync(updateRestartMarkerDir, { recursive: true });
+          NodeFS.writeFileSync(
+            installRecordPath,
+            JSON.stringify({
+              fromVersion: environment.appVersion,
+              targetVersion: downloadedVersion,
+            }),
+          );
+        } catch {
+          // A failed record must not prevent the updater's quit listener.
+        }
+      });
       yield* applyAutoUpdaterChannel(settings.updateChannel);
       yield* electronUpdater.setDisableDifferentialDownload(
         isArm64HostRunningIntelBuild(environment.runtimeInfo),

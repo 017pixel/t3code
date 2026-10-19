@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
+import * as Electron from "electron";
 import { autoUpdater } from "electron-updater";
 
 type AutoUpdater = typeof autoUpdater;
@@ -61,6 +62,7 @@ export class ElectronUpdater extends Context.Service<
     readonly setFeedURL: (options: ElectronUpdaterFeedUrl) => Effect.Effect<void>;
     readonly setAutoDownload: (value: boolean) => Effect.Effect<void>;
     readonly setAutoInstallOnAppQuit: (value: boolean) => Effect.Effect<void>;
+    readonly onInstallOnAppQuit: (listener: () => void) => Effect.Effect<void>;
     readonly setChannel: (channel: string) => Effect.Effect<void>;
     readonly setAllowPrerelease: (value: boolean) => Effect.Effect<void>;
     readonly allowDowngrade: Effect.Effect<boolean>;
@@ -96,6 +98,14 @@ export const make = ElectronUpdater.of({
     Effect.suspend(() => {
       autoUpdater.autoInstallOnAppQuit = value;
       return Effect.void;
+    }),
+  onInstallOnAppQuit: (listener) =>
+    Effect.sync(() => {
+      // Scoped listeners are removed during backend shutdown, before final quit.
+      // Keep this until quit, just like electron-updater's installer listener.
+      Electron.app.once("quit", (_event, exitCode) => {
+        if (exitCode === 0 && autoUpdater.autoInstallOnAppQuit) listener();
+      });
     }),
   setChannel: (channel) =>
     Effect.suspend(() => {

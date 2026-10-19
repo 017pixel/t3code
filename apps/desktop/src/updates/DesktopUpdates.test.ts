@@ -12,6 +12,17 @@ import * as References from "effect/References";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { vi } from "vite-plus/test";
+
+const { mkdirSyncMock, writeFileSyncMock } = vi.hoisted(() => ({
+  mkdirSyncMock: vi.fn(),
+  writeFileSyncMock: vi.fn(),
+}));
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+  mkdirSync: mkdirSyncMock,
+  writeFileSync: writeFileSyncMock,
+}));
 
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
@@ -1080,6 +1091,7 @@ function makeFeedHarness(
 ) {
   let emit: ReturnType<typeof makeHarness>["emit"] | undefined;
   const harness = makeHarness({
+    platform: "win32",
     ...options,
     checkForUpdates: Effect.sync(() => {
       if (feed.version === null) emit?.("update-not-available");
@@ -1098,24 +1110,60 @@ const failDownload = Effect.fail(
 );
 
 describe("DesktopUpdates background downloads", () => {
-  it.effect("downloads what the startup check finds and installs it on quit", () => {
-    const { harness } = makeFeedHarness();
+  it.effect.each(["win32", "linux"] as const)(
+    "records the downloaded update only on an armed normal quit on %s",
+    (platform) => {
+      mkdirSyncMock.mockReset();
+      writeFileSyncMock.mockReset();
+      const { harness } = makeFeedHarness({ platform, env: { APPIMAGE: "/tmp/T3Code.AppImage" } });
 
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        yield* updates.configure;
-        yield* TestClock.adjust(Duration.millis(15_000));
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+          yield* updates.configure;
+          yield* updater.setAutoInstallOnAppQuit(true);
+          harness.emit("quit", {}, 0);
+          assert.equal(writeFileSyncMock.mock.calls.length, 0);
+          yield* updater.setAutoInstallOnAppQuit(false);
+          yield* TestClock.adjust(Duration.millis(15_000));
 
-        assert.equal(harness.downloadCount(), 1);
-        assert.deepEqual(harness.autoInstallOnAppQuitCalls, [false, true]);
+          assert.equal(harness.downloadCount(), 1);
+          assert.deepEqual(harness.autoInstallOnAppQuitCalls, [false, true, false, true]);
 
-        harness.emit("update-downloaded", { version: "1.2.4" });
-        yield* flushCallbacks;
-        assert.equal((yield* updates.getState).status, "downloaded");
-      }),
-    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
-  });
+          harness.emit("update-downloaded", { version: "1.2.4" });
+          yield* flushCallbacks;
+          assert.equal((yield* updates.getState).status, "downloaded");
+          assert.equal(writeFileSyncMock.mock.calls.length, 0);
+
+          harness.emit("quit", {}, 1);
+          yield* updater.setAutoInstallOnAppQuit(false);
+          harness.emit("quit", {}, 0);
+          assert.equal(writeFileSyncMock.mock.calls.length, 0);
+
+          yield* updater.setAutoInstallOnAppQuit(true);
+          harness.emit("quit", {}, 0);
+          const environment = yield* DesktopEnvironment.DesktopEnvironment;
+          const runtimeDir = environment.path.join(environment.baseDir, "runtime");
+          assert.deepEqual(mkdirSyncMock.mock.calls, [[runtimeDir, { recursive: true }]]);
+          assert.deepEqual(writeFileSyncMock.mock.calls, [
+            [
+              environment.path.join(runtimeDir, DesktopUpdates.DESKTOP_UPDATE_INSTALL_RECORD_FILE),
+              JSON.stringify({ fromVersion: "1.2.3", targetVersion: "1.2.4" }),
+            ],
+          ]);
+          writeFileSyncMock.mockImplementationOnce(() => {
+            throw new Error("disk full");
+          });
+          assert.doesNotThrow(() => harness.emit("quit", {}, 0));
+          mkdirSyncMock.mockImplementationOnce(() => {
+            throw new Error("permission denied");
+          });
+          assert.doesNotThrow(() => harness.emit("quit", {}, 0));
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
 
   it.effect("leaves the download to the button after a manual check", () => {
     const { harness } = makeFeedHarness();
@@ -1138,8 +1186,8 @@ describe("DesktopUpdates background downloads", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
-  it.effect("does not arm install on quit for a .deb", () => {
-    const { harness } = makeFeedHarness({ platform: "linux", packageType: "deb" });
+  it.effect.each(["darwin", "linux"] as const)("keeps explicit Install on %s", (platform) => {
+    const { harness } = makeFeedHarness({ platform, packageType: "deb" });
 
     return Effect.scoped(
       Effect.gen(function* () {
@@ -1149,6 +1197,10 @@ describe("DesktopUpdates background downloads", () => {
 
         assert.equal(harness.downloadCount(), 1);
         assert.deepEqual(harness.autoInstallOnAppQuitCalls, [false, false]);
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+        assert.isTrue((yield* updates.install).accepted);
+        assert.equal(harness.quitAndInstalls(), 1);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
