@@ -1286,8 +1286,7 @@ export const make = Effect.gen(function* () {
         return { oldContents, newContents };
       });
 
-  /** `isRequired` is asked for on github.com only: an older Enterprise server may not know it. */
-  const asksRequired = (host: string) => host.toLowerCase() === "github.com";
+  const isGitHubDotCom = (host: string) => host.toLowerCase() === "github.com";
 
   /**
    * Every check context of the head commit, a page at a time, for a rollup the detail read cut at
@@ -1304,7 +1303,7 @@ export const make = Effect.gen(function* () {
       let headSha: string | null = null;
       const { pages, truncated } = yield* readPages(
         GraphQLClient.pages(client.PullRequestCheckContexts, {
-          variables: { owner, name, number: input.number, required: asksRequired(input.host) },
+          variables: { owner, name, number: input.number, required: isGitHubDotCom(input.host) },
           connection: (result) => {
             const page = toPullRequestCheckContextsPage(result);
             if (page === null) return null;
@@ -1347,41 +1346,47 @@ export const make = Effect.gen(function* () {
     const operation = "getPullRequestDetail";
     return SourceControlRateLimit.Interactive.pipe(
       Effect.flatMap((allowReserve) =>
-        client
-          .PullRequestCore({
-            owner,
-            name,
-            number: input.number,
-            headRef: `refs/pull/${input.number}/head`,
-            required: asksRequired(input.host),
-          })
-          .pipe(
-            graphql({ ...input, operation, allowReserve }),
-            Effect.map(toPullRequestCore),
-            Effect.flatMap(found({ ...input, operation })),
-            // Past a hundred checks the first page would let the rest imply success, so the whole
-            // rollup is walked instead.
-            Effect.filterOrElse(
-              (core) => !core.checksTruncated,
-              (core) =>
-                readAllCheckContexts(input, allowReserve).pipe(
-                  Effect.filterOrFail(
-                    (all) => all.headSha === core.headSha,
-                    () =>
-                      readError(
-                        input.cwd,
-                        operation,
-                        new Error("Pull request head changed while reading checks."),
-                      ),
-                  ),
-                  Effect.map((all) => ({
-                    ...core,
-                    ...pullRequestChecksFromContexts(all.contexts),
-                    checksTruncated: all.truncated,
-                  })),
+        (isGitHubDotCom(input.host)
+          ? client.PullRequestCore({
+              owner,
+              name,
+              number: input.number,
+              headRef: `refs/pull/${input.number}/head`,
+              required: true,
+            })
+          : client.PullRequestCoreEnterprise({
+              owner,
+              name,
+              number: input.number,
+              required: false,
+            })
+        ).pipe(
+          graphql({ ...input, operation, allowReserve }),
+          Effect.map(toPullRequestCore),
+          Effect.flatMap(found({ ...input, operation })),
+          // Past a hundred checks the first page would let the rest imply success, so the whole
+          // rollup is walked instead.
+          Effect.filterOrElse(
+            (core) => !core.checksTruncated,
+            (core) =>
+              readAllCheckContexts(input, allowReserve).pipe(
+                Effect.filterOrFail(
+                  (all) => all.headSha === core.headSha,
+                  () =>
+                    readError(
+                      input.cwd,
+                      operation,
+                      new Error("Pull request head changed while reading checks."),
+                    ),
                 ),
-            ),
+                Effect.map((all) => ({
+                  ...core,
+                  ...pullRequestChecksFromContexts(all.contexts),
+                  checksTruncated: all.truncated,
+                })),
+              ),
           ),
+        ),
       ),
     );
   };
@@ -2064,9 +2069,10 @@ export const make = Effect.gen(function* () {
         const threadPage = (
           after: string | null,
         ): Effect.Effect<GitHubReviewThreadPage, GitHubPullRequestApiError> =>
-          client
-            .ReviewThreads({ owner, name, number: input.number, after })
-            .pipe(graphql(target), Effect.map(toReviewThreadPage), Effect.flatMap(found(target)));
+          (isGitHubDotCom(input.host)
+            ? client.ReviewThreads({ owner, name, number: input.number, after })
+            : client.ReviewThreadsEnterprise({ owner, name, number: input.number, after })
+          ).pipe(graphql(target), Effect.map(toReviewThreadPage), Effect.flatMap(found(target)));
         const entries: GitHubReviewThreadEntry[] = [];
         const avatarsByLogin = new Map<string, string>();
         const botLogins = new Set<string>();
@@ -2183,13 +2189,15 @@ export const make = Effect.gen(function* () {
     listReviewerCandidates: (input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       const operation = "listReviewerCandidates";
-      return client
-        .ReviewerCandidates({ owner, name, number: input.number })
-        .pipe(
-          graphql({ ...input, operation, allowReserve: true }),
-          Effect.map(toReviewerCandidates),
-          Effect.flatMap(found({ ...input, operation })),
-        );
+      return (
+        isGitHubDotCom(input.host)
+          ? client.ReviewerCandidates({ owner, name, number: input.number })
+          : client.ReviewerCandidatesEnterprise({ owner, name, number: input.number })
+      ).pipe(
+        graphql({ ...input, operation, allowReserve: true }),
+        Effect.map(toReviewerCandidates),
+        Effect.flatMap(found({ ...input, operation })),
+      );
     },
 
     setReviewerRequest: (input) => {
@@ -2436,20 +2444,35 @@ export const make = Effect.gen(function* () {
         // Read fresh rather than from the node id cache: merging and updating act on the head
         // as it stands now, and the merge queue decides which mutation a merge is.
         const target = { ...input, operation: "runPullRequestAction" };
-        const state = yield* client
-          .PullRequestActionState({
-            owner,
-            name,
-            number: input.number,
-            headRef: `refs/pull/${input.number}/head`,
-          })
-          .pipe(
-            graphql({ ...target, allowReserve: true }),
-            Effect.map((result) => result.repository?.pullRequest ?? null),
-            Effect.flatMap(found(target)),
-          );
+        const stateResult = isGitHubDotCom(input.host)
+          ? yield* client
+              .PullRequestActionState({
+                owner,
+                name,
+                number: input.number,
+                headRef: `refs/pull/${input.number}/head`,
+              })
+              .pipe(graphql({ ...target, allowReserve: true }))
+          : yield* client
+              .PullRequestActionStateEnterprise({
+                owner,
+                name,
+                number: input.number,
+              })
+              .pipe(graphql({ ...target, allowReserve: true }));
+        const state = yield* found(target)(stateResult.repository?.pullRequest ?? null);
         if (action === "update-branch") {
-          if (state.baseRef?.compare?.behindBy === 0) return;
+          if ("baseRefOid" in state) {
+            // Enterprise lacks Ref.compare. Compare the fresh OIDs, bounding the REST commit list.
+            const comparison = yield* restRead({
+              ...target,
+              path: `repos/${owner}/${name}/compare/${state.baseRefOid}...${state.headRefOid}?per_page=1`,
+              decode: Schema.decodeUnknownResult(
+                Schema.fromJsonString(Schema.Struct({ behind_by: Schema.Int })),
+              ),
+            });
+            if (comparison.behind_by === 0) return;
+          } else if (state.baseRef?.compare?.behindBy === 0) return;
           // GitHub updates with a merge commit unless asked to rebase, which is its own default.
           return yield* client
             .UpdatePullRequestBranch({

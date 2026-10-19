@@ -43,8 +43,101 @@ fragment CheckContext on StatusCheckRollupContext {
   }
 }
 
-# The detail of a pull request with the viewer's standing on it. Pull refs let the comparison
-# (`$headRef` is `refs/pull/<number>/head`) share this read without first resolving a fork branch.
+fragment PullRequestCoreFields on Repository {
+  mergeCommitAllowed
+  squashMergeAllowed
+  rebaseMergeAllowed
+  viewerPermission
+  pullRequest(number: $number) {
+    number
+    title
+    url
+    body
+    state
+    isDraft
+    mergeable
+    reviewDecision
+    additions
+    deletions
+    changedFiles
+    createdAt
+    updatedAt
+    mergedAt
+    closedAt
+    headRefName
+    baseRefName
+    headRefOid
+    isCrossRepository
+    headRepositoryOwner {
+      login
+    }
+    # The source branch's own repository and ref, which is what deleting the branch needs: write
+    # there, and a branch still to delete.
+    headRepository {
+      nameWithOwner
+      viewerPermission
+    }
+    headRef {
+      id
+    }
+    author {
+      login
+      avatarUrl
+      ... on User {
+        id
+        name
+      }
+    }
+    autoMergeRequest {
+      mergeMethod
+    }
+    viewerCanUpdate
+    viewerDidAuthor
+    reviewRequests(first: 100) {
+      nodes {
+        requestedReviewer {
+          ... on User {
+            login
+            name
+          }
+          # A team's name and avatar are nullable differently from a person's, so they travel
+          # under their own aliases. `combinedSlug` is the `org/slug` a reviewer row shows.
+          ... on Team {
+            slug
+            combinedSlug
+            teamName: name
+            teamAvatarUrl: avatarUrl
+          }
+        }
+      }
+    }
+    labels(first: 100) {
+      nodes {
+        name
+        color
+      }
+    }
+    commits(last: 1) {
+      nodes {
+        commit {
+          statusCheckRollup {
+            contexts(first: 100) {
+              nodes {
+                ...CheckContext
+              }
+              pageInfo {
+                hasNextPage
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+# Pull refs let github.com compare without first resolving a fork branch. Enterprise schemas
+# without Ref.compare or viewerCanUpdateBranch must never receive those selections.
 query PullRequestCore(
   $owner: String!
   $name: String!
@@ -53,105 +146,35 @@ query PullRequestCore(
   $required: Boolean!
 ) {
   repository(owner: $owner, name: $name) {
-    mergeCommitAllowed
-    squashMergeAllowed
-    rebaseMergeAllowed
-    viewerPermission
+    ...PullRequestCoreFields
     pullRequest(number: $number) {
-      number
-      title
-      url
-      body
-      state
-      isDraft
-      mergeable
-      reviewDecision
-      additions
-      deletions
-      changedFiles
-      createdAt
-      updatedAt
-      mergedAt
-      closedAt
-      headRefName
-      baseRefName
-      headRefOid
-      isCrossRepository
-      headRepositoryOwner {
-        login
-      }
-      # The source branch's own repository and ref, which is what deleting the branch needs: write
-      # there, and a branch still to delete.
-      headRepository {
-        nameWithOwner
-        viewerPermission
-      }
-      headRef {
-        id
-      }
-      author {
-        login
-        avatarUrl
-        ... on User {
-          id
-          name
+      reviewRequests(first: 100) {
+        nodes {
+          requestedReviewer {
+            ... on Bot {
+              login
+            }
+          }
         }
       }
-      autoMergeRequest {
-        mergeMethod
-      }
-      viewerCanUpdate
-      viewerDidAuthor
       viewerCanUpdateBranch
       baseRef {
         compare(headRef: $headRef) {
           behindBy
         }
       }
-      reviewRequests(first: 100) {
-        nodes {
-          requestedReviewer {
-            ... on User {
-              login
-              name
-            }
-            ... on Bot {
-              login
-            }
-            # A team's name and avatar are nullable differently from a person's, so they travel
-            # under their own aliases. `combinedSlug` is the `org/slug` a reviewer row shows.
-            ... on Team {
-              slug
-              combinedSlug
-              teamName: name
-              teamAvatarUrl: avatarUrl
-            }
-          }
-        }
-      }
-      labels(first: 100) {
-        nodes {
-          name
-          color
-        }
-      }
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100) {
-                nodes {
-                  ...CheckContext
-                }
-                pageInfo {
-                  hasNextPage
-                }
-              }
-            }
-          }
-        }
-      }
     }
+  }
+}
+
+query PullRequestCoreEnterprise(
+  $owner: String!
+  $name: String!
+  $number: Int!
+  $required: Boolean!
+) {
+  repository(owner: $owner, name: $name) {
+    ...PullRequestCoreFields
   }
 }
 
@@ -380,37 +403,49 @@ query ViewerPermissions($owner: String!, $name: String!, $number: Int!) {
 # taken back. The teams a repository could newly be sent to live on the owning organization and
 # need `read:org`, which a repository-scoped token need not carry, and a query GitHub refuses
 # fails whole, taking the people down with the teams.
-query ReviewerCandidates($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    assignableUsers(first: 100) {
-      pageInfo {
-        hasNextPage
-      }
+fragment ReviewerCandidateFields on Repository {
+  assignableUsers(first: 100) {
+    pageInfo {
+      hasNextPage
+    }
+    nodes {
+      login
+      name
+      avatarUrl
+    }
+  }
+  pullRequest(number: $number) {
+    author {
+      login
+    }
+    reviewRequests(first: 100) {
       nodes {
-        login
-        name
-        avatarUrl
+        requestedReviewer {
+          ... on User {
+            login
+            name
+            avatarUrl
+          }
+          # Aliased apart from a person's: their nullability differs.
+          ... on Team {
+            slug
+            combinedSlug
+            teamName: name
+            teamAvatarUrl: avatarUrl
+          }
+        }
       }
     }
+  }
+}
+
+query ReviewerCandidates($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    ...ReviewerCandidateFields
     pullRequest(number: $number) {
-      author {
-        login
-      }
       reviewRequests(first: 100) {
         nodes {
           requestedReviewer {
-            ... on User {
-              login
-              name
-              avatarUrl
-            }
-            # Aliased apart from a person's: their nullability differs.
-            ... on Team {
-              slug
-              combinedSlug
-              teamName: name
-              teamAvatarUrl: avatarUrl
-            }
             ... on Bot {
               login
               avatarUrl
@@ -419,6 +454,12 @@ query ReviewerCandidates($owner: String!, $name: String!, $number: Int!) {
         }
       }
     }
+  }
+}
+
+query ReviewerCandidatesEnterprise($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    ...ReviewerCandidateFields
   }
 }
 
@@ -481,19 +522,32 @@ query PullRequestMergeMessage(
   }
 }
 
-# What `gh pr merge` and `gh pr update-branch` read before they act.
+fragment PullRequestActionFields on PullRequest {
+  id
+  headRefOid
+  isMergeQueueEnabled
+  mergeStateStatus
+}
+
+# Merge and branch update actions read fresh state before mutating.
 query PullRequestActionState($owner: String!, $name: String!, $number: Int!, $headRef: String!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      id
-      headRefOid
-      isMergeQueueEnabled
-      mergeStateStatus
+      ...PullRequestActionFields
       baseRef {
         compare(headRef: $headRef) {
           behindBy
         }
       }
+    }
+  }
+}
+
+query PullRequestActionStateEnterprise($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      ...PullRequestActionFields
+      baseRefOid
     }
   }
 }

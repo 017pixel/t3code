@@ -67,8 +67,6 @@ export function gitHubViewerPermissions(access: GitHubViewerAccess): PullRequest
           ] as const)
         : []),
       ...(access.canUpdate ? (["ready", "draft", "close", "reopen"] as const) : []),
-      // Whether this viewer may update the branch is GitHub's own answer, read with the
-      // comparison; without it the action is offered to nobody rather than to everybody.
       ...(access.canUpdateBranch === true ? (["update-branch"] as const) : []),
     ],
     comment: true,

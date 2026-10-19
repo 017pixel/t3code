@@ -49,150 +49,171 @@ fragment ThreadComment on PullRequestReviewComment {
 #
 # Reviewers come from here because `reviewRequests` holds only requests still outstanding, so
 # anyone who has already reviewed drops off it; `latestReviews` adds them back. A reviewer can be a
-# person or an app, and both are asked for by name because they are different GraphQL types.
+# person or an app; Enterprise's requested-reviewer union may not include Bot.
 #
 # `viewerCanUpdate` and `viewerDidAuthor` belong to the pull request this query is already
 # standing on, so what the reader may do with it arrives with the conversation.
-query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
-  viewer {
-    login
-  }
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100, after: $after) {
+fragment ReviewThreadFields on PullRequest {
+  reviewThreads(first: 100, after: $after) {
+    totalCount
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      id
+      isResolved
+      isOutdated
+      path
+      # Null once the thread's line has left the diff, which `isOutdated` reports.
+      line
+      diffSide
+      # Only ten comments ride with each thread. A hundred threads times a hundred comments
+      # made GitHub reserve 10,000 nested rows and charge 104 points; unfinished threads are
+      # paged from their own cursor by `ReviewThreadComments`.
+      comments(first: 10) {
         totalCount
         pageInfo {
           hasNextPage
           endCursor
         }
         nodes {
-          id
-          isResolved
-          isOutdated
-          path
-          # Null once the thread's line has left the diff, which `isOutdated` reports.
-          line
-          diffSide
-          # Only ten comments ride with each thread. A hundred threads times a hundred comments
-          # made GitHub reserve 10,000 nested rows and charge 104 points; unfinished threads are
-          # paged from their own cursor by `ReviewThreadComments`.
-          comments(first: 10) {
-            totalCount
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-            nodes {
-              ...ThreadComment
-            }
-          }
+          ...ThreadComment
         }
       }
-      viewerCanUpdate
-      viewerDidAuthor
+    }
+  }
+  viewerCanUpdate
+  viewerDidAuthor
+  author {
+    __typename
+    login
+    avatarUrl
+  }
+  ...Reactions
+  comments(first: 100) {
+    nodes {
+      id
+      lastEditedAt
       author {
         __typename
         login
         avatarUrl
       }
       ...Reactions
-      comments(first: 100) {
-        nodes {
-          id
-          lastEditedAt
-          author {
-            __typename
-            login
-            avatarUrl
-          }
-          ...Reactions
+    }
+  }
+  # For their reactions and edit times: the words and the verdict arrive with the activity read.
+  reviews(first: 100) {
+    nodes {
+      id
+      lastEditedAt
+      author {
+        __typename
+        login
+        avatarUrl
+      }
+      ...Reactions
+    }
+  }
+  reviewRequests(first: 50) {
+    nodes {
+      # Null for nobody. A team goes by its `org/slug`; a mannequin answers with neither and
+      # names nobody to show. A team's name and avatar are aliased apart from a person's,
+      # since their nullability differs.
+      requestedReviewer {
+        ... on User {
+          login
+          name
+          avatarUrl
+        }
+        ... on Team {
+          combinedSlug
+          teamName: name
+          teamAvatarUrl: avatarUrl
         }
       }
-      # For their reactions and edit times: the words and the verdict arrive with the activity read.
-      reviews(first: 100) {
-        nodes {
+    }
+  }
+  latestReviews(first: 50) {
+    nodes {
+      state
+      author {
+        __typename
+        login
+        avatarUrl
+      }
+    }
+  }
+  reviewDismissals: timelineItems(itemTypes: [REVIEW_DISMISSED_EVENT], first: 100) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      ... on ReviewDismissedEvent {
+        dismissalMessage
+        review {
           id
-          lastEditedAt
-          author {
-            __typename
-            login
-            avatarUrl
-          }
-          ...Reactions
         }
       }
+    }
+  }
+  # `last` rather than `first`: a pull request with more than a hundred commits keeps the
+  # newest ones, which is what a reader scoping a diff wants.
+  commits(last: 100) {
+    nodes {
+      commit {
+        oid
+        messageHeadline
+        committedDate
+        additions
+        deletions
+        parents(first: 1) {
+          totalCount
+        }
+        authors(first: 3) {
+          nodes {
+            name
+            avatarUrl
+            user {
+              login
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer {
+    login
+  }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      ...ReviewThreadFields
       reviewRequests(first: 50) {
         nodes {
-          # Null for nobody. A team goes by its `org/slug`; a mannequin answers with neither and
-          # names nobody to show. A team's name and avatar are aliased apart from a person's,
-          # since their nullability differs.
           requestedReviewer {
-            ... on User {
-              login
-              name
-              avatarUrl
-            }
             ... on Bot {
               login
               avatarUrl
             }
-            ... on Team {
-              combinedSlug
-              teamName: name
-              teamAvatarUrl: avatarUrl
-            }
           }
         }
       }
-      latestReviews(first: 50) {
-        nodes {
-          state
-          author {
-            __typename
-            login
-            avatarUrl
-          }
-        }
-      }
-      reviewDismissals: timelineItems(itemTypes: [REVIEW_DISMISSED_EVENT], first: 100) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-        nodes {
-          ... on ReviewDismissedEvent {
-            dismissalMessage
-            review {
-              id
-            }
-          }
-        }
-      }
-      # `last` rather than `first`: a pull request with more than a hundred commits keeps the
-      # newest ones, which is what a reader scoping a diff wants.
-      commits(last: 100) {
-        nodes {
-          commit {
-            oid
-            messageHeadline
-            committedDate
-            additions
-            deletions
-            parents(first: 1) {
-              totalCount
-            }
-            authors(first: 3) {
-              nodes {
-                name
-                avatarUrl
-                user {
-                  login
-                }
-              }
-            }
-          }
-        }
-      }
+    }
+  }
+}
+
+query ReviewThreadsEnterprise($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer {
+    login
+  }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      ...ReviewThreadFields
     }
   }
 }

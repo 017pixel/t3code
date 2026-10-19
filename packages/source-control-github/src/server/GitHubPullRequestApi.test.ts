@@ -4171,7 +4171,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                 })),
               },
               pullRequest: {
-                author: { login: "author" },
+                author: { __typename: "User", login: "author" },
                 reviewRequests: enterpriseReviewRequests,
               },
             },
