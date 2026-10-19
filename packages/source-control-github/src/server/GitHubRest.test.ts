@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -11,6 +12,7 @@ import { VcsProcessSpawnError, VcsProcessTimeoutError } from "@t3tools/contracts
 import { HttpClient, HttpClientResponse, type HttpClientRequest } from "effect/http";
 
 import * as GitHubRest from "./GitHubRest.ts";
+import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
 import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubQuota from "./GitHubQuota.ts";
@@ -53,7 +55,7 @@ function harness(respond: (request: HttpClientRequest.HttpClientRequest) => Resp
     }),
   );
   const layer = GitHubRest.layer.pipe(
-    Layer.provide(Layer.mergeAll(credentials, http)),
+    Layer.provideMerge(Layer.mergeAll(credentials, http)),
     Layer.provideMerge(GitHubQuota.layer),
     Layer.provideMerge(SourceControlRateLimit.layer),
   );
@@ -173,6 +175,86 @@ describe("GitHubRest", () => {
       expect(requests).toHaveLength(3);
     }).pipe(Effect.provide(layer));
   });
+
+  it.effect(
+    "uses the REST reserve for explicit Enterprise branch updates in background context",
+    () => {
+      const reset = Math.floor(NOW / 1000) + 600;
+      const updates: Array<Readonly<Record<string, unknown>>> = [];
+      const { layer, requests } = harness((request) => {
+        if (request.url.endsWith("/api/graphql")) {
+          const sent =
+            request.body._tag === "Uint8Array"
+              ? (JSON.parse(new TextDecoder().decode(request.body.body)) as {
+                  operationName: string;
+                  variables: Readonly<Record<string, unknown>>;
+                })
+              : { operationName: "", variables: {} };
+          if (sent.operationName === "UpdatePullRequestBranch") updates.push(sent.variables);
+          return json({
+            data:
+              sent.operationName === "PullRequestActionStateEnterprise"
+                ? {
+                    repository: {
+                      pullRequest: {
+                        id: "PR_7",
+                        headRefOid: "abc123",
+                        isMergeQueueEnabled: false,
+                        mergeStateStatus: "BLOCKED",
+                        baseRef: { target: { __typename: "Commit", oid: "live789" } },
+                      },
+                    },
+                  }
+                : { updatePullRequestBranch: null },
+          });
+        }
+        return json(
+          { behind_by: 2 },
+          {
+            headers: {
+              "x-ratelimit-resource": "core",
+              "x-ratelimit-limit": "5000",
+              "x-ratelimit-remaining": "499",
+              "x-ratelimit-reset": String(reset),
+            },
+          },
+        );
+      });
+      return Effect.gen(function* () {
+        yield* TestClock.setTime(NOW);
+        const rest = yield* GitHubRest.GitHubRest;
+        const read = { host: "ghe.reserve.test", operation: "sweep", path: "repos/acme/web/pulls" };
+        yield* rest.rest(read);
+        expect((yield* Effect.flip(rest.rest(read)))._tag).toBe(
+          "SourceControlRateLimitPausedError",
+        );
+        const api = yield* GitHubPullRequestApi.make;
+        yield* api
+          .runPullRequestAction({
+            cwd: "/w",
+            repository: "acme/web",
+            host: read.host,
+            number: 7,
+            action: "update-branch",
+          })
+          .pipe(Effect.provideService(SourceControlRateLimit.Interactive, false));
+        expect(updates).toEqual([
+          { pullRequestId: "PR_7", expectedHeadOid: "abc123", updateMethod: "MERGE" },
+        ]);
+        expect(requests.map(({ url }) => new URL(url).pathname)).toEqual([
+          "/api/v3/repos/acme/web/pulls",
+          "/api/graphql",
+          "/api/v3/repos/acme/web/compare/live789...abc123",
+          "/api/graphql",
+        ]);
+        expect((yield* Effect.flip(rest.rest(read)))._tag).toBe(
+          "SourceControlRateLimitPausedError",
+        );
+      }).pipe(
+        Effect.provide(Layer.mergeAll(layer, TestSourceControlHost.layer(), NodeServices.layer)),
+      );
+    },
+  );
 
   it.effect("carries GitHub's own reason for a refused REST request", () => {
     const { layer } = harness(() =>

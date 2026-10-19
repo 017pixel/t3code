@@ -508,6 +508,15 @@ function routeEnterprise(...routes: ReadonlyArray<readonly [needle: string, body
   });
 }
 
+const botReviewRequest = {
+  requestedReviewer: {
+    __typename: "Bot",
+    login: "review-bot",
+    name: null,
+    avatarUrl: "https://avatars/bot",
+  },
+};
+
 const enterpriseReviewRequests = {
   nodes: [
     {
@@ -4144,6 +4153,63 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
+  it.effect.each(["github.com", " Acme.GHE.COM "])(
+    "retains Cloud required checks, bot reviewers and branch freshness on %s",
+    (host) =>
+      Effect.gen(function* () {
+        const input = { cwd: "/w", repository: "acme/web", host, number: 7 };
+        const first = checkRun({ name: "first", conclusion: "SUCCESS", isRequired: true });
+        const last = checkRun({ name: "last", conclusion: "FAILURE", isRequired: false });
+        const response = (overflow: boolean) =>
+          coreResponse({
+            baseRef: { compare: { behindBy: 2 }, target: { __typename: "Commit", oid: "live789" } },
+            reviewRequests: {
+              nodes: [botReviewRequest],
+            },
+            commits: {
+              nodes: [
+                {
+                  commit: {
+                    statusCheckRollup: {
+                      contexts: {
+                        nodes: [first],
+                        pageInfo: { hasNextPage: overflow },
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          });
+        route(["query PullRequestCore", response(false)], ["/compare/", { behind_by: 2 }]);
+        const provider = yield* GitHubPullRequestProvider.make;
+        const detail = yield* provider.getChangeRequest(input);
+        expect(detail.checks.map(({ name, required }) => ({ name, required }))).toEqual([
+          { name: "first", required: true },
+        ]);
+        expect(detail.reviewers.map(({ login }) => login)).toEqual(["review-bot"]);
+        expect(detail.baseComparison).toBe("behind");
+        expect(detail.behindBy).toBe(2);
+        expect(detail.viewerPermissions.actions).toContain("update-branch");
+        route(
+          ["query PullRequestCore", response(true)],
+          ["query PullRequestCheckContexts", JSON.parse(checkContextsPage([first, last], null))],
+        );
+        const overflow = yield* provider.getChangeRequest(input);
+        expect(overflow.checks.map(({ name, required }) => ({ name, required }))).toEqual([
+          { name: "first", required: true },
+          { name: "last", required: false },
+        ]);
+        expect(overflow.checksState).toBe("failing");
+        route(["query PullRequestActionState", actionState()]);
+        yield* provider.runAction({ ...input, action: "update-branch" });
+        expect(variablesOf("updatePullRequestBranch(")).toEqual([
+          { pullRequestId: "PR_7", expectedHeadOid: "abc123", updateMethod: "MERGE" },
+        ]);
+        expect(restCallsTo("/compare/")).toHaveLength(0);
+      }),
+  );
+
   it.effect(
     "loads older Enterprise details with live freshness and guarded update permission",
     () =>
@@ -4226,84 +4292,104 @@ layer("GitHubPullRequestApi.layer", (it) => {
       }),
   );
 
-  it.effect("loads requested people and teams in older Enterprise review activity", () =>
-    Effect.gen(function* () {
-      routeEnterprise([
-        "query ReviewThreads",
-        {
-          data: {
-            viewer: { login: "viewer" },
-            repository: {
-              pullRequest: {
-                reviewThreads: { totalCount: 0, pageInfo: lastPage, nodes: [] },
-                viewerCanUpdate: true,
-                viewerDidAuthor: false,
-                author: null,
-                reactionGroups: [],
-                comments: { nodes: [] },
-                reviews: { nodes: [] },
-                reviewRequests: enterpriseReviewRequests,
-                latestReviews: { nodes: [] },
-                reviewDismissals: { pageInfo: lastPage, nodes: [] },
-                commits: { nodes: [] },
+  it.effect.each(["ghe.example.test", " Acme.GHE.COM "])(
+    "loads requested reviewers in review activity on %s",
+    (host) =>
+      Effect.gen(function* () {
+        const cloud = host.trim().toLowerCase().endsWith(".ghe.com");
+        (cloud ? route : routeEnterprise)([
+          "query ReviewThreads",
+          {
+            data: {
+              viewer: { login: "viewer" },
+              repository: {
+                pullRequest: {
+                  reviewThreads: { totalCount: 0, pageInfo: lastPage, nodes: [] },
+                  viewerCanUpdate: true,
+                  viewerDidAuthor: false,
+                  author: null,
+                  reactionGroups: [],
+                  comments: { nodes: [] },
+                  reviews: { nodes: [] },
+                  reviewRequests: {
+                    nodes: [
+                      ...enterpriseReviewRequests.nodes,
+                      ...(cloud ? [botReviewRequest] : []),
+                    ],
+                  },
+                  latestReviews: { nodes: [] },
+                  reviewDismissals: { pageInfo: lastPage, nodes: [] },
+                  commits: { nodes: [] },
+                },
               },
             },
           },
-        },
-      ]);
-      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
-      const activity = yield* cli.listReviewThreadComments({
-        cwd: "/w",
-        repository: "acme/web",
-        host: "ghe.example.test",
-        number: 7,
-      });
-      expect(activity.reviewers).toEqual([
-        { login: "reviewer", name: null, avatarUrl: "https://avatars/reviewer" },
-        { login: "acme/maintainers", name: "Maintainers", avatarUrl: "https://avatars/team" },
-      ]);
-    }),
+        ]);
+        const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+        const activity = yield* cli.listReviewThreadComments({
+          cwd: "/w",
+          repository: "acme/web",
+          host,
+          number: 7,
+        });
+        expect(activity.reviewers).toEqual([
+          { login: "reviewer", name: null, avatarUrl: "https://avatars/reviewer" },
+          { login: "acme/maintainers", name: "Maintainers", avatarUrl: "https://avatars/team" },
+          ...(cloud
+            ? [{ login: "review-bot", name: null, avatarUrl: "https://avatars/bot", isBot: true }]
+            : []),
+        ]);
+      }),
   );
 
-  it.effect("loads older Enterprise reviewer candidates with existing team requests", () =>
-    Effect.gen(function* () {
-      routeEnterprise([
-        "query ReviewerCandidates",
-        {
-          data: {
-            repository: {
-              assignableUsers: {
-                pageInfo: { hasNextPage: false },
-                nodes: ["author", "reviewer", "available"].map((login) => ({
-                  login,
-                  name: null,
-                  avatarUrl: `https://avatars/${login}`,
-                })),
-              },
-              pullRequest: {
-                author: { __typename: "User", login: "author" },
-                reviewRequests: enterpriseReviewRequests,
+  it.effect.each(["ghe.example.test", " Acme.GHE.COM "])(
+    "loads reviewer candidates with existing requests on %s",
+    (host) =>
+      Effect.gen(function* () {
+        const cloud = host.trim().toLowerCase().endsWith(".ghe.com");
+        (cloud ? route : routeEnterprise)([
+          "query ReviewerCandidates",
+          {
+            data: {
+              repository: {
+                assignableUsers: {
+                  pageInfo: { hasNextPage: false },
+                  nodes: ["author", "reviewer", "available"].map((login) => ({
+                    login,
+                    name: null,
+                    avatarUrl: `https://avatars/${login}`,
+                  })),
+                },
+                pullRequest: {
+                  author: { __typename: "User", login: "author" },
+                  reviewRequests: {
+                    nodes: [
+                      ...enterpriseReviewRequests.nodes,
+                      ...(cloud ? [botReviewRequest] : []),
+                    ],
+                  },
+                },
               },
             },
           },
-        },
-      ]);
-      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
-      const list = yield* cli.listReviewerCandidates({
-        cwd: "/w",
-        repository: "acme/web",
-        host: "ghe.example.test",
-        number: 7,
-      });
-      expect(
-        list.candidates.map(({ id, kind, isRequested }) => ({ id, kind, isRequested })),
-      ).toEqual([
-        { id: "reviewer", kind: "user", isRequested: true },
-        { id: "maintainers", kind: "team", isRequested: true },
-        { id: "available", kind: "user", isRequested: false },
-      ]);
-      expect(list.truncated).toBe(false);
-    }),
+        ]);
+        const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+        const list = yield* cli.listReviewerCandidates({
+          cwd: "/w",
+          repository: "acme/web",
+          host,
+          number: 7,
+        });
+        expect(
+          list.candidates.map(({ id, kind, isRequested }) => ({ id, kind, isRequested })),
+        ).toEqual([
+          { id: "reviewer", kind: "user", isRequested: true },
+          { id: "maintainers", kind: "team", isRequested: true },
+          ...(cloud ? [{ id: "review-bot", kind: "user", isRequested: true }] : []),
+          { id: "available", kind: "user", isRequested: false },
+        ]);
+        expect(list.truncated).toBe(false);
+      }),
   );
 
   it.effect("keeps the core detail read separate from conversation activity", () =>

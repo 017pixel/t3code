@@ -1139,10 +1139,16 @@ export const make = Effect.gen(function* () {
     readonly host: string;
     readonly operation: string;
     readonly path: string;
+    readonly allowReserve?: boolean | undefined;
     readonly decode: (raw: string) => Result.Result<A, unknown>;
   }): Effect.Effect<A, GitHubPullRequestApiError> =>
     api
-      .rest({ host: input.host, operation: input.operation, path: input.path })
+      .rest({
+        host: input.host,
+        operation: input.operation,
+        path: input.path,
+        ...(input.allowReserve === undefined ? {} : { allowReserve: input.allowReserve }),
+      })
       .pipe(
         Effect.flatMap((response) =>
           decodeWith(input.cwd, input.operation, input.decode, response.body),
@@ -1155,6 +1161,7 @@ export const make = Effect.gen(function* () {
       readonly repository: string;
       readonly host: string;
       readonly operation: string;
+      readonly allowReserve?: boolean | undefined;
       readonly baseOid: string | null | undefined;
       readonly headOid: string;
     }) {
@@ -1317,7 +1324,10 @@ export const make = Effect.gen(function* () {
         return { oldContents, newContents };
       });
 
-  const isGitHubDotCom = (host: string) => host.toLowerCase() === "github.com";
+  const isGitHubCloud = (host: string) => {
+    const normalized = GitHubRequestPolicy.normalizeHost(host);
+    return normalized === "github.com" || normalized.endsWith(".ghe.com");
+  };
 
   /**
    * Every check context of the head commit, a page at a time, for a rollup the detail read cut at
@@ -1344,7 +1354,7 @@ export const make = Effect.gen(function* () {
         };
       };
       const variables = { owner, name, number: input.number };
-      const pagesStream = isGitHubDotCom(input.host)
+      const pagesStream = isGitHubCloud(input.host)
         ? GraphQLClient.pages(client.PullRequestCheckContexts, {
             variables: { ...variables, required: true },
             connection,
@@ -1384,7 +1394,7 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((allowReserve) =>
         Effect.gen(function* () {
           const target = { ...input, operation, allowReserve };
-          const result = isGitHubDotCom(input.host)
+          const result = isGitHubCloud(input.host)
             ? yield* client
                 .PullRequestCore({
                   owner,
@@ -2122,7 +2132,7 @@ export const make = Effect.gen(function* () {
         const threadPage = (
           after: string | null,
         ): Effect.Effect<GitHubReviewThreadPage, GitHubPullRequestApiError> =>
-          (isGitHubDotCom(input.host)
+          (isGitHubCloud(input.host)
             ? client.ReviewThreads({ owner, name, number: input.number, after })
             : client.ReviewThreadsEnterprise({ owner, name, number: input.number, after })
           ).pipe(graphql(target), Effect.map(toReviewThreadPage), Effect.flatMap(found(target)));
@@ -2243,7 +2253,7 @@ export const make = Effect.gen(function* () {
       const { owner, name } = parseRepositorySelector(input.repository);
       const operation = "listReviewerCandidates";
       return (
-        isGitHubDotCom(input.host)
+        isGitHubCloud(input.host)
           ? client.ReviewerCandidates({ owner, name, number: input.number })
           : client.ReviewerCandidatesEnterprise({ owner, name, number: input.number })
       ).pipe(
@@ -2497,7 +2507,7 @@ export const make = Effect.gen(function* () {
         // Read fresh rather than from the node id cache: merging and updating act on the head
         // as it stands now, and the merge queue decides which mutation a merge is.
         const target = { ...input, operation: "runPullRequestAction" };
-        const stateResult = isGitHubDotCom(input.host)
+        const stateResult = isGitHubCloud(input.host)
           ? yield* client
               .PullRequestActionState({
                 owner,
@@ -2515,9 +2525,10 @@ export const make = Effect.gen(function* () {
               .pipe(graphql({ ...target, allowReserve: true }));
         const state = yield* found(target)(stateResult.repository?.pullRequest ?? null);
         if (action === "update-branch") {
-          if (!isGitHubDotCom(input.host)) {
+          if (!isGitHubCloud(input.host)) {
             const behindBy = yield* compareEnterpriseBase({
               ...target,
+              allowReserve: true,
               baseOid:
                 state.baseRef && "target" in state.baseRef ? state.baseRef.target?.oid : null,
               headOid: state.headRefOid,
