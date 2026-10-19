@@ -545,6 +545,44 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(b.bearers, []);
 
+      const probes = yield* Ref.get(b.probes);
+      for (const name of ["schedule_task", "update_scheduled_task"]) {
+        const args =
+          name === "schedule_task"
+            ? { projectId: boxProject, prompt: "Handle {{body.action}}." }
+            : { scheduledTaskId: "scheduled-task:box" };
+        const signed = yield* a.call("thread:laptop-full", name, {
+          ...args,
+          environmentId: box.environmentId,
+          schedule: {
+            type: "webhook",
+            signature: {
+              header: "x-hub-signature-256",
+              encoding: "hex",
+              prefix: "sha256=",
+              secretRef: "secret:local-only",
+            },
+          },
+        });
+        expect(yield* Ref.get(b.probes)).toBe(probes);
+        expect(yield* Ref.get(b.bearers)).toEqual([]);
+        expect(failureOf(signed)).toMatchObject({
+          code: "invalid_request",
+          message: expect.stringContaining("signature.secretRef"),
+        });
+        expect(failureOf(signed).message).toContain("destination environment");
+
+        const ordinary = yield* a.call("thread:laptop-full", name, {
+          ...args,
+          environmentId: EnvironmentId.make("environment-elsewhere"),
+          schedule: { type: "interval", everyMs: 3_600_000 },
+        });
+        expect(failureOf(ordinary)).toMatchObject({
+          code: "invalid_request",
+          message: expect.stringContaining("not linked"),
+        });
+      }
+
       const unknown = yield* a.call("thread:laptop-full", "t3_thread_read", {
         environmentId: EnvironmentId.make("environment-elsewhere"),
         threadId: boxThread,
