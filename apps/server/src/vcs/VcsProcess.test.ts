@@ -702,3 +702,98 @@ describe("VcsProcess.run", () => {
     }).pipe(provideLive),
   );
 });
+
+it.effect("limits termination escalation to checkpoint capture commands", () =>
+  Effect.gen(function* () {
+    const inputs: ProcessRunner.ProcessRunInput[] = [];
+    const service = yield* VcsProcess.make.pipe(
+      Effect.provideService(ProcessRunner.ProcessRunner, {
+        run: (input) =>
+          Effect.sync(() => {
+            inputs.push(input);
+            return {
+              stdout: "",
+              stderr: "",
+              code: ChildProcessSpawner.ExitCode(0),
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+              stdoutInvalidUtf8: false,
+              stderrInvalidUtf8: false,
+            };
+          }),
+      }),
+    );
+    for (const operation of [VcsProcess.CHECKPOINT_CAPTURE_OPERATION, "GitVcsDriver.status"]) {
+      yield* service.run({ ...baseInput, operation, timeoutMs: 30_000 });
+    }
+    expect(inputs[0]).toHaveProperty("forceKillAfter");
+    expect(inputs[1]).not.toHaveProperty("forceKillAfter");
+    expect(inputs.map((input) => input.timeout)).toEqual([30_000, 30_000]);
+  }),
+);
+
+it.live.each(["timeout", "interrupt"] as const)(
+  "reaps an owned SIGTERM-resistant checkpoint child on %s",
+  (mode) =>
+    Effect.gen(function* () {
+      const ready = yield* Deferred.make<void>();
+      let childPid: number | undefined;
+      let watchdogFired = false;
+      const killOwnedChild = () => {
+        if (childPid === undefined) return;
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      };
+      // @effect-diagnostics-next-line globalTimersInEffect:off -- This watchdog must survive blocked Effect finalizers.
+      const watchdog = setTimeout(() => {
+        watchdogFired = true;
+        killOwnedChild();
+      }, 6_000);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          clearTimeout(watchdog);
+          killOwnedChild();
+        }),
+      );
+      const fiber = yield* run({
+        operation: VcsProcess.CHECKPOINT_CAPTURE_OPERATION,
+        command: process.execPath,
+        args: [
+          "-e",
+          [
+            "process.on('SIGTERM', () => {});",
+            "console.log(process.pid);",
+            "setTimeout(() => process.exit(99), 10000);",
+          ].join(""),
+        ],
+        cwd: process.cwd(),
+        timeoutMs: 2_000,
+        onStdoutChunk: (chunk) => {
+          childPid = Number(Buffer.from(chunk).toString().trim());
+          Deferred.doneUnsafe(ready, Effect.void);
+        },
+      }).pipe(Effect.forkChild);
+      yield* Deferred.await(ready).pipe(Effect.timeout("4 seconds"));
+      expect(childPid).toBeGreaterThan(0);
+      if (mode === "interrupt") yield* Fiber.interrupt(fiber);
+      const exit = yield* Fiber.await(fiber);
+      assert.isTrue(Exit.isFailure(exit));
+      if (Exit.isFailure(exit)) {
+        if (mode === "timeout") {
+          expect(Cause.findErrorOption(exit.cause)).toMatchObject({
+            _tag: "Some",
+            value: { _tag: "VcsProcessTimeoutError" },
+          });
+        } else {
+          assert.isTrue(Cause.hasInterruptsOnly(exit.cause));
+        }
+      }
+      expect(watchdogFired, "production cleanup must finish before the test watchdog").toBe(false);
+      expect(() => process.kill(childPid!, 0)).toThrow();
+    }).pipe(Effect.scoped, provideLive),
+  { timeout: 12_000 },
+);
