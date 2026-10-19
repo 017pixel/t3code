@@ -1107,7 +1107,7 @@ describe("CodexAdapterV2 native protocol logging", () => {
           params: {
             id: "evt-1",
             http_headers: { Authorization: "Bearer secret-codex-token" },
-            audio: { type: "audio", url: "data:audio/wav;base64,cHJpdmF0ZQ==" },
+            audio: { type: "audio", url: `data:audio/wav;base64,${"cHJpdmF0ZQ==".repeat(8_192)}` },
             usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
           },
         },
@@ -1187,6 +1187,47 @@ describe("CodexAdapterV2 native protocol logging", () => {
       assert.equal(writes.length, 1);
       assert.nestedPropertyVal(writes[0], "event.stage", "decode_failed");
       assert.nestedPropertyVal(writes[0], "event.payload.method", "turn/completed");
+    }),
+  );
+
+  it.effect("bounds deeply nested and wide notifications without interrupting logging", () =>
+    Effect.gen(function* () {
+      const writes: Array<unknown> = [];
+      const protocolLogger = CodexAdapterV2.makeCodexAppServerProtocolLogger({
+        nativeEventLogger: {
+          filePath: "/tmp/events.log",
+          write: (event) =>
+            Effect.sync(() => {
+              writes.push(event);
+            }),
+          close: () => Effect.void,
+        },
+        threadId: ThreadId.make("thread-1"),
+        providerSessionId: ProviderSessionId.make("provider-session-1"),
+      });
+      assert.exists(protocolLogger);
+      if (protocolLogger === undefined) return;
+
+      let nested: unknown = { token: "secret-token" };
+      for (let i = 0; i < 20_000; i++) nested = i % 2 === 0 ? { nested } : [nested];
+      for (const result of [nested, Array.from({ length: 20_000 }, () => nested)]) {
+        yield* protocolLogger({
+          direction: "incoming",
+          stage: "decoded",
+          payload: { method: "item/completed", params: { result } },
+        });
+      }
+      yield* protocolLogger({
+        direction: "incoming",
+        stage: "decoded",
+        payload: { method: "turn/completed", params: { turnId: "next-turn" } },
+      });
+
+      assert.lengthOf(writes, 3);
+      const serialized = encodeUnknownJson(writes);
+      assert.isBelow(serialized.length, 64 * 1_024);
+      assert.notInclude(serialized, "secret-token");
+      assert.nestedPropertyVal(writes[2], "event.payload.params.turnId", "next-turn");
     }),
   );
 

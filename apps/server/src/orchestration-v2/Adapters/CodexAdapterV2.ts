@@ -1448,9 +1448,19 @@ export function makeCodexAppServerProtocolLogger(input: {
   };
 }
 
-function redactCodexProtocolValue(value: unknown): unknown {
+function redactCodexProtocolValue(
+  value: unknown,
+  depth = 0,
+  budget = { remainingFields: 1_024 },
+): unknown {
+  if (budget.remainingFields-- <= 0 || depth > 16) return "[TRUNCATED]";
   if (Array.isArray(value)) {
-    return value.map(redactCodexProtocolValue);
+    const redacted: Array<unknown> = [];
+    for (const nested of value) {
+      if (budget.remainingFields <= 0) break;
+      redacted.push(redactCodexProtocolValue(nested, depth + 1, budget));
+    }
+    return redacted;
   }
   if (value === null || typeof value !== "object") {
     if (typeof value !== "string") {
@@ -1471,18 +1481,30 @@ function redactCodexProtocolValue(value: unknown): unknown {
     }
     try {
       return JSON.stringify(
-        redactCodexProtocolValue(boundProviderEventForLogging(JSON.parse(trimmed) as unknown)),
+        redactCodexProtocolValue(
+          boundProviderEventForLogging(JSON.parse(trimmed) as unknown),
+          depth + 1,
+          budget,
+        ),
       );
     } catch {
       return value;
     }
   }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, nested]) => [
+  const entries: Array<[string, unknown]> = [];
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (budget.remainingFields <= 0) break;
+    entries.push([
       key,
-      isSensitiveCodexProtocolKey(key) ? "[REDACTED]" : redactCodexProtocolValue(nested),
-    ]),
-  );
+      redactCodexProtocolValue(
+        isSensitiveCodexProtocolKey(key) ? "[REDACTED]" : Reflect.get(value, key),
+        depth + 1,
+        budget,
+      ),
+    ]);
+  }
+  return Object.fromEntries(entries);
 }
 
 function isSensitiveCodexProtocolKey(key: string): boolean {
