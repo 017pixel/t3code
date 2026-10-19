@@ -1,3 +1,4 @@
+import { DispatchModeLimit, narrowDispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -956,6 +957,11 @@ const make = Effect.gen(function* () {
             (yield* ids.allocate
               .message({ threadId, ordinal: 1 })
               .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId))));
+          const ambientLimit = yield* DispatchModeLimit;
+          const launchLimit =
+            input.createdBy === "agent"
+              ? narrowDispatchModeLimit(input, ambientLimit)
+              : ambientLimit;
           const dispatched = yield* threads
             .dispatch({
               type: "message.dispatch",
@@ -977,7 +983,10 @@ const make = Effect.gen(function* () {
               createdBy: input.createdBy,
               creationSource: input.creationSource,
             })
-            .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId)));
+            .pipe(
+              Effect.provideService(DispatchModeLimit, launchLimit),
+              Effect.mapError(mapError(input, "dispatch-message", threadId)),
+            );
           const runCreated = dispatched.storedEvents.find(
             (stored) => stored.event.type === "run.created",
           );

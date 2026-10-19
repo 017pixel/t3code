@@ -16,7 +16,7 @@ export const PeerLink = Schema.Struct({
 });
 export type PeerLink = typeof PeerLink.Type;
 
-/** Whether a link can be used now, as worked out when it is listed. */
+/** Descriptor reachability and local expiry; this does not authenticate the peer session. */
 export const PeerLinkStatus = Schema.Literals(["reachable", "unreachable", "expired"]);
 export type PeerLinkStatus = typeof PeerLinkStatus.Type;
 

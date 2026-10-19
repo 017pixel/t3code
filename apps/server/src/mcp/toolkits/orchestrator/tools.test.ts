@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Tool } from "effect/ai";
+import * as Schema from "effect/Schema";
 
 import {
   CreateThreadsTool,
@@ -8,6 +9,8 @@ import {
   ScheduleTaskTool,
   ThreadUpdateTool,
 } from "./tools.ts";
+
+const decodeThreadUpdate = Schema.decodeUnknownResult(ThreadUpdateTool.parametersSchema);
 
 describe("orchestrator MCP tool guidance", () => {
   it("directs subagent requests to delegation instead of ordinary threads", () => {
@@ -80,6 +83,7 @@ describe("orchestrator MCP tool guidance", () => {
 
     assert.equal(schema.type, "object");
     assert.hasAllKeys(schema.properties ?? {}, [
+      "environmentId",
       "threadId",
       "action",
       "title",
@@ -87,5 +91,14 @@ describe("orchestrator MCP tool guidance", () => {
       "clientRequestId",
     ]);
     assert.include(ThreadUpdateTool.description ?? "", "Workspace and branch changes");
+    assert.deepEqual(
+      [
+        { action: "rename" },
+        { action: "link_pull_request" },
+        { action: "rename", title: "Renamed locally" },
+        { action: "rename", title: "Renamed remotely", environmentId: "destination" },
+      ].map((input) => decodeThreadUpdate(input)._tag),
+      ["Failure", "Failure", "Success", "Success"],
+    );
   });
 });

@@ -9,6 +9,12 @@ import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentS
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import { McpSchema, McpServer } from "effect/ai";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
+import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
+import * as SourceControlRepositories from "../sourceControl/SourceControlRepositoryService.ts";
 import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   ChatAttachmentId,
@@ -70,6 +76,9 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 const projectId = ProjectId.make("project:launch-test");
 const otherProjectId = ProjectId.make("project:launch-other");
 const encodeThreadProjection = Schema.encodeEffect(OrchestrationV2ThreadProjectionJson);
+const decodeMcpLaunchResult = Schema.decodeUnknownEffect(
+  ProjectToolkit.tools.t3_thread_launch.successSchema,
+);
 const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.1-codex",
@@ -2032,6 +2041,137 @@ it.effect("replays a server-allocated launch", () =>
     }).pipe(Effect.provide(harness.layer));
   }),
 );
+
+it.effect("replays MCP launches durably within each caller's request namespace", () =>
+  Effect.gen(function* () {
+    const setupEntered = yield* Deferred.make<void>();
+    const allowSetup = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      hasCommit: () => Effect.succeed(true),
+      runSetup: () =>
+        Deferred.succeed(setupEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(allowSetup)),
+          Effect.as({ status: "no-script" as const }),
+        ),
+    });
+    const layerDependencies = Layer.mergeAll(
+      harness.layer,
+      NodeCrypto.layer,
+      NodeServices.layer,
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-launch-retry-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(SourceControlRepositories.SourceControlRepositoryService)({}),
+    );
+    const layerToolkit = McpHttpServer.toolkitRegistration(
+      ProjectToolkit,
+      ProjectHandlers.layer,
+    ).pipe(Layer.provideMerge(McpServer.McpServer.layer), Layer.provideMerge(layerDependencies));
+    yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const client = McpSchema.McpServerClient.of({
+        clientId: 1,
+        protocolVersion: "2025-06-18",
+        clientCapabilities: {},
+        clientInfo: { name: "launch-retry", version: "1" },
+        initializePayload: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "launch-retry", version: "1" },
+        },
+        getClient: Effect.die("unused"),
+      });
+      const launch = (sessionId: string) =>
+        server
+          .callTool({
+            name: "t3_thread_launch",
+            arguments: {
+              projectId,
+              title: "Retry safely",
+              message: "Only one initial message per caller",
+              workspaceStrategy: { type: "worktree", baseRef: "main" },
+              clientRequestId: "same-request",
+            },
+          })
+          .pipe(
+            Effect.provideService(McpSchema.McpServerClient, client),
+            Effect.provideService(McpInvocationContext.McpInvocationContext, {
+              environmentId: EnvironmentId.make("launch-environment"),
+              requestNamespace: `client:${sessionId}`,
+              thread: undefined,
+              client: { sessionId, label: sessionId, access: "auto" },
+              issuedAt: 0,
+              capabilities: new Set(["orchestration"] as const),
+            }),
+            Effect.flatMap((result) => {
+              assert.isFalse(result.isError, JSON.stringify(result));
+              return decodeMcpLaunchResult(result.structuredContent);
+            }),
+          );
+      const first = yield* launch("caller-a");
+      yield* Deferred.await(setupEntered);
+      const replay = yield* launch("caller-a");
+      const other = yield* launch("caller-b");
+      const otherReplay = yield* launch("caller-b");
+      assert.equal(replay.threadId, first.threadId);
+      assert.equal(replay.runId, first.runId);
+      assert.notEqual(other.threadId, first.threadId);
+      assert.equal(otherReplay.threadId, other.threadId);
+      assert.equal(otherReplay.runId, other.runId);
+      for (const result of [first, other]) {
+        const projection = yield* threads.getThreadProjection(result.threadId);
+        assert.equal(projection.messages.length, 1);
+        assert.equal(projection.runs.length, 1);
+        assert.equal(projection.runs[0]?.id, result.runId);
+        assert.equal(projection.thread.projectId, projectId);
+        assert.equal(projection.thread.runtimeMode, "auto");
+        assert.equal(projection.thread.interactionMode, "default");
+        assert.deepEqual(projection.thread.modelSelection, modelSelection);
+      }
+    }).pipe(Effect.provide(layerToolkit));
+  }),
+);
+
+it.effect("refuses a narrowed agent launch replay before persisting its first message", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    for (const modes of [
+      { runtimeMode: "auto", interactionMode: "default" },
+      { runtimeMode: "full-access", interactionMode: "plan" },
+    ] as const) {
+      const input = {
+        ...launchInput({
+          command: `command:launch:narrowed:${modes.runtimeMode}`,
+          thread: `thread:launch:narrowed:${modes.runtimeMode}`,
+        }),
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+      };
+      const created = yield* launches.launch(input);
+      // A retry can carry the first message after an earlier create-only request won.
+      const result = yield* launches
+        .launch({
+          ...input,
+          ...modes,
+          initialMessage: { text: "Must not start above my modes", attachments: [] },
+        })
+        .pipe(Effect.exit);
+      const projection = yield* threads.getThreadProjection(created.threadId);
+      assert.equal(projection.messages.length, 0);
+      assert.equal(projection.runs.length, 0);
+      assert.isTrue(Exit.isFailure(result));
+      if (Exit.isFailure(result)) {
+        const error = Cause.squash(result.cause);
+        assert.instanceOf(error, ThreadLaunch.ThreadLaunchError);
+        assert.equal((error as ThreadLaunch.ThreadLaunchError).operation, "dispatch-message");
+      }
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect("refuses a launch when the project disables the model's provider instance", () => {
   const harness = makeHarness({

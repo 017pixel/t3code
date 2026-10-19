@@ -8,6 +8,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { OrchestratorMcpEnvironmentTarget } from "./environment.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 
@@ -79,6 +80,7 @@ export const ThreadMetadataMcpPullRequest = Schema.Struct({
 export type ThreadMetadataMcpPullRequest = typeof ThreadMetadataMcpPullRequest.Type;
 
 export const ThreadMetadataMcpUpdateInput = Schema.Struct({
+  environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: Schema.optional(ThreadId).annotate({
     description: "Thread to update. Omit to update the calling thread.",
   }),

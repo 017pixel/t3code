@@ -63,6 +63,8 @@ import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
+import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
@@ -707,6 +709,7 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(layerPullRequestService),
   Layer.provide(ServerBrowser.layer.pipe(Layer.provide(DesktopBrowserChannel.layer))),
   Layer.provide(PreviewBrowser.layer),
+  Layer.provide(PeerForwarding.layer.pipe(Layer.provide(PeerMcpClient.layer))),
   Layer.provide(PeerLinks.layer),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),

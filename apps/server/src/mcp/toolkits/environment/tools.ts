@@ -1,4 +1,5 @@
 import {
+  OrchestratorMcpEnvironmentLinksResult,
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
   ExecutionEnvironmentDescriptor,
@@ -64,4 +65,17 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
   }),
   success: Schema.Struct(PreferenceFields),
 }).annotate(Tool.Destructive, true);
-export const EnvironmentToolkit = Toolkit.make(EnvironmentReadTool, EnvironmentPreferencesTool);
+const EnvironmentLinksTool = Tool.make("t3_environment_links", {
+  ...shared,
+  description:
+    "List this environment's paired destinations without credentials. Reachable means the public descriptor answers with the expected identity, not that access is still authorized.",
+  success: OrchestratorMcpEnvironmentLinksResult,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
+export const EnvironmentToolkit = Toolkit.make(
+  EnvironmentReadTool,
+  EnvironmentPreferencesTool,
+  EnvironmentLinksTool,
+);

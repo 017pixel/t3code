@@ -1,5 +1,6 @@
 import {
   OrchestratorMcpCapabilitiesResult,
+  OrchestratorMcpEnvironmentTarget,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
@@ -52,7 +53,8 @@ const threadMetadataDependencies = [
 
 const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   description:
-    "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this caller. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
+    "List the V2 provider instances and their current models locally or in a linked environment with environmentId, from the same live catalog as that environment's composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this caller. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
+  parameters: Schema.Struct({ environmentId: OrchestratorMcpEnvironmentTarget }),
   success: OrchestratorMcpCapabilitiesResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",
@@ -192,7 +194,7 @@ export const CreateThreadsTool = Tool.make("create_threads", {
 
 const ThreadListTool = Tool.make("t3_thread_list", {
   description:
-    "List T3 threads in a project, newest first. Omit projectId for the calling thread's project. Filter by durable run status, title, or settled state (settled=true lists threads the user or auto-settlement moved out of the active list), or snoozed state, and paginate with the returned cursor. A snoozed thread wakes early when it asks for something, fails, or completes. pullRequests lists every pull request linked to each thread; linkedPullRequest is a legacy single link and can be null while pullRequests still has entries. To link a thread for the user, write `[title](t3-thread://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; T3 Code shows the thread's current title.",
+    "List T3 threads in a project locally or in a linked environment with environmentId, newest first. Locally, omit projectId for the calling thread's project. Filter by durable run status, title, or settled state (settled=true lists threads the user or auto-settlement moved out of the active list), or snoozed state, and paginate with the returned cursor. A snoozed thread wakes early when it asks for something, fails, or completes. pullRequests lists every pull request linked to each thread; linkedPullRequest is a legacy single link and can be null while pullRequests still has entries. To link a thread for the user, write `[title](t3-thread://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; T3 Code shows the thread's current title.",
   parameters: OrchestratorMcpThreadListInput,
   success: OrchestratorMcpThreadListResult,
   failure: OrchestratorMcpFailure,
@@ -206,7 +208,7 @@ const ThreadListTool = Tool.make("t3_thread_list", {
 
 const ThreadReadTool = Tool.make("t3_thread_read", {
   description:
-    "Read durable state and a paginated timeline from any T3 thread in this environment. The default messages view returns user messages, assistant messages, and proposed plans; activity returns all summarized timeline items. Reading an untruncated terminal assistant result from this parent thread's direct app-owned child acknowledges that child's automatic completion delivery. Continue with afterPosition=nextPosition. Recover long item text with itemId and textOffset=nextTextOffset until nextTextOffset is null; offsets count UTF-16 code units. The thread also reports its snooze state and, in pullRequests, every linked pull request; linkedPullRequest is a legacy single link and can be null while pullRequests still has entries. To link a thread for the user, write `[title](t3-thread://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; T3 Code shows the thread's current title.",
+    "Read durable state and a paginated timeline from any T3 thread locally or in a linked environment with environmentId. The default messages view returns user messages, assistant messages, and proposed plans; activity returns all summarized timeline items. Reading an untruncated terminal assistant result from this parent thread's direct app-owned child acknowledges that child's automatic completion delivery. Continue with afterPosition=nextPosition. Recover long item text with itemId and textOffset=nextTextOffset until nextTextOffset is null; offsets count UTF-16 code units. The thread also reports its snooze state and, in pullRequests, every linked pull request; linkedPullRequest is a legacy single link and can be null while pullRequests still has entries. To link a thread for the user, write `[title](t3-thread://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; T3 Code shows the thread's current title.",
   parameters: OrchestratorMcpThreadReadInput,
   success: OrchestratorMcpThreadReadResult,
   failure: OrchestratorMcpFailure,
@@ -221,7 +223,7 @@ const ThreadReadTool = Tool.make("t3_thread_read", {
 
 export const ThreadUpdateTool = Tool.make("t3_thread_update", {
   description:
-    "Update metadata for a thread. Omit threadId to update this thread. Use action='rename' with title, action='regenerate_title' with no extra field, action='link_pull_request' with pullRequest, or action='unlink_pull_request'. Workspace and branch changes are intentionally not supported. clientRequestId makes retries idempotent.",
+    "Update metadata for a thread locally or in a linked environment with environmentId. Locally, omit threadId to update this thread. Use action='rename' with title, action='regenerate_title' with no extra field, action='link_pull_request' with pullRequest, or action='unlink_pull_request'. Workspace and branch changes are intentionally not supported. clientRequestId makes retries idempotent.",
   parameters: ThreadMetadataMcpUpdateInput,
   success: ThreadMetadataMcpUpdateResult,
   failure: OrchestratorMcpFailure,
@@ -234,7 +236,7 @@ export const ThreadUpdateTool = Tool.make("t3_thread_update", {
 
 const ThreadSendTool = Tool.make("t3_thread_send", {
   description:
-    "Send a message to any T3 thread in this environment. The target cannot have broader permission modes than the caller. Use delegate_task with the full review context and a new clientRequestId for independent review rounds. For a follow-up that needs the same child's conversation, send to its childThreadId. After the original task completes, a requested follow-up creates a fresh task in that child thread and returns taskId when it starts a turn or restarts a turn without its own task; its completion notifies the parent, and the original result stays unchanged. A steer that joins a running turn returns that turn's task, if it has one. mode='auto' starts an idle thread, steers a fully active turn, or queues behind a turn that is not yet steerable. Use queue for a separate follow-up turn, steer for an in-flight update, or restart to interrupt-and-restart the active turn. clientRequestId makes retries idempotent.",
+    "Send a message to any T3 thread locally or in a linked environment with environmentId. The target cannot have broader permission modes than the caller. Use delegate_task with the full review context and a new clientRequestId for independent review rounds. For a follow-up that needs the same child's conversation, send to its childThreadId. After the original task completes, a requested follow-up creates a fresh task in that child thread and returns taskId when it starts a turn or restarts a turn without its own task; its completion notifies the parent, and the original result stays unchanged. A steer that joins a running turn returns that turn's task, if it has one. mode='auto' starts an idle thread, steers a fully active turn, or queues behind a turn that is not yet steerable. Use queue for a separate follow-up turn, steer for an in-flight update, or restart to interrupt-and-restart the active turn. clientRequestId makes retries idempotent.",
   parameters: OrchestratorMcpThreadSendInput,
   success: OrchestratorMcpThreadSendResult,
   failure: OrchestratorMcpFailure,
@@ -247,7 +249,7 @@ const ThreadSendTool = Tool.make("t3_thread_send", {
 
 const ThreadWaitTool = Tool.make("t3_thread_wait", {
   description:
-    "Wait for a T3 thread run to reach a terminal durable state. Without runId, the latest run at call time is selected; an idle thread returns immediately. Timeout does not interrupt work, so call again or use t3_thread_read/list after timedOut=true. Waiting reports status only and does not acknowledge a delegated result.",
+    "Wait for a T3 thread run locally or in a linked environment with environmentId to reach a terminal durable state. Without runId, the latest run at call time is selected; an idle thread returns immediately. Timeout does not interrupt work, so call again or use t3_thread_read/list after timedOut=true. Waiting reports status only and does not acknowledge a delegated result.",
   parameters: OrchestratorMcpThreadWaitInput,
   success: OrchestratorMcpThreadWaitResult,
   failure: OrchestratorMcpFailure,
@@ -261,7 +263,7 @@ const ThreadWaitTool = Tool.make("t3_thread_wait", {
 
 const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
   description:
-    "Request interruption of a running turn in any T3 thread in this environment. Without runId, the newest interruptible run is selected. Terminal runs and threads without an active turn return without another side effect. clientRequestId makes retries idempotent.",
+    "Request interruption of a running turn in any T3 thread locally or in a linked environment with environmentId. Without runId, the newest interruptible run is selected. Terminal runs and threads without an active turn return without another side effect. clientRequestId makes retries idempotent.",
   parameters: OrchestratorMcpThreadInterruptInput,
   success: OrchestratorMcpThreadInterruptResult,
   failure: OrchestratorMcpFailure,

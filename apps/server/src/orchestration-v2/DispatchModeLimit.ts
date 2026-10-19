@@ -43,3 +43,17 @@ export const exceededDispatchModeLimit = (
     : interactionModeRank[modes.interactionMode] > interactionModeRank[limit.interactionMode]
       ? "interaction"
       : undefined;
+
+// A launch must honor both its requested modes and any narrower caller limit.
+export const narrowDispatchModeLimit = (
+  requested: DispatchModes,
+  ambient: DispatchModeLimitValue | undefined,
+): DispatchModeLimitValue => ({
+  ...ambient,
+  runtimeMode:
+    ambient !== undefined &&
+    runtimeModeRank[ambient.runtimeMode] < runtimeModeRank[requested.runtimeMode]
+      ? ambient.runtimeMode
+      : requested.runtimeMode,
+  interactionMode: ambient?.interactionMode === "plan" ? "plan" : requested.interactionMode,
+});

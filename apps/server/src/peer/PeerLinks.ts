@@ -50,6 +50,10 @@ export class PeerLinks extends Context.Service<
       environmentId: EnvironmentId,
     ) => Effect.Effect<Option.Option<PeerLink>, PeerLinkError>;
     readonly unlink: (environmentId: EnvironmentId) => Effect.Effect<boolean, PeerLinkError>;
+    readonly recordOutcome: (
+      environmentId: EnvironmentId,
+      outcome: { readonly error: string | null },
+    ) => Effect.Effect<void, PeerLinkError>;
     readonly resolve: (
       environmentId: EnvironmentId,
     ) => Effect.Effect<ResolvedPeerLink, PeerLinkError>;
@@ -491,7 +495,16 @@ const make = Effect.gen(function* () {
     return { link, url, token: new TextDecoder().decode(stored.value) };
   });
 
-  return PeerLinks.of({ link, list, get, unlink, resolve });
+  const recordOutcome: PeerLinks["Service"]["recordOutcome"] = Effect.fn("PeerLinks.recordOutcome")(
+    function* (environmentId, outcome) {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      yield* sql`UPDATE peer_environment_links SET
+        last_reached_at = CASE WHEN ${outcome.error} IS NULL THEN ${now} ELSE last_reached_at END,
+        last_error = ${outcome.error === null ? null : outcome.error.slice(0, 256)}
+        WHERE environment_id = ${environmentId}`.pipe(Effect.catch(failStorage));
+    },
+  );
+  return PeerLinks.of({ link, list, get, unlink, resolve, recordOutcome });
 });
 
 export const layer = Layer.effect(PeerLinks, make);

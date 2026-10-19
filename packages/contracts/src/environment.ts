@@ -9,6 +9,13 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 
+export const OrchestratorMcpEnvironmentTarget = Schema.optional(
+  EnvironmentId.annotate({
+    description:
+      "Linked destination environment from t3_environment_links. Omit or name this environment to act locally. Remote IDs belong to the destination; local caller targets are not inherited.",
+  }),
+);
+
 export const ORCHESTRATION_PROTOCOL_VERSION = 2;
 export const ORCHESTRATION_PROTOCOL_VERSION_TEXT = "2";
 export const ORCHESTRATION_PROTOCOL_QUERY_PARAM = "orchestrationProtocol";

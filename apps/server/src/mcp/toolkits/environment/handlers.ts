@@ -1,4 +1,6 @@
 import { OrchestratorMcpFailure, type ServerSettings } from "@t3tools/contracts";
+import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
+import * as Option from "effect/Option";
 import * as Effect from "effect/Effect";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -41,6 +43,14 @@ const access = Effect.gen(function* () {
   return { ...context, descriptor, settings: yield* Settings.ServerSettingsService };
 });
 export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
+  t3_environment_links: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const forwarding = yield* Effect.serviceOption(PeerForwarding.PeerForwarding);
+      if (Option.isNone(forwarding)) return yield* unavailable();
+      return yield* forwarding.value.links(scope);
+    }),
+  ),
   t3_environment_read: McpToolAccess.reads(() =>
     Effect.gen(function* () {
       const { descriptor, settings } = yield* access;

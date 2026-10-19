@@ -4,6 +4,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
   ContextTransferId,
+  EnvironmentId,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -22,6 +23,7 @@ import {
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
 } from "./scheduledTask.ts";
+import { PeerLinkSummary } from "./peerLink.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { PullRequestState } from "./pullRequest.ts";
 import {
@@ -43,13 +45,33 @@ import {
 } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
+import { OrchestratorMcpEnvironmentTarget } from "./environment.ts";
+
+export { OrchestratorMcpEnvironmentTarget } from "./environment.ts";
+
+export const OrchestratorMcpEnvironmentLinksResult = Schema.Struct({
+  environmentId: EnvironmentId,
+  links: Schema.Array(
+    Schema.Struct({
+      environmentId: PeerLinkSummary.fields.environmentId,
+      label: PeerLinkSummary.fields.label,
+      status: PeerLinkSummary.fields.status,
+      access: PeerLinkSummary.fields.access,
+      expiresAt: IsoDateTime,
+      lastError: PeerLinkSummary.fields.lastError,
+    }),
+  ),
+});
+export type OrchestratorMcpEnvironmentLinksResult =
+  typeof OrchestratorMcpEnvironmentLinksResult.Type;
+
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
   description: "Complete task or message text for the target agent.",
 });
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512)).annotate({
   description: "Optional concise display title.",
 });
-const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(
+export const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(256),
 ).annotate({ description: "Stable idempotency key to reuse when retrying this mutation." });
 
@@ -296,6 +318,7 @@ const OrchestratorMcpProjectTarget = Schema.optional(
 );
 
 export const OrchestratorMcpThreadListInput = Schema.Struct({
+  environmentId: OrchestratorMcpEnvironmentTarget,
   projectId: OrchestratorMcpProjectTarget,
   statuses: Schema.optional(
     Schema.Array(OrchestratorMcpThreadStatus).check(Schema.isMaxLength(10)),
@@ -354,6 +377,7 @@ export const OrchestratorMcpThreadListResult = Schema.Struct({
 export type OrchestratorMcpThreadListResult = typeof OrchestratorMcpThreadListResult.Type;
 
 export const OrchestratorMcpThreadReadInput = Schema.Struct({
+  environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   itemId: Schema.optional(TurnItemId),
   textOffset: Schema.optional(NonNegativeInt),
@@ -441,6 +465,7 @@ export const OrchestratorMcpThreadReadResult = Schema.Struct({
 export type OrchestratorMcpThreadReadResult = typeof OrchestratorMcpThreadReadResult.Type;
 
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
+  environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   message: OrchestratorMcpPrompt,
   mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
@@ -459,6 +484,7 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
+  environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   runId: Schema.optional(RunId),
   timeoutMs: Schema.optional(Schema.Finite),
@@ -474,6 +500,7 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
 export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
+  environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   runId: Schema.optional(RunId),
   reason: Schema.optional(Schema.String.check(Schema.isMaxLength(2_000))),

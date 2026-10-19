@@ -1,4 +1,5 @@
 import {
+  OrchestratorMcpEnvironmentTarget,
   ScheduledTaskId,
   ScheduledTask,
   OrchestrationSearchThreadsInput,
@@ -30,8 +31,9 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply. Settling this thread takes effect when your turn completes, returning settlesWhenTurnEnds=true; a turn that fails or is interrupted, or a queued message, leaves it active.",
+    "Pin, snooze, settle, archive, or mark a thread unread locally or in a linked environment with environmentId. Locally, omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply. Settling this thread takes effect when your turn completes, returning settlesWhenTurnEnds=true; a turn that fails or is interrupted, or a queued message, leaves it active.",
   parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
       "pin",
@@ -61,7 +63,11 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   .annotate(Tool.Title, "Organize a thread")
   .annotate(Tool.Destructive, true);
 
-const queueTarget = { threadId: Schema.optional(ThreadId), queuedRunId: RunId };
+const queueTarget = {
+  environmentId: OrchestratorMcpEnvironmentTarget,
+  threadId: Schema.optional(ThreadId),
+  queuedRunId: RunId,
+};
 const commandTool = {
   success: OrchestrationV2DispatchCommandResult,
   failure: OrchestratorMcpFailure,
@@ -80,8 +86,9 @@ const queueEntry = Schema.Struct({
 const QueueListTool = Tool.make("t3_queue_list", {
   ...commandTool,
   description:
-    "List queued messages in delivery order. Results are a live offset page; use t3_thread_read for full thread history.",
+    "List queued messages in delivery order locally or in a linked environment with environmentId. Results are a live offset page; use t3_thread_read for full thread history.",
   parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
     cursor: Schema.optional(NonNegativeInt),
     limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
@@ -95,7 +102,8 @@ const QueueListTool = Tool.make("t3_queue_list", {
   .annotate(Tool.Destructive, false);
 const QueueReadTool = Tool.make("t3_queue_read", {
   ...commandTool,
-  description: "Read up to 16,000 characters of a queued message. Omit threadId for this thread.",
+  description:
+    "Read up to 16,000 characters of a queued message locally or in a linked environment with environmentId. Locally, omit threadId for this thread.",
   parameters: Schema.Struct(queueTarget),
   success: queueEntry,
 })
@@ -104,7 +112,7 @@ const QueueReadTool = Tool.make("t3_queue_read", {
 const QueueEditTool = Tool.make("t3_queue_edit", {
   ...commandTool,
   description:
-    "Replace a queued message's text, preserving its attachments. The service rejects runs that are no longer queued.",
+    "Replace a queued message's text locally or in a linked environment with environmentId, preserving its attachments. The service rejects runs that are no longer queued.",
   parameters: Schema.Struct({
     ...queueTarget,
     text: Schema.String.check(Schema.isMaxLength(100000)),
@@ -112,22 +120,34 @@ const QueueEditTool = Tool.make("t3_queue_edit", {
 }).annotate(Tool.Destructive, true);
 const QueueCancelTool = Tool.make("t3_queue_cancel", {
   ...commandTool,
-  description: "Cancel a queued run using the existing queue command.",
+  description:
+    "Cancel a queued run locally or in a linked environment with environmentId using the existing queue command.",
   parameters: Schema.Struct(queueTarget),
 }).annotate(Tool.Destructive, true);
 const QueueReorderTool = Tool.make("t3_queue_reorder", {
   ...commandTool,
-  description: "Move a queued run before another queued run, or to the end with beforeRunId=null.",
-  parameters: Schema.Struct({ ...queueTarget, beforeRunId: Schema.NullOr(RunId) }),
+  description:
+    "Move a queued run before another queued run, or to the end with beforeRunId=null, locally or in a linked environment with environmentId.",
+  parameters: Schema.Struct({
+    ...queueTarget,
+    beforeRunId: Schema.NullOr(RunId),
+  }),
 }).annotate(Tool.Destructive, true);
 const QueuePromoteTool = Tool.make("t3_queue_promote_to_steer", {
   ...commandTool,
   description:
-    "Deliver a queued message as steering to the specified active run. Existing provider and run-state rules apply.",
-  parameters: Schema.Struct({ ...queueTarget, targetRunId: RunId }),
+    "Deliver a queued message as steering to the specified active run locally or in a linked environment with environmentId. Existing provider and run-state rules apply.",
+  parameters: Schema.Struct({
+    ...queueTarget,
+    targetRunId: RunId,
+  }),
 }).annotate(Tool.Destructive, true);
 
-const requestTarget = { threadId: Schema.optional(ThreadId), requestId: RuntimeRequestId };
+const requestTarget = {
+  environmentId: OrchestratorMcpEnvironmentTarget,
+  threadId: Schema.optional(ThreadId),
+  requestId: RuntimeRequestId,
+};
 const question = Schema.Struct({
   id: Schema.String,
   header: Schema.String,
@@ -151,8 +171,11 @@ const pendingRequest = Schema.Struct({
 const PendingRequestListTool = Tool.make("t3_pending_request_list", {
   ...commandTool,
   description:
-    "List pending user questions in a thread. Omit threadId for this thread. Approval requests are not included.",
-  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
+    "List pending user questions in a thread locally or in a linked environment with environmentId. Locally, omit threadId for this thread. Approval requests are not included.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+  }),
   success: Schema.Struct({ requestIds: Schema.Array(RuntimeRequestId) }),
 })
   .annotate(Tool.Readonly, true)
@@ -160,7 +183,7 @@ const PendingRequestListTool = Tool.make("t3_pending_request_list", {
 const PendingRequestReadTool = Tool.make("t3_pending_request_read", {
   ...commandTool,
   description:
-    "Read a pending user question. Answer with t3_pending_request_respond; existing live or message response handling is used.",
+    "Read a pending user question locally or in a linked environment with environmentId. Answer with t3_pending_request_respond; existing live or message response handling is used.",
   parameters: Schema.Struct(requestTarget),
   success: pendingRequest,
 })
@@ -169,8 +192,11 @@ const PendingRequestReadTool = Tool.make("t3_pending_request_read", {
 const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
   ...commandTool,
   description:
-    "Answer a pending user-input request using the existing runtime response command. This cannot approve a permission request.",
-  parameters: Schema.Struct({ ...requestTarget, answers: ProviderUserInputAnswers }),
+    "Answer a pending user-input request locally or in a linked environment with environmentId using the existing runtime response command. This cannot approve a permission request.",
+  parameters: Schema.Struct({
+    ...requestTarget,
+    answers: ProviderUserInputAnswers,
+  }),
 })
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
@@ -178,8 +204,11 @@ const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
 const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
   ...commandTool,
   description:
-    "Read a thread's provider/model selection and modes. Omit threadId for this thread. orchestrator_capabilities lists available providers and models.",
-  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
+    "Read a thread's provider/model selection and modes locally or in a linked environment with environmentId. Locally, omit threadId for this thread. orchestrator_capabilities lists available providers and models.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+  }),
   success: Schema.Struct({
     threadId: ThreadId,
     modelSelection: ModelSelection,
@@ -192,8 +221,9 @@ const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
 const ThreadConfigureTool = Tool.make("t3_thread_configure", {
   ...commandTool,
   description:
-    "Set a thread's provider, model and options with the existing selection command. Omit threadId for this thread. This does not change permission modes. Use orchestrator_capabilities to choose a selection.",
+    "Set a thread's provider, model and options locally or in a linked environment with environmentId using the existing selection command. Locally, omit threadId for this thread. This does not change permission modes. Use orchestrator_capabilities to choose a selection.",
   parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
     modelSelection: ModelSelection,
   }),
@@ -203,8 +233,9 @@ const transferResult = Schema.Struct({ sequence: NonNegativeInt, targetThreadId:
 const ThreadForkTool = Tool.make("t3_thread_fork", {
   ...commandTool,
   description:
-    "Fork a thread from a stable run or checkpoint using the existing fork command. Omit threadId to fork this thread. The fork inherits the source configuration. Acceptance does not mean a provider turn has completed.",
+    "Fork a thread from a stable run or checkpoint locally or in a linked environment with environmentId using the existing fork command. Locally, omit threadId to fork this thread. The fork inherits the source configuration. Acceptance does not mean a provider turn has completed.",
   parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
     sourcePoint: OrchestrationV2ThreadForkSourcePoint,
     title: Schema.optional(TrimmedNonEmptyString),
@@ -214,8 +245,9 @@ const ThreadForkTool = Tool.make("t3_thread_fork", {
 const ThreadMergeBackTool = Tool.make("t3_thread_merge_back", {
   ...commandTool,
   description:
-    "Merge context from a thread back to a related thread in the same project. Omit sourceThreadId to merge from this thread. Existing lineage and transfer rules apply.",
+    "Merge context from a thread back to a related thread in the same project locally or in a linked environment with environmentId. Locally, omit sourceThreadId to merge from this thread. Existing lineage and transfer rules apply.",
   parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
     sourceThreadId: Schema.optional(ThreadId),
     targetThreadId: ThreadId,
     sourcePoint: OrchestrationV2ThreadForkSourcePoint,
@@ -224,8 +256,12 @@ const ThreadMergeBackTool = Tool.make("t3_thread_merge_back", {
 }).annotate(Tool.Destructive, true);
 const ThreadTransfersTool = Tool.make("t3_thread_transfers", {
   ...commandTool,
-  description: "Read context transfer status for a thread. Omit threadId for this thread.",
-  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
+  description:
+    "Read context transfer status for a thread locally or in a linked environment with environmentId. Locally, omit threadId for this thread.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+  }),
   success: Schema.Struct({
     transfers: Schema.Array(
       Schema.Struct({
@@ -243,8 +279,9 @@ const ThreadTransfersTool = Tool.make("t3_thread_transfers", {
 const ThreadSearchTool = Tool.make("t3_thread_search", {
   ...commandTool,
   description:
-    "Search active thread titles and content with the app's existing bounded search. Matches are limited to one project (projectId, else the calling thread's project) out of the global top matches, so this may return fewer than limit. A caller outside a T3 thread that omits projectId searches every project. No pagination or exhaustive-result guarantee.",
+    "Search active thread titles and content locally or in a linked environment with environmentId using the app's existing bounded search. Matches are limited to one project (projectId, else the local calling thread's project) out of the global top matches, so this may return fewer than limit. A caller outside a T3 thread that omits projectId searches every project. No pagination or exhaustive-result guarantee.",
   parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
     ...OrchestrationSearchThreadsInput.fields,
     projectId: Schema.optional(ProjectId),
   }),
