@@ -2269,120 +2269,137 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  const unloadThreadWithSubagent = (options: { readonly rejectParent: boolean }) =>
-    Effect.gen(function* () {
-      const nativeThreadId = "unload-parent-thread";
-      const nativeTurnId = "unload-parent-turn";
-      const childThreadId = "unload-child-thread";
-      const prompt = "Use a subagent.";
-      const unsubscribe = (id: number, threadId: string, rejected = false) =>
-        [
-          {
-            type: "expect_outbound",
-            label: `thread/unsubscribe/${threadId}`,
-            frame: { id, method: "thread/unsubscribe", params: { threadId } },
-          },
-          {
+  it.effect.each(["success", "parent and child rejected"] as const)(
+    "unloads only the native subagent subtree and reports the first failure: %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "unload-root";
+        const nativeTurnId = "unload-turn";
+        const prompt = "Use subagents.";
+        const notification = (method: string, params: unknown) =>
+          ({
             type: "emit_inbound",
-            label: `thread/unsubscribe/${threadId}`,
-            frame: rejected
-              ? { id, error: { code: -32600, message: "invalid thread id" } }
-              : { id, result: { status: "unsubscribed" } },
-          },
-        ] satisfies Array<CodexReplay.CodexAppServerReplayEntry>;
-      const transcript = makeCodexReplayTranscript({
-        scenario: `unload-thread-subagents-${options.rejectParent ? "rejected" : "ok"}`,
-        entries: [
-          ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
-          {
-            type: "emit_inbound",
-            label: "item/completed/subAgentActivity-started",
-            frame: {
-              method: "item/completed",
-              params: {
-                item: {
-                  type: "subAgentActivity",
-                  id: "call-unload-spawn",
-                  kind: "started",
-                  agentThreadId: childThreadId,
-                  agentPath: "/root/computer_use_agent",
+            label: method,
+            frame: { method, params },
+          }) satisfies CodexReplay.CodexAppServerReplayEntry;
+        const spawn = (parent: string, child: string, turnId: string) =>
+          notification("item/completed", {
+            threadId: parent,
+            turnId,
+            item: {
+              type: "subAgentActivity",
+              id: `spawn-${child}`,
+              kind: "started",
+              agentThreadId: child,
+              agentPath: `/root/${child}`,
+            },
+          });
+        const unrelatedPreamble = codexReplayPreamble({
+          nativeThreadId: "unrelated-root",
+          nativeTurnId: "unrelated-turn",
+          prompt,
+        });
+        const transcript = makeCodexReplayTranscript({
+          scenario: `unload-subtree-${outcome}`,
+          entries: [
+            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+            spawn(nativeThreadId, "unload-child", nativeTurnId),
+            notification("turn/started", {
+              threadId: "unload-child",
+              turn: makeCodexReplayTurn({ id: "child-turn", status: "inProgress" }),
+            }),
+            spawn("unload-child", "unload-grandchild", "child-turn"),
+            notification("turn/completed", {
+              threadId: nativeThreadId,
+              turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+            }),
+            ...unrelatedPreamble.slice(3, 5).map((entry) => withReplayRequestId(entry, 4)),
+            ...unrelatedPreamble.slice(5, 7).map((entry) => withReplayRequestId(entry, 5)),
+            ...unrelatedPreamble.slice(7),
+            spawn("unrelated-root", "unrelated-child", "unrelated-turn"),
+            ...[nativeThreadId, "unload-child", "unload-grandchild"].flatMap((threadId, index) => {
+              const id = 6 + index;
+              return [
+                {
+                  type: "expect_outbound",
+                  label: `unsubscribe-${threadId}`,
+                  frame: { id, method: "thread/unsubscribe", params: { threadId } },
                 },
-                threadId: nativeThreadId,
-                turnId: nativeTurnId,
-                completedAtMs: 1782622441000,
-              },
-            },
-          },
-          {
-            type: "emit_inbound",
-            label: "turn/completed",
-            frame: {
-              method: "turn/completed",
-              params: {
-                threadId: nativeThreadId,
-                turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
-              },
-            },
-          },
-          ...unsubscribe(4, nativeThreadId, options.rejectParent),
-          ...unsubscribe(5, childThreadId),
-        ],
-      });
-      const subagentRegistered = yield* Deferred.make<void>();
-      const unsubscribed: Array<unknown> = [];
-      const harness = yield* makeCodexReplayHarness(
-        transcript,
-        (event) =>
-          event.type === "subagent.updated"
-            ? Deferred.succeed(subagentRegistered, undefined)
-            : Effect.void,
-        (method, params) =>
-          Effect.sync(() => {
-            if (method === "thread/unsubscribe") unsubscribed.push(params);
-          }),
-      );
-      yield* harness.runtime.startTurn(
-        makeCodexTestTurnInput({
-          threadId: harness.threadId,
+                {
+                  type: "emit_inbound",
+                  label: `unsubscribe-${threadId}`,
+                  frame:
+                    outcome !== "success" && index < 2
+                      ? { id, error: { code: -32600, message: `Cannot unload ${threadId}` } }
+                      : { id, result: { status: "unsubscribed" } },
+                },
+              ] satisfies Array<CodexReplay.CodexAppServerReplayEntry>;
+            }),
+          ],
+        });
+        const registered = yield* Deferred.make<void>();
+        const unsubscribed: Array<unknown> = [];
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          (event) =>
+            event.type === "subagent.updated" && event.subagent.title === "/root/unrelated-child"
+              ? Deferred.succeed(registered, undefined)
+              : Effect.void,
+          (method, params) =>
+            Effect.sync(() => {
+              if (method === "thread/unsubscribe") unsubscribed.push(params);
+            }),
+        );
+        for (const threadId of [harness.threadId, ThreadId.make("unrelated-thread")]) {
+          const providerThread =
+            threadId === harness.threadId
+              ? harness.providerThread
+              : yield* harness.runtime.ensureThread({
+                  threadId,
+                  modelSelection: CODEX_TEST_MODEL_SELECTION,
+                  runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                });
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId,
+              providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(`unload-${threadId}`),
+              text: prompt,
+            }),
+          );
+        }
+        yield* Deferred.await(registered);
+        const unloaded = yield* harness.runtime.unloadThread!({
           providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make("unload-thread-subagents"),
-          text: prompt,
-        }),
-      );
-      yield* Deferred.await(subagentRegistered);
-      const unloaded = yield* harness.runtime.unloadThread!({
-        providerThread: harness.providerThread,
-      }).pipe(Effect.result);
-      return { unloaded, unsubscribed, nativeThreadId, childThreadId };
-    });
-
-  it.effect("unsubscribes from the thread's subagents when it is unloaded", () =>
-    Effect.gen(function* () {
-      const { unloaded, unsubscribed, nativeThreadId, childThreadId } =
-        yield* unloadThreadWithSubagent({ rejectParent: false });
-      assert.isTrue(Result.isSuccess(unloaded));
-      assert.deepEqual(unsubscribed, [{ threadId: nativeThreadId }, { threadId: childThreadId }]);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        }).pipe(Effect.result);
+        assert.deepEqual(unsubscribed, [
+          { threadId: nativeThreadId },
+          { threadId: "unload-child" },
+          { threadId: "unload-grandchild" },
+        ]);
+        if (outcome === "success") {
+          assert.isTrue(Result.isSuccess(unloaded));
+        } else {
+          assert.isTrue(Result.isFailure(unloaded));
+          if (Result.isFailure(unloaded)) {
+            const error = unloaded.failure;
+            assert.equal(error._tag, "ProviderAdapterProtocolError");
+            assert.deepInclude(
+              error._tag === "ProviderAdapterProtocolError" ? error.cause : undefined,
+              {
+                _tag: "CodexAppServerRequestError",
+                errorMessage: `Cannot unload ${nativeThreadId}`,
+              },
+            );
+          }
+        }
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
       ),
-    ),
-  );
-
-  it.effect("still unsubscribes the subagents when the thread's unsubscribe is rejected", () =>
-    Effect.gen(function* () {
-      const { unloaded, unsubscribed, nativeThreadId, childThreadId } =
-        yield* unloadThreadWithSubagent({ rejectParent: true });
-      assert.isTrue(Result.isFailure(unloaded));
-      assert.deepEqual(unsubscribed, [{ threadId: nativeThreadId }, { threadId: childThreadId }]);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
   );
 
   it.effect("keeps the app-server failure as the cause when an unload is rejected", () =>
