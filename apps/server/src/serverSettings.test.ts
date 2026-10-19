@@ -114,6 +114,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       const disconnect = yield* Deferred.make<void>();
       const disconnected = yield* Deferred.make<void>();
       const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+      const failedRecoveryRead = yield* Deferred.make<void>();
+      const recovered = yield* Deferred.make<void>();
+      const subsequent = yield* Deferred.make<void>();
+      const eventObserved = yield* Deferred.make<void>();
       const changes: Array<ServerSettings> = [];
       let settingsPath = "";
       let failRead = false;
@@ -127,10 +131,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       });
       const controlled = FileSystem.FileSystem.of({
         ...fs,
-        watch: (directory) => {
+        watch: (directory, options) => {
           if (directory === path.dirname(first)) {
             return Stream.unwrap(
-              Deferred.succeed(attached, undefined).pipe(
+              Effect.sync(() => options?.onReady?.()).pipe(
+                Effect.andThen(Deferred.succeed(attached, undefined)),
                 Effect.as(
                   Stream.fromEffect(
                     Deferred.await(disconnect).pipe(
@@ -147,17 +152,26 @@ it.layer(NodeServices.layer)("server settings", (it) => {
               Effect.gen(function* () {
                 recoveryAttachments += 1;
                 yield* fs.writeFileString(second, '{"responseStreamingMode":"paragraph"}');
-                return Stream.fromQueue(events);
+                options?.onReady?.();
+                return Stream.fromQueue(events).pipe(
+                  Stream.tap(() => Deferred.succeed(eventObserved, undefined)),
+                );
               }),
             );
           }
-          return Stream.never;
+          return Stream.unwrap(
+            Effect.sync(() => {
+              options?.onReady?.();
+              return Stream.never;
+            }),
+          );
         },
         readFileString: (file, encoding) =>
           Effect.suspend(() => {
             if ((file === settingsPath || file === second) && failRead) {
               failRead = false;
               failedReads += 1;
+              Deferred.doneUnsafe(failedRecoveryRead, Effect.void);
               return Effect.fail(unavailable);
             }
             return fs.readFileString(file, encoding);
@@ -174,6 +188,13 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           Stream.runForEach((change) =>
             Effect.sync(() => {
               changes.push(change);
+              if (
+                change.responseStreamingMode === "turn" &&
+                changes.some((item) => item.responseStreamingMode === "paragraph")
+              )
+                Deferred.doneUnsafe(subsequent, Effect.void);
+              if (change.responseStreamingMode === "paragraph")
+                Deferred.doneUnsafe(recovered, Effect.void);
             }),
           ),
           Effect.forkScoped({ startImmediately: true }),
@@ -185,7 +206,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* fs.remove(settingsPath);
         yield* fs.symlink(second, settingsPath);
         failRead = true;
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(failedRecoveryRead);
         yield* TestClock.adjust("1 minute");
+        yield* Deferred.await(recovered);
         assert.isAtLeast(
           recoveryAttachments,
           1,
@@ -200,7 +224,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
         yield* fs.writeFileString(second, '{"responseStreamingMode":"turn"}');
         yield* Queue.offer(events, { _tag: "Update", path: second });
+        yield* Deferred.await(eventObserved);
+        yield* Effect.yieldNow;
         yield* TestClock.adjust("1 second");
+        yield* Deferred.await(subsequent);
         assert.equal(changes.at(-1)?.responseStreamingMode, "turn");
       }).pipe(
         Effect.provide(

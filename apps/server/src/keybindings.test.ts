@@ -72,6 +72,9 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
         const disconnect = yield* Deferred.make<void>();
         const disconnected = yield* Deferred.make<void>();
         const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+        const failedRecoveryRead = yield* Deferred.make<void>();
+        const recovered = yield* Deferred.make<void>();
+        const subsequent = yield* Deferred.make<void>();
         const changes: Array<Keybindings.KeybindingsChangeEvent> = [];
         let watches = 0;
         let configPath = "";
@@ -85,11 +88,12 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
         });
         const controlled = FileSystem.FileSystem.of({
           ...fs,
-          watch: () =>
+          watch: (_directory, options) =>
             Stream.unwrap(
               Effect.gen(function* () {
                 watches += 1;
                 if (watches === 1) {
+                  options?.onReady?.();
                   yield* Deferred.succeed(attached, undefined);
                   return Stream.fromEffect(Deferred.await(disconnect)).pipe(
                     Stream.flatMap(() =>
@@ -103,6 +107,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
                   configPath,
                   '[{"key":"ctrl+shift+y","command":"terminal.toggle"}]',
                 );
+                options?.onReady?.();
                 return Stream.fromQueue(events);
               }),
             ),
@@ -111,6 +116,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
               if (path === configPath && failRead) {
                 failRead = false;
                 failedReads += 1;
+                Deferred.doneUnsafe(failedRecoveryRead, Effect.void);
                 return Effect.fail(unavailable);
               }
               return fs.readFileString(path, encoding);
@@ -124,6 +130,10 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
             Stream.runForEach((change) =>
               Effect.sync(() => {
                 changes.push(change);
+                if (change.keybindings.some((rule) => rule.shortcut.key === "z"))
+                  Deferred.doneUnsafe(subsequent, Effect.void);
+                if (change.keybindings.some((rule) => rule.shortcut.key === "y"))
+                  Deferred.doneUnsafe(recovered, Effect.void);
               }),
             ),
             Effect.forkScoped({ startImmediately: true }),
@@ -137,7 +147,10 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
             '[{"key":"ctrl+shift+x","command":"terminal.toggle"}]',
           );
           failRead = true;
+          yield* TestClock.adjust("1 second");
+          yield* Deferred.await(failedRecoveryRead);
           yield* TestClock.adjust("1 minute");
+          yield* Deferred.await(recovered);
           assert.equal(failedReads, 1);
           assert.isAtLeast(changes.length, 1, "recovery must publish without another file event");
           assert.isTrue(changes.at(-1)!.keybindings.some((rule) => rule.shortcut.key === "y"));
@@ -148,6 +161,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
           );
           yield* Queue.offer(events, { _tag: "Update", path: configPath });
           yield* TestClock.adjust("1 second");
+          yield* Deferred.await(subsequent);
           assert.isTrue(changes.at(-1)!.keybindings.some((rule) => rule.shortcut.key === "z"));
         }).pipe(
           Effect.provide(
