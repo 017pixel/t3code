@@ -479,6 +479,57 @@ function route(...routes: ReadonlyArray<readonly [needle: string, body: unknown]
   });
 }
 
+// Older Enterprise validates the whole document, including fields behind @include(false).
+function routeEnterprise(...routes: ReadonlyArray<readonly [needle: string, body: unknown]>): void {
+  route(...routes);
+  const answer = mockedExecute.getMockImplementation();
+  assert.isDefined(answer);
+  mockedExecute.mockImplementation((call) => {
+    if (
+      call.kind === "graphql" &&
+      (/\bviewerCanUpdateBranch\b|\bcompare\s*\(/.test(call.query) ||
+        // Bot remains valid in reaction actors; only the requested-reviewer union rejects it.
+        /requestedReviewer\s*\{(?:[^{}]|\{[^{}]*\})*\.\.\.\s*on\s+Bot\b/.test(call.query) ||
+        (call.query.match(/\$headRef\b/g)?.length ?? 0) === 1)
+    ) {
+      return Effect.succeed(
+        output(
+          encodeJson({
+            errors: [
+              {
+                message: "Unsupported field, reviewer type or unused headRef in Enterprise schema",
+              },
+            ],
+          }),
+        ),
+      );
+    }
+    return answer(call);
+  });
+}
+
+const enterpriseReviewRequests = {
+  nodes: [
+    {
+      requestedReviewer: {
+        __typename: "User",
+        login: "reviewer",
+        name: null,
+        avatarUrl: "https://avatars/reviewer",
+      },
+    },
+    {
+      requestedReviewer: {
+        __typename: "Team",
+        slug: "maintainers",
+        combinedSlug: "acme/maintainers",
+        teamName: "Maintainers",
+        teamAvatarUrl: "https://avatars/team",
+      },
+    },
+  ],
+};
+
 /** What a mutation answers when nothing is asked of its payload: each root field, null. */
 function mutationAnswer(query: string) {
   const root = /\)\{(\w+)(?:\(|\{|@)/.exec(query)?.[1];
@@ -2363,6 +2414,59 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
+  it.effect.each([
+    { outcome: "behind", behindBy: 2 },
+    { outcome: "already current", behindBy: 0 },
+    { outcome: "comparison failure", behindBy: null },
+  ])("checks the Enterprise base before updating a branch: $outcome", ({ behindBy }) =>
+    Effect.gen(function* () {
+      // The behind case also validates the schema; the others isolate no-op and failure safety.
+      const routeAction = behindBy === 2 ? routeEnterprise : route;
+      routeAction([
+        "query PullRequestActionState",
+        actionState({ baseRef: null, baseRefOid: "def456" }),
+      ]);
+      const answer = mockedExecute.getMockImplementation();
+      assert.isDefined(answer);
+      const comparisonFailure = new GitHubRequestPolicy.GitHubApiResponseError({
+        host: "ghe.example.test",
+        operation: "runPullRequestAction",
+        status: 503,
+      });
+      mockedExecute.mockImplementation((call) =>
+        call.kind === "rest" && call.path.includes("/compare/")
+          ? behindBy === null
+            ? Effect.fail(comparisonFailure)
+            : Effect.succeed(output(encodeJson({ behind_by: behindBy })))
+          : answer(call),
+      );
+      const provider = yield* GitHubPullRequestProvider.make;
+      const result = yield* provider
+        .runAction({
+          cwd: "/w",
+          repository: "acme/web",
+          host: "ghe.example.test",
+          number: 7,
+          action: "update-branch",
+        })
+        .pipe(Effect.result);
+
+      if (behindBy === null) {
+        expect(result).toMatchObject({ _tag: "Failure", failure: { cause: comparisonFailure } });
+      } else {
+        expect(Result.isSuccess(result)).toBe(true);
+      }
+      expect(variablesOf("updatePullRequestBranch(")).toEqual(
+        behindBy === 2
+          ? [{ pullRequestId: "PR_7", expectedHeadOid: "abc123", updateMethod: "MERGE" }]
+          : [],
+      );
+      expect(restCallsTo("/compare/")).toMatchObject([
+        { host: "ghe.example.test", path: "repos/acme/web/compare/def456...abc123?per_page=1" },
+      ]);
+    }),
+  );
+
   it.effect("merges with the strategy it was asked for", () =>
     Effect.gen(function* () {
       route(["query PullRequestActionState", actionState()]);
@@ -3981,6 +4085,114 @@ layer("GitHubPullRequestApi.layer", (it) => {
       );
 
       assert.strictEqual(error._tag, "GitHubPullRequestReadError");
+    }),
+  );
+
+  it.effect("loads older Enterprise details and permits updating a writable behind branch", () =>
+    Effect.gen(function* () {
+      routeEnterprise(
+        [
+          "query PullRequestCore",
+          coreResponse({
+            url: "https://ghe.example.test/acme/web/pull/7",
+            viewerCanUpdateBranch: undefined,
+            baseRef: undefined,
+            baseRefOid: "def456",
+            headRepository: { nameWithOwner: "acme/web", viewerPermission: "WRITE" },
+            headRef: { id: "REF_feature" },
+            reviewRequests: enterpriseReviewRequests,
+          }),
+        ],
+        ["/compare/", { behind_by: 2 }],
+      );
+      const provider = yield* GitHubPullRequestProvider.make;
+      const input = { cwd: "/w", repository: "acme/web", host: "ghe.example.test", number: 7 };
+      const detail = yield* provider.getChangeRequest(input);
+      expect(detail.title).toBe("Pull request 7");
+      expect(detail.reviewers.map(({ login }) => login)).toEqual(["reviewer", "acme/maintainers"]);
+      expect(detail.viewerPermissions.actions).toContain("update-branch");
+      expect(detail.viewerPermissions.updateMethods).toContain("merge");
+      expect((yield* provider.getViewerPermissions(input)).actions).toContain("update-branch");
+    }),
+  );
+
+  it.effect("loads requested people and teams in older Enterprise review activity", () =>
+    Effect.gen(function* () {
+      routeEnterprise([
+        "query ReviewThreads",
+        {
+          data: {
+            viewer: { login: "viewer" },
+            repository: {
+              pullRequest: {
+                reviewThreads: { totalCount: 0, pageInfo: lastPage, nodes: [] },
+                viewerCanUpdate: true,
+                viewerDidAuthor: false,
+                author: null,
+                reactionGroups: [],
+                comments: { nodes: [] },
+                reviews: { nodes: [] },
+                reviewRequests: enterpriseReviewRequests,
+                latestReviews: { nodes: [] },
+                reviewDismissals: { pageInfo: lastPage, nodes: [] },
+                commits: { nodes: [] },
+              },
+            },
+          },
+        },
+      ]);
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      const activity = yield* cli.listReviewThreadComments({
+        cwd: "/w",
+        repository: "acme/web",
+        host: "ghe.example.test",
+        number: 7,
+      });
+      expect(activity.reviewers).toEqual([
+        { login: "reviewer", name: null, avatarUrl: "https://avatars/reviewer" },
+        { login: "acme/maintainers", name: "Maintainers", avatarUrl: "https://avatars/team" },
+      ]);
+    }),
+  );
+
+  it.effect("loads older Enterprise reviewer candidates with existing team requests", () =>
+    Effect.gen(function* () {
+      routeEnterprise([
+        "query ReviewerCandidates",
+        {
+          data: {
+            repository: {
+              assignableUsers: {
+                pageInfo: { hasNextPage: false },
+                nodes: ["author", "reviewer", "available"].map((login) => ({
+                  login,
+                  name: null,
+                  avatarUrl: `https://avatars/${login}`,
+                })),
+              },
+              pullRequest: {
+                author: { login: "author" },
+                reviewRequests: enterpriseReviewRequests,
+              },
+            },
+          },
+        },
+      ]);
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      const list = yield* cli.listReviewerCandidates({
+        cwd: "/w",
+        repository: "acme/web",
+        host: "ghe.example.test",
+        number: 7,
+      });
+      expect(
+        list.candidates.map(({ id, kind, isRequested }) => ({ id, kind, isRequested })),
+      ).toEqual([
+        { id: "reviewer", kind: "user", isRequested: true },
+        { id: "maintainers", kind: "team", isRequested: true },
+        { id: "available", kind: "user", isRequested: false },
+      ]);
+      expect(list.truncated).toBe(false);
     }),
   );
 
