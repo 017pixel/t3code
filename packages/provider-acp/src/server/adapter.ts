@@ -7307,9 +7307,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     snapshotInput.providerThread.appThreadId,
                   );
                   const sessionId = yield* nativeThreadId(driver, snapshotInput.providerThread);
+                  const activeTurnForSession =
+                    (yield* Ref.get(activeTurn))?.nativeThreadId === sessionId;
                   if (
                     (yield* Ref.get(activeSessionId)) !== sessionId ||
-                    (yield* Ref.get(hydratedSessionId)) !== sessionId
+                    ((yield* Ref.get(hydratedSessionId)) !== sessionId && !activeTurnForSession)
                   ) {
                     if (!capabilities.threads.canReadThreadSnapshot) {
                       return yield* new ProviderAdapter.ProviderAdapterProtocolError({
@@ -7400,6 +7402,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         );
                         yield* Ref.set(runtimeRestartRequired, false);
                         yield* Ref.set(activeSessionId, candidate.sessionId);
+                        yield* Ref.set(hydratedSessionId, candidate.sessionId);
                         yield* Ref.set(activeSessionSetup, candidate);
                         yield* Ref.set(activeSelection, null);
                         yield* Ref.set(activeInteractionMode, null);
