@@ -8,6 +8,7 @@ import {
   collectAssistantCitations,
 } from "@t3tools/shared/assistantCitations";
 import { shallow } from "zustand/vanilla/shallow";
+import { renderCodexCitationsAsMarkdown } from "@t3tools/shared/codexCitations";
 import { renderCodexDirectivesForCopy } from "@t3tools/shared/codexMarkdownDirectives";
 import {
   commandDisplayText,
@@ -667,7 +668,11 @@ export function resolveAssistantMessageCopyState({
   const hasText = text !== null && text.trim().length > 0;
   const visible = showCopyButton && hasText && !streaming;
   return {
-    text: hasText ? (visible ? renderCodexDirectivesForCopy(text) : text) : null,
+    text: hasText
+      ? visible
+        ? renderCodexDirectivesForCopy(renderCodexCitationsAsMarkdown(text))
+        : text
+      : null,
     visible,
   };
 }

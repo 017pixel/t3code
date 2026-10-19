@@ -1,3 +1,5 @@
+import { renderCodexCitationsAsMarkdown } from "@t3tools/shared/codexCitations";
+import { renderCodexDirectivesForCopy } from "@t3tools/shared/codexMarkdownDirectives";
 import { Button } from "../../components/ui/Button";
 import { SubagentStatusDot } from "./SubagentStatusDot";
 import { ThreadSubagentGroup } from "./thread-subagent-group";
@@ -487,7 +489,7 @@ interface ThreadWorkLogProps {
   /** `groupId` is the group a lone call stands in for; it opens and closes with the row. */
   readonly onToggleRow: (rowId: string, anchorKey: string, groupId?: string) => void;
   readonly renderImage: MarkdownImageRenderer;
-  readonly renderReasoning: (text: string) => ReactNode;
+  readonly renderReasoning: (text: string, isStreaming: boolean) => ReactNode;
   readonly onPressPreview: (source: FilePreviewSource) => void;
 }
 
@@ -525,7 +527,12 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
     return (
       <ScrollView nestedScrollEnabled className="ml-7 max-h-96 py-1">
         {props.activities.map((row) => (
-          <View key={row.id}>{props.renderReasoning(row.workEntry.detail ?? "")}</View>
+          <View key={row.id}>
+            {props.renderReasoning(
+              row.workEntry.detail ?? "",
+              row.projectedItem.item.type === "reasoning" && row.projectedItem.item.streaming,
+            )}
+          </View>
         ))}
       </ScrollView>
     );
@@ -1056,7 +1063,18 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
             props.onToggleRow(row.id, props.anchorKey, row.groupStandIn?.groupId);
           }
         }}
-        onLongPress={() => props.onCopyRow(row.id, row.getCopyText())}
+        onLongPress={() =>
+          props.onCopyRow(
+            row.id,
+            reasoning
+              ? renderCodexDirectivesForCopy(
+                  renderCodexCitationsAsMarkdown(row.getCopyText(), {
+                    isStreaming: reasoning.streaming,
+                  }),
+                )
+              : row.getCopyText(),
+          )
+        }
       >
         {row.live && !expanded ? (
           <ShimmeringWorkContent
@@ -1198,7 +1216,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
             contentContainerStyle={{ paddingRight: 8 }}
           >
             {reasoning ? (
-              props.renderReasoning(reasoning.text)
+              props.renderReasoning(reasoning.text, reasoning.streaming)
             ) : call ? (
               [
                 call.command,

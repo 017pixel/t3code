@@ -12,6 +12,7 @@ import {
   remarkCodexDirectives,
 } from "./codexMarkdownDirectives.ts";
 import { isWindowsDrivePathHref } from "./markdownLinks.ts";
+import { CODEX_CITATION_HAST_PROPERTIES, remarkCodexCitations } from "./codexCitations.ts";
 import { THREAD_LINK_PROTOCOL } from "./threadLinks.ts";
 
 type MarkdownImageHastNode = {
@@ -140,6 +141,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
     ],
     blockquote: [...(defaultSchema.attributes?.blockquote ?? []), "dataAlert"],
     div: [...(defaultSchema.attributes?.div ?? []), ...CODEX_ARTIFACT_TEMPLATE_HAST_PROPERTIES],
+    span: [...(defaultSchema.attributes?.span ?? []), ...CODEX_CITATION_HAST_PROPERTIES],
     a: [...(defaultSchema.attributes?.a ?? []), "dataPullRequestAutolink"],
     img: [
       ...(defaultSchema.attributes?.img ?? []),
@@ -167,6 +169,7 @@ export const CHAT_MARKDOWN_REMARK_PLUGINS: PluggableList = [
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkCodexDirectives,
+  remarkCodexCitations,
   remarkPreserveCodeMeta,
   remarkNormalizeLinksAndTagInlineCode,
 ];
@@ -177,10 +180,34 @@ export const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS: PluggableList = [
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkCodexDirectives,
+  remarkCodexCitations,
   remarkBreaks,
   remarkPreserveCodeMeta,
   remarkNormalizeLinksAndTagInlineCode,
 ];
+
+const streamingRemarkPlugins = (plugins: PluggableList): PluggableList =>
+  plugins.map((plugin) =>
+    plugin === remarkCodexCitations ? [remarkCodexCitations, { isStreaming: true }] : plugin,
+  );
+
+const STREAMING_REMARK_PLUGINS = streamingRemarkPlugins(CHAT_MARKDOWN_REMARK_PLUGINS);
+const STREAMING_REMARK_PLUGINS_WITH_BREAKS = streamingRemarkPlugins(
+  CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
+);
+
+export function chatMarkdownRemarkPlugins({
+  isStreaming = false,
+  lineBreaks = false,
+}: {
+  readonly isStreaming?: boolean;
+  readonly lineBreaks?: boolean;
+} = {}): PluggableList {
+  if (isStreaming) {
+    return lineBreaks ? STREAMING_REMARK_PLUGINS_WITH_BREAKS : STREAMING_REMARK_PLUGINS;
+  }
+  return lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS;
+}
 
 export const CHAT_MARKDOWN_REHYPE_PLUGINS: PluggableList = [
   rehypePreserveBareAnchorPlaceholders,

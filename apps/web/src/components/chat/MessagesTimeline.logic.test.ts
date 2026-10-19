@@ -670,6 +670,99 @@ describe("resolveAssistantMessageCopyState", () => {
       visible: true,
     });
   });
+
+  it("copies readable citations without changing unrelated Markdown or literal examples", () => {
+    const example = "\uE200cite\uE202excluded\uE201";
+    const before = [
+      "# Report",
+      "",
+      "🦊 \\*literal\\* &amp; **bold**  ",
+      `Example: \`${example}\` and [source ${example}](<https://example.com>).`,
+      `<a href="https://example.com">${example}</a>`,
+      "",
+      "```md",
+      example,
+      "```",
+      "",
+      "> Evidence ",
+    ].join("\n");
+    const after = "\n\n- untouched  spacing\n";
+    const text = `${before}\uE200cite\uE202__opaque_id__\uE201${after}`;
+    const input = Object.freeze({ text, showCopyButton: true, streaming: false });
+
+    expect(resolveAssistantMessageCopyState(input)).toEqual({
+      text: `${before}\\[Source 1: \\_\\_opaque\\_id\\_\\_\\]${after}`,
+      visible: true,
+    });
+    expect(input.text).toBe(text);
+  });
+
+  it("copies recovered nested list citations at their original positions", () => {
+    const text = [
+      "🦊 Before.",
+      "",
+      "-       First **evidence** \uE200cite\uE202turn0view0\uE201.",
+      "",
+      "        -       Second \uE200cite\uE202turn1view0\uE201.",
+      "",
+      "After \uE200cite\uE202turn0view0\uE201.",
+    ].join("\r\n");
+
+    expect(
+      resolveAssistantMessageCopyState({ text, showCopyButton: true, streaming: false }),
+    ).toEqual({
+      text: [
+        "🦊 Before.",
+        "",
+        "-       First **evidence** \\[Source 1: turn0view0\\].",
+        "",
+        "        -       Second \\[Source 2: turn1view0\\].",
+        "",
+        "After \\[Source 1: turn0view0\\].",
+      ].join("\r\n"),
+      visible: true,
+    });
+  });
+
+  it("keeps source numbering across artifacts without numbering directive contents", () => {
+    const literal = "\uE200cite\uE202excluded\uE201";
+    const text = [
+      `Created :codex-file-citation{path="outputs/${literal}.txt" purpose="output"}.`,
+      "",
+      "Before \uE200cite\uE202turn0view0\uE201.",
+      "",
+      `::artifact-template{skill_name="artifact-template-report" skill_directory="/skills/report" display_name="${literal}" artifact_kind="document"}`,
+      "",
+      "After \uE200cite\uE202turn1search2\uE202turn0view0\uE202L8-L13\uE201.",
+    ].join("\n");
+
+    expect(
+      resolveAssistantMessageCopyState({ text, showCopyButton: true, streaming: false }),
+    ).toEqual({
+      text: [
+        `Created [${literal}.txt](<outputs/${literal}.txt>).`,
+        "",
+        "Before \\[Source 1: turn0view0\\].",
+        "",
+        `${literal} (Document template)`,
+        "",
+        "After \\[Source 2: turn1search2; Source 1: turn0view0; L8-L13\\].",
+      ].join("\n"),
+      visible: true,
+    });
+  });
+
+  it("leaves streaming copy hidden and retains an unfinished marker when stopped", () => {
+    const tail = "\uE200cite\uE202next";
+    const text = `Evidence \uE200cite\uE202turn0view0\uE201 and ${tail}`;
+
+    expect(
+      resolveAssistantMessageCopyState({ text, showCopyButton: true, streaming: true }),
+    ).toEqual({ text, visible: false });
+    expect(
+      resolveAssistantMessageCopyState({ text, showCopyButton: true, streaming: false }),
+    ).toEqual({ text: `Evidence \\[Source 1: turn0view0\\] and ${tail}`, visible: true });
+  });
 });
 
 describe("deriveMessagesTimelineRows", () => {

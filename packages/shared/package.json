@@ -431,6 +431,10 @@
       "types": "./src/codexArtifactTemplates.ts",
       "import": "./src/codexArtifactTemplates.ts"
     },
+    "./codexCitations": {
+      "types": "./src/codexCitations.ts",
+      "import": "./src/codexCitations.ts"
+    },
     "./codexFileCitations": {
       "types": "./src/codexFileCitations.ts",
       "import": "./src/codexFileCitations.ts"
