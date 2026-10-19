@@ -61,6 +61,10 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
+import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
@@ -115,6 +119,7 @@ const claudeAdapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
 interface HarnessOptions {
+  readonly getProject?: ProjectService.ProjectService["Service"]["getById"];
   readonly closeTerminal?: TerminalManager.TerminalManager["Service"]["close"];
   readonly adapters?: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>;
   readonly managedFolders?: Layer.Layer<ManagedProjectFolders.ManagedProjectFolders>;
@@ -179,14 +184,16 @@ function makeHarness(options: HarnessOptions = {}) {
       bootstrap: () => Effect.die("unused"),
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
-      getById: (id) =>
-        Effect.succeed(
-          id === projectId
-            ? Option.some(project)
-            : id === otherProjectId
-              ? Option.some(otherProject)
-              : Option.none(),
-        ),
+      getById:
+        options.getProject ??
+        ((id) =>
+          Effect.succeed(
+            id === projectId
+              ? Option.some(project)
+              : id === otherProjectId
+                ? Option.some(otherProject)
+                : Option.none(),
+          )),
       getByWorkspaceRoot: () => Effect.succeed(Option.some(project)),
       snapshot: Effect.die("unused"),
       getShell: () => Effect.die("unused"),
@@ -2033,6 +2040,114 @@ it.effect("replays a server-allocated launch", () =>
   }),
 );
 
+it.effect("MCP replays an accepted launch after its base and project default disappear", () =>
+  Effect.gen(function* () {
+    const setupEntered = yield* Deferred.make<void>();
+    const allowSetup = yield* Deferred.make<void>();
+    let changed = false;
+    const harness = makeHarness({
+      getProject: (id) =>
+        Effect.sync(() =>
+          id === projectId
+            ? Option.some({ ...project, defaultModelSelection: changed ? null : modelSelection })
+            : id === otherProjectId
+              ? Option.some(otherProject)
+              : Option.none(),
+        ),
+      hasCommit: ({ refName }) => Effect.sync(() => refName === "HEAD" || !changed),
+      git: { hasRefNamed: () => Effect.succeed(false) },
+      runSetup: () =>
+        Deferred.succeed(setupEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(allowSetup)),
+          Effect.as({ status: "no-script" as const }),
+        ),
+    });
+    const context = McpInvocationContext.McpInvocationContext.of({
+      environmentId: EnvironmentId.make("launch-retry"),
+      requestNamespace: "client:launch-retry",
+      thread: undefined,
+      client: { sessionId: "launch-retry", label: "Test", access: "full-access" },
+      issuedAt: 0,
+      capabilities: new Set(["orchestration" as const]),
+    });
+    const dependencies = Layer.mergeAll(
+      harness.layer,
+      NodeCrypto.layer,
+      NodeServices.layer,
+      Layer.succeed(McpInvocationContext.McpInvocationContext, context),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-launch-retry-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer)),
+      );
+      const input = {
+        title: "Only once",
+        projectId,
+        clientRequestId: "lost-response",
+        message: "Do the work",
+        workspaceStrategy: { type: "worktree" as const, baseRef: "temporary-base" },
+      };
+      const launch = (params: Parameters<typeof toolkit.handle<"t3_thread_launch">>[1]) =>
+        toolkit.handle("t3_thread_launch", params).pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.map((results) => results.at(-1)?.result),
+        );
+      const first = yield* launch(input);
+      assert.isDefined(first);
+      assert.notProperty(first, "code");
+      yield* Deferred.await(setupEntered);
+      changed = true;
+
+      assert.deepEqual(yield* launch(input), first);
+      assert.deepEqual(yield* launch({ ...input, modelSelection: claudeModelSelection }), first);
+      assert.include(yield* launch({ ...input, projectId: otherProjectId }), {
+        code: "orchestration_error",
+      });
+      assert.include(
+        yield* launch(input).pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...context,
+            client: { ...context.client!, access: "read-only" },
+          }),
+        ),
+        { code: "capability_denied" },
+      );
+      assert.include(yield* launch({ ...input, clientRequestId: "fresh" }), {
+        code: "invalid_request",
+      });
+      assert.include(
+        yield* launch({
+          ...input,
+          clientRequestId: "fresh-root",
+          workspaceStrategy: { type: "root" },
+        }),
+        { code: "invalid_request" },
+      );
+      const threadId = ThreadId.make("mcp:launch:client%3Alaunch-retry:lost-response");
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const projection = yield* threads.getThreadProjection(threadId);
+      assert.equal(projection.messages.length, 1);
+      assert.equal(projection.runs.length, 1);
+      assert.equal(harness.createWorktree.mock.calls.length, 1);
+      assert.equal(harness.runSetup.mock.calls.length, 1);
+      yield* Deferred.succeed(allowSetup, undefined);
+      yield* threads.streamStoredEventsFrom({ threadId }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.commandId === CommandId.make(`${threadId}:release`) &&
+            stored.event.type === "run.updated",
+        ),
+        Stream.runHead,
+      );
+    }).pipe(Effect.provide(dependencies));
+  }),
+);
+
 it.effect("refuses a launch when the project disables the model's provider instance", () => {
   const harness = makeHarness({
     serverSettings: {
@@ -2559,6 +2674,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
               }),
             ),
           ),
+        getAcceptedLaunch: launches.getAcceptedLaunch,
         checkWorktreeBase: launches.checkWorktreeBase,
         retryPreparation: launches.retryPreparation,
         prepareRun: launches.prepareRun,

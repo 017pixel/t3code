@@ -102,12 +102,25 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 ),
               )).projectId
             : yield* resolveProjectId(context, input.projectId);
+        // Accepted creates keep their workspace and model even if refs or
+        // project defaults change. Message intake still handles their replay.
+        const acceptedLaunch =
+          input.clientRequestId === undefined
+            ? undefined
+            : Option.getOrUndefined(
+                yield* ThreadLaunch.ThreadLaunchService.pipe(
+                  Effect.flatMap((launches) =>
+                    launches.getAcceptedLaunch({ commandId, threadId, projectId }),
+                  ),
+                  Effect.mapError(unavailable),
+                ),
+              );
         const readProject = Project.ProjectService.pipe(
           Effect.flatMap((projects) => projects.getById(projectId)),
           Effect.mapError(unavailable),
           Effect.map(Option.getOrUndefined),
         );
-        if (input.workspaceStrategy?.type === "existing_worktree") {
+        if (acceptedLaunch === undefined && input.workspaceStrategy?.type === "existing_worktree") {
           const project = yield* readProject;
           if (project === undefined)
             return yield* new OrchestratorMcpFailure({
@@ -119,7 +132,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         // A launch is accepted before its worktree is provisioned, so a base
         // ref that cannot resolve is refused while the agent can still act on it.
         const strategy = input.workspaceStrategy;
-        if (strategy?.type === "worktree")
+        if (acceptedLaunch === undefined && strategy?.type === "worktree")
           yield* ThreadLaunch.ThreadLaunchService.pipe(
             Effect.flatMap((launches) =>
               launches.checkWorktreeBase({ projectId, workspaceStrategy: strategy }),
@@ -137,6 +150,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             ),
           );
         const modelSelection =
+          acceptedLaunch?.modelSelection ??
           input.modelSelection ??
           caller?.modelSelection ??
           (yield* readProject)?.defaultModelSelection ??
