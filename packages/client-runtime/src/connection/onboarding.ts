@@ -176,6 +176,10 @@ const addT3ConnectRoute = Effect.fn("clientRuntime.connection.onboarding.addT3Co
     if (descriptor.environmentId !== environmentId) {
       return yield* differentMachineError(descriptor.label);
     }
+    const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
+    if (compatibilityError !== null && compatibilityError.serverUpdateRequired !== true) {
+      return yield* compatibilityError;
+    }
     const label = entry.target.label;
     const connectionId = bearerConnectionId(environmentId, address.httpBaseUrl);
     yield* registry

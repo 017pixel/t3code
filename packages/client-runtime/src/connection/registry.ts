@@ -968,6 +968,16 @@ export const make = Effect.gen(function* () {
         }
         const existing = findRouteToSameAddress(routes, route);
         if (existing !== undefined && !isLearned(existing)) return;
+        const conflicting = routes.find(
+          (candidate) => connectionRouteId(candidate.target) === connectionRouteId(route.target),
+        );
+        if (conflicting !== undefined && !isLearned(conflicting)) {
+          return yield* new ConnectionBlockedError({
+            reason: "configuration",
+            detail:
+              "A saved route was moved from this address. Edit that route or use a pairing code.",
+          });
+        }
         if (profile !== null) yield* profiles.put(profile);
         yield* replaceRoutesLocked(entry, upsertRoute(routes, route));
       }),

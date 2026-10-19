@@ -1892,7 +1892,10 @@ describe("EnvironmentRegistry", () => {
   );
 });
 
-function routeOnboardingHttp(environmentId = RELAY_TARGET.environmentId) {
+function routeOnboardingHttp(
+  environmentId = RELAY_TARGET.environmentId,
+  protocolVersion = ORCHESTRATION_PROTOCOL_VERSION,
+) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const layer = RpcHttp.layerRemoteHttpClient(((input, init = {}) => {
     const url = String(input);
@@ -1908,7 +1911,7 @@ function routeOnboardingHttp(environmentId = RELAY_TARGET.environmentId) {
           label: "Route environment",
           platform: { os: "linux", arch: "x64" },
           serverVersion: "0.0.0-test",
-          orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+          orchestrationProtocolVersion: protocolVersion,
           capabilities: { repositoryIdentity: true },
         }),
       );
@@ -2117,6 +2120,20 @@ describe("EnvironmentRegistry routes", () => {
             routesOf(yield* Ref.get(harness.storedTargets), RELAY_TARGET.environmentId),
           ).toHaveLength(2);
           expect(http.calls.filter(({ url }) => url.endsWith("/oauth/token"))).toHaveLength(1);
+          yield* onboarding.updateBearer({
+            environmentId: RELAY_TARGET.environmentId,
+            label: "Edited paired route",
+            httpBaseUrl: "http://192.168.1.21:3773",
+          });
+          const editedProfiles = yield* Ref.get(harness.storedProfiles);
+          const editedTargets = yield* Ref.get(harness.storedTargets);
+          expect(yield* onboarding.registerPairing(input).pipe(Effect.flip)).toMatchObject({
+            _tag: "ConnectionBlockedError",
+            reason: "configuration",
+          });
+          expect(yield* Ref.get(harness.storedProfiles)).toEqual(editedProfiles);
+          expect(yield* Ref.get(harness.storedTargets)).toEqual(editedTargets);
+          expect(yield* Ref.get(harness.storedCredentials)).toEqual(pairedCredentials);
         }).pipe(
           Effect.provide(
             Layer.mergeAll(
@@ -2129,6 +2146,57 @@ describe("EnvironmentRegistry routes", () => {
           Effect.scoped,
         );
       }),
+  );
+
+  it.effect("keeps an incompatible machine disabled when adding a Connect route", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([RELAY_TARGET], [], [], {
+        initialDisabled: [RELAY_TARGET.environmentId],
+      });
+      const http = routeOnboardingHttp(
+        RELAY_TARGET.environmentId,
+        ORCHESTRATION_PROTOCOL_VERSION + 1,
+      );
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* registry.setCompatibility(
+          RELAY_TARGET.environmentId,
+          new ConnectionBlockedError({ reason: "unsupported", detail: "Update your app." }),
+        );
+        const before = (yield* SubscriptionRef.get(registry.entries)).get(
+          RELAY_TARGET.environmentId,
+        );
+        const onboarding = yield* Onboarding.make;
+        expect(
+          yield* onboarding
+            .registerPairing({
+              host: "192.168.1.20:3773",
+              expectedEnvironmentId: RELAY_TARGET.environmentId,
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ConnectionBlockedError", reason: "unsupported" });
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(RELAY_TARGET.environmentId),
+        ).toEqual(before);
+        expect(yield* Ref.get(harness.storedTargets)).toEqual([RELAY_TARGET]);
+        expect(yield* Ref.get(harness.storedProfiles)).toEqual(new Map());
+        expect(yield* Ref.get(harness.storedCredentials)).toEqual(new Map());
+        expect(http.calls.map(({ url }) => new URL(url).pathname)).toEqual([
+          "/.well-known/t3/environment",
+        ]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            harness.layer,
+            harness.connectionStores,
+            http.layer,
+            routeClientPresentation,
+          ),
+        ),
+        Effect.scoped,
+      );
+    }),
   );
 
   it.effect.each(["different machine", "no Connect route"] as const)(
