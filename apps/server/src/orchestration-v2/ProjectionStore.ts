@@ -331,6 +331,7 @@ function historySupportForItems(
   projection: OrchestrationV2ThreadProjection,
   items: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
 ) {
+  items = items.filter((row) => row.sourceThreadId === projection.thread.id);
   const runIds = new Set(items.map(({ item }) => item.runId));
   const runs = projection.runs.filter((run) => runIds.has(run.id));
   const attempts = projection.attempts.filter((attempt) => runIds.has(attempt.runId));
@@ -2949,6 +2950,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     WHEN (SELECT COUNT(*) FROM user_anchors) > 0 THEN -1
                     ELSE ${window.rowLimit}
                   END
+                ), prompt_runs AS (
+                  SELECT run_id FROM selected WHERE run_id IS NOT NULL
+                  UNION
+                  SELECT run_id FROM orchestration_v2_projection_runs
+                  WHERE thread_id = ${threadId}
+                    AND status IN ('queued','preparing','starting','running','waiting')
                 ), retained AS MATERIALIZED (
                   SELECT item_rowid, ordinal, turn_item_id FROM selected
                   UNION
@@ -2967,43 +2974,36 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     AND request.type = 'run_interrupt_request'
                   UNION
                   SELECT prompt.rowid, prompt.ordinal, prompt.turn_item_id
-                  FROM orchestration_v2_projection_turn_items AS prompt
-                  WHERE ${window.deferHistoricalSupport ? 1 : 0} = 1
-                    AND prompt.thread_id = ${threadId}
-                    AND prompt.run_id IN (
-                      SELECT run_id FROM (
-                        SELECT run_id FROM selected ORDER BY ordinal ASC, turn_item_id ASC LIMIT 1
-                      )
-                      UNION
-                      SELECT run_id FROM orchestration_v2_projection_runs
-                      WHERE thread_id = ${threadId}
-                        AND status IN ('queued','preparing','starting','running','waiting')
-                    )
-                    AND prompt.rowid = (
+                  FROM prompt_runs
+                  CROSS JOIN orchestration_v2_projection_turn_items AS prompt ON prompt.rowid = (
                       SELECT first_input.rowid FROM orchestration_v2_projection_turn_items first_input
-                      WHERE first_input.run_id = prompt.run_id
+                      WHERE first_input.run_id = prompt_runs.run_id
+                        AND first_input.thread_id = ${threadId}
                         AND (first_input.type = 'notification' OR first_input.type = 'user_message'
                           AND json_extract(first_input.payload_json, '$.inputIntent') IN ('turn_start','queued_turn'))
                       ORDER BY first_input.ordinal LIMIT 1
                     )
+                  WHERE ${window.deferHistoricalSupport ? 1 : 0} = 1
                   UNION
                   SELECT control.rowid, control.ordinal, control.turn_item_id
-                  FROM orchestration_v2_projection_turn_items AS control
+                  FROM orchestration_v2_projection_runs AS active_run
+                  CROSS JOIN orchestration_v2_projection_turn_items AS control
+                    ON control.run_id = active_run.run_id
                   WHERE ${window.deferHistoricalSupport ? 1 : 0} = 1
+                    AND active_run.thread_id = ${threadId}
+                    AND active_run.status IN ('queued','preparing','starting','running','waiting')
                     AND control.thread_id = ${threadId}
-                    AND (
-                      (control.status IN ('pending','starting','running','waiting')
-                        AND control.run_id IN (
-                          SELECT run_id FROM orchestration_v2_projection_runs
-                          WHERE thread_id = ${threadId}
-                            AND status IN ('queued','preparing','starting','running','waiting')
-                        ))
-                      OR (control.type IN ('approval_request','user_input_request')
-                        AND json_extract(control.payload_json, '$.requestId') IN (
-                          SELECT runtime_request_id FROM orchestration_v2_projection_runtime_requests
-                          WHERE thread_id = ${threadId} AND status IN ('pending','waiting')
-                        ))
-                    )
+                    AND control.status IN ('pending','starting','running','waiting')
+                  UNION
+                  SELECT control.rowid, control.ordinal, control.turn_item_id
+                  FROM orchestration_v2_projection_runtime_requests AS request
+                  CROSS JOIN orchestration_v2_projection_turn_items AS control
+                    ON control.node_id = request.node_id
+                  WHERE ${window.deferHistoricalSupport ? 1 : 0} = 1
+                    AND request.thread_id = ${threadId} AND request.status IN ('pending','waiting')
+                    AND control.thread_id = ${threadId}
+                    AND control.type IN ('approval_request','user_input_request')
+                    AND json_extract(control.payload_json, '$.requestId') = request.runtime_request_id
                   UNION
                   SELECT latest.item_rowid, latest.ordinal, latest.turn_item_id
                   FROM (
@@ -5167,6 +5167,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       threadId: ThreadId,
       items: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
     ) {
+      items = items.filter((row) => row.sourceThreadId === threadId);
       const runIds = encodeIdList([
         ...new Set(items.flatMap(({ item }) => (item.runId === null ? [] : [item.runId]))),
       ]);
@@ -5176,29 +5177,32 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       const checkpointIds = encodeIdList(
         items.flatMap(({ item }) => ("checkpointId" in item ? [item.checkpointId] : [])),
       );
-      const sourceThreadIds = encodeIdList([...new Set(items.map((row) => row.sourceThreadId))]);
       const [nodes, checkpoints, runs, attempts] = yield* Effect.all([
         sql<PayloadRow>`
           WITH RECURSIVE retained(node_id) AS (
             SELECT value FROM json_each(${nodeIds})
             UNION
             SELECT json_extract(payload_json, '$.rootNodeId') FROM orchestration_v2_projection_runs
-            WHERE run_id IN (SELECT value FROM json_each(${runIds}))
+            WHERE thread_id = ${threadId} AND run_id IN (SELECT value FROM json_each(${runIds}))
             UNION
             SELECT root_node_id FROM orchestration_v2_projection_run_attempts
-            WHERE run_id IN (SELECT value FROM json_each(${runIds}))
+            WHERE thread_id = ${threadId} AND run_id IN (
+              SELECT run_id FROM orchestration_v2_projection_runs
+              WHERE thread_id = ${threadId} AND run_id IN (SELECT value FROM json_each(${runIds}))
+            )
             UNION
             SELECT node.parent_node_id FROM orchestration_v2_projection_nodes node
             JOIN retained ON retained.node_id = node.node_id
-            WHERE node.parent_node_id IS NOT NULL
+            WHERE node.thread_id = ${threadId} AND node.parent_node_id IS NOT NULL
           )
           SELECT node.payload_json FROM retained
           CROSS JOIN orchestration_v2_projection_nodes node ON node.node_id = retained.node_id
+          WHERE node.thread_id = ${threadId}
           ORDER BY COALESCE(node.started_at, ''), node.node_id
         `.pipe(Effect.flatMap(decodeRows(decodeNodePayload, threadId))),
         sql<PayloadRow>`
           SELECT payload_json FROM orchestration_v2_projection_checkpoints
-          WHERE thread_id IN (SELECT value FROM json_each(${sourceThreadIds}))
+          WHERE thread_id = ${threadId}
             AND (run_id IN (SELECT value FROM json_each(${runIds}))
               OR node_id IN (SELECT value FROM json_each(${nodeIds}))
               OR checkpoint_id IN (SELECT value FROM json_each(${checkpointIds})))
@@ -5206,11 +5210,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         `.pipe(Effect.flatMap(decodeRows(decodeCheckpointPayload, threadId))),
         sql<PayloadRow>`
           SELECT payload_json FROM orchestration_v2_projection_runs
-          WHERE run_id IN (SELECT value FROM json_each(${runIds})) ORDER BY ordinal
+          WHERE thread_id = ${threadId} AND run_id IN (SELECT value FROM json_each(${runIds}))
+          ORDER BY ordinal
         `.pipe(Effect.flatMap(decodeRows(decodeRunPayload, threadId))),
         sql<PayloadRow>`
           SELECT payload_json FROM orchestration_v2_projection_run_attempts
-          WHERE run_id IN (SELECT value FROM json_each(${runIds})) ORDER BY run_id, attempt_ordinal
+          WHERE thread_id = ${threadId} AND run_id IN (
+            SELECT run_id FROM orchestration_v2_projection_runs
+            WHERE thread_id = ${threadId} AND run_id IN (SELECT value FROM json_each(${runIds}))
+          ) ORDER BY run_id, attempt_ordinal
         `.pipe(Effect.flatMap(decodeRows(decodeRunAttemptPayload, threadId))),
       ]);
       return { nodes, checkpoints, runs, attempts };
@@ -6931,19 +6939,8 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   }),
                 catch: (cause) => new ProjectionStoreReadError({ threadId, cause }),
               });
-              const supports = includeSupport
-                ? yield* Effect.forEach(
-                    [...new Set(page.items.map((row) => row.sourceThreadId))],
-                    (sourceId) =>
-                      service.getThreadSnapshot(sourceId).pipe(
-                        Effect.map(({ projection }) =>
-                          historySupportForItems(
-                            projection,
-                            page.items.filter((row) => row.sourceThreadId === sourceId),
-                          ),
-                        ),
-                      ),
-                  )
+              const support = includeSupport
+                ? historySupportForItems(projection, page.items)
                 : undefined;
               return {
                 ...page,
@@ -6951,16 +6948,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 items: conversationOnly
                   ? page.items.filter((row) => isConversationHistoryItem(row.item))
                   : page.items,
-                ...(supports === undefined
-                  ? {}
-                  : {
-                      support: {
-                        nodes: supports.flatMap((support) => support.nodes),
-                        checkpoints: supports.flatMap((support) => support.checkpoints),
-                        runs: supports.flatMap((support) => support.runs),
-                        attempts: supports.flatMap((support) => support.attempts),
-                      },
-                    }),
+                ...(support === undefined ? {} : { support }),
               };
             }),
           ),
@@ -7009,17 +6997,29 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   : anchors.at(-anchorLimit)!
                 : Math.max(0, anchorIndex - options.rowLimit);
             const windowItems = candidates.slice(start);
-            const firstRunId = windowItems[0]?.item.runId;
-            const prompt =
-              options.deferHistoricalSupport && firstRunId != null
-                ? candidates.find(
-                    (row, index) => row.item.runId === firstRunId && turnStarts[index],
+            const windowRunIds = new Set(windowItems.map(({ item }) => item.runId));
+            const prompts = options.deferHistoricalSupport
+              ? candidates.filter((row) => {
+                  if (
+                    row.item.runId == null ||
+                    !windowRunIds.has(row.item.runId) ||
+                    !(
+                      row.item.type === "notification" ||
+                      (row.item.type === "user_message" &&
+                        ["turn_start", "queued_turn"].includes(row.item.inputIntent))
+                    )
                   )
-                : undefined;
+                    return false;
+                  windowRunIds.delete(row.item.runId);
+                  return !windowItems.includes(row);
+                })
+              : [];
             const visibleTurnItems =
-              prompt !== undefined && !windowItems.includes(prompt)
-                ? [prompt, ...windowItems]
-                : windowItems;
+              prompts.length === 0
+                ? windowItems
+                : [...prompts, ...windowItems].sort(
+                    (left, right) => left.position - right.position,
+                  );
             const recentRunIds = new Set(
               snapshot.projection.runs
                 .filter((run) => run.status !== "rolled_back")
@@ -7032,6 +7032,19 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 .filter((run) => activeRunStatuses.has(run.status))
                 .map((run) => run.id),
             ]);
+            const fullNodeIds = new Set(visibleTurnItems.map(({ item }) => item.nodeId));
+            const fullCheckpointIds = new Set(
+              visibleTurnItems.flatMap(({ item }) =>
+                "checkpointId" in item ? [item.checkpointId] : [],
+              ),
+            );
+            const retainCheckpointFiles = (
+              checkpoint: OrchestrationV2ThreadProjection["checkpoints"][number],
+            ) =>
+              ["pending", "capturing"].includes(checkpoint.status) ||
+              (checkpoint.runId !== null && fullRunIds.has(checkpoint.runId)) ||
+              (checkpoint.nodeId !== null && fullNodeIds.has(checkpoint.nodeId)) ||
+              fullCheckpointIds.has(checkpoint.id);
             return {
               ...snapshot,
               projection: {
@@ -7042,12 +7055,11 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                       checkpoints: snapshot.projection.checkpoints
                         .filter(
                           (checkpoint) =>
-                            checkpoint.runId !== null &&
-                            (recentRunIds.has(checkpoint.runId) ||
-                              fullRunIds.has(checkpoint.runId)),
+                            retainCheckpointFiles(checkpoint) ||
+                            (checkpoint.runId !== null && recentRunIds.has(checkpoint.runId)),
                         )
                         .map((checkpoint) =>
-                          fullRunIds.has(checkpoint.runId)
+                          retainCheckpointFiles(checkpoint)
                             ? checkpoint
                             : {
                                 ...checkpoint,

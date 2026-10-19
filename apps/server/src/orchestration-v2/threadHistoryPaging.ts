@@ -478,6 +478,7 @@ export function buildBoundedThreadProjection(input: {
     ...(input.viewportWindow
       ? {
           checkpoints: input.projection.checkpoints.map((checkpoint) =>
+            ["pending", "capturing"].includes(checkpoint.status) ||
             (checkpoint.runId !== null && retainedRunIds.has(checkpoint.runId)) ||
             (checkpoint.nodeId !== null && retainedNodeIds.has(checkpoint.nodeId)) ||
             retainedCheckpointIds.has(checkpoint.id) ||
@@ -527,20 +528,27 @@ export function buildBoundedThreadProjection(input: {
     policy: windowPolicy,
     rowEncodedBytes: (row) => projectedRowBoundedSnapshotEncodedBytes(row, threadId),
   });
-  const oldest = window.items[0];
-  const prompt =
-    input.viewportWindow && oldest?.item.runId != null
-      ? controlProjection.visibleTurnItems.find(
-          (row) =>
-            row.item.runId === oldest.item.runId &&
-            (isThreadHistoryTurnStart(row.item) || row.item.type === "notification"),
-        )
-      : undefined;
+  const windowRunIds = new Set(window.items.map(({ item }) => item.runId));
+  const visibleItemIds = new Set(window.items.map((row) => row.sourceItemId));
+  const prompts = input.viewportWindow
+    ? controlProjection.visibleTurnItems.filter((row) => {
+        if (
+          row.item.runId == null ||
+          !windowRunIds.has(row.item.runId) ||
+          !(isThreadHistoryTurnStart(row.item) || row.item.type === "notification")
+        ) {
+          return false;
+        }
+        windowRunIds.delete(row.item.runId);
+        return !visibleItemIds.has(row.sourceItemId);
+      })
+    : [];
   // The cursor stays at the row window so paging fills the gap below its prompt.
+  for (const prompt of prompts) visibleItemIds.add(prompt.sourceItemId);
   const visibleTurnItems = renumberPositions(
-    prompt === undefined || window.items.includes(prompt)
+    prompts.length === 0
       ? window.items
-      : [prompt, ...window.items],
+      : controlProjection.visibleTurnItems.filter((row) => visibleItemIds.has(row.sourceItemId)),
   );
   const windowTurnItems = localTurnItemsForVisibleWindow(controlProjection, visibleTurnItems);
   const dependencyTurnItems = retainedInterruptRequestTurnItems(
