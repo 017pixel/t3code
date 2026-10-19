@@ -458,11 +458,35 @@ export function buildBoundedThreadProjection(input: {
   readonly projection: OrchestrationV2ThreadProjection;
   readonly snapshotSequence: number;
   readonly policy?: ThreadHistoryPagePolicy | undefined;
+  readonly viewportWindow?: boolean;
 }): BoundedProjectionResult {
   const policy = input.policy ?? THREAD_HISTORY_PAGE_POLICY;
   const threadId = input.projection.thread.id;
+  const recentRows = input.projection.visibleTurnItems.slice(-policy.maxItems);
+  const retainedRunIds = new Set(recentRows.map(({ item }) => item.runId));
+  for (const run of input.projection.runs) {
+    if (["queued", "preparing", "starting", "running", "waiting"].includes(run.status)) {
+      retainedRunIds.add(run.id);
+    }
+  }
+  const retainedNodeIds = new Set(recentRows.map(({ item }) => item.nodeId));
+  const retainedCheckpointIds = new Set(
+    recentRows.flatMap(({ item }) => ("checkpointId" in item ? [item.checkpointId] : [])),
+  );
   const controlProjection = {
     ...input.projection,
+    ...(input.viewportWindow
+      ? {
+          checkpoints: input.projection.checkpoints.map((checkpoint) =>
+            (checkpoint.runId !== null && retainedRunIds.has(checkpoint.runId)) ||
+            (checkpoint.nodeId !== null && retainedNodeIds.has(checkpoint.nodeId)) ||
+            retainedCheckpointIds.has(checkpoint.id) ||
+            checkpoint.deferredFileCount !== undefined
+              ? checkpoint
+              : { ...checkpoint, files: [], deferredFileCount: checkpoint.files.length },
+          ),
+        }
+      : {}),
     plans: input.projection.plans.filter((plan) => plan.status === "active"),
     contextHandoffs: input.projection.contextHandoffs.filter(
       (handoff) => handoff.status === "pending" || handoff.status === "ready",
@@ -492,7 +516,7 @@ export function buildBoundedThreadProjection(input: {
     policy.maxEncodedBytes - dependencyReserve - controlBytes - 1_024,
   );
   const windowPolicy: ThreadHistoryPagePolicy = {
-    maxUserTurns: policy.maxUserTurns,
+    maxUserTurns: input.viewportWindow ? undefined : policy.maxUserTurns,
     maxItems: policy.maxItems,
     maxEncodedBytes: windowBudget,
   };
@@ -503,7 +527,21 @@ export function buildBoundedThreadProjection(input: {
     policy: windowPolicy,
     rowEncodedBytes: (row) => projectedRowBoundedSnapshotEncodedBytes(row, threadId),
   });
-  const visibleTurnItems = renumberPositions(window.items);
+  const oldest = window.items[0];
+  const prompt =
+    input.viewportWindow && oldest?.item.runId != null
+      ? controlProjection.visibleTurnItems.find(
+          (row) =>
+            row.item.runId === oldest.item.runId &&
+            (isThreadHistoryTurnStart(row.item) || row.item.type === "notification"),
+        )
+      : undefined;
+  // The cursor stays at the row window so paging fills the gap below its prompt.
+  const visibleTurnItems = renumberPositions(
+    prompt === undefined || window.items.includes(prompt)
+      ? window.items
+      : [prompt, ...window.items],
+  );
   const windowTurnItems = localTurnItemsForVisibleWindow(controlProjection, visibleTurnItems);
   const dependencyTurnItems = retainedInterruptRequestTurnItems(
     controlProjection,
@@ -515,6 +553,32 @@ export function buildBoundedThreadProjection(input: {
   }
   for (const item of dependencyTurnItems) {
     turnItemById.set(String(item.id), item);
+  }
+  if (input.viewportWindow) {
+    const activeRunIds = new Set(
+      controlProjection.runs
+        .filter((run) =>
+          ["queued", "preparing", "starting", "running", "waiting"].includes(run.status),
+        )
+        .map((run) => run.id),
+    );
+    const pendingRequestIds = new Set(
+      controlProjection.runtimeRequests
+        .filter((request) => request.status === "pending")
+        .map((request) => request.id),
+    );
+    for (const item of controlProjection.turnItems) {
+      if (
+        (item.runId !== null &&
+          activeRunIds.has(item.runId) &&
+          (item.type === "user_message" ||
+            item.type === "notification" ||
+            ["pending", "starting", "running", "waiting"].includes(item.status))) ||
+        ("requestId" in item && pendingRequestIds.has(item.requestId))
+      ) {
+        turnItemById.set(String(item.id), item);
+      }
+    }
   }
   const turnItems = [...turnItemById.values()];
 

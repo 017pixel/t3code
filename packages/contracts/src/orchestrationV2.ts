@@ -1184,6 +1184,8 @@ export const OrchestrationV2Checkpoint = Schema.Struct({
   ref: CheckpointRef,
   status: Schema.Literals(["ready", "missing", "error", "stale"]),
   files: Schema.Array(OrchestrationV2CheckpointFileSummary),
+  /** Historical file lists hydrate with their history page. */
+  deferredFileCount: Schema.optional(NonNegativeInt),
   capturedAt: Schema.DateTimeUtc,
 });
 export type OrchestrationV2Checkpoint = typeof OrchestrationV2Checkpoint.Type;
@@ -3190,6 +3192,7 @@ export const OrchestrationV2SubscribeThreadInput = Schema.Struct({
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
   acceptBoundedSnapshot: Schema.optionalKey(Schema.Boolean),
   acceptCompactTurnItems: Schema.optionalKey(Schema.Boolean),
+  acceptViewportWindow: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2SubscribeThreadInput = typeof OrchestrationV2SubscribeThreadInput.Type;
 
@@ -3237,6 +3240,14 @@ export const OrchestrationV2ThreadHistoryPage = Schema.Struct({
   ),
   nextCursor: Schema.NullOr(TrimmedNonEmptyString),
   hasMoreHistory: Schema.Boolean,
+  support: Schema.optionalKey(
+    Schema.Struct({
+      nodes: Schema.Array(OrchestrationV2ExecutionNode),
+      checkpoints: Schema.Array(OrchestrationV2Checkpoint),
+      runs: Schema.Array(OrchestrationV2Run),
+      attempts: Schema.Array(OrchestrationV2RunAttempt),
+    }),
+  ),
 });
 export type OrchestrationV2ThreadHistoryPage = typeof OrchestrationV2ThreadHistoryPage.Type;
 

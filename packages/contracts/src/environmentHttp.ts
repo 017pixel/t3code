@@ -574,10 +574,12 @@ const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
 });
 
 const EnvironmentOrchestrationThreadBoundedSnapshotQuery = Schema.Struct({
+  viewportWindow: Schema.optionalKey(Schema.String),
   compactTurnItems: Schema.optionalKey(Schema.String),
 });
 
 const EnvironmentOrchestrationThreadHistoryQuery = Schema.Struct({
+  includeSupport: Schema.optionalKey(Schema.String),
   cursor: TrimmedNonEmptyString,
   throughEntryId: Schema.optional(TrimmedNonEmptyString),
   view: Schema.optional(Schema.Literals(["conversation", "activity"])),
