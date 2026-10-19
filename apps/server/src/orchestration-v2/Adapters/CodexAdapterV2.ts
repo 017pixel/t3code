@@ -338,6 +338,8 @@ function toProtocolError(
   });
 }
 
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
 function normalizeCodexCause(error: unknown): unknown {
   return error;
 }
@@ -6827,7 +6829,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     // Only a confirmed missing rollout permits portable recovery. Native
                     // writer, access, transport, and identity failures retain the saved ref.
                     preserveNativeThread: !(
-                      cause instanceof CodexErrors.CodexAppServerRequestError &&
+                      isCodexAppServerRequestError(cause) &&
                       cause.code === -32600 &&
                       /^(?:thread not found(?:$|:| for )|no rollout found(?:$| for ))/.test(
                         cause.errorMessage,
