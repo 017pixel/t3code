@@ -103,6 +103,7 @@ const supportsSessionLifecycle = process.env.T3_ACP_SESSION_LIFECYCLE === "1";
 const supportsAcpMcp = process.env.T3_ACP_MCP_ACP === "1";
 const supportsV2Management = process.env.T3_ACP_V2_MANAGEMENT === "1";
 const omitSessionListHandler = process.env.T3_ACP_OMIT_SESSION_LIST_HANDLER === "1";
+const legacyTerminalAuth = process.env.T3_ACP_LEGACY_TERMINAL_AUTH === "1";
 const advertisedAuthMethodId = process.env.T3_ACP_AUTH_METHOD_ID?.trim();
 const initializeAuthMethodId =
   advertisedAuthMethodId ?? (supportsSessionLifecycle ? "test" : undefined);
@@ -502,6 +503,17 @@ const program = Effect.gen(function* () {
         );
       }
       parameterizedModelPicker = request.capabilities?._meta?.parameterizedModelPicker === true;
+      const legacyTerminalMethods: AcpSchema.AuthMethod[] =
+        legacyTerminalAuth && request.capabilities?._meta?.["terminal-auth"] === true
+          ? [
+              {
+                type: "terminal",
+                methodId: "legacy-login",
+                name: "Terminal login",
+                args: ["login"],
+              },
+            ]
+          : [];
       return {
         protocolVersion: 2,
         info: { name: "t3-acp-mock-agent", version: "0.0.0" },
@@ -525,6 +537,7 @@ const program = Effect.gen(function* () {
               ],
             }
           : {}),
+        ...(legacyTerminalAuth ? { authMethods: legacyTerminalMethods } : {}),
       };
     }),
   );

@@ -9,10 +9,12 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as EffectAcpErrors from "effect-acp/errors";
 
+import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
   acpRegistryProbeFailure,
@@ -29,6 +31,11 @@ const instanceId = ProviderInstanceId.make("acpRegistry_codex");
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../scripts/acp-mock-agent.ts");
 const decodeSettings = Schema.decodeSync(AcpRegistrySettings);
+const decodeRequest = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({ method: Schema.String, params: Schema.optional(Schema.Unknown) }),
+  ),
+);
 
 describe("ACP Registry probe", () => {
   it("returns advertised auth methods and de-duplicated models", () => {
@@ -424,6 +431,93 @@ describe("ACP Registry probe", () => {
       Effect.provide(NodeServices.layer),
       Effect.scoped,
     ),
+  );
+
+  it.effect.each([true, false])(
+    "discovers legacy terminal sign-in only with a PTY (available: %s)",
+    (hasPty) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const requestLogPath = NodePath.join(directory, "requests.ndjson");
+        const input = {
+          instanceId,
+          settings: decodeSettings({ agentId: "mock-agent" }),
+          cwd: directory,
+          environment: process.env,
+        };
+        const catalog = AcpRegistrySupport.AcpRegistryCatalog.of({
+          search: () => Effect.die("unused search"),
+          prepare: () => Effect.die("unused prepare"),
+          inspect: () => Effect.die("unused inspect"),
+          uninstallManagedBinary: () => Effect.die("unused uninstall"),
+          resolve: () =>
+            Effect.succeed({
+              agent: {
+                id: "mock-agent",
+                name: "Mock Agent",
+                version: "1.0.0",
+                description: "ACP terminal authentication test agent",
+                distribution: { npx: { package: "mock-agent@1.0.0" } },
+              },
+              distribution: "npx",
+              spawn: {
+                command: "node",
+                args: [mockAgentPath],
+                env: {
+                  ...process.env,
+                  T3_ACP_COMMAND_ADVERTISEMENT_DELAY_MS: "25",
+                  T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+                  T3_ACP_LEGACY_TERMINAL_AUTH: "1",
+                  T3_ACP_SESSION_LIFECYCLE: "1",
+                },
+              },
+            }),
+        });
+        const setup = Effect.gen(function* () {
+          const result = yield* probeAcpRegistryConfiguration(input);
+          yield* listAcpRegistrySessions(input);
+          return result;
+        }).pipe(Effect.provideService(AcpRegistrySupport.AcpRegistryCatalog, catalog));
+        const result = yield* hasPty
+          ? setup.pipe(
+              Effect.provideService(PtyAdapter.PtyAdapter, {
+                spawn: () => Effect.die("discovery must not open a terminal"),
+              }),
+            )
+          : setup;
+        const log = yield* fs.readFileString(requestLogPath);
+        const messages = yield* Effect.forEach(log.trim().split("\n"), (line) =>
+          decodeRequest(line),
+        );
+        const requests = messages.filter((request) => request.method === "initialize");
+        expect(requests).toHaveLength(2);
+        expect(requests[0]?.params).toMatchObject({
+          clientCapabilities: { auth: { terminal: hasPty } },
+        });
+        expect(requests[1]?.params).toMatchObject({
+          clientCapabilities: { auth: { terminal: false } },
+        });
+        expect(requests[1]?.params).not.toHaveProperty(
+          "clientCapabilities._meta.terminal-auth",
+          true,
+        );
+        if (hasPty) {
+          expect(requests[0]?.params).toHaveProperty(
+            "clientCapabilities._meta.terminal-auth",
+            true,
+          );
+          expect(result.probe.authMethods).toContainEqual(
+            expect.objectContaining({ id: "legacy-login", type: "terminal" }),
+          );
+        } else {
+          expect(requests[0]?.params).not.toHaveProperty(
+            "clientCapabilities._meta.terminal-auth",
+            true,
+          );
+          expect(result.probe.authMethods.some((method) => method.type === "terminal")).toBe(false);
+        }
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
   it.effect("includes package resolution in the probe timeout", () =>
