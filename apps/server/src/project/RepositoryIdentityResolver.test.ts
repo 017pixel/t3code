@@ -1,4 +1,5 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
+import { resolveGitHubRepository } from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
 // @effect-diagnostics nodeBuiltinImport:off - realpathSync.native resolves Windows 8.3 short names, which the Effect realPath does not.
 import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -346,7 +347,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
   );
 
   it.effect(
-    "refreshes the gh default remote and restores upstream when the preference is removed",
+    "refreshes the gh default remote and restores upstream for ambiguous or removed preferences",
     () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -375,6 +376,24 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
         expect(selected?.origin).toBeUndefined();
         expect(yield* resolver.resolve(cwd)).toEqual(selected);
 
+        yield* git(cwd, ["config", "remote.upstream.gh-resolved", "base"]);
+        const resolved = yield* git(cwd, ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"]);
+        expect(resolved.stdout).toBe(
+          "remote.origin.gh-resolved base\nremote.upstream.gh-resolved base\n",
+        );
+        const remotes = yield* git(cwd, ["remote", "-v"]);
+        expect(
+          resolveGitHubRepository({
+            remotes: remotes.stdout,
+            resolved: resolved.stdout,
+            hostHint: undefined,
+            defaultHost: "github.com",
+          }).locator,
+        ).toEqual({ host: "github.com", owner: "t3tools", name: "t3code" });
+        expect(yield* resolver.resolve(cwd, { refresh: true })).toEqual(upstream);
+
+        yield* git(cwd, ["config", "--unset", "remote.upstream.gh-resolved"]);
+        expect(yield* resolver.resolve(cwd, { refresh: true })).toEqual(selected);
         yield* git(cwd, ["config", "--unset", "remote.origin.gh-resolved"]);
         expect(yield* resolver.resolve(cwd)).toEqual(selected);
         expect(yield* resolver.resolve(cwd, { refresh: true })).toEqual(upstream);

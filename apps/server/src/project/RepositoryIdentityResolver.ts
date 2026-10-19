@@ -101,6 +101,8 @@ function pickPrimaryRemote(
   resolved: string,
 ): { readonly remoteName: string; readonly remoteUrl: string } | null {
   // gh stores `base` for the marked remote, or OWNER/REPO for a parent with no remote.
+  let markedRemote: { readonly remoteName: string; readonly remoteUrl: string } | null = null;
+  let validMarkCount = 0;
   for (const line of resolved.split("\n")) {
     const match = /^remote\.(.+)\.gh-resolved\s+(\S+)$/u.exec(line.trim());
     const remoteName = match?.[1];
@@ -108,8 +110,13 @@ function pickPrimaryRemote(
     const markedUrl = remoteName ? remotes.get(remoteName) : undefined;
     if (!remoteName || !repository || !markedUrl) continue;
     const remoteUrl = repository === "base" ? markedUrl : withRepositoryPath(markedUrl, repository);
-    if (remoteUrl) return { remoteName, remoteUrl };
+    if (remoteUrl) {
+      markedRemote = { remoteName, remoteUrl };
+      validMarkCount++;
+    }
   }
+  // Multiple valid marks fall back like the GitHub provider's repository resolution.
+  if (validMarkCount === 1) return markedRemote;
 
   for (const preferredRemoteName of ["upstream", "origin"] as const) {
     const remoteUrl = remotes.get(preferredRemoteName);
