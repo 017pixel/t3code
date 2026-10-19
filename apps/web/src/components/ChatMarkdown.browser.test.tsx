@@ -97,7 +97,7 @@ describe("ChatMarkdown bare anchor placeholders", () => {
         `- **"From ${token}"** appears in the header.\n\n- **Tests:** cover inheritance.\n\nThe deferred move continues on B.\n\nSee <a href="https://example.com">the link</a>.`,
       );
       expect(container.querySelector("strong")?.textContent).toBe(`"From ${token}"`);
-      expect(linkTexts(container)).toEqual(["the link"]);
+      await vi.waitFor(() => expect(linkTexts(container)).toEqual(["the link"]));
       expect(container.querySelectorAll("li")).toHaveLength(2);
       expect([...container.querySelectorAll("p")].map((p) => p.textContent)).toContain(
         "The deferred move continues on B.",
@@ -769,7 +769,7 @@ describe("ChatMarkdown thread find", () => {
 
     await show("Needle");
     await frame();
-    expect(diagrams()).toBe(2);
+    await vi.waitFor(() => expect(diagrams()).toBe(2));
     await show("Alpha");
     await frame();
     await frame();

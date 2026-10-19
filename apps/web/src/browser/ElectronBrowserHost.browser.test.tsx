@@ -128,11 +128,14 @@ describe("ElectronBrowserHost", () => {
 
     const host = container.querySelector("[data-electron-browser-host]")!;
     const webviews = () => [...host.querySelectorAll("webview")];
+    await vi.waitFor(() =>
+      expect(
+        webviews()
+          .map((node) => node.getAttribute("data-preview-server-tab"))
+          .toSorted(),
+      ).toEqual(["tab_7", "tab_8"]),
+    );
     const before = webviews();
-    expect(before.map((node) => node.getAttribute("data-preview-server-tab")).toSorted()).toEqual([
-      "tab_7",
-      "tab_8",
-    ]);
 
     // Electron destroys a webview's guest when its element leaves the DOM, so a reorder that
     // detaches and re-inserts the element blanks the tab.

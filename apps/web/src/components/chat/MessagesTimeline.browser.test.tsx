@@ -505,8 +505,10 @@ describe("MessagesTimeline messages", () => {
         { role: "assistant" },
       ),
     ]);
-    expect(container.querySelector("[data-markdown-details]")?.textContent).toContain(
-      "Safe details",
+    await vi.waitFor(() =>
+      expect(container.querySelector("[data-markdown-details]")?.textContent).toContain(
+        "Safe details",
+      ),
     );
     expect(text()).not.toContain("<details");
     expect(container.querySelector("script, [onclick], [onerror]")).toBeNull();
