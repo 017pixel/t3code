@@ -526,18 +526,22 @@ const program = Effect.gen(function* () {
           },
           ...(supportsV2Management ? { providers: {} } : {}),
         },
-        ...(initializeAuthMethodId
+        ...(initializeAuthMethodId || legacyTerminalAuth
           ? {
               authMethods: [
-                {
-                  type: "agent" as const,
-                  methodId: initializeAuthMethodId,
-                  name: "Mock agent authentication",
-                },
+                ...(initializeAuthMethodId
+                  ? [
+                      {
+                        type: "agent" as const,
+                        methodId: initializeAuthMethodId,
+                        name: "Mock agent authentication",
+                      },
+                    ]
+                  : []),
+                ...legacyTerminalMethods,
               ],
             }
           : {}),
-        ...(legacyTerminalAuth ? { authMethods: legacyTerminalMethods } : {}),
       };
     }),
   );
