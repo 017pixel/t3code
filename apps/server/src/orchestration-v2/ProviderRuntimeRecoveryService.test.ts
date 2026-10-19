@@ -808,14 +808,14 @@ it.effect(
       nodes: [{ id: rootNodeId, runId, status: "running" }],
       subagents: [],
       messages: [{ id: MessageId.make("message_recovery_cancel"), runId, streaming: true }],
-      turnItems: [
-        {
-          id: TurnItemId.make("turn_item_recovery_cancel"),
-          runId,
-          nodeId: rootNodeId,
-          status: "running",
-        },
-      ],
+      turnItems: ["assistant_message", "reasoning", "proposed_plan"].map((type) => ({
+        id: TurnItemId.make("turn_item_recovery_cancel_" + type),
+        type,
+        runId,
+        nodeId: rootNodeId,
+        status: "running",
+        streaming: true,
+      })),
     } as unknown as OrchestrationV2ThreadProjection;
     const layer = ProviderRuntimeRecovery.layer.pipe(
       Layer.provide(ServerSettings.layerTest()),
@@ -868,12 +868,18 @@ it.effect(
           ["provider-turn.updated", "cancelled"],
           ["message.updated", null],
           ["turn-item.updated", "cancelled"],
+          ["turn-item.updated", "cancelled"],
+          ["turn-item.updated", "cancelled"],
           ["provider-thread.updated", "idle"],
           ["provider-session.updated", "stopped"],
         ],
       );
       const messageEvent = events.find((event) => event.type === "message.updated");
       assert.isFalse(messageEvent?.type === "message.updated" && messageEvent.payload.streaming);
+      for (const event of events) {
+        if (event.type === "turn-item.updated")
+          assert.propertyVal(event.payload, "streaming", false);
+      }
     }).pipe(Effect.provide(layer));
   },
 );

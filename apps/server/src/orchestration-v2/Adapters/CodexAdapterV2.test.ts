@@ -7,6 +7,8 @@ import {
 } from "./ProviderTextDeltaCoalescer.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  ChatAttachmentId,
+  ComposerContextId,
   CommandId,
   CheckpointId,
   CodexSettings,
@@ -42,7 +44,11 @@ import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
 import * as FileSystem from "effect/FileSystem";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference } from "@t3tools/shared/mcpApp";
-import { resolveAttachmentPathById } from "../../attachmentStore.ts";
+import {
+  createAttachmentId,
+  resolveAttachmentPath,
+  resolveAttachmentPathById,
+} from "../../attachmentStore.ts";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -67,6 +73,21 @@ import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import { makeReplayServerConfig, withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
 
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlitePersistence from "../../persistence/Sqlite.ts";
+import * as ServerSettings from "../../serverSettings.ts";
+import * as EventSink from "../EventSink.ts";
+import * as EventStore from "../EventStore.ts";
+import * as EffectOutbox from "../EffectOutbox.ts";
+import * as ProjectionStore from "../ProjectionStore.ts";
+import * as ProviderRuntimeRecovery from "../ProviderRuntimeRecoveryService.ts";
+import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
+
+const decodeCodexTurnInput = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    input: Schema.Array(Schema.Unknown),
+  }),
+);
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const replayTranscriptJson = Schema.fromJsonString(CodexReplay.CodexAppServerReplayTranscript);
 const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
@@ -3456,6 +3477,374 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
       ),
     ),
+  );
+
+  it.effect.each([1, 2])(
+    "delivers queued steering to Codex with its image and context after %s restarts",
+    (restarts) =>
+      Effect.gen(function* () {
+        const name = "restart-steering-" + restarts;
+        const threadId = ThreadId.make(name);
+        const nativeThreadId = "native-" + name;
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-restart-steering-" });
+        const serverConfig = yield* makeReplayServerConfig(name).pipe(Effect.orDie);
+        yield* Effect.addFinalizer(() =>
+          fs.remove(serverConfig.baseDir, { recursive: true, force: true }).pipe(Effect.orDie),
+        );
+        const attachment = {
+          type: "image" as const,
+          id: ChatAttachmentId.make(createAttachmentId(threadId)!),
+          name: "steering.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+        };
+        const imagePath = resolveAttachmentPath({
+          attachmentsDir: serverConfig.attachmentsDir,
+          attachment,
+        });
+        assert.isNotNull(imagePath);
+        yield* fs.makeDirectory((yield* Path.Path).dirname(imagePath), { recursive: true });
+        yield* fs.writeFile(imagePath, new Uint8Array([1, 2, 3, 4]));
+        const sent: Array<unknown> = [];
+        let sessions = 0;
+        const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
+          instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CODEX_SETTINGS,
+          environment: {},
+          crypto: yield* Crypto.Crypto,
+          fileSystem: fs,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig,
+          clientFactory: {
+            open: (input) =>
+              Effect.gen(function* () {
+                const firstSession = sessions++ === 0;
+                const preamble = codexReplayPreamble({
+                  nativeThreadId,
+                  nativeTurnId: "unused",
+                  prompt: "unused",
+                });
+                const transcript = makeCodexReplayTranscript({
+                  scenario: name,
+                  entries: firstSession
+                    ? preamble.slice(0, 5)
+                    : [
+                        ...preamble.slice(0, 3),
+                        {
+                          type: "expect_outbound",
+                          frame: {
+                            id: 2,
+                            method: "thread/resume",
+                            params: {
+                              threadId: nativeThreadId,
+                              excludeTurns: true,
+                              config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+                            },
+                          },
+                        },
+                        {
+                          type: "emit_inbound",
+                          frame: {
+                            id: 2,
+                            result: { thread: { id: nativeThreadId, updatedAt: 1782622450 } },
+                          },
+                        },
+                      ],
+                });
+                const context = yield* Layer.build(CodexReplay.layerReplay(transcript));
+                const client = yield* CodexClient.CodexAppServerClient.pipe(
+                  Effect.provide(context),
+                );
+                // Capture the real adapter output; only the external turn/start response is stubbed.
+                const request = ((method, params) =>
+                  method === "turn/start"
+                    ? Effect.sync(() => {
+                        sent.push(params);
+                        return {
+                          turn: makeCodexReplayTurn({
+                            id: "turn-" + sent.length,
+                            status: "inProgress",
+                          }),
+                        };
+                      })
+                    : client.request(method, params)) as typeof client.request;
+                return { ...client, request };
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterOpenSessionError({
+                      driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                      providerSessionId: input.providerSessionId,
+                      cause,
+                    }),
+                ),
+              ),
+          },
+        });
+        let database = SqlitePersistence.layerFromPath(directory + "/state.sqlite").pipe(
+          Layer.provide(NodeServices.layer),
+        );
+        const snapshot = (file: string) =>
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql.unsafe("VACUUM INTO ?", [file]);
+          }).pipe(Effect.provide(database));
+        const runtime = () =>
+          ProviderReplayHarness.layerWithRegistry(
+            { name, runtimePolicyOverride: { cwd: directory } },
+            ProviderAdapterRegistry.layerSingle(adapter),
+            {
+              databaseLayer: database,
+              runEffectWorker: false,
+              continueThreadsAfterServerUpdate: true,
+            },
+          );
+        const recovery = () =>
+          ProviderRuntimeRecovery.layer.pipe(
+            Layer.provide(
+              EventSink.layer.pipe(
+                Layer.provideMerge(
+                  Layer.mergeAll(
+                    EventStore.layer,
+                    ProjectionStore.layer,
+                    EffectOutbox.layer,
+                    IdAllocator.layer,
+                  ).pipe(Layer.provideMerge(database)),
+                ),
+              ),
+            ),
+            Layer.provide(ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true })),
+          );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make(name + ":create"),
+              threadId,
+              projectId: ProjectId.make(name),
+              title: name,
+              modelSelection: CODEX_TEST_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: directory,
+              createdBy: "user",
+              creationSource: "web",
+            });
+            const started = yield* orchestrator.streamDomainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.type === "provider-turn.updated" && event.payload.status === "running",
+              ),
+              Stream.take(1),
+              Stream.runDrain,
+              Effect.forkScoped,
+            );
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(name + ":first"),
+              threadId,
+              messageId: MessageId.make(name + ":first"),
+              text: "Start working",
+              attachments: [],
+              modelSelection: CODEX_TEST_MODEL_SELECTION,
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            });
+            yield* worker.drain();
+            yield* Fiber.join(started);
+            const projection = yield* orchestrator.getThreadProjection(threadId);
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(name + ":steer"),
+              threadId,
+              messageId: MessageId.make(name + ":steer"),
+              text: "STEERING_MARKER use [terminal](t3-context://v1/terminal/restart-terminal)",
+              attachments: [attachment],
+              context: {
+                version: 1,
+                records: [
+                  {
+                    version: 1,
+                    contextId: ComposerContextId.make("restart-terminal"),
+                    kind: "terminal",
+                    label: "terminal",
+                    terminalId: "terminal-1",
+                    terminalLabel: "Shell",
+                    lineStart: 1,
+                    lineEnd: 1,
+                    text: "CONTEXT_MARKER",
+                  },
+                ],
+              },
+              modelSelection: CODEX_TEST_MODEL_SELECTION,
+              dispatchMode: { type: "steer_active", targetRunId: projection.runs[0]!.id },
+              createdBy: "user",
+              creationSource: "web",
+            });
+            // No daemon is running: the steer is committed but has not reached the provider.
+            assert.lengthOf(sent, 1);
+            // Snapshot before scope finalizers perform a graceful session shutdown.
+            yield* snapshot(directory + "/crash-1.sqlite");
+          }).pipe(Effect.provide(runtime())),
+        );
+        for (let restart = 1; restart <= restarts; restart++) {
+          yield* TestClock.adjust("1 milli");
+          database = SqlitePersistence.layerFromPath(
+            directory + "/crash-" + restart + ".sqlite",
+          ).pipe(Layer.provide(NodeServices.layer));
+          yield* Effect.scoped(
+            ProviderRuntimeRecovery.ProviderRuntimeRecoveryService.use((service) =>
+              service.reconcile("startup"),
+            ).pipe(Effect.provide(recovery())),
+          );
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+              if (restart < restarts) {
+                // Admit the continuation, then lose the process before its provider-start effect.
+                assert.isTrue(yield* worker.runOnce);
+                const projection = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+                  threadId,
+                );
+                assert.equal(projection.runs.at(-1)?.status, "starting");
+                assert.lengthOf(sent, 1);
+                yield* snapshot(directory + "/crash-" + (restart + 1) + ".sqlite");
+              } else {
+                yield* worker.drain();
+              }
+            }).pipe(Effect.provide(runtime())),
+          );
+        }
+        assert.lengthOf(sent, 2);
+        const delivered = yield* decodeCodexTurnInput(sent[1]);
+        assert.include(JSON.stringify(delivered.input), "STEERING_MARKER");
+        assert.include(JSON.stringify(delivered.input), "CONTEXT_MARKER");
+        assert.deepInclude(delivered.input, { type: "localImage", path: imagePath });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each([
+    { goalStatus: "active" },
+    { goalStatus: "paused" },
+    { goalStatus: null },
+  ] as const)(
+    "retries an EmptyInput continuation with a prompt only for an active goal ($goalStatus)",
+    ({ goalStatus }) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "native-empty-continuation";
+        const prompt = "Continue where you left off.";
+        const params = {
+          threadId: nativeThreadId,
+          cwd: "/workspace",
+          model: "gpt-5.4",
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandboxPolicy: { type: "dangerFullAccess" },
+          summary: "detailed",
+        };
+        const request = (id: number, method: string, params: unknown, result: unknown) => [
+          { type: "expect_outbound" as const, frame: { id, method, params } },
+          { type: "emit_inbound" as const, frame: { id, result } },
+        ];
+        const methods: string[] = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "goal-empty-continuation",
+            entries: [
+              ...codexReplayPreamble({ nativeThreadId, nativeTurnId: "unused", prompt }).slice(
+                0,
+                5,
+              ),
+              {
+                type: "expect_outbound",
+                frame: { id: 3, method: "turn/start", params: { ...params, input: [] } },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 3,
+                  error: { code: -32603, message: "failed to submit turn input: EmptyInput" },
+                },
+              },
+              ...request(
+                4,
+                "thread/goal/get",
+                { threadId: nativeThreadId },
+                {
+                  goal:
+                    goalStatus === null
+                      ? null
+                      : {
+                          threadId: nativeThreadId,
+                          objective: "Finish the work",
+                          status: goalStatus,
+                          tokenBudget: null,
+                          tokensUsed: 10,
+                          timeUsedSeconds: 3,
+                          createdAt: 1782622440,
+                          updatedAt: 1782622450,
+                        },
+                },
+              ),
+              ...(goalStatus === "active"
+                ? request(
+                    5,
+                    "turn/start",
+                    {
+                      ...params,
+                      input: [{ type: "text", text: prompt }],
+                    },
+                    { turn: makeCodexReplayTurn({ id: "continued-goal", status: "inProgress" }) },
+                  )
+                : []),
+            ],
+          }),
+          () => Effect.void,
+          (method) =>
+            Effect.sync(() => {
+              methods.push(method);
+            }),
+        );
+        const result = yield* harness.runtime
+          .startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("empty-continuation"),
+              text: prompt,
+            }),
+            restartContinuationOfRunId: RunId.make("interrupted-goal"),
+          })
+          .pipe(Effect.result);
+        assert.equal(result._tag, goalStatus === "active" ? "Success" : "Failure");
+        assert.deepEqual(
+          methods.slice(2),
+          goalStatus === "active"
+            ? ["turn/start", "thread/goal/get", "turn/start"]
+            : ["turn/start", "thread/goal/get"],
+        );
+        if (result._tag === "Failure") {
+          assert.nestedPropertyVal(
+            result.failure,
+            "cause.errorMessage",
+            "failed to submit turn input: EmptyInput",
+          );
+        }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
   );
 
   it.effect("resolves retryable app-server errors on resumed provider activity", () =>
