@@ -4,8 +4,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import * as PlatformError from "effect/PlatformError";
-import { ChildProcessSpawner } from "effect/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { VcsProcessExitError, VcsProcessSpawnError } from "@t3tools/contracts";
 
 import type * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
@@ -23,7 +25,12 @@ const processOutput = (stdout: string): SourceControlHost.SourceControlProcessOu
 const mockRun = vi.fn<SourceControlHost.SourceControlHost["Service"]["process"]["run"]>();
 
 const layerSupport = Layer.mergeAll(
-  TestSourceControlHost.layer({ process: { run: mockRun } }),
+  TestSourceControlHost.layer({
+    process: {
+      run: (input) =>
+        input.command === "git" ? Effect.succeed(processOutput("")) : mockRun(input),
+    },
+  }),
   NodeServices.layer,
 );
 const layer = Layer.mergeAll(AzureDevOpsCli.layer.pipe(Layer.provide(layerSupport)), layerSupport);
@@ -32,7 +39,339 @@ afterEach(() => {
   mockRun.mockReset();
 });
 
+const gitRepositoryBindings = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+] as const;
+
+const checkoutFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-azure-cli-" });
+  const cleanEnv = { ...process.env };
+  for (const key of gitRepositoryBindings) delete cleanEnv[key];
+  const calls: SourceControlHost.SourceControlProcessInput[] = [];
+  const runGit = Effect.fnUntraced(function* (input: SourceControlHost.SourceControlProcessInput) {
+    const result = yield* Effect.gen(function* () {
+      const child = yield* spawner.spawn(
+        ChildProcess.make("git", input.args, {
+          cwd: input.spawnCwd ?? input.cwd,
+          env: { ...process.env, ...input.env },
+          extendEnv: false,
+        }),
+      );
+      const [stdout, stderr, exitCode] = yield* Effect.all(
+        [
+          child.stdout.pipe(
+            Stream.decodeText(),
+            Stream.runFold(
+              () => "",
+              (a, b) => a + b,
+            ),
+          ),
+          child.stderr.pipe(
+            Stream.decodeText(),
+            Stream.runFold(
+              () => "",
+              (a, b) => a + b,
+            ),
+          ),
+          child.exitCode,
+        ],
+        { concurrency: "unbounded" },
+      );
+      return { ...processOutput(stdout), stderr, exitCode };
+    }).pipe(
+      Effect.scoped,
+      Effect.mapError((cause) => new VcsProcessSpawnError({ ...input, cause })),
+    );
+    if (result.exitCode !== 0 && !input.allowNonZeroExit) {
+      return yield* new VcsProcessExitError({
+        ...input,
+        exitCode: result.exitCode,
+        detail: result.stderr,
+      });
+    }
+    return result;
+  });
+  const git = (...args: string[]) =>
+    runGit({
+      operation: "test",
+      command: "git",
+      cwd,
+      args,
+      env: {
+        ...Object.fromEntries(gitRepositoryBindings.map((key) => [key, undefined])),
+        ...cleanEnv,
+      },
+    });
+  yield* git("init", "--quiet");
+  const run: SourceControlHost.SourceControlHost["Service"]["process"]["run"] = Effect.fnUntraced(
+    function* (input) {
+      calls.push(input);
+      if (input.command === "az") return processOutput("[]");
+      assert.strictEqual(input.command, "git");
+      return yield* runGit(input);
+    },
+  );
+  const az = yield* AzureDevOpsCli.AzureDevOpsCli.pipe(
+    Effect.provide(
+      AzureDevOpsCli.layer.pipe(Layer.provide(TestSourceControlHost.layer({ process: { run } }))),
+    ),
+  );
+  const execute = Effect.fnUntraced(function* (args: ReadonlyArray<string>) {
+    yield* az.execute({ cwd, args });
+    const call = calls.at(-1);
+    assert.isDefined(call);
+    assert.strictEqual(call.command, "az");
+    return call.args;
+  });
+  return { cwd, git, calls, execute, path };
+});
+
 describe("AzureDevOpsCli.layer", () => {
+  it.effect("scopes repository and PR commands without adding unsupported arguments", () =>
+    Effect.gen(function* () {
+      const { git, execute } = yield* checkoutFixture;
+      yield* git("remote", "add", "origin", "https://dev.azure.com/acme/Project/_git/Repo");
+      for (const [command, scope] of [
+        [
+          ["repos", "show"],
+          ["--project", "Project", "--repository", "Repo"],
+        ],
+        [
+          ["repos", "create", "--name", "New"],
+          ["--project", "Project"],
+        ],
+        [
+          ["repos", "pr", "list", "-o", "json"],
+          ["--project", "Project", "--repository", "Repo"],
+        ],
+        [
+          ["repos", "pr", "create", "--title", "Change"],
+          ["--project", "Project", "--repository", "Repo"],
+        ],
+        [["repos", "pr", "show", "--id", "42"], []],
+        [["repos", "pr", "update", "--id", "42"], []],
+        [["repos", "pr", "checkout", "--id", "42"], []],
+        [["devops", "invoke", "--area", "git"], []],
+      ] as const) {
+        const actual = yield* execute([...command, "--detect", "true"]);
+        const expected = [
+          ...command,
+          "--detect",
+          "false",
+          "--organization",
+          "https://dev.azure.com/acme",
+          ...scope,
+        ];
+        expect(actual).toEqual(expect.arrayContaining(expected));
+        expect(actual).toHaveLength(expected.length);
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("uses modern and legacy HTTPS and SSH checkout URLs in the CLI executor", () =>
+    Effect.gen(function* () {
+      const { git, execute } = yield* checkoutFixture;
+      yield* git("remote", "add", "origin", "https://dev.azure.com/placeholder/Project/_git/Repo");
+      for (const remote of [
+        "https://dev.azure.com/acme/My%20Project/_git/My%20Repo",
+        "https://user@dev.azure.com/acme/My%20Project/_git/My%20Repo",
+        "https://acme.visualstudio.com/DefaultCollection/My%20Project/_git/My%20Repo",
+        "https://acme.visualstudio.com/My%20Project/_git/My%20Repo",
+        "git@ssh.dev.azure.com:v3/acme/My%20Project/My%20Repo",
+        "ssh://git@ssh.dev.azure.com:22/v3/acme/My%20Project/My%20Repo",
+        "git@vs-ssh.visualstudio.com:v3/acme/My%20Project/My%20Repo",
+      ]) {
+        yield* git("remote", "set-url", "origin", remote);
+        const args = yield* execute(["repos", "show", "--detect", "true"]);
+        expect(args).toEqual(
+          expect.arrayContaining([
+            "--detect",
+            "false",
+            "--organization",
+            "https://dev.azure.com/acme",
+            "--project",
+            "My Project",
+            "--repository",
+            "My Repo",
+          ]),
+        );
+        expect(args).not.toContain("true");
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps scope aligned with primary remote order and explicit checkout selection", () =>
+    Effect.gen(function* () {
+      const { git, execute } = yield* checkoutFixture;
+      for (const name of ["zebra", "alpha", "origin", "upstream"]) {
+        yield* git(
+          "remote",
+          "add",
+          name,
+          `https://dev.azure.com/${name}/${name}-project/_git/${name}-repo`,
+        );
+      }
+      const checkout = yield* execute([
+        "repos",
+        "pr",
+        "checkout",
+        "--id",
+        "42",
+        "--remote-name",
+        "origin",
+        "--detect",
+        "true",
+      ]);
+      expect(checkout).toEqual(
+        expect.arrayContaining(["--organization", "https://dev.azure.com/origin"]),
+      );
+      expect(checkout).not.toContain("--project");
+      expect(checkout).not.toContain("--repository");
+      for (const name of ["upstream", "origin", "alpha"]) {
+        const args = yield* execute(["repos", "show", "--detect", "true"]);
+        expect(args).toEqual(
+          expect.arrayContaining([
+            "--organization",
+            `https://dev.azure.com/${name}`,
+            "--project",
+            `${name}-project`,
+            "--repository",
+            `${name}-repo`,
+          ]),
+        );
+        yield* git("remote", "remove", name);
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("preserves explicit project and repository flags while supplying organization", () =>
+    Effect.gen(function* () {
+      const { git, execute } = yield* checkoutFixture;
+      yield* git("remote", "add", "origin", "https://dev.azure.com/acme/Detected/_git/Detected");
+      for (const selection of [
+        ["--project", "Chosen Project", "--repository", "Chosen Repo"],
+        ["-p", "Chosen Project", "-r", "Chosen Repo"],
+      ]) {
+        const args = yield* execute(["repos", "pr", "create", ...selection, "--detect", "true"]);
+        const expected = [
+          "repos",
+          "pr",
+          "create",
+          ...selection,
+          "--detect",
+          "false",
+          "--organization",
+          "https://dev.azure.com/acme",
+        ];
+        expect(args).toEqual(expect.arrayContaining(expected));
+        expect(args).toHaveLength(expected.length);
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("skips discovery without detect true or with an explicit organization", () =>
+    Effect.gen(function* () {
+      const { execute, calls } = yield* checkoutFixture;
+      for (const args of [
+        ["account", "show"],
+        ["repos", "show"],
+        ["repos", "show", "--detect", "false"],
+        ["repos", "show", "--detect", "true", "--organization", "https://dev.azure.com/explicit"],
+        ["repos", "show", "--detect", "true", "--org", "https://dev.azure.com/explicit"],
+      ]) {
+        expect(yield* execute(args)).toEqual(args);
+      }
+      expect(calls).toHaveLength(5);
+      expect(calls.every((call) => call.command === "az")).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("leaves detection to az when Git or the selected remote cannot supply scope", () =>
+    Effect.gen(function* () {
+      const { git, execute, cwd, path } = yield* checkoutFixture;
+      const fs = yield* FileSystem.FileSystem;
+      const args = ["repos", "show", "--detect", "true"];
+      expect(yield* execute(args)).toEqual(args);
+      yield* git("remote", "add", "origin", "https://dev.azure.com/acme/Project/_git/Repo");
+      const missing = [...args, "--remote-name", "missing"];
+      expect(yield* execute(missing)).toEqual(missing);
+      yield* git("remote", "add", "upstream", "https://github.com/acme/repo");
+      expect(yield* execute(args)).toEqual(args);
+      yield* git("remote", "remove", "upstream");
+      for (const url of [
+        "https://github.com/acme/repo",
+        "https://dev.azure.com/acme",
+        "https://dev.azure.com/acme/%XX/_git/Repo",
+        "git@ssh.dev.azure.com:v4/acme/Project/Repo",
+      ]) {
+        yield* git("remote", "set-url", "origin", url);
+        expect(yield* execute(args)).toEqual(args);
+      }
+      yield* fs.remove(path.join(cwd, ".git"), { recursive: true });
+      expect(yield* execute(args)).toEqual(args);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "discovers the requested checkout despite inherited bindings to another Git repository",
+    () =>
+      Effect.gen(function* () {
+        const target = yield* checkoutFixture;
+        const unrelated = yield* checkoutFixture;
+        yield* target.git(
+          "remote",
+          "add",
+          "origin",
+          "https://dev.azure.com/target/Project/_git/Repo",
+        );
+        yield* unrelated.git(
+          "remote",
+          "add",
+          "origin",
+          "https://dev.azure.com/unrelated/Other/_git/Wrong",
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => vi.unstubAllEnvs()));
+        const gitDir = unrelated.path.join(unrelated.cwd, ".git");
+        for (const [key, value] of Object.entries({
+          GIT_DIR: gitDir,
+          GIT_WORK_TREE: unrelated.cwd,
+          GIT_COMMON_DIR: gitDir,
+          GIT_INDEX_FILE: unrelated.path.join(gitDir, "index"),
+          GIT_OBJECT_DIRECTORY: unrelated.path.join(gitDir, "objects"),
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: unrelated.path.join(gitDir, "objects"),
+        }))
+          vi.stubEnv(key, value);
+        const args = yield* target.execute(["repos", "pr", "list", "--detect", "true"]);
+        expect(args).toEqual(
+          expect.arrayContaining([
+            "--detect",
+            "false",
+            "--organization",
+            "https://dev.azure.com/target",
+            "--project",
+            "Project",
+            "--repository",
+            "Repo",
+          ]),
+        );
+        expect(args).not.toContain("https://dev.azure.com/unrelated");
+        const discovery = target.calls.filter((call) => call.command === "git");
+        expect(discovery.length).toBeGreaterThan(0);
+        for (const call of discovery) {
+          const env = { ...process.env, ...call.env };
+          for (const key of gitRepositoryBindings) expect(env[key]).toBeUndefined();
+        }
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("parses pull request view output", () =>
     Effect.gen(function* () {
       mockRun.mockReturnValueOnce(
