@@ -5131,7 +5131,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 }
               : {}),
             ...(input.progress === undefined ? {} : { progress: input.progress }),
-            ...(input.usage === undefined
+            ...(input.usage === undefined || workflowWithThreads !== undefined
               ? {}
               : {
                   usage: {
@@ -5145,6 +5145,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             completedAt: input.status === "running" ? null : (priorTask?.completedAt ?? now),
             updatedAt: now,
           } satisfies OrchestrationV2Subagent;
+          if (workflowWithThreads !== undefined) delete task.usage;
           const subagent = {
             task,
             confirmedOutcome:
@@ -6467,14 +6468,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const task = {
             ...registered.task,
             ...(progress === undefined ? {} : { progress }),
-            ...(message.usage === undefined
-              ? {}
-              : {
-                  usage: {
-                    contextTokens: message.usage.total_tokens,
-                    toolUses: message.usage.tool_uses,
-                  },
-                }),
             workflow: workflowWithThreads,
             updatedAt: now,
           } satisfies OrchestrationV2Subagent;

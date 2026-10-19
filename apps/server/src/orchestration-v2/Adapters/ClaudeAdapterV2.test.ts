@@ -13254,10 +13254,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         for (let index = 0; index < 5; index++) yield* offerProgressOnly(index);
         yield* Queue.offer(
           harness.sdkMessages,
-          workflowSnapshot({ uuid: "00000000-0000-4000-8000-000000001121", state: "start" }),
+          claudeSdkFrame({
+            ...workflowSnapshot({ uuid: "00000000-0000-4000-8000-000000001121", state: "start" }),
+            usage: { total_tokens: 12000, tool_uses: 3, duration_ms: 1000 },
+          }),
         );
-        yield* awaitUntil(() => coordinatorCount() > inTurnCount, "in-turn workflow snapshot");
+        while (coordinatorCount() <= inTurnCount) yield* Queue.take(harness.subagentReceipts);
         assert.equal(coordinatorCount(), inTurnCount + 1);
+        const inTurnCoordinator = workflowCoordinatorEvents(harness.events).at(-1)?.subagent;
+        assert.equal(inTurnCoordinator?.workflow?.totalTokens, 12000);
+        assert.equal(inTurnCoordinator?.workflow?.toolCalls, 3);
 
         yield* Queue.offer(
           harness.sdkMessages,
@@ -13272,13 +13278,20 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         for (let index = 5; index < 10; index++) yield* offerProgressOnly(index);
         yield* Queue.offer(
           harness.sdkMessages,
-          workflowSnapshot({ uuid: "00000000-0000-4000-8000-000000001123", state: "done" }),
+          claudeSdkFrame({
+            ...workflowSnapshot({ uuid: "00000000-0000-4000-8000-000000001123", state: "done" }),
+            usage: { total_tokens: 18000, tool_uses: 5, duration_ms: 2000 },
+          }),
         );
-        yield* awaitUntil(
-          () => coordinatorCount() > betweenTurnCount,
-          "between-turn workflow snapshot",
-        );
+        while (coordinatorCount() <= betweenTurnCount) yield* Queue.take(harness.subagentReceipts);
         assert.equal(coordinatorCount(), betweenTurnCount + 1);
+        const betweenTurnCoordinator = workflowCoordinatorEvents(harness.events).at(-1)?.subagent;
+        assert.equal(betweenTurnCoordinator?.workflow?.totalTokens, 18000);
+        assert.equal(betweenTurnCoordinator?.workflow?.toolCalls, 5);
+        assert.deepEqual(
+          [inTurnCoordinator?.usage, betweenTurnCoordinator?.usage],
+          [undefined, undefined],
+        );
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
