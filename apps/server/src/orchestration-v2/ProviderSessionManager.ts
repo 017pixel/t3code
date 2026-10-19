@@ -10,9 +10,9 @@ import {
   OrchestrationV2RuntimeRequest,
   ProviderInstanceId,
   ProviderSessionId,
-  ServerSettingsError,
   ThreadId,
   type ProviderThreadId,
+  type ProjectId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -335,8 +335,10 @@ export const layerWithOptions = (
               tools: EMPTY_MCP_PROVIDER_SESSION_TOOLS,
             };
           const settings = yield* serverSettings.value.getSettings;
+          let projectId: ProjectId | null = null;
           return yield* Effect.gen(function* () {
             const thread = yield* projectionStore.getThread(threadId);
+            projectId = thread.projectId;
             const entries = Object.values(settings.projectSettingsOverrides);
             const browserOverridden = entries.some(
               (entry) => entry.enableAgentBrowserAccess !== undefined,
@@ -362,18 +364,28 @@ export const layerWithOptions = (
               tools: resolveAgentTools(settings, thread.projectId),
             };
           }).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning(
-                "Could not resolve agent access; withholding browser, device and user tools.",
+            Effect.catch((cause) => {
+              // Without a project ID, a fallback could enable a project-disabled skill.
+              if (
+                projectId === null &&
+                Object.values(settings.projectSettingsOverrides).some((entry) =>
+                  Object.values(entry.disabledSkills ?? {}).some(Boolean),
+                )
+              ) {
+                return Effect.fail(cause);
+              }
+              const effective = resolveProjectSettings(settings, projectId).settings;
+              return Effect.logWarning(
+                "Could not resolve agent access; withholding browser, device and user MCP servers.",
                 { threadId, cause },
               ).pipe(
                 Effect.as({
                   browser: false,
                   device: false,
-                  tools: resolveAgentTools({ ...settings, mcpServers: {} }, null),
+                  tools: resolveAgentTools({ ...effective, mcpServers: {} }, null),
                 }),
-              ),
-            ),
+              );
+            }),
           );
         },
       );
@@ -445,7 +457,10 @@ export const layerWithOptions = (
       const prepareMcpSession = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
-      ): Effect.Effect<PreparedMcpCredential, ServerSettingsError> =>
+      ): Effect.Effect<
+        PreparedMcpCredential,
+        Effect.Error<ReturnType<typeof agentAccessSettings>>
+      > =>
         options.configureMcp === false
           ? mcpSessions
               .clear(threadId)

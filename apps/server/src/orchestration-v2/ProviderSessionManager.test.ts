@@ -637,6 +637,7 @@ function runBrowserAccessScenario(input: {
   readonly deviceOverride?: boolean;
   readonly createThread?: boolean;
   readonly projectExists?: boolean;
+  readonly projectLookupFails?: boolean;
   readonly toolsOverride?: boolean;
   readonly projectToolsOverride?: boolean;
   readonly disabledSkills?: ReadonlyArray<string>;
@@ -651,14 +652,22 @@ function runBrowserAccessScenario(input: {
     const threadId = ThreadId.make("thread-provider-session-manager-browser-access");
     const layerProjectService = Layer.mock(ProjectService.ProjectService)({
       getById: (requestedProjectId) =>
-        Effect.succeed(
-          input.projectExists === false
-            ? Option.none()
-            : Option.some(makeBrowserAccessProject(requestedProjectId)),
-        ),
+        input.projectLookupFails
+          ? Effect.fail(
+              new ProjectService.ProjectOperationError({
+                operation: "read-project",
+                projectId: requestedProjectId,
+                cause: new Error("project store unavailable"),
+              }),
+            )
+          : Effect.succeed(
+              input.projectExists === false
+                ? Option.none()
+                : Option.some(makeBrowserAccessProject(requestedProjectId)),
+            ),
     });
 
-    yield* Effect.gen(function* () {
+    const opened = yield* Effect.gen(function* () {
       const eventSink = yield* EventSink.EventSinkV2;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -672,9 +681,9 @@ function runBrowserAccessScenario(input: {
           events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now, projectId })],
         });
       }
-      yield* manager
+      return yield* manager
         .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
-        .pipe(Effect.ignore);
+        .pipe(Effect.result);
     }).pipe(
       Effect.provide(
         layerTest({
@@ -724,7 +733,7 @@ function runBrowserAccessScenario(input: {
       ),
     );
 
-    return (yield* Ref.get(mcpConfigs))[0];
+    return { config: (yield* Ref.get(mcpConfigs))[0], opened };
   });
 }
 
@@ -2008,7 +2017,7 @@ it.effect(
 
 it.effect("ProviderSessionManagerV2 honors a project browser-access opt-out", () =>
   Effect.gen(function* () {
-    const captured = yield* runBrowserAccessScenario({
+    const { config: captured } = yield* runBrowserAccessScenario({
       enableAgentBrowserAccess: true,
       projectOverride: false,
     });
@@ -2019,7 +2028,7 @@ it.effect("ProviderSessionManagerV2 honors a project browser-access opt-out", ()
 
 it.effect("ProviderSessionManagerV2 honors a project browser-access opt-in", () =>
   Effect.gen(function* () {
-    const captured = yield* runBrowserAccessScenario({
+    const { config: captured } = yield* runBrowserAccessScenario({
       enableAgentBrowserAccess: false,
       projectOverride: true,
     });
@@ -2030,16 +2039,29 @@ it.effect("ProviderSessionManagerV2 honors a project browser-access opt-in", () 
 
 it.effect("ProviderSessionManagerV2 fails browser access closed for a missing project", () =>
   Effect.gen(function* () {
-    const captured = yield* runBrowserAccessScenario({
+    const settings = {
       enableAgentBrowserAccess: true,
       projectOverride: true,
-      projectExists: false,
+      deviceOverride: true,
       toolsOverride: true,
+      disabledSkills: ["environment-off"],
+    };
+    const { config: missing } = yield* runBrowserAccessScenario({
+      ...settings,
+      projectExists: false,
     });
-    assert.isDefined(captured);
-    assert.equal(captured?.browserToolsAvailable, false);
-    assert.deepEqual(captured?.tools?.servers, []);
-    assert.deepEqual(captured?.tools?.disabledSkills, ["review"]);
+    const { config: failed } = yield* runBrowserAccessScenario({
+      ...settings,
+      projectLookupFails: true,
+    });
+    for (const captured of [missing, failed]) {
+      assert.isDefined(captured);
+      assert.equal(captured?.browserToolsAvailable, false);
+      assert.isFalse(captured?.capabilities?.has("device"));
+      assert.deepEqual(captured?.tools?.servers, []);
+      assert.deepEqual(captured?.tools?.disabledSkills, ["environment-off", "review"]);
+    }
+    assert.deepEqual(failed?.tools, missing?.tools);
   }),
 );
 
@@ -2050,7 +2072,7 @@ it.effect("ProviderSessionManagerV2 fails browser access closed for a missing th
       projectOverride: true,
       disabledSkills: ["environment-off"],
     };
-    const healthy = yield* runBrowserAccessScenario({
+    const { config: healthy } = yield* runBrowserAccessScenario({
       ...environment,
       toolsOverride: true,
       projectToolsOverride: false,
@@ -2060,24 +2082,36 @@ it.effect("ProviderSessionManagerV2 fails browser access closed for a missing th
       ["docs"],
     );
     assert.deepEqual(healthy?.tools?.disabledSkills, ["environment-off"]);
-    const captured = yield* runBrowserAccessScenario({
+    const { config: captured } = yield* runBrowserAccessScenario({
       ...environment,
       createThread: false,
       toolsOverride: true,
+      projectToolsOverride: false,
     });
     assert.isDefined(captured);
     assert.equal(captured?.browserToolsAvailable, false);
     assert.deepEqual(captured?.tools?.disabledSkills, ["environment-off"]);
     assert.deepEqual(captured?.tools?.servers, []);
     assert.notEqual(captured?.tools?.fingerprint, healthy?.tools?.fingerprint);
-    const withoutServers = yield* runBrowserAccessScenario(environment);
+    const { config: withoutServers } = yield* runBrowserAccessScenario(environment);
     assert.deepEqual(captured?.tools, withoutServers?.tools);
+    const { config: restricted, opened } = yield* runBrowserAccessScenario({
+      ...environment,
+      createThread: false,
+      toolsOverride: true,
+    });
+    assert.isUndefined(restricted);
+    assert.equal(opened._tag, "Failure");
+    if (opened._tag === "Failure") {
+      assert.equal(opened.failure._tag, "ProviderSessionOpenError");
+      assert.instanceOf(opened.failure.cause, ProjectionStore.ProjectionStoreThreadNotFoundError);
+    }
   }),
 );
 
 it.effect("ProviderSessionManagerV2 refuses to start with unavailable tool settings", () =>
   Effect.gen(function* () {
-    const captured = yield* runBrowserAccessScenario({
+    const { config: captured } = yield* runBrowserAccessScenario({
       enableAgentBrowserAccess: true,
       projectOverride: true,
       toolsOverride: true,
@@ -4992,14 +5026,14 @@ it.effect(
   "ProviderSessionManagerV2 applies project device access independently of browser access",
   () =>
     Effect.gen(function* () {
-      const enabled = yield* runBrowserAccessScenario({
+      const { config: enabled } = yield* runBrowserAccessScenario({
         enableAgentBrowserAccess: false,
         projectOverride: false,
         deviceOverride: true,
       });
       assert.isTrue(enabled?.capabilities?.has("device"));
       assert.isFalse(enabled?.browserToolsAvailable);
-      const denied = yield* runBrowserAccessScenario({
+      const { config: denied } = yield* runBrowserAccessScenario({
         enableAgentBrowserAccess: false,
         projectOverride: false,
         deviceOverride: true,
