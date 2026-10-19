@@ -5107,7 +5107,7 @@ it.effect("reuses an idle writer only after a proven refusal before native relea
           assert.equal(yield* Ref.get(attempts), 1, "the refused generation must be cancelled");
           assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
           assert.equal((yield* Ref.get(state)).closeCount, 0, "the busy pooled peer must survive");
-        }),
+        }).pipe(Effect.orDie),
       {
         beforeUnload: Effect.gen(function* () {
           yield* Ref.update(attempts, (n) => n + 1);
