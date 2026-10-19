@@ -803,6 +803,7 @@ export const layerQueryRunner: Layer.Layer<
       return yield* spawner
         .string(
           ChildProcess.make(executablePath, [...args, method, sessionId, encodedOptions], {
+            ...(options.dir === undefined ? {} : { cwd: options.dir }),
             env: { ...environment, ELECTRON_RUN_AS_NODE: "1" },
             extendEnv: false,
           }),
