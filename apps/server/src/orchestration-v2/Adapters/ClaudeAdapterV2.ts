@@ -8255,8 +8255,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             callbackOptions.description ??
             callbackOptions.decisionReason
           )?.trim();
-          // The user approves the operation itself; Claude's text only explains it.
-          const command = firstStringInputField(nativeToolInput, ["command", "cmd", "script"]);
+          // The user approves the operation itself; Claude's text only explains it. The command
+          // stays untrimmed: `trim` drops unicode blanks such as U+00A0 that a shell keeps.
+          const command = ["command", "cmd", "script"]
+            .map((key) => inputRecordValue(nativeToolInput, key))
+            .find((value): value is string => typeof value === "string" && value.trim() !== "");
           const artifacts = yield* buildApprovalRequestArtifacts({
             context,
             nativeItemId: nativeRequestId,

@@ -523,6 +523,7 @@ describe("approvalCommandDisplayText", () => {
     ["/tmp/bash -c 'echo safe'", "/tmp/bash -c 'echo safe'"],
     ["/bin/bash -c '\u00a0printf SAFE'", "\u00a0printf SAFE"],
     ["\u00a0/bin/bash -c 'pwd'", "\u00a0/bin/bash -c 'pwd'"],
+    [`/bin/bash -c 'printf "<%s>" SAFE\\ '`, `printf "<%s>" SAFE\\ `],
     ["/usr/local/bin/zsh -lc 'git status'", "git status"],
     ["bash -c {echo,MARKER}", "bash -c {echo,MARKER}"],
     ["bash -c *.sh", "bash -c *.sh"],
