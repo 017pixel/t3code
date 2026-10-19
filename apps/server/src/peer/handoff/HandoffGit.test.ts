@@ -158,6 +158,7 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
           yield* git(sender, ["update-index", "--split-index"]);
         }
         yield* fs.writeFileString(path.join(receiver, "app.ts"), "receiver work\n");
+        if (mode === "sparse checkout") yield* git(receiver, ["sparse-checkout", "set", "sub"]);
         const senderBefore = yield* repositoryState(sender);
         const receiverBefore = yield* repositoryState(receiver);
         // A server launched by a Git hook can inherit another checkout's GIT_DIR.
@@ -199,8 +200,8 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         assert.isFalse(yield* fs.exists(path.join(worktree, "settings.txt")));
         if (mode === "sparse checkout") {
           assert.equal(
-            yield* fs.readFileString(path.join(worktree, "excluded", "file")),
-            "outside cone\n",
+            yield* git(worktree, ["show", `${packed.snapshot}:excluded/file`]),
+            "outside cone",
           );
         }
         assert.equal(

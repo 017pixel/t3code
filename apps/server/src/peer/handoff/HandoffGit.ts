@@ -433,8 +433,8 @@ const make = Effect.gen(function* () {
         : ["worktree", "add", worktreePath, branch],
     );
     yield* git(worktreePath, ["checkout", "--no-overlay", input.snapshot, "--", "."]);
-    // Restore the index without resetting a branch another process may have moved.
-    yield* git(worktreePath, ["read-tree", input.tip]);
+    // Preserve sparse entries without resetting a branch another process may have moved.
+    yield* git(worktreePath, ["read-tree", "-m", input.tip]);
     if ((yield* out(worktreePath, ["rev-parse", "HEAD"])) !== input.tip) {
       return yield* new HandoffGitStepError({ step: "worktree" });
     }
