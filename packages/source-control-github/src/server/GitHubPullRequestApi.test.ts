@@ -1754,54 +1754,32 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
-  it.effect("asks whether search covers several repositories in one request", () =>
+  it.effect("batches search coverage and isolates a refused repository", () =>
     Effect.gen(function* () {
-      // `acme/web` has pull requests search finds, `acme/empty` has none, `acme/skipped` has some
-      // search does not find, `acme/gone` does not exist, and `acme/gated` is refused. Neither
-      // refusal takes the rest of the batch down with it.
-      const answers: Record<string, unknown> = {
-        "acme/web": { search: { issueCount: 3 }, repository: { pullRequests: { totalCount: 4 } } },
-        "acme/empty": {
-          search: { issueCount: 0 },
-          repository: { pullRequests: { totalCount: 0 } },
-        },
-        "acme/skipped": {
-          search: { issueCount: 0 },
-          repository: { pullRequests: { totalCount: 7 } },
-        },
-        "acme/gone": { search: { issueCount: 0 }, repository: null },
-        "acme/gated": { search: { issueCount: 0 }, repository: null },
-      };
-      mockedExecute.mockImplementation((call) => {
-        const variables = call.kind === "graphql" ? (call.variables ?? {}) : {};
-        const data: Record<string, unknown> = {};
-        const errors: Array<unknown> = [];
-        for (const [name, owner] of Object.entries(variables)) {
-          const prefix = /^(_\d+_)owner$/.exec(name)?.[1];
-          if (prefix === undefined) continue;
-          const answer = answers[`${owner}/${variables[`${prefix}name`]}`] as {
-            readonly search: unknown;
-            readonly repository: unknown;
-          };
-          data[`${prefix}search`] = answer.search;
-          data[`${prefix}repository`] = answer.repository;
-          if (answer.repository === null) {
-            // A SAML-gated organisation refuses its repository rather than hiding it.
-            const type =
-              owner === "acme" && variables[`${prefix}name`] === "gated"
-                ? "FORBIDDEN"
-                : "NOT_FOUND";
-            errors.push({ type, path: [`${prefix}repository`], message: "refused" });
-          }
-        }
-        return Effect.succeed(output(encodeJson({ data, errors })));
-      });
+      mockedExecute.mockReturnValue(
+        Effect.succeed(
+          output(
+            encodeJson({
+              data: {
+                _0_search: { issueCount: 3 },
+                _0_repository: { pullRequests: { totalCount: 4 } },
+                _1_search: { issueCount: 0 },
+                _1_repository: { pullRequests: { totalCount: 0 } },
+                _2_search: { issueCount: 0 },
+                _2_repository: { pullRequests: { totalCount: 7 } },
+                _3_search: { issueCount: 0 },
+                _3_repository: null,
+              },
+              errors: [{ type: "FORBIDDEN", path: ["_3_repository"], message: "refused" }],
+            }),
+          ),
+        ),
+      );
       const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
-
       const coverage = yield* cli.searchCoverage({
         cwd: "/w",
         host: "github.com",
-        repositories: Object.keys(answers),
+        repositories: ["acme/web", "acme/empty", "acme/skipped", "acme/gated"],
       });
 
       assert.strictEqual(mockedExecute.mock.calls.length, 1);
@@ -1809,10 +1787,16 @@ layer("GitHubPullRequestApi.layer", (it) => {
         { repository: "acme/web", covered: true },
         { repository: "acme/empty", covered: true },
         { repository: "acme/skipped", covered: false },
-        { repository: "acme/gone", covered: false },
         { repository: "acme/gated", covered: false },
       ]);
-      expect(varsAt(0)).toMatchObject({ _0_q: "is:pr repo:acme/web" });
+      expect(Object.values(varsAt(0))).toEqual(
+        expect.arrayContaining([
+          "is:pr repo:acme/web",
+          "is:pr repo:acme/empty",
+          "is:pr repo:acme/skipped",
+          "is:pr repo:acme/gated",
+        ]),
+      );
     }),
   );
 

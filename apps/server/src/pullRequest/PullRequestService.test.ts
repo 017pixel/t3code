@@ -3945,7 +3945,6 @@ it.effect("keeps a listing running for the next reader when its reader goes away
       .list({ state: "open" })
       .pipe(Effect.map((result) => result.entries.map((entry) => entry.number)));
 
-    // A page refreshing mid-read cancels its reader; the read GitHub is already answering goes on.
     const original = yield* Effect.forkChild(read, { startImmediately: true });
     yield* Deferred.await(started);
     yield* Fiber.interrupt(original);
@@ -3959,7 +3958,7 @@ it.effect("keeps a listing running for the next reader when its reader goes away
 
 it.effect("reads a turn's own project listing fresh while other listings wait", () =>
   Effect.gen(function* () {
-    const asked: Array<string | undefined> = [];
+    const asked: string[] = [];
     const service = yield* makeService({
       projects: [
         project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
@@ -3980,7 +3979,6 @@ it.effect("reads a turn's own project listing fresh while other listings wait", 
     ]);
 
     yield* readBoth;
-    // The first turn moves every listing; the second, inside the window, only its own project's.
     yield* service.refreshAfterTurn("p1" as ProjectId);
     yield* readBoth;
     yield* service.refreshAfterTurn("p2" as ProjectId);
@@ -4361,7 +4359,7 @@ it.effect("explicit and turn invalidations make the next listing ask the host ag
   }),
 );
 
-it.effect("turns re-read the listings at most once per cache window", () =>
+it.effect("coalesces turn bursts for 30 seconds without delaying explicit refresh", () =>
   Effect.gen(function* () {
     let hostCalls = 0;
     const service = yield* makeService({
@@ -4375,20 +4373,26 @@ it.effect("turns re-read the listings at most once per cache window", () =>
         }),
       ],
     });
-    const turn = (projectId: string) =>
-      service.refreshAfterTurn(projectId as ProjectId).pipe(Effect.andThen(Effect.yieldNow));
 
     yield* service.list({ state: "open" });
-    // The first turn moves the listings at once.
-    yield* turn("p1");
+    yield* service.refreshAfterTurn("p1" as ProjectId);
     yield* service.list({ state: "open" });
     assert.strictEqual(hostCalls, 2);
 
-    // A burst of turns in other projects inside the window shares one later refresh.
-    yield* turn("p2");
-    yield* turn("p3");
+    yield* TestClock.adjust("10 seconds");
+    yield* service.refreshAfterTurn("p2" as ProjectId);
+    yield* service.refreshAfterTurn("p3" as ProjectId);
     yield* service.list({ state: "open" });
     assert.strictEqual(hostCalls, 2);
+
+    // This cache entry expires at t=40, so the t=30 read must rely on the trailing refresh.
+    yield* service.invalidate({});
+    yield* service.list({ state: "open" });
+    assert.strictEqual(hostCalls, 3);
+    yield* TestClock.adjust("19 seconds");
+    yield* service.refreshAfterTurn("p2" as ProjectId);
+    yield* service.list({ state: "open" });
+    assert.strictEqual(hostCalls, 3);
 
     const refreshed = yield* service.subscribeRefreshes.pipe(
       Stream.drop(1),
@@ -4396,10 +4400,10 @@ it.effect("turns re-read the listings at most once per cache window", () =>
       Stream.runDrain,
       Effect.forkChild({ startImmediately: true }),
     );
-    yield* TestClock.adjust("30 seconds");
+    yield* TestClock.adjust("1 second");
     yield* Fiber.join(refreshed);
     yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 3);
+    assert.strictEqual(hostCalls, 4);
   }),
 );
 
@@ -4729,9 +4733,10 @@ it.effect("asks on its own for a repository a search answered nothing for", () =
     );
   }),
 );
-it.effect("asks once whether search covers the repositories it was silent about", () =>
+it.effect("caches silent repository coverage for ten minutes before probing again", () =>
   Effect.gen(function* () {
     const separately: string[] = [];
+    let coverageFails = false;
     const coverageAsks: Array<ReadonlyArray<string>> = [];
     const service = yield* makeService({
       projects: [
@@ -4745,32 +4750,42 @@ it.effect("asks once whether search covers the repositories it was silent about"
             separately.push(repository);
             return Effect.succeed({ items: [], truncated: false, continues: true });
           },
-          // A full slice: the page says there is more, which used to send every silent
-          // repository to its own read.
           listChangeRequestsAcross: () =>
             Effect.succeed({
               items: [batchedChangeRequest(1, "acme/web", "2026-07-03T00:00:00Z")],
               truncated: true,
             }),
           searchCoverage: ({ repositories }) =>
-            Effect.sync(() => {
+            Effect.suspend(() => {
               coverageAsks.push(repositories);
-              return repositories.map((repository) => ({
-                repository,
-                covered: repository !== "acme/old",
-              }));
+              return coverageFails
+                ? Effect.fail(requestFailed)
+                : Effect.succeed(
+                    repositories.map((repository) => ({
+                      repository,
+                      covered: repository !== "acme/old",
+                    })),
+                  );
             }),
         }),
       ],
     });
 
     yield* service.list({ state: "open", involvement: "all" });
+    yield* TestClock.adjust("599 seconds");
     yield* service.list({ state: "open", involvement: "authored" });
 
-    // Both answers are held: the second listing asks about neither again. `acme/docs` is covered,
-    // so its silence is believed; `acme/old` is not, so each listing reads it on its own.
     assert.deepStrictEqual(coverageAsks, [["acme/docs", "acme/old"]]);
-    assert.deepStrictEqual(separately, ["acme/old", "acme/old"]);
+    assert.deepStrictEqual(separately.splice(0), ["acme/old", "acme/old"]);
+
+    coverageFails = true;
+    yield* TestClock.adjust("2 seconds");
+    yield* service.list({ state: "open", involvement: "all" });
+    assert.deepStrictEqual(coverageAsks, [
+      ["acme/docs", "acme/old"],
+      ["acme/docs", "acme/old"],
+    ]);
+    assert.deepStrictEqual(separately, ["acme/docs", "acme/old"]);
   }),
 );
 it.effect("reads the repositories one at a time when the search itself fails", () =>
