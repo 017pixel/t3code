@@ -1,4 +1,5 @@
 import { MenuView } from "@react-native-menu/menu";
+import * as Haptics from "expo-haptics";
 import {
   cloneElement,
   isValidElement,
@@ -86,6 +87,8 @@ export function Menu(props: MenuProps) {
       menuPress.current.isOpen = true;
       menuPress.current.suppressPress = true;
       pendingPress.current = null;
+      // Android plays this impact when a long-press menu opens.
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       props.onOpenMenu?.();
     };
     menuProps.onCloseMenu = () => {
