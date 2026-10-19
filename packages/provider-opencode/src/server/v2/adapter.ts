@@ -312,6 +312,7 @@ interface ThreadState {
 }
 
 interface UserMcpRegistration {
+  readonly revoked?: boolean;
   readonly names: ReadonlyArray<string>;
   readonly directory: string;
   readonly fingerprint: string;
@@ -2755,7 +2756,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     });
 
     const writeRules = Effect.fnUntraced(function* (state: ThreadState, policy: RulesPolicy) {
-      const rules = yield* rulesFor(state, policy, rootOf(state).providerThread.appThreadId);
+      const root = rootOf(state);
+      const appThreadId = root.providerThread.appThreadId;
+      let rules = yield* rulesFor(state, policy, appThreadId);
+      if (root.userMcp?.revoked && appThreadId !== null) {
+        const prefix = yield* userMcpPrefixFor(appThreadId);
+        rules = [
+          ...rules.filter((entry) => entry.action !== `${prefix}-*`),
+          rule(`${prefix}-*`, "deny"),
+        ];
+      }
       if (!sameRules(state.rules, rules)) {
         yield* client.session.update({
           sessionID: Session.ID.make(state.sessionId),
@@ -2978,29 +2988,83 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     const removeMcp = (mcp: { readonly name: string; readonly directory: string }) =>
       Effect.suspend(() =>
         client.mcp.remove({ server: mcp.name, location: { directory: mcp.directory } }),
-      ).pipe(Effect.timeout("5 seconds"), Effect.ignore({ log: true }));
-
-    const removeUserMcp = (registration: UserMcpRegistration) =>
-      Effect.forEach(
-        registration.names,
-        (name) => removeMcp({ name, directory: registration.directory }),
-        { concurrency: 8, discard: true },
+      ).pipe(
+        Effect.timeout("5 seconds"),
+        Effect.catchTags({ McpServerNotFoundError: () => Effect.void }),
       );
 
-    // T3's MCP registrations outlive a session only on an external server; a
-    // spawned one forgets them when it stops.
+    const removeUserMcp = Effect.fnUntraced(function* (state: ThreadState) {
+      const registration = state.userMcp;
+      if (registration === undefined) return;
+      state.userMcp = { ...registration, revoked: true };
+      // Revoke the namespace before deleting credentials; a failed removal must
+      // not leave the old servers usable by this session, including its grants.
+      const appThreadId = state.providerThread.appThreadId;
+      if (appThreadId !== null) {
+        const prefix = yield* userMcpPrefixFor(appThreadId);
+        yield* Effect.forEach(
+          sessionsOf(state),
+          (session) =>
+            Effect.gen(function* () {
+              const rules = [
+                ...(session.rules ?? []).filter((entry) => entry.action !== `${prefix}-*`),
+                rule(`${prefix}-*`, "deny"),
+              ];
+              if (!sameRules(session.rules, rules)) {
+                yield* client.session
+                  .update({
+                    sessionID: Session.ID.make(session.sessionId),
+                    permissions: rules,
+                  })
+                  .pipe(
+                    Effect.timeout("5 seconds"),
+                    Effect.catchTags({ SessionNotFoundError: () => Effect.void }),
+                  );
+                session.rules = rules;
+              }
+            }),
+          { concurrency: 8, discard: true },
+        );
+      }
+      const remaining = yield* Effect.forEach(
+        registration.names,
+        (name) =>
+          removeMcp({ name, directory: registration.directory }).pipe(
+            Effect.as([] as string[]),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not remove an MCP server from OpenCode.", {
+                errorTag: causeErrorTag(cause),
+              }).pipe(Effect.as([name])),
+            ),
+          ),
+        { concurrency: 8 },
+      );
+      const names = remaining.flat();
+      state.userMcp = names.length === 0 ? undefined : { ...registration, names, revoked: true };
+      if (names.length > 0) {
+        return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+          driver,
+          detail: "Could not revoke previous MCP servers in OpenCode. Retry before continuing.",
+        });
+      }
+    });
+
+    // Failed unloads stay in threads so closing the runtime retries cleanup.
     yield* Effect.addFinalizer(() =>
       Effect.forEach(
-        [...threads.values()].flatMap((state) => [
-          ...(state.mcp === undefined ? [] : [state.mcp]),
-          ...(state.userMcp === undefined
-            ? []
-            : state.userMcp.names.map((name) => ({
-                name,
-                directory: state.userMcp!.directory,
-              }))),
-        ]),
-        removeMcp,
+        threads.values(),
+        (state) =>
+          Effect.gen(function* () {
+            if (state.mcp !== undefined)
+              yield* removeMcp(state.mcp).pipe(Effect.ignore({ log: true }));
+            yield* removeUserMcp(state).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Could not clean up OpenCode MCP registrations.", {
+                  errorTag: causeErrorTag(cause),
+                }),
+              ),
+            );
+          }),
         { concurrency: 8, discard: true },
       ),
     );
@@ -3022,11 +3086,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const current = state.userMcp;
       const unchanged =
         current !== undefined &&
+        !current.revoked &&
         current.directory === directory &&
         current.fingerprint === tools.fingerprint;
       if (current !== undefined && !unchanged) {
-        yield* removeUserMcp(current);
-        state.userMcp = undefined;
+        yield* removeUserMcp(state);
       }
       if (tools.servers.length === 0) return;
       const prefix = yield* userMcpPrefixFor(threadId);
@@ -3034,54 +3098,49 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         ? yield* client.mcp.list({ location: { directory } }).pipe(
             Effect.timeout(INVENTORY_TIMEOUT),
             Effect.map(
-              (listed) =>
-                new Set(
-                  listed.data
-                    .filter((entry) => entry.status.status !== "failed")
-                    .map((entry) => entry.name),
-                ),
+              (listed) => new Map(listed.data.map((entry) => [entry.name, entry.status.status])),
             ),
-            Effect.orElseSucceed(() => new Set(current.names)),
+            Effect.orElseSucceed(() => new Map(current.names.map((name) => [name, "connected"]))),
           )
-        : new Set<string>();
-      const names = unchanged ? current.names.filter((name) => inventory.has(name)) : [];
+        : new Map<string, string>();
+      const names = unchanged ? [...current.names] : [];
+      state.userMcp = { names, directory, fingerprint: tools.fingerprint };
       for (const server of tools.servers) {
         const name = `${prefix}-${server.name}`;
-        if (names.includes(name)) continue;
-        const added = yield* client.mcp
-          .add({
-            server: name,
-            location: { directory },
-            config:
-              server.transport.type === "stdio"
-                ? new Mcp.LocalConfig({
-                    type: "local",
-                    command: [server.transport.command, ...server.transport.args],
-                    environment: mcpServerVariableRecord(server.transport.env),
-                  })
-                : new Mcp.RemoteConfig({
-                    type: "remote",
-                    url: server.transport.url,
-                    headers: mcpServerVariableRecord(server.transport.headers),
-                  }),
-          })
-          .pipe(
-            Effect.timeout(INVENTORY_TIMEOUT),
-            Effect.as(true),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Could not add an MCP server to OpenCode.", {
-                server: server.name,
-                errorTag: causeErrorTag(cause),
-              }).pipe(Effect.as(false)),
-            ),
-          );
-        if (added) names.push(name);
+        const status = inventory.get(name);
+        if (status !== undefined && status !== "failed") continue;
+        // Even an unsuccessful request may have installed credential-bearing
+        // config. Keep it tracked until deletion succeeds.
+        if (!names.includes(name)) names.push(name);
+        yield* (
+          status === "failed"
+            ? client.mcp.connect({ server: name, location: { directory } })
+            : client.mcp.add({
+                server: name,
+                location: { directory },
+                config:
+                  server.transport.type === "stdio"
+                    ? new Mcp.LocalConfig({
+                        type: "local",
+                        command: [server.transport.command, ...server.transport.args],
+                        environment: mcpServerVariableRecord(server.transport.env),
+                      })
+                    : new Mcp.RemoteConfig({
+                        type: "remote",
+                        url: server.transport.url,
+                        headers: mcpServerVariableRecord(server.transport.headers),
+                      }),
+              })
+        ).pipe(
+          Effect.timeout(INVENTORY_TIMEOUT),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Could not connect an MCP server to OpenCode.", {
+              server: server.name,
+              errorTag: causeErrorTag(cause),
+            }),
+          ),
+        );
       }
-      state.userMcp = {
-        names,
-        directory,
-        fingerprint: tools.fingerprint,
-      };
     });
 
     /**
@@ -3111,7 +3170,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           state.mcp.directory !== wanted.directory ||
           state.mcp.credential !== wanted.credential)
       ) {
-        yield* removeMcp(state.mcp);
+        yield* removeMcp(state.mcp).pipe(Effect.ignore({ log: true }));
         state.mcp = undefined;
       }
       // Idle Location eviction drops runtime MCP servers without clearing T3's cache.
@@ -3141,6 +3200,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         if (mcpAvailable) state.mcp = wanted;
       }
       yield* prepareUserMcp(state, turnInput.threadId, directory, mcpSession);
+      yield* writeRules(state, turnInput.runtimePolicy);
       const instructions = [
         buildRuntimeInstructions({ harness: "OpenCode", model: turnInput.modelSelection.model }),
         t3OrchestrationSystemPrompt(mcpAvailable),
@@ -3850,14 +3910,24 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           ) {
             return;
           }
+          yield* removeUserMcp(state).pipe(
+            Effect.mapError((cause) =>
+              isProviderAdapterError(cause)
+                ? cause
+                : new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver,
+                    detail: "Could not revoke MCP servers before unloading OpenCode.",
+                  }),
+            ),
+          );
           threads.delete(nativeId);
           for (const [child, owner] of childOwners) {
             if (owner !== state) continue;
             childOwners.delete(child);
             threads.delete(child);
           }
-          if (state.mcp !== undefined) yield* removeMcp(state.mcp);
-          if (state.userMcp !== undefined) yield* removeUserMcp(state.userMcp);
+          if (state.mcp !== undefined)
+            yield* removeMcp(state.mcp).pipe(Effect.ignore({ log: true }));
         }),
       respondToRuntimeRequest: (requestInput) =>
         Effect.gen(function* () {

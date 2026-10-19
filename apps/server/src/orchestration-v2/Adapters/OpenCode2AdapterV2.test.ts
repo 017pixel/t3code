@@ -3273,67 +3273,46 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           ...supervisedRules,
           { action: `${prefix}-*`, resource: "*", effect: "ask" },
         ];
-        const t3Server = "t3-code-thread_opencode2-adapter";
-        const addT3 = out("mcp.add", {
-          server: t3Server,
-          "location[directory]": WORK,
-          config: {
-            type: "remote",
-            url: "http://127.0.0.1:3773/mcp",
-            headers: { Authorization: "Bearer thread-credential" },
-            oauth: false,
-          },
-        });
-        const addUser = (name: string) =>
-          out("mcp.add", {
-            server: `${prefix}-${name}`,
-            "location[directory]": WORK,
-            config: { type: "remote", url: `https://${name}.example/mcp`, headers: {} },
-          });
+        const mcp = {
+          servers: new Map<string, { config: unknown; status: "connected" | "failed" }>(),
+          failingConnections: new Set([`${prefix}-retry`]),
+          failingRemovals: new Set<string>(),
+          calls: [] as Array<{ type: string; server: string }>,
+        };
         const turn = [
           out("session.prompt", { sessionID: SESSION, text: "<any>" }),
           promptAccepted,
           event("session.execution.succeeded", { sessionID: SESSION }),
         ];
-        const runtime = yield* openCode2ReplayRuntime([
-          ...opening,
-          out("session.get", { sessionID: SESSION }),
-          replyData("session.get", sessionInfo()),
-          ...noOpenRequests,
-          out("agent.list", "<any>"),
-          reply("agent.list", agentList),
-          out("session.update", { sessionID: SESSION, permissions: ownRules }),
-          reply("session.update", null),
-          addT3,
-          reply("mcp.add", null),
-          addUser("healthy"),
-          reply("mcp.add", null),
-          addUser("retry"),
-          reply("mcp.add", { status: 500, body: { message: "Unavailable" } }),
-          out("session.instructions.entry.put", {
-            sessionID: SESSION,
-            key: "t3-code",
-            value: "<any>",
-          }),
-          reply("session.instructions.entry.put", null),
-          ...turn,
-          addT3,
-          reply("mcp.add", null),
-          out("mcp.list", { "location[directory]": WORK }),
-          reply("mcp.list", {
-            location: { directory: WORK },
-            data: [{ name: `${prefix}-healthy`, status: { status: "connected" } }],
-          }),
-          addUser("retry"),
-          reply("mcp.add", null),
-          ...turn,
-          out("mcp.remove", { server: t3Server, "location[directory]": WORK }),
-          reply("mcp.remove", null),
-          out("mcp.remove", { server: `${prefix}-healthy`, "location[directory]": WORK }),
-          out("mcp.remove", { server: `${prefix}-retry`, "location[directory]": WORK }),
-          reply("mcp.remove", null),
-          reply("mcp.remove", null),
-        ]);
+        const runtime = yield* openCode2ReplayRuntime(
+          [
+            ...opening,
+            out("session.get", { sessionID: SESSION }),
+            replyData("session.get", sessionInfo()),
+            ...noOpenRequests,
+            out("agent.list", "<any>"),
+            reply("agent.list", agentList),
+            out("session.update", { sessionID: SESSION, permissions: ownRules }),
+            reply("session.update", null),
+            out("session.instructions.entry.put", {
+              sessionID: SESSION,
+              key: "t3-code",
+              value: "<any>",
+            }),
+            reply("session.instructions.entry.put", null),
+            ...turn,
+            ...turn,
+            out("session.update", {
+              sessionID: SESSION,
+              permissions: [
+                ...supervisedRules,
+                { action: `${prefix}-*`, resource: "*", effect: "deny" },
+              ],
+            }),
+            reply("session.update", null),
+          ],
+          { mcp },
+        );
         const thread = yield* runtime.resumeThread({
           providerThread: providerThread(yield* DateTime.now),
           threadId,
@@ -3344,8 +3323,187 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
           yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
           assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+          assert.equal(
+            mcp.servers.get(`${prefix}-retry`)?.status,
+            index === 0 ? "failed" : "connected",
+          );
+          mcp.failingConnections.clear();
         }
+        assert.deepEqual(
+          mcp.calls.filter((call) => call.server.startsWith(prefix)),
+          [
+            { type: "mcp.add", server: `${prefix}-healthy` },
+            { type: "mcp.add", server: `${prefix}-retry` },
+            { type: "mcp.connect", server: `${prefix}-retry` },
+          ],
+        );
         yield* runtime.unloadThread!({ providerThread: thread });
+        assert.equal(mcp.servers.size, 0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "blocks revoked user MCP use and retries failed removal on settings, directory and unload changes",
+    () =>
+      Effect.gen(function* () {
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        const prefix = "t3u-c26f2f1f";
+        const ownRules = [
+          ...supervisedRules,
+          { action: `${prefix}-*`, resource: "*", effect: "ask" },
+        ];
+        const deniedRules = [
+          ...supervisedRules,
+          { action: `${prefix}-*`, resource: "*", effect: "deny" },
+        ];
+        const update = (permissions: ReadonlyArray<unknown>) => [
+          out("session.update", { sessionID: SESSION, permissions }),
+          reply("session.update", null),
+        ];
+        const turn = [
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ];
+        for (const change of [
+          "disable",
+          "replace",
+          "directory",
+          "unload",
+          "resume",
+          "cleanup",
+        ] as const) {
+          const mcp = yield* Effect.gen(function* () {
+            const config = {
+              environmentId: EnvironmentId.make("environment:opencode2-adapter"),
+              threadId,
+              providerSessionId: "mcp:opencode2-adapter",
+              providerInstanceId: instanceId,
+              endpoint: "http://127.0.0.1:3773/mcp",
+              authorizationHeader: "Bearer thread-credential",
+              browserToolsAvailable: false,
+              tools: {
+                servers: [
+                  {
+                    name: "docs",
+                    transport: {
+                      type: "http" as const,
+                      url: "https://old.example/mcp",
+                      headers: [],
+                    },
+                  },
+                ],
+                disabledSkills: [],
+                fingerprint: "old",
+              },
+            };
+            yield* mcpSessions.set(config);
+            yield* Effect.addFinalizer(() => mcpSessions.clear(threadId));
+            const mcp = {
+              servers: new Map<string, { config: unknown; status: "connected" | "failed" }>(),
+              failingConnections: new Set<string>(),
+              failingRemovals: new Set<string>(),
+              calls: [] as Array<{ type: string; server: string }>,
+            };
+            const nextRules = change === "disable" ? supervisedRules : ownRules;
+            const runtime = yield* openCode2ReplayRuntime(
+              [
+                ...opening,
+                out("session.get", { sessionID: SESSION }),
+                replyData("session.get", sessionInfo()),
+                ...noOpenRequests,
+                out("agent.list", "<any>"),
+                reply("agent.list", agentList),
+                ...update(ownRules),
+                out("session.instructions.entry.put", {
+                  sessionID: SESSION,
+                  key: "t3-code",
+                  value: "<any>",
+                }),
+                reply("session.instructions.entry.put", null),
+                ...turn,
+                ...(change === "disable" ? update(nextRules) : []),
+                ...update(deniedRules),
+                ...(change === "unload" || change === "cleanup"
+                  ? []
+                  : [
+                      ...update(nextRules),
+                      ...turn,
+                      ...(change === "disable" ? [] : update(deniedRules)),
+                    ]),
+              ],
+              { mcp },
+            );
+            const thread = yield* runtime.resumeThread({
+              providerThread: providerThread(yield* DateTime.now),
+              threadId,
+              modelSelection: bigPickle,
+              runtimePolicy: policy("approval-required"),
+            });
+            const completed = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+            yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
+            assert.equal((yield* Fiber.join(completed))?.status, "completed");
+            mcp.failingRemovals.add(`${prefix}-docs`);
+            if (change === "disable" || change === "replace") {
+              yield* mcpSessions.set({
+                ...config,
+                tools: {
+                  ...config.tools,
+                  fingerprint: "new",
+                  servers:
+                    change === "disable"
+                      ? []
+                      : [
+                          {
+                            name: "docs",
+                            transport: {
+                              type: "http",
+                              url: "https://new.example/mcp",
+                              headers: [],
+                            },
+                          },
+                        ],
+                },
+              });
+            }
+            const input = turnInput(thread, bigPickle, "approval-required");
+            const changedInput =
+              change === "directory"
+                ? { ...input, runtimePolicy: { ...input.runtimePolicy, cwd: "/work/other" } }
+                : input;
+            const failed = yield* Effect.exit(
+              change === "unload" || change === "resume" || change === "cleanup"
+                ? runtime.unloadThread!({ providerThread: thread })
+                : runtime.startTurn(changedInput),
+            );
+            assert.equal(failed._tag, "Failure", change);
+            assert.equal(mcp.servers.get(`${prefix}-docs`)?.status, "connected");
+            assert.equal(
+              mcp.calls.filter(
+                (call) => call.type === "mcp.remove" && call.server === `${prefix}-docs`,
+              ).length,
+              1,
+            );
+            mcp.failingRemovals.clear();
+            if (change === "cleanup") return mcp;
+            if (change !== "unload") {
+              const retried = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+              yield* runtime.startTurn(changedInput);
+              assert.equal((yield* Fiber.join(retried))?.status, "completed");
+              assert.equal(mcp.servers.has(`${prefix}-docs`), change !== "disable");
+            }
+            yield* runtime.unloadThread!({ providerThread: thread });
+            assert.equal(mcp.servers.size, 0);
+            assert.equal(
+              mcp.calls.filter(
+                (call) => call.type === "mcp.remove" && call.server === `${prefix}-docs`,
+              ).length,
+              change === "disable" || change === "unload" ? 2 : 3,
+            );
+            return mcp;
+          }).pipe(Effect.scoped);
+          assert.equal(mcp.servers.size, 0);
+        }
       }).pipe(Effect.scoped),
   );
 
