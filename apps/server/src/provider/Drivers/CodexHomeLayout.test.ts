@@ -344,6 +344,30 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         }),
     );
 
+    it.effect.skipIf(!symlinksSupported)(
+      "shares native writer locks before a shadow account starts first",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("t3code-codex-first-writer-");
+          const shadowHome = path.join(yield* makeTempDir("t3code-codex-first-shadow-"), "shadow");
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+          );
+          yield* materializeCodexShadowHome(layout);
+          const locks = path.join(sharedHome, "thread-writer-locks");
+          expect(yield* fileSystem.exists(locks)).toBe(true);
+          yield* writeTextFile(
+            path.join(shadowHome, "thread-writer-locks", "synthetic-native.lock"),
+            "synthetic lock marker",
+          );
+          expect(yield* fileSystem.readFileString(path.join(locks, "synthetic-native.lock"))).toBe(
+            "synthetic lock marker",
+          );
+        }),
+    );
+
     it.effect("preserves filesystem operation, paths, and cause", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
