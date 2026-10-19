@@ -191,6 +191,15 @@ export function setAgentAwarenessRelayTokenProvider(
     if (relayTokenProviderIdentity && identity !== relayTokenProviderIdentity) {
       clearAndroidAgentNotifications();
     }
+    // Hide the previous account's rows while the new account's first read runs.
+    if (
+      provider &&
+      identity &&
+      relayTokenProviderIdentity &&
+      identity !== relayTokenProviderIdentity
+    ) {
+      publishWidget({ kind: "loading" });
+    }
     androidDeviceReplayedAt = null;
     deviceRegistrationGeneration++;
     activeDeviceRegistration = null;

@@ -1410,6 +1410,15 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }),
     );
 
+    it("hides the previous account's rows as soon as another account signs in", () => {
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-a"), "user-a");
+      expect(publishWidgetMock).not.toHaveBeenCalled();
+
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-b"), "user-b");
+
+      expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "loading" });
+    });
+
     it("shows the signed-out state after cloud sign-out", () => {
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
 

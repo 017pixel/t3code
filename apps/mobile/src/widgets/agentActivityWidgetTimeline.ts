@@ -9,6 +9,7 @@ export const AGENT_ACTIVITY_WIDGET_STALE_AFTER_MS = 10 * 60_000;
 export type AgentActivityWidgetSource =
   | { readonly kind: "signed-out" }
   | { readonly kind: "unavailable" }
+  | { readonly kind: "loading" }
   | { readonly kind: "snapshot"; readonly aggregate: RelayAgentActivityAggregateState | null };
 
 export function agentActivityWidgetTimeline(source: AgentActivityWidgetSource, now: number) {
@@ -21,7 +22,9 @@ export function agentActivityWidgetTimeline(source: AgentActivityWidgetSource, n
           ? "Sign in to T3 Connect to see agents"
           : source.kind === "unavailable"
             ? "Couldn't reach T3 Connect"
-            : "No active agents",
+            : source.kind === "loading"
+              ? "Loading agents…"
+              : "No active agents",
       activeCount: 0,
       updatedAt,
       activities: [],
