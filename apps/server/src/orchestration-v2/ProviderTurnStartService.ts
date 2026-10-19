@@ -544,6 +544,7 @@ export const layer: Layer.Layer<
         readonly signal: string;
         readonly title: string;
         readonly error: Error;
+        readonly message?: string;
       }) =>
         Effect.gen(function* () {
           const nestedCause = "cause" in failed.error ? failed.error.cause : undefined;
@@ -559,11 +560,12 @@ export const layer: Layer.Layer<
               failure: makeProviderFailure({
                 cause: failed.error,
                 message:
-                  nestedCause instanceof Error
+                  failed.message ??
+                  (nestedCause instanceof Error
                     ? nestedCause.message
                     : typeof nestedCause === "string"
                       ? nestedCause
-                      : failed.error.message,
+                      : failed.error.message),
                 class: "provider_error",
               }),
             },
@@ -675,6 +677,21 @@ export const layer: Layer.Layer<
         );
         if (resumed._tag === "Success") {
           return resumed.success;
+        }
+
+        if (session.driver === "codex") {
+          // A transcript summary cannot recover native Codex context. Preserve
+          // the reference so retries keep resuming the same conversation.
+          if (input.willRetry === true) return yield* resumed.failure;
+          yield* settleStartFailure({
+            signal: "provider-native-resume-failure",
+            title: "Codex native conversation could not resume",
+            error: resumed.failure,
+            message: uncertainDelivery
+              ? "Codex history delivery was not acknowledged. Check the native history before retrying. The saved native conversation has been preserved."
+              : "Codex could not resume the saved native conversation. Check account access, the shared Codex home, and other writers before retrying. The saved native conversation has been preserved.",
+          });
+          return undefined;
         }
 
         yield* Effect.logWarning("Provider resume failed; attempting a fresh native session", {

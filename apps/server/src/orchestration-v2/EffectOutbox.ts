@@ -4,6 +4,7 @@ import {
   CommandId,
   MessageId,
   NodeId,
+  ProviderInstanceId,
   ProviderSessionId,
   RunAttemptId,
   ProviderApprovalDecision,
@@ -37,6 +38,8 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("provider-session.detach"),
     providerSessionId: ProviderSessionId,
     detail: Schema.optional(Schema.String),
+    // A delayed account transfer must not detach a later source binding.
+    expectedTargetInstanceId: Schema.optional(ProviderInstanceId),
     revokeMcpCredential: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
