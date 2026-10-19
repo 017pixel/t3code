@@ -579,8 +579,12 @@ describe("Android keyframe handshake", () => {
     client.stop();
   });
 
-  it("requests one fresh keyframe after pending video overflows and resumes from it", async () => {
-    const { client, sockets, decoders, Decoder, sps } = recoveryFixture("android", false);
+  it("recovers idle video after pending overflow despite the hub reset cooldown", async () => {
+    const { client, sockets, decoders, Decoder, sps, decodedFrame, events } = recoveryFixture(
+      "android",
+      false,
+    );
+    vi.setSystemTime(0);
     let resolveSupport!: (support: { supported: boolean }) => void;
     Decoder.isConfigSupported.mockImplementationOnce(
       () =>
@@ -589,34 +593,66 @@ describe("Android keyframe handshake", () => {
         }),
     );
     client.start();
-    const socket = sockets[0]!;
-    socket.onopen?.();
-    socket.onmessage?.({ data: videoSession(576, 1280) });
-    socket.onmessage?.({ data: semuPacket(1, true, 0, sps) });
-    // A stalled support probe must not retain an entire 128 MiB video backlog.
-    const largeDelta = new Uint8Array(256 * 1024);
-    largeDelta.set(new Uint8Array(delta));
-    for (let index = 1; index <= 512; index++) {
-      socket.onmessage?.({ data: semuPacket(1, false, index * 16667, largeDelta.buffer) });
-    }
-    resolveSupport({ supported: true });
-    await vi.advanceTimersByTimeAsync(0);
-    socket.onmessage?.({ data: semuPacket(1, false, 9_000_000, delta) });
-    expect.soft(decoders.flatMap((decoder) => decoder.decode.mock.calls)).toEqual([]);
-    expect
-      .soft(socket.send.mock.calls.map(([message]) => JSON.parse(message as string)))
-      .toEqual([{ type: "reset-video", ack: false }]);
+    try {
+      const socket = sockets[0]!;
+      socket.onopen?.();
+      // Opening the hub client already resets video; ack:false hides coalesced requests.
+      let lastResetAt = vi.getMockedSystemTime()!.getTime();
+      const acceptedResets: number[] = [];
+      const freshKey = Uint8Array.of(...new Uint8Array(sps), 0xaa).buffer;
+      socket.send.mockImplementation((message: string) => {
+        expect(JSON.parse(message)).toEqual({ type: "reset-video", ack: false });
+        const now = vi.getMockedSystemTime()!.getTime();
+        if (now - lastResetAt < 500) return;
+        lastResetAt = now;
+        acceptedResets.push(lastResetAt);
+        void Promise.resolve().then(() => {
+          socket.onmessage?.({ data: videoSession(576, 1280) });
+          socket.onmessage?.({ data: semuPacket(1, true, 0, freshKey) });
+          socket.onmessage?.({ data: semuPacket(1, false, 16667, delta) });
+        });
+      });
+      socket.onmessage?.({ data: videoSession(576, 1280) });
+      // A stalled support probe must not retain an entire 128 MiB video backlog.
+      const largeDelta = new Uint8Array(256 * 1024);
+      largeDelta.set(new Uint8Array(delta));
+      for (const key of [sps, Uint8Array.of(...new Uint8Array(sps), 0xbb).buffer]) {
+        await vi.advanceTimersByTimeAsync(100);
+        socket.onmessage?.({ data: semuPacket(1, true, 0, key) });
+        for (let index = 1; index <= 256; index++) {
+          socket.onmessage?.({ data: semuPacket(1, false, index * 16667, largeDelta.buffer) });
+        }
+      }
+      await vi.advanceTimersByTimeAsync(299);
+      expect.soft(socket.send.mock.calls.length).toBeLessThanOrEqual(1);
+      expect(acceptedResets).toEqual([]);
+      expect(decoders).toHaveLength(0);
 
-    socket.onmessage?.({ data: videoSession(576, 1280) });
-    socket.onmessage?.({ data: semuPacket(1, true, 0, sps) });
-    await vi.advanceTimersByTimeAsync(0);
-    socket.onmessage?.({ data: semuPacket(1, false, 16667, delta) });
-    expect(decoders.flatMap((decoder) => decoder.decode.mock.calls)).toEqual([
-      [{ type: "key", timestamp: 0, data: new Uint8Array(sps) }],
-      [{ type: "delta", timestamp: 16667, data: new Uint8Array(delta) }],
-    ]);
-    expect(socket.send).toHaveBeenCalledOnce();
-    client.stop();
+      resolveSupport({ supported: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(decoders.flatMap((decoder) => decoder.decode.mock.calls)).toEqual([]);
+      // The screen is idle: only an accepted reset can supply another key or delta.
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect.soft(acceptedResets).toHaveLength(1);
+      expect(decoders.flatMap((decoder) => decoder.decode.mock.calls)).toEqual([
+        [{ type: "key", timestamp: 0, data: new Uint8Array(freshKey) }],
+        [{ type: "delta", timestamp: 16667, data: new Uint8Array(delta) }],
+      ]);
+      decodedFrame();
+      expect(events.onStatus).toHaveBeenLastCalledWith("streaming", undefined);
+
+      const requestsAfterRecovery = socket.send.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(socket.send).toHaveBeenCalledTimes(requestsAfterRecovery);
+      expect(events.onStatus).toHaveBeenLastCalledWith("streaming", undefined);
+      expect(vi.getTimerCount()).toBe(0);
+      client.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(socket.send).toHaveBeenCalledTimes(requestsAfterRecovery);
+    } finally {
+      client.stop();
+    }
   });
 
   it("keeps painting through same-size restarts and replaces the decoder after resizing", async () => {
