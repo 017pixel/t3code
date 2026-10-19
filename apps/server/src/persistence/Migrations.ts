@@ -65,7 +65,11 @@ import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
-import Migration0063 from "./Migrations/063_ProjectionThreadSweepIndexes.ts";
+import Migration0063 from "./Migrations/063_DropUnusedV1Projections.ts";
+import Migration0064 from "./Migrations/064_CanonicalizeThreadPullRequestLinks.ts";
+
+import Migration0065 from "./Migrations/065_ProjectionThreadSweepIndexes.ts";
+
 import ensureThreadReadProjection, {
   migrateThreadReadProjection,
 } from "./Migrations/064_ProjectionThreadReadPayload.ts";
@@ -134,8 +138,10 @@ export const migrationEntries = [
   [60, "ThreadSnapshotWindowIndexes", Migration0060],
   [61, "PullRequestReviewGuides", Migration0061],
   [62, "ThreadFailureLookupIndex", Migration0062],
-  [63, "ProjectionThreadSweepIndexes", Migration0063],
-  [64, "ProjectionThreadReadPayload", migrateThreadReadProjection],
+  [63, "DropUnusedV1Projections", Migration0063],
+  [64, "CanonicalizeThreadPullRequestLinks", Migration0064],
+  [65, "ProjectionThreadSweepIndexes", Migration0065],
+  [66, "ProjectionThreadReadPayload", migrateThreadReadProjection],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -180,16 +186,17 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
       return [];
     const recordedName = recordedNames.get(id);
     if (recordedName === name) return [];
-    // Migration 63 repairs the index skipped by older sweep builds at id 62.
+    // Migration 65 repairs main's effects skipped by published perf migration ids.
     if (
-      id === 62 &&
-      (recordedName === "ProjectionThreadSweepIndexes" ||
-        recordedName === "ProjectionThreadReadPayload")
+      (id === 62 &&
+        (recordedName === "ProjectionThreadSweepIndexes" ||
+          recordedName === "ProjectionThreadReadPayload")) ||
+      (id === 63 &&
+        (recordedName === "ProjectionThreadSweepIndexes" ||
+          recordedName === "ProjectionThreadReadPayload")) ||
+      (id === 64 && recordedName === "ProjectionThreadReadPayload")
     )
       return [];
-    if (id === 63 && recordedName === "ProjectionThreadReadPayload") return [];
-    // The derived read projection is ensured below even when its id was skipped.
-    if (id === 64) return [];
     return [`${id}_${name} (recorded: ${recordedName ?? "nothing"})`];
   });
   if (skipped.length === 0) return;

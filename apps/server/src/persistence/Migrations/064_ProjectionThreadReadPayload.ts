@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
-import ProjectionThreadSweepIndexes from "./063_ProjectionThreadSweepIndexes.ts";
+import ProjectionThreadSweepIndexes from "./065_ProjectionThreadSweepIndexes.ts";
 
 import {
   compactThreadPullRequests,

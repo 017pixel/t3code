@@ -1,6 +1,7 @@
 import {
   OrchestrationProjectShell,
   OrchestrationV2ThreadShell,
+  RepositoryIdentity,
   ThreadPullRequestLink,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ShellStreamItem,
@@ -10,6 +11,9 @@ import * as Schema from "effect/Schema";
 const sameThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
 const sameProjectShell = Schema.toEquivalence(OrchestrationProjectShell);
 const sameLinks = Schema.toEquivalence(Schema.UndefinedOr(Schema.Array(ThreadPullRequestLink)));
+const sameRepositoryIdentity = Schema.toEquivalence(
+  Schema.UndefinedOr(Schema.NullOr(RepositoryIdentity)),
+);
 
 export function sameThreadPullRequests(
   left: OrchestrationV2ThreadShell["pullRequests"],
@@ -28,7 +32,7 @@ export function reuseUnchangedThreadShells(
 ): OrchestrationV2ShellSnapshot {
   if (previous === null || previous.threads.length === 0) return next;
   const previousById = new Map(previous.threads.map((thread) => [thread.id, thread] as const));
-  let reused = 0;
+  let changed = false;
   const threads = next.threads.map((thread) => {
     const prior = previousById.get(thread.id);
     if (prior === undefined) return thread;
@@ -36,11 +40,11 @@ export function reuseUnchangedThreadShells(
       thread.pullRequests === undefined && prior.pullRequests !== undefined
         ? { ...thread, pullRequests: prior.pullRequests }
         : thread;
-    if (!sameThreadShell(prior, candidate)) return thread;
-    reused += 1;
-    return prior;
+    const retained = sameThreadShell(prior, candidate) ? prior : candidate;
+    if (retained !== thread) changed = true;
+    return retained;
   });
-  return reused === 0 ? next : { ...next, threads };
+  return changed ? { ...next, threads } : next;
 }
 
 function upsertById<T extends { readonly id: unknown }>(
@@ -97,8 +101,12 @@ export function mergeShellSnapshotProjects(
           return project;
         }
         if (resolvedRootSet?.has(project.workspaceRoot) === true) {
-          const resolved = { ...project, repositoryIdentity: candidate.repositoryIdentity };
-          return sameProjectShell(project, resolved) ? project : resolved;
+          // Refreshes re-resolve every root; an unchanged identity keeps the project's identity
+          // so every subscriber (each pull request row, the sidebar) skips re-rendering.
+          if (sameRepositoryIdentity(project.repositoryIdentity, candidate.repositoryIdentity)) {
+            return project;
+          }
+          return { ...project, repositoryIdentity: candidate.repositoryIdentity };
         }
         if (project.repositoryIdentity == null && candidate.repositoryIdentity != null) {
           return { ...project, repositoryIdentity: candidate.repositoryIdentity };

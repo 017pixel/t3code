@@ -75,6 +75,8 @@ const cursorSource = (refreshing: boolean): UsageSource => ({
   ...(refreshing ? { refreshing: true as const } : {}),
 });
 
+const sameServerSettings = Schema.toEquivalence(ServerSettings);
+
 const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
   beforeRead: (
     request: number,
@@ -191,11 +193,9 @@ const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
       type: "settingsUpdated",
       payload: { settings },
     });
-    // An update equal to the current settings keeps the current object.
+    // An equal settings document keeps the previous object, so match on content.
     yield* AtomRegistry.toStream(registry, atoms.settingsValueAtom(TARGET.environmentId)).pipe(
-      Stream.filter(
-        (current) => current !== null && Schema.toEquivalence(ServerSettings)(current, next),
-      ),
+      Stream.filter((current) => current !== null && sameServerSettings(current, next)),
       Stream.runHead,
     );
   });

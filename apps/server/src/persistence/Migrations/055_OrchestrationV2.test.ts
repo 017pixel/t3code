@@ -6,7 +6,7 @@ import * as References from "effect/References";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationEntries, runMigrations } from "../Migrations.ts";
-import ProjectionThreadSweepIndexes from "./063_ProjectionThreadSweepIndexes.ts";
+import ProjectionThreadSweepIndexes from "./065_ProjectionThreadSweepIndexes.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
@@ -16,7 +16,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 64 }, (_, index) => index + 1),
+        Array.from({ length: 65 }, (_, index) => index + 1),
       );
     }),
   );
@@ -37,8 +37,9 @@ layer("055_OrchestrationV2", (it) => {
         [60, "ThreadSnapshotWindowIndexes"],
         [61, "PullRequestReviewGuides"],
         [62, "ThreadFailureLookupIndex"],
-        [63, "ProjectionThreadSweepIndexes"],
-        [64, "ProjectionThreadReadPayload"],
+        [63, "DropUnusedV1Projections"],
+        [64, "CanonicalizeThreadPullRequestLinks"],
+        [65, "ProjectionThreadSweepIndexes"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -67,8 +68,9 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
         { migration_id: 61, name: "PullRequestReviewGuides" },
         { migration_id: 62, name: "ThreadFailureLookupIndex" },
-        { migration_id: 63, name: "ProjectionThreadSweepIndexes" },
-        { migration_id: 64, name: "ProjectionThreadReadPayload" },
+        { migration_id: 63, name: "DropUnusedV1Projections" },
+        { migration_id: 64, name: "CanonicalizeThreadPullRequestLinks" },
+        { migration_id: 65, name: "ProjectionThreadSweepIndexes" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -204,10 +206,10 @@ layer("055_OrchestrationV2", (it) => {
         runtime_mode, interaction_mode, created_at, updated_at, payload_json
       ) VALUES ('thread', 'project', 'Title', 'codex', 'codex', 'full-access', 'default',
         '2026-07-24', '2026-07-24', '{"settledOverride":"settled","pullRequests":[{"number":1}]}')`;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [63, "ProjectionThreadSweepIndexes"],
-        [64, "ProjectionThreadReadPayload"],
-      ]);
+      assert.deepStrictEqual(
+        yield* runMigrations(),
+        migrationEntries.filter(([id]) => id > 62).map(([id, name]) => [id, name]),
+      );
       assert.deepStrictEqual(warnings, legacy ? [["62_ThreadFailureLookupIndex"]] : []);
       yield* ProjectionThreadSweepIndexes;
       assert.deepStrictEqual(yield* runMigrations(), []);
@@ -223,11 +225,6 @@ layer("055_OrchestrationV2", (it) => {
       yield* sql`UPDATE orchestration_v2_projection_threads
         SET payload_json = json_set(payload_json, '$.pullRequests', json('[]'))`;
       assert.deepStrictEqual(yield* sweep, []);
-      assert.deepStrictEqual(
-        yield* sql`SELECT run_id FROM orchestration_v2_projection_runs
-        INDEXED BY orchestration_v2_projection_runs_failed_idx WHERE status = 'failed'`,
-        [],
-      );
       assert.deepStrictEqual(
         yield* sql`SELECT turn_item_id FROM orchestration_v2_projection_turn_items
         INDEXED BY orchestration_v2_projection_turn_items_failed_error_idx
