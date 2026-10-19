@@ -588,7 +588,7 @@ it.effect.each(["after-initial", "before-initial", "manual-before", "manual-duri
                 type: "message.updated",
                 threadId,
                 runId: run.id,
-                nodeId: run.rootNodeId,
+                nodeId: run.rootNodeId ?? undefined,
                 occurredAt: now,
                 payload: {
                   id: MessageId.make("message:title:refinement:assistant"),
@@ -610,7 +610,7 @@ it.effect.each(["after-initial", "before-initial", "manual-before", "manual-duri
                 type: "run.updated",
                 threadId,
                 runId: run.id,
-                nodeId: run.rootNodeId,
+                nodeId: run.rootNodeId ?? undefined,
                 occurredAt: now,
                 payload: { ...run, status: "completed", startedAt: now, completedAt: now },
               },
@@ -662,7 +662,7 @@ it.effect.each(["after-initial", "before-initial", "manual-before", "manual-duri
         assert.equal(generations, timing === "manual-before" ? 1 : 2);
         if (generations === 2) {
           assert.include(
-            harness.generateThreadTitle.mock.calls[1]![0].message,
+            harness.generateThreadTitle.mock.calls[1]![0]!.message,
             "SQLite checkpoints",
           );
         }
@@ -675,7 +675,7 @@ it.effect.each(["after-initial", "before-initial", "manual-before", "manual-duri
               type: "run.updated",
               threadId,
               runId: completed.id,
-              nodeId: completed.rootNodeId,
+              nodeId: completed.rootNodeId ?? undefined,
               occurredAt: yield* DateTime.now,
               payload: completed,
             },
