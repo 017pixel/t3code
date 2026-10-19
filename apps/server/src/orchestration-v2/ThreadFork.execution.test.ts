@@ -409,6 +409,11 @@ const decodeForkInput = Schema.decodeUnknownEffect(
 
 const responseForkCases = [
   { ...forkCases[0]!, replyStatus: "completed" as const, ancestry: "root" },
+  {
+    ...forkCases[0]!,
+    replyStatus: "completed" as const,
+    ancestry: "root after source rollback",
+  },
   { ...forkCases[0]!, replyStatus: "completed" as const, ancestry: "fork with a local run" },
   { ...forkCases[3]!, replyStatus: "completed" as const, ancestry: "root" },
   { ...forkCases[0]!, replyStatus: "interrupted" as const, ancestry: "root" },
@@ -675,6 +680,22 @@ it.effect.each(responseForkCases)(
 
       const targetThreadId = ThreadId.make("response-fork");
       yield* forkAt(cutId, targetThreadId);
+      if (ancestry === "root after source rollback") {
+        const source = yield* orchestrator.getThreadProjection(sourceThreadId);
+        const sourceRun = source.runs.find((run) => run.id === runId)!;
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make("source-run-rolled-back"),
+              type: "run.updated",
+              threadId: sourceThreadId,
+              runId,
+              occurredAt: now,
+              payload: { ...sourceRun, status: "rolled_back" },
+            },
+          ],
+        });
+      }
       const expectedIds = items.slice(0, 2).map((item) => item.id);
       const inherited = yield* orchestrator.getThreadProjection(targetThreadId);
       assert.deepEqual(
@@ -744,7 +765,7 @@ it.effect.each(responseForkCases)(
       assert.include(context, "INCLUDED_RESPONSE");
       assert.notInclude(context, "EXCLUDED");
 
-      if (ancestry === "root") return;
+      if (ancestry !== "fork with a local run") return;
 
       const localRun = continued.runs[0]!;
       const localItems = items.slice(0, 4).map((item) => ({

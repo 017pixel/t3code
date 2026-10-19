@@ -113,7 +113,6 @@ import {
   emptyProjection,
   threadShellFromProjection,
   ProjectionStoreV2,
-  isTurnItemAtOrBeforeRun,
   type ProjectionRecordField,
   type ProjectionTimelinePage,
   type ProjectionTimelinePageOptions,
@@ -5889,28 +5888,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const portableForkItems =
         !requiresPortableFork || sourceProjection === null || sourceRun === null
           ? []
-          : yield* projectionStore.getThreadProjection(sourceProjection.thread.id).pipe(
-              Effect.map((sourceHistory) => {
-                const runOrdinalById = new Map(
-                  sourceHistory.runs.map((run) => [run.id, run.ordinal]),
-                );
-                // Inherited rows already respect the source fork's own boundary.
-                return sourceHistory.visibleTurnItems
-                  .map((row) => row.item)
-                  .filter(
-                    (item) =>
-                      item.threadId !== sourceHistory.thread.id ||
-                      isTurnItemAtOrBeforeRun({
-                        historyOrigin: sourceHistory.thread.historyOrigin,
-                        itemRunId: item.runId,
-                        runOrdinalById,
-                        sourceRunOrdinal: sourceRun.ordinal,
-                      }),
-                  );
-              }),
+          : yield* projectionStore.getThreadProjection(command.threadId).pipe(
+              Effect.map((targetHistory) =>
+                targetHistory.visibleTurnItems
+                  .filter((row) => row.visibility === "inherited")
+                  .map((row) => row.item),
+              ),
               Effect.mapError(
-                (cause) =>
-                  new OrchestratorProjectionError({ threadId: sourceProjection.thread.id, cause }),
+                (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
               ),
             );
       const cutItemId = pendingForkTransfer?.sourcePoint.turnItemId;
@@ -5927,12 +5912,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Fork source item ${cutItemId} is no longer available.`,
         });
       }
-      const boundedForkItems =
-        cutItem === undefined
-          ? portableForkItems
-          : portableForkItems.filter(
-              (item) => item.runId !== sourceRun?.id || item.ordinal <= cutItem.ordinal,
-            );
       const portableForkHandoff =
         !requiresPortableFork ||
         pendingForkTransfer === undefined ||
@@ -5949,9 +5928,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 toProviderThreadId: ensuredProviderThread.id,
                 fromProviderInstanceId: sourceRun.providerInstanceId,
                 toProviderInstanceId: modelSelection.instanceId,
-                coveredRunOrdinals: visibleDeltaRunOrdinals(sourceProjection, boundedForkItems),
+                coveredRunOrdinals: visibleDeltaRunOrdinals(sourceProjection, portableForkItems),
                 strategy: "full_thread_summary",
-                items: boundedForkItems,
+                items: portableForkItems,
                 runs: sourceProjection.runs,
                 createdAt: now,
               })
