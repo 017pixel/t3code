@@ -3,7 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { createPackageWithOptions, extractFile, statFile } from "@electron/asar";
+import { createPackageWithOptions, extractFile, listPackage, statFile } from "@electron/asar";
 import { vi } from "vite-plus/test";
 import * as CuaRelease from "@t3tools/shared/cuaDriverRelease";
 import { assert, it } from "@effect/vitest";
@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -45,6 +46,7 @@ import {
   MacPasskeySigningConfigurationResolutionError,
   MissingMacPasskeyProvisioningProfileError,
   packWindowsServerAsar,
+  stageWindowsServerSidecar,
   preflightLinuxDesktopBuild,
   preflightMacDesktopBuild,
   preflightWindowsDesktopBuild,
@@ -401,22 +403,21 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         } else {
           const companions =
             platform === "win"
-              ? [
-                  "cua-driver.exe",
-                  "cua-driver-uia.exe",
-                  "cua-cursor-theme.exe",
-                  "cua_driver_sdk.dll",
-                  "cua_driver_node_runtime.node",
-                ]
+              ? ["cua-driver.exe", "cua-driver-uia.exe", "cua-cursor-theme.exe"]
               : [
                   "cua-driver",
                   "cua-cursor-theme",
-                  "libcua_driver_sdk.so",
-                  "cua_driver_node_runtime.node",
+                  "wayland-helper/README.md",
                   "wayland-helper/install.sh",
                   "wayland-helper/winrects@cua/metadata.json",
                   "wayland-helper/winrects@cua/extension.js",
                 ];
+          assert.deepStrictEqual(
+            (yield* h.fs.readDirectory(destination)).sort(),
+            platform === "win"
+              ? [...companions].sort()
+              : ["cua-cursor-theme", "cua-driver", "wayland-helper"],
+          );
           for (const member of companions) {
             assert.equal(yield* h.fs.readFileString(h.path.join(destination, member)), member);
           }
@@ -1193,7 +1194,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ]);
   });
 
-  it.effect("unpacks target Windows natives while excluding the other architecture", () =>
+  it.effect("stages Windows sidecar externals and unpacks target natives", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -1211,15 +1212,60 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           "node_modules/node-pty/prebuilds/linux-x64/pty.node",
         ];
 
-        for (const nativeFile of nativeFiles) {
-          const nativePath = path.join(sourceDir, nativeFile);
-          yield* fs.makeDirectory(path.dirname(nativePath), { recursive: true });
-          yield* fs.writeFileString(nativePath, nativeFile.includes("linux") ? "\x7fELF" : "MZ");
-        }
-
+        const decodeDependencies = Schema.decodeUnknownEffect(
+          Schema.fromJsonString(
+            Schema.Struct({ dependencies: Schema.Record(Schema.String, Schema.String) }),
+          ),
+        );
+        const installSpawner = ChildProcessSpawner.make(() =>
+          Effect.gen(function* () {
+            const { dependencies } = yield* decodeDependencies(
+              yield* fs.readFileString(path.join(sourceDir, "package.json")),
+            ).pipe(Effect.orDie);
+            const installedFiles = Object.keys(dependencies).map(
+              (name) => `node_modules/${name}/package.json`,
+            );
+            if (Object.hasOwn(dependencies, "node-pty")) installedFiles.push(...nativeFiles);
+            if (Object.hasOwn(dependencies, "@trycua/cua-driver")) {
+              installedFiles.push(
+                "node_modules/@trycua/cua-driver-win32-x64-msvc/cua_driver_sdk.dll",
+              );
+            }
+            for (const file of installedFiles) {
+              const filePath = path.join(sourceDir, file);
+              yield* fs.makeDirectory(path.dirname(filePath), { recursive: true });
+              yield* fs.writeFileString(filePath, file.includes("linux") ? "\x7fELF" : "MZ");
+            }
+            return mockProcess(0);
+          }),
+        );
+        const serverDistDir = path.join(tempDir, "dist");
+        yield* fs.makeDirectory(serverDistDir);
+        yield* fs.writeFileString(path.join(serverDistDir, "bin.mjs"), "console.log('server');");
         const asarPath = path.join(tempDir, "server.asar");
-        yield* packWindowsServerAsar({ sourceDir, asarPath, arch: "x64" });
+        yield* stageWindowsServerSidecar({
+          stageRoot: tempDir,
+          repoRoot: tempDir,
+          serverDistDir,
+          arch: "x64",
+          appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+          runtimeExternalDependencies: { "node-pty": "1.1.0", "@trycua/cua-driver": "0.34.1" },
+          fffNodeVersion: "0.9.4",
+          allowBuilds: {},
+          patchedDependencies: {},
+          overrides: {},
+          asarPath,
+          verbose: false,
+        }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, installSpawner));
         const unpackedRoot = `${asarPath}.unpacked`;
+        assert.deepStrictEqual(
+          (yield* decodeDependencies(extractFile(asarPath, "package.json").toString()))
+            .dependencies,
+          { "node-pty": "1.1.0", "@ff-labs/fff-bin-win32-x64": "0.9.4" },
+        );
+        assert.isFalse(
+          listPackage(asarPath, { isPack: false }).some((file) => file.includes("@trycua")),
+        );
 
         assert.isTrue(
           yield* fs.exists(

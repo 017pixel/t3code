@@ -2455,7 +2455,20 @@ export const stageCuaDriverExecutable = Effect.fn("stageCuaDriverExecutable")(fu
           ? ChildProcess.make("unzip", ["-q", archivePath, "-d", extracted])
           : ChildProcess.make("tar", ["-xf", archivePath, "-C", extracted]);
       yield* runCommand(command, { label: "extract Cua Driver", verbose: input.verbose });
-      for (const file of input.platform === "mac" ? [release.executable] : release.requiredFiles) {
+      const requiredFiles = [
+        release.executable,
+        ...(input.platform === "win"
+          ? ["cua-driver-uia.exe", "cua-cursor-theme.exe"]
+          : input.platform === "linux"
+            ? [
+                "cua-cursor-theme",
+                "wayland-helper/install.sh",
+                "wayland-helper/winrects@cua/metadata.json",
+                "wayland-helper/winrects@cua/extension.js",
+              ]
+            : []),
+      ];
+      for (const file of requiredFiles) {
         if ((yield* fs.stat(path.join(extracted, file))).type !== "File") {
           return yield* new CuaDriverArtifactError({
             message: `Cua Driver release is missing ${file}.`,
@@ -2469,7 +2482,15 @@ export const stageCuaDriverExecutable = Effect.fn("stageCuaDriverExecutable")(fu
         yield* fs.copyFile(path.join(extracted, release.executable), destination);
         yield* fs.chmod(destination, 0o755);
       } else {
-        yield* fs.copy(extracted, destination);
+        yield* fs.makeDirectory(destination, { recursive: true });
+        // SDK libraries come from the app's npm dependencies, not this release.
+        const entries =
+          input.platform === "linux"
+            ? [release.executable, "cua-cursor-theme", "wayland-helper"]
+            : requiredFiles;
+        for (const entry of entries) {
+          yield* fs.copy(path.join(extracted, entry), path.join(destination, entry));
+        }
         if (input.platform === "linux") {
           for (const executable of [release.executable, "cua-cursor-theme"]) {
             yield* fs.chmod(path.join(destination, executable), 0o755);
@@ -3129,7 +3150,12 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   yield* fs.copy(input.serverDistDir, path.join(serverStageDir, "apps/server/dist"));
 
   const sidecarDependencies = {
-    ...input.runtimeExternalDependencies,
+    // The desktop host owns Cua; this server reaches it through telemetry IPC.
+    ...Object.fromEntries(
+      Object.entries(input.runtimeExternalDependencies).filter(
+        ([name]) => name !== "@trycua/cua-driver",
+      ),
+    ),
     ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
   };
   const sidecarPatchedDependencies = createStagePatchedDependencies(
