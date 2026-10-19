@@ -280,6 +280,7 @@ const make = Effect.gen(function* () {
       host: target.host,
       repository: target.repository,
       number: target.number,
+      webUrl: null,
     });
     const url = yield* Effect.try(() => new URL(detail.url));
     url.username = "";
@@ -305,11 +306,12 @@ const make = Effect.gen(function* () {
     if (watching && before?.snapshot?.state === "merged") {
       return yield* new PullRequestNotOpenError({ state: "merged" });
     }
-    const link = watching
-      ? yield* resolveLink(target, input, project).pipe(
-          Effect.mapError((cause) => new PullRequestWatchFailedError({ cause })),
-        )
-      : undefined;
+    const link =
+      watching && before === undefined
+        ? yield* resolveLink(target, input, project).pipe(
+            Effect.mapError((cause) => new PullRequestWatchFailedError({ cause })),
+          )
+        : undefined;
     yield* engine
       .dispatch({
         type: "thread.pull-request.watch",
@@ -327,7 +329,7 @@ const make = Effect.gen(function* () {
       host: target.host,
       repository: target.repository,
       number: target.number,
-      url: link?.url ?? target.url,
+      url: link?.url ?? before?.url ?? target.url,
       watching: watchedLink(after)?.watch !== undefined,
       wasWatching: before?.watch !== undefined,
     };
