@@ -85,7 +85,13 @@ import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 
 const decodeCodexTurnInput = Schema.decodeUnknownEffect(
   Schema.Struct({
-    input: Schema.Array(Schema.Unknown),
+    input: Schema.Array(
+      Schema.Union([
+        Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
+        Schema.Struct({ type: Schema.Literal("localImage"), path: Schema.String }),
+        Schema.Struct({ type: Schema.Literal("image"), url: Schema.String }),
+      ]),
+    ),
   }),
 );
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
@@ -3479,11 +3485,36 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect.each([1, 2])(
-    "delivers queued steering to Codex with its image and context after %s restarts",
-    (restarts) =>
+  it.effect.each([
+    {
+      scenario: "image and context after one restart",
+      restarts: 1,
+      completed: false,
+      files: false,
+    },
+    {
+      scenario: "image and context after two restarts",
+      restarts: 2,
+      completed: false,
+      files: false,
+    },
+    {
+      scenario: "a steer accepted before its provider turn completed",
+      restarts: 1,
+      completed: true,
+      files: false,
+    },
+    {
+      scenario: "two large steers with ordinary files",
+      restarts: 1,
+      completed: false,
+      files: true,
+    },
+  ])(
+    "delivers queued steering to Codex after recovery: $scenario",
+    ({ scenario, restarts, completed, files }) =>
       Effect.gen(function* () {
-        const name = "restart-steering-" + restarts;
+        const name = "restart-steering-" + scenario.replaceAll(" ", "-");
         const threadId = ThreadId.make(name);
         const nativeThreadId = "native-" + name;
         const fs = yield* FileSystem.FileSystem;
@@ -3492,20 +3523,29 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* Effect.addFinalizer(() =>
           fs.remove(serverConfig.baseDir, { recursive: true, force: true }).pipe(Effect.orDie),
         );
-        const attachment = {
-          type: "image" as const,
-          id: ChatAttachmentId.make(createAttachmentId(threadId)!),
-          name: "steering.png",
-          mimeType: "image/png",
-          sizeBytes: 4,
-        };
-        const imagePath = resolveAttachmentPath({
-          attachmentsDir: serverConfig.attachmentsDir,
-          attachment,
-        });
-        assert.isNotNull(imagePath);
-        yield* fs.makeDirectory((yield* Path.Path).dirname(imagePath), { recursive: true });
-        yield* fs.writeFile(imagePath, new Uint8Array([1, 2, 3, 4]));
+        const attachments = yield* Effect.forEach(
+          files ? ["first.txt", "second.txt"] : ["steering.png"],
+          (name) =>
+            Effect.gen(function* () {
+              const attachment = {
+                type: files ? ("file" as const) : ("image" as const),
+                id: ChatAttachmentId.make(createAttachmentId(threadId)!),
+                name,
+                mimeType: files ? "text/plain" : "image/png",
+                sizeBytes: 4,
+              };
+              const path = resolveAttachmentPath({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachment,
+              });
+              assert.isNotNull(path);
+              yield* fs.makeDirectory((yield* Path.Path).dirname(path), { recursive: true });
+              yield* fs.writeFile(path, new Uint8Array([1, 2, 3, 4]));
+              return { attachment, path };
+            }),
+        );
+        const completeTurn =
+          yield* Deferred.make<Effect.Effect<void, CodexError.CodexAppServerError>>();
         const sent: Array<unknown> = [];
         let sessions = 0;
         const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
@@ -3556,7 +3596,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 const client = yield* CodexClient.CodexAppServerClient.pipe(
                   Effect.provide(context),
                 );
-                // Capture the real adapter output; only the external turn/start response is stubbed.
+                // Capture real adapter output while stubbing the external Codex response.
                 const request = ((method, params) =>
                   method === "turn/start"
                     ? Effect.sync(() => {
@@ -3569,7 +3609,24 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                         };
                       })
                     : client.request(method, params)) as typeof client.request;
-                return { ...client, request };
+                const handleServerNotification: typeof client.handleServerNotification = (
+                  method,
+                  handler,
+                ) =>
+                  client.handleServerNotification(method, handler).pipe(
+                    Effect.tap(() =>
+                      firstSession && method === "turn/completed"
+                        ? Deferred.succeed(
+                            completeTurn,
+                            handler({
+                              threadId: nativeThreadId,
+                              turn: makeCodexReplayTurn({ id: "turn-1", status: "completed" }),
+                            } as Parameters<typeof handler>[0]),
+                          )
+                        : Effect.void,
+                    ),
+                  );
+                return { ...client, request, handleServerNotification };
               }).pipe(
                 Effect.mapError(
                   (cause) =>
@@ -3599,7 +3656,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               runEffectWorker: false,
               continueThreadsAfterServerUpdate: true,
             },
-          );
+          ).pipe(Layer.provideMerge(EffectOutbox.layer.pipe(Layer.provide(database))));
         const recovery = () =>
           ProviderRuntimeRecovery.layer.pipe(
             Layer.provide(
@@ -3658,36 +3715,85 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             yield* worker.drain();
             yield* Fiber.join(started);
             const projection = yield* orchestrator.getThreadProjection(threadId);
-            yield* orchestrator.dispatch({
-              type: "message.dispatch",
-              commandId: CommandId.make(name + ":steer"),
-              threadId,
-              messageId: MessageId.make(name + ":steer"),
-              text: "STEERING_MARKER use [terminal](t3-context://v1/terminal/restart-terminal)",
-              attachments: [attachment],
-              context: {
-                version: 1,
-                records: [
-                  {
-                    version: 1,
-                    contextId: ComposerContextId.make("restart-terminal"),
-                    kind: "terminal",
-                    label: "terminal",
-                    terminalId: "terminal-1",
-                    terminalLabel: "Shell",
-                    lineStart: 1,
-                    lineEnd: 1,
-                    text: "CONTEXT_MARKER",
-                  },
-                ],
-              },
-              modelSelection: CODEX_TEST_MODEL_SELECTION,
-              dispatchMode: { type: "steer_active", targetRunId: projection.runs[0]!.id },
-              createdBy: "user",
-              creationSource: "web",
-            });
+            for (const [index, { attachment }] of attachments.entries()) {
+              const steerId = name + ":steer-" + index;
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(steerId),
+                threadId,
+                messageId: MessageId.make(steerId),
+                text:
+                  "STEERING_MARKER_" +
+                  index +
+                  " use [terminal](t3-context://v1/terminal/restart-terminal)",
+                attachments: [attachment],
+                context: {
+                  version: 1,
+                  records: [
+                    {
+                      version: 1,
+                      contextId: ComposerContextId.make("restart-terminal"),
+                      kind: "terminal",
+                      label: "terminal",
+                      terminalId: "terminal-" + index,
+                      terminalLabel: "Shell",
+                      lineStart: 1,
+                      lineEnd: 1,
+                      text: files
+                        ? "CONTEXT_MARKER_" + index + "x".repeat(61_000)
+                        : "CONTEXT_MARKER",
+                    },
+                  ],
+                },
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+                dispatchMode: { type: "steer_active", targetRunId: projection.runs[0]!.id },
+                createdBy: "user",
+                creationSource: "web",
+              });
+              const outbox = yield* EffectOutbox.EffectOutboxV2;
+              const effects = yield* outbox.listByCommandId(CommandId.make(steerId));
+              assert.isTrue(
+                effects.some(
+                  (effect) =>
+                    effect.request.type === "provider-turn.steer" && effect.status === "pending",
+                ),
+              );
+            }
             // No daemon is running: the steer is committed but has not reached the provider.
             assert.lengthOf(sent, 1);
+            if (completed) {
+              const settled = yield* orchestrator.streamDomainEvents.pipe(
+                Stream.filter(
+                  (event) => event.type === "run.updated" && event.payload.status === "waiting",
+                ),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped,
+              );
+              const completion = yield* Deferred.await(completeTurn);
+              yield* completion;
+              yield* Fiber.join(settled);
+              const finished = yield* orchestrator.getThreadProjection(threadId);
+              assert.equal(finished.runs[0]?.status, "waiting");
+              assert.equal(finished.providerTurns[0]?.status, "completed");
+              const outbox = yield* EffectOutbox.EffectOutboxV2;
+              const checkpoints = yield* outbox.listByCommandId(
+                CommandId.make("command:effect:checkpoint.capture:" + finished.runs[0]!.id),
+              );
+              assert.isTrue(
+                checkpoints.some(
+                  (effect) =>
+                    effect.request.type === "checkpoint.capture" && effect.status === "pending",
+                ),
+              );
+              const effects = yield* outbox.listByCommandId(CommandId.make(name + ":steer-0"));
+              assert.isTrue(
+                effects.some(
+                  (effect) =>
+                    effect.request.type === "provider-turn.steer" && effect.status === "pending",
+                ),
+              );
+            }
             // Snapshot before scope finalizers perform a graceful session shutdown.
             yield* snapshot(directory + "/crash-1.sqlite");
           }).pipe(Effect.provide(runtime())),
@@ -3716,6 +3822,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 yield* snapshot(directory + "/crash-" + (restart + 1) + ".sqlite");
               } else {
                 yield* worker.drain();
+                if (completed) {
+                  yield* worker.drain();
+                  const projection =
+                    yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(threadId);
+                  assert.lengthOf(
+                    projection.messages.filter(
+                      (message) => message.id === MessageId.make(name + ":steer-0"),
+                    ),
+                    1,
+                  );
+                  assert.equal(projection.runs[0]?.status, "completed");
+                  assert.lengthOf(sent, 2, "accepted steer starts exactly one follow-up");
+                  assert.lengthOf(projection.runs, 2);
+                }
               }
             }).pipe(Effect.provide(runtime())),
           );
@@ -3724,7 +3844,37 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const delivered = yield* decodeCodexTurnInput(sent[1]);
         assert.include(JSON.stringify(delivered.input), "STEERING_MARKER");
         assert.include(JSON.stringify(delivered.input), "CONTEXT_MARKER");
-        assert.deepInclude(delivered.input, { type: "localImage", path: imagePath });
+        if (files) {
+          const outbound = delivered.input
+            .filter((item) => item.type === "text")
+            .map((item) => item.text)
+            .join("\n");
+          for (const index of attachments.keys()) {
+            assert.isTrue(outbound.includes("STEERING_MARKER_" + index), "steer text " + index);
+            assert.isTrue(
+              outbound.includes("CONTEXT_MARKER_" + index + "x".repeat(61_000)),
+              "complete context " + index,
+            );
+          }
+          assert.deepEqual(
+            attachments
+              .filter(({ path }) => outbound.includes(path))
+              .map(({ attachment }) => attachment.name),
+            ["first.txt", "second.txt"],
+            "both file paths reach the provider",
+          );
+        } else {
+          const bytes = yield* Effect.forEach(
+            delivered.input.filter((item) => item.type !== "text"),
+            (item) =>
+              item.type === "localImage"
+                ? fs
+                    .readFile(item.path)
+                    .pipe(Effect.map((data) => Buffer.from(data).toString("base64")))
+                : Effect.succeed(item.url.replace(/^data:image\/png;base64,/, "")),
+          );
+          assert.deepEqual(bytes, ["AQIDBA=="]);
+        }
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
