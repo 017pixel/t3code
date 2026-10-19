@@ -31,6 +31,30 @@ Add another ChatGPT account in **Settings → Providers**, then select the accou
 from the thread's model picker. Compatible accounts can continue the same thread.
 Connecting accounts through T3 Code leaves your CLI login unchanged.
 
+Upgrading older account shadow homes can report **SQLite recovery is required**
+on any platform, including macOS and Linux. T3 Code refuses all legacy SQLite
+symlinks, including dangling or orphaned sidecar links, until you recover the
+data and manually remove those links.
+
+For accounts connected through T3 Code, generated shadow homes normally live at
+`~/.t3/userdata/providers/codex/<provider-instance-id>/shadow`. On the environment's
+machine, list the account directories with:
+
+```bash
+ls -d ~/.t3/userdata/providers/codex/*/shadow
+```
+
+If the server uses `T3CODE_HOME` or `--base-dir`, replace `~/.t3` with that T3 home;
+keep the `userdata` directory in the path. For a configured **Shadow home path**,
+use the path in **Settings → Providers** instead. For a remote environment, these
+paths are on the server's machine.
+
+Before removing links, stop every Codex process using either the shared or shadow
+home and back up both directories. Recover or checkpoint any shadow WAL/journal
+data, then remove only the old shadow SQLite symlinks. Do not delete real
+databases or sidecars to force startup. T3 Code does not repair or merge them
+automatically.
+
 ### Multiple CLI logins
 
 A shared Codex home with a shadow home lets work and personal accounts continue
@@ -55,13 +79,6 @@ Then add a second Codex instance in **Settings > Providers**:
 Both instances must use the same **CODEX_HOME path**. T3 Code prepares the shared
 state in the shadow directory; do not populate it by copying your whole Codex
 home.
-
-If an older shadow home reports **SQLite recovery is required**, stop every
-Codex process using either home and back up both directories. Recover or
-checkpoint any shadow WAL/journal data before removing the old shadow SQLite
-symlinks, including dangling or orphaned sidecar links. Do not delete real
-databases or sidecars to force startup. T3 Code does not repair or merge them
-automatically.
 
 The shadow account needs its own `auth.json` file. If Codex uses an OS credential
 store, configure file storage for this setup. See
