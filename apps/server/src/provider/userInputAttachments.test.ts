@@ -8,6 +8,9 @@ import * as Layer from "effect/Layer";
 import * as ServerConfig from "../config.ts";
 import * as DocumentText from "./DocumentText.ts";
 import { extractDocumentText } from "./documentTextWorker.ts";
+import * as Cleanup from "../orchestration-v2/ResourceCleanupService.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as PreviewManager from "../preview/Manager.ts";
 import * as NodeZlib from "node:zlib";
 import { appendUserInputAttachmentPaths } from "./userInputAttachments.ts";
 
@@ -54,9 +57,35 @@ describe("question answer paths", () => {
       expect(NodeFS.readFileSync(`${path}.txt`, "utf8")).toContain("301");
       expect(NodeFS.readFileSync(`${path}.txt`, "utf8")).toContain("42");
       expect(NodeFS.readFileSync(path, "utf8")).toBe(notebook);
-      const before = NodeFS.statSync(`${path}.txt`).mtimeMs;
-      yield* (yield* DocumentText.DocumentText).ensure(path);
-      expect(NodeFS.statSync(`${path}.txt`).mtimeMs).toBe(before);
+      const before = NodeFS.statSync(path + ".txt").mtimeMs;
+      // A changed binary would fail parsing if the cached extraction were not reused.
+      NodeFS.writeFileSync(path, "invalid notebook");
+      const documents = yield* DocumentText.DocumentText;
+      const results = yield* Effect.all([documents.ensure(path), documents.ensure(path)], {
+        concurrency: "unbounded",
+      });
+      expect(results).toEqual([path + ".txt", path + ".txt"]);
+      expect(NodeFS.statSync(path + ".txt").mtimeMs).toBe(before);
+      yield* Effect.gen(function* () {
+        const cleanup = yield* Cleanup.ResourceCleanupService;
+        yield* cleanup.cleanupAttachments([file.id]);
+        expect(NodeFS.existsSync(path)).toBe(false);
+        expect(NodeFS.existsSync(path + ".txt")).toBe(false);
+        NodeFS.writeFileSync(path + ".txt", "orphaned extraction");
+        yield* cleanup.cleanupAttachments([file.id]);
+        expect(NodeFS.existsSync(path + ".txt")).toBe(false);
+      }).pipe(
+        Effect.provide(
+          Cleanup.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.mock(TerminalManager.TerminalManager)({}),
+                Layer.mock(PreviewManager.PreviewManager)({}),
+              ),
+            ),
+          ),
+        ),
+      );
     }).pipe(Effect.provide(layer)),
   );
 

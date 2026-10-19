@@ -66,6 +66,35 @@ describe("AttachmentClaims", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("copies a pending document's extraction without parsing it again", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const pendingId = createPendingAttachmentId("docx");
+      const path = NodePath.join(config.attachmentsDir, pendingId + ".docx");
+      NodeFS.writeFileSync(path, "invalid document");
+      NodeFS.writeFileSync(path + ".txt", "North calibration: 946");
+      const claimed = yield* claimPendingAttachments({
+        threadId: "thread-document",
+        attachments: [
+          {
+            type: "file",
+            id: ChatAttachmentId.make(pendingId),
+            name: "calibration.docx",
+            mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            sizeBytes: 16,
+          },
+        ],
+      });
+      expect(claimed.claimedPaths).toHaveLength(2);
+      expect(NodeFS.readFileSync(claimed.claimedPaths[1]!, "utf8")).toBe("North calibration: 946");
+      const documents = yield* DocumentText.DocumentText;
+      expect(yield* documents.ensure(claimed.claimedPaths[0]!)).toBe(claimed.claimedPaths[1]);
+      yield* releaseClaimedAttachments(claimed.claimedPaths);
+      expect(NodeFS.existsSync(claimed.claimedPaths[1]!)).toBe(false);
+      expect(NodeFS.existsSync(path + ".txt")).toBe(true);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("rejects oversized image batches before copying a pending upload", () =>
     Effect.gen(function* () {
       const pending = yield* stagePendingUpload({

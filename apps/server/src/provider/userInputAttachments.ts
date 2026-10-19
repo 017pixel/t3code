@@ -3,7 +3,6 @@ import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
-import { attachmentExtractedTextPath } from "@t3tools/provider-core/server/attachmentPrompt";
 import * as DocumentText from "./DocumentText.ts";
 class UserInputAttachmentError extends Schema.TaggedError<UserInputAttachmentError>()(
   "UserInputAttachmentError",
@@ -49,8 +48,7 @@ export const appendUserInputAttachmentPaths = Effect.fn("appendUserInputAttachme
             issue: `Attachment '${attachment.name}' is no longer available. Attach it again.`,
           });
         }
-        yield* documents.ensure(path);
-        const extracted = attachmentExtractedTextPath(path);
+        const extracted = yield* documents.ensure(path);
         references.push(
           `Attached ${attachment.type} ${quoteReference(attachment.name)}: ${quoteReference(path)}${extracted ? ` (text extracted to: ${quoteReference(extracted)})` : ""}`,
         );

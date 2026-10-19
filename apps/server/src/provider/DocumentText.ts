@@ -11,6 +11,18 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const extensions = new Set(["docx", "xlsx", "pptx", "odt", "ods", "odp", "rtf", "epub", "ipynb"]);
 
+export const resolveExtractedTextPath = Effect.fn("DocumentText.resolveExtractedTextPath")(
+  function* (path: string) {
+    const extension = path.split(".").at(-1)?.toLowerCase();
+    if (!extension || !extensions.has(extension)) return;
+    const fs = yield* FileSystem.FileSystem;
+    return yield* fs.exists(path + ".txt").pipe(
+      Effect.map((exists) => (exists ? path + ".txt" : undefined)),
+      Effect.orElseSucceed(() => undefined),
+    );
+  },
+);
+
 class DocumentTextError extends Schema.TaggedError<DocumentTextError>()("DocumentTextError", {
   cause: Schema.Defect(),
 }) {}

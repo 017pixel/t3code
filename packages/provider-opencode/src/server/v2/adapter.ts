@@ -2913,12 +2913,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       };
     });
 
-    const promptText = (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) =>
-      providerMessageTextWithAttachmentPaths({
+    const promptText = Effect.fnUntraced(function* (
+      turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+    ) {
+      return (yield* providerMessageTextWithAttachmentPaths({
         text: turnInput.message.text,
         attachments: turnInput.message.attachments,
         resolveAttachmentPath: host.resolveAttachmentPath,
-      }).trim();
+        resolveExtractedTextPath: host.resolveExtractedTextPath,
+      })).trim();
+    });
 
     const removeMcp = (mcp: { readonly name: string; readonly directory: string }) =>
       Effect.suspend(() =>
@@ -3262,7 +3266,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         .prompt({
           sessionID,
           id,
-          text: promptText(turnInput),
+          text: yield* promptText(turnInput),
           ...(skills.length === 0
             ? {}
             : { skills: skills.map((id) => ({ id: Skill.ID.make(id) })) }),
@@ -3587,11 +3591,12 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             .prompt({
               sessionID: Session.ID.make(sessionId),
               id: inboxID,
-              text: providerMessageTextWithAttachmentPaths({
+              text: (yield* providerMessageTextWithAttachmentPaths({
                 text: steerInput.message.text,
                 attachments: steerInput.message.attachments,
                 resolveAttachmentPath: host.resolveAttachmentPath,
-              }).trim(),
+                resolveExtractedTextPath: host.resolveExtractedTextPath,
+              })).trim(),
               delivery: "steer",
             })
             .pipe(
