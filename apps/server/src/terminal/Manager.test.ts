@@ -379,22 +379,22 @@ const createCodexTerminal = Effect.fn("test.createCodexTerminal")(function* (
     Effect.provideService(ServerConfig.ServerConfig, config),
     Effect.provideService(PtyAdapter.PtyAdapter, ptyAdapter),
     Effect.provide(
-      Layer.mock(PortScanner.PortDiscovery)({
-        registerTerminalProcesses: () => Effect.void,
-        unregisterTerminal: () => Effect.void,
-      }),
-    ),
-    Effect.provide(NativeTelemetryClient.layerTest({ processTable: Effect.succeed([]) })),
-    Effect.provide(
-      ServerSettings.layerTest({
-        providerInstances: {
-          [providerInstanceId]: {
-            driver: ProviderDriverKind.make("codex"),
-            config: { setupMode: "managed", homePath: "", shadowHomePath: "", ...options.config },
-            environment: options.environment ?? [],
+      Layer.mergeAll(
+        Layer.mock(PortScanner.PortDiscovery)({
+          registerTerminalProcesses: () => Effect.void,
+          unregisterTerminal: () => Effect.void,
+        }),
+        NativeTelemetryClient.layerTest({ processTable: Effect.succeed([]) }),
+        ServerSettings.layerTest({
+          providerInstances: {
+            [providerInstanceId]: {
+              driver: ProviderDriverKind.make("codex"),
+              config: { setupMode: "managed", homePath: "", shadowHomePath: "", ...options.config },
+              environment: options.environment ?? [],
+            },
           },
-        },
-      }),
+        }),
+      ),
     ),
   );
   return {
