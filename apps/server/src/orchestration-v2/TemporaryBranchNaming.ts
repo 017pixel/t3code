@@ -1,4 +1,4 @@
-import { CommandId, type ChatAttachment, type ProjectId, type ThreadId } from "@t3tools/contracts";
+import { CommandId, ThreadId, type ChatAttachment, type ProjectId } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
@@ -6,11 +6,17 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+
+class BranchMetadataPublicationStalled extends Schema.TaggedError<BranchMetadataPublicationStalled>()(
+  "BranchMetadataPublicationStalled",
+  { threadId: ThreadId },
+) {}
 
 type NamingInput = {
   readonly threadId: ThreadId;
@@ -91,6 +97,8 @@ const make = Effect.gen(function* () {
             ),
           );
       if ((yield* sharing(oldBranch)).length === 0) return;
+      yield* git.invalidateLocalStatus(cwd);
+      if ((yield* git.localStatus({ cwd })).refName !== oldBranch) return;
       const renamed = yield* git.renameBranch({
         cwd,
         oldBranch,
@@ -118,10 +126,15 @@ const make = Effect.gen(function* () {
             ),
           );
       yield* Effect.gen(function* () {
+        const visited = new Set<ThreadId>();
         while (true) {
           const remaining = yield* sharing(oldBranch);
           if (remaining.length === 0) break;
           for (const thread of remaining) {
+            // A replayed receipt can succeed without advancing rolled-back metadata.
+            if (visited.has(thread.id))
+              return yield* new BranchMetadataPublicationStalled({ threadId: thread.id });
+            visited.add(thread.id);
             yield* update(thread.id, oldBranch, renamed.branch, "branch-rename").pipe(
               Effect.retry({ times: 2, schedule: Schedule.spaced("100 millis") }),
             );
