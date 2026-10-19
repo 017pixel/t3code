@@ -17,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -762,10 +763,9 @@ export const make = Effect.gen(function* () {
             (effect) =>
               effect.threadId === threadId &&
               effect.request.type === "provider-thread.rollback" &&
-              effect.status === "failed" &&
-              effect.failureCode === "checkpoint_restore_partial",
+              effect.status === "failed",
           );
-          if (failed?.lastError == null) return;
+          if (failed === undefined) return;
           const now = yield* DateTime.now;
           const commandId = CommandId.make(`command:runtime-reconcile:rollback:${requestId}`);
           yield* eventSink.commitCommand({
@@ -782,7 +782,13 @@ export const make = Effect.gen(function* () {
                 occurredAt: now,
                 payload: {
                   ...thread,
-                  rollbackFailure: { requestId, message: failed.lastError },
+                  rollbackFailure: {
+                    requestId,
+                    message:
+                      failed.failureCode === "checkpoint_restore_partial"
+                        ? CheckpointRollbackService.ROLLBACK_PARTIAL_MESSAGE
+                        : CheckpointRollbackService.ROLLBACK_FAILED_MESSAGE,
+                  },
                   updatedAt: now,
                 },
               },

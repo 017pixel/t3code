@@ -45,6 +45,7 @@ import * as Statement from "effect/sql/Statement";
 import { LIVE_STREAM_MAX_ITEMS, LiveStreamBufferError } from "./LiveStreamBudget.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { ROLLBACK_FAILED_MESSAGE, ROLLBACK_PARTIAL_MESSAGE } from "./CheckpointRollbackService.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
@@ -2997,9 +2998,30 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       }),
   );
 
-  it.effect.each([true, false])(
-    "projects an uncertain guarded restore without replay after startup, expectedIdle=%s",
-    (expectedIdle) =>
+  it.effect.each([
+    {
+      expectedIdle: true,
+      terminalFailureCode: null,
+      expectedMessage: ROLLBACK_PARTIAL_MESSAGE,
+    },
+    {
+      expectedIdle: false,
+      terminalFailureCode: null,
+      expectedMessage: ROLLBACK_PARTIAL_MESSAGE,
+    },
+    {
+      expectedIdle: true,
+      terminalFailureCode: "checkpoint_restore_rejected",
+      expectedMessage: ROLLBACK_FAILED_MESSAGE,
+    },
+    {
+      expectedIdle: true,
+      terminalFailureCode: "checkpoint_restore_partial",
+      expectedMessage: ROLLBACK_PARTIAL_MESSAGE,
+    },
+  ] as const)(
+    "projects a safe guarded restore failure without replay after startup, expectedIdle=$expectedIdle, terminalFailureCode=$terminalFailureCode",
+    ({ expectedIdle, terminalFailureCode, expectedMessage }) =>
       Effect.gen(function* () {
         const outbox = yield* EffectOutbox.EffectOutboxV2;
         const eventSink = yield* EventSink.EventSinkV2;
@@ -3059,6 +3081,18 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           leaseDurationMs: 30_000,
         });
         assert.equal(Option.getOrThrow(claimed).id, effect.id);
+        const internalDiagnostic =
+          "SqlError: private rollback diagnostic\n    at commit (/private/workspace/secret-project/restore.ts:42:7)";
+        if (terminalFailureCode !== null) {
+          assert.isTrue(
+            yield* outbox.fail({
+              effectId: effect.id,
+              workerId: "lost-worker",
+              failureCode: terminalFailureCode,
+              error: internalDiagnostic,
+            }),
+          );
+        }
 
         const recovery = yield* ProviderRuntimeRecovery.make.pipe(
           Effect.provide(ServerSettings.layerTest()),
@@ -3067,8 +3101,12 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           yield* recovery.recover;
           const settled = Option.getOrThrow(yield* outbox.get(effect.id));
           assert.equal(settled.status, "failed");
-          assert.equal(settled.failureCode, "checkpoint_restore_partial");
-          assert.include(settled.lastError ?? "", "uncertain");
+          assert.equal(settled.failureCode, terminalFailureCode ?? "checkpoint_restore_partial");
+          if (terminalFailureCode !== null) {
+            assert.equal(settled.lastError, internalDiagnostic);
+          } else {
+            assert.include(settled.lastError ?? "", "uncertain");
+          }
           assert.equal(settled.attemptCount, 1);
           assert.isTrue(
             Option.isNone(
@@ -3079,7 +3117,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           assert.equal(projection.thread.rollbackRequestId, commandId);
           assert.deepEqual(projection.thread.rollbackFailure, {
             requestId: commandId,
-            message: settled.lastError,
+            message: expectedMessage,
           });
         }
       }).pipe(Effect.provide(Layer.fresh(layerTest))),
