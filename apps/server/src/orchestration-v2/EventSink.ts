@@ -5,16 +5,13 @@ import {
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
-  type ProviderTurnId,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
-  MessageId,
   NodeId,
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
-import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -37,9 +34,6 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
-/**
- * ERRORS
- */
 export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>()(
   "EventSinkWriteError",
   {
@@ -71,9 +65,6 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
 export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
-/**
- * SERVICE DEFINITION
- */
 export interface EventSinkV2Shape {
   readonly write: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
@@ -88,15 +79,6 @@ export interface EventSinkV2Shape {
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
-    /**
-     * Best-effort settlement of work an earlier projection read showed open,
-     * committed ahead of `events`. For a writer that settles work it no longer
-     * receives events for. It is rechecked in the transaction: a request
-     * answered or a row that ended since keeps its own outcome, and a row still
-     * open is settled from its current state. If the recheck cannot read, the
-     * settlement is dropped and `events` still commit.
-     */
-    readonly settlement?: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly commandId?: CommandId;
     readonly threadId: ThreadId;
     readonly runId: RunId;
@@ -175,10 +157,6 @@ export interface EventSinkV2Shape {
     readonly rejectedAt: DateTime.Utc;
     readonly error: string;
   }) => Effect.Effect<CommandReceiptStore.CommandReceiptV2, EventSinkV2Error>;
-  /**
-   * Append a project event, fold it into its row and record the receipt in one
-   * transaction. A reused command id commits nothing and returns its receipt.
-   */
   readonly commitProjectCommand: (input: {
     readonly commandId: CommandId;
     readonly projectId: ProjectId;
@@ -189,7 +167,6 @@ export interface EventSinkV2Shape {
     { readonly receipt: CommandReceiptStore.ProjectCommandReceiptV2; readonly committed: boolean },
     EventSinkV2Error
   >;
-  /** Record a rejected project command, or return the receipt its command id already has. */
   readonly commitRejectedProjectCommand: (input: {
     readonly commandId: CommandId;
     readonly projectId: ProjectId;
@@ -200,7 +177,6 @@ export interface EventSinkV2Shape {
   readonly stream: (input?: {
     readonly threadId?: ThreadId;
     readonly afterSequence?: number;
-    /** Filter before queuing live events so a busy worker retains only the events it handles. */
     readonly eventType?: OrchestrationV2DomainEvent["type"];
     /** Bound RPC subscribers; internal workers must not drop their subscription under load. */
     readonly bounded?: boolean;
@@ -217,9 +193,6 @@ export class EventSinkV2 extends Context.Service<EventSinkV2, EventSinkV2Shape>(
   "t3/orchestration-v2/EventSink/EventSinkV2",
 ) {}
 
-/**
- * IMPLEMENTATIONS
- */
 const layerBase: Layer.Layer<
   EventSinkV2,
   never,
@@ -261,10 +234,7 @@ const layerBase: Layer.Layer<
     // Transactions commit one at a time, but each writer publishes after its
     // commit. If a writer is descheduled in between, a later commit reaches
     // subscribers first, and clients drop any event at or below the newest
-    // sequence they have applied. So a writer takes this lane as the last step
-    // of its transaction and holds it until it has published. Publishing never
-    // waits, so a writer that holds the transaction while it waits for the
-    // lane is not blocked for long.
+    // sequence they have applied.
     const publishLane = yield* Semaphore.make(1);
     const commitThenPublish = <A, E, R>(
       transaction: Effect.Effect<A, E, R>,
@@ -292,65 +262,14 @@ const layerBase: Layer.Layer<
 
     // A user can answer after terminal normalization reads the pending request.
     // Recheck inside the write transaction so stale cleanup cannot erase answers.
-    // `allKinds` extends this from questions to approvals and every other kind.
-    const guardRequestCancellations = (
-      events: ReadonlyArray<OrchestrationV2DomainEvent>,
-      allKinds: boolean,
-    ) =>
+    const guardUserInputCancellations = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
       Effect.gen(function* () {
         const staleRequests = new Set<RuntimeRequestId>();
         const staleNodes = new Set<NodeId>();
-        // A run's cleanup settles a request's node and item with the run's own
-        // status, which is not always `cancelled`.
-        const settles = (status: string) =>
-          status === "cancelled" || (allKinds && (status === "failed" || status === "interrupted"));
-        // Whether a request was answered after the cleanup read it. A missing
-        // request leaves nothing to protect.
-        const answered = new Map<RuntimeRequestId, boolean>();
-        const wasAnswered = (threadId: ThreadId, requestId: RuntimeRequestId) =>
-          Effect.gen(function* () {
-            const known = answered.get(requestId);
-            if (known !== undefined) return known;
-            const current = yield* projectionStore.getRuntimeRequest(threadId, requestId);
-            const result =
-              current !== undefined &&
-              (current.status !== "pending" || current.responseCapability.type === "message");
-            answered.set(requestId, result);
-            return result;
-          });
         for (const event of events) {
-          // The cleanup reads nodes, requests and items at different moments,
-          // so it can settle a request's node or item after the request was
-          // answered and left its pending read. Each one is checked against
-          // its own request, with or without a cancellation beside it.
-          if (allKinds && event.type === "node.updated") {
-            const requestId = event.payload.runtimeRequestId;
-            if (
-              requestId !== null &&
-              settles(event.payload.status) &&
-              (yield* wasAnswered(event.payload.threadId, requestId))
-            ) {
-              staleNodes.add(event.payload.id);
-            }
-            continue;
-          }
-          if (
-            allKinds &&
-            event.type === "turn-item.updated" &&
-            (event.payload.type === "user_input_request" ||
-              event.payload.type === "approval_request")
-          ) {
-            if (
-              settles(event.payload.status) &&
-              (yield* wasAnswered(event.payload.threadId, event.payload.requestId))
-            ) {
-              staleRequests.add(event.payload.requestId);
-            }
-            continue;
-          }
           if (
             event.type !== "runtime-request.updated" ||
-            (!allKinds && event.payload.kind !== "user_input") ||
+            event.payload.kind !== "user_input" ||
             event.payload.status !== "cancelled"
           )
             continue;
@@ -360,7 +279,7 @@ const layerBase: Layer.Layer<
           );
           if (
             current?.status !== "pending" ||
-            current.kind !== event.payload.kind ||
+            current.kind !== "user_input" ||
             current.providerTurnId !== event.payload.providerTurnId ||
             current.responseCapability.type === "message"
           ) {
@@ -373,12 +292,11 @@ const layerBase: Layer.Layer<
             case "runtime-request.updated":
               return event.payload.status !== "cancelled" || !staleRequests.has(event.payload.id);
             case "node.updated":
-              return !settles(event.payload.status) || !staleNodes.has(event.payload.id);
+              return event.payload.status !== "cancelled" || !staleNodes.has(event.payload.id);
             case "turn-item.updated":
               return (
-                (event.payload.type !== "user_input_request" &&
-                  event.payload.type !== "approval_request") ||
-                !settles(event.payload.status) ||
+                event.payload.type !== "user_input_request" ||
+                event.payload.status !== "cancelled" ||
                 !staleRequests.has(event.payload.requestId)
               );
             default:
@@ -386,187 +304,6 @@ const layerBase: Layer.Layer<
           }
         });
       });
-    // A cleanup settles work it read as open. A row that ended on its own
-    // before the commit keeps its own outcome and result. One still open is
-    // settled from its current row, so a reply that streamed further since the
-    // read keeps its text.
-    const refreshSettlement = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
-      Effect.gen(function* () {
-        const ended = (status: string) =>
-          status === "completed" ||
-          status === "failed" ||
-          status === "cancelled" ||
-          status === "interrupted";
-        // Only the rows the settlement names are read, so a long thread's
-        // history stays out of the write transaction.
-        const ids = new Map<
-          ThreadId,
-          {
-            readonly messageIds: Array<MessageId>;
-            readonly nodeIds: Array<NodeId>;
-            readonly subagentIds: Array<NodeId>;
-            readonly providerTurnIds: Array<ProviderTurnId>;
-          }
-        >();
-        const idsFor = (threadId: ThreadId) => {
-          const known = ids.get(threadId);
-          if (known !== undefined) return known;
-          const created = { messageIds: [], nodeIds: [], subagentIds: [], providerTurnIds: [] };
-          ids.set(threadId, created);
-          return created;
-        };
-        for (const event of events) {
-          if (event.type === "message.updated")
-            idsFor(event.payload.threadId).messageIds.push(event.payload.id);
-          else if (event.type === "node.updated")
-            idsFor(event.payload.threadId).nodeIds.push(event.payload.id);
-          else if (event.type === "subagent.updated")
-            idsFor(event.payload.threadId).subagentIds.push(event.payload.id);
-          else if (event.type === "provider-turn.updated")
-            idsFor(event.threadId).providerTurnIds.push(event.payload.id);
-        }
-        const threads = new Map<
-          ThreadId,
-          | ProjectionStore.ProjectionRecords<"nodes" | "subagents" | "providerTurns" | "messages">
-          | undefined
-        >();
-        const records = (threadId: ThreadId) =>
-          Effect.gen(function* () {
-            if (threads.has(threadId)) return threads.get(threadId);
-            const read = yield* projectionStore
-              .getThreadRecords(
-                threadId,
-                ["nodes", "subagents", "providerTurns", "messages"],
-                idsFor(threadId),
-              )
-              .pipe(
-                Effect.catchTags({
-                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined),
-                }),
-              );
-            threads.set(threadId, read);
-            return read;
-          });
-        const kept: Array<OrchestrationV2DomainEvent> = [];
-        for (const event of events) {
-          switch (event.type) {
-            case "subagent.updated": {
-              const current = (yield* records(event.payload.threadId))?.subagents.find(
-                (row) => row.id === event.payload.id,
-              );
-              if (current === undefined) kept.push(event);
-              else if (!ended(current.status)) {
-                kept.push({
-                  ...event,
-                  payload: {
-                    ...current,
-                    status: event.payload.status,
-                    completedAt: event.payload.completedAt,
-                    updatedAt: event.payload.updatedAt,
-                  },
-                });
-              }
-              break;
-            }
-            case "node.updated": {
-              const current = (yield* records(event.payload.threadId))?.nodes.find(
-                (row) => row.id === event.payload.id,
-              );
-              if (current === undefined) kept.push(event);
-              else if (!ended(current.status)) {
-                kept.push({
-                  ...event,
-                  payload: {
-                    ...current,
-                    status: event.payload.status,
-                    completedAt: event.payload.completedAt,
-                  },
-                });
-              }
-              break;
-            }
-            case "turn-item.updated": {
-              const current = yield* projectionStore.getTurnItem({
-                threadId: event.payload.threadId,
-                itemId: event.payload.id,
-              });
-              if (current === null) kept.push(event);
-              else if (!ended(current.status)) {
-                const settled = {
-                  status: event.payload.status,
-                  completedAt: event.payload.completedAt,
-                  updatedAt: event.payload.updatedAt,
-                };
-                kept.push({
-                  ...event,
-                  payload:
-                    "streaming" in current
-                      ? { ...current, ...settled, streaming: false }
-                      : // A secret card still open also closes its form.
-                        current.type === "secret_request" && current.secretStatus === "pending"
-                        ? { ...current, ...settled, secretStatus: "cancelled" }
-                        : { ...current, ...settled },
-                });
-              }
-              break;
-            }
-            case "message.updated": {
-              const current = (yield* records(event.payload.threadId))?.messages.find(
-                (row) => row.id === event.payload.id,
-              );
-              if (current === undefined) kept.push(event);
-              else if (current.streaming) {
-                kept.push({
-                  ...event,
-                  payload: { ...current, streaming: false, updatedAt: event.payload.updatedAt },
-                });
-              }
-              break;
-            }
-            case "provider-turn.updated": {
-              const current = (yield* records(event.threadId))?.providerTurns.find(
-                (row) => row.id === event.payload.id,
-              );
-              if (current === undefined) kept.push(event);
-              else if (!ended(current.status)) {
-                kept.push({
-                  ...event,
-                  payload: {
-                    ...current,
-                    status: event.payload.status,
-                    completedAt: event.payload.completedAt,
-                  },
-                });
-              }
-              break;
-            }
-            default:
-              kept.push(event);
-          }
-        }
-        return kept;
-      });
-    // The settlement is optional; the events it rides with are not. A recheck
-    // that cannot read drops the whole settlement rather than the write.
-    const guardSettlement = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
-      guardRequestCancellations(events, true).pipe(
-        Effect.flatMap(refreshSettlement),
-        Effect.catchCauseIf(
-          (cause) => !Cause.hasInterruptsOnly(cause),
-          (cause) =>
-            Effect.logWarning("event sink dropped a settlement it could not recheck", {
-              eventCount: events.length,
-              cause: Cause.pretty(cause),
-            }).pipe(Effect.as([])),
-        ),
-      );
-    const guardCancellations = (input: {
-      readonly guardPendingUserInputCancellations?: boolean;
-      readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
-    }) =>
-      input.guardPendingUserInputCancellations === true
-        ? guardRequestCancellations(input.events, false)
-        : Effect.succeed(input.events);
 
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
       const runOrdinals = new Map(
@@ -632,7 +369,11 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
-          const normalized = yield* normalizeEvents(yield* guardCancellations(input));
+          const normalized = yield* normalizeEvents(
+            input.guardPendingUserInputCancellations === true
+              ? yield* guardUserInputCancellations(input.events)
+              : input.events,
+          );
           const committed = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
             events: normalized,
@@ -640,12 +381,7 @@ const layerBase: Layer.Layer<
           yield* applyStoredEvents(committed);
           yield* effectOutbox.enqueue(input.effects);
           return committed;
-        }).pipe(
-          // Every streamed agent event is a write, so its statements would
-          // dominate the trace file. This span and its sql.transaction span
-          // still time each write, including the commit.
-          Effect.withTracerEnabled(false),
-        ),
+        }).pipe(Effect.withTracerEnabled(false)),
         (storedEvents) =>
           Effect.gen(function* () {
             if (input.effects.length > 0) {
@@ -691,10 +427,11 @@ const layerBase: Layer.Layer<
               };
             }
 
-            const normalized = yield* normalizeEvents([
-              ...(input.settlement === undefined ? [] : yield* guardSettlement(input.settlement)),
-              ...(yield* guardCancellations(input)),
-            ]);
+            const normalized = yield* normalizeEvents(
+              input.guardPendingUserInputCancellations === true
+                ? yield* guardUserInputCancellations(input.events)
+                : input.events,
+            );
             const storedEvents = yield* eventStore.append({
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
               events: normalized,
@@ -755,7 +492,11 @@ const layerBase: Layer.Layer<
             };
           }
 
-          const normalized = yield* normalizeEvents(yield* guardCancellations(input));
+          const normalized = yield* normalizeEvents(
+            input.guardPendingUserInputCancellations === true
+              ? yield* guardUserInputCancellations(input.events)
+              : input.events,
+          );
           const storedEvents = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
             events: normalized,
@@ -1174,10 +915,8 @@ const layerBase: Layer.Layer<
 );
 
 /**
- * Event sink layer for application compositions that already own the
- * persistence services. Keeping the outbox instance shared with the worker is
- * important because enqueue notifications are in-memory wakeups backed by the
- * durable SQL queue.
+ * Keeping the outbox instance shared with the worker is important because enqueue notifications
+ * are in-memory wakeups backed by the durable SQL queue.
  */
 export const layerFromStores = layerBase;
 
