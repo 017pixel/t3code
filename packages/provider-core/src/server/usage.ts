@@ -116,10 +116,13 @@ export type ProviderUsageReader<Config, R> =
       readonly kind: "transcripts";
       readonly provider: UsageProviderKind;
       readonly format: TranscriptUsageFormat<unknown>;
-      readonly directories: (
-        instance: ProviderUsageInstance<Config>,
-      ) => Effect.Effect<
-        ReadonlyArray<{ readonly dir: string; readonly fileName?: string }>,
+      readonly directories: (instance: ProviderUsageInstance<Config>) => Effect.Effect<
+        ReadonlyArray<{
+          readonly dir: string;
+          /** Transcript roots sharing the logical source identity in `dir`. Defaults to `dir`. */
+          readonly transcriptDirs?: readonly string[];
+          readonly fileName?: string;
+        }>,
         never,
         R
       >;

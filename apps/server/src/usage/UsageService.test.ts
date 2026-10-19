@@ -1380,7 +1380,7 @@ describe("UsageService", () => {
         assert.strictEqual(
           summary.sources.find((source) => source.fingerprint.provider === "codex")?.fingerprint
             .resolvedHomePath,
-          NodePath.join(home, "inherited-codex", "sessions"),
+          NodePath.join(home, "inherited-codex"),
         );
         assert.strictEqual(
           summary.sources.find((source) => source.fingerprint.provider === "grok")?.fingerprint

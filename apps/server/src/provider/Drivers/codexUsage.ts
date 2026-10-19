@@ -227,6 +227,14 @@ export const codexUsageReader: ProviderUsageReader<CodexSettings, Path.Path> = {
         ? { ...config, homePath: environmentHome }
         : config,
     );
-    return [{ dir: path.resolve(layout.sharedHomePath, "sessions") }];
+    return [
+      {
+        dir: path.resolve(layout.sharedHomePath),
+        transcriptDirs: [
+          path.resolve(layout.sharedHomePath, "sessions"),
+          path.resolve(layout.sharedHomePath, "archived_sessions"),
+        ],
+      },
+    ];
   }),
 };

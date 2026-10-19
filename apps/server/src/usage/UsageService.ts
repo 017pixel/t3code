@@ -95,6 +95,7 @@ interface TranscriptSource {
   readonly format: TranscriptUsageFormat<unknown>;
   readonly dir: string;
   readonly volumeId: string;
+  readonly transcriptDirs: readonly string[];
   readonly fileName?: string;
 }
 
@@ -112,7 +113,12 @@ const encodeRatesCache = Schema.encodeEffect(
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeUsageRecordKey = Schema.encodeSync(ScanCacheJson);
-const CachedSource = Schema.Struct({ dir: Schema.String, volumeId: Schema.String });
+const CachedSource = Schema.Struct({
+  dir: Schema.String,
+  volumeId: Schema.String,
+  // Keep canonical roots when a symlink disappears, so its cached files still belong here.
+  transcriptDirs: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+});
 
 function isLaterRead(a: CachedFile, b: CachedFile): boolean {
   return a.mtimeMs > b.mtimeMs || (a.mtimeMs === b.mtimeMs && a.size > b.size);
@@ -334,18 +340,38 @@ export const make = Effect.gen(function* () {
   ) {
     const dirs: Array<TranscriptSource> = [];
     const seen = new Set<string>();
+    const seenRoots = new Set<string>();
     for (const { driver, reader } of transcriptReaders) {
       const { provider, format } = reader;
       const directories = yield* Effect.forEach(
         yield* usageInstances(driver, settings),
         (instance) => reader.directories(instance),
       );
-      for (const { dir: directory, fileName } of directories.flat()) {
+      for (const { dir: directory, transcriptDirs, fileName } of directories.flat()) {
         const sourceKey = provider + "\0" + directory;
         const previous = sourceCache.get(sourceKey);
         const dir = yield* fileSystem
           .realPath(directory)
           .pipe(Effect.orElseSucceed(() => previous?.dir ?? directory));
+        const resolvedRoots = Object.fromEntries(
+          yield* Effect.forEach(
+            transcriptDirs ?? [directory],
+            Effect.fnUntraced(function* (root) {
+              const canonical = yield* (
+                root === directory ? Effect.succeed(dir) : fileSystem.realPath(root)
+              ).pipe(
+                Effect.orElseSucceed(
+                  () =>
+                    previous?.transcriptDirs?.[root] ??
+                    sourceCache.get(provider + "\0" + root)?.dir ??
+                    path.resolve(dir, path.relative(directory, root)),
+                ),
+              );
+              return [root, canonical] as const;
+            }),
+          ),
+        );
+        const roots = [...new Set(Object.values(resolvedRoots))];
         const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
         const hasRetainedHistory = fileCache
           .entries()
@@ -354,24 +380,38 @@ export const make = Effect.gen(function* () {
               entry.provider === provider &&
               entry.mtimeMs >= retentionCutoffMs &&
               entry.records.length + entry.tailRecords.length > 0 &&
-              isWithinDirectory(filePath, dir),
+              roots.some((root) => isWithinDirectory(filePath, root)),
           );
         const volumeId =
           previous?.dir === dir && (hasRetainedHistory || !currentVolumeId)
             ? previous.volumeId || currentVolumeId
             : currentVolumeId;
-        if (previous?.dir !== dir || previous.volumeId !== volumeId) {
-          sourceCache.set(sourceKey, { dir, volumeId });
+        const previousRoots = previous?.transcriptDirs ?? {};
+        const rootsChanged =
+          Object.keys(previousRoots).length !== Object.keys(resolvedRoots).length ||
+          Object.entries(resolvedRoots).some(
+            ([root, canonical]) => previousRoots[root] !== canonical,
+          );
+        if (previous?.dir !== dir || previous.volumeId !== volumeId || rootsChanged) {
+          sourceCache.set(sourceKey, { dir, volumeId, transcriptDirs: resolvedRoots });
           cacheDirty = true;
         }
         const key = `${provider}\0${dir}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        const uniqueRoots = roots.filter((root) => {
+          const rootKey = provider + "\0" + root;
+          if (seenRoots.has(rootKey)) return false;
+          seenRoots.add(rootKey);
+          return true;
+        });
+        if (uniqueRoots.length === 0) continue;
         dirs.push({
           provider,
           format,
           dir,
           volumeId,
+          transcriptDirs: uniqueRoots,
           ...(fileName === undefined ? {} : { fileName }),
         });
       }
@@ -517,6 +557,7 @@ export const make = Effect.gen(function* () {
     readonly dir: string;
     readonly volumeId: string;
     readonly hostId?: string;
+    readonly transcriptDirs?: readonly string[];
     readonly status?: UsageSource["status"];
     readonly message?: string;
     readonly action?: UsageSource["action"];
@@ -530,14 +571,26 @@ export const make = Effect.gen(function* () {
     source: TranscriptSource,
     windowStartMs: number,
   ) {
-    const { provider, format, dir, volumeId, fileName } = source;
-    const exists = yield* fileSystem
-      .exists(dir)
-      .pipe(Effect.catchCause(() => Effect.succeed(false)));
-    if (!exists) return { provider, dir, volumeId, files: null } satisfies ScannedDir;
-    const { files, failedPaths } = yield* Effect.promise(() =>
-      listTranscriptFiles(dir, windowStartMs, fileName === undefined ? undefined : { fileName }),
+    const { provider, format, dir, volumeId, transcriptDirs, fileName } = source;
+    const listings = yield* Effect.forEach(
+      transcriptDirs,
+      Effect.fnUntraced(function* (root) {
+        const exists = yield* fileSystem.exists(root).pipe(Effect.orElseSucceed(() => true));
+        if (!exists) return null;
+        return yield* Effect.promise(() =>
+          listTranscriptFiles(
+            root,
+            windowStartMs,
+            fileName === undefined ? undefined : { fileName },
+          ),
+        );
+      }),
     );
+    const present = listings.filter((listing) => listing !== null);
+    if (present.length === 0)
+      return { provider, dir, volumeId, transcriptDirs, files: null } satisfies ScannedDir;
+    const files = present.flatMap((listing) => listing.files);
+    const failedPaths = present.reduce((sum, listing) => sum + listing.failedPaths, 0);
     const read = yield* Effect.forEach(
       files,
       (file) =>
@@ -567,6 +620,7 @@ export const make = Effect.gen(function* () {
       provider,
       dir,
       volumeId,
+      transcriptDirs,
       files: parsedFiles,
       ...(unread > 0
         ? {
@@ -702,7 +756,7 @@ export const make = Effect.gen(function* () {
     // Cleanup may remove transcripts, but the usage we already saved still
     // contributes to its source through the normal aggregation and dedupe path.
     const retainedSinceMs = Math.max(windowStartMs, retentionCutoffMs);
-    const filesByDir = scannedDirs.map(({ provider, dir, files }) => {
+    const filesByDir = scannedDirs.map(({ provider, dir, transcriptDirs, files }) => {
       const retainedFiles = [...(files ?? [])];
       const livePaths = new Set(retainedFiles.map((file) => file.path));
       for (const [filePath, entry] of fileCache) {
@@ -710,7 +764,7 @@ export const make = Effect.gen(function* () {
           entry.provider !== provider ||
           entry.mtimeMs < retainedSinceMs ||
           livePaths.has(filePath) ||
-          !isWithinDirectory(filePath, dir)
+          !(transcriptDirs ?? [dir]).some((root) => isWithinDirectory(filePath, root))
         )
           continue;
         retainedFiles.push({ path: filePath, records: [...entry.records, ...entry.tailRecords] });
@@ -725,7 +779,7 @@ export const make = Effect.gen(function* () {
     ] of scannedDirs.entries()) {
       let scannedFiles = 0;
       let skippedFiles = 0;
-      // Distinct per directory. Buckets carry per-cell session counts, but a
+      // Distinct per source. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
 
