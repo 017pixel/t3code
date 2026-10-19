@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeOS from "node:os";
 import { assert, it, afterEach, describe, expect, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -61,7 +62,12 @@ const checkoutFixture = Effect.gen(function* () {
       const child = yield* spawner.spawn(
         ChildProcess.make("git", input.args, {
           cwd: input.spawnCwd ?? input.cwd,
-          env: { ...process.env, ...input.env },
+          env: {
+            ...process.env,
+            ...input.env,
+            GIT_CONFIG_GLOBAL: NodeOS.devNull,
+            GIT_CONFIG_NOSYSTEM: "1",
+          },
           extendEnv: false,
         }),
       );
