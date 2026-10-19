@@ -2,6 +2,7 @@ import { expect, it } from "vite-plus/test";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
+import { searchableMessageSegments } from "./threadFindText.ts";
 import {
   CHAT_MARKDOWN_REHYPE_PLUGINS,
   CHAT_MARKDOWN_REMARK_PLUGINS,
@@ -97,6 +98,9 @@ it("renders stable source numbers, grouped locators and opaque IDs through both 
   expect(
     markdownText(processor.runSync(processor.parse(nextMessage), { value: nextMessage })),
   ).toBe("[Source 1: L42]");
+  expect(
+    searchableMessageSegments({ role: "assistant", text: markdown, streaming: false }),
+  ).toEqual([expected]);
 });
 
 it("keeps citation examples literal without numbering them or suppressing later prose", () => {
