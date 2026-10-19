@@ -18,11 +18,9 @@ vi.mock("../../state/session", () => ({
   useEnvironmentScope: () => true,
   readEnvironmentScope: () => true,
 }));
-vi.mock("../../state/environments", () => ({ useEnvironmentProviders: () => new Map() }));
 vi.mock("../../state/server", () => ({ serverEnvironment: { consumeResetCredit: null } }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => consume }));
 vi.mock("../../hooks/useSettings", () => ({ usePrimarySettings: () => "24h" }));
-vi.mock("../chat/ProviderInstanceIcon", () => ({ ProviderInstanceIcon: () => null }));
 vi.mock("../settings/RedactedSensitiveText", () => ({ RedactedSensitiveText: () => null }));
 
 import { UsageLimitsPooled } from "./UsageLimitsPooled";
@@ -94,6 +92,57 @@ async function click(label: string) {
   expect(button).toBeDefined();
   await act(() => userEvent.click(button!));
 }
+
+it("keeps the account badge identity when pooling fresher credits from another named instance", async () => {
+  const environmentId = EnvironmentId.make("env-a");
+  const presentation = presentations.get(environmentId)!;
+  const alpha = presentation.serverConfig!.providers[0]!;
+  const beta = {
+    ...alpha,
+    instanceId: ProviderInstanceId.make("beta"),
+    displayName: "Beta",
+    auth: { ...alpha.auth, email: "beta@example.com" },
+    usageLimits: {
+      ...alpha.usageLimits!,
+      checkedAt: "2026-09-03T11:30:00Z",
+      resetCredits: { availableCount: 2 },
+    },
+  } satisfies ServerProvider;
+  async function renderProviders(providers: ServerProvider[]) {
+    const input = new Map([
+      [
+        environmentId,
+        { ...presentation, serverConfig: { ...presentation.serverConfig, providers } },
+      ],
+    ]);
+    await act(() => root.render(<UsageLimitsPooled presentations={input} now={0} />));
+  }
+  function popupIdentity() {
+    const popup = document.querySelector('[data-slot="popover-popup"]')!;
+    const icon = popup.querySelector("[data-provider-accent-color]")!;
+    const badge = icon.querySelector("span[aria-hidden]")!;
+    return {
+      name: icon.nextElementSibling?.textContent,
+      initials: badge.textContent,
+      color: getComputedStyle(badge).backgroundColor,
+    };
+  }
+
+  await renderProviders([alpha, beta]);
+  await click("Alpha:");
+  const original = popupIdentity();
+  expect(original).toMatchObject({ name: "Alpha", initials: "AL" });
+  expect(original.color).not.toBe("rgba(0, 0, 0, 0)");
+  await act(() => userEvent.keyboard("{Escape}"));
+  await expect.poll(() => document.querySelector('[data-slot="popover-popup"]')).toBeNull();
+
+  await renderProviders([alpha, { ...beta, auth: alpha.auth }]);
+  expect(container.querySelectorAll('button[aria-label^="Beta:"]')).toHaveLength(0);
+  const pooled = container.querySelector('button[aria-label^="Alpha:"]')!;
+  expect(pooled.getAttribute("aria-label")).toContain("2 reset credits banked");
+  await click("Alpha:");
+  expect(popupIdentity()).toEqual(original);
+});
 
 it.each([
   {

@@ -19,8 +19,7 @@ import { Fragment, type ReactNode, useState } from "react";
 import { ensureLocalApi } from "../../localApi";
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
-import { deriveProviderInstanceEntries, shouldShowInstanceBadge } from "../../providerInstances";
-import { useEnvironmentProviders } from "../../state/environments";
+import { resolveProviderInstanceAccentColor } from "../../providerInstances";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { providerClients } from "../settings/providerDriverMeta";
@@ -71,25 +70,17 @@ function AccountAvatar({
   readonly account: LimitAccount;
   readonly className?: string;
 }) {
-  const providersByEnvironment = useEnvironmentProviders();
-  const target = account.redeem;
-  const entries = deriveProviderInstanceEntries(
-    target ? (providersByEnvironment.get(target.environmentId) ?? []) : [],
-  );
-  const instanceId = target && "instanceId" in target.input ? target.input.instanceId : null;
-  const entry = entries.find((candidate) => candidate.instanceId === instanceId);
-  if (target) {
+  if (account.redeem) {
     return (
       <ProviderInstanceIcon
         driverKind={account.driver}
         displayName={
-          entry?.displayName ??
           account.displayName ??
           providerClients.get(account.driver)?.label ??
           String(account.driver)
         }
-        accentColor={entry ? entry.accentColor : account.accentColor}
-        showBadge={entry ? shouldShowInstanceBadge(entry, entries) : Boolean(account.displayName)}
+        accentColor={account.accentColor}
+        showBadge={Boolean(account.displayName || account.accentColor)}
         indicatorBackground="var(--popover)"
         className={cn("size-5", className)}
         iconClassName="size-4 text-foreground/80"
@@ -543,7 +534,27 @@ export function UsageLimitsPooled({
   readonly now: number;
   readonly cursorPrompt?: ReactNode;
 }) {
-  const pools = collectLimitPools(collectLimitAccounts(presentations), now);
+  const coloredPresentations = new Map(
+    [...presentations].map(([environmentId, presentation]) => {
+      const config = presentation.serverConfig;
+      return [
+        environmentId,
+        {
+          ...presentation,
+          serverConfig: config
+            ? {
+                ...config,
+                providers: config.providers.map((provider) => ({
+                  ...provider,
+                  accentColor: resolveProviderInstanceAccentColor(provider, config.providers),
+                })),
+              }
+            : null,
+        },
+      ] as const;
+    }),
+  );
+  const pools = collectLimitPools(collectLimitAccounts(coloredPresentations), now);
   const notices = collectLimitNotices(presentations);
   const externalLinks = collectExternalUsageLinks(presentations);
   const cursorPromptAt =
