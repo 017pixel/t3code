@@ -8127,6 +8127,160 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
+  it.effect("does not fence unrelated roots for an unmatched turn start on a known root", () =>
+    Effect.gen(function* () {
+      const root = "known-root";
+      const peer = "known-root-peer";
+      const releaseNotification = yield* Deferred.make<void>();
+      const processed = yield* Deferred.make<void>();
+      const rootSettled = yield* Deferred.make<void>();
+      const clientReady = yield* Deferred.make<CodexClient.CodexAppServerClient["Service"]>();
+      const transcript = makeCodexReplayTranscript({
+        scenario: "known-root-unmatched-start",
+        entries: [
+          ...codexReplayPreamble({
+            nativeThreadId: root,
+            nativeTurnId: "known-root-turn",
+            prompt: "Continue",
+          }),
+          {
+            type: "emit_inbound",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: root,
+                turn: makeCodexReplayTurn({ id: "known-root-turn", status: "completed" }),
+              },
+            },
+          },
+          ...codexReplayPreamble({ nativeThreadId: peer, nativeTurnId: "unused", prompt: "unused" })
+            .slice(3, 5)
+            .map((entry) => withReplayRequestId(entry, 4)),
+          {
+            type: "emit_inbound",
+            label: "unmatched-root-start",
+            frame: {
+              method: "turn/started",
+              params: {
+                threadId: root,
+                turn: makeCodexReplayTurn({ id: "unmatched-root-turn", status: "inProgress" }),
+              },
+            },
+          },
+          {
+            type: "expect_outbound",
+            frame: { id: 5, method: "thread/unsubscribe", params: { threadId: peer } },
+          },
+          { type: "emit_inbound", frame: { id: 5, result: { status: "unsubscribed" } } },
+          { type: "emit_inbound", frame: { method: "thread/closed", params: { threadId: peer } } },
+        ],
+      });
+      const driver = yield* CodexReplay.makeReplayDriver(transcript, {
+        beforeEmitInbound: (entry) =>
+          entry.label === "unmatched-root-start"
+            ? Deferred.await(releaseNotification)
+            : Effect.void,
+      });
+      const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
+        instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CODEX_SETTINGS,
+        environment: {},
+        clientFactory: {
+          open: (input) =>
+            Effect.gen(function* () {
+              const context = yield* Layer.build(CodexReplay.layerReplayWithDriver(driver));
+              const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+                Effect.provide(context),
+              );
+              yield* Deferred.succeed(clientReady, client);
+              return {
+                ...client,
+                raw: {
+                  ...client.raw,
+                  request: (method, params) =>
+                    method === "thread/read"
+                      ? Effect.succeed({ thread: { id: root, model: "gpt-5.4", source: "vscode" } })
+                      : client.raw.request(method, params),
+                },
+              } satisfies CodexClient.CodexAppServerClient["Service"];
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterOpenSessionError({
+                    driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                    providerSessionId: input.providerSessionId,
+                    cause,
+                  }),
+              ),
+            ),
+        },
+        crypto: yield* Crypto.Crypto,
+        fileSystem: yield* FileSystem.FileSystem,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+        serverConfig: yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
+      });
+      const runtime = yield* adapter.openSession({
+        threadId: ThreadId.make(root),
+        providerSessionId: ProviderSessionId.make("known-root-session"),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      const client = yield* Deferred.await(clientReady);
+      // Client handlers run in registration order, so this observes the adapter
+      // finishing the notification, not merely the replay emitting it.
+      yield* client.handleServerNotification("turn/started", (payload) =>
+        payload.turn.id === "unmatched-root-turn"
+          ? Deferred.succeed(processed, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          event.type === "turn.terminal"
+            ? Deferred.succeed(rootSettled, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      const rootThread = yield* runtime.ensureThread({
+        threadId: ThreadId.make(root),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      yield* runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: ThreadId.make(root),
+          providerThread: rootThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("known-root-attempt"),
+          text: "Continue",
+        }),
+      );
+      yield* Deferred.await(rootSettled);
+      const peerThread = yield* runtime.ensureThread({
+        threadId: ThreadId.make(peer),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      yield* Deferred.succeed(releaseNotification, undefined);
+      yield* Deferred.await(processed);
+      const pending = yield* runtime.hasPendingBackgroundWorkForThread!(peerThread);
+      const unloaded = yield* runtime.unloadThread!({ providerThread: peerThread }).pipe(
+        Effect.result,
+      );
+      assert.isFalse(pending, "a registered root is not an unresolved native child");
+      assert.equal(unloaded._tag, "Success");
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isNull((yield* Ref.get(driver.state)).failure);
+      assert.equal((yield* Ref.get(driver.state)).cursor, transcript.entries.length);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect("recovers out-of-order native ancestry and releases only the completed subtree", () =>
     Effect.gen(function* () {
       const root = "owned-root",
