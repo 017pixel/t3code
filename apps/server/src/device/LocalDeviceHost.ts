@@ -179,8 +179,8 @@ const androidSdk = Effect.gen(function* () {
     if (sdk.adb && sdk.emulator && sdk.avdmanager) return sdk;
     fallback ??= sdk;
   }
-  // PATH entries can be slow to stat (network shares), so only consult them after the standard locations miss.
-  if (!explicit && !fallback) {
+  // PATH entries can be slow to stat (network shares), so skip them when a standard SDK is complete.
+  if (!explicit) {
     const searchPath = environment.PATH ?? environment.Path ?? "";
     for (const directory of searchPath.split(windows ? ";" : ":")) {
       if (!directory) continue;
@@ -188,7 +188,9 @@ const androidSdk = Effect.gen(function* () {
       if (!(yield* exists(adb))) continue;
       const resolved = yield* fs.realPath(adb).pipe(Effect.orElseSucceed(() => adb));
       const sdk = yield* inspect(path.dirname(path.dirname(resolved)));
-      if (sdk) return sdk;
+      if (!sdk) continue;
+      if (sdk.adb && sdk.emulator && sdk.avdmanager) return sdk;
+      fallback ??= sdk;
     }
   }
   return (
