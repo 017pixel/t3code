@@ -105,6 +105,14 @@ function reasonFor(
   }
 }
 
+const FAILURE_DETAIL: Record<IssueTrackerError["reason"], string> = {
+  "missing-tool": "GitHub CLI is not installed.",
+  unauthenticated: "GitHub authentication is unavailable. Sign in and retry.",
+  "rate-limited": "GitHub API rate limit exceeded.",
+  "not-found": "GitHub could not find the requested issue.",
+  failed: "The GitHub issue request failed.",
+};
+
 const group = GraphQLGroup.merge(
   IssuesGraphQLGroup,
   GraphQLGroup.make(AddReaction, RemoveReaction),
@@ -123,7 +131,7 @@ export const make = Effect.gen(function* () {
         reason: reasonFor(error),
         detail: GraphQLClientError.isGraphQLClientError(error)
           ? `GitHub returned an unreadable ${operation} response.`
-          : error.message,
+          : FAILURE_DETAIL[reasonFor(error)],
         ...("retryAt" in error && error.retryAt !== undefined ? { retryAt: error.retryAt } : {}),
         cause: error,
       });
@@ -161,12 +169,27 @@ export const make = Effect.gen(function* () {
     ) =>
       effect.pipe(GitHubGraphQlClient.call({ host, operation }), Effect.mapError(fail(operation)));
 
+  const verifiedIssue = Effect.fnUntraced(function* (
+    input: { readonly host: string; readonly scope: string; readonly key: string },
+    operation: string,
+  ) {
+    const target = yield* issue(input, operation);
+    const { owner, name, number } = target;
+    // REST issue endpoints also accept pull requests; resolve an Issue before writing.
+    const result = yield* client
+      .IssueNodeId({ owner, name, number })
+      .pipe(graphql(input.host, operation));
+    const id = result.repository?.issue?.id;
+    if (id === undefined) return yield* notFound(operation);
+    return { ...target, id };
+  });
+
   const patchIssue = (
     input: { readonly host: string; readonly scope: string; readonly key: string },
     operation: string,
     body: Record<string, unknown>,
   ) =>
-    issue(input, operation).pipe(
+    verifiedIssue(input, operation).pipe(
       Effect.flatMap(({ path }) =>
         api
           .rest({ host: input.host, operation, method: "PATCH", path, body })
@@ -312,7 +335,7 @@ export const make = Effect.gen(function* () {
       ),
 
     comment: (input) =>
-      issue(input, "comment").pipe(
+      verifiedIssue(input, "comment").pipe(
         Effect.flatMap(({ path }) =>
           api
             .rest({
@@ -344,16 +367,12 @@ export const make = Effect.gen(function* () {
 
     setReaction: (input) =>
       Effect.gen(function* () {
-        const { owner, name, number } = yield* issue(input, "setReaction");
         let subjectId: string;
         if (input.subjectId === undefined) {
-          const result = yield* client
-            .IssueNodeId({ owner, name, number })
-            .pipe(graphql(input.host, "setReaction"));
-          const id = result.repository?.issue?.id;
-          if (id === undefined) return yield* notFound("setReaction");
-          subjectId = id;
+          const target = yield* verifiedIssue(input, "setReaction");
+          subjectId = target.id;
         } else {
+          const { owner, name, number } = yield* issue(input, "setReaction");
           // Node ids are global: prove the comment belongs to this issue before writing.
           const result = yield* client
             .IssueCommentScope({ owner, name, number, commentId: input.subjectId })

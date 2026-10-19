@@ -128,74 +128,200 @@ const DETAIL_RESPONSE = JSON.stringify({
 const decodeVariables = Schema.decodeUnknownSync(
   Schema.fromJsonString(
     Schema.Struct({
+      query: Schema.String,
       variables: Schema.Record(Schema.String, Schema.Unknown),
     }),
   ),
 );
 
-function tracker(onRequest: (variables: unknown) => void, templateRepository?: unknown) {
-  return GitHubIssueTracker.make.pipe(
-    Effect.provide(
-      GitHubRest.layer.pipe(
-        Layer.provideMerge(
-          Layer.mergeAll(
-            GitHubQuota.layer,
-            SourceControlRateLimit.layer,
-            Layer.mock(GitHubCredentials.GitHubCredentials)({
-              get: (host) =>
-                Effect.succeed({
-                  host,
-                  token: Redacted.make("test-token"),
-                  source: "gh" as const,
-                  fingerprint: "test",
-                }),
+function transport(httpClient: HttpClient.HttpClient) {
+  return GitHubRest.layer.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        GitHubQuota.layer,
+        SourceControlRateLimit.layer,
+        Layer.mock(GitHubCredentials.GitHubCredentials)({
+          get: (host) =>
+            Effect.succeed({
+              host,
+              token: Redacted.make("test-token"),
+              source: "gh" as const,
+              fingerprint: "test",
             }),
-            Layer.succeed(
-              HttpClient.HttpClient,
-              HttpClient.make((request) => {
-                if (request.body._tag !== "Uint8Array")
-                  return Effect.die("Expected a GraphQL JSON request.");
-                const { variables } = decodeVariables(new TextDecoder().decode(request.body.body));
-                onRequest(variables);
-                const body =
-                  templateRepository !== undefined
-                    ? JSON.stringify({ data: { repository: templateRepository } })
-                    : "labelsCursor" in variables
-                      ? JSON.stringify({
-                          data: {
-                            repository: {
-                              issue: {
-                                labels: {
-                                  pageInfo: { hasNextPage: false, endCursor: null },
-                                  nodes: [{ name: "needs repro", color: "ffffff" }],
-                                },
-                                assignees: {
-                                  pageInfo: { hasNextPage: false, endCursor: null },
-                                  nodes: [],
-                                },
-                              },
-                            },
-                          },
-                        })
-                      : DETAIL_RESPONSE;
-                return Effect.succeed(
-                  HttpClientResponse.fromWeb(
-                    request,
-                    new Response(body, {
-                      headers: { "content-type": "application/json" },
-                    }),
-                  ),
-                );
-              }),
-            ),
-          ),
-        ),
+        }),
+        Layer.succeed(HttpClient.HttpClient, httpClient),
       ),
     ),
   );
 }
 
+function tracker(onRequest: (variables: unknown) => void, templateRepository?: unknown) {
+  return GitHubIssueTracker.make.pipe(
+    Effect.provide(
+      transport(
+        HttpClient.make((request) => {
+          if (request.body._tag !== "Uint8Array")
+            return Effect.die("Expected a GraphQL JSON request.");
+          const { variables } = decodeVariables(new TextDecoder().decode(request.body.body));
+          onRequest(variables);
+          const body =
+            templateRepository !== undefined
+              ? JSON.stringify({ data: { repository: templateRepository } })
+              : "labelsCursor" in variables
+                ? JSON.stringify({
+                    data: {
+                      repository: {
+                        issue: {
+                          labels: {
+                            pageInfo: { hasNextPage: false, endCursor: null },
+                            nodes: [{ name: "needs repro", color: "ffffff" }],
+                          },
+                          assignees: {
+                            pageInfo: { hasNextPage: false, endCursor: null },
+                            nodes: [],
+                          },
+                        },
+                      },
+                    },
+                  })
+                : DETAIL_RESPONSE;
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response(body, {
+                headers: { "content-type": "application/json" },
+              }),
+            ),
+          );
+        }),
+      ),
+    ),
+  );
+}
+
+const decodeBody = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
+
 describe("GitHubIssueTracker", () => {
+  it.effect("writes an issue lifecycle without mutating pull requests or foreign comments", () =>
+    Effect.gen(function* () {
+      const writes: unknown[] = [];
+      const http = HttpClient.make((request) => {
+        if (request.body._tag !== "Uint8Array") return Effect.die("Expected a JSON request.");
+        const text = new TextDecoder().decode(request.body.body);
+        let response: unknown = {};
+        if (request.url === "https://api.github.com/graphql") {
+          const { query, variables } = decodeVariables(text);
+          expect(request.method).toBe("POST");
+          const operation = query.match(/(?:query|mutation)\s+(\w+)/)?.[1];
+          if (operation === "IssueNodeId" || operation === "IssueCommentScope") {
+            expect(variables).toMatchObject({ owner: "acme", name: "web" });
+            response = {
+              data: {
+                repository: { issue: variables["number"] === 42 ? { id: "I_42" } : null },
+                ...(operation === "IssueCommentScope"
+                  ? { node: { __typename: "IssueComment", issue: { id: "I_other" } } }
+                  : {}),
+              },
+            };
+          } else {
+            expect(["AddReaction", "RemoveReaction"]).toContain(operation);
+            expect(variables).toEqual({ subjectId: "I_42", content: "THUMBS_UP" });
+            writes.push(operation);
+            response = {
+              data: {
+                [operation === "AddReaction" ? "addReaction" : "removeReaction"]: {
+                  reaction: { content: "THUMBS_UP" },
+                },
+              },
+            };
+          }
+        } else {
+          writes.push([request.method, request.url, decodeBody(text)]);
+          if (request.url.endsWith("/issues")) {
+            response = { number: 42, html_url: "https://github.com/acme/web/issues/42" };
+          }
+        }
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(JSON.stringify(response), {
+              headers: { "content-type": "application/json" },
+            }),
+          ),
+        );
+      });
+      const api = yield* GitHubIssueTracker.make.pipe(Effect.provide(transport(http)));
+      const target = { cwd: "/w", host: "github.com", scope: "acme/web", key: "42" };
+      expect(
+        yield* api.create({
+          ...target,
+          title: "Fixture",
+          body: "Body",
+          labels: ["bug"],
+          assignees: ["octocat"],
+        }),
+      ).toEqual({
+        key: "42",
+        displayKey: "#42",
+        url: "https://github.com/acme/web/issues/42",
+      });
+      yield* api.comment({ ...target, body: "Comment" });
+      yield* api.update({ ...target, title: "Updated", body: "Edited", labels: [], assignees: [] });
+      yield* api.setState({ ...target, state: "closed", closeReason: "not-planned" });
+      yield* api.setState({ ...target, state: "open" });
+      yield* api.setReaction({ ...target, content: "thumbs-up", reacted: true });
+      yield* api.setReaction({ ...target, content: "thumbs-up", reacted: false });
+
+      const pullRequest = { ...target, key: "50" };
+      expect(
+        yield* api.update({ ...pullRequest, title: "Do not edit" }).pipe(Effect.result),
+      ).toMatchObject({ _tag: "Failure", failure: { operation: "update", reason: "not-found" } });
+      expect(
+        yield* api.setState({ ...pullRequest, state: "closed" }).pipe(Effect.result),
+      ).toMatchObject({
+        _tag: "Failure",
+        failure: { operation: "setState", reason: "not-found" },
+      });
+      expect(
+        yield* api.comment({ ...pullRequest, body: "Do not comment" }).pipe(Effect.result),
+      ).toMatchObject({ _tag: "Failure", failure: { operation: "comment", reason: "not-found" } });
+      expect(
+        yield* Effect.flip(
+          api.setReaction({
+            ...target,
+            subjectId: "IC_other",
+            content: "thumbs-up",
+            reacted: true,
+          }),
+        ),
+      ).toMatchObject({ operation: "setReaction", reason: "failed" });
+
+      expect(writes).toEqual([
+        [
+          "POST",
+          "https://api.github.com/repos/acme/web/issues",
+          { title: "Fixture", body: "Body", labels: ["bug"], assignees: ["octocat"] },
+        ],
+        ["POST", "https://api.github.com/repos/acme/web/issues/42/comments", { body: "Comment" }],
+        [
+          "PATCH",
+          "https://api.github.com/repos/acme/web/issues/42",
+          { title: "Updated", body: "Edited", labels: [], assignees: [] },
+        ],
+        [
+          "PATCH",
+          "https://api.github.com/repos/acme/web/issues/42",
+          { state: "closed", state_reason: "not_planned" },
+        ],
+        ["PATCH", "https://api.github.com/repos/acme/web/issues/42", { state: "open" }],
+        "AddReaction",
+        "RemoveReaction",
+      ]);
+    }),
+  );
+
   it.effect("offers YAML issue forms when blank issues are disabled", () =>
     Effect.gen(function* () {
       const form = {

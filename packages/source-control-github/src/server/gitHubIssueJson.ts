@@ -194,7 +194,7 @@ function previousCursorOf(
   return pageInfo?.hasPreviousPage === true ? pageInfo.startCursor : null;
 }
 
-export function toViewerPermissions(raw: {
+function toViewerPermissions(raw: {
   readonly viewerPermission?: string | null | undefined;
   readonly issue: { readonly viewerCanUpdate: boolean } | null;
 }): IssueViewerPermissions {

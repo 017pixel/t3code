@@ -208,7 +208,10 @@ describe("IssueService", () => {
         key: "42",
         body: "Repro attached.",
       });
-      expect(requests).toEqual(["POST https://api.github.com/repos/acme/web/issues/42/comments"]);
+      expect(requests).toEqual([
+        "POST https://api.github.com/graphql",
+        "POST https://api.github.com/repos/acme/web/issues/42/comments",
+      ]);
     }).pipe(
       Effect.provide(
         GitHubRest.layer.pipe(
@@ -229,7 +232,15 @@ describe("IssueService", () => {
                 HttpClient.HttpClient,
                 HttpClient.make((request) => {
                   requests.push(`${request.method} ${request.url}`);
-                  return Effect.succeed(HttpClientResponse.fromWeb(request, new Response("{}")));
+                  const body = request.url.endsWith("/graphql")
+                    ? JSON.stringify({ data: { repository: { issue: { id: "I_42" } } } })
+                    : "{}";
+                  return Effect.succeed(
+                    HttpClientResponse.fromWeb(
+                      request,
+                      new Response(body, { headers: { "content-type": "application/json" } }),
+                    ),
+                  );
                 }),
               ),
             ),
