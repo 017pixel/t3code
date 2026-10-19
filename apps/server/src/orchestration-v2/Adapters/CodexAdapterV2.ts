@@ -2837,6 +2837,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* emitSubagentProviderTurnStarted(subagent, input);
               return;
             }
+            if (rootProviderThreads.has(input.nativeThreadId)) return;
             yield* Ref.update(pendingSubagentTurns, (current) => {
               const pending = current.get(input.nativeThreadId) ?? [];
               if (pending.some((turn) => turn.nativeTurnId === input.nativeTurnId)) return current;
