@@ -163,3 +163,22 @@ export function stepComposerPromptHistory(input: {
   if (!entry) return { position: null, prompt: "" };
   return { position: { entryId: entry.id, recalled: entry.prompt }, prompt: entry.prompt };
 }
+
+export async function loadEarlierComposerPromptHistory(input: {
+  readonly getCurrent: () => Omit<Parameters<typeof stepComposerPromptHistory>[0], "direction"> & {
+    readonly blocked: boolean;
+  };
+  readonly loadEarlier: () => Promise<void>;
+  readonly signal: AbortSignal;
+}): Promise<ComposerPromptHistoryStep | null> {
+  if (input.signal.aborted) return null;
+  try {
+    await input.loadEarlier();
+  } catch {
+    return null;
+  }
+  if (input.signal.aborted) return null;
+  const current = input.getCurrent();
+  if (current.blocked) return null;
+  return stepComposerPromptHistory({ ...current, direction: "backward" });
+}

@@ -1078,7 +1078,10 @@ import {
 } from "../../types";
 import {
   buildComposerPromptHistoryEntries,
+  loadEarlierComposerPromptHistory,
   stepComposerPromptHistory,
+  type ComposerPromptHistoryMessage,
+  type ComposerPromptHistoryStep,
   type ComposerPromptHistoryPosition,
 } from "./composerPromptHistory";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
@@ -1508,6 +1511,13 @@ export interface ChatComposerProps {
   activeThread: Thread | undefined;
   activeThreadShell: ThreadShell | null;
   promptHistoryMessages: ReadonlyArray<ChatMessage>;
+  getPromptHistory?:
+    | (() => {
+        readonly messages: ReadonlyArray<ComposerPromptHistoryMessage>;
+        readonly blocked: boolean;
+      })
+    | undefined;
+  onLoadOlderPromptHistory?: (() => Promise<void> | null) | undefined;
   isServerThread: boolean;
   isLocalDraftThread: boolean;
   forceExpandedOnMobile: boolean;
@@ -1904,6 +1914,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
     promptHistoryMessages,
+    getPromptHistory,
+    onLoadOlderPromptHistory,
     isServerThread: _isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     forceExpandedOnMobile,
@@ -2407,6 +2419,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     targetKey: string;
     position: ComposerPromptHistoryPosition;
   } | null>(null);
+  const pendingPromptRecallRef = useRef<AbortController | null>(null);
+  const cancelPendingPromptRecall = useStableCallback(() => {
+    pendingPromptRecallRef.current?.abort();
+    pendingPromptRecallRef.current = null;
+  });
+  useLayoutEffect(() => {
+    if (promptHistoryPositionRef.current?.targetKey !== composerDraftTargetKey) {
+      promptHistoryPositionRef.current = null;
+    }
+    return cancelPendingPromptRecall;
+  }, [composerDraftTargetKey, cancelPendingPromptRecall]);
   const [composerHighlightedSearchKey, setComposerHighlightedSearchKey] = useState<string | null>(
     null,
   );
@@ -3506,7 +3529,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     );
     setIsComposerScrollCollapsed(false);
   };
-  const expandComposerForEditorChangeStable = useStableCallback(expandComposerForEditorChange);
 
   /**
    * Payloads for chips the prompt no longer references. History undo restores the
@@ -3530,6 +3552,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     cursorAdjacentToMention: boolean,
     contextIds: string[],
   ) => {
+    cancelPendingPromptRecall();
     expandComposerForEditorChange();
     // Typing is when the menu is about to need skills, so it re-checks a
     // snapshot that has aged past its TTL.
@@ -4003,6 +4026,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     });
     setComposerSubmissionError(submission.validationMessage);
     if (!submission.didDispatch) return;
+    cancelPendingPromptRecall();
     onTypingGuardSend();
     if (shouldBlurMobileComposerOnSubmit()) {
       blurMobileComposerAfterSend();
@@ -4103,47 +4127,117 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setComposerHighlightedItemId(null);
   };
 
-  const navigatePromptHistory = (
-    direction: "backward" | "forward",
-    event: KeyboardEvent,
-  ): boolean => {
-    if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || event.isComposing) {
-      return false;
-    }
-    if (isComposerApprovalState || pendingUserInputs.length > 0) return false;
-    if (
-      composerImagesRef.current.length > 0 ||
-      composerFilesRef.current.length > 0 ||
-      composerTerminalContextsRef.current.length > 0 ||
-      composerPreviewAnnotations.length > 0 ||
-      composerReviewComments.length > 0
-    ) {
-      return false;
-    }
+  const isPromptHistoryBlocked = useStableCallback(() => {
+    const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    return (
+      isComposerApprovalState ||
+      incomingPendingApproval !== null ||
+      incomingPendingUserInputs.length > 0 ||
+      (draft?.images.length ?? 0) > 0 ||
+      (draft?.files.length ?? 0) > 0 ||
+      (draft?.terminalContexts.length ?? 0) > 0 ||
+      (draft?.previewAnnotations.length ?? 0) > 0 ||
+      (draft?.reviewComments.length ?? 0) > 0 ||
+      (draft?.threadContexts.length ?? 0) > 0 ||
+      (pendingImageCompressionsRef.current.get(attachmentTargetKey) ?? 0) > 0 ||
+      pendingDraftWork.has(attachmentTargetKey)
+    );
+  });
+  const readPromptHistory = useStableCallback((fresh = false) => {
+    const history = fresh ? getPromptHistory?.() : undefined;
     const recalled = promptHistoryPositionRef.current;
-    const position = recalled?.targetKey === promptHistoryTargetKey ? recalled.position : null;
-    if (position === null && promptRef.current.length > 0) {
-      return false;
-    }
-    const editor = composerEditorRef.current;
-    if (!editor?.isCaretOnVisualEdge(direction === "backward" ? "start" : "end")) {
-      return false;
-    }
-    const step = stepComposerPromptHistory({
-      direction,
-      entries: buildComposerPromptHistoryEntries(promptHistoryMessagesRef.current),
-      position,
-      currentPrompt: promptRef.current,
-    });
-    if (!step) return false;
+    return {
+      entries: buildComposerPromptHistoryEntries(
+        history?.messages ?? promptHistoryMessagesRef.current,
+      ),
+      position: recalled?.targetKey === promptHistoryTargetKey ? recalled.position : null,
+      currentPrompt:
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.prompt ??
+        promptRef.current,
+      blocked: history?.blocked === true || isPromptHistoryBlocked(),
+    };
+  });
+  const applyPromptHistoryStep = useStableCallback((step: ComposerPromptHistoryStep) => {
     promptHistoryPositionRef.current = step.position
       ? { targetKey: promptHistoryTargetKey, position: step.position }
       : null;
     replacePromptFromHistory(step.prompt);
+  });
+  useLayoutEffect(() => {
+    if (pendingPromptRecallRef.current && isPromptHistoryBlocked()) cancelPendingPromptRecall();
+  });
+
+  const onPromptHistorySelectionChange = useStableCallback(() => {
+    cancelPendingPromptRecall();
+    expandComposerForEditorChange();
+  });
+
+  const navigatePromptHistory = (
+    direction: "backward" | "forward",
+    event: KeyboardEvent,
+  ): boolean => {
+    if (
+      event.shiftKey ||
+      event.altKey ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.isComposing ||
+      event.keyCode === 229
+    ) {
+      cancelPendingPromptRecall();
+      return false;
+    }
+    if (isPromptHistoryBlocked()) {
+      cancelPendingPromptRecall();
+      return false;
+    }
+    const current = readPromptHistory();
+    if (current.currentPrompt.length > 0 && current.position?.recalled !== current.currentPrompt) {
+      cancelPendingPromptRecall();
+      return false;
+    }
+    const editor = composerEditorRef.current;
+    if (!editor?.isCaretOnVisualEdge(direction === "backward" ? "start" : "end")) {
+      cancelPendingPromptRecall();
+      return false;
+    }
+    const step = stepComposerPromptHistory({ ...current, direction });
+    if (step) {
+      cancelPendingPromptRecall();
+      applyPromptHistoryStep(step);
+      return true;
+    }
+    if (direction !== "backward") {
+      cancelPendingPromptRecall();
+      return false;
+    }
+    if (pendingPromptRecallRef.current) return true;
+    const page = onLoadOlderPromptHistory?.();
+    if (!page) return false;
+    const controller = new AbortController();
+    pendingPromptRecallRef.current = controller;
+    // Store changes include context arriving before React commits its new props.
+    const requestDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    const unsubscribe = useComposerDraftStore.subscribe((state) => {
+      if (state.getComposerDraft(composerDraftTarget) !== requestDraft) controller.abort();
+    });
+    void loadEarlierComposerPromptHistory({
+      getCurrent: () => readPromptHistory(true),
+      loadEarlier: () => page,
+      signal: controller.signal,
+    }).then((loadedStep) => {
+      unsubscribe();
+      if (pendingPromptRecallRef.current !== controller) return;
+      pendingPromptRecallRef.current = null;
+      if (loadedStep && !controller.signal.aborted && !readPromptHistory(true).blocked) {
+        applyPromptHistoryStep(loadedStep);
+      }
+    });
     return true;
   };
 
   const onComposerCommandKey = (key: string, event: KeyboardEvent, isTaskItem = false) => {
+    if (key !== "ArrowUp") cancelPendingPromptRecall();
     const submissionIntent = composerSubmissionIntentForKey({
       event,
       keybindings,
@@ -7097,7 +7191,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         "flex items-center overflow-hidden whitespace-nowrap leading-8",
                     )}
                     onChange={onPromptChangeStable}
-                    onVisibleSelectionChange={expandComposerForEditorChangeStable}
+                    onVisibleSelectionChange={onPromptHistorySelectionChange}
                     onCommandKeyDown={onComposerCommandKeyStable}
                     onPageScrollKeyDown={onPageScrollKeyDown}
                     onPageScrollKeyUp={onPageScrollKeyUp}

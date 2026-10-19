@@ -361,7 +361,8 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
-import { threadEnvironment } from "../state/threads";
+import { environmentThreadDetails, threadEnvironment } from "../state/threads";
+import { waitForAtomValue } from "../state/waitForAtomValue";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";
 import { sourceControlEnvironment } from "../state/sourceControl";
@@ -1172,6 +1173,45 @@ export default function ChatView(props: ChatViewProps) {
       },
     };
   })() as MessagesTimelineHistoryControls | undefined;
+  const getPromptHistory = useStableCallback(() => {
+    if (routeThreadDetailRef === null) return { messages: [], blocked: true };
+    const requests = appAtomRegistry.get(
+      environmentThreadDetails.pendingRequestsAtom(routeThreadDetailRef),
+    );
+    return {
+      messages: appAtomRegistry
+        .get(environmentThreadDetails.visibleTurnItemsAtom(routeThreadDetailRef))
+        .flatMap(({ item }) =>
+          item.type === "user_message"
+            ? [{ id: item.messageId, role: "user", text: item.text }]
+            : [],
+        ),
+      blocked: requests === null || requests.approvals.length > 0 || requests.userInputs.length > 0,
+    };
+  });
+  const loadOlderPromptHistory = useStableCallback(() => {
+    if (routeThreadDetailRef === null) return null;
+    const historyAtom = environmentThreadDetails.historyAtom(routeThreadDetailRef);
+    const history = appAtomRegistry.get(historyAtom);
+    if (!history.hasMoreHistory || history.loading || history.historyCursor === null) return null;
+    return (async () => {
+      const result = await loadEarlierThreadHistory({
+        environmentId: routeThreadDetailRef.environmentId,
+        input: { threadId: routeThreadDetailRef.threadId },
+      });
+      if (!AsyncResult.isSuccess(result) || result.value._tag !== "loaded") {
+        throw new Error("Could not load earlier prompt history.");
+      }
+      // The command can finish before the atom subscription delivers its page.
+      const updated = await waitForAtomValue({
+        registry: appAtomRegistry,
+        atom: historyAtom,
+        predicate: (current) => !current.loading && current.historyCursor !== history.historyCursor,
+        timeoutMs: 6_000,
+      });
+      if (!updated) throw new Error("Earlier prompt history did not arrive.");
+    })();
+  });
   const committedServerMessageIds = deriveCommittedServerUserMessageIds(serverVisibleTurnItems);
   // Queued messages have no turn item until their run starts, so the
   // turn-item-derived set alone can never retire their optimistic rows —
@@ -8178,6 +8218,8 @@ export default function ChatView(props: ChatViewProps) {
                               activeThread={activeThread}
                               activeThreadShell={activeThreadShell}
                               promptHistoryMessages={timelineMessages}
+                              getPromptHistory={isServerThread ? getPromptHistory : undefined}
+                              onLoadOlderPromptHistory={loadOlderPromptHistory}
                               isServerThread={isServerThread}
                               isLocalDraftThread={isLocalDraftThread}
                               forceExpandedOnMobile={

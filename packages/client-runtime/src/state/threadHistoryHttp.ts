@@ -28,8 +28,7 @@ export const fetchEnvironmentThreadHistoryPage = Effect.fn(
     params: { threadId: input.threadId },
     query: {
       cursor: input.cursor,
-      includeSupport: "1",
-      ...(input.view === undefined ? {} : { view: input.view }),
+      ...(input.view === undefined ? { includeSupport: "1" as const } : { view: input.view }),
       ...(input.throughEntryId === undefined ? {} : { throughEntryId: input.throughEntryId }),
     },
   };
