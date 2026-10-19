@@ -1,152 +1,219 @@
-import type { ReactElement } from "react";
+import type { Dispatch, ReactElement, SetStateAction } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { reactHookHarness as hooks } from "../../test/reactHookHarness";
-import {
-  consumeConnectOnboardingAuthPending,
-  markConnectOnboardingAuthPending,
-} from "../../cloud/connectOnboarding";
+import { CONNECT_ONBOARDING_OPT_OUT_STORAGE_KEY } from "../../cloud/connectOnboarding";
 
-const authState = vi.hoisted(() => ({
-  isLoaded: true,
-  isSignedIn: true,
-  userId: "user-after-desktop-auth" as string | null,
-}));
-
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react")>();
-  const { reactHookHarness } = await import("../../test/reactHookHarness");
+// Keep the pre-browser hook harness convention for this renderer-reload lifecycle:
+// a reload discards hook slots while preserving the browser storage objects.
+const hooks = vi.hoisted(() => {
+  let slots: unknown[] = [];
+  let cursor = 0;
+  let changed = false;
   return {
-    ...actual,
-    useEffect: (effect: () => void | (() => void)) => effect(),
-    useRef: reactHookHarness.useRef,
-    useState: reactHookHarness.useState,
+    reset() {
+      slots = [];
+      cursor = 0;
+    },
+    render<T>(render: () => T): T {
+      for (let attempt = 0; attempt < 25; attempt++) {
+        cursor = 0;
+        changed = false;
+        const result = render();
+        if (!changed) return result;
+      }
+      throw new Error("Onboarding did not settle");
+    },
+    useState<T>(initial: T | (() => T)): [T, Dispatch<SetStateAction<T>>] {
+      const index = cursor++;
+      if (index >= slots.length) {
+        slots[index] = typeof initial === "function" ? (initial as () => T)() : initial;
+      }
+      return [
+        slots[index] as T,
+        (next) => {
+          const value =
+            typeof next === "function" ? (next as (previous: T) => T)(slots[index] as T) : next;
+          changed ||= !Object.is(slots[index], value);
+          slots[index] = value;
+        },
+      ];
+    },
+    useMemoCache(size: number) {
+      const index = cursor++;
+      slots[index] ??= Array.from({ length: size }, () => Symbol.for("react.memo_cache_sentinel"));
+      return slots[index] as unknown[];
+    },
   };
 });
 
-vi.mock("react/compiler-runtime", async () => {
-  const { reactHookHarness } = await import("../../test/reactHookHarness");
-  return { c: reactHookHarness.useMemoCache };
-});
+const state = vi.hoisted(() => ({
+  auth: { isLoaded: true, isSignedIn: false, userId: null as string | null },
+  session: { _tag: "Success" as "Initial" | "Success" },
+  openSignIn: vi.fn(),
+}));
 
+vi.mock("react", async (original) => ({
+  ...(await original<typeof import("react")>()),
+  useState: hooks.useState,
+  useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
+}));
+vi.mock("react/compiler-runtime", () => ({ c: hooks.useMemoCache }));
 vi.mock("@clerk/react", () => ({
-  useAuth: () => authState,
+  useAuth: () => state.auth,
+  useClerk: () => ({ openSignIn: state.openSignIn }),
 }));
-
-vi.mock("../../cloud/publicConfig", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../cloud/publicConfig")>()),
-  hasCloudPublicConfig: () => true,
-}));
-
+vi.mock("@effect/atom-react", () => ({ useAtomValue: () => state.session }));
+vi.mock("../../env", () => ({ isElectron: true }));
+vi.mock("../../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => true }));
 vi.mock("../../cloud/useCloudLinkController", () => ({
   useCloudLinkController: () => ({
-    linkState: {
-      data: null,
-      isPending: false,
-      target: { environmentId: "local" },
-    },
+    linkState: { data: null, error: null, target: null },
     operationError: null,
-    reconcileCloudState: vi.fn(),
   }),
 }));
-
-vi.mock("../../environments/primary", () => ({
-  usePrimarySessionState: () => ({ data: null, error: null }),
+vi.mock("../../state/environments", () => ({
+  useEnvironments: () => ({ isReady: true, environments: [] }),
+  usePrimaryEnvironmentId: () => "local",
+  usePrimaryEnvironment: () => null,
 }));
-
-vi.mock("../../hooks/useLocalStorage", () => ({
-  useLocalStorage: (_key: string, initialValue: unknown) => [initialValue, vi.fn()],
+vi.mock("../../state/session", () => ({
+  environmentSession: { sessionStateAtom: () => "primary-session" },
+  useEnvironmentScope: () => false,
+  readEnvironmentScope: () => false,
 }));
+vi.mock("./CloudEnvironmentConnectList", () => ({ CloudEnvironmentConnectRows: () => null }));
 
+import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { ConnectOnboardingDialog } from "./ConnectOnboardingDialog";
 
-const sessionValues = new Map<string, string>();
-const sessionStorage = {
-  getItem: vi.fn((key: string) => sessionValues.get(key) ?? null),
-  setItem: vi.fn((key: string, value: string) => sessionValues.set(key, value)),
-  removeItem: vi.fn((key: string) => sessionValues.delete(key)),
-};
-
-function renderConfiguredDialog() {
-  const wrapper = ConnectOnboardingDialog() as ReactElement;
-  const ConfiguredDialog = wrapper.type as () => ReactElement<{ open: boolean }>;
-
-  hooks.beginRender();
-  return ConfiguredDialog();
+function createStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => {
+      values.set(key, value);
+    },
+    removeItem: (key) => {
+      values.delete(key);
+    },
+    clear: () => values.clear(),
+    key: (index) => [...values.keys()][index] ?? null,
+    get length() {
+      return values.size;
+    },
+  };
 }
 
-describe("ConnectOnboardingDialog", () => {
+function renderDialog() {
+  const wrapper = ConnectOnboardingDialog() as ReactElement;
+  const render = wrapper.type as () => ReactElement<{
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+  }>;
+  return hooks.render(render).props;
+}
+
+function signIn(userId = "account-a") {
+  state.auth = { isLoaded: true, isSignedIn: true, userId };
+}
+
+function signOut() {
+  state.auth = { isLoaded: true, isSignedIn: false, userId: null };
+}
+
+describe("ConnectOnboardingDialog auth lifecycle", () => {
   beforeEach(() => {
     hooks.reset();
-    sessionValues.clear();
-    authState.isLoaded = true;
-    authState.isSignedIn = true;
-    authState.userId = "user-after-desktop-auth";
-    vi.stubGlobal("window", { desktopBridge: {}, sessionStorage });
+    signOut();
+    state.session = { _tag: "Success" };
+    state.openSignIn.mockReset();
+    vi.stubGlobal("window", {
+      location: { href: "t3code-dev://app/#/settings/connections" },
+      sessionStorage: createStorage(),
+      localStorage: createStorage(),
+      dispatchEvent: vi.fn(),
+    });
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
-  it("opens after an in-place desktop sign-in", () => {
-    authState.isSignedIn = false;
-    authState.userId = null;
-    renderConfiguredDialog();
-
-    markConnectOnboardingAuthPending();
-    authState.isSignedIn = true;
-    authState.userId = "user-after-desktop-auth";
-    renderConfiguredDialog();
-    renderConfiguredDialog();
-    const dialog = renderConfiguredDialog();
-
-    expect(dialog.props.open).toBe(true);
-  });
-
-  it("opens when the desktop renderer returns from auth already signed in", () => {
-    markConnectOnboardingAuthPending();
-    renderConfiguredDialog();
-    renderConfiguredDialog();
-    const dialog = renderConfiguredDialog();
-
-    expect(dialog.props.open).toBe(true);
-  });
-
-  it("stays closed on a normal desktop launch with a restored session", () => {
-    renderConfiguredDialog();
-    renderConfiguredDialog();
-    const dialog = renderConfiguredDialog();
-
-    expect(dialog.props.open).toBe(false);
-  });
-
-  it("consumes a saved auth marker only once", () => {
-    markConnectOnboardingAuthPending();
-
-    expect(consumeConnectOnboardingAuthPending()).toBe(true);
-    expect(consumeConnectOnboardingAuthPending()).toBe(false);
-  });
-
-  it.each(["getItem", "removeItem"] as const)(
-    "ignores auth markers when sessionStorage.%s fails",
-    (method) => {
-      markConnectOnboardingAuthPending();
-      sessionStorage[method].mockImplementationOnce(() => {
-        throw new DOMException("Session storage is unavailable", "SecurityError");
+  it.each([true, false])(
+    "opens once after sign-in reload (auth initially loaded: %s)",
+    (initiallyLoaded) => {
+      expect(renderDialog().open).toBe(false);
+      // Clerk can reload synchronously: the pending marker must already exist.
+      state.openSignIn.mockImplementationOnce(() => {
+        hooks.reset();
+        state.auth = {
+          isLoaded: initiallyLoaded,
+          isSignedIn: true,
+          userId: initiallyLoaded ? "account-a" : null,
+        };
+        state.session = { _tag: "Initial" };
+        expect(renderDialog().open).toBe(false);
+        signIn();
+        expect(renderDialog().open).toBe(false);
+        state.session = { _tag: "Success" };
+        expect(renderDialog().open).toBe(true);
       });
 
-      expect(consumeConnectOnboardingAuthPending()).toBe(false);
+      hooks.render(useT3ConnectAuthPrompt).openAuthPrompt();
+      expect(state.openSignIn).toHaveBeenCalledOnce();
+      expect(renderDialog().open).toBe(true);
+      renderDialog().onOpenChange(false);
+      expect(renderDialog().open).toBe(false);
+      hooks.reset();
+      expect(renderDialog().open).toBe(false);
     },
   );
 
-  it("ignores auth markers when session storage is unavailable", () => {
+  it("keeps a restored session closed through incomplete auth snapshots", () => {
+    state.auth = { isLoaded: false, isSignedIn: true, userId: null };
+    expect(renderDialog().open).toBe(false);
+    state.auth.isLoaded = true;
+    expect(renderDialog().open).toBe(false);
+    signIn();
+    expect(renderDialog().open).toBe(false);
+    hooks.reset();
+    expect(renderDialog().open).toBe(false);
+  });
+
+  it("honors persisted opt-outs after reload and still opens for another account", () => {
+    window.localStorage.setItem(
+      CONNECT_ONBOARDING_OPT_OUT_STORAGE_KEY,
+      JSON.stringify({ optOutAccounts: ["account-a"] }),
+    );
+    hooks.render(useT3ConnectAuthPrompt).openAuthPrompt();
+    hooks.reset();
+    signIn();
+    expect(renderDialog().open).toBe(false);
+    signIn("account-b");
+    expect(renderDialog().open).toBe(true);
+    signOut();
+    expect(renderDialog().open).toBe(false);
+    signIn();
+    expect(renderDialog().open).toBe(false);
+    signIn("account-b");
+    expect(renderDialog().open).toBe(true);
+  });
+
+  it("allows sign-in and in-session onboarding when session storage is unavailable", () => {
     Object.defineProperty(window, "sessionStorage", {
       get() {
-        throw new DOMException("Session storage is unavailable", "SecurityError");
+        throw new DOMException("Storage blocked", "SecurityError");
       },
     });
-
-    expect(consumeConnectOnboardingAuthPending()).toBe(false);
+    expect(renderDialog().open).toBe(false);
+    state.openSignIn.mockImplementationOnce(() => signIn());
+    hooks.render(useT3ConnectAuthPrompt).openAuthPrompt();
+    expect(state.openSignIn).toHaveBeenCalledOnce();
+    expect(renderDialog().open).toBe(true);
+    renderDialog().onOpenChange(false);
+    expect(renderDialog().open).toBe(false);
+    hooks.reset();
+    expect(renderDialog().open).toBe(false);
   });
 });
