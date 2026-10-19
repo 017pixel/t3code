@@ -191,7 +191,7 @@ export function isWorkspaceFontPreviewPath(path: string): boolean {
   return /\.(ttf|otf|woff2?)$/i.test(path);
 }
 
-export function audioMimeTypeFromExtension(extension: string): string | null {
+function audioMimeTypeFromExtension(extension: string): string | null {
   if (!/^\.[a-z0-9-]+$/i.test(extension)) return null;
   return AUDIO_MIME_TYPE_BY_EXTENSION.get(extension.toLowerCase()) ?? null;
 }
