@@ -3691,7 +3691,8 @@ it.effect.each(["temporary-head", "user-selected-head"] as const)(
           yield* command(worktreePath, ["checkout", "-b", "user/selected"]);
         }
         yield* send("Implement the settings editor", "valid");
-        yield* Fiber.join(yield* Deferred.await(namingStarted));
+        const namingExit = yield* Fiber.await(yield* Deferred.await(namingStarted));
+        assert.equal(namingExit._tag, "Success");
         const projection = yield* threads.getThreadProjection(launched.threadId);
         assert.lengthOf(delivered, 1);
         assert.include(delivered[0]!, "Implement the settings editor");
@@ -3802,7 +3803,7 @@ it.effect.each(["write-failure", "replayed-receipt"] as const)(
                   ? Queue.offer(failures, undefined).pipe(
                       Effect.andThen(
                         failure === "replayed-receipt"
-                          ? Effect.void
+                          ? Effect.succeed({ sequence: 0, storedEvents: [] })
                           : Effect.fail(
                               new Orchestrator.OrchestratorDispatchError({
                                 commandId: command.commandId,
