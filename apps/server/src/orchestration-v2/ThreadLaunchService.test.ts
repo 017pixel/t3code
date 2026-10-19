@@ -3495,179 +3495,237 @@ it.effect.each(
     }),
 );
 
-it.effect("names an empty launch only after its first provider-reaching message", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const worktreePath = yield* fs.makeTempDirectoryScoped({ prefix: "launch-first-turn-" });
-    let branch = "t3/abcd1234";
-    const delivered: Array<string> = [];
-    const testAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
-      ...adapter,
-      openSession: (input) =>
-        Effect.gen(function* () {
-          const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
-          const now = yield* DateTime.now;
-          const unused = () => Effect.die("unexpected provider operation");
-          return {
-            instanceId: adapter.instanceId,
-            driver: adapter.driver,
-            providerSessionId: input.providerSessionId,
-            providerSession: {
-              id: input.providerSessionId,
+it.effect.each(["temporary-head", "user-selected-head"] as const)(
+  "names an empty launch only after its first provider-reaching message: %s",
+  (checkout) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const git = yield* GitVcsDriver.GitVcsDriver;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "launch-first-turn-" });
+      const repo = `${directory}/repo`;
+      const worktreePath = `${directory}/worktree`;
+      const branch = "t3/abcd1234";
+      const command = (cwd: string, args: string[]) =>
+        git.execute({ operation: "launch-test", cwd, args });
+      yield* fs.makeDirectory(repo);
+      yield* command(repo, ["init", "-b", "main"]);
+      yield* command(repo, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ]);
+      const namingStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+      const delivered: Array<string> = [];
+      const testAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+        ...adapter,
+        openSession: (input) =>
+          Effect.gen(function* () {
+            const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+            const now = yield* DateTime.now;
+            const unused = () => Effect.die("unexpected provider operation");
+            return {
+              instanceId: adapter.instanceId,
               driver: adapter.driver,
-              providerInstanceId: adapter.instanceId,
-              status: "ready" as const,
-              cwd: worktreePath,
-              model: modelSelection.model,
-              capabilities: CodexProviderCapabilitiesV2,
-              createdAt: now,
-              updatedAt: now,
-              lastError: null,
-            },
-            events: Stream.fromQueue(events),
-            ensureThread: ({ threadId }) =>
-              Effect.succeed({
-                id: ProviderThreadId.make("provider-thread:first-real-turn"),
+              providerSessionId: input.providerSessionId,
+              providerSession: {
+                id: input.providerSessionId,
                 driver: adapter.driver,
                 providerInstanceId: adapter.instanceId,
-                providerSessionId: input.providerSessionId,
-                appThreadId: threadId,
-                ownerNodeId: null,
-                nativeThreadRef: {
-                  driver: adapter.driver,
-                  nativeId: "first-real-turn",
-                  strength: "strong" as const,
-                },
-                nativeConversationHeadRef: null,
-                status: "idle" as const,
-                firstRunOrdinal: null,
-                lastRunOrdinal: null,
-                handoffIds: [],
-                forkedFrom: null,
+                status: "ready" as const,
+                cwd: worktreePath,
+                model: modelSelection.model,
+                capabilities: CodexProviderCapabilitiesV2,
                 createdAt: now,
                 updatedAt: now,
-              }),
-            resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
-            startTurn: (turn) =>
-              Effect.gen(function* () {
-                delivered.push(turn.message.text);
-                const providerTurnId = ProviderTurnId.make("provider-turn:" + turn.runOrdinal);
-                yield* Queue.offer(events, {
-                  type: "provider_turn.updated",
+                lastError: null,
+              },
+              events: Stream.fromQueue(events),
+              ensureThread: ({ threadId }) =>
+                Effect.succeed({
+                  id: ProviderThreadId.make("provider-thread:first-real-turn"),
                   driver: adapter.driver,
-                  providerTurn: {
-                    id: providerTurnId,
-                    providerThreadId: turn.providerThread.id,
-                    nodeId: turn.rootNodeId,
-                    runAttemptId: turn.attemptId,
-                    nativeTurnRef: null,
-                    ordinal: turn.providerTurnOrdinal,
-                    status: "completed",
-                    startedAt: now,
-                    completedAt: now,
+                  providerInstanceId: adapter.instanceId,
+                  providerSessionId: input.providerSessionId,
+                  appThreadId: threadId,
+                  ownerNodeId: null,
+                  nativeThreadRef: {
+                    driver: adapter.driver,
+                    nativeId: "first-real-turn",
+                    strength: "strong" as const,
                   },
-                });
-                yield* Queue.offer(events, {
-                  type: "turn.terminal",
-                  driver: adapter.driver,
-                  providerThreadId: turn.providerThread.id,
-                  providerTurnId,
-                  runOrdinal: turn.runOrdinal,
-                  status: "completed",
-                  failure: null,
-                  threadDisposition: "reusable",
-                });
-              }),
-            steerTurn: unused,
-            interruptTurn: unused,
-            respondToRuntimeRequest: unused,
-            readThreadSnapshot: unused,
-            rollbackThread: unused,
-            forkThread: unused,
-          };
-        }),
-    };
-    const provisioned = yield* Deferred.make<void>();
-    const harness = makeHarness({
-      adapters: [testAdapter],
-      createWorktree: (input) =>
-        Effect.succeed({
-          worktree: {
-            path: worktreePath,
-            refName: input.newRefName ?? input.refName,
-            headSha: "abc",
-          },
-        }),
-      runSetup: () =>
-        Deferred.succeed(provisioned, undefined).pipe(Effect.as({ status: "no-script" as const })),
-      renameBranch: (input) =>
-        Effect.sync(() => {
-          branch = input.newBranch;
-          return { branch };
-        }),
-    });
-    yield* Effect.gen(function* () {
-      const launches = yield* ThreadLaunch.ThreadLaunchService;
-      const threads = yield* ThreadManagement.ThreadManagementService;
-      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-      const launched = yield* launches.launch(
-        launchInput({
-          command: "command:first-real-turn:launch",
-          thread: "thread:first-real-turn",
-          workspace: { type: "worktree", baseRef: "main", branch },
-        }),
-      );
-      yield* Deferred.await(provisioned);
-      const send = (text: string, suffix: string) =>
-        Effect.gen(function* () {
-          const afterSequence = yield* threads.getThreadEventSequence(launched.threadId);
-          yield* threads.dispatch({
-            type: "message.dispatch",
-            commandId: CommandId.make("command:first-real-turn:" + suffix),
-            threadId: launched.threadId,
-            messageId: MessageId.make("message:first-real-turn:" + suffix),
-            text,
-            attachments: [],
-            modelSelection,
-            dispatchMode: { type: "start_immediately" },
-            createdBy: "user",
-            creationSource: "web",
-          });
-          yield* worker.drain();
-          yield* threads
-            .streamStoredEventsFrom({
+                  nativeConversationHeadRef: null,
+                  status: "idle" as const,
+                  firstRunOrdinal: null,
+                  lastRunOrdinal: null,
+                  handoffIds: [],
+                  forkedFrom: null,
+                  createdAt: now,
+                  updatedAt: now,
+                }),
+              resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+              startTurn: (turn) =>
+                Effect.gen(function* () {
+                  delivered.push(turn.message.text);
+                  const providerTurnId = ProviderTurnId.make("provider-turn:" + turn.runOrdinal);
+                  yield* Queue.offer(events, {
+                    type: "provider_turn.updated",
+                    driver: adapter.driver,
+                    providerTurn: {
+                      id: providerTurnId,
+                      providerThreadId: turn.providerThread.id,
+                      nodeId: turn.rootNodeId,
+                      runAttemptId: turn.attemptId,
+                      nativeTurnRef: null,
+                      ordinal: turn.providerTurnOrdinal,
+                      status: "completed",
+                      startedAt: now,
+                      completedAt: now,
+                    },
+                  });
+                  yield* Queue.offer(events, {
+                    type: "turn.terminal",
+                    driver: adapter.driver,
+                    providerThreadId: turn.providerThread.id,
+                    providerTurnId,
+                    runOrdinal: turn.runOrdinal,
+                    status: "completed",
+                    failure: null,
+                    threadDisposition: "reusable",
+                  });
+                }),
+              steerTurn: unused,
+              interruptTurn: unused,
+              respondToRuntimeRequest: unused,
+              readThreadSnapshot: unused,
+              rollbackThread: unused,
+              forkThread: unused,
+            };
+          }),
+      };
+      const provisioned = yield* Deferred.make<void>();
+      const harness = makeHarness({
+        adapters: [testAdapter],
+        createWorktree: (input) => git.createWorktree({ ...input, cwd: repo, path: worktreePath }),
+        runSetup: () =>
+          Deferred.succeed(provisioned, undefined).pipe(
+            Effect.as({ status: "no-script" as const }),
+          ),
+        renameBranch: git.renameBranch,
+        git: { status: git.status, localStatus: git.status },
+        generateBranchName: () =>
+          Effect.fiber.pipe(
+            Effect.tap((fiber) => Deferred.succeed(namingStarted, fiber)),
+            Effect.as({ branch: "generated-branch" }),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const launched = yield* launches.launch(
+          launchInput({
+            command: "command:first-real-turn:launch",
+            thread: "thread:first-real-turn",
+            workspace: { type: "worktree", baseRef: "main", branch },
+          }),
+        );
+        yield* Deferred.await(provisioned);
+        const send = (text: string, suffix: string) =>
+          Effect.gen(function* () {
+            const afterSequence = yield* threads.getThreadEventSequence(launched.threadId);
+            yield* threads.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("command:first-real-turn:" + suffix),
               threadId: launched.threadId,
-              afterSequence,
-              eventType: "run.updated",
-            })
-            .pipe(
-              Stream.filter(
-                ({ event }) =>
-                  event.type === "run.updated" &&
-                  !["starting", "running"].includes(event.payload.status),
-              ),
-              Stream.runHead,
-            );
-          yield* worker.drain();
-        });
-      yield* send("/compact", "local");
-      assert.equal(branch, "t3/abcd1234");
-      assert.equal(harness.generateBranchName.mock.calls.length, 0);
-      assert.deepEqual(delivered, []);
+              messageId: MessageId.make("message:first-real-turn:" + suffix),
+              text,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            });
+            yield* worker.drain();
+            yield* threads
+              .streamStoredEventsFrom({
+                threadId: launched.threadId,
+                afterSequence,
+                eventType: "run.updated",
+              })
+              .pipe(
+                Stream.filter(
+                  ({ event }) =>
+                    event.type === "run.updated" &&
+                    !["starting", "running"].includes(event.payload.status),
+                ),
+                Stream.runHead,
+              );
+            yield* worker.drain();
+          });
+        yield* send("/compact", "local");
+        assert.equal(yield* git.resolveBranchName(worktreePath, "HEAD"), branch);
+        assert.equal(harness.generateBranchName.mock.calls.length, 0);
+        assert.deepEqual(delivered, []);
 
-      yield* send("Implement the settings editor", "valid");
-      const projection = yield* threads.getThreadProjection(launched.threadId);
-      assert.lengthOf(delivered, 1);
-      assert.include(delivered[0]!, "Implement the settings editor");
-      assert.equal(projection.runs.at(-1)?.status, "completed");
-      assert.equal(projection.thread.branch, "generated-branch");
-      assert.equal(branch, "generated-branch");
-      yield* send("Add keyboard support", "next");
-      assert.equal(harness.generateBranchName.mock.calls.length, 1);
-      assert.equal(harness.renameBranch.mock.calls.length, 1);
-      assert.equal((yield* threads.getThreadProjection(launched.threadId)).thread.branch, branch);
-    }).pipe(Effect.provide(harness.layer));
-  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+        const before = (yield* threads.getThreadProjection(launched.threadId)).thread;
+        const temporaryRef = yield* command(worktreePath, ["rev-parse", `refs/heads/${branch}`]);
+        if (checkout === "user-selected-head") {
+          yield* command(worktreePath, ["checkout", "-b", "user/selected"]);
+        }
+        yield* send("Implement the settings editor", "valid");
+        yield* Fiber.join(yield* Deferred.await(namingStarted));
+        const projection = yield* threads.getThreadProjection(launched.threadId);
+        assert.lengthOf(delivered, 1);
+        assert.include(delivered[0]!, "Implement the settings editor");
+        assert.equal(projection.runs.at(-1)?.status, "completed");
+        if (checkout === "user-selected-head") {
+          assert.equal(yield* git.resolveBranchName(worktreePath, "HEAD"), "user/selected");
+          assert.deepEqual(
+            {
+              refs: yield* git.listLocalBranchNames(worktreePath),
+              branch: projection.thread.branch,
+              worktreePath: projection.thread.worktreePath,
+            },
+            {
+              refs: ["main", branch, "user/selected"],
+              branch: before.branch,
+              worktreePath: before.worktreePath,
+            },
+            "first-turn naming must leave the inactive temporary ref and thread metadata untouched",
+          );
+          assert.equal(
+            (yield* command(worktreePath, ["rev-parse", `refs/heads/${branch}`])).stdout,
+            temporaryRef.stdout,
+          );
+          assert.equal(harness.renameBranch.mock.calls.length, 0);
+          return;
+        }
+        assert.equal(projection.thread.branch, "generated-branch");
+        assert.equal(yield* git.resolveBranchName(worktreePath, "HEAD"), "generated-branch");
+        yield* send("Add keyboard support", "next");
+        assert.equal(harness.generateBranchName.mock.calls.length, 1);
+        assert.equal(harness.renameBranch.mock.calls.length, 1);
+        assert.equal(
+          (yield* threads.getThreadProjection(launched.threadId)).thread.branch,
+          yield* git.resolveBranchName(worktreePath, "HEAD"),
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(
+      Effect.provide(
+        GitVcsDriver.layer.pipe(
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "launch-first-turn-git-" }),
+          ),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+      Effect.scoped,
+    ),
 );
 
 it.effect("restores the temporary Git branch when branch metadata cannot be persisted", () =>
