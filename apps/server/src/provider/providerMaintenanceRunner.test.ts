@@ -25,6 +25,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as PlatformError from "effect/PlatformError";
 import * as Logger from "effect/Logger";
 import * as Scope from "effect/Scope";
 import * as NodeChildProcess from "node:child_process";
@@ -1257,6 +1258,93 @@ describe("ProviderInstallLock", () => {
         anyHeld: true,
       });
       assert.isFalse(yield* second.anyHeld);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("holds the lock through verification after the installer exits", () =>
+    Effect.gen(function* () {
+      const { first, second } = yield* withHome;
+      const installer = yield* Effect.service(ProviderMaintenanceRunner.ProviderInstaller).pipe(
+        Effect.provide(ProviderMaintenanceRunner.layerInstaller),
+      );
+      yield* first.tryRun("k", (recordChildPid) =>
+        Effect.gen(function* () {
+          const result = yield* installer.run({
+            command: process.execPath,
+            args: ["-e", ""],
+            recordChildPid,
+          });
+          assert.strictEqual(result.exitCode, 0);
+          assert.isTrue(yield* second.anyHeld);
+          assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
+        }),
+      );
+      assert.isFalse(yield* second.anyHeld);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("leaves a replacement lock owned by another run when releasing an expired lock", () =>
+    Effect.gen(function* () {
+      const { directory, first, second } = yield* withHome;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const entered = yield* Deferred.make<void>();
+      const finish = yield* Deferred.make<void>();
+      const original = yield* first
+        .tryRun("k", () =>
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(finish))),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* fileSystem.utimes(lockFile(directory, "k"), 0, 0);
+      yield* TestClock.adjust(Duration.hours(1));
+      const replacement = yield* second.tryRun("k", () =>
+        Effect.gen(function* () {
+          const contents = yield* fileSystem.readFileString(lockFile(directory, "k"));
+          yield* Deferred.succeed(finish, undefined);
+          yield* Fiber.join(original);
+          assert.strictEqual(yield* fileSystem.readFileString(lockFile(directory, "k")), contents);
+          assert.isTrue(yield* second.anyHeld);
+        }),
+      );
+      assert.isTrue(Option.isSome(replacement));
+      assert.isFalse(yield* second.anyHeld);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("removes a newly created lock if writing its contents fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-install-lock-" });
+      const failure = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "FileSystem",
+        method: "writeAll",
+        description: "No space left on device",
+      });
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        open: (file, options) =>
+          fileSystem
+            .open(file, options)
+            .pipe(Effect.map((handle) => ({ ...handle, writeAll: () => Effect.fail(failure) }))),
+      });
+      const lock = yield* Effect.service(ProviderInstallLock.ProviderInstallLock).pipe(
+        Effect.provide(ProviderInstallLock.layer),
+        Effect.provideService(FileSystem.FileSystem, failingFileSystem),
+        Effect.provideService(HostProcess.Environment, { XDG_CACHE_HOME: home }),
+      );
+      const result = yield* lock.tryRun("k", () => Effect.die("must not run")).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
+      if (Exit.isFailure(result)) {
+        assert.strictEqual(
+          Schema.is(ProviderInstallLock.ProviderInstallLockError)(Cause.squash(result.cause)),
+          true,
+        );
+      }
+      assert.isFalse(
+        yield* fileSystem.exists(lockFile(NodePath.join(home, "t3", "provider-install"), "k")),
+      );
+      assert.isFalse(yield* lock.anyHeld);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
