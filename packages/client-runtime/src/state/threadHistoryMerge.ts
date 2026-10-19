@@ -1,8 +1,11 @@
 import type {
+  OrchestrationV2Checkpoint,
   OrchestrationV2ProjectedTurnItem,
+  OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import { isOrchestrationV2TurnItemVisible } from "@t3tools/shared/orchestrationV2Timeline";
+import * as DateTime from "effect/DateTime";
 
 export type ThreadHistoryMeta = {
   readonly historyCursor: string | null;
@@ -49,10 +52,79 @@ function renumberVisible(
   return rows.map((row, position) => (row.position === position ? row : { ...row, position }));
 }
 
-export function mergeOlderHistoryIntoProjection(
+function mergeMissingEntities<T extends { readonly id: unknown }>(
+  current: ReadonlyArray<T>,
+  older: ReadonlyArray<T>,
+): ReadonlyArray<T> {
+  const ids = new Set(current.map((entity) => entity.id));
+  const missing = older.filter((entity) => {
+    if (ids.has(entity.id)) return false;
+    ids.add(entity.id);
+    return true;
+  });
+  return missing.length === 0 ? current : [...missing, ...current];
+}
+
+function hydrateCheckpointFiles(
+  current: OrchestrationV2Checkpoint,
+  older: OrchestrationV2Checkpoint | undefined,
+): OrchestrationV2Checkpoint {
+  const { deferredFileCount, ...checkpoint } = current;
+  if (
+    deferredFileCount === undefined ||
+    older === undefined ||
+    older.deferredFileCount !== undefined ||
+    older.files.length !== deferredFileCount ||
+    current.threadId !== older.threadId ||
+    current.scopeId !== older.scopeId ||
+    current.runId !== older.runId ||
+    current.nodeId !== older.nodeId ||
+    current.parentCheckpointId !== older.parentCheckpointId ||
+    current.ordinalWithinScope !== older.ordinalWithinScope ||
+    current.appRunOrdinal !== older.appRunOrdinal ||
+    current.ref !== older.ref ||
+    current.status !== older.status ||
+    DateTime.toEpochMillis(current.capturedAt) !== DateTime.toEpochMillis(older.capturedAt)
+  ) {
+    return current;
+  }
+  return { ...checkpoint, files: older.files };
+}
+
+function mergeHistorySupport(
   projection: OrchestrationV2ThreadProjection,
-  olderItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
+  support: OrchestrationV2ThreadHistoryPage["support"],
 ): OrchestrationV2ThreadProjection {
+  if (support === undefined) return projection;
+  const nodes = mergeMissingEntities(projection.nodes, support.nodes);
+  const runs = mergeMissingEntities(projection.runs, support.runs);
+  const attempts = mergeMissingEntities(projection.attempts, support.attempts);
+  const olderCheckpoints = new Map(
+    support.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
+  );
+  const hydrated = projection.checkpoints.map((checkpoint) =>
+    hydrateCheckpointFiles(checkpoint, olderCheckpoints.get(checkpoint.id)),
+  );
+  const checkpoints = mergeMissingEntities(
+    hydrated.every((checkpoint, index) => checkpoint === projection.checkpoints[index])
+      ? projection.checkpoints
+      : hydrated,
+    support.checkpoints,
+  );
+  return nodes === projection.nodes &&
+    runs === projection.runs &&
+    attempts === projection.attempts &&
+    checkpoints === projection.checkpoints
+    ? projection
+    : { ...projection, nodes, runs, attempts, checkpoints };
+}
+
+export function mergeOlderHistoryIntoProjection(
+  current: OrchestrationV2ThreadProjection,
+  olderItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
+  support?: OrchestrationV2ThreadHistoryPage["support"],
+): OrchestrationV2ThreadProjection {
+  const projection = mergeHistorySupport(current, support);
   if (olderItems.length === 0) {
     return projection;
   }
@@ -99,6 +171,18 @@ export function mergeOlderHistoryIntoProjection(
     ...page,
     ...projection.visibleTurnItems.filter((row) => !pageKeys.has(projectedItemKey(row))),
   ];
+  // Ordinals are local to the item thread. Keep inherited source order, including
+  // fork markers, while inserting activity below a retained prompt in that source.
+  const sourceOrder = new Map<string, number>();
+  for (const row of visible) {
+    if (!sourceOrder.has(row.item.threadId)) sourceOrder.set(row.item.threadId, sourceOrder.size);
+  }
+  visible.sort(
+    (left, right) =>
+      sourceOrder.get(left.item.threadId)! - sourceOrder.get(right.item.threadId)! ||
+      left.item.ordinal - right.item.ordinal ||
+      String(left.item.id).localeCompare(String(right.item.id)),
+  );
   if (
     visible.length === projection.visibleTurnItems.length &&
     visible.every((row, index) => row === projection.visibleTurnItems[index])
