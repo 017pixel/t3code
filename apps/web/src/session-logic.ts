@@ -634,7 +634,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
       previousRow.sourceThreadId === row.sourceThreadId &&
       previousRow.sourceItemId === row.sourceItemId &&
       old !== undefined &&
-      old.attempt === attempt &&
+      (old.kind === "message" || old.attempt === attempt) &&
       (item.type !== "proposed_plan" || input.plans === previous.input.plans) &&
       (sameAttachmentUrls ||
         (item.type !== "user_message" && item.type !== "assistant_message") ||
@@ -645,16 +645,29 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
         ))
     ) {
       // History prepends renumber wrappers while retaining immutable item payloads.
+      if (old.kind === "message") {
+        if (previousRow === row && old.attempt === attempt) {
+          entries.push(old);
+        } else {
+          const { attempt: _previousAttempt, ...rest } = old;
+          entries.push({
+            ...rest,
+            projectedItem: row,
+            ...(attempt === undefined ? {} : { attempt }),
+          });
+        }
+        committedMessageIds.add(old.message.id);
+        continue;
+      }
       entries.push(
         previousRow === row
           ? old
           : old.kind === "work"
             ? { ...old, entry: { ...old.entry, projectedItem: row } }
-            : old.kind === "message" || old.kind === "event"
+            : old.kind === "event"
               ? { ...old, projectedItem: row }
               : old,
       );
-      if (old.kind === "message") committedMessageIds.add(old.message.id);
       continue;
     }
     const createdAt = projectedItemCreatedAt(row);

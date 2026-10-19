@@ -1408,6 +1408,19 @@ describe("work-log failure policy (#7999/#7893)", () => {
 describe("incremental v2 timeline entries", () => {
   it("reuses history presentation after a prepend while refreshing sources and previews", () => {
     const fixture = makeStreamingTimelineFixture("Partial");
+    const attempt: OrchestrationV2RunAttempt = {
+      id: RunAttemptId.make("live-attempt"),
+      runId: fixture.runId,
+      attemptOrdinal: 1,
+      rootNodeId: NodeId.make("live-root"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerThreadId: ProviderThreadId.make("live-provider-thread"),
+      providerTurnId: null,
+      reason: "initial",
+      status: "running",
+      startedAt: DateTime.makeUnsafe(fixture.time(5)),
+      completedAt: null,
+    };
     const attachment = {
       type: "image" as const,
       id: "live-image",
@@ -1418,8 +1431,11 @@ describe("incremental v2 timeline entries", () => {
     const visibleTurnItems = fixture.visibleTurnItems.slice(3).map((row, position) => ({
       ...row,
       position,
-      item:
-        row.item.type === "user_message" ? { ...row.item, attachments: [attachment] } : row.item,
+      item: {
+        ...row.item,
+        nodeId: attempt.rootNodeId,
+        ...(row.item.type === "user_message" ? { attachments: [attachment] } : {}),
+      },
     }));
     const base = makeThreadProjectionFixture();
     const projection = {
@@ -1432,6 +1448,7 @@ describe("incremental v2 timeline entries", () => {
       visibleTurnItems,
       optimisticMessages: [],
       attachmentUrlById: new Map([[attachment.id, "https://server.test/image"]]),
+      attempts: [attempt],
     };
     const previous = deriveTimelineEntriesFromVisibleTurnItemsWithState(input);
     const merged = mergeOlderHistoryIntoProjection(
@@ -1469,6 +1486,28 @@ describe("incremental v2 timeline entries", () => {
       expect(source).toBe(
         merged.visibleTurnItems.find((row) => row.sourceItemId === source?.sourceItemId),
       );
+    }
+    const completedAttempt = {
+      ...attempt,
+      status: "completed" as const,
+      completedAt: DateTime.makeUnsafe(fixture.time(8)),
+    };
+    const completedInput = { ...nextInput, attempts: [completedAttempt] };
+    const completed = deriveTimelineEntriesFromVisibleTurnItemsWithState(completedInput, next);
+    expect(completed.entries).toEqual(deriveTimelineEntriesFromVisibleTurnItems(completedInput));
+    const removedInput = { ...completedInput, attempts: [] };
+    const removed = deriveTimelineEntriesFromVisibleTurnItemsWithState(removedInput, completed);
+    expect(removed.entries).toEqual(deriveTimelineEntriesFromVisibleTurnItems(removedInput));
+    for (const entry of next.entries) {
+      if (entry.kind !== "message" || entry.message.runId !== fixture.runId) continue;
+      const refreshed = completed.entries.find((candidate) => candidate.id === entry.id);
+      const cleared = removed.entries.find((candidate) => candidate.id === entry.id);
+      expect(refreshed?.kind === "message" && refreshed.message).toBe(entry.message);
+      expect(refreshed?.attempt).toBe(completedAttempt);
+      expect(cleared?.kind === "message" && cleared.message).toBe(entry.message);
+      expect(cleared).not.toHaveProperty("attempt");
+      expect(entry.attempt).toBe(attempt);
+      expect(refreshed?.attempt?.status).toBe("completed");
     }
     const renewedInput = {
       ...nextInput,
