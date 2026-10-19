@@ -1,11 +1,11 @@
 import {
-  type KiroSettings,
   type ModelCapabilities,
   ProviderDriverKind,
   type ProviderOptionDescriptor,
   type ServerProviderAuth,
   type ServerProviderModel,
 } from "@t3tools/contracts";
+import type { KiroSettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -21,7 +21,7 @@ import {
   KIRO_AGENT_CONFIG_ID,
   KIRO_SUPPORTED_RUNTIME_MODES,
   makeKiroAcpRuntime,
-} from "./acp/KiroAcpSupport.ts";
+} from "./acpSupport.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,

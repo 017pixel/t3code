@@ -1,11 +1,11 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
 import {
-  KiroSettings,
   type ModelSelection,
   ProviderDriverKind,
   type OrchestrationV2ProviderCapabilities,
 } from "@t3tools/contracts";
+import { KiroSettings } from "../settings.ts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -47,7 +47,7 @@ import {
   kiroAutopilotValue,
   kiroPermissionDisposition,
   makeKiroAcpRuntime,
-} from "../../provider/acp/KiroAcpSupport.ts";
+} from "./acpSupport.ts";
 
 export const KIRO_PROVIDER = ProviderDriverKind.make("kiro");
 /** T3's slug for "Kiro default", and Kiro's documented default model id. */

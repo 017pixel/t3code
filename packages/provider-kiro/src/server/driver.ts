@@ -1,4 +1,5 @@
-import { KiroSettings, ProviderDriverKind, TextGenerationError } from "@t3tools/contracts";
+import { ProviderDriverKind, TextGenerationError } from "@t3tools/contracts";
+import { KiroSettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -22,15 +23,12 @@ import {
   type ProviderSnapshotSettings,
 } from "@t3tools/provider-core/server/snapshotSettings";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
-import {
-  type KiroAdapterV2DriverEnv,
-  makeKiroAdapterV2Driver,
-} from "../../orchestration-v2/Adapters/KiroAdapterV2.ts";
+import { type KiroAdapterV2DriverEnv, makeKiroAdapterV2Driver } from "./adapter.ts";
 import {
   buildInitialKiroProviderSnapshot,
   checkKiroProviderStatus,
   kiroDefaultModelId,
-} from "../KiroProvider.ts";
+} from "./status.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("kiro");
 const decodeKiroSettings = Schema.decodeSync(KiroSettings);

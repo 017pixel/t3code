@@ -1,7 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
-  KiroSettings,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -50,11 +49,13 @@ import {
   type ProviderReplayGate,
 } from "@t3tools/provider-testing/replayGate";
 import { readProviderReplayTranscript } from "@t3tools/provider-testing/replayTranscript";
+import { KiroSettings } from "@t3tools/provider-kiro/settings";
 import {
+  KIRO_PROVIDER,
   kiroAutopilotValue,
   kiroPermissionDisposition,
-} from "../../provider/acp/KiroAcpSupport.ts";
-import { KIRO_PROVIDER, makeKiroAdapterV2 } from "./KiroAdapterV2.ts";
+  makeKiroAdapterV2,
+} from "@t3tools/provider-kiro/testing";
 
 const testLayer = Layer.mergeAll(
   NodeServices.layer,

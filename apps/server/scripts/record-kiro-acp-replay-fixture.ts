@@ -13,7 +13,8 @@
  *   node scripts/record-kiro-acp-replay-fixture.ts --scenario simple
  */
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { KiroSettings, type ProviderReplayEntry } from "@t3tools/contracts";
+import type { ProviderReplayEntry } from "@t3tools/contracts";
+import { KiroSettings } from "@t3tools/provider-kiro/settings";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Clock from "effect/Clock";
@@ -26,10 +27,7 @@ import * as Schema from "effect/Schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
-import {
-  KIRO_PROVIDER,
-  makeKiroAdapterV2,
-} from "../src/orchestration-v2/Adapters/KiroAdapterV2.ts";
+import { KIRO_PROVIDER, makeKiroAdapterV2 } from "@t3tools/provider-kiro/testing";
 import { ACP_PROTOCOL } from "@t3tools/provider-acp/server/adapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -40,7 +38,7 @@ import { materializeFixtureInput } from "../src/orchestration-v2/testkit/fixture
 import { runOrchestratorV2Scenario } from "../src/orchestration-v2/testkit/OrchestratorScenario.ts";
 import * as ProviderReplayHarness from "../src/orchestration-v2/testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
-import { makeKiroAcpRuntime } from "../src/provider/acp/KiroAcpSupport.ts";
+import { makeKiroAcpRuntime } from "@t3tools/provider-kiro/testing";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 
 const wallClock = Clock.Clock.defaultValue();

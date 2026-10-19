@@ -1,5 +1,6 @@
 import type * as EffectAcpSchema from "effect-acp/compat";
-import type { KiroSettings, ProviderApprovalOption, RuntimeMode } from "@t3tools/contracts";
+import type { ProviderApprovalOption, RuntimeMode } from "@t3tools/contracts";
+import type { KiroSettings } from "../settings.ts";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";

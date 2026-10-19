@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { KiroSettings } from "@t3tools/contracts";
+import { KiroSettings } from "@t3tools/provider-kiro/settings";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
@@ -13,7 +13,7 @@ import {
   checkKiroProviderStatus,
   kiroAgentDescriptor,
   kiroDefaultModelId,
-} from "./KiroProvider.ts";
+} from "@t3tools/provider-kiro/testing";
 
 const encoder = new TextEncoder();
 const settings = Schema.decodeSync(KiroSettings)({ enabled: true });

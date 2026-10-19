@@ -1,17 +1,15 @@
 import { assert, describe, it } from "@effect/vitest";
-import { KiroSettings } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-import { BUILT_IN_DRIVERS } from "../builtInDrivers.ts";
-import { buildKiroAcpSpawnInput } from "../acp/KiroAcpSupport.ts";
-import { kiroAuthFromWhoami } from "../KiroProvider.ts";
-import { KiroDriver } from "./KiroDriver.ts";
+import { KiroSettings } from "../settings.ts";
+import { buildKiroAcpSpawnInput } from "./acpSupport.ts";
+import { KiroDriver } from "./driver.ts";
+import { kiroAuthFromWhoami } from "./status.ts";
 
 const decodeSettings = Schema.decodeUnknownSync(KiroSettings);
 
 describe("KiroDriver", () => {
-  it("is a built-in driver that starts disabled", () => {
-    assert.isTrue(BUILT_IN_DRIVERS.includes(KiroDriver));
+  it("starts disabled", () => {
     assert.isFalse(KiroDriver.defaultConfig().enabled);
   });
 

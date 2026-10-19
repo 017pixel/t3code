@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { KiroSettings, ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId } from "@t3tools/contracts";
+import { KiroSettings } from "@t3tools/provider-kiro/settings";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -20,7 +21,7 @@ import {
   makeAcpReplayCompletenessAssertion,
   makeAcpReplayRuntime,
 } from "./AcpAdapterV2.testkit.ts";
-import { KIRO_PROVIDER, makeKiroAdapterV2 } from "./KiroAdapterV2.ts";
+import { KIRO_PROVIDER, makeKiroAdapterV2 } from "@t3tools/provider-kiro/testing";
 
 const KIRO_REPLAY_SETTINGS = Schema.decodeUnknownSync(KiroSettings)({ enabled: true });
 
