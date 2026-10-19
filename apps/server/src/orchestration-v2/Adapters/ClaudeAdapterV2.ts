@@ -89,7 +89,6 @@ import {
   type ProviderRequestKind,
   type ProviderUserInputAnswers,
   type ProviderThreadId,
-  type McpServerVariable,
   type ResolvedMcpServer,
   type RunId,
   type ThreadId,
@@ -1261,7 +1260,6 @@ export function claudeMcpQueryOverrides(input: {
   readonly allowedTools?: ReadonlyArray<string>;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
   readonly sdkSettings?: ClaudeSdkSettings;
-  readonly mcpEnvironment?: Readonly<Record<string, string>>;
 } {
   const session = input.mcpSession;
   if (session === undefined) {
@@ -1277,7 +1275,7 @@ export function claudeMcpQueryOverrides(input: {
   return {
     allowedTools: Array.from(new Set([...(input.allowedTools ?? []), ...mcpAllowedTools])),
     mcpServers: {
-      ...userServers.mcpServers,
+      ...userServers,
       "t3-code": {
         type: "http",
         url: session.endpoint,
@@ -1299,35 +1297,13 @@ export function claudeMcpQueryOverrides(input: {
             ),
           },
         }),
-    ...(Object.keys(userServers.environment).length === 0
-      ? {}
-      : { mcpEnvironment: userServers.environment }),
   };
 }
 
-/**
- * The user's servers for `--mcp-config`. A sensitive env value or header becomes a `${VAR}` reference there, and its value goes
- * into the child's environment.
- */
-function claudeUserMcpServers(servers: ReadonlyArray<ResolvedMcpServer>): {
-  readonly mcpServers: NonNullable<ClaudeQueryOptions["mcpServers"]>;
-  readonly environment: Readonly<Record<string, string>>;
-} {
-  const environment: Record<string, string> = {};
-  const values = (variables: ReadonlyArray<McpServerVariable>) => {
-    const record = mcpServerVariableRecord(variables);
-    // A repeated name keeps its last entry, as the record does.
-    const sensitive = new Map(variables.map((variable) => [variable.name, variable.sensitive]));
-    for (const name of Object.keys(record)) {
-      if (sensitive.get(name) !== true) continue;
-      // Indexed, so two names that read the same once uppercased stay apart.
-      const reference = `T3_MCP_SECRET_${Object.keys(environment).length}`;
-      environment[reference] = record[name]!;
-      record[name] = `\${${reference}}`;
-    }
-    return record;
-  };
-  const mcpServers = Object.fromEntries(
+function claudeUserMcpServers(
+  servers: ReadonlyArray<ResolvedMcpServer>,
+): NonNullable<ClaudeQueryOptions["mcpServers"]> {
+  return Object.fromEntries(
     servers.map((server) => [
       server.name,
       server.transport.type === "stdio"
@@ -1335,16 +1311,15 @@ function claudeUserMcpServers(servers: ReadonlyArray<ResolvedMcpServer>): {
             type: "stdio" as const,
             command: server.transport.command,
             args: [...server.transport.args],
-            env: values(server.transport.env),
+            env: mcpServerVariableRecord(server.transport.env),
           }
         : {
             type: "http" as const,
             url: server.transport.url,
-            headers: values(server.transport.headers),
+            headers: mcpServerVariableRecord(server.transport.headers),
           },
     ]),
   );
-  return { mcpServers, environment };
 }
 
 function providerSession(input: {
@@ -1986,7 +1961,6 @@ export function claudeEffectiveQueryPolicyKey(
     readonly allowedTools?: ReadonlyArray<string>;
     readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
     readonly sdkSettings?: ClaudeSdkSettings;
-    readonly mcpEnvironment?: Readonly<Record<string, string>>;
   },
 ): string {
   return JSON.stringify({
@@ -1999,7 +1973,6 @@ export function claudeEffectiveQueryPolicyKey(
     mcpServers: mcpOverrides.mcpServers,
     // Skill switches load at process start, so a change reopens the query.
     sdkSettings: mcpOverrides.sdkSettings,
-    mcpEnvironment: mcpOverrides.mcpEnvironment,
   });
 }
 
@@ -8597,7 +8570,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             cwd: turnInput.runtimePolicy.cwd,
             attachmentsDir,
             settings: adapterOptions.settings,
-            environment: { ...adapterOptions.environment, ...mcpOverrides.mcpEnvironment },
+            environment: adapterOptions.environment,
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
             ...(mcpOverrides.allowedTools === undefined
               ? {}
