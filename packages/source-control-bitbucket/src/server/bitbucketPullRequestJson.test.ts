@@ -1,3 +1,5 @@
+import { PullRequestComment, PullRequestReviewThread } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -398,69 +400,82 @@ describe("repository permission decoding", () => {
 });
 
 describe("mention display bodies", () => {
-  const token = "@{712020:11111111-2222-4333-8444-555555555555}";
-  const html =
-    '<p><span class="ap-mention" data-atlassian-id="712020:11111111-2222-4333-8444-555555555555">@Alex Smith</span> thanks.</p>';
-  it("preserves editable source in descriptions, comments and inline threads", () => {
-    const body = `${token} thanks.`;
+  it("decodes same-object mention names for descriptions and discussions without changing their source", () => {
+    const token = "@{712020:11111111-2222-4333-8444-555555555555}";
+    const html =
+      '<span class="ap-mention" data-atlassian-id="712020:11111111-2222-4333-8444-555555555555">@Alex_Smith &amp; Co</span>';
+    const literals = [
+      `\`${token}\``,
+      `\`\`\`text\n${token}\n\`\`\``,
+      `    ${token}`,
+      `\\${token}`,
+      `[${token}](https://example.com/${token})`,
+      `<span title="${token}">${token}</span>`,
+    ].join("\n\n");
+    const body = `## Review\n\n**Thanks ${token}**\n\n${literals}\n\n> ${token}, ask @{unknown}.\n\n${token} <br> <span><em>${token}</em></span> ${token}`;
+    const displayBody = `## Review\n\n**Thanks @Alex\\_Smith \\& Co**\n\n${literals}\n\n> @Alex\\_Smith \\& Co, ask @{unknown}.\n\n@Alex\\_Smith \\& Co <br> <span><em>${token}</em></span> @Alex\\_Smith \\& Co`;
     const pr = expectSuccess(
       decodePullRequestJson(
         JSON.stringify(pullRequest({ description: body, rendered: { description: { html } } })),
       ),
     );
-    expect(pr).toMatchObject({ body, displayBody: "@Alex Smith thanks." });
-    const pageResult = expectSuccess(
+    expect(pr).toMatchObject({ body, displayBody });
+
+    const decoded = expectSuccess(
       decodeCommentsJson(
         page([
+          { id: 1, content: { raw: body, html }, created_on: "2026-10-02T00:00:00Z" },
           {
-            id: 1,
+            id: 2,
             content: { raw: body, html },
             created_on: "2026-10-02T00:00:00Z",
             inline: { path: "src/search.ts", to: 1 },
           },
-        ]),
-      ),
-    );
-    expect(pageResult.comments[0]).toMatchObject({ body, displayBody: "@Alex Smith thanks." });
-    expect(buildReviewThreads(pageResult.entries)[0]?.comments[0]).toMatchObject({
-      body,
-      displayBody: "@Alex Smith thanks.",
-    });
-  });
-  it("keeps raw descriptions when rendered HTML is missing", () => {
-    const pr = expectSuccess(
-      decodePullRequestJson(JSON.stringify(pullRequest({ description: token }))),
-    );
-    expect(pr.body).toBe(token);
-    expect(pr.displayBody).toBeUndefined();
-  });
-
-  it.each([42, "invalid", { description: 42 }, { description: { html: 42 } }])(
-    "keeps valid pull requests when rendered metadata is malformed: %j",
-    (rendered) => {
-      const input = pullRequest({ description: token, rendered });
-      const pr = expectSuccess(decodePullRequestJson(JSON.stringify(input)));
-      expect(pr.body).toBe(token);
-      expect(pr.displayBody).toBeUndefined();
-      expect(expectSuccess(decodePullRequestPageJson(page([input]))).items).toHaveLength(1);
-    },
-  );
-
-  it("keeps comments and inline threads when optional HTML has the wrong type", () => {
-    const result = expectSuccess(
-      decodeCommentsJson(
-        page([
+          { id: 3, content: { raw: token }, created_on: "2026-10-02T00:00:00Z" },
           {
-            id: 1,
+            id: 4,
+            content: { raw: token, html: html + html.replace("Alex_Smith", "Someone Else") },
+            created_on: "2026-10-02T00:00:00Z",
+          },
+          {
+            id: 5,
             content: { raw: token, html: 42 },
             created_on: "2026-10-02T00:00:00Z",
-            inline: { path: "src/search.ts", to: 1 },
+            inline: { path: "src/search.ts", to: 2 },
           },
         ]),
       ),
     );
-    expect(result.comments[0]).toMatchObject({ body: token });
-    expect(result.comments[0]?.displayBody).toBeUndefined();
-    expect(buildReviewThreads(result.entries)[0]?.comments[0]).toMatchObject({ body: token });
+    const commentsCodec = Schema.toCodecJson(Schema.Array(PullRequestComment));
+    const comments = Schema.decodeSync(commentsCodec)(
+      Schema.encodeSync(commentsCodec)(decoded.comments),
+    );
+    expect(comments.map(({ body, displayBody }) => ({ body, displayBody }))).toEqual([
+      { body, displayBody },
+      { body, displayBody },
+      { body: token, displayBody: undefined },
+      { body: token, displayBody: undefined },
+      { body: token, displayBody: undefined },
+    ]);
+    const threadsCodec = Schema.toCodecJson(Schema.Array(PullRequestReviewThread));
+    const threads = Schema.decodeSync(threadsCodec)(
+      Schema.encodeSync(threadsCodec)(buildReviewThreads(decoded.entries)),
+    );
+    expect(threads.flatMap((thread) => thread.comments)).toMatchObject([
+      { body, displayBody },
+      { body: token },
+    ]);
+    expect(threads[1]?.comments[0]?.displayBody).toBeUndefined();
+
+    const missingDescription = expectSuccess(
+      decodePullRequestJson(JSON.stringify(pullRequest({ description: token }))),
+    );
+    expect(missingDescription.body).toBe(token);
+    expect(missingDescription.displayBody).toBeUndefined();
+    const malformed = pullRequest({ description: token, rendered: { description: { html: 42 } } });
+    const fallback = expectSuccess(decodePullRequestJson(JSON.stringify(malformed)));
+    expect(fallback.body).toBe(token);
+    expect(fallback.displayBody).toBeUndefined();
+    expect(expectSuccess(decodePullRequestPageJson(page([malformed]))).items).toHaveLength(1);
   });
 });
