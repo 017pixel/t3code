@@ -2046,9 +2046,10 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
   ] as const)("handles checkpoint rollback and subsequent resume: %s", (scenario) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
-      const configDir = yield* fileSystem.makeTempDirectoryScoped({
+      const sessionDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-claude-rollback-",
       });
+      const configDir = NodePath.join(sessionDir, "claude-home");
       yield* Effect.acquireRelease(
         Effect.sync(() => {
           const previous = process.env.CLAUDE_CONFIG_DIR;
@@ -2080,7 +2081,11 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
             : { message: { role: type, content: [{ type: "text", text: `message-${index}` }] } }),
         }),
       );
-      const projectDir = NodePath.join(configDir, "projects", "-workspace");
+      const projectDir = NodePath.join(
+        configDir,
+        "projects",
+        sessionDir.replace(/[^a-zA-Z0-9]/g, "-"),
+      );
       yield* fileSystem.makeDirectory(projectDir, { recursive: true });
       yield* fileSystem.writeFileString(
         NodePath.join(projectDir, `${sourceSessionId}.jsonl`),
@@ -2102,7 +2107,7 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
         assert.deepEqual(
           yield* historyRunner.sessionMessageIds({
             sessionId: sourceSessionId,
-            dir: "/workspace",
+            dir: sessionDir,
             environment: { CLAUDE_CONFIG_DIR: NodePath.join(configDir, "other-instance") },
           }),
           [],
@@ -2137,8 +2142,16 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
           Effect.gen(function* () {
             const messages = yield* sdk("resume", async () => {
               assert.isDefined(input.options.resume, "an existing transcript must be resumed");
+              // In-process SDK reads use the absolute home of the query subprocess.
+              assert.equal(
+                NodePath.resolve(
+                  input.options.cwd ?? process.cwd(),
+                  input.options.env?.CLAUDE_CONFIG_DIR ?? "",
+                ),
+                configDir,
+              );
               const history = await getSessionMessages(input.options.resume!, {
-                dir: "/workspace",
+                dir: input.options.cwd ?? process.cwd(),
               });
               const cursor = input.options.resumeSessionAt;
               const index =
@@ -2168,7 +2181,10 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
       const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
         instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_CLAUDE_SETTINGS,
-        environment: { CLAUDE_CONFIG_DIR: configDir },
+        environment: {
+          CLAUDE_CONFIG_DIR:
+            scenario === "compacted" ? NodePath.relative(sessionDir, configDir) : configDir,
+        },
         attachmentsDir: configDir,
         fileSystem,
         path: yield* Path.Path,
@@ -2181,7 +2197,10 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
         threadId,
         providerSessionId: ProviderSessionId.make("session-claude-compacted-rollback"),
         modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          ...CLAUDE_TEST_RUNTIME_POLICY,
+          cwd: sessionDir,
+        }),
       };
       const openRuntime = (initialNativeThreadId = sourceSessionId) =>
         Effect.gen(function* () {
@@ -2220,7 +2239,7 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
             targetThreadId: ThreadId.make("claude-fork-after-recovery"),
           });
           const forkedHistory = yield* sdk("getSessionMessages", () =>
-            getSessionMessages(forked.nativeThreadRef!.nativeId!, { dir: "/workspace" }),
+            getSessionMessages(forked.nativeThreadRef!.nativeId!, { dir: sessionDir }),
           );
           assert.deepEqual(
             forkedHistory.map((message) => message.message),
@@ -2228,7 +2247,7 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
           );
           const sessionId = providerThread.nativeThreadRef!.nativeId!;
           const history = yield* sdk("getSessionMessages", () =>
-            getSessionMessages(sessionId, { dir: "/workspace" }),
+            getSessionMessages(sessionId, { dir: sessionDir }),
           );
           const newRows = ["user", "assistant", "system", "user", "assistant"].map(
             (type, index) => ({
@@ -2324,6 +2343,7 @@ describe("ClaudeAdapterV2 rollback past compaction", () => {
             attachments: [],
             nativeThreadHasTurns: true,
             providerTurnOrdinal: ordinal + 1,
+            runtimePolicy: sessionInput.runtimePolicy,
           }),
         );
         assert.deepEqual(resumedHistories.at(-1), [
