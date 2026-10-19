@@ -3156,7 +3156,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       if (wake?.running !== true) return;
       state.wakes.pop();
       yield* replay(wake);
-      yield* syncRosterAncestors(state);
+      for (const session of sessionsOf(state).toReversed()) yield* syncRoster(session);
     });
 
     const runWake = Effect.fnUntraced(function* (
@@ -3184,7 +3184,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           }
           if (wake.running) state.unsettled = false;
           yield* replay(wake);
-          yield* syncRosterAncestors(state);
+          for (const session of sessionsOf(state).toReversed()) yield* syncRoster(session);
         }),
       );
     });

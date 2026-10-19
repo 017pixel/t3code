@@ -74,11 +74,18 @@ const event = (
   type: string,
   data: Record<string, unknown>,
   label?: string,
+  version = 1,
 ): ProviderReplayEntry => ({
   type: "emit_inbound",
   frame: {
     type: "sdk.event",
-    event: { id: `evt_${type.replaceAll(".", "")}0000`, created: 1, type, data, ...durable },
+    event: {
+      id: `evt_${type.replaceAll(".", "")}0000`,
+      created: 1,
+      type,
+      data,
+      durable: { ...durable.durable, version },
+    },
   },
   ...(label === undefined ? {} : { label }),
 });
@@ -1468,6 +1475,69 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         until,
       };
     });
+
+  it.effect("clears a nested report cancelled during a held wake", () =>
+    Effect.gen(function* () {
+      const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
+      const gate = makeProviderReplayGate(["drained"]);
+      const { runtime, thread } = yield* resumed(
+        [
+          ...backgroundLaunch(CHILD),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+          event("session.execution.succeeded", { sessionID: CHILD }),
+          childReport("msg_report", "CHILD_OK"),
+          event("session.execution.started", { sessionID: SESSION }),
+          ...nestedLaunch.slice(3, -2),
+          event(
+            "session.tool.success",
+            {
+              ...toolOf(SESSION, "call-middle"),
+              content: [{ type: "text", text: "MIDDLE_OK" }],
+              metadata: { sessionID: MIDDLE, status: "completed", truncated: false },
+              executed: false,
+            },
+            undefined,
+            2,
+          ),
+          event("session.execution.succeeded", { sessionID: DEEP }),
+          deepReport("completed"),
+          event("session.inbox.cancelled", { sessionID: MIDDLE, inboxID: "msg_deep_report" }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+          event("session.model.selected", {
+            sessionID: SESSION,
+            model: { providerID: "opencode", id: "big-pickle", variant: "thinking" },
+          }),
+          event(
+            "session.model.selected",
+            {
+              sessionID: SESSION,
+              model: { providerID: "opencode", id: "big-pickle", variant: "none" },
+            },
+            "drained",
+          ),
+        ],
+        { replayGate: gate },
+      ).pipe(
+        Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+          offer: (request) =>
+            Effect.sync(() => {
+              offers.push(request);
+            }),
+          take: Effect.never,
+        }),
+      );
+      const watch = yield* watchNested(runtime);
+      yield* runtime.startTurn(withLineage(thread));
+      assert.isTrue(yield* Effect.promise(() => gate.waitForReached("drained")));
+      yield* watch.until(() => watch.rootVariant === "thinking");
+      assert.lengthOf(offers, 1);
+      yield* runtime.startTurn(continuationTurn(thread, offers[0]!));
+      gate.release("drained");
+      yield* watch.until(() => watch.rootVariant === "none");
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.strictEqual(watch.pendingSnapshots.get(MIDDLE), false);
+    }).pipe(Effect.scoped),
+  );
 
   it.effect("stops a foreground subagent's background subagent after the turn ended", () =>
     Effect.gen(function* () {
