@@ -942,6 +942,7 @@ const make = Effect.gen(function* () {
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 expectedEmpty: true,
+                expectedWorktreePath: reusableThread?.worktreePath,
                 ...(initialWorktreePath !== null ||
                 (reusableThread !== undefined && reusableThread.worktreePath !== null)
                   ? { branch: initialBranch, worktreePath: initialWorktreePath }
