@@ -41,6 +41,7 @@ import {
   decodeThreadHistoryCursor,
   selectHistoryPageFromCursor,
   THREAD_HISTORY_PAGE_POLICY,
+  THREAD_HISTORY_MAX_RAW_TURNS,
 } from "./threadHistoryPaging.ts";
 
 const layerTest = Layer.mergeAll(
@@ -1395,6 +1396,26 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ];
         startIds.push(rows[1]!.turn_item_id);
         yield* sql`INSERT INTO orchestration_v2_projection_turn_items ${sql.insert(rows)}`;
+        yield* projectionStore.apply({
+          id: EventId.make(`event:notification-turn-pages:checkpoint:${run}`),
+          type: "checkpoint.captured",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: CheckpointId.make(`checkpoint:notification-turn-pages:${run}`),
+            threadId,
+            scopeId: CheckpointScopeId.make(`scope:notification-turn-pages:${run}`),
+            runId: RunId.make(runId),
+            nodeId: NodeId.make(`node:notification-turn-pages:${run}`),
+            parentCheckpointId: null,
+            ordinalWithinScope: 1,
+            appRunOrdinal: run,
+            ref: CheckpointRef.make(`refs/t3/notification-turn-pages/${run}`),
+            status: "ready",
+            capturedAt: now,
+            files: [{ path: `run-${run}.ts`, kind: "modified", additions: run, deletions: 1 }],
+          },
+        });
       }
 
       const { statements, tracer } = traceSqlStatements();
@@ -1445,6 +1466,73 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         cursor = page.nextCursor;
       }
       assert.deepEqual(loaded, allIds);
+
+      // One old user turn must not make notification-started runs an unlimited support cohort.
+      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        SET type = 'notification', payload_json = json_set(payload_json,
+          '$.type', 'notification', '$.source', json('{"kind":"monitor"}'),
+          '$.outcome', 'completed', '$.summary', 'Wake')
+        WHERE thread_id = ${threadId} AND type = 'user_message'
+          AND run_id <> ${"run:notification-turn-pages:1"}`;
+      const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+        rowLimit: 77,
+        deferHistoricalSupport: true,
+      });
+      assert.isAtMost(viewport.projection.checkpoints.length, THREAD_HISTORY_MAX_RAW_TURNS + 2);
+      const boundedViewport = buildBoundedThreadProjection({ ...viewport, viewportWindow: true });
+      const checkpoints = boundedViewport.projection.checkpoints;
+      assert.isAtMost(checkpoints.length, THREAD_HISTORY_MAX_RAW_TURNS + 2);
+      assert.isFalse(checkpoints.some((checkpoint) => checkpoint.appRunOrdinal === 1));
+      const visibleRunIds = new Set(
+        boundedViewport.projection.visibleTurnItems.map((row) => row.item.runId),
+      );
+      const deferred = checkpoints.filter((checkpoint) => !visibleRunIds.has(checkpoint.runId));
+      assert.isAbove(
+        deferred.length,
+        0,
+        "recent inactive turns remain available to Diff and Review",
+      );
+      const loadedRunIds = new Set(viewport.projection.turnItems.map((item) => item.runId));
+      assert.isTrue(deferred.some((checkpoint) => !loadedRunIds.has(checkpoint.runId)));
+      for (const checkpoint of deferred) {
+        assert.deepEqual(checkpoint.files, []);
+        assert.strictEqual(checkpoint.deferredFileCount, 1);
+      }
+      assert.deepEqual(
+        checkpoints.find((checkpoint) => checkpoint.appRunOrdinal === startedRuns)?.files,
+        [{ path: `run-${startedRuns}.ts`, kind: "modified", additions: startedRuns, deletions: 1 }],
+      );
+
+      assert.isNotNull(boundedViewport.historyCursor);
+      const history = yield* projectionStore.getThreadHistoryPage(
+        threadId,
+        boundedViewport.historyCursor!,
+        undefined,
+        false,
+        true,
+      );
+      const historyRunIds = new Set(history.items.map((row) => row.item.runId));
+      const recovered = deferred.filter((checkpoint) => historyRunIds.has(checkpoint.runId));
+      assert.isAbove(recovered.length, 0);
+      for (const checkpoint of recovered) {
+        const hydrated = history.support?.checkpoints.find((entry) => entry.id === checkpoint.id);
+        assert.deepEqual(hydrated?.files, [
+          {
+            path: `run-${checkpoint.appRunOrdinal}.ts`,
+            kind: "modified",
+            additions: checkpoint.appRunOrdinal,
+            deletions: 1,
+          },
+        ]);
+        assert.isUndefined(hydrated?.deferredFileCount);
+        assert.isTrue(history.support?.runs.some((run) => run.id === checkpoint.runId));
+      }
+      const legacyHistory = yield* projectionStore.getThreadHistoryPage(
+        threadId,
+        boundedViewport.historyCursor!,
+      );
+      assert.deepEqual(legacyHistory.items, history.items);
+      assert.isUndefined(legacyHistory.support);
     }),
   );
 
@@ -1570,7 +1658,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
               providerTurnId: null,
               nativeItemRef: null,
               parentItemId: null,
-              ordinal: index,
+              ordinal: index + 1,
               status: "completed",
               title: null,
               startedAt: now,
@@ -1673,6 +1761,54 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         });
         assert.lengthOf(sharedNodeSnapshot.projection.visibleTurnItems, 76);
         assert.deepEqual(sharedNodeSnapshot.projection.nodes, snapshot.projection.nodes);
+
+        const promptId = TurnItemId.make("item:bounded-node-history:prompt");
+        yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+          SELECT ${promptId}, thread_id, run_id, ${rootNodeId}, provider_thread_id,
+            provider_turn_id, parent_item_id, 0, 'user_message', status, updated_at,
+            json_set(payload_json, '$.id', ${promptId}, '$.nodeId', ${rootNodeId}, '$.ordinal', 0,
+              '$.type', 'user_message', '$.messageId', 'prompt', '$.text', 'Start the long run',
+              '$.attachments', json('[]'), '$.inputIntent', 'turn_start', '$.createdBy', 'user', '$.creationSource', 'web')
+          FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${duplicateItemId}`;
+        const viewport = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: 77,
+          deferHistoricalSupport: true,
+        });
+        assert.isAtMost(viewport.projection.visibleTurnItems.length, 78);
+        assert.strictEqual(viewport.projection.visibleTurnItems[0]?.sourceItemId, promptId);
+        const boundedViewport = buildBoundedThreadProjection({ ...viewport, viewportWindow: true });
+        assert.strictEqual(boundedViewport.projection.visibleTurnItems[0]?.sourceItemId, promptId);
+        assert.isAtMost(boundedViewport.projection.visibleTurnItems.length, 76);
+        assert.isTrue(boundedViewport.hasMoreHistory);
+        assert.deepEqual(
+          boundedViewport.projection.runtimeRequests,
+          snapshot.projection.runtimeRequests,
+        );
+        for (const nodeId of [rootNodeId, parentNodeId, liveNodeId, requestNodeId]) {
+          assert.isTrue(boundedViewport.projection.nodes.some((node) => node.id === nodeId));
+        }
+        assert.isFalse(
+          boundedViewport.projection.nodes.some(
+            (node) => node.id === NodeId.make("node:bounded-node-history:1"),
+          ),
+        );
+        const olderPage = yield* projectionStore.getThreadHistoryPage(
+          threadId,
+          boundedViewport.historyCursor!,
+          undefined,
+          false,
+          true,
+        );
+        assert.isTrue(
+          olderPage.items.some(
+            (row) => row.item.nodeId === NodeId.make("node:bounded-node-history:1"),
+          ),
+        );
+        assert.isTrue(
+          olderPage.support?.nodes.some(
+            (node) => node.id === NodeId.make("node:bounded-node-history:1"),
+          ),
+        );
       }),
   );
 

@@ -175,6 +175,65 @@ describe("threadHistoryPaging", () => {
     expect(item.payloadBudgetExceeded).toBe(false);
   });
 
+  it("opens a long completed turn at its viewport and keeps its prompt and interrupt dependency", () => {
+    const promptRow = makeRow(0);
+    const prompt: OrchestrationV2ProjectedTurnItem = {
+      ...promptRow,
+      item: {
+        ...promptRow.item,
+        type: "user_message",
+        runId: RUN,
+        createdBy: "user",
+        creationSource: "web",
+        inputIntent: "turn_start",
+        messageId: MessageId.make("long-turn-prompt"),
+        text: "Do the long task",
+        attachments: [],
+      },
+    };
+    const rows = [
+      prompt,
+      interruptRow(1, "run_interrupt_request"),
+      ...Array.from({ length: 300 }, (_, index) => {
+        const row = makeRow(index + 2);
+        return { ...row, item: { ...row.item, runId: RUN } };
+      }),
+      interruptRow(302, "run_interrupt_result"),
+    ];
+    const full = makeProjection(rows);
+    const projection = {
+      ...full,
+      runs: full.runs.map((run) => ({ ...run, id: RUN, ordinal: 1, status: "completed" as const })),
+    };
+    const legacy = buildBoundedThreadProjection({ projection, snapshotSequence: 7 });
+    expect(legacy.projection.visibleTurnItems).toEqual(rows);
+    expect(legacy.hasMoreHistory).toBe(false);
+
+    const viewport = buildBoundedThreadProjection({
+      projection,
+      snapshotSequence: 7,
+      viewportWindow: true,
+    });
+    const recent = rows.slice(-THREAD_HISTORY_PAGE_POLICY.maxItems);
+    expect(viewport.projection.visibleTurnItems).toHaveLength(recent.length + 1);
+    expect(viewport.projection.visibleTurnItems.map((row) => row.sourceItemId)).toEqual(
+      [prompt, ...recent].map((row) => row.sourceItemId),
+    );
+    expect(viewport.projection.turnItems).toContainEqual(rows[1]!.item);
+    expect(viewport.latestLocalTurnOrdinal).toBe(303);
+    expect(viewport.hasMoreHistory).toBe(true);
+    expect(decodeThreadHistoryCursor(viewport.historyCursor!).si).toBe(recent[0]!.sourceItemId);
+    const older = selectHistoryPageFromCursor({
+      items: rows,
+      cursor: viewport.historyCursor!,
+      snapshotSequence: 7,
+    });
+    expect([...older.items, ...recent].map((row) => row.sourceItemId)).toEqual(
+      rows.map((row) => row.sourceItemId),
+    );
+    expect(older.hasMoreHistory).toBe(false);
+  });
+
   it("keeps background turns with user turns, with main's 150-turn fan-out ceiling", () => {
     const items = Array.from({ length: 161 }, (_, turn) => {
       const row = makeRow(turn * 2);
