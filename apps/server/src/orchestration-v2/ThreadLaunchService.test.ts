@@ -2040,7 +2040,7 @@ it.effect("replays a server-allocated launch", () =>
   }),
 );
 
-it.effect("MCP replays an accepted launch after its base and project default disappear", () =>
+it.effect("MCP replays accepted launches and checks worktree membership", () =>
   Effect.gen(function* () {
     const setupEntered = yield* Deferred.make<void>();
     const allowSetup = yield* Deferred.make<void>();
@@ -2075,7 +2075,9 @@ it.effect("MCP replays an accepted launch after its base and project default dis
       NodeCrypto.layer,
       NodeServices.layer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, context),
-      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({
+        listWorktreePaths: () => Effect.succeed([project.workspaceRoot, "/repo-worktrees/feature"]),
+      }),
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-launch-retry-" }).pipe(
         Layer.provide(NodeServices.layer),
       ),
@@ -2097,11 +2099,46 @@ it.effect("MCP replays an accepted launch after its base and project default dis
           Stream.runCollect,
           Effect.map((results) => results.at(-1)?.result),
         );
+      const fs = yield* FileSystem.FileSystem;
+      const outsidePath = yield* fs.makeTempDirectoryScoped({ prefix: "launch-unregistered-" });
+      const outsideStrategy = { type: "existing_worktree" as const, worktreePath: outsidePath };
+      const refusal = {
+        code: "invalid_request",
+        message:
+          "worktreePath must be one of the project's git worktrees. t3_worktree_list shows them.",
+      };
+      const idleInput = {
+        title: "Idle accepted launch",
+        projectId,
+        clientRequestId: "idle-retry",
+        workspaceStrategy: { type: "root" as const },
+      };
+      assert.include(yield* launch(idleInput), { runId: null, status: null });
+      assert.include(
+        yield* launch({
+          ...idleInput,
+          message: "Run outside the project",
+          workspaceStrategy: outsideStrategy,
+        }),
+        refusal,
+      );
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const idle = yield* threads.getThreadProjection(
+        ThreadId.make("mcp:launch:client%3Alaunch-retry:idle-retry"),
+      );
+      assert.equal(idle.messages.length, 0);
+      assert.equal(idle.runs.length, 0);
+      assert.equal(idle.thread.worktreePath, null);
+      assert.equal(harness.createWorktree.mock.calls.length, 0);
+      assert.equal(harness.runSetup.mock.calls.length, 0);
+
       const first = yield* launch(input);
       assert.isDefined(first);
       assert.notProperty(first, "code");
       yield* Deferred.await(setupEntered);
       changed = true;
+
+      assert.include(yield* launch({ ...input, workspaceStrategy: outsideStrategy }), refusal);
 
       assert.deepEqual(yield* launch(input), first);
       assert.deepEqual(yield* launch({ ...input, modelSelection: claudeModelSelection }), first);
@@ -2129,10 +2166,12 @@ it.effect("MCP replays an accepted launch after its base and project default dis
         { code: "invalid_request" },
       );
       const threadId = ThreadId.make("mcp:launch:client%3Alaunch-retry:lost-response");
-      const threads = yield* ThreadManagement.ThreadManagementService;
       const projection = yield* threads.getThreadProjection(threadId);
       assert.equal(projection.messages.length, 1);
       assert.equal(projection.runs.length, 1);
+      assert.equal(projection.runs[0]?.status, "preparing");
+      assert.deepEqual(projection.runs[0]?.workspacePreparation, input.workspaceStrategy);
+      assert.equal(projection.thread.worktreePath, "/repo-worktrees/feature");
       assert.equal(harness.createWorktree.mock.calls.length, 1);
       assert.equal(harness.runSetup.mock.calls.length, 1);
       yield* Deferred.succeed(allowSetup, undefined);

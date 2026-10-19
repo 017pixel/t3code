@@ -102,8 +102,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 ),
               )).projectId
             : yield* resolveProjectId(context, input.projectId);
-        // Accepted creates keep their workspace and model even if refs or
-        // project defaults change. Message intake still handles their replay.
+        // Accepted creates skip mutable base/default-model preflights.
+        // Message intake still handles their replay and preparation.
         const acceptedLaunch =
           input.clientRequestId === undefined
             ? undefined
@@ -120,7 +120,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           Effect.mapError(unavailable),
           Effect.map(Option.getOrUndefined),
         );
-        if (acceptedLaunch === undefined && input.workspaceStrategy?.type === "existing_worktree") {
+        if (input.workspaceStrategy?.type === "existing_worktree") {
           const project = yield* readProject;
           if (project === undefined)
             return yield* new OrchestratorMcpFailure({
