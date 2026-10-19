@@ -2432,6 +2432,13 @@ export const make = (
       resumeSession: (sessionId, activationOptions) =>
         start.pipe(
           Effect.flatMap((started) => {
+            if (
+              started.sessionId === sessionId &&
+              options.resumeSessionId === sessionId &&
+              options.resumeMethod === "resume"
+            ) {
+              return Effect.succeed(started);
+            }
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
@@ -2442,9 +2449,8 @@ export const make = (
               "session/resume",
               requestPayload,
               acp.agent.resumeSession(requestPayload),
-            );
+            ).pipe(Effect.flatMap((response) => adoptSession(sessionId, response)));
           }),
-          Effect.flatMap((response) => adoptSession(sessionId, response)),
         ),
       forkSession: (sessionId, activationOptions) =>
         start.pipe(
