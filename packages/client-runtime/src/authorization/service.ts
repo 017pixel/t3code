@@ -37,7 +37,7 @@ import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
-import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 
 import {
   DPOP_ACCESS_TOKEN_REFRESH_SKEW_MS,
@@ -71,6 +71,12 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpop: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
+      /**
+       * The access token is not bound to an origin, and each proof is minted
+       * for the URL it signs, so a token from the relay also works on the
+       * environment's LAN or tailnet address.
+       */
+      readonly directEndpoint?: { readonly httpBaseUrl: string; readonly wsBaseUrl: string };
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpopHttp: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
@@ -80,11 +86,6 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
 >()("@t3tools/client-runtime/authorization/service/RemoteEnvironmentAuthorization") {}
 
 const CACHED_ENDPOINT_SOCKET_TIMEOUT_MS = 3_000;
-// 3 s + 7 s ends the cached ticket step by 10 s, the default request budget. That leaves
-// 5 s of the supervisor's 15 s setup deadline for the descriptor check and websocket open.
-const CACHED_ENDPOINT_SOCKET_RETRY_TIMEOUT_MS = 7_000;
-/** Cached ticket attempts in a row that time out before the client asks the relay again. */
-const CACHED_TICKET_TIMEOUT_LIMIT = 3;
 const BEARER_DESCRIPTOR_CACHE_TTL_MS = 10_000;
 const DPOP_AUTHORIZATION_TIMEOUT_MS = 30_000;
 
@@ -117,12 +118,6 @@ export const make = Effect.gen(function* () {
     EnvironmentId,
     { readonly accessToken: string; readonly identity: ClientCapabilities.CloudSessionIdentity }
   >();
-  // Timed-out cached ticket steps in a row, per environment and token. It lives as long as
-  // the service, so supervisor retries and a mobile foreground resume do not reset it.
-  const cachedTicketTimeouts = new Map<
-    EnvironmentId,
-    { readonly accessToken: string; readonly count: number }
-  >();
   const pendingTokens = new Map<
     EnvironmentId,
     {
@@ -143,14 +138,13 @@ export const make = Effect.gen(function* () {
     >
   >(new Map());
 
-  const authorizeBearer = Effect.fn("clientRuntime.connection.remote.authorizeBearer")(
+  /**
+   * A saved LAN address can belong to another machine on a different network.
+   */
+  const verifyDirectEndpoint = Effect.fn("clientRuntime.connection.remote.verifyDirectEndpoint")(
     function* (input: {
-      readonly expectedEnvironmentId: Parameters<
-        RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]
-      >[0]["expectedEnvironmentId"];
+      readonly expectedEnvironmentId: EnvironmentId;
       readonly httpBaseUrl: string;
-      readonly wsBaseUrl: string;
-      readonly bearerToken: string;
       readonly connectionMethod: ClientConnectionMethod;
     }) {
       const now = yield* Clock.currentTimeMillis;
@@ -180,6 +174,21 @@ export const make = Effect.gen(function* () {
           return next;
         });
       }
+      return descriptor;
+    },
+  );
+
+  const authorizeBearer = Effect.fn("clientRuntime.connection.remote.authorizeBearer")(
+    function* (input: {
+      readonly expectedEnvironmentId: Parameters<
+        RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]
+      >[0]["expectedEnvironmentId"];
+      readonly httpBaseUrl: string;
+      readonly wsBaseUrl: string;
+      readonly bearerToken: string;
+      readonly connectionMethod: ClientConnectionMethod;
+    }) {
+      const descriptor = yield* verifyDirectEndpoint(input);
       const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({
         wsBaseUrl: input.wsBaseUrl,
         httpBaseUrl: input.httpBaseUrl,
@@ -204,11 +213,15 @@ export const make = Effect.gen(function* () {
   );
 
   const createDpopSocketUrl = Effect.fn("clientRuntime.connection.remote.createDpopSocketUrl")(
-    function* (token: TokenStore.RemoteDpopAccessToken, timeoutMs?: number) {
+    function* (
+      token: TokenStore.RemoteDpopAccessToken,
+      timeoutMs?: number,
+      endpoint: { readonly httpBaseUrl: string; readonly wsBaseUrl: string } = token.endpoint,
+    ) {
       const ticketProof = yield* signer
         .createProof({
           method: "POST",
-          url: environmentEndpointUrl(token.endpoint.httpBaseUrl, "/api/auth/websocket-ticket"),
+          url: environmentEndpointUrl(endpoint.httpBaseUrl, "/api/auth/websocket-ticket"),
           accessToken: token.accessToken,
         })
         .pipe(
@@ -221,8 +234,8 @@ export const make = Effect.gen(function* () {
           ),
         );
       return yield* resolveRemoteDpopWebSocketConnectionUrl({
-        wsBaseUrl: token.endpoint.wsBaseUrl,
-        httpBaseUrl: token.endpoint.httpBaseUrl,
+        wsBaseUrl: endpoint.wsBaseUrl,
+        httpBaseUrl: endpoint.httpBaseUrl,
         accessToken: token.accessToken,
         dpopProof: ticketProof,
         clientMetadata: presentation.metadata,
@@ -236,6 +249,15 @@ export const make = Effect.gen(function* () {
     new ConnectionBlockedError({
       reason: "authentication",
       detail: "Your cloud sign-in changed. Sign in again to authorize the environment.",
+    });
+
+  // A missing identity before the attempt captures one means the cloud session
+  // is still loading, not a sign-out. Only a captured identity that goes away
+  // or changes is evidence of one.
+  const sessionPending = () =>
+    new ConnectionTransientError({
+      reason: "session-pending",
+      detail: "Waiting for the T3 Connect sign-in to load.",
     });
 
   const assertSession = Effect.fnUntraced(function* (
@@ -325,7 +347,6 @@ export const make = Effect.gen(function* () {
         httpBaseUrl: bootstrap.endpoint.httpBaseUrl,
         credential: bootstrap.credential,
         dpopProof: bootstrapProof,
-        scopes: presentation.scopes,
         clientMetadata: presentation.metadata,
       }).pipe(
         Effect.mapError(mapRemoteDpopEnvironmentError),
@@ -350,7 +371,7 @@ export const make = Effect.gen(function* () {
   ) {
     const session = yield* cloudSession.identity;
     if (Option.isNone(session)) {
-      return yield* sessionChanged();
+      return yield* sessionPending();
     }
     const identity = session.value;
     const thumbprint = yield* signer.thumbprint.pipe(
@@ -460,10 +481,11 @@ export const make = Effect.gen(function* () {
 
   const httpAuthorization = (
     token: TokenStore.RemoteDpopAccessToken,
+    httpBaseUrl = token.endpoint.httpBaseUrl,
   ): AuthorizedRemoteHttpEnvironment => ({
     environmentId: token.environmentId,
     label: token.label,
-    httpBaseUrl: token.endpoint.httpBaseUrl,
+    httpBaseUrl,
     httpAuthorization: {
       _tag: "Dpop",
       accessToken: token.accessToken,
@@ -474,57 +496,48 @@ export const make = Effect.gen(function* () {
   const authorizeDpop = Effect.fn("clientRuntime.connection.remote.authorizeDpop")(function* (
     input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeDpop"]>[0],
   ) {
+    const endpoint = input.directEndpoint;
+    if (endpoint !== undefined) {
+      yield* verifyDirectEndpoint({
+        expectedEnvironmentId: input.expectedEnvironmentId,
+        httpBaseUrl: endpoint.httpBaseUrl,
+        connectionMethod: "direct",
+      });
+    }
+    const authorized = (token: TokenStore.RemoteDpopAccessToken, socketUrl: string) => ({
+      ...httpAuthorization(token, endpoint?.httpBaseUrl),
+      socketUrl,
+    });
     let selected = yield* getDpopToken(input);
     if (selected.fromCache) {
-      const cachedToken = selected.token;
-      // A timeout means a lost request or a slow server, not a bad token. Retry the same
-      // token once, so a lost request recovers in about 3 s without a new credential.
       const cachedSocket = yield* createDpopSocketUrl(
-        cachedToken,
+        selected.token,
         CACHED_ENDPOINT_SOCKET_TIMEOUT_MS,
-      ).pipe(
-        Effect.catchTags({
-          RemoteEnvironmentAuthTimeoutError: () =>
-            createDpopSocketUrl(cachedToken, CACHED_ENDPOINT_SOCKET_RETRY_TIMEOUT_MS),
-        }),
-        Effect.result,
-      );
+        endpoint,
+      ).pipe(Effect.result);
       if (Result.isSuccess(cachedSocket)) {
-        cachedTicketTimeouts.delete(input.expectedEnvironmentId);
         yield* assertSession(selected.identity);
-        return { ...httpAuthorization(cachedToken), socketUrl: cachedSocket.success };
+        return authorized(selected.token, cachedSocket.success);
       }
       if (cachedSocket.failure._tag === "ConnectionBlockedError") {
         return yield* mapDpopSocketError(cachedSocket.failure);
       }
-      // When the retry also times out, keep the token and fail as transient. The relay returns
-      // the same hostname for an environment, so a new credential would only add an auth
-      // session on that slow server. Leave out the network hint: the relay and tunnel answered
-      // for this token before. At the limit, drop the token and ask the relay again in case
-      // the endpoint moved. That mint runs in the service scope, so it lands even if this
-      // attempt times out.
-      if (cachedSocket.failure._tag === "RemoteEnvironmentAuthTimeoutError") {
-        const accessToken = cachedToken.accessToken;
-        const previous = cachedTicketTimeouts.get(input.expectedEnvironmentId);
-        const count = previous?.accessToken === accessToken ? previous.count + 1 : 1;
-        if (count < CACHED_TICKET_TIMEOUT_LIMIT) {
-          cachedTicketTimeouts.set(input.expectedEnvironmentId, { accessToken, count });
-          return yield* new ConnectionTransientError({
-            reason: "timeout",
-            detail: `${cachedToken.label} did not respond during connection setup.`,
-          });
-        }
-        cachedTicketTimeouts.delete(input.expectedEnvironmentId);
+      // An unreachable direct address says nothing about the token, so keep
+      // it for the T3 Connect route rather than forcing a relay round trip.
+      if (endpoint !== undefined && cachedSocket.failure._tag !== "EnvironmentAuthInvalidError") {
+        return yield* mapDpopSocketError(cachedSocket.failure);
       }
+      yield* assertSession(selected.identity);
       selected = yield* getDpopToken({
         ...input,
-        rejectedAccessToken: cachedToken.accessToken,
+        rejectedAccessToken: selected.token.accessToken,
       });
     }
-    const socket = yield* createDpopSocketUrl(selected.token).pipe(Effect.result);
+    const socket = yield* createDpopSocketUrl(selected.token, undefined, endpoint).pipe(
+      Effect.result,
+    );
     if (Result.isFailure(socket)) {
-      // A timeout does not mean the new token is bad. Keep it so the next attempt reuses it.
-      if (socket.failure._tag !== "RemoteEnvironmentAuthTimeoutError") {
+      if (endpoint === undefined || socket.failure._tag === "ConnectionBlockedError") {
         yield* tokenLock.withPermits(1)(
           removeRejectedToken(input.expectedEnvironmentId, selected.token.accessToken),
         );
@@ -532,7 +545,7 @@ export const make = Effect.gen(function* () {
       return yield* mapDpopSocketError(socket.failure);
     }
     yield* assertSession(selected.identity);
-    return { ...httpAuthorization(selected.token), socketUrl: socket.success };
+    return authorized(selected.token, socket.success);
   });
 
   return RemoteEnvironmentAuthorization.of({
