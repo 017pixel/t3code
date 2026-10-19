@@ -305,6 +305,7 @@ const make = Effect.gen(function* () {
               Effect.result,
             );
             if (page._tag === "Failure") {
+              if (cursor !== undefined) nextCursors[key] = cursor;
               recordFailure(project, page.failure);
               errors.push({
                 projectId: project.project.id,

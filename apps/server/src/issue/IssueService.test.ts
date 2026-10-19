@@ -277,6 +277,7 @@ describe("IssueService", () => {
   it.effect("deduplicates and pages repositories despite partial failures", () =>
     Effect.gen(function* () {
       const listed: string[] = [];
+      let failContinuation = true;
       const service = yield* makeService({
         projects: [
           project({ id: "web", repository: "acme/web" }),
@@ -305,6 +306,15 @@ describe("IssueService", () => {
                   });
                 if (input.scope === "acme/docs")
                   return { items: [issue("3", "2026-07-04T00:00:00Z")], nextCursor: null };
+                if (input.cursor === "next" && failContinuation) {
+                  failContinuation = false;
+                  return yield* new IssueTrackerError({
+                    tracker: GITHUB,
+                    operation: "listIssues",
+                    reason: "failed",
+                    detail: "try again",
+                  });
+                }
                 if (input.cursor === "next")
                   return { items: [issue("4", "2026-07-01T00:00:00Z")], nextCursor: null };
                 return {
@@ -338,11 +348,16 @@ describe("IssueService", () => {
 
       // A continuation only reads the scopes it names.
       listed.length = 0;
-      const next = yield* service.list({
+      const failed = yield* service.list({
         state: "open",
-        cursors: { "github.com acme/web": "next" },
+        cursors: result.nextCursors,
       });
       expect(listed).toEqual(["acme/web"]);
+      expect(failed.nextCursors).toEqual(result.nextCursors);
+      expect(failed.errors).toEqual([
+        { projectId: "web", projectTitle: "web", message: "try again" },
+      ]);
+      const next = yield* service.list({ state: "open", cursors: failed.nextCursors });
       expect(next.entries.map((entry) => [entry.projectId, entry.key])).toEqual([["web", "4"]]);
       expect(next.nextCursors).toEqual({});
       expect(next.errors).toEqual([]);
