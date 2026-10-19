@@ -184,13 +184,13 @@ describe("matchesLinkedPullRequestUrl", () => {
     ).toBe(expected);
   });
 
-  it("keeps other providers' existing port normalization", () => {
+  it("distinguishes GitHub hosts served on different HTTPS ports", () => {
     expect(
       matchesLinkedPullRequestUrl(
         linkedPullRequest,
         "https://github.com:8443/pingdotgg/t3code/pull/42",
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("keeps Forgejo and GitHub path shapes distinct on a GitHub-named host", () => {

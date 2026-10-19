@@ -50,9 +50,14 @@ describe("parseChangeRequestUrl", () => {
     expect(
       parseChangeRequestUrl("https://gitlab.com/t3tools/platform/t3code/-/merge_requests/42"),
     ).toEqual({ host: "gitlab.com", repository: "t3tools/platform/t3code", number: 42 });
-    expect(parseChangeRequestUrl("https://code.acme.test/team/project/-/merge_requests/9")).toEqual(
-      { host: "code.acme.test", repository: "team/project", number: 9 },
-    );
+    expect(
+      parseChangeRequestUrl("https://code.acme.test:8443/team/project/-/merge_requests/9"),
+    ).toEqual({
+      host: "code.acme.test:8443",
+      authority: "code.acme.test:8443",
+      repository: "team/project",
+      number: 9,
+    });
   });
 
   it("reads Bitbucket and both Azure DevOps URL forms", () => {

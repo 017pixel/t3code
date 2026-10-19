@@ -3,8 +3,8 @@ import { canonicalRepositoryKey } from "./sourceControl.ts";
 
 /**
  * The two strings are what `pullRequestHostOf` and the project's `repositoryIdentity` produce
- * from a git remote — lower case, no port, the full path below the host — because links are
- * matched against those. Anything else matches nothing.
+ * from a git remote — lower case, including web ports, the full path below the host — because
+ * links are matched against those. Anything else matches nothing.
  */
 export interface ChangeRequestLink {
   readonly host: string;
@@ -30,35 +30,41 @@ export function parseChangeRequestUrl(targetUrl: string): ChangeRequestLink | nu
 
   if (host === "git.cafe" || host === "staging.git.cafe") {
     const match = /^\/([^/]+\/[^/]+)\/pulls\/(\d+)(?:\/|$)/u.exec(url.pathname);
-    return claim(host, match);
+    return claim(url, match);
   }
   if (isHostOf(host, "github.com", "github")) {
     const match = /^\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/|$)/u.exec(url.pathname);
-    if (match) return claim(host, match);
+    if (match) return claim(url, match);
   }
   const forgejo = /^\/([^/]+(?:\/[^/]+)+)\/pulls\/(\d+)(?:\/|$)/u.exec(url.pathname);
   if (forgejo) {
-    const link = claim(host, forgejo);
-    return link === null ? null : { ...link, authority: url.host.toLowerCase() };
+    const link = claim(url, forgejo);
+    return link === null ? null : { ...link, host, authority: url.host.toLowerCase() };
   }
   const gitlab = /^\/([^/]+(?:\/[^/]+)+)\/-\/merge_requests\/(\d+)(?:\/|$)/u.exec(url.pathname);
-  if (gitlab) return claim(host, gitlab);
+  if (gitlab) return claim(url, gitlab);
   if (isHostOf(host, "bitbucket.org", "bitbucket")) {
     const match = /^\/([^/]+\/[^/]+)\/pull-requests\/(\d+)(?:\/|$)/u.exec(url.pathname);
-    return claim(host, match);
+    return claim(url, match);
   }
   if (isHostOf(host, "dev.azure.com") || host.endsWith(".visualstudio.com")) {
     const match = /^\/((?:[^/]+\/)*_git\/[^/]+)\/pullrequest\/(\d+)(?:\/|$)/u.exec(url.pathname);
-    return claim(host, match);
+    return claim(url, match);
   }
   return null;
 }
 
-function claim(host: string, match: RegExpExecArray | null): ChangeRequestLink | null {
+function claim(url: URL, match: RegExpExecArray | null): ChangeRequestLink | null {
   const repository = match?.[1];
   const number = Number(match?.[2]);
   return repository && Number.isSafeInteger(number) && number > 0
-    ? { host, repository: repository.toLowerCase(), number }
+    ? {
+        host: url.host.toLowerCase(),
+        repository: repository.toLowerCase(),
+        number,
+        // Older stored link keys need the URL's authority to recover their web port.
+        ...(url.port ? { authority: url.host.toLowerCase() } : {}),
+      }
     : null;
 }
 

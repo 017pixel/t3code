@@ -17,7 +17,7 @@ describe("resolveLinkPullRequestInput", () => {
   it.each([
     ["https://bitbucket.org/acme/web/pull-requests/42", "bitbucket.org"],
     ["https://github.acme.test/acme/web/pull/42", "github.acme.test"],
-    ["https://git.acme.test/acme/web/-/merge_requests/42", "git.acme.test"],
+    ["https://git.acme.test:8443/acme/web/-/merge_requests/42", "git.acme.test:8443"],
   ])("links supported host URL %s without a thread project", (url, host) => {
     expect(
       resolveLinkPullRequestInput({
