@@ -1418,17 +1418,25 @@ export const layerWithOptions = (
           });
         });
 
-      const reclaimRefusedIdleRelease = (entry: LiveSessionEntry, threadId: ThreadId) =>
+      const reclaimRefusedThreadRelease = (
+        entry: LiveSessionEntry,
+        threadId: ThreadId,
+        refusal?: ProviderAdapter.ProviderAdapterThreadUnloadRefusedError,
+      ) =>
         Effect.gen(function* () {
           const pending = entry.pendingThreadReleases.get(threadId);
           const idle = entry.idleThreadUnloads.get(threadId);
           const loaded = entry.loadedProviderThreadByThread.get(threadId);
           const original = pending?.providerThreads[0];
           if (
-            pending?.idleUnload?.release !== "refused" ||
+            pending === undefined ||
             pending.providerThreads.length !== 1 ||
-            idle?.generation !== pending.idleUnload.generation ||
-            !entry.attachedThreadIds.has(threadId) ||
+            (pending.idleUnload === undefined
+              ? refusal?.driver !== entry.runtime.driver ||
+                refusal.providerThreadId !== original?.id
+              : pending.idleUnload.release !== "refused" ||
+                !entry.attachedThreadIds.has(threadId)) ||
+            idle?.generation !== pending.idleUnload?.generation ||
             loaded === undefined ||
             original?.nativeThreadRef === null ||
             original === undefined ||
@@ -1439,7 +1447,7 @@ export const layerWithOptions = (
             original.providerSessionId !== entry.runtime.providerSessionId
           )
             return false;
-          const generation = pending.idleUnload.generation;
+          const generation = pending.idleUnload?.generation;
           const projection = yield* projectionStore.getThreadRecords(threadId, ["providerThreads"]);
           const binding = projection.providerThreads.find(
             (thread) => thread.id === projection.thread.activeProviderThreadId,
@@ -1458,7 +1466,7 @@ export const layerWithOptions = (
             const latestIdle = latest?.idleThreadUnloads.get(threadId);
             if (
               latest?.runtime !== entry.runtime ||
-              !latest.attachedThreadIds.has(threadId) ||
+              latest.attachedThreadIds.has(threadId) !== entry.attachedThreadIds.has(threadId) ||
               latest.pendingThreadReleases.get(threadId) !== pending ||
               latest.loadedProviderThreadByThread.get(threadId) !== loaded ||
               latestIdle?.generation !== generation
@@ -1470,7 +1478,7 @@ export const layerWithOptions = (
             idleThreadUnloads.delete(threadId);
             const updated = new Map(current);
             updated.set(key, { ...latest, pendingThreadReleases, idleThreadUnloads });
-            return [Option.some(latestIdle.fiber), updated] as const;
+            return [Option.some(latestIdle?.fiber ?? null), updated] as const;
           });
           if (Option.isNone(reclaimed)) return false;
           yield* cancelIdleFiber(reclaimed.value);
@@ -1912,9 +1920,20 @@ export const layerWithOptions = (
                   detail: "Provider runtime changed before thread attachment; retry the operation.",
                 });
               }
-              yield* reclaimRefusedIdleRelease(entry, threadId).pipe(
+              yield* reclaimRefusedThreadRelease(entry, threadId).pipe(
                 Effect.flatMap((reclaimed) =>
-                  reclaimed ? Effect.void : confirmPendingThreadRelease(entry, threadId),
+                  reclaimed
+                    ? Effect.void
+                    : confirmPendingThreadRelease(entry, threadId).pipe(
+                        Effect.catchTags({
+                          ProviderAdapterThreadUnloadRefusedError: (refusal) =>
+                            reclaimRefusedThreadRelease(entry, threadId, refusal).pipe(
+                              Effect.flatMap((reclaimed) =>
+                                reclaimed ? Effect.void : Effect.fail(refusal),
+                              ),
+                            ),
+                        }),
+                      ),
                 ),
                 Effect.mapError(
                   (cause) =>
