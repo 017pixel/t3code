@@ -3266,6 +3266,50 @@ describe("PiAdapterV2", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    it.effect("suppresses session grants until all overlapping lifecycle requests finish", () =>
+      Effect.gen(function* () {
+        const { fake, runtime, providerThread, takeApproval, grant, askAgain } = yield* setup;
+        fake.deferNextLifecycle("switch_session");
+        const first = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkScoped);
+        const firstRequest = yield* fake.takeRequest("switch_session");
+        fake.deferNextLifecycle("switch_session");
+        const second = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkScoped);
+        const secondRequest = yield* fake.takeRequest("switch_session");
+        yield* fake.emit({
+          type: "response",
+          id: firstRequest["id"],
+          command: "switch_session",
+          success: true,
+          data: { cancelled: false },
+        });
+        yield* Fiber.join(first);
+        yield* grant;
+        yield* fake.emit({
+          type: "response",
+          id: secondRequest["id"],
+          command: "switch_session",
+          success: true,
+          data: { cancelled: false },
+        });
+        yield* Fiber.join(second);
+        yield* fake.emit(prompt("after-lifecycle"));
+        const pending = yield* Effect.race(
+          takeApproval,
+          fake.takeRequest("extension_ui_response").pipe(Effect.as(undefined)),
+        );
+        assert.isDefined(pending);
+        if (pending === undefined) throw new Error("Expected approval after lifecycle requests");
+        assert.equal(pending.status, "pending");
+        yield* runtime.respondToRuntimeRequest({
+          requestId: pending.id,
+          decision: "acceptForSession",
+        });
+        assert.equal((yield* fake.takeRequest("extension_ui_response"))["confirmed"], true);
+        assert.equal((yield* takeApproval).status, "resolved");
+        assert.equal(yield* askAgain, "automatic");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
     it.effect(
       "does not resolve a cancelled dialog or restore its grant after an in-flight answer",
       () =>

@@ -516,7 +516,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       >();
       const pendingPrompts = new Map<string, PendingPiPrompt>();
       const sessionApprovals = new Set<string>();
-      let lifecycleInFlight = false;
+      let lifecycleRequestsInFlight = 0;
       // Answering a dialog and terminalizing a turn both publish lifecycle
       // events. Pi can settle immediately after `extension_ui_response`, so
       // serialize the two paths to stop `turn.terminal` from overtaking the
@@ -641,26 +641,29 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       };
 
       const lifecycleRequest = (record: PiRpcRecord) =>
-        Effect.suspend(() => {
-          sessionApprovals.clear();
-          lifecycleInFlight = true;
-          return request(record, PI_SESSION_TIMEOUT_MS);
-        }).pipe(
-          // A local timeout does not cancel Pi's lifecycle hook. Retire the
-          // process before fallback can race its eventual switch/new-session.
-          Effect.tapError((error) =>
-            Effect.logWarning("Pi session lifecycle request failed", {
-              providerSessionId: input.providerSessionId,
-              operation: record["type"],
-              errorTag: error._tag,
-            }),
-          ),
-          Effect.catchTags({
-            PiRpcTimeoutError: (error) =>
-              connection.terminate.pipe(Effect.andThen(Effect.fail(error))),
+        Effect.acquireUseRelease(
+          Effect.sync(() => {
+            sessionApprovals.clear();
+            lifecycleRequestsInFlight++;
           }),
-          Effect.onInterrupt(() => connection.terminate),
-          Effect.ensuring(Effect.sync(() => (lifecycleInFlight = false))),
+          () =>
+            request(record, PI_SESSION_TIMEOUT_MS).pipe(
+              // A local timeout does not cancel Pi's lifecycle hook. Retire the
+              // process before fallback can race its eventual switch/new-session.
+              Effect.tapError((error) =>
+                Effect.logWarning("Pi session lifecycle request failed", {
+                  providerSessionId: input.providerSessionId,
+                  operation: record["type"],
+                  errorTag: error._tag,
+                }),
+              ),
+              Effect.catchTags({
+                PiRpcTimeoutError: (error) =>
+                  connection.terminate.pipe(Effect.andThen(Effect.fail(error))),
+              }),
+              Effect.onInterrupt(() => connection.terminate),
+            ),
+          () => Effect.sync(() => lifecycleRequestsInFlight--),
         );
 
       const tokenUsageFromStats = (
@@ -2763,7 +2766,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             if (
               pending.method === "confirm" &&
               requestInput.decision === "acceptForSession" &&
-              !lifecycleInFlight
+              lifecycleRequestsInFlight === 0
             ) {
               sessionApprovals.add(pending.approvalKey);
             }
