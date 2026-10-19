@@ -177,6 +177,7 @@ describe("threadHistoryPaging", () => {
 
   it("opens a long completed turn at its viewport and keeps its prompt and interrupt dependency", () => {
     const promptRow = makeRow(0);
+    if (promptRow.item.type !== "command_execution") throw new Error("Expected command fixture");
     const prompt: OrchestrationV2ProjectedTurnItem = {
       ...promptRow,
       item: {

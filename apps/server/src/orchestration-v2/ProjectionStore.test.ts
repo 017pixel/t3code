@@ -1515,6 +1515,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const recovered = deferred.filter((checkpoint) => historyRunIds.has(checkpoint.runId));
       assert.isAbove(recovered.length, 0);
       for (const checkpoint of recovered) {
+        if (checkpoint.appRunOrdinal === null) throw new Error("Expected a run ordinal");
         const hydrated = history.support?.checkpoints.find((entry) => entry.id === checkpoint.id);
         assert.deepEqual(hydrated?.files, [
           {
