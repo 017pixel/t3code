@@ -1269,6 +1269,10 @@ function createTerminalSpawnEnv(
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value === undefined) continue;
     if (shouldExcludeTerminalEnvKey(key)) continue;
+    if (platform === "win32") {
+      const normalizedKey = key.toUpperCase();
+      if (normalizedKey === "TERM_PROGRAM" || normalizedKey === "TERM_PROGRAM_VERSION") continue;
+    }
     spawnEnv[key] = value;
   }
   // The server inherits its launcher's identity (e.g. Apple_Terminal); shells
