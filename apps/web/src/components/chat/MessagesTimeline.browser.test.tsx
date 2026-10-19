@@ -677,7 +677,7 @@ describe("MessagesTimeline messages", () => {
           }),
         } as Entry,
       ],
-      { onForkFromRun },
+      { onForkFromRun, routeThreadKey: "environment-local:thread-1" },
     );
     await click(button("Fork from this response"));
     expect(onForkFromRun).toHaveBeenCalledWith({ sourceThreadId: "thread-1", runId: "run-1" });
