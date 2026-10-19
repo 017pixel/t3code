@@ -2427,6 +2427,106 @@ it.effect("schedules an accepted preparing message exactly once across concurren
   }),
 );
 
+it.effect(
+  "keeps an accepted launch workspace when the same command retries with a different strategy",
+  () =>
+    Effect.gen(function* () {
+      const setupEntered = yield* Deferred.make<void>();
+      const allowSetup = yield* Deferred.make<void>();
+      const harness = makeHarness({
+        hasCommit: () => Effect.succeed(true),
+        runSetup: () =>
+          Deferred.succeed(setupEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(allowSetup)),
+            Effect.as({ status: "no-script" as const }),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const input = launchInput({
+          command: "command:launch:changed-strategy",
+          thread: "thread:launch:accepted-strategy",
+          message: "Prepare the accepted workspace",
+          workspace: { type: "worktree", baseRef: "accepted-base", branch: "accepted-branch" },
+        });
+        // Reproduce process loss after durable acceptance and before scheduling preparation.
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          projectId: input.projectId,
+          title: input.title,
+          modelSelection: input.modelSelection,
+          runtimeMode: input.runtimeMode,
+          interactionMode: input.interactionMode,
+          branch: null,
+          worktreePath: null,
+          createdBy: input.createdBy,
+          creationSource: input.creationSource,
+        });
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(input.commandId + ":initial-message"),
+          threadId: input.threadId,
+          messageId: input.initialMessage!.messageId,
+          text: input.initialMessage!.text,
+          attachments: [],
+          modelSelection: input.modelSelection,
+          dispatchMode: { type: "defer_start", workspaceStrategy: input.workspaceStrategy },
+          createdBy: input.createdBy,
+          creationSource: input.creationSource,
+        });
+        const accepted = yield* threads.getThreadProjection(input.threadId);
+        assert.equal(accepted.runs[0]?.status, "preparing");
+        assert.deepEqual(accepted.runs[0]?.workspacePreparation, input.workspaceStrategy);
+        assert.lengthOf(harness.createWorktree.mock.calls, 0);
+
+        const { threadId: _, ...retryInput } = input;
+        const retry = yield* launches
+          .launch({
+            ...retryInput,
+            workspaceStrategy: {
+              type: "worktree",
+              baseRef: "different-base",
+              branch: "different-branch",
+            },
+          })
+          .pipe(Effect.exit);
+        if (Exit.isSuccess(retry)) {
+          assert.equal(retry.value.threadId, input.threadId);
+          assert.isTrue(retry.value.resumed);
+          yield* Deferred.await(setupEntered);
+          assert.lengthOf(harness.createWorktree.mock.calls, 1);
+          assert.include(harness.createWorktree.mock.calls[0]?.[0], {
+            refName: "accepted-base",
+            baseRefName: "accepted-base",
+            newRefName: "accepted-branch",
+          });
+        } else {
+          assert.isTrue(Cause.hasFails(retry.cause));
+          assert.isFalse(Cause.hasDies(retry.cause));
+          assert.lengthOf(harness.createWorktree.mock.calls, 0);
+        }
+        const snapshot = yield* threads.getShellSnapshot();
+        assert.deepEqual(
+          snapshot.threads.map((thread) => thread.id),
+          [input.threadId],
+        );
+        const current = yield* threads.getThreadProjection(input.threadId);
+        assert.deepEqual(
+          current.messages.map((message) => message.id),
+          accepted.messages.map((message) => message.id),
+        );
+        assert.deepEqual(
+          current.runs.map((run) => run.id),
+          accepted.runs.map((run) => run.id),
+        );
+        yield* Deferred.succeed(allowSetup, undefined);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
+
 it.effect("creates a strong provider-thread mapping for an imported native session", () => {
   const harness = makeHarness();
   return Effect.gen(function* () {
