@@ -2649,6 +2649,31 @@ it.layer(
       }).pipe(Effect.provideService(HostProcess.Platform, platform)),
   );
 
+  it.effect.each(["default", "explicit"] as const)(
+    "Codex SQLite selected generated managed shadow uses $0 SQLite home",
+    (sqlite) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-generated-sqlite-" });
+        const { manager, ptyAdapter, input, home, generated } = yield* createCodexTerminal(root);
+        const explicit = path.join(root, "explicit-sqlite");
+        yield* fs.makeDirectory(generated, { recursive: true });
+        yield* manager.open({
+          ...input,
+          env: {
+            CODEX_HOME: generated,
+            ...(sqlite === "explicit" ? { CODEX_SQLITE_HOME: explicit } : {}),
+          },
+        });
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        expect(ptyAdapter.spawnInputs[0]?.env.CODEX_HOME).toBe(generated);
+        expect(ptyAdapter.spawnInputs[0]?.env.CODEX_SQLITE_HOME).toBe(
+          sqlite === "explicit" ? explicit : path.join(home, ".codex"),
+        );
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
+
   it.effect.each(["configured", "generated"] as const)(
     "Codex SQLite checks the $0 shadow before resolving the selected account home",
     (mode) =>
