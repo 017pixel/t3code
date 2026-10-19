@@ -1,7 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -9,391 +11,351 @@ import * as Path from "effect/Path";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import * as HandoffGit from "./HandoffGit.ts";
 
-// A thread's git work moves from the laptop's checkout to the box's clone of
-// the same repository: the commits the remote lacks, the edits, the deletes
-// and the new files, exactly, and nothing on the box is overwritten.
-
 const layer = HandoffGit.layer.pipe(
   Layer.provideMerge(VcsProcess.layer),
   Layer.provideMerge(NodeServices.layer),
 );
+const branch = "fix/login";
+const handoffId = "transfer";
 
-const sh = (cwd: string, args: ReadonlyArray<string>) =>
-  VcsProcess.VcsProcess.pipe(
-    Effect.flatMap((processes) =>
-      processes.run({
-        operation: "HandoffGit.test",
-        command: "git",
-        cwd,
-        args,
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "Test",
-          GIT_AUTHOR_EMAIL: "test@example.com",
-          GIT_COMMITTER_NAME: "Test",
-          GIT_COMMITTER_EMAIL: "test@example.com",
-        },
-      }),
-    ),
-    Effect.map((result) => result.stdout.trim()),
-    Effect.orDie,
-  );
-
-/** `git status --porcelain`, sorted; untrimmed, since its first column is a space. */
-const status = (cwd: string) =>
-  VcsProcess.VcsProcess.pipe(
-    Effect.flatMap((processes) =>
-      processes.run({
-        operation: "HandoffGit.test",
-        command: "git",
-        cwd,
-        args: ["status", "--porcelain"],
-      }),
-    ),
-    Effect.map((result) =>
-      result.stdout
-        .split("\n")
-        .filter((line) => line !== "")
-        .sort(),
-    ),
-    Effect.orDie,
-  );
-
-/** An origin with one commit on main, and the laptop's and the box's clones of it. */
-const repos = Effect.gen(function* () {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-handoff-git-" });
-  const origin = path.join(root, "origin.git");
-  const seed = path.join(root, "seed");
-  yield* fileSystem.makeDirectory(seed);
-  yield* sh(root, ["init", "--quiet", "--bare", "--initial-branch=main", origin]);
-  yield* sh(seed, ["init", "--quiet", "--initial-branch=main"]);
-  yield* fileSystem.writeFileString(path.join(seed, "app.ts"), "export const version = 1;\n");
-  yield* fileSystem.writeFileString(path.join(seed, "old.ts"), "export const gone = true;\n");
-  yield* sh(seed, ["add", "."]);
-  yield* sh(seed, ["commit", "--quiet", "-m", "start"]);
-  yield* sh(seed, ["remote", "add", "origin", origin]);
-  yield* sh(seed, ["push", "--quiet", "origin", "main"]);
-  const laptop = path.join(root, "laptop");
-  const box = path.join(root, "box");
-  yield* sh(root, ["clone", "--quiet", origin, laptop]);
-  yield* sh(root, ["clone", "--quiet", origin, box]);
-  const outDir = path.join(root, "out");
-  yield* fileSystem.makeDirectory(outDir);
-  return { root, origin, laptop, box, outDir };
+const git = Effect.fnUntraced(function* (cwd: string, args: ReadonlyArray<string>) {
+  const processes = yield* VcsProcess.VcsProcess;
+  const result = yield* processes.run({
+    operation: "HandoffGit.test",
+    command: "git",
+    cwd,
+    args,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "Test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    },
+  });
+  return result.stdout.trimEnd();
 });
 
-/** The laptop's thread: an unpushed commit on a branch, then uncommitted work. */
-const workOnLaptop = (laptop: string) =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    yield* sh(laptop, ["checkout", "--quiet", "-b", "fix/login"]);
-    yield* fileSystem.writeFileString(path.join(laptop, "app.ts"), "export const version = 2;\n");
-    yield* sh(laptop, ["commit", "--quiet", "-am", "unpushed: bump version"]);
-    yield* fileSystem.writeFileString(path.join(laptop, "app.ts"), "export const version = 3;\n");
-    yield* fileSystem.remove(path.join(laptop, "old.ts"));
-    yield* fileSystem.writeFileString(path.join(laptop, "new.ts"), "export const fresh = true;\n");
-    yield* fileSystem.writeFileString(path.join(laptop, ".env"), "SECRET=1\n");
-    yield* fileSystem.writeFileString(path.join(laptop, ".gitignore"), ".env\n");
-    yield* sh(laptop, ["add", "new.ts"]);
-  });
+const fixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-handoff-git-" });
+  const origin = path.join(root, "origin.git");
+  const sender = path.join(root, "sender");
+  const receiver = path.join(root, "receiver");
+  const outDir = path.join(root, "out");
+  yield* git(root, ["init", "--bare", "--initial-branch=main", origin]);
+  yield* git(root, ["clone", origin, sender]);
+  yield* fs.writeFileString(path.join(sender, "app.ts"), "initial\n");
+  yield* fs.writeFileString(path.join(sender, "old.ts"), "delete me\n");
+  yield* fs.writeFileString(path.join(sender, ".gitignore"), ".env\n");
+  yield* git(sender, ["add", "."]);
+  yield* git(sender, ["commit", "-m", "base"]);
+  yield* git(sender, ["push", "origin", "main"]);
+  yield* git(root, ["clone", origin, receiver]);
+  yield* fs.makeDirectory(outDir);
+  return { fs, path, origin, sender, receiver, outDir, worktree: path.join(root, "received") };
+});
 
-it.layer(layer)("handing a thread's git work to another checkout", (it) => {
-  it.effect("carries an unpushed commit, edits, deletes and new files exactly", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const handoff = yield* HandoffGit.HandoffGit;
-        const { laptop, box, outDir, root } = yield* repos;
-        yield* workOnLaptop(laptop);
-        const stagedBefore = yield* sh(laptop, ["diff", "--cached", "--name-only"]);
+const editSender = Effect.fnUntraced(function* (sender: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* git(sender, ["checkout", "-b", branch]);
+  yield* fs.writeFileString(path.join(sender, "app.ts"), "unpushed\n");
+  yield* git(sender, ["commit", "-am", "unpushed"]);
+  yield* fs.writeFileString(path.join(sender, "app.ts"), "staged\n");
+  yield* git(sender, ["add", "app.ts"]);
+  yield* fs.writeFileString(path.join(sender, "app.ts"), "unstaged\n");
+  yield* fs.remove(path.join(sender, "old.ts"));
+  yield* fs.makeDirectory(path.join(sender, "sub"));
+  yield* fs.writeFileString(path.join(sender, "sub", "new.ts"), "untracked\n");
+  yield* fs.writeFileString(path.join(sender, ".env"), "SECRET=private\n");
+});
 
-        const packed = yield* handoff.pack({ cwd: laptop, handoffId: "h1", outDir });
-        assert.equal(packed.branch, "fix/login");
-        // Packing leaves the laptop's own staging and refs as they were.
-        assert.equal(yield* sh(laptop, ["diff", "--cached", "--name-only"]), stagedBefore);
-        assert.equal(yield* sh(laptop, ["for-each-ref", "refs/t3code"]), "");
+const repositoryState = Effect.fnUntraced(function* (cwd: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const status = yield* git(cwd, ["status", "--porcelain"]);
+  const gitDir = yield* git(cwd, ["rev-parse", "--absolute-git-dir"]);
+  return {
+    status,
+    head: yield* git(cwd, ["rev-parse", "HEAD"]),
+    refs: yield* git(cwd, ["show-ref"]),
+    index: yield* fs.readFile(path.join(gitDir, "index")),
+    indexFiles: (yield* fs.readDirectory(gitDir)).filter((name) => name.includes("index")).sort(),
+  };
+});
 
-        const worktree = path.join(root, "box-worktree");
-        const applied = yield* handoff.apply({
-          repoRoot: box,
-          worktreePath: worktree,
-          handoffId: "h1",
-          bundlePath: packed.bundlePath,
-          branch: packed.branch,
-          tip: packed.tip,
-          snapshot: packed.snapshot,
-        });
-        assert.equal(applied.branch, "fix/login");
-        // The committed work, unpushed on the laptop, is the branch here.
-        assert.equal(yield* sh(worktree, ["rev-parse", "HEAD"]), packed.tip);
-        assert.equal(yield* sh(worktree, ["log", "-1", "--format=%s"]), "unpushed: bump version");
-        // The working tree matches, and shows as uncommitted.
-        assert.equal(
-          yield* fileSystem.readFileString(path.join(worktree, "app.ts")),
-          "export const version = 3;\n",
-        );
-        assert.isFalse(yield* fileSystem.exists(path.join(worktree, "old.ts")));
-        assert.equal(
-          yield* fileSystem.readFileString(path.join(worktree, "new.ts")),
-          "export const fresh = true;\n",
-        );
-        assert.deepEqual(yield* status(worktree), [
-          " D old.ts",
-          " M app.ts",
-          "?? .gitignore",
-          "?? new.ts",
-        ]);
-        // Ignored files stay where they were.
-        assert.isFalse(yield* fileSystem.exists(path.join(worktree, ".env")));
-        assert.equal(yield* sh(box, ["for-each-ref", "refs/t3code"]), "");
-      }),
-    ),
+const applyInput = (repo: Effect.Success<typeof fixture>, packed: HandoffGit.HandoffPackage) => ({
+  ...packed,
+  handoffId,
+  repoRoot: repo.receiver,
+  worktreePath: repo.worktree,
+});
+
+// Real Git performs every mutation; the gate exposes a deterministic cancellation boundary.
+const pauseGit = Effect.fnUntraced(function* (
+  matches: (input: VcsProcess.VcsProcessInput) => boolean,
+  timing: "before" | "after" = "before",
+) {
+  const processes = yield* VcsProcess.VcsProcess;
+  const reached = yield* Deferred.make<void>();
+  const handoff = yield* HandoffGit.HandoffGit.pipe(
+    Effect.provide(Layer.fresh(HandoffGit.layer)),
+    Effect.provideService(VcsProcess.VcsProcess, {
+      run: (input) => {
+        const run = processes.run(input);
+        if (!matches(input)) return run;
+        const pause = Deferred.succeed(reached, undefined).pipe(Effect.andThen(Effect.never));
+        return timing === "before"
+          ? pause.pipe(Effect.andThen(run))
+          : run.pipe(Effect.tap(() => pause));
+      },
+    }),
   );
+  return { handoff, reached };
+});
 
-  it.effect("refuses a branch that moved on here, and leaves everything as it was", () =>
-    Effect.scoped(
+it.layer(layer)("Git bundle pack/apply", (it) => {
+  it.effect.each(["branch", "detached subdirectory"])(
+    "round-trips %s without changing either existing checkout",
+    (mode) =>
       Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
+        const repo = yield* fixture;
+        const { path, fs, sender, receiver, outDir, worktree } = repo;
         const handoff = yield* HandoffGit.HandoffGit;
-        const { laptop, box, outDir, root } = yield* repos;
-        yield* workOnLaptop(laptop);
-        const packed = yield* handoff.pack({ cwd: laptop, handoffId: "h2", outDir });
-
-        // The box has its own commit on the same branch.
-        yield* sh(box, ["checkout", "--quiet", "-b", "fix/login"]);
-        yield* fileSystem.writeFileString(path.join(box, "box.ts"), "export const mine = 1;\n");
-        yield* sh(box, ["add", "."]);
-        yield* sh(box, ["commit", "--quiet", "-m", "box-only work"]);
-        yield* sh(box, ["checkout", "--quiet", "main"]);
-        const boxBranch = yield* sh(box, ["rev-parse", "fix/login"]);
-        const worktreesBefore = yield* sh(box, ["worktree", "list", "--porcelain"]);
-
-        const refused = yield* handoff
-          .apply({
-            repoRoot: box,
-            worktreePath: path.join(root, "box-worktree"),
-            handoffId: "h2",
-            bundlePath: packed.bundlePath,
-            branch: packed.branch,
-            tip: packed.tip,
-            snapshot: packed.snapshot,
-          })
-          .pipe(Effect.flip);
-        assert.equal(refused._tag, "HandoffBranchDivergedError");
-        assert.equal(yield* sh(box, ["rev-parse", "fix/login"]), boxBranch);
-        assert.equal(yield* sh(box, ["worktree", "list", "--porcelain"]), worktreesBefore);
-        assert.equal(yield* sh(box, ["for-each-ref", "refs/t3code"]), "");
-        assert.isFalse(yield* fileSystem.exists(path.join(root, "box-worktree")));
-      }),
-    ),
-  );
-
-  it.effect("moves a branch that is behind forward, and undoes it when a later step fails", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const handoff = yield* HandoffGit.HandoffGit;
-        const { laptop, box, outDir, root } = yield* repos;
-        yield* workOnLaptop(laptop);
-        const packed = yield* handoff.pack({ cwd: laptop, handoffId: "h3", outDir });
-        // The box has the branch at main, behind the laptop's tip.
-        yield* sh(box, ["branch", "fix/login", "main"]);
-        const before = yield* sh(box, ["rev-parse", "fix/login"]);
-
-        // The worktree path is taken, so adding the worktree fails after the branch moved.
-        const taken = path.join(root, "taken");
-        yield* fileSystem.makeDirectory(taken);
-        yield* fileSystem.writeFileString(path.join(taken, "keep.txt"), "mine\n");
-        const failed = yield* handoff
-          .apply({
-            repoRoot: box,
-            worktreePath: taken,
-            handoffId: "h3",
-            bundlePath: packed.bundlePath,
-            branch: packed.branch,
-            tip: packed.tip,
-            snapshot: packed.snapshot,
-          })
-          .pipe(Effect.flip);
-        assert.equal(failed._tag, "HandoffGitStepError");
-        assert.equal(yield* sh(box, ["rev-parse", "fix/login"]), before);
-        assert.equal(yield* sh(box, ["for-each-ref", "refs/t3code"]), "");
-        assert.equal(yield* fileSystem.readFileString(path.join(taken, "keep.txt")), "mine\n");
-
-        // With a free path it moves forward and applies.
-        const applied = yield* handoff.apply({
-          repoRoot: box,
-          worktreePath: path.join(root, "box-worktree"),
-          handoffId: "h3",
-          bundlePath: packed.bundlePath,
-          branch: packed.branch,
-          tip: packed.tip,
-          snapshot: packed.snapshot,
-        });
-        assert.equal(applied.branch, "fix/login");
-        assert.equal(yield* sh(box, ["rev-parse", "fix/login"]), packed.tip);
-      }),
-    ),
-  );
-
-  it.effect("carries the whole working tree when the thread sits in a subdirectory", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const handoff = yield* HandoffGit.HandoffGit;
-        const { laptop, box, outDir, root } = yield* repos;
-        yield* workOnLaptop(laptop);
-        const packages = path.join(laptop, "packages");
-        yield* fileSystem.makeDirectory(packages);
-        yield* fileSystem.writeFileString(path.join(packages, "lib.ts"), "export const lib = 1;\n");
-
-        const packed = yield* handoff.pack({ cwd: packages, handoffId: "h6", outDir });
-        const worktree = path.join(root, "box-worktree");
-        yield* handoff.apply({
-          repoRoot: box,
-          worktreePath: worktree,
-          handoffId: "h6",
-          bundlePath: packed.bundlePath,
-          branch: packed.branch,
-          tip: packed.tip,
-          snapshot: packed.snapshot,
-        });
-        // Edits above the subdirectory travel too, not only those under it.
-        assert.deepEqual(yield* status(worktree), [
-          " D old.ts",
-          " M app.ts",
-          "?? .gitignore",
-          "?? new.ts",
-          "?? packages/",
-        ]);
-      }),
-    ),
-  );
-
-  it.effect("packs the thread's checkout even when the server runs inside another repository", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const handoff = yield* HandoffGit.HandoffGit;
-        const { laptop, box, outDir } = yield* repos;
-        yield* workOnLaptop(laptop);
-        const boxGitDir = yield* sh(box, ["rev-parse", "--path-format=absolute", "--git-dir"]);
-        // As when the server is started from a git hook in the box's clone.
-        yield* Effect.acquireRelease(
-          Effect.sync(() => {
-            const before = process.env.GIT_DIR;
-            process.env.GIT_DIR = boxGitDir;
-            return before;
+        yield* editSender(sender);
+        if (mode === "detached subdirectory") yield* git(sender, ["checkout", "--detach"]);
+        yield* fs.writeFileString(path.join(receiver, "app.ts"), "receiver work\n");
+        const senderBefore = yield* repositoryState(sender);
+        const receiverBefore = yield* repositoryState(receiver);
+        // A server launched by a Git hook can inherit another checkout's GIT_DIR.
+        const packed = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const gitDir = yield* git(receiver, ["rev-parse", "--absolute-git-dir"]);
+            yield* Effect.acquireRelease(
+              Effect.sync(() => {
+                const before = process.env.GIT_DIR;
+                process.env.GIT_DIR = gitDir;
+                return before;
+              }),
+              (before) =>
+                Effect.sync(() => {
+                  if (before === undefined) delete process.env.GIT_DIR;
+                  else process.env.GIT_DIR = before;
+                }),
+            );
+            return yield* handoff.pack({
+              cwd: mode === "branch" ? sender : path.join(sender, "sub"),
+              handoffId,
+              outDir,
+            });
           }),
-          (before) =>
-            Effect.sync(() => {
-              if (before === undefined) delete process.env.GIT_DIR;
-              else process.env.GIT_DIR = before;
-            }),
         );
-        const packed = yield* handoff.pack({ cwd: laptop, handoffId: "h8", outDir });
-        assert.equal(packed.branch, "fix/login");
-      }),
-    ),
+        assert.deepEqual(yield* repositoryState(sender), senderBefore);
+        assert.equal(packed.branch, mode === "branch" ? branch : null);
+        yield* handoff.apply(applyInput(repo, packed));
+        assert.equal(yield* git(worktree, ["rev-parse", "HEAD"]), senderBefore.head);
+        assert.equal(yield* git(worktree, ["show", "HEAD:app.ts"]), "unpushed");
+        assert.equal(yield* fs.readFileString(path.join(worktree, "app.ts")), "unstaged\n");
+        assert.equal(yield* fs.readFileString(path.join(worktree, "sub", "new.ts")), "untracked\n");
+        assert.isFalse(yield* fs.exists(path.join(worktree, "old.ts")));
+        assert.isFalse(yield* fs.exists(path.join(worktree, ".env")));
+        assert.equal(
+          yield* git(worktree, ["status", "--porcelain"]),
+          " M app.ts\n D old.ts\n?? sub/",
+        );
+        const receiverAfter = yield* repositoryState(receiver);
+        assert.deepEqual({ ...receiverAfter, refs: receiverBefore.refs }, receiverBefore);
+        assert.equal(yield* fs.readFileString(path.join(receiver, "app.ts")), "receiver work\n");
+        assert.equal(yield* git(receiver, ["for-each-ref", "refs/t3code"]), "");
+      }).pipe(Effect.scoped),
   );
 
-  it.effect("keeps a branch it created when someone moved it before a later step failed", () =>
-    Effect.scoped(
+  it.effect.each(["unused behind", "diverged", "checked out behind", "checked out at tip"])(
+    "handles a receiver branch that is %s",
+    (mode) =>
       Effect.gen(function* () {
+        const repo = yield* fixture;
+        const { path, sender, receiver, outDir, worktree, fs } = repo;
         const handoff = yield* HandoffGit.HandoffGit;
-        const { laptop, box, outDir } = yield* repos;
-        yield* workOnLaptop(laptop);
-        const packed = yield* handoff.pack({ cwd: laptop, handoffId: "h7", outDir });
-        // A hook that fires when the worktree is checked out moves the branch
-        // the apply just created, then fails the checkout.
-        const hooks = yield* sh(box, [
-          "rev-parse",
-          "--path-format=absolute",
-          "--git-path",
-          "hooks",
-        ]);
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const moved = yield* sh(box, ["rev-parse", "main"]);
-        const hook = path.join(hooks, "post-checkout");
-        yield* fileSystem.makeDirectory(hooks, { recursive: true });
-        yield* fileSystem.writeFileString(
+        yield* editSender(sender);
+        const packed = yield* handoff.pack({ cwd: sender, handoffId, outDir });
+        if (mode === "checked out at tip")
+          yield* git(receiver, ["fetch", sender, `${branch}:${branch}`]);
+        else yield* git(receiver, ["branch", branch]);
+        if (mode !== "unused behind") yield* git(receiver, ["checkout", branch]);
+        if (mode === "diverged") {
+          yield* git(receiver, ["commit", "--allow-empty", "-m", "receiver only"]);
+          yield* git(receiver, ["checkout", "main"]);
+        }
+        const before = yield* repositoryState(receiver);
+        const worktrees = yield* git(receiver, ["worktree", "list", "--porcelain"]);
+        const apply = handoff.apply(applyInput(repo, packed));
+        if (mode === "diverged" || mode === "checked out behind") {
+          const error = yield* apply.pipe(Effect.flip);
+          assert.equal(
+            error._tag,
+            mode === "diverged" ? "HandoffBranchDivergedError" : "HandoffBranchCheckedOutError",
+          );
+          assert.deepEqual(yield* repositoryState(receiver), before);
+          assert.equal(yield* git(receiver, ["worktree", "list", "--porcelain"]), worktrees);
+          assert.isFalse(yield* fs.exists(worktree));
+        } else {
+          assert.equal((yield* apply).branch, mode === "unused behind" ? branch : null);
+          assert.equal(yield* git(receiver, ["rev-parse", branch]), packed.tip);
+          assert.equal(yield* git(worktree, ["rev-parse", "HEAD"]), packed.tip);
+          assert.equal(yield* fs.readFileString(path.join(worktree, "app.ts")), "unstaged\n");
+        }
+        assert.equal(yield* git(receiver, ["for-each-ref", "refs/t3code"]), "");
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["new branch", "fast-forward", "concurrent branch move"])(
+    "rolls back a failed post-checkout hook: %s",
+    (mode) =>
+      Effect.gen(function* () {
+        const repo = yield* fixture;
+        const { path, fs, sender, receiver, outDir, worktree } = repo;
+        const handoff = yield* HandoffGit.HandoffGit;
+        yield* editSender(sender);
+        const packed = yield* handoff.pack({ cwd: sender, handoffId, outDir });
+        if (mode === "fast-forward") yield* git(receiver, ["branch", branch]);
+        const before = yield* git(receiver, ["show-ref"]);
+        const worktrees = yield* git(receiver, ["worktree", "list", "--porcelain"]);
+        if (mode === "fast-forward") {
+          yield* fs.makeDirectory(worktree);
+          yield* fs.writeFileString(path.join(worktree, "keep.txt"), "existing work\n");
+          const error = yield* handoff.apply(applyInput(repo, packed)).pipe(Effect.flip);
+          assert.equal(error._tag, "HandoffGitStepError");
+          assert.equal(yield* git(receiver, ["show-ref"]), before);
+          assert.equal(yield* git(receiver, ["worktree", "list", "--porcelain"]), worktrees);
+          assert.equal(
+            yield* fs.readFileString(path.join(worktree, "keep.txt")),
+            "existing work\n",
+          );
+          yield* fs.remove(worktree, { recursive: true });
+        }
+        const moved = yield* git(receiver, ["rev-parse", "main"]);
+        const hook = path.join(receiver, ".git", "hooks", "post-checkout");
+        yield* fs.writeFileString(
           hook,
-          `#!/bin/sh\ngit -C "${box}" update-ref refs/heads/fix/login ${moved}\nexit 1\n`,
+          `#!/bin/sh\n${mode === "concurrent branch move" ? `git update-ref refs/heads/${branch} ${moved}\n` : ""}exit 1\n`,
         );
-        yield* fileSystem.chmod(hook, 0o755);
-
-        const failed = yield* handoff
-          .apply({
-            repoRoot: box,
-            worktreePath: path.join(path.dirname(box), "box-worktree"),
-            handoffId: "h7",
-            bundlePath: packed.bundlePath,
-            branch: packed.branch,
-            tip: packed.tip,
-            snapshot: packed.snapshot,
-          })
-          .pipe(Effect.flip);
-        assert.equal(failed._tag, "HandoffGitStepError");
-        // The rollback left the branch where the other process put it.
-        assert.equal(yield* sh(box, ["rev-parse", "fix/login"]), moved);
-      }),
-    ),
+        yield* fs.chmod(hook, 0o755);
+        const error = yield* handoff.apply(applyInput(repo, packed)).pipe(Effect.flip);
+        assert.equal(error._tag, "HandoffGitStepError");
+        if (mode === "concurrent branch move")
+          assert.equal(yield* git(receiver, ["rev-parse", branch]), moved);
+        else assert.equal(yield* git(receiver, ["show-ref"]), before);
+        assert.equal(yield* git(receiver, ["for-each-ref", "refs/t3code"]), "");
+        assert.equal(yield* git(receiver, ["worktree", "list", "--porcelain"]), worktrees);
+        assert.isFalse(yield* fs.exists(worktree));
+      }).pipe(Effect.scoped),
   );
 
-  it.effect("fetches the base a bundle builds on, and refuses work over the size limit", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const handoff = yield* HandoffGit.HandoffGit;
-        const { laptop, box, outDir, root } = yield* repos;
-        // The laptop's branch builds on a commit pushed after the box cloned.
-        yield* fileSystem.writeFileString(path.join(laptop, "pushed.ts"), "export const p = 1;\n");
-        yield* sh(laptop, ["add", "."]);
-        yield* sh(laptop, ["commit", "--quiet", "-m", "pushed later"]);
-        // Pushed through the remote, so the laptop knows origin has it and the
-        // bundle leaves it out: the box has to fetch it.
-        yield* sh(laptop, ["push", "--quiet", "origin", "main"]);
-        yield* workOnLaptop(laptop);
-        const packed = yield* handoff.pack({ cwd: laptop, handoffId: "h4", outDir });
-        assert.isFalse(
-          (yield* sh(packed.bundlePath.replace(/\/[^/]+$/, ""), [
-            "bundle",
-            "list-heads",
-            packed.bundlePath,
-          ])).includes(yield* sh(laptop, ["rev-parse", "main"])),
-        );
-        const applied = yield* handoff.apply({
-          repoRoot: box,
-          worktreePath: path.join(root, "box-worktree"),
-          handoffId: "h4",
-          bundlePath: packed.bundlePath,
-          branch: packed.branch,
-          tip: packed.tip,
-          snapshot: packed.snapshot,
-        });
-        assert.equal(applied.branch, "fix/login");
-        assert.isTrue(yield* fileSystem.exists(path.join(root, "box-worktree", "pushed.ts")));
+  it.effect.each(["new branch", "fast-forward"])("rolls back a cancelled apply: %s", (mode) =>
+    Effect.gen(function* () {
+      const repo = yield* fixture;
+      const { path, sender, receiver, outDir, worktree, fs } = repo;
+      yield* editSender(sender);
+      if (mode === "fast-forward") yield* git(receiver, ["branch", branch]);
+      const before = yield* repositoryState(receiver);
+      const worktrees = yield* git(receiver, ["worktree", "list", "--porcelain"]);
+      const { handoff, reached } = yield* pauseGit(
+        (input) => input.cwd === worktree && input.args[0] === "checkout",
+      );
+      const packed = yield* handoff.pack({ cwd: sender, handoffId, outDir });
+      const fiber = yield* handoff.apply(applyInput(repo, packed)).pipe(Effect.forkScoped);
+      yield* Deferred.await(reached);
+      assert.isTrue(yield* fs.exists(path.join(worktree, ".git")));
+      yield* Fiber.interrupt(fiber);
+      assert.deepEqual(
+        {
+          repository: yield* repositoryState(receiver),
+          worktrees: yield* git(receiver, ["worktree", "list", "--porcelain"]),
+          worktreeExists: yield* fs.exists(worktree),
+        },
+        { repository: before, worktrees, worktreeExists: false },
+      );
+    }).pipe(Effect.scoped),
+  );
 
-        // An untracked file bigger than a handoff carries, and incompressible.
-        const crypto = yield* Crypto.Crypto;
-        yield* fileSystem.writeFile(
-          path.join(laptop, "big.bin"),
-          yield* crypto.randomBytes(HandoffGit.MAX_HANDOFF_BUNDLE_BYTES + 1024).pipe(Effect.orDie),
+  it.effect.each(["existing origin", "no origin"])(
+    "resolves a missing bundle base with %s",
+    (mode) =>
+      Effect.gen(function* () {
+        const repo = yield* fixture;
+        const { path, sender, receiver, origin, outDir, worktree, fs } = repo;
+        const handoff = yield* HandoffGit.HandoffGit;
+        yield* fs.writeFileString(path.join(sender, "later.ts"), "pushed later\n");
+        yield* git(sender, ["add", "."]);
+        yield* git(sender, ["commit", "-m", "later base"]);
+        yield* git(sender, ["push", "origin", "main"]);
+        yield* editSender(sender);
+        const packed = yield* handoff.pack({ cwd: sender, handoffId, outDir });
+        const processes = yield* VcsProcess.VcsProcess;
+        assert.notEqual(
+          (yield* processes.run({
+            operation: "test.verify",
+            command: "git",
+            cwd: receiver,
+            args: ["bundle", "verify", packed.bundlePath],
+            allowNonZeroExit: true,
+          })).exitCode,
+          0,
         );
-        const tooLarge = yield* handoff
-          .pack({ cwd: laptop, handoffId: "h5", outDir })
-          .pipe(Effect.flip);
-        assert.equal(tooLarge._tag, "HandoffTooLargeError");
-        assert.isFalse(yield* fileSystem.exists(path.join(outDir, "h5.bundle")));
-      }),
-    ),
+        if (mode === "no origin") {
+          yield* git(receiver, ["remote", "remove", "origin"]);
+          yield* git(receiver, ["remote", "add", "other", origin]);
+          const before = yield* repositoryState(receiver);
+          const error = yield* handoff.apply(applyInput(repo, packed)).pipe(Effect.flip);
+          assert.equal(error._tag, "HandoffMissingBaseError");
+          assert.deepEqual(yield* repositoryState(receiver), before);
+          assert.isFalse(yield* fs.exists(worktree));
+        } else {
+          yield* handoff.apply(applyInput(repo, packed));
+          assert.equal(yield* fs.readFileString(path.join(worktree, "later.ts")), "pushed later\n");
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("rejects an incompressible bundle over 50 MiB and removes its artifacts", () =>
+    Effect.gen(function* () {
+      const { path, fs, sender, outDir } = yield* fixture;
+      const handoff = yield* HandoffGit.HandoffGit;
+      const crypto = yield* Crypto.Crypto;
+      yield* fs.writeFile(
+        path.join(sender, "large.bin"),
+        yield* crypto.randomBytes(50 * 1024 * 1024 + 1024),
+      );
+      const before = yield* repositoryState(sender);
+      const error = yield* handoff.pack({ cwd: sender, handoffId, outDir }).pipe(Effect.flip);
+      assert.equal(error._tag, "HandoffTooLargeError");
+      assert.deepEqual(yield* fs.readDirectory(outDir), []);
+      assert.deepEqual(yield* repositoryState(sender), before);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["private index", "written bundle"])("cleans a cancelled pack at %s", (stage) =>
+    Effect.gen(function* () {
+      const { path, fs, sender, outDir } = yield* fixture;
+      yield* editSender(sender);
+      const before = yield* repositoryState(sender);
+      const { handoff, reached } = yield* pauseGit(
+        (input) =>
+          stage === "private index"
+            ? input.args[0] === "write-tree"
+            : input.args[0] === "bundle" && input.args[1] === "create",
+        stage === "private index" ? "before" : "after",
+      );
+      const fiber = yield* handoff.pack({ cwd: sender, handoffId, outDir }).pipe(Effect.forkScoped);
+      yield* Deferred.await(reached);
+      if (stage === "written bundle")
+        assert.isTrue(yield* fs.exists(path.join(outDir, `${handoffId}.bundle`)));
+      yield* Fiber.interrupt(fiber);
+      assert.deepEqual(yield* repositoryState(sender), before);
+      assert.deepEqual(yield* fs.readDirectory(outDir), []);
+    }).pipe(Effect.scoped),
   );
 });
