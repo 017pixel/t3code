@@ -493,8 +493,35 @@ describe("Android keyframe handshake", () => {
     JSON.stringify({ type: "video-session", size: { width, height } });
   const delta = new Uint8Array([0, 0, 0, 1, 0x41, 0x9a, 0x02]).buffer;
 
-  it("decodes the SPS keyframe instead of asking serve-emu for another one", async () => {
-    const { client, sockets, decoders, events, decodedFrame, sps } = recoveryFixture(
+  it("paints the first SPS/IDR without resetting the encoder for intervening deltas", async () => {
+    const { client, sockets, decoders, events, decodedFrame, drawImage, sps } = recoveryFixture(
+      "android",
+      false,
+    );
+    client.start();
+    const socket = sockets[0]!;
+    socket.onopen?.();
+    socket.onmessage?.({ data: videoSession(576, 1280) });
+    socket.onmessage?.({ data: sps });
+    socket.onmessage?.({ data: delta });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(decoders[0]!.decode).toHaveBeenCalledOnce();
+    expect(EncodedVideoChunk).toHaveBeenCalledWith({
+      type: "key",
+      timestamp: 0,
+      data: new Uint8Array(sps),
+    });
+    expect(drawImage).not.toHaveBeenCalled();
+    decodedFrame();
+    expect(drawImage).toHaveBeenCalledOnce();
+    expect(events.onStatus).toHaveBeenLastCalledWith("streaming", undefined);
+    client.stop();
+  });
+
+  it("keeps painting through same-size restarts and replaces the decoder after resizing", async () => {
+    const { client, sockets, decoders, decodedFrame, drawImage, sps } = recoveryFixture(
       "android",
       false,
     );
@@ -504,37 +531,35 @@ describe("Android keyframe handshake", () => {
     socket.onmessage?.({ data: videoSession(576, 1280) });
     socket.onmessage?.({ data: sps });
     await vi.advanceTimersByTimeAsync(0);
-
-    expect(decoders).toHaveLength(1);
-    expect(decoders[0]!.state).toBe("configured");
-    // `reset-video` here restarts the encoder, which is what looped forever.
-    expect(socket.send).not.toHaveBeenCalled();
-    expect(decoders[0]!.decode).toHaveBeenCalledTimes(1);
+    const decoder = decoders[0]!;
     decodedFrame();
-    expect(events.onStatus).toHaveBeenLastCalledWith("streaming", undefined);
-    client.stop();
-  });
 
-  it("keeps the decoder across a same-size encoder restart and rebuilds it on a new size", async () => {
-    const { client, sockets, decoders, sps } = recoveryFixture("android", false);
-    client.start();
-    const socket = sockets[0]!;
-    socket.onopen?.();
     socket.onmessage?.({ data: videoSession(576, 1280) });
     socket.onmessage?.({ data: sps });
     await vi.advanceTimersByTimeAsync(0);
-    const decoder = decoders[0]!;
-
-    socket.onmessage?.({ data: videoSession(576, 1280) });
+    expect(decoders).toEqual([decoder]);
     expect(decoder.state).toBe("configured");
+    expect(decoder.decode).toHaveBeenCalledTimes(2);
+    decodedFrame();
+    expect(drawImage).toHaveBeenCalledTimes(2);
 
     socket.onmessage?.({ data: videoSession(1280, 576) });
     expect(decoder.state).toBe("closed");
+    drawImage.mockClear();
+    decodedFrame(0);
+    expect(drawImage).not.toHaveBeenCalled();
+    socket.onmessage?.({ data: sps });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(decoders).toHaveLength(2);
+    expect(decoders[1]!.decode).toHaveBeenCalledOnce();
+    decodedFrame();
+    expect(drawImage).toHaveBeenCalledOnce();
+    expect(socket.send).not.toHaveBeenCalled();
     client.stop();
   });
 
-  it("drops a configure whose session was resized while support was being checked", async () => {
-    const { client, sockets, decoders, drawImage, Decoder, sps } = recoveryFixture(
+  it("discards a pending configuration on resize and decodes the new session", async () => {
+    const { client, sockets, decoders, drawImage, decodedFrame, Decoder, sps } = recoveryFixture(
       "android",
       false,
     );
@@ -550,26 +575,17 @@ describe("Android keyframe handshake", () => {
     socket.onopen?.();
     socket.onmessage?.({ data: videoSession(576, 1280) });
     socket.onmessage?.({ data: sps });
-    // The device rotates before the support check comes back, so the keyframe
-    // that configure captured belongs to a session that no longer exists.
     socket.onmessage?.({ data: videoSession(1280, 576) });
     resolveSupport({ supported: true });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(decoders.every((decoder) => decoder.state !== "configured")).toBe(true);
-    expect(drawImage).not.toHaveBeenCalled();
-    client.stop();
-  });
-
-  it("does not reset video for deltas that arrive while the decoder is configuring", async () => {
-    const { client, sockets, sps } = recoveryFixture("android", false);
-    client.start();
-    const socket = sockets[0]!;
-    socket.onopen?.();
+    expect(decoders).toHaveLength(0);
     socket.onmessage?.({ data: sps });
-    socket.onmessage?.({ data: delta });
     await vi.advanceTimersByTimeAsync(0);
-
+    expect(decoders).toHaveLength(1);
+    expect(decoders[0]!.decode).toHaveBeenCalledOnce();
+    decodedFrame();
+    expect(drawImage).toHaveBeenCalledOnce();
     expect(socket.send).not.toHaveBeenCalled();
     client.stop();
   });
