@@ -8037,6 +8037,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const message = input.message;
           const transcriptNotifications = claudeTranscriptTaskNotifications(message);
           for (const notification of transcriptNotifications) {
+            // Transcript outcomes can predate a registered subagent's latest resume.
+            if ((yield* Ref.get(sessionSubagentsByTaskId)).has(notification.task_id)) continue;
             yield* emitUntrackedTaskReceipt(notification);
             yield* handleRoutedSdkMessage({ query: input.query, message: notification });
           }
