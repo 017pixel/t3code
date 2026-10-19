@@ -258,6 +258,11 @@ describe("Android SDK availability", () => {
   it.effect("uses the standard Windows SDK without probing PATH", () =>
     Effect.gen(function* () {
       const root = "C:\\Users\\test\\AppData\\Local\\Android\\Sdk";
+      const sdkFiles = new Set([
+        `${root}\\platform-tools\\adb.exe`,
+        `${root}\\emulator\\emulator.exe`,
+        `${root}\\cmdline-tools\\latest\\bin\\avdmanager.bat`,
+      ]);
       const probes: string[] = [];
       const sdk = yield* LocalDeviceHost.__testing.androidSdk.pipe(
         Effect.provideService(HostProcess.Environment, {
@@ -272,14 +277,14 @@ describe("Android SDK availability", () => {
             exists: (file) =>
               Effect.sync(() => {
                 probes.push(file);
-                return file === `${root}\\platform-tools\\adb.exe`;
+                return sdkFiles.has(file);
               }),
             realPath: () => Effect.die("Standard SDK must not resolve PATH executables"),
           }),
         ),
         Effect.provide(NodePath.layerWin32),
       );
-      expect(sdk).toMatchObject({ root, adb: true });
+      expect(sdk).toMatchObject({ root, adb: true, emulator: true, avdmanager: true });
       expect(probes.filter((file) => !file.startsWith("C:\\Users\\test\\"))).toEqual([]);
     }),
   );
