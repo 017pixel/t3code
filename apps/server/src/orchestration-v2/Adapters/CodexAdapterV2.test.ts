@@ -2269,23 +2269,29 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect.each(["success", "parent and child rejected", "child only", "resumed child"] as const)(
+  it.effect.each([
+    "success",
+    "parent and child rejected",
+    "child only",
+    "resumed child",
+    "rollback child",
+  ] as const)(
     "unloads only the native subagent subtree and reports the first failure: %s",
     (outcome) =>
       Effect.gen(function* () {
         const nativeThreadId = "unload-root";
         const nativeTurnId = "unload-turn";
         const prompt = "Use subagents.";
+        const independentlyOwnedChild = outcome === "resumed child" || outcome === "rollback child";
         const expectedThreadIds =
           outcome === "child only"
             ? ["unload-child", "unload-grandchild"]
-            : outcome === "resumed child"
+            : independentlyOwnedChild
               ? [nativeThreadId, "unload-sibling"]
               : [nativeThreadId, "unload-child", "unload-grandchild", "unload-sibling"];
-        const allExpectedThreadIds =
-          outcome === "resumed child"
-            ? [...expectedThreadIds, "unload-child", "unload-grandchild"]
-            : expectedThreadIds;
+        const allExpectedThreadIds = independentlyOwnedChild
+          ? [...expectedThreadIds, "unload-child", "unload-grandchild"]
+          : expectedThreadIds;
         const notification = (method: string, params: unknown) =>
           ({
             type: "emit_inbound",
@@ -2324,12 +2330,70 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               threadId: nativeThreadId,
               turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
             }),
+            ...(outcome === "rollback child"
+              ? [
+                  notification("turn/completed", {
+                    threadId: "unload-child",
+                    turn: makeCodexReplayTurn({ id: "child-turn", status: "completed" }),
+                  }),
+                ]
+              : []),
             ...unrelatedPreamble.slice(3, 5).map((entry) => withReplayRequestId(entry, 4)),
             ...unrelatedPreamble.slice(5, 7).map((entry) => withReplayRequestId(entry, 5)),
             ...unrelatedPreamble.slice(7),
             spawn("unrelated-root", "unrelated-child", "unrelated-turn"),
+            ...(outcome === "rollback child"
+              ? ([
+                  {
+                    type: "expect_outbound",
+                    label: "rollback-turns",
+                    frame: {
+                      id: 6,
+                      method: "thread/turns/list",
+                      params: {
+                        threadId: "unload-child",
+                        cursor: null,
+                        limit: 1,
+                        sortDirection: "desc",
+                        itemsView: "summary",
+                      },
+                    },
+                  },
+                  {
+                    type: "emit_inbound",
+                    label: "rollback-turns",
+                    frame: {
+                      id: 6,
+                      result: {
+                        data: [makeCodexReplayTurn({ id: "child-turn", status: "completed" })],
+                        nextCursor: null,
+                      },
+                    },
+                  },
+                  {
+                    type: "expect_outbound",
+                    label: "rollback-revert",
+                    frame: {
+                      id: 7,
+                      method: "thread/revert",
+                      params: { threadId: "unload-child", beforeTurnId: "child-turn" },
+                    },
+                  },
+                  {
+                    type: "emit_inbound",
+                    label: "rollback-revert",
+                    frame: {
+                      id: 7,
+                      result: codexReplayThreadResult({
+                        nativeThreadId: "unload-child",
+                        forkedFromId: null,
+                      }),
+                    },
+                  },
+                ] satisfies Array<CodexReplay.CodexAppServerReplayEntry>)
+              : []),
             ...allExpectedThreadIds.flatMap((threadId, index) => {
-              const id = 6 + index;
+              const id = (outcome === "rollback child" ? 8 : 6) + index;
               return [
                 {
                   type: "expect_outbound",
@@ -2353,6 +2417,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const releaseRootUnsubscribe = yield* Deferred.make<void>();
         const unsubscribed: Array<unknown> = [];
         let childProviderThread: OrchestrationV2ProviderThread | undefined;
+        let rollingBack = false;
+        const rollbackLoads: Array<string> = [];
         const harness = yield* makeCodexReplayHarness(
           transcript,
           (event) => {
@@ -2376,8 +2442,26 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 yield* Deferred.await(releaseRootUnsubscribe);
               }
             }),
-          (threadId) =>
-            Effect.succeed({ thread: { id: threadId, updatedAt: 1782622450 }, model: null }),
+          (threadId, method) =>
+            Effect.sync(() => {
+              if (rollingBack && threadId === "unload-child" && method === "thread/resume") {
+                rollbackLoads.push(threadId);
+              }
+              return {
+                thread: {
+                  id: threadId,
+                  updatedAt: 1782622450,
+                  historyMode: "paginated",
+                  status: {
+                    type:
+                      rollingBack && threadId === "unload-child" && method === "thread/read"
+                        ? "notLoaded"
+                        : "idle",
+                  },
+                },
+                model: null,
+              };
+            }),
         );
         for (const threadId of [harness.threadId, ThreadId.make("unrelated-thread")]) {
           const providerThread =
@@ -2400,6 +2484,31 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         }
         yield* Deferred.await(registered);
         assert.isDefined(childProviderThread);
+        if (outcome === "rollback child") {
+          rollingBack = true;
+          const now = yield* DateTime.now;
+          const providerThreadTurns = [1, 2].map((ordinal) =>
+            codexReplaySourceTurn({
+              id: `child-provider-turn-${ordinal}`,
+              ordinal,
+              nativeId: ordinal === 2 ? "child-turn" : "previous-child-turn",
+              providerThreadId: childProviderThread!.id,
+              now,
+            }),
+          );
+          const snapshot = yield* harness.runtime.rollbackThread({
+            providerThread: childProviderThread!,
+            target: {
+              type: "provider_turn",
+              checkpointId: CheckpointId.make("child-checkpoint"),
+              appRunOrdinal: 1,
+              providerTurn: providerThreadTurns[0]!,
+            },
+            providerThreadTurns,
+          });
+          childProviderThread = snapshot.providerThread;
+          assert.deepEqual(rollbackLoads, ["unload-child"]);
+        }
         if (outcome === "resumed child") {
           assert.isTrue(
             yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
@@ -2428,7 +2537,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           unsubscribed,
           expectedThreadIds.map((threadId) => ({ threadId })),
         );
-        if (outcome === "resumed child") {
+        if (independentlyOwnedChild) {
           yield* harness.runtime.unloadThread!({ providerThread: childProviderThread! });
           assert.deepEqual(
             unsubscribed,

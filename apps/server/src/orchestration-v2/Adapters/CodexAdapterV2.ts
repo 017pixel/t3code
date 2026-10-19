@@ -7263,6 +7263,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     runtimePolicy: input.runtimePolicy,
                   }),
                 });
+                appOwnedThreadIds.add(threadId);
               }
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(revertCodexThread(client, threadId, numTurns)),
