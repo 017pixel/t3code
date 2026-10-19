@@ -33,17 +33,13 @@ interface EscapeCompileContext {
  * Prose paths end at whitespace: past that, nothing tells a path from a sentence, and
  * `C:\x and \*this\*` must still read `*this*`.
  */
-export function remarkKeepWindowsPaths(
-  this: Processor,
-  options?: { onPreservedEscape?: (offset: number) => void },
-) {
-  function keepWindowsPathEscape(this: EscapeCompileContext, token: { start: { offset: number } }) {
+export function remarkKeepWindowsPaths(this: Processor) {
+  function keepWindowsPathEscape(this: EscapeCompileContext) {
     const text = this.stack.at(-1)?.children?.at(-1);
     if (text?.type !== "text" || text.value === undefined) return;
     const before = text.value.slice(0, -1);
     if (UNFINISHED_DRIVE_PATH.test(before)) {
       text.value = `${before}\\${text.value.slice(-1)}`;
-      options?.onPreservedEscape?.(token.start.offset);
     }
   }
 

@@ -1,13 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  markdownHtmlContent,
-  markdownWithHtml,
-  markdownWithWindowsPaths,
-  parseMarkdownDocument,
-} from "./markdownDocument";
-import { unified } from "unified";
-import remarkParse from "remark-parse";
-import remarkGfm from "remark-gfm";
+import { markdownHtmlContent, markdownWithHtml, parseMarkdownDocument } from "./markdownDocument";
 import { markdownImageSources } from "./markdownImageSources";
 
 describe("HTML in native Markdown", () => {
@@ -81,18 +73,12 @@ describe("HTML in native Markdown", () => {
 });
 
 describe("Windows drive paths in mobile Markdown documents", () => {
-  const sourceParser = unified().use(remarkParse).use(remarkGfm);
-  const parsers = [
-    parseMarkdownDocument,
-    (markdown: string) => sourceParser.parse(markdownWithWindowsPaths(markdown)),
-  ];
   it("keeps backslashes before punctuation in prose paths", () => {
     const markdown = String.raw`Saved to C:\Users\me\.t3\_build\shot.png and C:/work\.config and C:\folder\(draft.`;
 
-    for (const parse of parsers)
-      expect(parse(markdown).children).toMatchObject([
-        { type: "paragraph", children: [{ type: "text", value: markdown }] },
-      ]);
+    expect(parseMarkdownDocument(markdown).children).toMatchObject([
+      { type: "paragraph", children: [{ type: "text", value: markdown }] },
+    ]);
   });
 
   it("keeps ordinary Markdown escapes and inline and fenced code unchanged around drive paths", () => {
@@ -105,21 +91,39 @@ describe("Windows drive paths in mobile Markdown documents", () => {
       "```",
     ].join("\n");
 
-    for (const parse of parsers)
-      expect(parse(markdown).children).toMatchObject([
-        {
-          type: "paragraph",
-          children: [
-            { type: "text", value: String.raw`See C:\x and *this* and Note:*that*. Code: ` },
-            { type: "inlineCode", value: code },
-          ],
-        },
-        { type: "code", lang: "text", value: code },
-      ]);
+    expect(parseMarkdownDocument(markdown).children).toMatchObject([
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", value: String.raw`See C:\x and *this* and Note:*that*. Code: ` },
+          { type: "inlineCode", value: code },
+        ],
+      },
+      { type: "code", lang: "text", value: code },
+    ]);
 
     const links = String.raw`[file](C:\dir\.config "C:\dir\_title") and ![image](C:\dir\.png)
 
 [file]: C:\dir\.config`;
-    expect(sourceParser.parse(markdownWithWindowsPaths(links))).toEqual(sourceParser.parse(links));
+    expect(parseMarkdownDocument(links).children).toMatchObject([
+      {
+        type: "paragraph",
+        children: [
+          { type: "link", url: String.raw`C:\dir\.config`, title: String.raw`C:\dir\_title` },
+          { type: "text", value: " and " },
+          { type: "image", url: String.raw`C:\dir\.png` },
+        ],
+      },
+      { type: "definition", identifier: "file", url: String.raw`C:\dir\.config` },
+    ]);
+    for (const suffix of ["", "[]"]) {
+      const references =
+        String.raw`[C:\a\.b]` + suffix + "\n\n" + String.raw`[C:\a\.b]: https://x.test`;
+      const [paragraph, definition] = parseMarkdownDocument(references).children;
+      expect(paragraph).toMatchObject({ type: "paragraph", children: [{ type: "linkReference" }] });
+      expect(definition).toMatchObject({ type: "definition", url: "https://x.test" });
+      if (paragraph?.type === "paragraph" && definition?.type === "definition")
+        expect(paragraph.children[0]).toMatchObject({ identifier: definition.identifier });
+    }
   });
 });

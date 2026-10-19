@@ -206,32 +206,3 @@ export function markdownWithTableBreaks(markdown: string): string {
 export function parseMarkdownDocument(markdown: string): Root {
   return parser.parse(markdownWithHtml(markdown));
 }
-
-export function markdownWithWindowsPaths(markdown: string): string {
-  if (!markdown.includes("\\") || !/[A-Za-z]:/.test(markdown)) return markdown;
-  const offsets: number[] = [];
-  const document = parser()
-    .use(remarkKeepWindowsPaths, { onPreservedEscape: (offset) => offsets.push(offset) })
-    .parse(markdown);
-  const parts: string[] = [];
-  let previous = 0;
-  let index = 0;
-  // Escape callbacks also see buffered link destinations; only final text nodes are prose.
-  const visit = (node: MarkdownNode) => {
-    if (node.type === "text") {
-      const start = node.position?.start.offset;
-      const end = node.position?.end.offset;
-      if (start === undefined || end === undefined) return;
-      while (index < offsets.length && offsets[index]! < start) index += 1;
-      while (index < offsets.length && offsets[index]! < end) {
-        const offset = offsets[index++]!;
-        // The native parser needs both a literal separator and the original punctuation escape.
-        parts.push(markdown.slice(previous, offset), "\\\\");
-        previous = offset;
-      }
-    } else if ("children" in node) node.children.forEach(visit);
-  };
-  visit(document);
-  parts.push(markdown.slice(previous));
-  return parts.join("");
-}
