@@ -1,13 +1,14 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, UsageSummary } from "@t3tools/contracts";
 import type { UsageContractMismatch } from "@t3tools/shared/usageMerge";
 
 export function usageAvailability(
   environments: readonly {
     readonly environmentId: EnvironmentId;
     readonly label: string;
-    readonly summary: unknown;
+    readonly summary: UsageSummary | null;
     readonly error?: string | null;
     readonly isConnected?: boolean;
+    readonly canReadDiagnostics?: boolean;
   }[],
   mismatches: readonly UsageContractMismatch[],
 ) {
@@ -19,7 +20,9 @@ export function usageAvailability(
     const { environmentId, label, summary, error, isConnected } = environment;
     const mismatch = mismatches.find((entry) => entry.environmentId === environmentId);
     let message: string;
-    if (mismatch) {
+    if (environment.canReadDiagnostics === false && error) {
+      message = `${label}: ${error}`;
+    } else if (mismatch) {
       message =
         mismatch.direction === "clientBehind"
           ? `Update this app to see usage from ${label}. Its server uses a newer usage format.`
@@ -48,7 +51,11 @@ export function usageAvailability(
     hasCompatibleSummary,
     notices,
     canRetry: environments.some(
-      ({ error, isConnected }) => Boolean(error) && isConnected !== false,
+      ({ environmentId, error, isConnected, canReadDiagnostics }) =>
+        Boolean(error) &&
+        isConnected !== false &&
+        canReadDiagnostics !== false &&
+        !incompatibleIds.has(environmentId),
     ),
     coverageMessage: hasCompatibleSummary
       ? excluded

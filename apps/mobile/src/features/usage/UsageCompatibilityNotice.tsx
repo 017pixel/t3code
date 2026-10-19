@@ -1,7 +1,7 @@
-import { Pressable, View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
+import { View } from "react-native";
 
-import { EmptyState } from "../../components/EmptyState";
+import { Button } from "../../components/ui/Button";
+import { EmptyState } from "../../components/ui/EmptyState";
 import type { usageAvailability } from "./usageAvailability";
 
 export function UsageCompatibilityNotice({
@@ -25,17 +25,12 @@ export function UsageCompatibilityNotice({
         detail={detail}
         action={
           availability.canRetry && onRetry ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={refreshing ? "Retrying usage" : "Retry usage"}
-              disabled={refreshing}
+            <Button
+              label={refreshing ? "Retrying…" : "Retry"}
+              accessibilityHint="Refresh usage from the selected environments."
+              loading={refreshing}
               onPress={onRetry}
-              className="rounded-full border border-border bg-card px-4 py-2.5 disabled:opacity-50"
-            >
-              <Text className="text-sm font-t3-medium text-foreground">
-                {refreshing ? "Retrying…" : "Retry"}
-              </Text>
-            </Pressable>
+            />
           ) : undefined
         }
       />

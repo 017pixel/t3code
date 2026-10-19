@@ -112,7 +112,6 @@ export function UsageRouteScreen() {
   );
   const isFocused = useIsFocused();
   const availability = usageAvailability(selectedEnvironments, merged.contractMismatches);
-  const usageUnavailable = availability.notices.length > 0 && !availability.hasCompatibleSummary;
   const limits = useRefreshLimits(selectedEnvironmentIds, isFocused && tab === "limits");
   const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
   const refreshAfterCursorEnable = () => {
@@ -305,31 +304,19 @@ export function UsageRouteScreen() {
                   {merged.duplicateSources.join(", ")}
                 </Text>
               ) : null}
-              {isPending &&
-              !availability.canRetry &&
-              merged.contractMismatches.length === 0 &&
-              selectedEnvironments.every((environment) => environment.isConnected) ? (
-                <Text className="py-16 text-center text-base text-foreground-muted">
-                  Scanning provider transcripts…
-                </Text>
-              ) : selectedEnvironments.length === 0 ? (
+              {selectedEnvironments.length === 0 ? (
                 <Text className="py-16 text-center text-base text-foreground-muted">
                   {environments.length === 0
                     ? "Connect an environment to see usage."
                     : "Select an environment to see usage."}
                 </Text>
-              ) : !canReadDiagnostics ? (
-                <View className="gap-2 py-16">
-                  {selectedEnvironments.map((environment) => (
-                    <Text
-                      key={environment.environmentId}
-                      className="text-center text-base text-foreground-muted"
-                    >
-                      {selectedEnvironments.length > 1 ? `${environment.label}: ` : null}
-                      {environment.error}
-                    </Text>
-                  ))}
-                </View>
+              ) : isPending &&
+                selectedEnvironments.every(
+                  (environment) => environment.isConnected && environment.error === null,
+                ) ? (
+                <Text className="py-16 text-center text-base text-foreground-muted">
+                  Scanning provider transcripts…
+                </Text>
               ) : (
                 <>
                   {sourceMessages.map((message) => (
@@ -342,7 +329,7 @@ export function UsageRouteScreen() {
                     onRetry={refreshWindow}
                     refreshing={refreshingUsage}
                   />
-                  {!usageUnavailable ? (
+                  {availability.hasCompatibleSummary ? (
                     <UsageUpdating dimmed={progress.dimmed} label={progress.label}>
                       <ChartCard
                         merged={merged}
