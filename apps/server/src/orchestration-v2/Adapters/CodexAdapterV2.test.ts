@@ -845,6 +845,18 @@ describe("CodexAdapterV2 process spawning", () => {
     {
       platform: "linux",
       key: "CODEX_SQLITE_HOME",
+      sqliteHome: "",
+      inheritedKey: "CODEX_SQLITE_HOME",
+    },
+    {
+      platform: "linux",
+      key: "CODEX_SQLITE_HOME",
+      sqliteHome: " \t ",
+      inheritedKey: "CODEX_SQLITE_HOME",
+    },
+    {
+      platform: "linux",
+      key: "CODEX_SQLITE_HOME",
       sqliteHome: "/explicit/sqlite",
       inheritedKey: "CODEX_SQLITE_HOME",
     },
@@ -910,7 +922,10 @@ describe("CodexAdapterV2 process spawning", () => {
           .pipe(Effect.scoped, Effect.exit);
         assert.lengthOf(environments, 1);
         assert.equal(environments[0]?.CODEX_HOME, shadowHome);
-        assert.equal(environments[0]?.CODEX_SQLITE_HOME, sqliteHome ?? sharedHome);
+        assert.equal(
+          environments[0]?.CODEX_SQLITE_HOME,
+          sqliteHome?.trim() ? sqliteHome : sharedHome,
+        );
         assert.lengthOf(
           Object.keys(environments[0] ?? {}).filter(
             (key) => key.toUpperCase() === "CODEX_SQLITE_HOME",
