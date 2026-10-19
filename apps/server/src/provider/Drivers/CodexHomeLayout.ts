@@ -77,7 +77,12 @@ export function withCodexSqliteHome(
 ): NodeJS.ProcessEnv {
   // Codex's sqlite_home config still takes precedence over this environment default.
   return layout.mode === "authOverlay"
-    ? { ...environment, CODEX_SQLITE_HOME: environment.CODEX_SQLITE_HOME ?? layout.sharedHomePath }
+    ? {
+        ...environment,
+        CODEX_SQLITE_HOME: environment.CODEX_SQLITE_HOME?.trim()
+          ? environment.CODEX_SQLITE_HOME
+          : layout.sharedHomePath,
+      }
     : environment;
 }
 // Codex creates these runtime locks itself when it starts in a shadow home before the shared
