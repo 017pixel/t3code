@@ -30,9 +30,8 @@ function shiftPositions(node: Root | RootContent, offset: number, lines: number)
   }
 }
 
-/** Keep the full document pipeline while avoiding parsing a completed code-heavy
- * prefix on every token. A closed top-level fence followed by a blank line is a
- * parsing boundary. Definitions are document-wide, so they require a full parse.
+/** Reparse only the tail after a closed top-level fence and blank line.
+ * Definitions are document-wide and still require the full parse.
  */
 function createIncrementalMarkdownParser(parse: Parser): Parser {
   let cached: ParsedPrefix | undefined;
@@ -43,6 +42,7 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
     if (source.includes("\r") || source.includes("\uFEFF")) return parse(source, file);
 
     const prefix = cached && source.startsWith(cached.source) ? cached : undefined;
+    if (!prefix) cached = undefined;
     let root: Root;
     if (prefix) {
       root = parse(source.slice(prefix.offset), file);

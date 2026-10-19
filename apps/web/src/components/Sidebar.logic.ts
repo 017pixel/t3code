@@ -1004,6 +1004,18 @@ export { sortPinnedThreadsByOrderKey as sortPinnedThreadsForSidebar } from "@t3t
 
 const EMPTY_CONTENT_MATCH_KEYS: ReadonlySet<string> = new Set<string>();
 
+type ThreadPullRequestSearchInput = Parameters<typeof threadPullRequestSearchTerms>[0];
+const pullRequestSearchIndex = new WeakMap<ThreadPullRequestSearchInput, string[]>();
+
+function indexedPullRequestSearch(thread: ThreadPullRequestSearchInput) {
+  let indexed = pullRequestSearchIndex.get(thread);
+  if (indexed === undefined) {
+    indexed = threadPullRequestSearchTerms(thread).map((term) => term.toLowerCase());
+    pullRequestSearchIndex.set(thread, indexed);
+  }
+  return indexed;
+}
+
 export function searchSidebarThreads<
   T extends {
     readonly environmentId: EnvironmentId;
@@ -1020,9 +1032,9 @@ export function searchSidebarThreads<
   const titleMatches: T[] = [];
   const contentMatches: T[] = [];
   for (const thread of threads) {
-    const matchesTitle = [thread.title, ...threadPullRequestSearchTerms(thread)].some((term) =>
-      term.toLowerCase().includes(normalizedQuery),
-    );
+    const matchesTitle =
+      thread.title.toLowerCase().includes(normalizedQuery) ||
+      indexedPullRequestSearch(thread).some((term) => term.includes(normalizedQuery));
     if (matchesTitle) {
       titleMatches.push(thread);
     } else if (

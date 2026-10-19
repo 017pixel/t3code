@@ -13,7 +13,13 @@ import {
   syncDocumentWindowControlsOverlayClass,
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
-import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+import {
+  clearChunkReloadGuardAfterStartup,
+  isChunkReloadScheduled,
+  isSpeculativeLoadFailure,
+  isSpeculativeLoadPending,
+  recoverChunkLoadError,
+} from "./lib/chunkReloadGuard";
 
 prepareProviderAuthDelivery();
 
@@ -29,16 +35,15 @@ if (isElectron) {
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
 
-// A failed split-chunk fetch usually means the hashed assets went stale under
-// a deploy; one guarded reload picks up the fresh index.html.
-let chunkLoadFailed = false;
-let reloadScheduled = false;
 window.addEventListener("vite:preloadError", (event) => {
-  chunkLoadFailed = true;
-  if (reloadOnceForChunkLoadError()) {
-    reloadScheduled = true;
-    event.preventDefault();
+  if (!isSpeculativeLoadPending()) {
+    if (recoverChunkLoadError()) event.preventDefault();
+    return;
   }
+  // The import rejects after this event. Wait for its owner to identify a failed preload.
+  setTimeout(() => {
+    if (!isSpeculativeLoadFailure(event.payload)) recoverChunkLoadError();
+  }, 0);
 });
 
 const app = <AppRoot router={router} />;
@@ -60,8 +65,8 @@ export const startup = Promise.all([
   .then(([ManagedAuthShell]) => {
     // A route chunk failure still resolves router.load(): the error is parked in
     // the lazy component and surfaces through the route error boundary.
-    if (reloadScheduled) return;
-    if (!chunkLoadFailed) clearChunkReloadGuard();
+    if (isChunkReloadScheduled()) return;
+    clearChunkReloadGuardAfterStartup();
     ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
       <React.StrictMode>
         {ManagedAuthShell && clerkPublishableKey ? (
@@ -73,6 +78,6 @@ export const startup = Promise.all([
     );
   })
   .catch((error: unknown) => {
-    if (reloadScheduled) return;
+    if (isChunkReloadScheduled()) return;
     throw error;
   });

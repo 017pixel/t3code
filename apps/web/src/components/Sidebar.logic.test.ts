@@ -999,11 +999,17 @@ describe("pullRequestMatchesSearchQuery", () => {
     url: "https://github.com/pingdotgg/t3code/pull/123",
   };
 
-  it("matches when every query token appears in the PR's terms", () => {
-    expect(pullRequestMatchesSearchQuery({ branchPullRequest }, "123")).toBe(true);
-    expect(pullRequestMatchesSearchQuery({ branchPullRequest }, "pingdotgg/t3code #123")).toBe(
-      true,
-    );
+  it("matches every query token and follows replacement PR snapshots", () => {
+    const original = { branchPullRequest };
+    expect(pullRequestMatchesSearchQuery(original, "123")).toBe(true);
+    expect(pullRequestMatchesSearchQuery(original, "pingdotgg/t3code #123")).toBe(true);
+
+    const updated = {
+      branchPullRequest: { ...branchPullRequest, number: 456, url: "https://example.com/pull/456" },
+    };
+    expect(pullRequestMatchesSearchQuery(updated, "#123")).toBe(false);
+    expect(pullRequestMatchesSearchQuery(updated, "#456")).toBe(true);
+    expect(pullRequestMatchesSearchQuery(original, "#123")).toBe(true);
   });
 
   it("rejects queries with a token the PR does not carry, and blank queries", () => {

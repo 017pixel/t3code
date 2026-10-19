@@ -910,13 +910,20 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     editorRef,
   } = props;
   const richText = !literalText && (richTextEnabled ?? false);
-  const clampEditorCursor = (text: string, position: number) =>
-    literalText
-      ? Math.max(
-          0,
-          Math.min(text.length, Number.isFinite(position) ? Math.floor(position) : text.length),
-        )
-      : clampCollapsedComposerCursor(text, position);
+  const cursorBoundsRef = useRef({ value: "", length: 0 });
+  const clampEditorCursor = (text: string, position: number) => {
+    if (!literalText && cursorBoundsRef.current.value !== text) {
+      // Selection reads revisit the same prompt; only inline tokens change its cursor bound.
+      cursorBoundsRef.current = {
+        value: text,
+        length: /[@[\p{Sc}]/u.test(text)
+          ? clampCollapsedComposerCursor(text, Infinity)
+          : text.length,
+      };
+    }
+    const length = literalText ? text.length : cursorBoundsRef.current.length;
+    return Math.max(0, Math.min(length, Number.isFinite(position) ? Math.floor(position) : length));
+  };
   const expandEditorCursor = (text: string, position: number) =>
     literalText ? position : expandCollapsedComposerCursor(text, position);
 
@@ -965,15 +972,20 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     };
   });
 
-  const initialCursor = clampEditorCursor(value, cursor);
-  const initialExpandedCursor = expandEditorCursor(value, initialCursor);
-  const snapshotRef = useRef({
-    value,
-    cursor: initialCursor,
-    expandedCursor: initialExpandedCursor,
-    contextIds: literalText ? [] : collectInlineContextIds(value),
+  const [initialSnapshot] = useState(() => {
+    const initialCursor = clampCollapsedComposerCursor(value, cursor, literalText);
+    return {
+      value,
+      cursor: initialCursor,
+      expandedCursor: expandEditorCursor(value, initialCursor),
+      contextIds: literalText ? [] : collectInlineContextIds(value),
+    };
   });
-  const selectionRangeRef = useRef({ start: initialExpandedCursor, end: initialExpandedCursor });
+  const snapshotRef = useRef(initialSnapshot);
+  const selectionRangeRef = useRef({
+    start: initialSnapshot.expandedCursor,
+    end: initialSnapshot.expandedCursor,
+  });
   const isApplyingControlledUpdateRef = useRef(false);
   const hasAppliedControlledSelectionRef = useRef(false);
   const citationRequestRef = useRef<ComposerCitationCommentRequest | null>(null);

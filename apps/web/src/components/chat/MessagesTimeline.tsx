@@ -330,7 +330,6 @@ interface TimelineRowSharedState {
   onRunShellCommand: ((command: string) => void) | undefined;
   findActive: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
-  displayThreadKey?: string;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
   workflowOpening: WorkflowOpening | null;
@@ -468,8 +467,6 @@ interface MessagesTimelineProps {
   runningRunId?: RunId | null;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
-  displayThreadKey?: string;
-  paintOnly?: boolean;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
   parentThreadLink?: {
@@ -574,8 +571,6 @@ const ConversationTimeline = memo(function ConversationTimeline({
   runningRunId = null,
   turnDiffSummaries,
   routeThreadKey,
-  displayThreadKey,
-  paintOnly = false,
   onOpenTurnDiff,
   onOpenThread,
   parentThreadLink = null,
@@ -613,10 +608,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
   historyControls,
   loadEarlier = null,
 }: MessagesTimelineProps) {
-  const listIdentityKey = displayThreadKey ?? routeThreadKey;
   // The remembered position is a snapshot taken when the list identity changes;
   // scrolling keeps rewriting the stored entry, which must not move the restore.
-  const [listState, setListState] = useState(() => timelineListStateFor(listIdentityKey));
+  const [listState, setListState] = useState(() => timelineListStateFor(routeThreadKey));
   const [expandedRunIds, setExpandedRunIds] = useState<ReadonlySet<RunId>>(
     () => listState.rememberedPosition?.disclosures?.runs ?? new Set(),
   );
@@ -627,22 +621,22 @@ const ConversationTimeline = memo(function ConversationTimeline({
     () => listState.rememberedPosition?.disclosures?.attempts ?? new Set(),
   );
   const [positionedThreadKey, setPositionedThreadKey] = useState<string | null>(() =>
-    listState.rememberedPosition?.atEnd === false ? null : listIdentityKey,
+    listState.rememberedPosition?.atEnd === false ? null : routeThreadKey,
   );
-  const restoringThreadPosition = positionedThreadKey !== listIdentityKey;
+  const restoringThreadPosition = positionedThreadKey !== routeThreadKey;
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
-  const [settlingListIdentity, setSettlingListIdentity] = useState<string | null>(listIdentityKey);
+  const [settlingListIdentity, setSettlingListIdentity] = useState<string | null>(routeThreadKey);
   let paintedExpandedRunIds = expandedRunIds;
   let paintedExpandedWorkGroupIds = expandedWorkGroupIds;
   let paintedExpandedAttemptIds = expandedAttemptIds;
-  const identityChanged = listState.identity !== listIdentityKey;
+  const identityChanged = listState.identity !== routeThreadKey;
   const { rememberedPosition, workGroupViewState } = identityChanged
-    ? timelineListStateFor(listIdentityKey)
+    ? timelineListStateFor(routeThreadKey)
     : listState;
   if (identityChanged) {
-    setListState({ identity: listIdentityKey, rememberedPosition, workGroupViewState });
+    setListState({ identity: routeThreadKey, rememberedPosition, workGroupViewState });
     setPositionedThreadKey(null);
-    setSettlingListIdentity(listIdentityKey);
+    setSettlingListIdentity(routeThreadKey);
     paintedExpandedRunIds = rememberedPosition?.disclosures?.runs ?? new Set();
     paintedExpandedWorkGroupIds = rememberedPosition?.disclosures?.workGroups ?? new Set();
     paintedExpandedAttemptIds = rememberedPosition?.disclosures?.attempts ?? new Set();
@@ -773,11 +767,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
     });
   };
 
-  const previousLatestRunRef = useRef({ identity: listIdentityKey, run: latestRun });
+  const previousLatestRunRef = useRef({ identity: routeThreadKey, run: latestRun });
   useEffect(() => {
     const { identity, run: previous } = previousLatestRunRef.current;
-    previousLatestRunRef.current = { identity: listIdentityKey, run: latestRun };
-    if (identity !== listIdentityKey || !latestRun || previous?.runId === undefined) {
+    previousLatestRunRef.current = { identity: routeThreadKey, run: latestRun };
+    if (identity !== routeThreadKey || !latestRun || previous?.runId === undefined) {
       return;
     }
     if (latestRun.runId === previous.runId) {
@@ -798,7 +792,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       next.delete(previous.runId);
       return next;
     });
-  }, [latestRun, listIdentityKey]);
+  }, [latestRun, routeThreadKey]);
 
   // Imported turns fold under synthetic keys rather than the entries' own run ids.
   const findFoldRunIds = findActive
@@ -843,7 +837,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       ? new Set(paintedExpandedAttemptIds).add(activeFindAttemptId)
       : paintedExpandedAttemptIds;
 
-  const rawRows = useIncrementalTimelineRows(`${listIdentityKey}\0${workspaceRoot ?? ""}`, {
+  const rawRows = useIncrementalTimelineRows(`${routeThreadKey}\0${workspaceRoot ?? ""}`, {
     timelineEntries,
     latestRun,
     runningRunId,
@@ -857,7 +851,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     supportsConversationRollback,
     worktreeSetup,
   });
-  const rows = useStableRows(rawRows, listIdentityKey);
+  const rows = useStableRows(rawRows, routeThreadKey);
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
@@ -874,7 +868,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     if (!list) return;
     if (citationRequest !== null) {
       // oxlint-disable-next-line react/set-state-in-effect -- The citation scroll owns positioning once the list has mounted.
-      setPositionedThreadKey(listIdentityKey);
+      setPositionedThreadKey(routeThreadKey);
       return;
     }
     let cancelled = false;
@@ -885,7 +879,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       cancelled = true;
       if (settleFrame !== null) cancelAnimationFrame(settleFrame);
       if (viewport) void list.scrollToOffset({ offset: viewport.scrollTop, animated: false });
-      setPositionedThreadKey(listIdentityKey);
+      setPositionedThreadKey(routeThreadKey);
     };
     const cancelForNavigation = () => {
       cancelRestoration();
@@ -923,7 +917,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     void Promise.resolve(scrolling).then(() => {
       if (cancelled) return;
       if (position?.atEnd !== false || index < 0) {
-        setPositionedThreadKey(listIdentityKey);
+        setPositionedThreadKey(routeThreadKey);
         return;
       }
       // Index scrolling starts from estimates. Keep the saved row mounted
@@ -955,7 +949,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
         }
         stableFrames += 1;
         if (stableFrames >= 2) {
-          setPositionedThreadKey(listIdentityKey);
+          setPositionedThreadKey(routeThreadKey);
         } else {
           settleFrame = requestAnimationFrame(reconcile);
         }
@@ -976,7 +970,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   }, [
     citationRequest,
     cancelPositionRestoreRef,
-    listIdentityKey,
+    routeThreadKey,
     listRef,
     onManualNavigation,
     rememberedPosition,
@@ -1113,13 +1107,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
     if (restoringThreadPosition || state?.data !== rows) return;
     const isAtEnd = resolveTimelineIsAtEnd(state);
     const position = state?.data?.length ? resolveWorkGroupScrollAnchor(state) : undefined;
-    if (position && state && isAtEnd !== undefined && !paintOnly) {
+    if (position && state && isAtEnd !== undefined) {
       const index = state.indexByKey(position.rowId);
       const row = index === undefined ? undefined : state.elementAtIndex(index);
       const element = listRef.current?.getScrollableNode();
       if (row && element) {
         rememberTimelinePosition(
-          listIdentityKey,
+          routeThreadKey,
           {
             ...position,
             offsetWithinRow: element.getBoundingClientRect().top - row.getBoundingClientRect().top,
@@ -1409,7 +1403,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       </div>
     </TimelineRowCtx>
   );
-  const listExtraData = { identity: listIdentityKey, rowCount: rows.length, sharedState };
+  const listExtraData = { identity: routeThreadKey, rowCount: rows.length, sharedState };
 
   const forwardMinimapWheel = (event: WheelEvent) => {
     const scrollNode = listRef.current?.getScrollableNode();
@@ -1465,7 +1459,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
               !findActive && citationRequest === null && rememberedPosition?.atEnd !== false
             }
             // Legend needs a data refresh to mount new pins without a scroll event.
-            dataVersion={readyCitationRequest?.key ?? listIdentityKey}
+            dataVersion={readyCitationRequest?.key ?? routeThreadKey}
             {...(alwaysRender ? { alwaysRender } : {})}
             onLoad={handleListLoad}
             {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
@@ -3981,7 +3975,6 @@ const AssistantChangedFilesSection = memo(function AssistantChangedFilesSection(
   turnSummary: TurnDiffSummary | undefined;
   routeThreadKey: string;
   resolvedTheme: "light" | "dark";
-  displayThreadKey?: string;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
 }) {
   if (!turnSummary) return null;
@@ -4010,7 +4003,6 @@ function AssistantChangedFilesSectionInner({
   checkpointFiles: TurnDiffSummary["files"];
   routeThreadKey: string;
   resolvedTheme: "light" | "dark";
-  displayThreadKey?: string;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
 }) {
   const ctx = use(TimelineRowCtx);

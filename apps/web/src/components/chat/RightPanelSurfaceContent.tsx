@@ -10,6 +10,7 @@ import type {
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { lazy, Suspense } from "react";
+import { diffPanelSurface } from "../lazySurfaces";
 import type { ComposerImageAttachment, DraftId } from "../../composerDraftStore";
 import type { ShortcutMatchContext } from "../../keybindings";
 import { type RightPanelSurface, useRightPanelStore } from "../../rightPanelStore";
@@ -26,7 +27,7 @@ import { ThreadPullRequestsPanel } from "../pullRequest/ThreadPullRequestsPanel"
 const PreviewPanel = lazy(() =>
   import("../preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
-const DiffPanel = lazy(() => import("../DiffPanel"));
+const DiffPanel = diffPanelSurface.Component;
 const DevicePanel = lazy(() =>
   import("../device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
@@ -105,14 +106,12 @@ export function RightPanelSurfaceContent(props: {
       );
     case "diff":
       return (
-        <Suspense fallback={null}>
-          <DiffPanel
-            key={scopedThreadKey(threadRef)}
-            mode="embedded"
-            composerDraftTarget={props.composerDraftTarget}
-            workspaceMutationId={props.workspaceMutationId}
-          />
-        </Suspense>
+        <DiffPanel
+          key={scopedThreadKey(threadRef)}
+          mode="embedded"
+          composerDraftTarget={props.composerDraftTarget}
+          workspaceMutationId={props.workspaceMutationId}
+        />
       );
     case "pull-request": {
       const pullRequest = props.pullRequest;

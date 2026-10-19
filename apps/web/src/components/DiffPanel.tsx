@@ -1,3 +1,4 @@
+import { preloadDiffWorkerPool } from "./DiffWorkerPoolProvider";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
 import type { FileDiffContentsLoader, FileDiffMetadata } from "@pierre/diffs";
@@ -196,6 +197,9 @@ export default function DiffPanel({
   workspaceMutationId,
 }: DiffPanelProps) {
   const { resolvedTheme } = useTheme();
+  useEffect(() => {
+    void preloadDiffWorkerPool(resolveDiffThemeName(resolvedTheme)).catch(() => undefined);
+  }, [resolvedTheme]);
   const settings = useClientSettings((settings) => ({
     diffFilesCollapsed: settings.diffFilesCollapsed,
     diffIgnoreWhitespace: settings.diffIgnoreWhitespace,

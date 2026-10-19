@@ -62,6 +62,26 @@ function acquireDiffWorkerPool(themeName: DiffThemeName, poolSize: number) {
   return entry;
 }
 
+function releaseDiffWorkerPool(entry: NonNullable<typeof sharedWorkerPool>) {
+  entry.consumers -= 1;
+  if (entry.consumers !== 0) return;
+  entry.idleTimer = setTimeout(() => {
+    entry.idleTimer = undefined;
+    entry.pool.terminate();
+    if (sharedWorkerPool === entry) sharedWorkerPool = undefined;
+  }, DIFF_WORKER_IDLE_TTL_MS);
+}
+
+export async function preloadDiffWorkerPool(themeName: DiffThemeName): Promise<void> {
+  if (typeof window === "undefined") return;
+  const entry = acquireDiffWorkerPool(themeName, resolveDiffWorkerPoolSize());
+  try {
+    await entry.pool.initialize();
+  } finally {
+    releaseDiffWorkerPool(entry);
+  }
+}
+
 function DiffWorkerThemeSync({ themeName }: { themeName: DiffThemeName }) {
   const workerPool = useWorkerPool();
 
@@ -134,15 +154,7 @@ export function DiffWorkerPoolProvider({ children }: { children?: ReactNode }) {
     if (typeof window === "undefined") return () => {};
     const entry = acquireDiffWorkerPool(diffThemeName, workerPoolSize);
     onStoreChange();
-    return () => {
-      entry.consumers -= 1;
-      if (entry.consumers !== 0) return;
-      entry.idleTimer = setTimeout(() => {
-        entry.idleTimer = undefined;
-        entry.pool.terminate();
-        if (sharedWorkerPool === entry) sharedWorkerPool = undefined;
-      }, DIFF_WORKER_IDLE_TTL_MS);
-    };
+    return () => releaseDiffWorkerPool(entry);
   });
   const workerPool = useSyncExternalStore(
     subscribe,

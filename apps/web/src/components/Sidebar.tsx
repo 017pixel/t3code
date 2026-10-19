@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "./ThreadHoverCard";
@@ -1408,6 +1409,16 @@ interface SidebarDraftRowData {
   composer: ComposerThreadDraftState;
 }
 
+function readSidebarDraftRow(draftId: DraftId): SidebarDraftRowData | null {
+  // The subscription excludes the active draft; route changes capture it from the full store.
+  const store = useComposerDraftStore.getState();
+  const session = store.draftThreadsByThreadKey[draftId];
+  const composer = store.draftsByThreadKey[draftId];
+  return session && session.promotedTo == null && composer && composerDraftHasUserContent(composer)
+    ? { draftId, session, composer }
+    : null;
+}
+
 const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   projectByKey: ReadonlyMap<string, EnvironmentProject>;
   projectDisplayNameByKey: ReadonlyMap<string, string>;
@@ -1417,22 +1428,22 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   onDraftContextMenu: (draftId: DraftId, position: { x: number; y: number }) => void;
 }) {
   const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
-  const draftsByThreadKey = useComposerDraftStore((store) => store.draftsByThreadKey);
+  const draftsByThreadKey = useComposerDraftStore(
+    useShallow((store) =>
+      Object.fromEntries(
+        Object.keys(store.draftThreadsByThreadKey)
+          .filter((key) => key !== props.routeDraftId)
+          .map((key) => [key, store.draftsByThreadKey[key]] as const),
+      ),
+    ),
+  );
   const [frozenActive, setFrozenActive] = useState<{
     routeDraftId: string | null;
     row: SidebarDraftRowData | null;
   }>({ routeDraftId: null, row: null });
   if (frozenActive.routeDraftId !== props.routeDraftId) {
-    let row: SidebarDraftRowData | null = null;
-    if (props.routeDraftId !== null) {
-      const draftId = DraftId.make(props.routeDraftId);
-      const session = draftThreadsByThreadKey[draftId];
-      const composer = draftsByThreadKey[draftId];
-      row =
-        session && session.promotedTo == null && composer && composerDraftHasUserContent(composer)
-          ? { draftId, session, composer }
-          : null;
-    }
+    const row =
+      props.routeDraftId === null ? null : readSidebarDraftRow(DraftId.make(props.routeDraftId));
     setFrozenActive({ routeDraftId: props.routeDraftId, row });
   }
   const drafts = (() => {

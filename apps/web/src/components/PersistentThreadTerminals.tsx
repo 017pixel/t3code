@@ -8,7 +8,7 @@ import {
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
-import { memo, useEffect, useState } from "react";
+import { type ComponentProps, memo, useEffect, useState } from "react";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useStableCallback } from "../hooks/useStableCallback";
 import type { TerminalContextSelection } from "../lib/terminalContext";
@@ -23,7 +23,14 @@ import { useEnvironmentScope } from "../state/session";
 import { useKnownTerminalSessions } from "../state/terminalSessions";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadTerminalActions } from "./terminal/useThreadTerminalActions";
-import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
+import { terminalDrawerSurface } from "./lazySurfaces";
+
+const LazyThreadTerminalDrawer = terminalDrawerSurface.Component;
+function ThreadTerminalDrawer(props: ComponentProps<typeof LazyThreadTerminalDrawer>) {
+  // Hidden sessions stay mounted; an empty closed drawer has nothing to synchronize.
+  if (props.visible === false && props.terminalIds.length === 0) return null;
+  return <LazyThreadTerminalDrawer {...props} />;
+}
 
 /** Where a drawer or panel opens new terminals when a script run overrides the thread's own. */
 export type PersistentTerminalLaunchContext = {

@@ -28,7 +28,6 @@ import {
 } from "@t3tools/contracts";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import * as DateTime from "effect/DateTime";
-import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import {
   squashAtomCommandFailure,
@@ -320,126 +319,40 @@ export function resolveDraftHeroState(input: {
   );
 }
 
-/**
- * Remounting LegendList (or handing it an empty first paint) punches a hole
- * through the chat pane — white in light mode — so cmd+1/2/3 spam flashes even
- * when the destination is already cached.
- */
-export type HeldThreadTimeline<T extends readonly unknown[]> = {
+const MAX_REMEMBERED_THREAD_TIMELINES = 16;
+const rememberedThreadTimelines = new Map<string, readonly unknown[]>();
+
+export function rememberReadyThreadTimeline<T extends readonly unknown[]>(input: {
   threadKey: string | null;
   entries: T;
-  markdownCwd?: string | null;
-  workspaceRoot?: string | null;
-};
-
-const MAX_REMEMBERED_THREAD_TIMELINES = 16;
-
-let rememberedThreadTimelines = new Map<string, HeldThreadTimeline<readonly unknown[]>>();
-let rememberedThreadTimelineOrder: string[] = [];
-let lastReadyThreadKey: string | null = null;
-
-function rememberThreadTimelineEntries(held: HeldThreadTimeline<readonly unknown[]>): void {
-  if (held.threadKey === null) {
-    return;
+}): void {
+  if (input.threadKey === null || input.entries.length === 0) return;
+  rememberedThreadTimelines.delete(input.threadKey);
+  rememberedThreadTimelines.set(input.threadKey, input.entries);
+  if (rememberedThreadTimelines.size > MAX_REMEMBERED_THREAD_TIMELINES) {
+    const oldest = rememberedThreadTimelines.keys().next().value;
+    if (oldest !== undefined) rememberedThreadTimelines.delete(oldest);
   }
-  rememberedThreadTimelines.set(held.threadKey, held);
-  rememberedThreadTimelineOrder = [
-    ...rememberedThreadTimelineOrder.filter((key) => key !== held.threadKey),
-    held.threadKey,
-  ];
-  while (rememberedThreadTimelineOrder.length > MAX_REMEMBERED_THREAD_TIMELINES) {
-    const evicted = rememberedThreadTimelineOrder.shift();
-    if (evicted !== undefined) {
-      rememberedThreadTimelines.delete(evicted);
-    }
-  }
-  lastReadyThreadKey = held.threadKey;
-}
-
-export function rememberReadyThreadTimeline<T extends readonly unknown[]>(
-  held: HeldThreadTimeline<T>,
-): void {
-  if (held.threadKey === null || held.entries.length === 0) {
-    return;
-  }
-  rememberThreadTimelineEntries(held);
 }
 
 export function peekRememberedThreadTimeline<T extends readonly unknown[]>(
   threadKey: string | null,
 ): T | null {
-  if (threadKey === null) {
-    return null;
-  }
-  return (rememberedThreadTimelines.get(threadKey)?.entries as T | undefined) ?? null;
+  if (threadKey === null) return null;
+  return (rememberedThreadTimelines.get(threadKey) as T | undefined) ?? null;
 }
 
-export function peekHeldThreadTimeline<
-  T extends readonly unknown[],
->(): HeldThreadTimeline<T> | null {
-  if (lastReadyThreadKey === null) {
-    return null;
-  }
-  const held = rememberedThreadTimelines.get(lastReadyThreadKey);
-  if (held === undefined || held.entries.length === 0) {
-    return null;
-  }
-  return held as HeldThreadTimeline<T>;
-}
-
-export function resetHeldThreadTimeline(): void {
-  rememberedThreadTimelines = new Map();
-  rememberedThreadTimelineOrder = [];
-  lastReadyThreadKey = null;
-}
-
-export function threadKeysShareEnvironment(left: string | null, right: string | null): boolean {
-  if (left === null || right === null) {
-    return false;
-  }
-  const leftRef = parseScopedThreadKey(left);
-  const rightRef = parseScopedThreadKey(right);
-  return leftRef !== null && rightRef !== null && leftRef.environmentId === rightRef.environmentId;
-}
-
-export function isPaintOnlyThreadTimeline(
-  displayThreadKey: string | null,
-  activeThreadKey: string | null,
-): boolean {
-  return (
-    displayThreadKey !== null && activeThreadKey !== null && displayThreadKey !== activeThreadKey
-  );
+export function resetRememberedThreadTimelines(): void {
+  rememberedThreadTimelines.clear();
 }
 
 export function resolveThreadSwitchTimeline<T extends readonly unknown[]>(input: {
   loading: boolean;
   activeThreadKey: string | null;
   nextEntries: T;
-  rememberedForActive?: T | null;
-  lastReady?: HeldThreadTimeline<T> | null;
-}): { entries: T; displayThreadKey: string | null } {
-  if (input.nextEntries.length > 0) {
-    return { entries: input.nextEntries, displayThreadKey: input.activeThreadKey };
-  }
-
-  const rememberedForActive =
-    input.rememberedForActive ?? peekRememberedThreadTimeline<T>(input.activeThreadKey);
-  if (input.loading && rememberedForActive !== null && rememberedForActive.length > 0) {
-    return { entries: rememberedForActive, displayThreadKey: input.activeThreadKey };
-  }
-
-  const lastReady = input.lastReady ?? peekHeldThreadTimeline<T>();
-  if (
-    input.loading &&
-    lastReady !== null &&
-    lastReady.threadKey !== null &&
-    lastReady.threadKey !== input.activeThreadKey &&
-    lastReady.entries.length > 0 &&
-    threadKeysShareEnvironment(lastReady.threadKey, input.activeThreadKey)
-  ) {
-    return { entries: lastReady.entries, displayThreadKey: lastReady.threadKey };
-  }
-  return { entries: input.nextEntries, displayThreadKey: input.activeThreadKey };
+}): T {
+  if (input.nextEntries.length > 0 || !input.loading) return input.nextEntries;
+  return peekRememberedThreadTimeline<T>(input.activeThreadKey) ?? input.nextEntries;
 }
 
 export function resolveDraftPromotionNavigationTarget(input: {

@@ -1,9 +1,12 @@
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { observeResize } from "../../lib/observeResize";
 
 export function measureComposerMultilinePrompt(body: HTMLElement): boolean | null {
   const editor = body.querySelector<HTMLElement>('[data-testid="composer-editor"]');
   if (!editor || editor.clientWidth === 0) return null;
+
+  // Scrolling already proves the prompt spans more than one line.
+  if (editor.scrollHeight > editor.clientHeight + 1) return true;
 
   const bodyStyle = getComputedStyle(body);
   const expandedWidth =
@@ -23,12 +26,16 @@ export function measureComposerMultilinePrompt(body: HTMLElement): boolean | nul
 
 export function useComposerMultilinePrompt(body: HTMLElement | null): boolean {
   const [isMultiline, setIsMultiline] = useState(false);
+  const measuredRef = useRef(false);
 
   useLayoutEffect(() => {
     if (!body) return;
     const measure = () => {
       const next = measureComposerMultilinePrompt(body);
-      if (next !== null) setIsMultiline(next);
+      if (next !== null && next !== measuredRef.current) {
+        measuredRef.current = next;
+        setIsMultiline(next);
+      }
     };
     measure();
     const editor = body.querySelector<HTMLElement>('[data-testid="composer-editor"]');
