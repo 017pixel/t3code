@@ -36,10 +36,6 @@ import * as ElectronShell from "../../electron/ElectronShell.ts";
 import * as ElectronTheme from "../../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as Electron from "electron";
-import {
-  isMacPermissionGranted,
-  requestMacPermission,
-} from "../../permissions/macPermissionStatus.ts";
 import * as MacPermissions from "../../permissions/MacPermissions.ts";
 import { safariPermissionCheck } from "../../preview/BrowserImport/SafariPermission.ts";
 import * as IpcChannels from "../channels.ts";
@@ -303,11 +299,10 @@ export const openSystemSettings = DesktopIpc.makeIpcMethod({
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     if (environment.platform !== "darwin") return false;
     const owner = Electron.BrowserWindow.getFocusedWindow();
-    if (pane !== "full-disk-access") yield* Effect.promise(() => requestMacPermission(pane));
     const opened = yield* shell.openSystemSettings(pane);
     if (opened && environment.isPackaged) {
       const permissions = yield* MacPermissions.MacPermissions;
-      const isGranted = pane === "full-disk-access" ? yield* safariPermissionCheck : undefined;
+      const isGranted = yield* safariPermissionCheck;
       yield* permissions.showHelper(pane, owner, isGranted);
     }
     return opened;
@@ -400,10 +395,9 @@ export const checkSystemPermission = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.CHECK_SYSTEM_PERMISSION_CHANNEL,
   payload: SystemSettingsPaneSchema,
   result: Schema.Boolean,
-  handler: Effect.fn("desktop.ipc.window.checkSystemPermission")(function* (pane) {
+  handler: Effect.fn("desktop.ipc.window.checkSystemPermission")(function* () {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     if (environment.platform !== "darwin") return false;
-    if (pane !== "full-disk-access") return isMacPermissionGranted(pane);
     const check = yield* safariPermissionCheck;
     return yield* Effect.promise(check);
   }),
