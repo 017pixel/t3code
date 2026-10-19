@@ -27,6 +27,11 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import { makeAntigravityAcpRuntime } from "../../provider/acp/AntigravityAcpSupport.ts";
+import {
+  readAntigravityClientTextFile,
+  writeAntigravityClientTextFile,
+} from "../../provider/acp/AntigravityClientFiles.ts";
+import { resolveAntigravityInstanceDirectories } from "../../provider/antigravityAuthSupport.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import {
@@ -135,6 +140,48 @@ const layerSession = Layer.mergeAll(
 );
 
 describe("AntigravityAdapterV2 client file system", () => {
+  it.effect("resolves missing nested paths beneath symlink roots without following escapes", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fileSystem.makeTempDirectoryScoped();
+      const realRoot = path.join(directory, "real");
+      const alias = path.join(directory, "alias");
+      yield* fileSystem.makeDirectory(realRoot);
+      yield* fileSystem.symlink(realRoot, alias);
+      const write = (root: string, target: string) =>
+        writeAntigravityClientTextFile({
+          fileSystem,
+          path,
+          allowedRoots: [root],
+          request: { sessionId: "session-1", path: target, content: "task output" },
+        });
+      const nested = path.join(alias, "brain", "session-1", "tasks", "output.txt");
+      yield* write(alias, nested);
+      const read = yield* readAntigravityClientTextFile({
+        fileSystem,
+        path,
+        allowedRoots: [realRoot],
+        request: { sessionId: "session-1", path: nested },
+      });
+      assert.equal(read.content, "task output");
+      // The configured root may itself be missing below the symlink.
+      const scratch = path.join(realRoot, "tmp", "session-1", "scratch.txt");
+      yield* write(path.join(alias, "tmp"), scratch);
+      assert.equal(yield* fileSystem.readFileString(scratch), "task output");
+
+      const outside = yield* fileSystem.makeTempDirectoryScoped();
+      yield* fileSystem.symlink(outside, path.join(realRoot, "escape"));
+      const escaped = path.join(outside, "missing", "nested", "output.txt");
+      const result = yield* write(
+        alias,
+        path.join(alias, "escape", "missing", "nested", "output.txt"),
+      ).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
+      assert.isFalse(yield* fileSystem.exists(escaped));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect("confines agent file requests to the workspace under full access", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -221,6 +268,43 @@ describe("AntigravityAdapterV2 client file system", () => {
         context("fs/read_text_file"),
       );
       assert.equal(pasted.content, "pasted");
+
+      // The agent keeps task logs and scratch files under its own per-instance
+      // directories, which usually do not exist yet when it first writes there.
+      const instanceDirectories = yield* resolveAntigravityInstanceDirectories(
+        host.paths.stateDir,
+        instanceId,
+      );
+      const agentRuntimeFiles = [
+        path.join(
+          instanceDirectories.profile,
+          "antigravity-acp",
+          "brain",
+          "mock-session-1",
+          "tasks",
+          "task-1.log",
+        ),
+        path.join(instanceDirectories.profile, "antigravity-acp", "tmp", "scratch.txt"),
+        path.join(instanceDirectories.runtimeTemp, "scratch.txt"),
+      ];
+      for (const runtimeFile of agentRuntimeFiles) {
+        yield* writeTextFile(
+          { sessionId: "mock-session-1", path: runtimeFile, content: "task output" },
+          context("fs/write_text_file"),
+        );
+        const readBack = yield* readTextFile(
+          { sessionId: "mock-session-1", path: runtimeFile },
+          context("fs/read_text_file"),
+        );
+        assert.equal(readBack.content, "task output");
+      }
+      const profileToken = path.join(instanceDirectories.profile, "acp_token.json");
+      yield* fileSystem.writeFileString(profileToken, "oauth-secret");
+      const tokenRead = yield* readTextFile(
+        { sessionId: "mock-session-1", path: profileToken },
+        context("fs/read_text_file"),
+      ).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(tokenRead), "the profile's credentials stay unreadable");
 
       const outsideRead = yield* readTextFile(
         { sessionId: "mock-session-1", path: outsideFile },

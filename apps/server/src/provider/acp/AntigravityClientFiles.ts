@@ -27,31 +27,33 @@ const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFil
     readonly requestPath: string;
   }) {
     const { path } = input;
-    const resolved = path.resolve(input.requestPath);
     const outside = EffectAcpErrors.AcpRequestError.invalidParams(
       `Path '${input.requestPath}' is outside the session workspace.`,
     );
-    const real = yield* input.fileSystem.realPath(resolved).pipe(
-      Effect.catch(() =>
-        Effect.gen(function* () {
-          // Only a missing file (a new write) falls back to its parent; a
-          // dangling or unreadable link must not be followed on write.
-          const entryExists = yield* input.fileSystem.readLink(resolved).pipe(
-            Effect.as(true),
-            Effect.catch(() => input.fileSystem.exists(resolved)),
-            Effect.orElseSucceed(() => true),
-          );
-          if (entryExists) return yield* outside;
-          const parent = yield* input.fileSystem
-            .realPath(path.dirname(resolved))
-            .pipe(Effect.orElseSucceed(() => path.dirname(resolved)));
-          return path.join(parent, path.basename(resolved));
-        }),
-      ),
-    );
-    const roots = yield* Effect.forEach(input.allowedRoots, (root) =>
-      input.fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root)),
-    );
+    // New task logs can have several missing parents beneath an aliased temp root.
+    const resolvePath = Effect.fnUntraced(function* (targetPath: string) {
+      let current = path.resolve(targetPath);
+      const suffix: Array<string> = [];
+      while (true) {
+        const real = yield* input.fileSystem.realPath(current).pipe(Effect.option);
+        if (real._tag === "Some") {
+          return path.join(real.value, ...suffix.toReversed());
+        }
+        const entryExists = yield* input.fileSystem.readLink(current).pipe(
+          Effect.as(true),
+          Effect.catch(() => input.fileSystem.exists(current)),
+          Effect.orElseSucceed(() => true),
+        );
+        const parent = path.dirname(current);
+        if (entryExists || parent === current) {
+          return yield* outside;
+        }
+        suffix.push(path.basename(current));
+        current = parent;
+      }
+    });
+    const real = yield* resolvePath(input.requestPath);
+    const roots = yield* Effect.forEach(input.allowedRoots, resolvePath);
     if (!roots.some((root) => isInsideRoot(path, root, real))) {
       return yield* outside;
     }

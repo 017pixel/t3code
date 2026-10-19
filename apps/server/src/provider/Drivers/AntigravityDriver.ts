@@ -433,7 +433,17 @@ export const AntigravityDriver: ProviderDriver<
             provider: DRIVER,
             threadId,
           }),
-      });
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER,
+              instanceId,
+              detail: "Could not prepare the Antigravity adapter.",
+              cause,
+            }),
+        ),
+      );
       const textGeneration = yield* makeAntigravityTextGeneration({
         profileDirectory,
         defaultModel,
