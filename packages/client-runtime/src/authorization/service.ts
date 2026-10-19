@@ -86,6 +86,9 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
 >()("@t3tools/client-runtime/authorization/service/RemoteEnvironmentAuthorization") {}
 
 const CACHED_ENDPOINT_SOCKET_TIMEOUT_MS = 3_000;
+// The 3 + 7 second ticket budget leaves 5 seconds of the supervisor's setup deadline.
+const RELAY_SOCKET_RETRY_TIMEOUT_MS = 7_000;
+const RELAY_TICKET_TIMEOUT_LIMIT = 3;
 const BEARER_DESCRIPTOR_CACHE_TTL_MS = 10_000;
 const DPOP_AUTHORIZATION_TIMEOUT_MS = 30_000;
 
@@ -117,6 +120,14 @@ export const make = Effect.gen(function* () {
   const tokenOwners = new Map<
     EnvironmentId,
     { readonly accessToken: string; readonly identity: ClientCapabilities.CloudSessionIdentity }
+  >();
+  const relayTicketTimeouts = new Map<
+    EnvironmentId,
+    {
+      readonly accessToken: string;
+      readonly identity: ClientCapabilities.CloudSessionIdentity;
+      readonly count: number;
+    }
   >();
   const pendingTokens = new Map<
     EnvironmentId,
@@ -510,14 +521,24 @@ export const make = Effect.gen(function* () {
     });
     let selected = yield* getDpopToken(input);
     if (selected.fromCache) {
+      const cachedToken = selected.token;
       const cachedSocket = yield* createDpopSocketUrl(
-        selected.token,
+        cachedToken,
         CACHED_ENDPOINT_SOCKET_TIMEOUT_MS,
         endpoint,
-      ).pipe(Effect.result);
+      ).pipe(
+        Effect.catchTags({
+          RemoteEnvironmentAuthTimeoutError: (error) =>
+            endpoint === undefined
+              ? createDpopSocketUrl(cachedToken, RELAY_SOCKET_RETRY_TIMEOUT_MS)
+              : Effect.fail(error),
+        }),
+        Effect.result,
+      );
       if (Result.isSuccess(cachedSocket)) {
         yield* assertSession(selected.identity);
-        return authorized(selected.token, cachedSocket.success);
+        if (endpoint === undefined) relayTicketTimeouts.delete(input.expectedEnvironmentId);
+        return authorized(cachedToken, cachedSocket.success);
       }
       if (cachedSocket.failure._tag === "ConnectionBlockedError") {
         return yield* mapDpopSocketError(cachedSocket.failure);
@@ -528,16 +549,40 @@ export const make = Effect.gen(function* () {
         return yield* mapDpopSocketError(cachedSocket.failure);
       }
       yield* assertSession(selected.identity);
+      if (cachedSocket.failure._tag === "RemoteEnvironmentAuthTimeoutError") {
+        const previous = relayTicketTimeouts.get(input.expectedEnvironmentId);
+        const count =
+          previous?.accessToken === cachedToken.accessToken &&
+          previous.identity === selected.identity
+            ? previous.count + 1
+            : 1;
+        if (count < RELAY_TICKET_TIMEOUT_LIMIT) {
+          relayTicketTimeouts.set(input.expectedEnvironmentId, {
+            accessToken: cachedToken.accessToken,
+            identity: selected.identity,
+            count,
+          });
+          // A slow ticket response does not establish a credential or network failure.
+          return yield* new ConnectionTransientError({
+            reason: "timeout",
+            detail: `${cachedToken.label} did not respond during connection setup.`,
+          });
+        }
+      }
+      if (endpoint === undefined) relayTicketTimeouts.delete(input.expectedEnvironmentId);
       selected = yield* getDpopToken({
         ...input,
-        rejectedAccessToken: selected.token.accessToken,
+        rejectedAccessToken: cachedToken.accessToken,
       });
     }
     const socket = yield* createDpopSocketUrl(selected.token, undefined, endpoint).pipe(
       Effect.result,
     );
     if (Result.isFailure(socket)) {
-      if (endpoint === undefined || socket.failure._tag === "ConnectionBlockedError") {
+      if (
+        (endpoint === undefined && socket.failure._tag !== "RemoteEnvironmentAuthTimeoutError") ||
+        socket.failure._tag === "ConnectionBlockedError"
+      ) {
         yield* tokenLock.withPermits(1)(
           removeRejectedToken(input.expectedEnvironmentId, selected.token.accessToken),
         );
@@ -545,6 +590,7 @@ export const make = Effect.gen(function* () {
       return yield* mapDpopSocketError(socket.failure);
     }
     yield* assertSession(selected.identity);
+    if (endpoint === undefined) relayTicketTimeouts.delete(input.expectedEnvironmentId);
     return authorized(selected.token, socket.success);
   });
 

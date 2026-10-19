@@ -46,14 +46,18 @@ const BOOTSTRAP: RelayEnvironmentConnectResponse = {
   expiresAt: "2026-06-06T01:00:00.000Z",
 };
 
-type RecordedResponse = Response | ((init: RequestInit) => Response);
+type RecordedResponse = Response | "stall" | ((init: RequestInit) => Response);
 
-function recordedFetch(responses: ReadonlyArray<RecordedResponse>) {
+function recordedFetch(responses: ReadonlyArray<RecordedResponse>, onStall: () => void) {
   const calls: Array<readonly [RequestInfo | URL, RequestInit]> = [];
   let responseIndex = 0;
   const fetchFn = ((input, init) => {
     calls.push([input, init ?? {}]);
     const response = responses[responseIndex++];
+    if (response === "stall") {
+      onStall();
+      return new Promise<Response>(() => {});
+    }
     return response === undefined
       ? Promise.reject(new Error(`Unexpected fetch call to ${String(input)}`))
       : Promise.resolve(typeof response === "function" ? response(init ?? {}) : response);
@@ -136,7 +140,8 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
       readonly accessToken?: string;
     }>
   >([]);
-  const fetch = recordedFetch(input.responses);
+  const stalls = yield* Queue.unbounded<void>();
+  const fetch = recordedFetch(input.responses, () => Queue.offerUnsafe(stalls, undefined));
 
   const tokenStore = TokenStore.RemoteDpopAccessTokenStore.of({
     get: (environmentId) =>
@@ -227,6 +232,7 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
     session,
     thumbprint,
     tokenReads,
+    stalls,
   };
 });
 
@@ -354,18 +360,36 @@ describe("RemoteEnvironmentAuthorization", () => {
       });
       const harness = yield* makeHarness({
         initialToken: cached,
-        responses: [Response.json(DESCRIPTOR), websocketTicket("lan-ticket")],
+        responses: [
+          Response.json(DESCRIPTOR),
+          websocketTicket("lan-ticket"),
+          "stall",
+          websocketTicket("fallback-ticket"),
+        ],
       });
 
       const authorized = yield* Effect.gen(function* () {
         const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
-        return yield* remote.authorizeDpop({
+        const direct = remote.authorizeDpop({
           expectedEnvironmentId: ENVIRONMENT_ID,
           directEndpoint: {
             httpBaseUrl: "http://192.168.1.10:3773/",
             wsBaseUrl: "ws://192.168.1.10:3773/",
           },
         });
+        const authorized = yield* direct;
+        const stalled = yield* direct.pipe(Effect.flip, Effect.forkChild);
+        yield* Queue.take(harness.stalls);
+        yield* TestClock.adjust("3 seconds");
+        expect(harness.fetch.calls).toHaveLength(3);
+        expect(yield* Fiber.join(stalled)).toMatchObject({
+          _tag: "ConnectionTransientError",
+          reason: "timeout",
+        });
+        const fallback = yield* remote.authorizeDpop({ expectedEnvironmentId: ENVIRONMENT_ID });
+        expect(fallback.socketUrl).toContain("wsTicket=fallback-ticket");
+        expect(fallback.httpAuthorization).toMatchObject({ accessToken: cached.accessToken });
+        return authorized;
       }).pipe(Effect.provide(harness.layer));
 
       expect(authorized.httpBaseUrl).toBe("http://192.168.1.10:3773/");
@@ -374,6 +398,8 @@ describe("RemoteEnvironmentAuthorization", () => {
       expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
         "http://192.168.1.10:3773/.well-known/t3/environment",
         "http://192.168.1.10:3773/api/auth/websocket-ticket",
+        "http://192.168.1.10:3773/api/auth/websocket-ticket",
+        "https://environment.example.test/api/auth/websocket-ticket",
       ]);
     }),
   );
@@ -663,6 +689,98 @@ describe("RemoteEnvironmentAuthorization", () => {
         }),
       );
       expect(harness.fetch.calls).toHaveLength(4);
+    }),
+  );
+
+  it.effect("resets relay ticket timeouts after recovery and after credential replacement", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        initialToken: persistedToken(),
+        responses: [
+          "stall",
+          "stall",
+          "stall",
+          "stall",
+          "stall",
+          websocketTicket("recovered-ticket"),
+          "stall",
+          "stall",
+          "stall",
+          "stall",
+          Response.json(DESCRIPTOR),
+          accessToken("replacement-token"),
+          "stall",
+          "stall",
+          websocketTicket("replacement-ticket"),
+        ],
+      });
+      yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        const authorize = remote.authorizeDpop({ expectedEnvironmentId: ENVIRONMENT_ID });
+        const timeOut = (expectedMints: number) =>
+          Effect.gen(function* () {
+            const pending = yield* authorize.pipe(Effect.flip, Effect.forkChild);
+            yield* Queue.take(harness.stalls);
+            yield* TestClock.adjust("3 seconds");
+            expect(yield* Ref.get(harness.bootstrapCalls)).toBe(expectedMints);
+            yield* Queue.take(harness.stalls);
+            yield* TestClock.adjust("7 seconds");
+            expect(yield* Ref.get(harness.bootstrapCalls)).toBe(expectedMints);
+            expect(yield* Fiber.join(pending)).toMatchObject({
+              _tag: "ConnectionTransientError",
+              reason: "timeout",
+            });
+          });
+        yield* timeOut(0);
+        yield* timeOut(0);
+        const recovery = yield* authorize.pipe(Effect.forkChild);
+        yield* Queue.take(harness.stalls);
+        yield* TestClock.adjust("3 seconds");
+        expect((yield* Fiber.join(recovery)).socketUrl).toContain("wsTicket=recovered-ticket");
+        yield* timeOut(0);
+        yield* timeOut(0);
+
+        yield* remote.authorizeDpopHttp({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          rejectedAccessToken: "cached-access-token",
+        });
+        yield* timeOut(1);
+        const replacement = yield* authorize;
+        expect(replacement.socketUrl).toContain("wsTicket=replacement-ticket");
+        expect(replacement.httpAuthorization).toMatchObject({ accessToken: "replacement-token" });
+        expect(yield* Ref.get(harness.bootstrapCalls)).toBe(1);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("reuses a newly minted credential after its first relay ticket times out", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [
+          Response.json(DESCRIPTOR),
+          accessToken("fresh-token"),
+          "stall",
+          websocketTicket("recovered-ticket"),
+        ],
+      });
+      yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        const authorize = remote.authorizeDpop({ expectedEnvironmentId: ENVIRONMENT_ID });
+        const pending = yield* authorize.pipe(Effect.flip, Effect.forkChild);
+        yield* Queue.take(harness.stalls);
+        yield* TestClock.adjust("10 seconds");
+        expect(yield* Fiber.join(pending)).toMatchObject({
+          _tag: "ConnectionTransientError",
+          reason: "timeout",
+        });
+        expect((yield* Ref.get(harness.tokens)).get(ENVIRONMENT_ID)?.accessToken).toBe(
+          "fresh-token",
+        );
+        const recovered = yield* authorize;
+        expect(recovered.socketUrl).toContain("wsTicket=recovered-ticket");
+        expect(recovered.httpAuthorization).toMatchObject({ accessToken: "fresh-token" });
+        expect(yield* Ref.get(harness.bootstrapCalls)).toBe(1);
+      }).pipe(Effect.provide(harness.layer));
     }),
   );
 
