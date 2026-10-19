@@ -1,11 +1,3 @@
-/**
- * TerminalManager - Terminal session orchestration service interface.
- *
- * Owns terminal lifecycle operations, output fanout, and session state
- * transitions for thread-scoped terminals.
- *
- * @module TerminalManager
- */
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   DEFAULT_TERMINAL_ID,
@@ -42,12 +34,14 @@ import {
 } from "@t3tools/contracts";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { AgentScope } from "@t3tools/shared/AgentScope";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { mergePathEntries } from "@t3tools/shared/shell";
 
-import { acpRegistryManagedBinaryDirectories } from "../provider/acp/AcpRegistrySupport.ts";
+import { acpRegistryManagedBinaryDirectories } from "@t3tools/provider-acp-registry/server";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
@@ -63,7 +57,7 @@ import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
-import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
@@ -73,11 +67,11 @@ import {
   terminalRestartsTotal,
   terminalSessionsTotal,
 } from "../observability/Metrics.ts";
-import { expandHomePath } from "../pathExpansion.ts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
-import * as PtyAdapter from "./PtyAdapter.ts";
+import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
 export {
   TerminalCwdError,
@@ -97,14 +91,27 @@ export {
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_HISTORY_BYTE_LIMIT = 8 * 1024 * 1024;
 const MAX_HISTORY_CHUNK_LENGTH = 16 * 1024;
-const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
+const DEFAULT_PERSIST_DEBOUNCE_MS = 250;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 const MAX_SUBPROCESS_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
-const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
+// The tmux/screen/Zellij keys name the multiplexer pane that launched the server,
+// so inheriting them points multiplexer-aware tools at that unrelated pane.
+const TERMINAL_ENV_BLOCKLIST = new Set([
+  "PORT",
+  "ELECTRON_RENDERER_PORT",
+  "ELECTRON_RUN_AS_NODE",
+  "TMUX",
+  "TMUX_PANE",
+  "STY",
+  "WINDOW",
+  "ZELLIJ",
+  "ZELLIJ_SESSION_NAME",
+  "ZELLIJ_PANE_ID",
+]);
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const MAX_TERMINAL_LABEL_LENGTH = 128;
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
@@ -145,56 +152,30 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
   }
 }
 
-/**
- * TerminalManager - Service tag for terminal session orchestration.
- */
 export class TerminalManager extends Context.Service<
   TerminalManager,
   {
-    /**
-     * Open or attach to a terminal session.
-     *
-     * Reuses an existing session for the same thread/terminal id and restores
-     * persisted history on first open.
-     */
     readonly open: (
       input: TerminalOpenInput,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
-    /**
-     * Attach to a terminal and stream its initial snapshot followed by live events.
-     *
-     * Returns an unsubscribe function.
-     */
     readonly attachStream: (
       input: TerminalAttachInput,
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void, TerminalError>;
 
-    /** Observe an existing session without starting or changing its process. */
     readonly observeStream: (
       input: TerminalObserveInput,
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void, TerminalError>;
 
-    /**
-     * Write input bytes to a terminal session.
-     */
     readonly write: (input: TerminalWriteInput) => Effect.Effect<void, TerminalError>;
 
-    /**
-     * Resize the PTY backing a terminal session.
-     */
     readonly resize: (input: TerminalResizeInput) => Effect.Effect<void, TerminalError>;
 
-    /**
-     * Clear terminal output history.
-     */
     readonly clear: (input: TerminalClearInput) => Effect.Effect<void, TerminalError>;
 
     /**
-     * Restart a terminal session in place.
-     *
      * Always resets history before spawning the new process.
      */
     readonly restart: (
@@ -202,37 +183,19 @@ export class TerminalManager extends Context.Service<
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     /**
-     * Close an active terminal session.
-     *
      * When `terminalId` is omitted, closes all sessions for the thread.
      */
     readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
 
-    /**
-     * Close a thread's terminals that wait at an idle shell prompt. A terminal
-     * that runs a command stays open. When `terminalId` is set, only that
-     * terminal is considered. Used when a thread settles and when a setup
-     * script finishes.
-     */
     readonly closeIdle: (input: {
       readonly threadId: string;
       readonly terminalId?: string;
     }) => Effect.Effect<void>;
 
-    /**
-     * Subscribe to terminal runtime events with a direct callback.
-     *
-     * Returns an unsubscribe function.
-     */
     readonly subscribe: (
       listener: (event: TerminalEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
 
-    /**
-     * Subscribe to lightweight terminal metadata with an initial full snapshot.
-     *
-     * Returns an unsubscribe function.
-     */
     readonly subscribeMetadata: (
       listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
@@ -296,7 +259,6 @@ interface TerminalSessionState {
   exitSignal: number | null;
   updatedAt: string;
   eventSequence: number;
-  /** Counts writes, so closeIdle can see input that has not echoed yet. */
   inputCount: number;
   cols: number;
   rows: number;
@@ -304,7 +266,6 @@ interface TerminalSessionState {
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
-  /** Normalized child command name when `hasRunningSubprocess`; cleared when idle. */
   childCommandLabel: string | null;
   runtimeEnv: Record<string, string> | null;
 }
@@ -872,7 +833,6 @@ export class BoundedTerminalHistory {
     this.cachedValue = null;
     if (this.maxBytes <= 0 || this.maxLines <= 0) {
       this.clear();
-      // Preserve the existing zero-line limit's trailing newline behavior.
       if (this.maxBytes > 0 && text.endsWith("\n")) this.appendChunk("\n");
       return;
     }
@@ -983,14 +943,12 @@ export class BoundedTerminalHistory {
         continue;
       }
       if (first.byteLength === first.data.length && first.lineBreaks === 0) {
-        // ASCII without newlines needs no scan to find the byte cutoff.
         this.trimChunk(bytesToDrop, bytesToDrop, 0);
         continue;
       }
       let offset = 0;
       let bytes = 0;
       let lineBreaks = 0;
-      // Scan only the discarded prefix of one small chunk, never all history.
       while (bytes < bytesToDrop) {
         const codePoint = first.data.codePointAt(offset)!;
         bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
@@ -1114,10 +1072,18 @@ function findEscapeSequenceEndIndex(input: string, start: number): number | null
   return isEscapeFinalByte(input.charCodeAt(cursor)) ? cursor + 1 : start + 1;
 }
 
+// eslint-disable-next-line no-control-regex -- Terminal sequence introducers must reach the parser.
+const HISTORY_SEQUENCE_START = /[\u001b\u0090\u009b\u009d\u009e\u009f]/;
+const NEXT_HISTORY_SEQUENCE_START = new RegExp(HISTORY_SEQUENCE_START.source, "g");
+
 function sanitizeTerminalHistoryChunk(
   pendingControlSequence: string,
   data: string,
 ): { visibleText: string; pendingControlSequence: string } {
+  if (pendingControlSequence.length === 0 && !HISTORY_SEQUENCE_START.test(data)) {
+    return { visibleText: data, pendingControlSequence: "" };
+  }
+
   const input = `${pendingControlSequence}${data}`;
   let visibleText = "";
   let index = 0;
@@ -1223,8 +1189,11 @@ function sanitizeTerminalHistoryChunk(
       continue;
     }
 
-    append(input[index] ?? "");
-    index += 1;
+    // One slice per printable run: every chunk of coloured output reaches this loop.
+    NEXT_HISTORY_SEQUENCE_START.lastIndex = index + 1;
+    const nextSequenceStart = NEXT_HISTORY_SEQUENCE_START.exec(input)?.index ?? input.length;
+    append(input.slice(index, nextSequenceStart));
+    index = nextSequenceStart;
   }
 
   return { visibleText, pendingControlSequence: "" };
@@ -1257,17 +1226,7 @@ function shouldExcludeTerminalEnvKey(key: string): boolean {
   return TERMINAL_ENV_BLOCKLIST.has(normalizedKey);
 }
 
-// Marker variables the AppImage runtime injects into the process it launches.
-// They describe the AppImage itself, not the user's session, so terminals must
-// not inherit them.
 const APPIMAGE_RUNTIME_ENV_KEYS = ["APPIMAGE", "APPDIR", "ARGV0", "OWD"] as const;
-// Colon-separated search-path variables the AppImage runtime points at its
-// temporary mount (e.g. /tmp/.mount_T3-XXXX/usr/bin, the bundled glib schemas,
-// and an $APPDIR/usr/share XDG data entry). Only the mount segments are
-// dropped; the user's real entries are preserved. When nothing but mount
-// segments remain the variable is removed entirely so consumers fall back to
-// their platform default (e.g. gsettings finds the host schemas instead of
-// reporting "No schemas installed"). See issues #1699 and #5059.
 const APPIMAGE_PATH_LIKE_ENV_KEYS = [
   "PATH",
   "LD_LIBRARY_PATH",
@@ -1283,9 +1242,8 @@ function isPathSegmentUnderAppDir(segment: string, appDir: string): boolean {
 // injects APPIMAGE/APPDIR/ARGV0/OWD plus mount entries on PATH/LD_LIBRARY_PATH.
 // The integrated terminal inherits the server process environment, so without
 // this scrub those leak into the PTY and tools resolve against the AppImage
-// mount instead of the user's real environment (e.g. `php` reporting
-// PHP_BINARY as the AppImage path). See issue #1699. The scrub is gated on an
-// actual AppImage launch so non-AppImage environments are left untouched.
+// mount instead of the user's real environment (e.g. `php` reporting PHP_BINARY
+// as the AppImage path). See issue #1699.
 function stripAppImageRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (env.APPIMAGE === undefined && env.APPDIR === undefined) return env;
 
@@ -1317,6 +1275,7 @@ function createTerminalSpawnEnv(
   baseEnv: NodeJS.ProcessEnv,
   runtimeEnv: Record<string, string> | null | undefined,
   platform: NodeJS.Platform,
+  home: string,
 ): NodeJS.ProcessEnv {
   const spawnEnv: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
@@ -1331,13 +1290,22 @@ function createTerminalSpawnEnv(
           ? Object.keys(spawnEnv).find((candidate) => candidate.toLowerCase() === key.toLowerCase())
           : undefined;
       spawnEnv[existingKey ?? key] =
-        key === "CODEX_HOME" || key === "CLAUDE_CONFIG_DIR" ? expandHomePath(value) : value;
+        key === "CODEX_HOME" || key === "CLAUDE_CONFIG_DIR" ? expandHomePath(value, home) : value;
     }
   }
-  // An explicit empty override opts out for terminals started without a client.
-  // Otherwise both PTY backends feed truecolor-capable terminal clients.
   if (!spawnEnv.COLORTERM && runtimeEnv?.COLORTERM === undefined) {
     spawnEnv.COLORTERM = "truecolor";
+  }
+  // fish 4.1+ can wait 10s at startup for a DA1 reply before a renderer can answer.
+  // Skip the query unless the user or provider already chose `query-term` or `no-query-term`.
+  const fishFeaturesKey =
+    platform === "win32"
+      ? (Object.keys(spawnEnv).find((candidate) => candidate.toLowerCase() === "fish_features") ??
+        "fish_features")
+      : "fish_features";
+  const fishFeatures = spawnEnv[fishFeaturesKey];
+  if (!fishFeatures?.includes("query-term")) {
+    spawnEnv[fishFeaturesKey] = fishFeatures ? `${fishFeatures},no-query-term` : "no-query-term";
   }
   return stripAppImageRuntimeEnv(spawnEnv);
 }
@@ -1358,11 +1326,6 @@ interface TerminalManagerOptions {
   ptyAdapter: PtyAdapter.PtyAdapter["Service"];
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
-  /**
-   * Catalog cache and tool directories for managed ACP Registry installs. Their
-   * install directories are appended to the terminal PATH so users can run
-   * managed agents by name (e.g. `kimi login`).
-   */
   managedBinaryCacheDir?: string;
   managedBinaryToolsDir?: string;
   subprocessInspector?: TerminalSubprocessInspector;
@@ -1408,7 +1371,7 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
     return yield* new TerminalProviderInstanceNotFoundError({ providerInstanceId });
   }
 
-  let resolved = mergeProviderInstanceEnvironment(instance.environment, input.env ?? {});
+  let resolved = yield* mergeProviderInstanceEnvironment(instance.environment, input.env ?? {});
   if (instance.driver === "codex") {
     const config = decodeCodexSettings(instance.config ?? {});
     if (Option.isSome(config)) {
@@ -1477,12 +1440,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const logsDir = options.logsDir;
   const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
   const historyByteLimit = options.historyByteLimit ?? DEFAULT_HISTORY_BYTE_LIMIT;
-  const platform = yield* HostProcessPlatform;
-  const architecture = yield* HostProcessArchitecture;
+  const platform = yield* HostProcess.Platform;
+  const architecture = yield* HostProcess.Architecture;
+  const agentScope = yield* AgentScope;
   // Terminals must inherit the user's full environment (minus the blocklist
   // applied in createTerminalSpawnEnv) — an allowlist here silently strips
   // things like PSModulePath, DISPLAY, proxies, and toolchain variables.
-  // `options.env` is the test seam.
   const baseEnv = options.env ?? process.env;
   const shellResolver = options.shellResolver ?? (() => defaultShellResolver(platform, baseEnv));
   const processRunner = yield* ProcessRunner.ProcessRunner;
@@ -1515,11 +1478,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const fetchProcessTableSnapshot: Effect.Effect<
     {
       readonly snapshot: TerminalProcessTableSnapshot;
-      /**
-       * False when the sidecar snapshot failed and this table came from the
-       * spawned fallback. The data is still applied, but the tick counts as
-       * a failure so polling backs off instead of hot-looping the fallback.
-       */
       readonly snapshotSucceeded: boolean;
     },
     TerminalSubprocessCheckError
@@ -1576,6 +1534,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     sessions: new Map(),
     killFibers: new Map(),
   });
+  // Keep close markers in memory so unknown IDs recover after a server restart.
+  const closedSessionKeys = new Set<string>();
   const threadLocks = yield* KeyedLock.make<string>();
   const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
   const workerScope = yield* Scope.make("sequential");
@@ -1637,6 +1597,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     fiber: Fiber.Fiber<void, never>,
   ) {
     yield* modifyManagerState((state) => {
+      // The child may finish (and run its finalizer) before this registration.
+      // Check inside the synchronized update so completed fibers are not retained.
+      if (fiber.pollUnsafe() !== undefined) {
+        return [undefined, state] as const;
+      }
       const killFibers = new Map(state.killFibers);
       killFibers.set(process, fiber);
       return [undefined, { ...state, killFibers }] as const;
@@ -1648,49 +1613,66 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     threadId: string,
     terminalId: string,
   ) {
-    const terminated = yield* Effect.try({
-      try: () => process.kill("SIGTERM"),
-      catch: (cause) =>
-        new TerminalProcessSignalError({
-          cause,
-          signal: "SIGTERM",
-          terminalPid: process.pid,
-        }),
-    }).pipe(
-      Effect.as(true),
-      Effect.catch((error) =>
-        Effect.logWarning("failed to kill terminal process", {
-          threadId,
-          terminalId,
-          signal: "SIGTERM",
-          cause: error,
-        }).pipe(Effect.as(false)),
-      ),
-    );
-    if (!terminated) {
-      return;
-    }
+    // Subscribe before SIGTERM so an immediate exit is not missed. Released with
+    // Effect.ensuring because a JS `finally` does not run when the fiber is interrupted.
+    const exited = Deferred.makeUnsafe<void>();
+    const unsubscribeExit = process.onExit(() => {
+      Deferred.doneUnsafe(exited, Effect.void);
+    });
+    yield* Effect.gen(function* () {
+      const terminated = yield* Effect.try({
+        try: () => process.kill("SIGTERM"),
+        catch: (cause) =>
+          new TerminalProcessSignalError({
+            cause,
+            signal: "SIGTERM",
+            terminalPid: process.pid,
+          }),
+      }).pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          Effect.logWarning("failed to kill terminal process", {
+            threadId,
+            terminalId,
+            signal: "SIGTERM",
+            cause: error,
+          }).pipe(Effect.as(false)),
+        ),
+      );
+      if (!terminated) {
+        return;
+      }
 
-    yield* Effect.sleep(processKillGraceMs);
+      const exitedBeforeGrace = yield* Deferred.await(exited).pipe(
+        Effect.as(true),
+        Effect.timeoutOrElse({
+          duration: processKillGraceMs,
+          orElse: () => Effect.succeed(false),
+        }),
+      );
+      if (exitedBeforeGrace) {
+        return;
+      }
 
-    yield* Effect.try({
-      try: () => process.kill("SIGKILL"),
-      catch: (cause) =>
-        new TerminalProcessSignalError({
-          cause,
-          signal: "SIGKILL",
-          terminalPid: process.pid,
-        }),
-    }).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("failed to force-kill terminal process", {
-          threadId,
-          terminalId,
-          signal: "SIGKILL",
-          cause: error,
-        }),
-      ),
-    );
+      yield* Effect.try({
+        try: () => process.kill("SIGKILL"),
+        catch: (cause) =>
+          new TerminalProcessSignalError({
+            cause,
+            signal: "SIGKILL",
+            terminalPid: process.pid,
+          }),
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to force-kill terminal process", {
+            threadId,
+            terminalId,
+            signal: "SIGKILL",
+            cause: error,
+          }),
+        ),
+      );
+    }).pipe(Effect.ensuring(Effect.sync(unsubscribeExit)));
   });
 
   const startKillEscalation = Effect.fn("terminal.startKillEscalation")(function* (
@@ -1999,6 +1981,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         for (const session of inactiveSessions.slice(0, toEvict)) {
           const key = toSessionKey(session.threadId, session.terminalId);
           sessions.delete(key);
+          closedSessionKeys.add(key);
         }
 
         return [undefined, { ...state, sessions }] as const;
@@ -2179,10 +2162,17 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       );
     }
 
+    const launch = yield* agentScope.wrap({
+      command: candidate.shell,
+      args: candidate.args ?? [],
+      name: "terminal",
+      env: spawnEnv,
+      survivesRestart: true,
+    });
     const attempt = yield* Effect.result(
       options.ptyAdapter.spawn({
-        shell: candidate.shell,
-        ...(candidate.args ? { args: candidate.args } : {}),
+        shell: launch.command,
+        ...(launch.args.length > 0 ? { args: [...launch.args] } : {}),
         cwd: session.cwd,
         cols: session.cols,
         rows: session.rows,
@@ -2244,7 +2234,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.andThen(
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
-            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv, platform);
+            const terminalEnv = createTerminalSpawnEnv(
+              baseEnv,
+              session.runtimeEnv,
+              platform,
+              yield* HostProcess.HomeDirectory,
+            );
             // Append (never prepend) managed ACP agent install directories so
             // `kimi login` and friends resolve by name without shadowing any
             // system or user tool of the same name.
@@ -2253,13 +2248,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               options.managedBinaryToolsDir !== undefined
             ) {
               const managedDirectories = yield* acpRegistryManagedBinaryDirectories({
-                fileSystem,
-                path,
                 cacheDir: options.managedBinaryCacheDir,
                 toolsDir: options.managedBinaryToolsDir,
                 platform,
                 architecture,
-              });
+              }).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+              );
               if (managedDirectories.length > 0) {
                 const delimiter = platform === "win32" ? ";" : ":";
                 const pathKey =
@@ -2390,6 +2386,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* flushPersist(threadId, terminalId);
 
     const removed = yield* modifyManagerState((state) => {
+      closedSessionKeys.add(key);
       if (!state.sessions.has(key)) {
         return [false, state] as const;
       }
@@ -2618,6 +2615,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       yield* modifyManagerState((state) => {
         const sessions = new Map(state.sessions);
         sessions.set(sessionKey, createdSession);
+        closedSessionKeys.delete(sessionKey);
         return [undefined, { ...state, sessions }] as const;
       });
 
@@ -2720,6 +2718,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const existing = yield* getSession(input.threadId, terminalId);
 
         if (Option.isNone(existing)) {
+          if (input.resume && closedSessionKeys.has(toSessionKey(input.threadId, terminalId))) {
+            return null;
+          }
           if (!input.cwd) {
             return yield* new TerminalSessionLookupError({
               threadId: input.threadId,
@@ -2739,7 +2740,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const targetCols = input.cols ?? session.cols;
         const targetRows = input.rows ?? session.rows;
 
-        if (!session.process && input.cwd && input.restartIfNotRunning === true) {
+        if (!input.resume && !session.process && input.cwd && input.restartIfNotRunning === true) {
           const resolvedInput = yield* resolveLaunchInputEnvironment({
             ...input,
             terminalId,
@@ -2796,7 +2797,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const streamSession = (
     input: TerminalObserveInput,
-    initial: Effect.Effect<TerminalSessionSnapshot, TerminalError>,
+    initial: Effect.Effect<TerminalSessionSnapshot | null, TerminalError>,
     listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
   ) => {
     let unsubscribe: (() => void) | null = null;
@@ -2821,13 +2822,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
       const initialSnapshot = yield* initial;
 
-      yield* listener({
-        type: "snapshot",
-        snapshot: initialSnapshot,
-      });
+      yield* listener(
+        initialSnapshot === null
+          ? { type: "closed", threadId: input.threadId, terminalId: input.terminalId }
+          : { type: "snapshot", snapshot: initialSnapshot },
+      );
 
       for (const event of bufferedEvents) {
-        if (isDuplicateAttachSnapshotEvent(event, initialSnapshot)) {
+        if (initialSnapshot !== null && isDuplicateAttachSnapshotEvent(event, initialSnapshot)) {
           continue;
         }
 
@@ -2976,7 +2978,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const resizeLocked = Effect.fn("terminal.resize")(function* (input: TerminalResizeInput) {
     const session = yield* getSession(input.threadId, input.terminalId);
-    // ResizeObserver traffic can already be in flight when the UI closes the session.
     if (Option.isNone(session)) {
       return;
     }
@@ -3057,6 +3058,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         yield* modifyManagerState((state) => {
           const sessions = new Map(state.sessions);
           sessions.set(sessionKey, createdSession);
+          closedSessionKeys.delete(sessionKey);
           return [undefined, { ...state, sessions }] as const;
         });
         yield* evictInactiveSessionsIfNeeded();
@@ -3139,9 +3141,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             (input.terminalId === undefined || session.terminalId === input.terminalId),
         );
         if (running.length === 0) return;
-        // A command started during the process check can miss the snapshot,
-        // but its input or echo still lands. Both counters only grow, so the
-        // sum changes when either one does.
         const activityMark = (session: TerminalSessionState) =>
           session.eventSequence + session.inputCount;
         const marks = new Map(
@@ -3165,7 +3164,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         );
       }),
     ).pipe(
-      // The process check failed, so every terminal stays open.
       Effect.catch((error) =>
         Effect.logWarning("failed to close idle terminals", {
           threadId: input.threadId,

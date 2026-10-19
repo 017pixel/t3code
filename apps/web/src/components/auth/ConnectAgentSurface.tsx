@@ -6,11 +6,12 @@ import {
   type AuthMcpAuthorizationRequest,
 } from "@t3tools/contracts";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
+import { isLoopbackHost } from "@t3tools/shared/preview";
 import { EyeIcon, type LucideIcon } from "lucide-react";
 import type * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "~/environments/primary/httpClient";
 import { runPrimaryHttp } from "~/lib/runtime";
@@ -35,6 +36,10 @@ const accessConfig: Record<
   ...runtimeModeConfig,
 };
 
+function redirectsToThisComputer(redirectHost: string): boolean {
+  return isLoopbackHost(new URL(`http://${redirectHost}`).hostname);
+}
+
 type Loaded =
   | { readonly status: "loading" }
   | { readonly status: "invalid"; readonly message: string }
@@ -48,12 +53,6 @@ type Answer<A> =
   | { readonly kind: "redirect"; readonly url: string }
   | { readonly kind: "error"; readonly message: string };
 
-/**
- * Runs an approval call. The server validates the agent's request again on
- * every call and answers what the page asked for, a message to show, or a URL
- * the browser must follow (an approval, a denial, or a protocol error the
- * agent should receive).
- */
 function runApproval<A>(
   call: (
     client: Context.Service.Shape<typeof PrimaryEnvironmentHttpClient>,
@@ -82,13 +81,6 @@ function readAuthorizationRequest(): AuthMcpAuthorizationRequest {
 }
 
 /**
- * /connect-agent: where an outside agent's MCP sign-in lands after the server
- * checks the request. The user picks the most the agent may allow, then
- * approves with a pairing code, or in one click when this browser is already
- * signed in to the environment as an administrator.
- */
-/**
- * Whether this browser's session may approve `access` without a pairing code.
  * A session may only grant access whose scopes it holds itself.
  */
 function oneClickApproves(details: AuthMcpApprovalDetails, access: AuthMcpClientAccess) {
@@ -124,30 +116,27 @@ export function ConnectAgentSurface() {
     };
   }, [authorization]);
 
-  const decide = useCallback(
-    async (choice: "approve" | "deny") => {
-      if (loaded.status !== "ready") return;
-      setPending(choice);
-      setErrorMessage("");
-      const { csrfToken } = loaded.details;
-      const decision: AuthMcpApprovalDecision =
-        choice === "deny"
-          ? { _tag: "deny" }
-          : csrfToken !== undefined && oneClickApproves(loaded.details, access)
-            ? { _tag: "browser-session", access, csrfToken }
-            : { _tag: "pairing-code", access, code: pairingCode.trim() };
-      const answer = await runApproval((client) =>
-        client.mcpOAuth.decision({ payload: { authorization, decision } }),
-      );
-      if (answer.kind === "redirect") {
-        window.location.replace(answer.url);
-        return;
-      }
-      setPending(null);
-      setErrorMessage(answer.kind === "error" ? answer.message : "The sign-in could not continue.");
-    },
-    [access, authorization, loaded, pairingCode],
-  );
+  const decide = async (choice: "approve" | "deny") => {
+    if (loaded.status !== "ready") return;
+    setPending(choice);
+    setErrorMessage("");
+    const { csrfToken } = loaded.details;
+    const decision: AuthMcpApprovalDecision =
+      choice === "deny"
+        ? { _tag: "deny" }
+        : csrfToken !== undefined && oneClickApproves(loaded.details, access)
+          ? { _tag: "browser-session", access, csrfToken }
+          : { _tag: "pairing-code", access, code: pairingCode.trim() };
+    const answer = await runApproval((client) =>
+      client.mcpOAuth.decision({ payload: { authorization, decision } }),
+    );
+    if (answer.kind === "redirect") {
+      window.location.replace(answer.url);
+      return;
+    }
+    setPending(null);
+    setErrorMessage(answer.kind === "error" ? answer.message : "The sign-in could not continue.");
+  };
 
   if (loaded.status === "loading") {
     return (
@@ -188,8 +177,18 @@ export function ConnectAgentSurface() {
         }
       />
       <p className="mt-2 text-xs text-muted-foreground">
-        The name is chosen by the agent. Approval returns to {details.redirectHost} on the computer
-        that opened this page. Only approve a sign-in you just started.
+        {redirectsToThisComputer(details.redirectHost) ? (
+          <>
+            The name is chosen by the agent. Approval returns to {details.redirectHost} on the
+            computer that opened this page. Only approve a sign-in you just started.
+          </>
+        ) : (
+          <>
+            The name is chosen by the agent. Approval gives access to whoever runs{" "}
+            <span className="font-medium text-foreground">{details.redirectHost}</span>. Only
+            approve a sign-in you just started there.
+          </>
+        )}
       </p>
 
       <form
@@ -295,9 +294,9 @@ function AccessOption({
       value={access}
       className={cn(
         "flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 text-left outline-none transition-[background-color,border-color,box-shadow]",
-        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+        "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
         selected
-          ? "border-primary bg-background ring-2 ring-primary/25 dark:border-transparent dark:bg-primary/10 dark:ring-1 dark:ring-primary/30"
+          ? "border-primary bg-background ring-2 ring-inset ring-primary/25 dark:border-transparent dark:bg-primary/10 dark:ring-1 dark:ring-primary/30"
           : "border-border bg-background hover:bg-muted/50 dark:border-transparent dark:bg-white/[0.035] dark:hover:bg-accent",
       )}
     >
