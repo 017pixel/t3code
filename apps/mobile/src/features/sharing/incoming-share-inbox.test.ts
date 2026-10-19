@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "@effect/vitest";
 import type { SharePayload } from "expo-sharing";
 
+import {
+  EMPTY_INCOMING_SHARE_PRESENTATION_STATE,
+  transitionIncomingSharePresentation,
+} from "./incoming-share-presentation";
 import type { IncomingShareDraft } from "./incoming-share-model";
 import { IncomingShareInbox, type IncomingShareInboxDependencies } from "./incoming-share-inbox";
 
@@ -132,6 +136,67 @@ describe("IncomingShareInbox", () => {
       draft("share-open-flow", "2026-07-16T07:59:00.000Z"),
     ]);
   });
+
+  it.each(["dismissed", "consumed"] as const)(
+    "preserves an identical new handoff after the earlier share was %s",
+    async (completion) => {
+      let payloads: ReadonlyArray<SharePayload> = [PAYLOAD];
+      let now = "2026-07-16T08:00:00.000Z";
+      const { inbox } = createHarness({
+        getPayloads: () => payloads,
+        clearPayloads: () => {
+          payloads = [];
+        },
+        now: () => now,
+      });
+      let pending = (await inbox.refresh({ ingestNative: true }))[0]!;
+      const first = pending;
+      let state = EMPTY_INCOMING_SHARE_PRESENTATION_STATE;
+      const step = (sheetShareId: string | null) => {
+        const result = transitionIncomingSharePresentation(state, {
+          pendingShareId: pending.id,
+          isSheetPresented: sheetShareId !== null,
+          sheetShareId,
+        });
+        state = result.state;
+        return result;
+      };
+
+      expect(step(null).shareIdToPresent).toBe(first.id);
+      expect(step(first.id).shareIdToDiscard).toBeNull();
+      if (completion === "dismissed") {
+        const dismissed = step(null);
+        expect(dismissed.shareIdToDiscard).toBe(first.id);
+        expect(dismissed.shareIdToPresent).toBeNull();
+        expect(step(null).shareIdToPresent).toBeNull();
+        await inbox.consume(dismissed.shareIdToDiscard!);
+        state = transitionIncomingSharePresentation(state, {
+          pendingShareId: null,
+          isSheetPresented: false,
+          sheetShareId: null,
+        }).state;
+      } else {
+        await inbox.consume(first.id);
+      }
+      await expect(inbox.refresh({ ingestNative: false })).resolves.toEqual([]);
+
+      now = "2026-07-16T08:01:00.000Z";
+      payloads = [PAYLOAD];
+      pending = (await inbox.refresh({ ingestNative: true }))[0]!;
+      expect(pending.text).toBe(first.text);
+      expect(pending.createdAt).not.toBe(first.createdAt);
+      if (completion === "consumed") {
+        // React may batch consumption and re-ingestion without rendering an empty inbox.
+        expect(step(first.id).shareIdToPresent).toBeNull();
+      }
+      const closed = step(null);
+      if (closed.shareIdToDiscard) {
+        await inbox.consume(closed.shareIdToDiscard);
+      }
+      await expect(inbox.refresh({ ingestNative: false })).resolves.toEqual([pending]);
+      expect(closed.shareIdToPresent).toBe(pending.id);
+    },
+  );
 
   it("does not acknowledge a supported payload when its durable write fails", async () => {
     const clearPayloads = vi.fn();
