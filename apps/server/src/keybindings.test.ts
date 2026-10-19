@@ -12,7 +12,7 @@ import * as Schema from "effect/Schema";
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import { KeybindingsConfigError, MAX_KEYBINDINGS_COUNT } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const KeybindingsConfigJson = Schema.fromJsonString(KeybindingsConfig);
 const encodeKeybindingsConfigJson = Schema.encodeEffect(KeybindingsConfigJson);
@@ -311,7 +311,6 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
         existing,
       ]);
 
-      // Removing the added rule later must survive the next startup.
       yield* writeKeybindingsConfig(keybindingsConfigPath, [existing]);
       yield* keybindings.syncDefaultKeybindingsOnStartup;
       assert.deepStrictEqual(yield* backgroundRules, [existing]);
@@ -564,7 +563,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
   );
 
   // chmod cannot make a directory unwritable on Windows, so the write succeeds.
-  it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     "fails when config directory is not writable",
     () =>
       Effect.gen(function* () {
@@ -616,7 +615,6 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
-      // A directory where the file should be makes the read itself fail.
       yield* fileSystem.makeDirectory(keybindingsConfigPath, { recursive: true });
 
       const keybindings = yield* Keybindings.Keybindings;
