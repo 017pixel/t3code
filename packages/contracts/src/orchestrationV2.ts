@@ -831,6 +831,8 @@ export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
   title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   itemIdentityVersion: Schema.optional(Schema.Literal(2)),
+  // Claude forks rewrite UUIDs; retained turns still address their source session.
+  claudeRollbackSessionIds: Schema.optional(Schema.Record(ProviderTurnId, TrimmedNonEmptyString)),
 });
 export type OrchestrationV2ProviderThreadNativeMetadata =
   typeof OrchestrationV2ProviderThreadNativeMetadata.Type;
