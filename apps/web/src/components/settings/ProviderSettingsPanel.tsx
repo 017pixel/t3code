@@ -807,6 +807,8 @@ export function EnvironmentProviderSettings({
     rows.find((row) => row.instanceId === selectedInstanceId) ??
     (targetInstanceMissing ? null : (rows[0] ?? null));
 
+  const accentSiblings = [...rows, ...serverProviders];
+
   const persistInstance = async (
     instanceId: ProviderInstanceId,
     next: ProviderInstanceConfig,
@@ -961,7 +963,7 @@ export function EnvironmentProviderSettings({
         readOnly={readOnly}
         canWriteSettings={canWriteSettings}
         liveProvider={serverProviders.find((candidate) => candidate.instanceId === row.instanceId)}
-        autoAccentColor={resolveProviderInstanceAccentColor(row, rows)}
+        autoAccentColor={resolveProviderInstanceAccentColor(row, accentSiblings)}
         isUpdateDispatching={updatingProviderInstanceIds.has(row.instanceId)}
         showProjectOverride={showProjectOverride}
         projectOverrideValue={
