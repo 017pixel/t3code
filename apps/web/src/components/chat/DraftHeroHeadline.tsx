@@ -300,34 +300,31 @@ export function DraftHeroHeadline({
                     machineByEnvironmentId={environmentMachineById}
                   />
                 ) : null}
-                {entry && item.value === activeProjectKey ? (
-                  // Only the selected project's row gets settings. Stopping the
-                  // click keeps the row from also selecting it, as in the
-                  // sidebar's project picker.
-                  <Button
-                    size="icon-xs"
-                    variant="ghost-muted"
-                    tabIndex={-1}
-                    aria-hidden="true"
-                    title={`Project settings for ${entry.group.displayName}`}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setPickerOpen(false);
-                      void navigate({
-                        to: "/projects/$projectKey",
-                        params: { projectKey: entry.group.projectKey },
-                      });
-                    }}
-                  >
-                    <SettingsIcon className="size-3.5" />
-                  </Button>
-                ) : null}
               </ComboboxItem>
             );
           }}
         </ComboboxList>
+        {activeProjectGroup && !activeProjectGroup.isScratch ? (
+          <div className="grid shrink-0 border-t border-border/70 p-1">
+            <Button
+              variant="ghost-muted"
+              size="sm"
+              aria-label={`Project settings for ${activeProjectGroup.displayName}`}
+              onClick={() => {
+                setPickerOpen(false);
+                void navigate({
+                  to: "/projects/$projectKey",
+                  params: { projectKey: activeProjectGroup.projectKey },
+                });
+              }}
+            >
+              <SettingsIcon aria-hidden="true" />
+              <span className="min-w-0 truncate">
+                Settings for {activeProjectGroup.displayName}
+              </span>
+            </Button>
+          </div>
+        ) : null}
       </ComboboxPopup>
     </Combobox>
   ) : (
