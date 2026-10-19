@@ -454,7 +454,7 @@ it.effect("the old project cannot edit, delete or run a moved task", () =>
   }).pipe(Effect.provide(atomicLayer)),
 );
 
-it.effect("guarded mutations reject changed bindings and bound-thread modes", () =>
+it.effect("guarded mutations reject changed bindings and current or new bound-thread modes", () =>
   Effect.gen(function* () {
     const service = yield* ScheduledTaskService.ScheduledTaskService;
     const sql = yield* SqlClient.SqlClient;
@@ -507,5 +507,17 @@ it.effect("guarded mutations reject changed bindings and bound-thread modes", ()
     ).task;
     assert.equal(edited.threadId, second);
     assert.equal(edited.title, "Archived binding kept");
+    const unbound = Option.getOrThrow(
+      yield* service.update({ ...atomicScope, threadId: null }),
+    ).task;
+    yield* sql`UPDATE orchestration_v2_projection_threads SET runtime_mode = 'full-access' WHERE thread_id = ${first}`;
+    assert.isTrue(
+      isScheduledTaskError(
+        yield* service
+          .update({ ...guard, expectedThreadId: null, threadId: first, title: "Stale rebind" })
+          .pipe(Effect.provideService(DispatchModeLimit, limit), Effect.flip),
+      ),
+    );
+    assert.deepEqual((yield* service.list()).tasks, [unbound]);
   }).pipe(Effect.provide(atomicLayer)),
 );

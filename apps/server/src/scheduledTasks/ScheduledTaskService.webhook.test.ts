@@ -3,7 +3,12 @@ import * as NodeCrypto from "node:crypto";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
-import { ScheduledTaskUpsertInput, SecretRef, SecretRequestError } from "@t3tools/contracts";
+import {
+  ScheduledTaskUpsertInput,
+  SecretRef,
+  SecretRequestError,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -917,6 +922,16 @@ it.effect("webhook edits retain credentials and consume a replacement secret onc
 
       const secretRef = SecretRef.make("secret-ref:00000000000000000000000000000003");
       secretsByRef.set(secretRef, "replacement-secret");
+      const invalidBinding = yield* service
+        .update({
+          ...scope,
+          threadId: ThreadId.make("missing-thread"),
+          schedule: { type: "webhook", signature: { ...signature, secretRef } },
+        })
+        .pipe(Effect.flip);
+      assert.equal(invalidBinding._tag, "ScheduledTaskError");
+      assert.deepEqual(consumedRefs, []);
+      assert.equal(secretsByRef.get(secretRef), "replacement-secret");
       const replaced = Option.getOrThrow(
         yield* service.update({
           ...scope,
