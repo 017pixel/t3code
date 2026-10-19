@@ -1,4 +1,5 @@
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
+import { WorkerPoolManager } from "@pierre/diffs/worker";
 import { act, memo, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -143,6 +144,9 @@ describe("attachment HTML preview recovery", () => {
     const button = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
     expect(button, label).not.toBeNull();
     await act(async () => button!.click());
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
   };
   const alert = () => container.querySelector('[role="alert"]');
 
@@ -206,11 +210,22 @@ describe("file editor scroll across panel navigation", () => {
   const noop = () => undefined;
   const keybindings = [] as const;
   let caseId = 0;
+  const initializingPools = new Set<Promise<void>>();
   const activeSurface = (ref = thread) =>
     selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, ref);
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    initializingPools.clear();
+    const initialize = WorkerPoolManager.prototype.initialize;
+    vi.spyOn(WorkerPoolManager.prototype, "initialize").mockImplementation(function (
+      this: WorkerPoolManager,
+      ...args
+    ) {
+      const pending = initialize.apply(this, args);
+      initializingPools.add(pending);
+      return pending;
+    });
     localStorage.setItem("t3code.fileExplorerOpen", "false");
     thread = {
       environmentId: EnvironmentId.make(`file-scroll-${++caseId}`),
@@ -230,6 +245,7 @@ describe("file editor scroll across panel navigation", () => {
     localStorage.removeItem("t3code.fileExplorerOpen");
     useRightPanelStore.setState({ byThreadKey: {} });
     useClosedViewStore.setState({ entries: [] });
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -296,8 +312,15 @@ describe("file editor scroll across panel navigation", () => {
     expect(element).not.toBeNull();
     return element!;
   };
-  const editorReady = (minScrollHeight = 10_000) =>
-    vi.waitFor(
+  const editorReady = async (minScrollHeight = 10_000) => {
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+    // Worker startup can outlast the DOM assertion budget on a cold CI worker.
+    await act(async () => {
+      await Promise.all(initializingPools);
+    });
+    await vi.waitFor(
       () => {
         expect(scroller().scrollHeight).toBeGreaterThan(minScrollHeight);
         expect(
@@ -308,6 +331,7 @@ describe("file editor scroll across panel navigation", () => {
       },
       { timeout: 5_000 },
     );
+  };
   const scrollTo = async (top: number) => {
     await act(async () => {
       // User input ends an outstanding reveal guard before scrolling the real viewport.
