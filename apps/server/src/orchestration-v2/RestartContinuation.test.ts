@@ -1069,6 +1069,7 @@ it.effect("shows a continuation as a T3 Code notice whose detail is the prompt",
 it.effect("carries steering the provider never received into the continuation", () =>
   Effect.gen(function* () {
     const steerId = MessageId.make("message:steer");
+    const contextSteerId = MessageId.make("message:context-steer");
     const attachment = {
       type: "file" as const,
       id: "attachment:steer",
@@ -1077,13 +1078,44 @@ it.effect("carries steering the provider never received into the continuation", 
       sizeBytes: 12,
     };
     const [resumed] = yield* continuationDispatches({
-      ...cutMidTurn({ restartPendingMessageIds: [steerId] }),
+      ...cutMidTurn({ restartPendingMessageIds: [steerId, contextSteerId] }),
       messages: [
         { id: steerId, text: "Also update the docs.", attachments: [attachment] },
+        {
+          id: contextSteerId,
+          text: "Check [log](t3-context://v1/terminal/ctx_terminal).",
+          attachments: [],
+          context: {
+            version: 1,
+            records: [
+              {
+                version: 1,
+                contextId: "ctx_terminal",
+                kind: "terminal",
+                label: "Terminal 1 lines 3-4",
+                terminalId: "term-1",
+                terminalLabel: "Terminal 1",
+                lineStart: 3,
+                lineEnd: 4,
+                text: "STATUS=queued\nMODE=restart",
+              },
+            ],
+          },
+        },
         { id: MessageId.make("message:unrelated"), text: "Not carried.", attachments: [] },
       ],
     } as unknown as OrchestrationV2ThreadProjection);
-    assert.equal(resumed?.text, "Continue where you left off.\n\nAlso update the docs.");
+    assert.include(
+      resumed?.text ?? "",
+      "Continue where you left off.\n\nAlso update the docs.\n\nCheck [Terminal: log; ref=ctx_terminal].",
+    );
+    assert.include(resumed?.text ?? "", '<context kind="terminal" id="ctx_terminal">');
+    assert.include(
+      resumed?.text ?? "",
+      "terminal: Terminal 1\n3 | STATUS=queued\n4 | MODE=restart",
+    );
+    assert.notInclude(resumed?.text ?? "", 'unavailable="true"');
+    assert.notInclude(resumed?.text ?? "", "Not carried.");
     assert.deepEqual(resumed?.attachments, [attachment]);
     assert.isUndefined(resumed?.notification);
   }),

@@ -1,5 +1,6 @@
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   CommandId,
   latestProviderTurnForAttempt,
@@ -265,9 +266,15 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     const pendingMessages = (source.restartPendingMessageIds ?? []).flatMap((id) =>
       sourceRecords.messages.filter((message) => message.id === id),
     );
-    const prompt = [CONTINUE_PROMPT, ...pendingMessages.map((message) => message.text)].join(
-      "\n\n",
-    );
+    const prompt = [
+      CONTINUE_PROMPT,
+      ...pendingMessages.map((message) =>
+        projectComposerContextForProvider({
+          text: message.text,
+          records: message.context?.records ?? [],
+        }),
+      ),
+    ].join("\n\n");
     const note = restartContinuationNote(
       source,
       projection.runs,
