@@ -2349,6 +2349,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ],
         });
         const registered = yield* Deferred.make<void>();
+        const rootUnsubscribeStarted = yield* Deferred.make<void>();
+        const releaseRootUnsubscribe = yield* Deferred.make<void>();
         const unsubscribed: Array<unknown> = [];
         let childProviderThread: OrchestrationV2ProviderThread | undefined;
         const harness = yield* makeCodexReplayHarness(
@@ -2366,8 +2368,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               : Effect.void;
           },
           (method, params) =>
-            Effect.sync(() => {
-              if (method === "thread/unsubscribe") unsubscribed.push(params);
+            Effect.gen(function* () {
+              if (method !== "thread/unsubscribe") return;
+              unsubscribed.push(params);
+              if (outcome === "resumed child" && unsubscribed.length === 1) {
+                yield* Deferred.succeed(rootUnsubscribeStarted, undefined);
+                yield* Deferred.await(releaseRootUnsubscribe);
+              }
             }),
           (threadId) =>
             Effect.succeed({ thread: { id: threadId, updatedAt: 1782622450 }, model: null }),
@@ -2394,13 +2401,29 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* Deferred.await(registered);
         assert.isDefined(childProviderThread);
         if (outcome === "resumed child") {
+          assert.isTrue(
+            yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
+          );
+        }
+        const unloadFiber = yield* harness.runtime.unloadThread!({
+          providerThread: outcome === "child only" ? childProviderThread! : harness.providerThread,
+        }).pipe(Effect.result, Effect.forkScoped);
+        if (outcome === "resumed child") {
+          yield* Deferred.await(rootUnsubscribeStarted);
           childProviderThread = yield* harness.runtime.resumeThread({
             providerThread: childProviderThread!,
           });
+          assert.isFalse(
+            yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
+            "an independently resumed child no longer pins its root",
+          );
+          assert.isTrue(
+            yield* harness.runtime.hasPendingBackgroundWorkForThread!(childProviderThread),
+            "the active child still pins its own subscription",
+          );
+          yield* Deferred.succeed(releaseRootUnsubscribe, undefined);
         }
-        const unloaded = yield* harness.runtime.unloadThread!({
-          providerThread: outcome === "child only" ? childProviderThread! : harness.providerThread,
-        }).pipe(Effect.result);
+        const unloaded = yield* Fiber.join(unloadFiber);
         assert.deepEqual(
           unsubscribed,
           expectedThreadIds.map((threadId) => ({ threadId })),

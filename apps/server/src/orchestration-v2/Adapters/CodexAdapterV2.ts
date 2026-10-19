@@ -6450,6 +6450,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               for (const context of contexts) {
                 let parent: ActiveCodexTurnContext | undefined = context;
                 while (parent !== undefined && parent.providerThread.id !== providerThread.id) {
+                  const nativeThreadId = parent.providerThread.nativeThreadRef?.nativeId;
+                  if (nativeThreadId != null && appOwnedThreadIds.has(nativeThreadId)) {
+                    parent = undefined;
+                    break;
+                  }
                   parent = parent.subagent?.parentContext;
                 }
                 if (parent === undefined) continue;
@@ -6682,31 +6687,38 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
           // Independently opened app threads own their subtree and unload it themselves.
+          // Recheck ownership before each unsubscribe because a child can resume between requests.
           // Attempt every remaining unsubscribe even if an earlier one fails.
           unloadThread: (unloadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
               appOwnedThreadIds.delete(nativeThreadId);
-              const nativeThreadIds = new Set([nativeThreadId]);
-              for (const [threadId, subagent] of yield* Ref.get(subagentThreads)) {
-                if (appOwnedThreadIds.has(threadId)) continue;
-                let parent: ActiveCodexTurnContext | undefined = subagent.parentContext;
-                while (parent !== undefined) {
-                  if (parent.providerThread.id === unloadInput.providerThread.id) {
-                    nativeThreadIds.add(threadId);
-                    break;
-                  }
-                  const parentNativeThreadId = parent.providerThread.nativeThreadRef?.nativeId;
-                  if (parentNativeThreadId != null && appOwnedThreadIds.has(parentNativeThreadId)) {
-                    break;
-                  }
-                  parent = parent.subagent?.parentContext;
-                }
-              }
-              const [, failures] = yield* Effect.partition(nativeThreadIds, (threadId) => {
-                sessionApprovals.delete(threadId);
-                return client.request("thread/unsubscribe", { threadId });
-              });
+              const subagents = yield* Ref.get(subagentThreads);
+              const [, failures] = yield* Effect.partition(
+                new Set([nativeThreadId, ...subagents.keys()]),
+                (threadId) =>
+                  Effect.gen(function* () {
+                    if (threadId !== nativeThreadId) {
+                      if (appOwnedThreadIds.has(threadId)) return;
+                      let parent = subagents.get(threadId)?.parentContext;
+                      while (parent !== undefined) {
+                        if (parent.providerThread.id === unloadInput.providerThread.id) break;
+                        const parentNativeThreadId =
+                          parent.providerThread.nativeThreadRef?.nativeId;
+                        if (
+                          parentNativeThreadId != null &&
+                          appOwnedThreadIds.has(parentNativeThreadId)
+                        ) {
+                          return;
+                        }
+                        parent = parent.subagent?.parentContext;
+                      }
+                      if (parent === undefined) return;
+                    }
+                    sessionApprovals.delete(threadId);
+                    yield* client.request("thread/unsubscribe", { threadId });
+                  }),
+              );
               const [firstFailure] = failures;
               if (firstFailure !== undefined) return yield* firstFailure;
             }).pipe(
