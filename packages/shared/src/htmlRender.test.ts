@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vite-plus/test";
+import * as NodeVM from "node:vm";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   HTML_RENDER_MAX_HEIGHT,
@@ -12,6 +13,7 @@ import {
   readHtmlRenderImageRequest,
   readHtmlRenderKeyDown,
   readHtmlRenderLinkRequest,
+  readHtmlRenderMessageRequest,
   readHtmlRenderReference,
 } from "./htmlRender.ts";
 import { T3_CODE_DARK_THEME_COLORS, T3_CODE_LIGHT_THEME_COLORS } from "./themePalettes.ts";
@@ -105,6 +107,140 @@ describe("readHtmlRenderLinkRequest", () => {
     expect(
       readHtmlRenderLinkRequest({ type: "t3-html-render-link", url: "https://example.com" }),
     ).toBeUndefined();
+  });
+});
+
+describe("readHtmlRenderMessageRequest", () => {
+  it("accepts reader text and rejects requests that cannot be sent as a user message", () => {
+    const request = {
+      jsonrpc: "2.0",
+      id: "choice",
+      method: "ui/message",
+      params: { role: "user", content: { type: "text", text: "  Option B  " } },
+    };
+    expect(readHtmlRenderMessageRequest(request)).toEqual({ id: "choice", text: "Option B" });
+    expect(
+      readHtmlRenderMessageRequest({
+        ...request,
+        id: 0,
+        params: {
+          role: "user",
+          content: [
+            { type: "text", text: "Option B" },
+            { type: "text", text: "Keep the existing name." },
+          ],
+        },
+      }),
+    ).toEqual({ id: 0, text: "Option B\nKeep the existing name." });
+    for (const invalid of [
+      null,
+      { ...request, jsonrpc: "1.0" },
+      { ...request, method: "ui/open-link" },
+      { ...request, id: undefined },
+      { ...request, params: { ...request.params, role: "assistant" } },
+      { ...request, params: { role: "user", content: { type: "text", text: "  " } } },
+      { ...request, params: { role: "user", content: { type: "text", text: 42 } } },
+      {
+        ...request,
+        params: { role: "user", content: [request.params.content, { type: "image", data: "" }] },
+      },
+    ]) {
+      expect(readHtmlRenderMessageRequest(invalid)).toBeUndefined();
+    }
+  });
+});
+
+function runSendBootstrap(transport: "web" | "mobile" | "standalone", activated = true) {
+  const html = injectHtmlRenderBootstrap("<button>Option B</button>");
+  const script = html.slice(html.indexOf("<script>") + 8, html.indexOf("</script>"));
+  const posted: Array<{ id?: string | number }> = [];
+  const listeners: Array<(event: { data: unknown; source: unknown }) => void> = [];
+  const window: { t3?: { send: (text: unknown) => Promise<void> } } & Record<string, unknown> = {
+    addEventListener: (type: string, listener: (typeof listeners)[number]) => {
+      if (type === "message") listeners.push(listener);
+    },
+  };
+  window.parent =
+    transport === "web"
+      ? { postMessage: (message: (typeof posted)[number]) => posted.push(message) }
+      : window;
+  if (transport === "mobile") {
+    window.ReactNativeWebView = {
+      postMessage: (message: string) => posted.push(JSON.parse(message)),
+    };
+  }
+  NodeVM.runInNewContext(script, {
+    window,
+    document: { getElementById: () => ({ textContent: "" }), addEventListener: () => {} },
+    location: { hash: "" },
+    navigator: transport === "mobile" ? {} : { userActivation: { isActive: activated } },
+    setTimeout,
+    clearTimeout,
+  });
+  expect(window.t3?.send).toBeTypeOf("function");
+  return {
+    send: (text: unknown) => window.t3!.send(text),
+    posted,
+    reply: (data: unknown, source = window.parent) => {
+      for (const listener of listeners) listener({ data, source });
+    },
+  };
+}
+
+describe("t3.send", () => {
+  it.each(["web", "mobile"] as const)(
+    "waits for the matching host answer over the %s transport",
+    async (transport) => {
+      const page = runSendBootstrap(transport);
+      const settled = vi.fn();
+      const sent = page.send("Option B");
+      const refused = page.send("Keep the existing name.");
+      void sent.then(settled, settled);
+      const rejection = expect(refused).rejects.toThrow("Thread is unavailable.");
+      const [first, second] = page.posted;
+      expect(page.posted).toEqual([
+        {
+          jsonrpc: "2.0",
+          id: expect.any(String),
+          method: "ui/message",
+          params: { role: "user", content: [{ type: "text", text: "Option B" }] },
+        },
+        {
+          jsonrpc: "2.0",
+          id: expect.any(String),
+          method: "ui/message",
+          params: { role: "user", content: [{ type: "text", text: "Keep the existing name." }] },
+        },
+      ]);
+      expect(first!.id).not.toBe(second!.id);
+      page.reply({ jsonrpc: "2.0", id: first!.id, result: {} }, {});
+      page.reply({ jsonrpc: "2.0", id: "unrelated", result: {} });
+      page.reply({ jsonrpc: "1.0", id: first!.id, result: {} });
+      await Promise.resolve();
+      expect(settled).not.toHaveBeenCalled();
+
+      page.reply({
+        jsonrpc: "2.0",
+        id: second!.id,
+        error: { code: -32000, message: "Thread is unavailable." },
+      });
+      await rejection;
+      expect(settled).not.toHaveBeenCalled();
+      page.reply({ jsonrpc: "2.0", id: first!.id, result: {} });
+      await expect(sent).resolves.toBeUndefined();
+    },
+  );
+
+  it("rejects without posting for invalid text, no reader activation, or no host", async () => {
+    const web = runSendBootstrap("web");
+    for (const text of ["  ", 42]) await expect(web.send(text)).rejects.toThrow();
+    expect(web.posted).toEqual([]);
+    const idle = runSendBootstrap("web", false);
+    await expect(idle.send("Option B")).rejects.toThrow();
+    expect(idle.posted).toEqual([]);
+    const standalone = runSendBootstrap("standalone");
+    await expect(standalone.send("Option B")).rejects.toThrow();
+    expect(standalone.posted).toEqual([]);
   });
 });
 
