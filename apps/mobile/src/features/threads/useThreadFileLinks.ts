@@ -1,16 +1,31 @@
 import { useAtomValue } from "@effect/atom-react";
-import { AuthFilesystemReadScope, type ScopedThreadRef } from "@t3tools/contracts";
+import {
+  AuthFilesystemReadScope,
+  type OrchestrationV2ThreadProjection,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { formatFilePathPosition, splitFilePathPosition } from "@t3tools/shared/fileLinks";
 import {
   resolveMarkdownFileLinkTarget,
   resolveThreadFilePathCandidate,
 } from "@t3tools/shared/markdownLinks";
+import { isAbsolutePath, resolveWorkspaceFilePath } from "@t3tools/shared/path";
 import { collectThreadFilePaths, createThreadFilePathIndex } from "@t3tools/shared/threadFilePaths";
 import { Atom } from "effect/reactivity";
-import { createContext, useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentScope, usePreparedConnection } from "../../state/session";
+import { environmentThreadDetails } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadVisibleTurnItems } from "../../state/use-thread-detail";
 
 /** Encode a literal selected path once before giving it back to markdown parsers. */
@@ -48,6 +63,50 @@ export function useThreadFileLinks(ref: ScopedThreadRef, cwd: string | null) {
   const enabled = canRead && connection._tag === "Some";
   const { environmentId, threadId } = ref;
   useAtomValue(projectEnvironment.fileMetadataThread(ref));
+  const checkpoints = useAtomValue(
+    environmentThreadDetails.threadAtom(ref),
+    (thread) => thread?.projection.checkpoints,
+  );
+  const invalidate = useAtomCommand(projectEnvironment.invalidateFileMetadata, {
+    reportFailure: false,
+  });
+  const previous = useRef<{
+    environmentId: ScopedThreadRef["environmentId"];
+    threadId: ScopedThreadRef["threadId"];
+    cwd: string | null;
+    checkpoints: OrchestrationV2ThreadProjection["checkpoints"];
+  } | null>(null);
+  useEffect(() => {
+    if (!checkpoints) {
+      previous.current = null;
+      return;
+    }
+    const before = previous.current;
+    previous.current = { environmentId, threadId, cwd, checkpoints };
+    if (
+      !before ||
+      before.environmentId !== environmentId ||
+      before.threadId !== threadId ||
+      before.cwd !== cwd
+    )
+      return;
+    const oldById = new Map(before.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]));
+    const paths = new Set<string>();
+    const addPath = (path: string) => {
+      if (cwd !== null || isAbsolutePath(path))
+        paths.add(cwd === null ? path : resolveWorkspaceFilePath(path, cwd));
+    };
+    for (const checkpoint of checkpoints) {
+      const old = oldById.get(checkpoint.id);
+      oldById.delete(checkpoint.id);
+      if (old?.files === checkpoint.files && old?.status === checkpoint.status) continue;
+      for (const file of checkpoint.files) addPath(file.path);
+      for (const file of old?.files ?? []) addPath(file.path);
+    }
+    for (const checkpoint of oldById.values())
+      for (const file of checkpoint.files) addPath(file.path);
+    if (paths.size > 0) void invalidate({ environmentId, input: { paths: [...paths] } });
+  }, [environmentId, threadId, cwd, checkpoints, invalidate]);
   const generation = useRef(0);
   useLayoutEffect(
     () => () => {
