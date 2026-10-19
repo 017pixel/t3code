@@ -1762,6 +1762,7 @@ describe("ClaudeAdapterV2 attachments", () => {
           "pages",
           "bytes",
           "invalid",
+          "invalid-page-tree",
           "aggregate-pages",
           "pasted-text",
           "text-only",
@@ -1787,6 +1788,13 @@ describe("ClaudeAdapterV2 attachments", () => {
             yield* fileSystem.truncate(documentPath, 20 * 1024 * 1024 + 1);
           } else if (scenario === "invalid") {
             yield* fileSystem.writeFileString(documentPath, "This is not a PDF");
+          } else if (scenario === "invalid-page-tree") {
+            const malformedBytes = Buffer.from(
+              "%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 42 >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF",
+            );
+            const malformed = yield* Effect.promise(() => PDFDocument.load(malformedBytes));
+            assert.throws(() => malformed.getPageCount());
+            yield* fileSystem.writeFile(documentPath, malformedBytes);
           } else if (scenario === "pasted-text") {
             yield* fileSystem.writeFile(documentPath, pdfBytes);
             attachments = [{ ...document, source: { _tag: "pasted-text" } }];

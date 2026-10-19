@@ -1694,17 +1694,13 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
           Effect.orElseSucceed(() => null),
         );
       if (bytes === null || bytes.length > remainingBytes) continue;
-      const document = yield* Effect.tryPromise(() => PDFDocument.load(bytes)).pipe(
-        Effect.orElseSucceed(() => null),
-      );
-      if (
-        document === null ||
-        document.getPageCount() === 0 ||
-        pdfPages + document.getPageCount() > 100
-      )
-        continue;
+      const pageCount = yield* Effect.tryPromise(async () => {
+        const document = await PDFDocument.load(bytes);
+        return document.getPageCount();
+      }).pipe(Effect.orElseSucceed(() => null));
+      if (pageCount === null || pageCount === 0 || pdfPages + pageCount > 100) continue;
       nativeBytes += bytes.length;
-      pdfPages += document.getPageCount();
+      pdfPages += pageCount;
       content.push({
         type: "document",
         source: { type: "base64", media_type: "application/pdf", data: bytes.toString("base64") },
