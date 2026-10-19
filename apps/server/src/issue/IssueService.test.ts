@@ -112,21 +112,27 @@ function makeService(input: {
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly trackers: ReadonlyArray<IssueTrackerApi>;
 }) {
-  return IssueService.make.pipe(
+  return IssueService.IssueService.pipe(
     Effect.provide(
-      Layer.mergeAll(
-        Layer.succeed(
-          IssueTrackerRegistry.IssueTrackerRegistry,
-          IssueTrackerRegistry.fromTrackers(input.trackers),
+      IssueService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(
+              IssueTrackerRegistry.IssueTrackerRegistry,
+              IssueTrackerRegistry.fromTrackers(input.trackers),
+            ),
+            Layer.mock(ProjectService.ProjectService)({
+              listShells: () => Effect.succeed(input.projects),
+              getShell: (projectId) =>
+                Effect.succeed(
+                  Option.fromNullishOr(input.projects.find((p) => p.id === projectId)),
+                ),
+            }),
+            Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+              resolve: () => Effect.succeed(null),
+            }),
+          ),
         ),
-        Layer.mock(ProjectService.ProjectService)({
-          listShells: () => Effect.succeed(input.projects),
-          getShell: (projectId) =>
-            Effect.succeed(Option.fromNullishOr(input.projects.find((p) => p.id === projectId))),
-        }),
-        Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
-          resolve: () => Effect.succeed(null),
-        }),
       ),
     ),
   );

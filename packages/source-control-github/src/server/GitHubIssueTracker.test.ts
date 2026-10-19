@@ -2,7 +2,13 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import * as GitHubApi from "./GitHubApi.ts";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
+import * as GitHubRest from "./GitHubRest.ts";
+import * as GitHubQuota from "./GitHubQuota.ts";
+import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as GitHubIssueTracker from "./GitHubIssueTracker.ts";
 
 const DETAIL_RESPONSE = JSON.stringify({
@@ -11,10 +17,16 @@ const DETAIL_RESPONSE = JSON.stringify({
     repository: {
       viewerPermission: "TRIAGE",
       issue: {
+        __typename: "Issue",
         number: 42,
         title: "Composer loses focus",
         url: "https://github.com/acme/web/issues/42",
-        author: { login: "octocat", avatarUrl: "https://avatars/octocat", name: "Octo Cat" },
+        author: {
+          __typename: "User",
+          login: "octocat",
+          avatarUrl: "https://avatars/octocat",
+          name: "Octo Cat",
+        },
         state: "CLOSED",
         stateReason: "NOT_PLANNED",
         createdAt: "2026-07-01T00:00:00Z",
@@ -25,8 +37,9 @@ const DETAIL_RESPONSE = JSON.stringify({
           pageInfo: { hasPreviousPage: true, startCursor: "Y3Vyc29y" },
           nodes: [
             {
+              __typename: "IssueComment",
               id: "IC_1",
-              author: { login: "julius", avatarUrl: null },
+              author: { __typename: "User", login: "julius", avatarUrl: "https://avatars/julius" },
               body: "Repro attached.",
               createdAt: "2026-07-02T00:00:00Z",
               url: "https://github.com/acme/web/issues/42#issuecomment-1",
@@ -34,7 +47,13 @@ const DETAIL_RESPONSE = JSON.stringify({
                 {
                   content: "THUMBS_UP",
                   viewerHasReacted: true,
-                  reactors: { totalCount: 2, nodes: [{ login: "julius" }, { login: "theo" }] },
+                  reactors: {
+                    totalCount: 2,
+                    nodes: [
+                      { __typename: "User", login: "julius" },
+                      { __typename: "User", login: "theo" },
+                    ],
+                  },
                 },
                 {
                   content: "EYES",
@@ -45,8 +64,14 @@ const DETAIL_RESPONSE = JSON.stringify({
             },
           ],
         },
-        assignees: { nodes: [{ login: "theo", name: null, avatarUrl: null }] },
-        labels: { nodes: [{ name: "bug", color: "d73a4a" }, null] },
+        assignees: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [{ login: "theo", name: null, avatarUrl: "https://avatars/julius" }],
+        },
+        labels: {
+          pageInfo: { hasNextPage: true, endCursor: "labels-next" },
+          nodes: [{ name: "bug", color: "d73a4a" }, null],
+        },
         body: "Typing in the composer drops focus after a paste.",
         viewerCanUpdate: false,
         reactionGroups: [],
@@ -68,14 +93,14 @@ const DETAIL_RESPONSE = JSON.stringify({
               __typename: "LabeledEvent",
               id: "LE_1",
               createdAt: "2026-07-01T01:00:00Z",
-              actor: { login: "theo" },
+              actor: { __typename: "User", login: "theo", avatarUrl: "https://avatars/theo" },
               label: { name: "bug" },
             },
             {
               __typename: "CrossReferencedEvent",
               id: "CRE_1",
               createdAt: "2026-07-02T01:00:00Z",
-              actor: { login: "julius" },
+              actor: { __typename: "User", login: "julius", avatarUrl: "https://avatars/julius" },
               source: {
                 __typename: "PullRequest",
                 number: 50,
@@ -100,12 +125,70 @@ const DETAIL_RESPONSE = JSON.stringify({
   },
 });
 
-function tracker(graphql: (variables: unknown) => string) {
+const decodeVariables = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      variables: Schema.Record(Schema.String, Schema.Unknown),
+    }),
+  ),
+);
+
+function tracker(onRequest: (variables: unknown) => void) {
   return GitHubIssueTracker.make.pipe(
     Effect.provide(
-      Layer.mock(GitHubApi.GitHubApi)({
-        graphql: ({ variables }) => Effect.succeed(graphql(variables)),
-      }),
+      GitHubRest.layer.pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            GitHubQuota.layer,
+            SourceControlRateLimit.layer,
+            Layer.mock(GitHubCredentials.GitHubCredentials)({
+              get: (host) =>
+                Effect.succeed({
+                  host,
+                  token: Redacted.make("test-token"),
+                  source: "gh" as const,
+                  fingerprint: "test",
+                }),
+            }),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) => {
+                if (request.body._tag !== "Uint8Array")
+                  return Effect.die("Expected a GraphQL JSON request.");
+                const { variables } = decodeVariables(new TextDecoder().decode(request.body.body));
+                onRequest(variables);
+                const body =
+                  "labelsCursor" in variables
+                    ? JSON.stringify({
+                        data: {
+                          repository: {
+                            issue: {
+                              labels: {
+                                pageInfo: { hasNextPage: false, endCursor: null },
+                                nodes: [{ name: "needs repro", color: "ffffff" }],
+                              },
+                              assignees: {
+                                pageInfo: { hasNextPage: false, endCursor: null },
+                                nodes: [],
+                              },
+                            },
+                          },
+                        },
+                      })
+                    : DETAIL_RESPONSE;
+                return Effect.succeed(
+                  HttpClientResponse.fromWeb(
+                    request,
+                    new Response(body, {
+                      headers: { "content-type": "application/json" },
+                    }),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ),
+      ),
     ),
   );
 }
@@ -113,10 +196,9 @@ function tracker(graphql: (variables: unknown) => string) {
 describe("GitHubIssueTracker", () => {
   it.effect("maps a detail read to the neutral issue shape", () =>
     Effect.gen(function* () {
-      let seen: unknown;
+      const seen: unknown[] = [];
       const api = yield* tracker((variables) => {
-        seen = variables;
-        return DETAIL_RESPONSE;
+        seen.push(variables);
       });
       const issue = yield* api.getIssue({
         cwd: "/w",
@@ -124,16 +206,32 @@ describe("GitHubIssueTracker", () => {
         scope: "acme/web",
         key: "42",
       });
-      expect(seen).toEqual({ owner: "acme", name: "web", number: 42 });
+      expect(seen).toEqual([
+        { owner: "acme", name: "web", number: 42 },
+        {
+          owner: "acme",
+          name: "web",
+          number: 42,
+          labelsCursor: "labels-next",
+          assigneesCursor: null,
+        },
+      ]);
       expect(issue).toMatchObject({
         key: "42",
         displayKey: "#42",
         title: "Composer loses focus",
         body: "Typing in the composer drops focus after a paste.",
         state: { category: "closed", name: "closed", closeReason: "not-planned" },
-        author: { login: "octocat", name: "Octo Cat", avatarUrl: "https://avatars/octocat" },
+        author: {
+          login: "octocat",
+          name: "Octo Cat",
+          avatarUrl: "https://avatars/octocat",
+        },
         assignees: [{ login: "theo" }],
-        labels: [{ name: "bug", color: "d73a4a" }],
+        labels: [
+          { name: "bug", color: "d73a4a" },
+          { name: "needs repro", color: "ffffff" },
+        ],
         commentCount: 3,
         viewer: "julius",
         // Triage may label and assign; `viewerCanUpdate: false` withholds state and edits.

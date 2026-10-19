@@ -1,18 +1,5 @@
-/**
- * Issues across the workspace's projects, read through whichever tracker each project resolves
- * to. The service owns resolution and permission; trackers own their APIs.
- *
- * Resolution: a git-host project resolves to the tracker of the same kind as its remote, with the
- * remote's host and `owner/repo` as the scope. A standalone tracker (Linear, Jira) will resolve
- * from a per-project binding in settings through the same `resolveProjectTracker` hook; only the
- * git-host path exists today.
- *
- * An issue whose scope is not any project's own can still be read through a project on the same
- * tracker and host — a frontend project reading a backend issue, or an external URL — but is
- * read-only: every write checks `writable` first.
- *
- * @module issue/IssueService
- */
+// References outside the project's canonical repository may be read on the same host,
+// but every write must pass through requireWritable.
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -58,7 +45,7 @@ const DEFAULT_LIST_LIMIT = 50;
 const SCOPE_CONCURRENCY = 4;
 
 /** One project's resolved tracker: which driver, where it is served from, and its container. */
-export interface ProjectTrackerBinding {
+interface ProjectTrackerBinding {
   readonly tracker: IssueTrackerKind;
   readonly host: string;
   readonly scope: string;
@@ -142,12 +129,11 @@ export class IssueService extends Context.Service<
   }
 >()("t3/issue/IssueService") {}
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const registry = yield* IssueTrackerRegistry.IssueTrackerRegistry;
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
 
-  /** Where a project's issues live. The one place a standalone tracker's binding will plug in. */
   const resolveProjectTracker = (
     project: OrchestrationProjectShell,
   ): Effect.Effect<ProjectTrackerBinding | null> =>
@@ -255,15 +241,16 @@ export const make = Effect.gen(function* () {
       const errors: IssueListProjectError[] = [];
       const nextCursors: Record<string, string> = {};
 
-      const viewerFor = (project: SupportedProject) =>
-        Effect.suspend(() => {
-          const known = viewers.get(project.host);
-          return known === undefined
-            ? project.api
-                .getViewer({ cwd: project.project.workspaceRoot, host: project.host })
-                .pipe(Effect.tap((viewer) => Effect.sync(() => viewers.set(project.host, viewer))))
-            : Effect.succeed(known);
-        });
+      const viewerRequests = new Map<string, Effect.Effect<string, IssueTrackerError>>();
+      for (const project of scopes.values()) {
+        if (viewerRequests.has(project.host)) continue;
+        const request = yield* Effect.cached(
+          project.api
+            .getViewer({ cwd: project.project.workspaceRoot, host: project.host })
+            .pipe(Effect.tap((viewer) => Effect.sync(() => viewers.set(project.host, viewer)))),
+        );
+        viewerRequests.set(project.host, request);
+      }
 
       // Every project counts, including worktrees of a scope read once below.
       for (const project of supported) {
@@ -295,7 +282,7 @@ export const make = Effect.gen(function* () {
             // A continuation names the scopes it wants; one not named has nothing to add.
             if (continuing !== undefined && continuing[key] === undefined) return;
             const cursor = continuing?.[key];
-            const page = yield* viewerFor(project).pipe(
+            const page = yield* viewerRequests.get(project.host)!.pipe(
               Effect.flatMap((viewer) =>
                 project.api.listIssues({
                   cwd: project.project.workspaceRoot,
