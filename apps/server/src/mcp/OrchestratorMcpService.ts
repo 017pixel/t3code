@@ -2709,7 +2709,6 @@ const make = Effect.gen(function* () {
               ...(input.reason === undefined ? {} : { reason: input.reason }),
             })
             .pipe(Effect.catch(stopFailed));
-          // A retry with the same clientRequestId repeats only the stops that failed.
           yield* threadManagement
             .stopDelegatedTasks({ threadId: input.threadId, commandId, reason: input.reason })
             .pipe(Effect.catch(stopFailed));
