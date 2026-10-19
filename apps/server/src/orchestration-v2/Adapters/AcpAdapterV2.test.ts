@@ -3569,6 +3569,8 @@ describe("AcpAdapterV2", () => {
           new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
         );
         const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const releasePrompt = yield* Deferred.make<void>();
+        let holdPrompt = false;
         const instanceId = ProviderInstanceId.make("acp-test");
         const adapter = yield* makeAcpAdapterV2({
           instanceId,
@@ -3584,7 +3586,19 @@ describe("AcpAdapterV2", () => {
               environment: {
                 T3_ACP_EMIT_LOAD_REPLAY: "1",
                 T3_ACP_PROMPT_RESPONSE_TEXT: "first reply",
+                ...(mode !== "resume-switched"
+                  ? { T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS: "1" }
+                  : {}),
               },
+              wrapRuntime: (native) => ({
+                ...native,
+                prompt: (input) =>
+                  native
+                    .prompt(input)
+                    .pipe(
+                      Effect.tap(() => (holdPrompt ? Deferred.await(releasePrompt) : Effect.void)),
+                    ),
+              }),
             }),
           },
           selfInvocation,
@@ -3603,6 +3617,7 @@ describe("AcpAdapterV2", () => {
           runtimePolicy,
           ...(mode === "resume-initial" ? { initialNativeThreadId: "mock-session-saved" } : {}),
         });
+        yield* Effect.addFinalizer(() => Deferred.succeed(releasePrompt, undefined));
         let providerThread = yield* runtime.ensureThread({
           threadId,
           modelSelection,
@@ -3642,6 +3657,62 @@ describe("AcpAdapterV2", () => {
           rawProtocolRequestParam(activationEvents[0]!, "replayFrom"),
           mode === "load" ? { type: "start" } : undefined,
         );
+
+        if (mode !== "resume-switched") {
+          holdPrompt = true;
+          const turn = makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 2,
+          });
+          yield* runtime.startTurn(turn);
+          const streamed = yield* runtime.events.pipe(
+            Stream.takeUntil(
+              (event) =>
+                event.type === "message.updated" && event.message.text.includes("after tool"),
+            ),
+            Stream.runCollect,
+          );
+          // Hold adapter completion so the read overlaps an active resumed turn.
+          const duringTurn = yield* runtime.readThreadSnapshot({ providerThread });
+          const activeHistoryRequests = (yield* Queue.clear(protocolEvents)).filter(
+            (event) =>
+              event.direction === "outgoing" && rawProtocolMethod(event) === "session/resume",
+          );
+          yield* Deferred.succeed(releasePrompt, undefined);
+          const completed = yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          );
+          const observed = [...streamed, ...completed];
+          assert.isTrue(
+            observed.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "command_execution" &&
+                event.turnItem.status === "completed",
+            ),
+          );
+          for (const text of ["before tool", "after tool"]) {
+            assert.isTrue(
+              observed.some(
+                (event) =>
+                  event.type === "message.updated" &&
+                  !event.message.streaming &&
+                  event.message.text.includes(text),
+              ),
+            );
+          }
+          assert.include(
+            duringTurn.messages.map((message) => message.id),
+            turn.message.messageId,
+            "active snapshot must retain the current user message",
+          );
+          assert.isEmpty(activeHistoryRequests, "history must wait until the active turn is idle");
+        }
 
         const first = yield* runtime.readThreadSnapshot({ providerThread });
         assert.includeMembers(
