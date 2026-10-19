@@ -46,6 +46,7 @@ import {
 import {
   codexContinuationIdentity,
   CODEX_SQLITE_RECOVERY_GUIDANCE,
+  CodexShadowHomeSqliteRecoveryRequiredError,
   materializeCodexShadowHome,
   mergeCodexEnvironment,
   withCodexSqliteHome,
@@ -59,6 +60,7 @@ import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
+const isSqliteRecoveryRequired = Schema.is(CodexShadowHomeSqliteRecoveryRequiredError);
 const DRIVER_KIND = ProviderDriverKind.make("codex");
 function isCodexStandaloneCommandPath(commandPath: string): boolean {
   return normalizeCommandPath(commandPath).includes("/packages/standalone/");
@@ -187,10 +189,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
             new ProviderDriverError({
               driver: DRIVER_KIND,
               instanceId,
-              detail:
-                cause.detail === CODEX_SQLITE_RECOVERY_GUIDANCE
-                  ? CODEX_SQLITE_RECOVERY_GUIDANCE
-                  : "Failed to build Codex orchestration adapter.",
+              detail: isSqliteRecoveryRequired(cause.cause)
+                ? CODEX_SQLITE_RECOVERY_GUIDANCE
+                : "Failed to build Codex orchestration adapter.",
               cause,
             }),
         ),
