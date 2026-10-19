@@ -394,18 +394,18 @@ describe("Android SDK availability", () => {
   it.effect("prefers a complete Homebrew SDK over an incomplete standard macOS SDK", () =>
     Effect.gen(function* () {
       const root = "/opt/homebrew/share/android-commandlinetools";
-      const files = [
+      const files = new Set([
         "/test/home/Library/Android/sdk/platform-tools/adb",
         `${root}/platform-tools/adb`,
         `${root}/emulator/emulator`,
         `${root}/cmdline-tools/latest/bin/avdmanager`,
-      ];
+      ]);
       const sdk = yield* LocalDeviceHost.__testing.androidSdk.pipe(
         Effect.provideService(HostProcess.Environment, { HOME: "/test/home" }),
         Effect.provideService(HostProcess.Platform, "darwin"),
         Effect.provideService(
           FileSystem.FileSystem,
-          FileSystem.makeNoop({ exists: (file) => Effect.succeed(files.includes(file)) }),
+          FileSystem.makeNoop({ exists: (file) => Effect.succeed(files.has(file)) }),
         ),
         Effect.provide(NodePath.layerPosix),
       );
@@ -421,6 +421,39 @@ describe("Android SDK availability", () => {
       });
       expect(reason).toContain(`Platform-Tools are missing from ${root}`);
     }),
+  );
+
+  it.effect(
+    "discovers a complete SDK through an adb symlink on PATH despite tools-only Homebrew",
+    () =>
+      Effect.gen(function* () {
+        const root = "/custom/android-sdk";
+        const adbLink = "/test/bin/adb";
+        const files = new Set([
+          "/opt/homebrew/share/android-commandlinetools/cmdline-tools/latest/bin/avdmanager",
+          adbLink,
+          `${root}/platform-tools/adb`,
+          `${root}/emulator/emulator`,
+          `${root}/cmdline-tools/latest/bin/avdmanager`,
+        ]);
+        const sdk = yield* LocalDeviceHost.__testing.androidSdk.pipe(
+          Effect.provideService(HostProcess.Environment, {
+            HOME: "/test/home",
+            PATH: "/test/bin",
+          }),
+          Effect.provideService(HostProcess.Platform, "darwin"),
+          Effect.provideService(
+            FileSystem.FileSystem,
+            FileSystem.makeNoop({
+              exists: (file) => Effect.succeed(files.has(file)),
+              realPath: (file) =>
+                Effect.succeed(file === adbLink ? `${root}/platform-tools/adb` : file),
+            }),
+          ),
+          Effect.provide(NodePath.layerPosix),
+        );
+        expect(sdk).toMatchObject({ root, adb: true, emulator: true, avdmanager: true });
+      }),
   );
 
   it.effect("reports an absent SDK without running or installing tools", () =>
