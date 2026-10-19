@@ -16,7 +16,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 65 }, (_, index) => index + 1),
+        Array.from({ length: 66 }, (_, index) => index + 1),
       );
     }),
   );
@@ -40,6 +40,7 @@ layer("055_OrchestrationV2", (it) => {
         [63, "DropUnusedV1Projections"],
         [64, "CanonicalizeThreadPullRequestLinks"],
         [65, "ProjectionThreadSweepIndexes"],
+        [66, "ProjectionThreadReadPayload"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -71,6 +72,7 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 63, name: "DropUnusedV1Projections" },
         { migration_id: 64, name: "CanonicalizeThreadPullRequestLinks" },
         { migration_id: 65, name: "ProjectionThreadSweepIndexes" },
+        { migration_id: 66, name: "ProjectionThreadReadPayload" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -145,12 +147,12 @@ layer("055_OrchestrationV2", (it) => {
     }),
   );
 
-  // Another build's migration at 64 or above makes the migrator skip this build's 64.
+  // Startup ensures the derived read projection even when migration 66 was skipped.
   it.effect("creates the thread read projection when another build took its migration id", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 63 });
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (64, 'OtherBuild')`;
+      yield* runMigrations({ toMigrationInclusive: 65 });
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (66, 'ProjectionThreadReadPayload')`;
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(
         yield* sql`
@@ -172,11 +174,13 @@ layer("055_OrchestrationV2", (it) => {
         yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
         [{ thread_id: "early" }],
       );
-      // Builds that ran this migration as 63 run it again as 64, which rebuilds the rows they
-      // wrote from the thread rows.
+      // Rebuild read rows written by early builds at id 63.
       yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 63`;
       yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (63, 'ProjectionThreadReadPayload')`;
-      assert.deepStrictEqual(yield* runMigrations(), [[64, "ProjectionThreadReadPayload"]]);
+      assert.deepStrictEqual(
+        yield* runMigrations(),
+        migrationEntries.filter(([id]) => id > 63).map(([id, name]) => [id, name]),
+      );
       assert.deepStrictEqual(
         yield* sql`SELECT thread_id FROM orchestration_v2_projection_thread_reads`,
         [],

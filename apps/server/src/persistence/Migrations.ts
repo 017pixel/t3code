@@ -72,7 +72,7 @@ import Migration0065 from "./Migrations/065_ProjectionThreadSweepIndexes.ts";
 
 import ensureThreadReadProjection, {
   migrateThreadReadProjection,
-} from "./Migrations/064_ProjectionThreadReadPayload.ts";
+} from "./Migrations/066_ProjectionThreadReadPayload.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],

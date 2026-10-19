@@ -5843,7 +5843,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             ON summary.thread_id = t.thread_id AND summary.source_stale = 0
           WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}
             AND t.archived_at IS NULL
-            -- Read from the sweep index (migration 061) rather than each payload.
+            -- Read from the sweep index (migration 065) rather than each payload.
             AND json_array_length(t.payload_json, '$.pullRequests') > 0
           ORDER BY t.updated_at ASC, t.thread_id ASC
         `;

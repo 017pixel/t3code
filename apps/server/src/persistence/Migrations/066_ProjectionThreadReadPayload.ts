@@ -10,7 +10,7 @@ import {
   encodeThreadReadPayload,
 } from "../../orchestration-v2/ThreadReadPayload.ts";
 
-// Startup also ensures this table when another build recorded migration 64 or above.
+// Startup also ensures this table when another build recorded migration 66 or above.
 // Triggers invalidate read rows when a build that does not maintain them writes a thread.
 const ensureInTransaction = (sql: SqlClient.SqlClient, rebuild: boolean) =>
   Effect.gen(function* () {
@@ -90,7 +90,7 @@ const ensureThreadReadProjection = Effect.gen(function* () {
 export default ensureThreadReadProjection;
 
 /**
- * Migration 64 itself rebuilds every row. Early builds of this change ran it as 62 or 63 and wrote
+ * Migration 66 itself rebuilds every row. Early builds of this change ran it as 62, 63 or 64 and wrote
  * compact rows in an older format that the triggers never mark stale.
  */
 export const migrateThreadReadProjection = Effect.gen(function* () {
