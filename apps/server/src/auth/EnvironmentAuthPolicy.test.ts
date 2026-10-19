@@ -27,6 +27,65 @@ const layerEnvironmentAuthPolicy = (overrides?: Partial<ServerConfig.ServerConfi
   );
 
 it.layer(NodeServices.layer)("EnvironmentAuthPolicy.layer", (it) => {
+  it.effect.each([
+    {
+      mode: "web",
+      localPolicy: "loopback-browser",
+      localBootstrapMethods: ["one-time-token"],
+      remoteBootstrapMethods: ["one-time-token"],
+    },
+    {
+      mode: "desktop",
+      localPolicy: "desktop-managed-local",
+      localBootstrapMethods: ["desktop-bootstrap"],
+      remoteBootstrapMethods: ["desktop-bootstrap", "one-time-token"],
+    },
+  ] as const)(
+    "advertises remote access only while Serve is configured for loopback $mode",
+    ({ mode, localPolicy, localBootstrapMethods, remoteBootstrapMethods }) =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const descriptorForServe = (tailscaleServeEnabled: boolean) =>
+          EnvironmentAuthPolicy.make.pipe(
+            Effect.provideService(ServerConfig.ServerConfig, {
+              ...config,
+              mode,
+              host: "127.0.0.1",
+              port: 3773,
+              tailscaleServeEnabled,
+            }),
+            Effect.flatMap((policy) => policy.getDescriptor()),
+          );
+
+        const local = yield* descriptorForServe(false);
+        const remote = yield* descriptorForServe(true);
+        const restored = yield* descriptorForServe(false);
+
+        expect(local).toEqual({
+          policy: localPolicy,
+          bootstrapMethods: localBootstrapMethods,
+          sessionMethods: ["browser-session-cookie", "bearer-access-token", "dpop-access-token"],
+          sessionCookieName:
+            mode === "web"
+              ? expect.stringMatching(/^t3_session_3773_[a-f0-9]{12}$/)
+              : "t3_session_3773",
+          serverUpdateScope: "environment:maintain",
+        });
+        expect([remote, restored]).toEqual([
+          { ...local, policy: "remote-reachable", bootstrapMethods: remoteBootstrapMethods },
+          local,
+        ]);
+      }).pipe(
+        Effect.provide(
+          ServerEnvironment.layerIdentity.pipe(
+            Layer.provideMerge(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-serve-policy-test-" }),
+            ),
+          ),
+        ),
+      ),
+  );
+
   it.effect("uses desktop-managed-local policy for desktop mode", () =>
     Effect.gen(function* () {
       const policy = yield* EnvironmentAuthPolicy.EnvironmentAuthPolicy;
