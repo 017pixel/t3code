@@ -2,10 +2,13 @@ import { assert, it } from "@effect/vitest";
 import {
   ORCHESTRATION_PROTOCOL_VERSION,
   ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
   type OrchestrationV2StoredEvent,
   type OrchestrationProjectShell,
   type ServerConfig,
+  type ServerProvider,
   type ServerConfigStreamEvent,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -19,10 +22,17 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 import * as SqlClient from "effect/sql/SqlClient";
+
+import * as EnvironmentTheme from "./environmentTheme.ts";
+import * as Keybindings from "./keybindings.ts";
+import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
+import * as ServerSettings from "./serverSettings.ts";
+import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
 import * as EventStore from "./orchestration-v2/EventStore.ts";
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
@@ -40,6 +50,7 @@ import {
   shouldUseBoundedThreadSnapshot,
   subscribeOrchestrationV2Shell,
   subscribeOrchestrationV2Thread,
+  subscribeServerConfig,
   withLateEditorConfig,
 } from "./ws.ts";
 
@@ -88,6 +99,74 @@ const settingsUpdated = (settings: object): ServerConfigStreamEvent => ({
   type: "settingsUpdated",
   payload: { settings: settings as ServerConfig["settings"] },
 });
+
+it.effect(
+  "delivers a provider probe published between the current read and live subscription",
+  () =>
+    Effect.gen(function* () {
+      const initialProvider = {
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        status: "error",
+        enabled: true,
+        installed: false,
+        version: null,
+        auth: { status: "unknown" },
+        checkedAt: "2026-10-19T00:00:00.000Z",
+        models: [],
+        slashCommands: [],
+        skills: [],
+      } as const satisfies ServerProvider;
+      const readyProviders = [{ ...initialProvider, status: "ready", installed: true }] as const;
+      const current = yield* Ref.make<ReadonlyArray<ServerProvider>>([initialProvider]);
+      const changes = yield* PubSub.unbounded<ReadonlyArray<ServerProvider> | null>();
+      const config = snapshotConfig({ providers: [initialProvider] });
+      const events = yield* subscribeServerConfig({}, Effect.succeed(config)).pipe(
+        Stream.runCollect,
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(ProviderRegistry.ProviderRegistry)({
+              getProviders: Effect.gen(function* () {
+                const captured = yield* Ref.get(current);
+                yield* Ref.set(current, readyProviders);
+                yield* PubSub.publish(changes, readyProviders);
+                // End only after publication. A late subscriber gets the marker,
+                // so losing the probe fails by stale output rather than a timeout.
+                yield* PubSub.end(changes, null);
+                return captured;
+              }),
+              subscribeChanges: PubSub.subscribe(changes).pipe(
+                Effect.map((subscription) =>
+                  Stream.fromSubscription(subscription).pipe(
+                    Stream.takeWhile((providers) => providers !== null),
+                  ),
+                ),
+              ),
+            }),
+            Layer.mock(UsageLimitSources.UsageLimitSources)({ streamChanges: Stream.make([]) }),
+            Layer.mock(Keybindings.Keybindings)({ streamChanges: Stream.empty }),
+            Layer.mock(ServerSettings.ServerSettingsService)({ streamChanges: Stream.empty }),
+            Layer.mock(EnvironmentTheme.EnvironmentThemeService)({ streamChanges: Stream.empty }),
+            Layer.mock(ExternalLauncher.ExternalLauncher)({
+              resolveAvailableEditors: () => Effect.succeed([]),
+              resolveFileManagerRevealKind: () => Effect.succeed(undefined),
+            }),
+          ),
+        ),
+      );
+
+      assert.equal(events[0]?.type, "snapshot");
+      if (events[0]?.type === "snapshot") {
+        assert.deepEqual(events[0].config.providers, [initialProvider]);
+      }
+      assert.deepEqual(
+        events.flatMap((event) =>
+          event.type === "providerStatuses" ? [event.payload.providers] : [],
+        ),
+        [readyProviders],
+      );
+    }),
+);
 
 it.effect("resends late editors without rolling back updates already sent", () =>
   Effect.gen(function* () {

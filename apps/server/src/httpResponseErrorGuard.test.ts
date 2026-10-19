@@ -140,3 +140,49 @@ it("serves HTTP and websocket requests received before handlers attach", async (
     server.closeAllConnections();
   }
 });
+
+it("bounds pending HTTP and upgrade admission and serves requests after attachment", async () => {
+  const server = holdRequestsUntilServing(guardHttpResponseWriteErrors(NodeHttp.createServer()));
+  const sockets: NodeNet.Socket[] = [];
+  const handled: string[] = [];
+  const send = (kind: "request" | "upgrade", url: string) => {
+    const socket = new NodeNet.Socket();
+    sockets.push(socket);
+    const request = new NodeHttp.IncomingMessage(socket);
+    request.url = url;
+    const response = new NodeHttp.ServerResponse(request);
+    response.assignSocket(socket);
+    if (kind === "request") server.emit(kind, request, response);
+    else server.emit(kind, request, socket, Buffer.alloc(0));
+    return { socket, response };
+  };
+
+  try {
+    // Both event types share the startup budget; two independent limits would
+    // retain twice as many requests.
+    const admitted = Array.from({ length: 256 }, (_, i) => `/early/${i}`);
+    admitted.forEach((url, i) => send(i % 2 === 0 ? "request" : "upgrade", url));
+    const excessHttp = send("request", "/excess-http");
+    const excessUpgrade = send("upgrade", "/excess-upgrade");
+    expect.soft(excessHttp.socket.destroyed || excessHttp.response.writableEnded).toBe(true);
+    expect.soft(excessUpgrade.socket.destroyed || excessUpgrade.socket.writableEnded).toBe(true);
+
+    server.on("request", (request, response) => {
+      handled.push(request.url!);
+      response.end();
+    });
+    server.on("upgrade", (request, socket) => {
+      handled.push(request.url!);
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect.soft(handled.toSorted()).toEqual(admitted.toSorted());
+
+    handled.length = 0;
+    send("request", "/after-http");
+    send("upgrade", "/after-upgrade");
+    expect(handled).toEqual(["/after-http", "/after-upgrade"]);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+  }
+});

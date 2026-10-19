@@ -99,6 +99,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  type WsSubscribeServerConfigRpc,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import {
@@ -354,6 +355,113 @@ export const withLateEditorConfig = <E, R>(
     ),
   );
 };
+
+export const subscribeServerConfig = <E, R>(
+  input: typeof WsSubscribeServerConfigRpc.payloadSchema.Type,
+  loadConfig: Effect.Effect<ClientServerConfig, E, R>,
+) =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const usageLimitsCommand = input.usageLimitsCommand === true;
+      const keybindings = yield* Keybindings.Keybindings;
+      const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
+      const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
+      const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
+      const config = yield* loadConfig;
+      // Acquire the changes-only subscription before the current read and startup
+      // release. Its scope retains probe results until live delivery begins.
+      const providerChanges = yield* providerRegistry.subscribeChanges;
+      const keybindingsUpdates = keybindings.streamChanges.pipe(
+        Stream.map((event) => ({
+          version: 1 as const,
+          type: "keybindingsUpdated" as const,
+          payload: {
+            keybindings: event.keybindings,
+            issues: event.issues,
+          },
+        })),
+      );
+      const providerStatuses = Stream.zipLatestWith(
+        // The registry stream carries changes only. Seed it with the current
+        // providers so a source refresh that lands before any provider change
+        // still pairs up and reaches the client.
+        Stream.concat(Stream.fromEffect(providerRegistry.getProviders), providerChanges),
+        usageLimitSources.streamChanges.pipe(
+          Stream.changesWith(usageLimitsCommand ? sameUsageLimitCommandCoverage : () => true),
+        ),
+        (providers, sources) =>
+          usageLimitsCommand ? withUsageLimitsCommands(providers, sources) : providers,
+      ).pipe(
+        // Both sides replay their current value, so the first pairing normally
+        // repeats the snapshot the client already holds. Compare against that
+        // snapshot rather than dropping blindly: a refresh that landed between
+        // the snapshot and the subscription still goes out.
+        (updates) => Stream.concat(rpcInitialItems([config.providers]), updates),
+        Stream.changesWith((previous, next) => JSON.stringify(previous) === JSON.stringify(next)),
+        Stream.drop(1),
+        Stream.map((providers) => ({
+          version: 1 as const,
+          type: "providerStatuses" as const,
+          payload: { providers },
+        })),
+        Stream.debounce(Duration.millis(PROVIDER_STATUS_DEBOUNCE_MS)),
+      );
+      // Gated on the subscriber's capability flag because an
+      // already-shipped client decodes this stream against the old
+      // event union and its whole config subscription dies on an
+      // unknown member.
+      const environmentThemeUpdates =
+        input.environmentThemes === true
+          ? environmentTheme.streamChanges.pipe(
+              Stream.map((themes) => ({
+                version: 1 as const,
+                type: "environmentThemesUpdated" as const,
+                payload: { themes },
+              })),
+            )
+          : Stream.empty;
+      const usageLimitSourceUpdates =
+        input.usageLimitSources === true
+          ? usageLimitSources.streamChanges.pipe(
+              Stream.map((sources) => ({
+                version: 1 as const,
+                type: "usageLimitSourcesUpdated" as const,
+                payload: { sources },
+              })),
+            )
+          : Stream.empty;
+      const settingsUpdates = serverSettings.streamChanges.pipe(
+        Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
+        Stream.map((settings) => ({
+          version: 1 as const,
+          type: "settingsUpdated" as const,
+          payload: { settings },
+        })),
+      );
+
+      const liveUpdates = Stream.merge(
+        keybindingsUpdates,
+        Stream.merge(
+          providerStatuses,
+          Stream.merge(
+            settingsUpdates,
+            Stream.merge(environmentThemeUpdates, usageLimitSourceUpdates),
+          ),
+        ),
+      );
+
+      return Stream.concat(
+        rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
+        Stream.unwrap(
+          ServerActivation.markClientServed.pipe(
+            Effect.as(withLateEditorConfig(config, liveUpdates, externalLauncher)),
+          ),
+        ),
+      );
+    }),
+  );
 
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
@@ -1234,7 +1342,6 @@ const layerWsRpc = (
       const agentSessionImporter = yield* AgentSessionImporter.AgentSessionImporter;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
-      const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const directEndpoints = yield* DirectEndpoints.DirectEndpoints;
@@ -2913,105 +3020,9 @@ const layerWsRpc = (
             }),
           ),
         [WS_METHODS.subscribeServerConfig]: (input) =>
-          Stream.unwrap(
-            Effect.gen(function* () {
-              const usageLimitsCommand = input.usageLimitsCommand === true;
-              const config = yield* loadServerConfig({ usageLimitsCommand });
-              const keybindingsUpdates = keybindings.streamChanges.pipe(
-                Stream.map((event) => ({
-                  version: 1 as const,
-                  type: "keybindingsUpdated" as const,
-                  payload: {
-                    keybindings: event.keybindings,
-                    issues: event.issues,
-                  },
-                })),
-              );
-              const providerStatuses = Stream.zipLatestWith(
-                // The registry stream carries changes only. Seed it with the current
-                // providers so a source refresh that lands before any provider change
-                // still pairs up and reaches the client.
-                Stream.concat(
-                  Stream.fromEffect(providerRegistry.getProviders),
-                  providerRegistry.streamChanges,
-                ),
-                usageLimitSources.streamChanges.pipe(
-                  Stream.changesWith(
-                    usageLimitsCommand ? sameUsageLimitCommandCoverage : () => true,
-                  ),
-                ),
-                (providers, sources) =>
-                  usageLimitsCommand ? withUsageLimitsCommands(providers, sources) : providers,
-              ).pipe(
-                // Both sides replay their current value, so the first pairing normally
-                // repeats the snapshot the client already holds. Compare against that
-                // snapshot rather than dropping blindly: a refresh that landed between
-                // the snapshot and the subscription still goes out.
-                (updates) => Stream.concat(rpcInitialItems([config.providers]), updates),
-                Stream.changesWith(
-                  (previous, next) => JSON.stringify(previous) === JSON.stringify(next),
-                ),
-                Stream.drop(1),
-                Stream.map((providers) => ({
-                  version: 1 as const,
-                  type: "providerStatuses" as const,
-                  payload: { providers },
-                })),
-                Stream.debounce(Duration.millis(PROVIDER_STATUS_DEBOUNCE_MS)),
-              );
-              // Gated on the subscriber's capability flag because an
-              // already-shipped client decodes this stream against the old
-              // event union and its whole config subscription dies on an
-              // unknown member.
-              const environmentThemeUpdates =
-                input.environmentThemes === true
-                  ? environmentTheme.streamChanges.pipe(
-                      Stream.map((themes) => ({
-                        version: 1 as const,
-                        type: "environmentThemesUpdated" as const,
-                        payload: { themes },
-                      })),
-                    )
-                  : Stream.empty;
-              const usageLimitSourceUpdates =
-                input.usageLimitSources === true
-                  ? usageLimitSources.streamChanges.pipe(
-                      Stream.map((sources) => ({
-                        version: 1 as const,
-                        type: "usageLimitSourcesUpdated" as const,
-                        payload: { sources },
-                      })),
-                    )
-                  : Stream.empty;
-              const settingsUpdates = serverSettings.streamChanges.pipe(
-                Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
-                Stream.map((settings) => ({
-                  version: 1 as const,
-                  type: "settingsUpdated" as const,
-                  payload: { settings },
-                })),
-              );
-
-              const liveUpdates = Stream.merge(
-                keybindingsUpdates,
-                Stream.merge(
-                  providerStatuses,
-                  Stream.merge(
-                    settingsUpdates,
-                    Stream.merge(environmentThemeUpdates, usageLimitSourceUpdates),
-                  ),
-                ),
-              );
-
-              return Stream.concat(
-                rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
-                Stream.unwrap(
-                  ServerActivation.markClientServed.pipe(
-                    Effect.as(withLateEditorConfig(config, liveUpdates, externalLauncher)),
-                  ),
-                ),
-              );
-            }),
+          subscribeServerConfig(
+            input,
+            loadServerConfig({ usageLimitsCommand: input.usageLimitsCommand === true }),
           ),
         [WS_METHODS.subscribeServerLifecycle]: (_input) =>
           Stream.unwrap(
