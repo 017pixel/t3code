@@ -292,7 +292,13 @@ export function cascadeTerminalizeRunOwnedSubagents(input: {
       }
     }
     for (const turnItem of input.open.childTurnItems.values()) {
-      if (!childThreadIds.has(turnItem.threadId) || isSettledTurnItemStatus(turnItem.status)) {
+      if (
+        !(
+          (turnItem.threadId === input.run.threadId && turnItem.runId === input.run.id) ||
+          childThreadIds.has(turnItem.threadId)
+        ) ||
+        isSettledTurnItemStatus(turnItem.status)
+      ) {
         continue;
       }
       events.push({
@@ -306,6 +312,9 @@ export function cascadeTerminalizeRunOwnedSubagents(input: {
         payload: {
           ...turnItem,
           ...("streaming" in turnItem ? { streaming: false } : {}),
+          ...(turnItem.type === "secret_request" && turnItem.secretStatus === "pending"
+            ? { secretStatus: "cancelled" as const }
+            : {}),
           status: input.status,
           completedAt: input.completedAt,
           updatedAt: input.completedAt,

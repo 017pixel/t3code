@@ -1316,42 +1316,54 @@ const persistedStartFailure = Effect.gen(function* () {
     countsForRun: false,
     checkpointScopeId: null,
   });
-  const unreadable = {
-    ...store,
-    getThreadRecords: (id, fields, filter) =>
-      fields.length === 0
-        ? store.getThreadRecords(id, fields, filter)
-        : Effect.fail(
+  let failedReads = 0;
+  const start = (
+    options: {
+      readonly beforeCommit?: Effect.Effect<unknown, EventSink.EventSinkV2Error>;
+      readonly readFailure?: "ownership" | "current work";
+    } = {},
+  ) =>
+    Effect.gen(function* () {
+      let readingSettlement = false;
+      const unavailable = Effect.sync(() => {
+        failedReads += 1;
+      }).pipe(
+        Effect.andThen(
+          Effect.fail(
             new ProjectionStore.ProjectionStoreReadError({
               threadId,
               cause: "inherited records unavailable",
             }),
           ),
-  } satisfies ProjectionStore.ProjectionStoreV2Shape;
-  const start = (
-    options: {
-      readonly beforeCommit?: Effect.Effect<unknown, EventSink.EventSinkV2Error>;
-      readonly readFailure?: "collection" | "reconciliation";
-    } = {},
-  ) =>
-    Effect.gen(function* () {
-      const commitSink =
-        options.readFailure === "reconciliation"
-          ? yield* EventSink.EventSinkV2.pipe(
-              Effect.provide(EventSink.layer),
-              Effect.provideService(ProjectionStore.ProjectionStoreV2, unreadable),
-            )
-          : sink;
+        ),
+      );
+      const settlementStore = {
+        ...store,
+        getThreadRecords: (id, fields, filter) =>
+          Effect.suspend(() => {
+            if (fields.some((field) => field === "subagents")) {
+              readingSettlement = true;
+              if (options.readFailure === "ownership") return unavailable;
+            }
+            return store.getThreadRecords(id, fields, filter);
+          }),
+        getRuntimeRecoveryProjection: (id) =>
+          Effect.suspend(() =>
+            readingSettlement && options.readFailure === "current work"
+              ? unavailable
+              : store.getRuntimeRecoveryProjection(id),
+          ),
+      } satisfies ProjectionStore.ProjectionStoreV2Shape;
       const harness = makeLocalCommandHarness({
         text: "Continue",
         ensureThreadFailure: new Error("Replacement thread cannot load"),
         persistence: {
-          store: options.readFailure === "collection" ? unreadable : store,
+          store: settlementStore,
           sink: {
-            ...commitSink,
+            ...sink,
             writeIfRunCurrent: (input) =>
               (options.beforeCommit ?? Effect.void).pipe(
-                Effect.andThen(commitSink.writeIfRunCurrent(input)),
+                Effect.andThen(sink.writeIfRunCurrent(input)),
               ),
           },
         },
@@ -1359,7 +1371,21 @@ const persistedStartFailure = Effect.gen(function* () {
       yield* harness.start;
       return yield* store.getThreadProjection(threadId);
     });
-  return { run, root, now, request, approval, item, message, subagent, write, start };
+  return {
+    run,
+    root,
+    now,
+    request,
+    approval,
+    item,
+    message,
+    subagent,
+    write,
+    start,
+    get failedReads() {
+      return failedReads;
+    },
+  };
 });
 
 effectIt.effect(
@@ -1370,7 +1396,7 @@ effectIt.effect(
       const { now, request, approval, item, message, subagent, write } = fixture;
       const result = yield* fixture.start({
         beforeCommit: Effect.gen(function* () {
-          // These writes land after collection, before the real SQLite guarded commit.
+          // These writes land during failed startup, before the real SQLite guarded commit.
           yield* write("runtime-request.updated", {
             ...request,
             status: "resolved",
@@ -1410,12 +1436,14 @@ effectIt.effect(
     }).pipe(Effect.provide(Layer.fresh(layerFailurePersistence))),
 );
 
-effectIt.effect.each(["collection", "reconciliation"] as const)(
+effectIt.effect.each(["ownership", "current work"] as const)(
   "still fails the run, attempt and root when inherited %s reads fail",
   (readFailure) =>
     Effect.gen(function* () {
       const fixture = yield* persistedStartFailure;
       const result = yield* fixture.start({ readFailure });
+      expect(fixture.failedReads).toBeGreaterThan(0);
+      expect(result.runtimeRequests).toMatchObject([{ status: "pending" }]);
       expect(result.runs[0]).toMatchObject({ status: "failed", startedAt: null });
       expect(result.attempts[0]).toMatchObject({ status: "failed", startedAt: null });
       expect(result.nodes.find(({ id }) => id === fixture.root.id)).toMatchObject({
