@@ -142,8 +142,6 @@ it.effect(
         id: providerThreadId,
         driver,
         providerInstanceId,
-        // The restart command has already projected this replacement binding
-        // before the process-bound restart effect executes.
         providerSessionId: replacementSessionId,
         appThreadId: threadId,
         ownerNodeId: null,
@@ -218,6 +216,7 @@ it.effect(
           getThread: () => Ref.get(projection).pipe(Effect.map((state) => state.thread)),
           getSettlementCandidates: () => Effect.die("unused getSettlementCandidates"),
           getThreadsWithPullRequests: () => Effect.die("unused getThreadsWithPullRequests"),
+          getThreadWorktreePaths: () => Effect.die("unused getThreadWorktreePaths"),
           getThreadProjection: () => Effect.die("control effects must not load transcript"),
           getTurnStartContext: () => Effect.die("unused"),
           getTurnStartHistory: () => Effect.die("unused"),
@@ -272,6 +271,7 @@ it.effect(
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
+          isLive: (providerSessionId) => Effect.succeed(providerSessionId === oldSessionId),
           close: () => Effect.void,
           closeInstance: () => Effect.void,
           release: () => Effect.void,
