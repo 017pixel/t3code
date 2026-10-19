@@ -1083,10 +1083,21 @@ export async function waitForRevertedMessage(
   const threadAtom = environmentThreadDetails.stateAtom(threadRef);
   const readProjection = () => Option.getOrNull(appAtomRegistry.get(threadAtom).data);
   const initial = readProjection();
-  if (!initial?.messages.some((message) => message.id === messageId)) {
+  // Paged prompts live in turn items without a duplicate projection message.
+  const messageRunId =
+    initial?.messages.find((message) => message.id === messageId)?.runId ??
+    initial?.visibleTurnItems.find(
+      ({ visibility, sourceThreadId, item }) =>
+        visibility === "local" &&
+        sourceThreadId === initial.thread.id &&
+        item.threadId === initial.thread.id &&
+        item.type === "user_message" &&
+        item.messageId === messageId &&
+        initial.runs.some((run) => run.id === item.runId && run.threadId === initial.thread.id),
+    )?.item.runId;
+  if (messageRunId == null) {
     throw new Error("The message to rewind is no longer available.");
   }
-  const messageRunId = initial.messages.find((message) => message.id === messageId)?.runId;
   return new Promise<void>((resolve, reject) => {
     let settled = false;
     let accepted = false;

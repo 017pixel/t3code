@@ -1182,7 +1182,7 @@ export default function ChatView(props: ChatViewProps) {
       messages: appAtomRegistry
         .get(environmentThreadDetails.visibleTurnItemsAtom(routeThreadDetailRef))
         .flatMap(({ item }) =>
-          item.type === "user_message"
+          item.type === "user_message" && !item.messageId.startsWith("async-answer:")
             ? [{ id: item.messageId, role: "user", text: item.text }]
             : [],
         ),
@@ -5752,7 +5752,7 @@ export default function ChatView(props: ChatViewProps) {
           createdAt: DateTime.formatIso(sourceMessage.createdAt),
           updatedAt: DateTime.formatIso(sourceMessage.updatedAt),
         }
-      : undefined;
+      : timelineMessages.find((message) => message.id === messageId);
     if (!message || message.role !== "user") return;
 
     if (!supportsConversationRollback) {
