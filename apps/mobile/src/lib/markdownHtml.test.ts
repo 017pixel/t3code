@@ -71,3 +71,35 @@ describe("HTML in native Markdown", () => {
     expect(result).toContain('`<img src="inline.png">`');
   });
 });
+
+describe("Windows drive paths in mobile Markdown documents", () => {
+  it("keeps backslashes before punctuation in prose paths", () => {
+    const markdown = String.raw`Saved to C:\Users\me\.t3\_build\shot.png and C:/work\.config and C:\folder\(draft.`;
+
+    expect(parseMarkdownDocument(markdown).children).toMatchObject([
+      { type: "paragraph", children: [{ type: "text", value: markdown }] },
+    ]);
+  });
+
+  it("keeps ordinary Markdown escapes and inline and fenced code unchanged around drive paths", () => {
+    const code = String.raw`C:\Users\me\.t3\_build\shot.png \*literal\*`;
+    const markdown = [
+      String.raw`See C:\x and \*this\* and Note:\*that\*. Code: ` + "`" + code + "`",
+      "",
+      "```text",
+      code,
+      "```",
+    ].join("\n");
+
+    expect(parseMarkdownDocument(markdown).children).toMatchObject([
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", value: String.raw`See C:\x and *this* and Note:*that*. Code: ` },
+          { type: "inlineCode", value: code },
+        ],
+      },
+      { type: "code", lang: "text", value: code },
+    ]);
+  });
+});
