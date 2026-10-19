@@ -1114,21 +1114,42 @@ const make = Effect.gen(function* () {
       Stream.unwrap(
         Effect.gen(function* () {
           const initialLinkTarget = yield* watchLinkTarget;
+          const rootReady = yield* Deferred.make<void>();
+          const linkReady = yield* Deferred.make<void>();
+          const targetReady = yield* Deferred.make<void>();
           const linkTargetEvents = Stream.make(initialLinkTarget).pipe(
             Stream.concat(
-              watchFileChanges(settingsPath).pipe(Stream.mapEffect(() => watchLinkTarget)),
+              watchFileChanges(settingsPath, () => {
+                Deferred.doneUnsafe(linkReady, Effect.void);
+              }).pipe(Stream.mapEffect(() => watchLinkTarget)),
             ),
             Stream.changes,
             Stream.switchMap(
               Option.match({
                 onNone: () => Stream.empty,
-                onSome: (target) => watchFileChanges(target, onReady),
+                onSome: (target) =>
+                  watchFileChanges(target, () => {
+                    Deferred.doneUnsafe(targetReady, Effect.void);
+                  }),
               }),
             ),
           );
+          const topologyReady = Stream.fromEffect(
+            Effect.gen(function* () {
+              yield* Deferred.await(rootReady);
+              yield* Deferred.await(linkReady);
+              if (Option.isSome(initialLinkTarget)) yield* Deferred.await(targetReady);
+              // A repoint before link-watch attachment must rebuild the target watch too.
+              if (!Equal.equals(initialLinkTarget, yield* watchLinkTarget))
+                return yield* new SettingsWatchEnded({});
+              onReady();
+            }),
+          ).pipe(Stream.drain);
           return Stream.merge(
-            watchFileChanges(settingsPath, Option.isNone(initialLinkTarget) ? onReady : undefined),
-            linkTargetEvents,
+            watchFileChanges(settingsPath, () => {
+              Deferred.doneUnsafe(rootReady, Effect.void);
+            }),
+            Stream.merge(linkTargetEvents, topologyReady),
           ).pipe(Stream.debounce(Duration.millis(100)));
         }),
       );
