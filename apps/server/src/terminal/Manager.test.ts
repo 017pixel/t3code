@@ -45,6 +45,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "./Manager.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+import packageJson from "../../package.json" with { type: "json" };
 
 vi.mock("effect/SynchronizedRef", async (importOriginal) => {
   const original = await importOriginal<typeof SynchronizedRef>();
@@ -2143,6 +2144,28 @@ it.layer(
           expect(env.COLORTERM).toBe(parentColor);
         }
       }),
+  );
+
+  it.effect("identifies as T3 Code unless the terminal env overrides it", () =>
+    Effect.gen(function* () {
+      const env = Object.freeze({ TERM_PROGRAM: "Apple_Terminal", TERM_PROGRAM_VERSION: "455" });
+      const { manager, ptyAdapter } = yield* createManager(5, { env });
+
+      yield* manager.open(openInput());
+      expect(ptyAdapter.spawnInputs[0]?.env).toMatchObject({
+        TERM_PROGRAM: "t3code",
+        TERM_PROGRAM_VERSION: packageJson.version,
+      });
+      expect(env.TERM_PROGRAM).toBe("Apple_Terminal");
+
+      yield* manager.restart(
+        restartInput({ env: { TERM_PROGRAM: "", TERM_PROGRAM_VERSION: "custom-version" } }),
+      );
+      expect(ptyAdapter.spawnInputs[1]?.env).toMatchObject({
+        TERM_PROGRAM: "",
+        TERM_PROGRAM_VERSION: "custom-version",
+      });
+    }),
   );
 
   it.effect("filters app runtime env variables from terminal sessions", () =>
