@@ -1,9 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off - electron-updater installs synchronously while the app quits.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import type { AppImageUpdater } from "electron-updater";
+import type { InstallOptions } from "electron-updater/out/BaseUpdater.js";
 
 type CopyFile = (from: string, to: string) => void;
 
@@ -103,4 +105,56 @@ export function installAppImageUpdate(input: {
   if (destination !== input.appImageFile) removeObsolete(input.appImageFile);
   removeObsolete(input.installerPath);
   return destination;
+}
+
+// These protected/private members belong to electron-updater 6.8.9. Keep the
+// override at doInstall so BaseUpdater still owns quit handling and errors.
+interface AppImageUpdaterInternals {
+  readonly installerPath: string | null;
+  readonly downloadedUpdateHelper: {
+    readonly downloadedFileInfo: { readonly sha512: string } | null;
+    readonly fileInfo: { readonly info: { readonly size?: number } } | null;
+  } | null;
+  readonly logger: AppImageUpdater["logger"];
+  emit: AppImageUpdater["emit"];
+  spawnLog(command: string, args: Array<string>, env: NodeJS.ProcessEnv): Promise<boolean>;
+  doInstall(options: InstallOptions): boolean;
+}
+
+export function verifyAppImageInstalls(updater: AppImageUpdater, copyFile?: CopyFile): void {
+  const internals = updater as unknown as AppImageUpdaterInternals;
+  internals.doInstall = function (options) {
+    const appImageFile = process.env.APPIMAGE;
+    if (
+      appImageFile === undefined ||
+      !NodePath.isAbsolute(appImageFile) ||
+      appImageFile.includes("\0")
+    ) {
+      throw new Error("APPIMAGE is not a valid absolute path.");
+    }
+    const installerPath = this.installerPath;
+    const sha512 = this.downloadedUpdateHelper?.downloadedFileInfo?.sha512;
+    if (installerPath === null || sha512 === undefined) {
+      throw new Error("No update filepath provided, can't quit and install");
+    }
+    const destination = installAppImageUpdate({
+      appImageFile,
+      installerPath,
+      sha512,
+      size: this.downloadedUpdateHelper?.fileInfo?.info.size,
+      logger: this.logger ?? undefined,
+      ...(copyFile === undefined ? {} : { copyFile }),
+    });
+    if (destination !== appImageFile) {
+      this.emit("appimage-filename-updated", destination);
+    }
+    const env: NodeJS.ProcessEnv = { ...process.env, APPIMAGE_SILENT_INSTALL: "true" };
+    if (options.isForceRunAfter) {
+      void this.spawnLog(destination, [], env);
+    } else {
+      env.APPIMAGE_EXIT_AFTER_INSTALL = "true";
+      NodeChildProcess.execFileSync(destination, [], { env });
+    }
+    return true;
+  };
 }

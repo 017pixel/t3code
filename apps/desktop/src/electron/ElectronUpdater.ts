@@ -4,7 +4,10 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
-import { autoUpdater } from "electron-updater";
+import { AppImageUpdater, autoUpdater } from "electron-updater";
+
+import { makeComponentLogger } from "../app/DesktopObservability.ts";
+import { verifyAppImageInstalls } from "./AppImageInstall.ts";
 
 type AutoUpdater = typeof autoUpdater;
 
@@ -81,92 +84,138 @@ export class ElectronUpdater extends Context.Service<
 >()("@t3tools/desktop/electron/ElectronUpdater") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
-export const make = ElectronUpdater.of({
-  setFeedURL: (options) =>
-    Effect.suspend(() => {
-      autoUpdater.setFeedURL(options);
-      return Effect.void;
-    }),
-  setAutoDownload: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.autoDownload = value;
-      return Effect.void;
-    }),
-  setAutoInstallOnAppQuit: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.autoInstallOnAppQuit = value;
-      return Effect.void;
-    }),
-  setChannel: (channel) =>
-    Effect.suspend(() => {
-      autoUpdater.channel = channel;
-      return Effect.void;
-    }),
-  setAllowPrerelease: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.allowPrerelease = value;
-      return Effect.void;
-    }),
-  allowDowngrade: Effect.sync(() => autoUpdater.allowDowngrade),
-  setAllowDowngrade: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.allowDowngrade = value;
-      return Effect.void;
-    }),
-  setFullChangelog: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.fullChangelog = value;
-      return Effect.void;
-    }),
-  setDisableDifferentialDownload: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.disableDifferentialDownload = value;
-      return Effect.void;
-    }),
-  checkForUpdates: Effect.suspend(() => {
-    const channel = autoUpdater.channel;
-    return Effect.tryPromise({
-      try: () => autoUpdater.checkForUpdates(),
-      catch: (cause) => new ElectronUpdaterCheckForUpdatesError({ channel, cause }),
-    }).pipe(Effect.asVoid);
-  }),
-  downloadUpdate: Effect.suspend(() => {
-    const channel = autoUpdater.channel;
-    return Effect.tryPromise({
-      try: () => autoUpdater.downloadUpdate(),
-      catch: (cause) => new ElectronUpdaterDownloadUpdateError({ channel, cause }),
-    }).pipe(Effect.asVoid);
-  }),
-  quitAndInstall: ({ isSilent, isForceRunAfter }) =>
-    Effect.suspend(() => {
-      const channel = autoUpdater.channel;
-      return Effect.try({
-        try: () => autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
-        catch: (cause) =>
-          new ElectronUpdaterQuitAndInstallError({
-            channel,
-            isSilent,
-            isForceRunAfter,
-            cause,
+export const make = Effect.gen(function* () {
+  const context = yield* Effect.context<never>();
+  const runSync = Effect.runSyncWith(context);
+  const log = makeComponentLogger("desktop-updater");
+  const bridge =
+    (level: "logDebug" | "logInfo" | "logWarning" | "logError") =>
+    (...args: Array<unknown>) => {
+      const message = args.map(String).join(" ");
+      runSync(
+        log[level](message).pipe(
+          Effect.withSpan("desktop.updater", {
+            attributes: { component: "desktop-updater", level },
           }),
-      });
-    }),
-  on: (eventName, listener) => {
-    const eventTarget = autoUpdater as unknown as {
-      on: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
-      removeListener: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
+        ),
+      );
     };
-    const untypedListener = listener as unknown as (...args: Array<unknown>) => void;
-    return Effect.acquireRelease(
-      Effect.sync(() => {
-        eventTarget.on(eventName, untypedListener);
+  let instance: AutoUpdater | undefined;
+  let restoreLogger = () => {};
+  yield* Effect.addFinalizer(() => Effect.sync(() => restoreLogger()));
+
+  const getUpdater = () => {
+    if (instance !== undefined) return instance;
+    const updater = autoUpdater;
+    const previousLogger = updater.logger;
+    updater.logger = {
+      debug: bridge("logDebug"),
+      info: bridge("logInfo"),
+      warn: bridge("logWarning"),
+      error: bridge("logError"),
+    };
+    restoreLogger = () => {
+      updater.logger = previousLogger;
+    };
+    if (updater instanceof AppImageUpdater) {
+      // The dependency's onQuit handler can install after this scope closes.
+      verifyAppImageInstalls(updater);
+    }
+    instance = updater;
+    return updater;
+  };
+
+  return ElectronUpdater.of({
+    setFeedURL: (options) =>
+      Effect.suspend(() => {
+        getUpdater().setFeedURL(options);
+        return Effect.void;
       }),
-      () =>
-        Effect.sync(() => {
-          eventTarget.removeListener(eventName, untypedListener);
-        }),
-    ).pipe(Effect.asVoid);
-  },
+    setAutoDownload: (value) =>
+      Effect.suspend(() => {
+        getUpdater().autoDownload = value;
+        return Effect.void;
+      }),
+    setAutoInstallOnAppQuit: (value) =>
+      Effect.suspend(() => {
+        getUpdater().autoInstallOnAppQuit = value;
+        return Effect.void;
+      }),
+    setChannel: (channel) =>
+      Effect.suspend(() => {
+        getUpdater().channel = channel;
+        return Effect.void;
+      }),
+    setAllowPrerelease: (value) =>
+      Effect.suspend(() => {
+        getUpdater().allowPrerelease = value;
+        return Effect.void;
+      }),
+    allowDowngrade: Effect.sync(() => getUpdater().allowDowngrade),
+    setAllowDowngrade: (value) =>
+      Effect.suspend(() => {
+        getUpdater().allowDowngrade = value;
+        return Effect.void;
+      }),
+    setFullChangelog: (value) =>
+      Effect.suspend(() => {
+        getUpdater().fullChangelog = value;
+        return Effect.void;
+      }),
+    setDisableDifferentialDownload: (value) =>
+      Effect.suspend(() => {
+        getUpdater().disableDifferentialDownload = value;
+        return Effect.void;
+      }),
+    checkForUpdates: Effect.suspend(() => {
+      const updater = getUpdater();
+      const channel = updater.channel;
+      return Effect.tryPromise({
+        try: () => updater.checkForUpdates(),
+        catch: (cause) => new ElectronUpdaterCheckForUpdatesError({ channel, cause }),
+      }).pipe(Effect.asVoid);
+    }),
+    downloadUpdate: Effect.suspend(() => {
+      const updater = getUpdater();
+      const channel = updater.channel;
+      return Effect.tryPromise({
+        try: () => updater.downloadUpdate(),
+        catch: (cause) => new ElectronUpdaterDownloadUpdateError({ channel, cause }),
+      }).pipe(Effect.asVoid);
+    }),
+    quitAndInstall: ({ isSilent, isForceRunAfter }) =>
+      Effect.suspend(() => {
+        const updater = getUpdater();
+        const channel = updater.channel;
+        return Effect.try({
+          try: () => updater.quitAndInstall(isSilent, isForceRunAfter),
+          catch: (cause) =>
+            new ElectronUpdaterQuitAndInstallError({
+              channel,
+              isSilent,
+              isForceRunAfter,
+              cause,
+            }),
+        });
+      }),
+    on: (eventName, listener) =>
+      Effect.suspend(() => {
+        const eventTarget = getUpdater() as unknown as {
+          on: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
+          removeListener: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
+        };
+        const untypedListener = listener as unknown as (...args: Array<unknown>) => void;
+        return Effect.acquireRelease(
+          Effect.sync(() => {
+            eventTarget.on(eventName, untypedListener);
+          }),
+          () =>
+            Effect.sync(() => {
+              eventTarget.removeListener(eventName, untypedListener);
+            }),
+        ).pipe(Effect.asVoid);
+      }),
+  });
 });
 
-export const layer = Layer.succeed(ElectronUpdater, make);
+export const layer = Layer.effect(ElectronUpdater, make);
