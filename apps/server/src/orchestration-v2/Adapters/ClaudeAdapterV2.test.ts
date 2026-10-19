@@ -10601,6 +10601,19 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
+        const readThrough = Effect.fnUntraced(function* (uuid: string) {
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "informational",
+              level: "warning",
+              content: uuid,
+              uuid,
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* Queue.take(harness.systemNoticeReceipts);
+        });
         const objective = "all tests pass";
         const receiptText = (taskId: string) =>
           `<task-notification><task-id>${taskId}</task-id><status>stopped</status><summary>Previous session ended</summary></task-notification>`;
@@ -10642,6 +10655,44 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             isSynthetic: false,
           }),
         );
+        const taskId = "registered-task";
+        const taskStatuses = () =>
+          harness.events.flatMap((event) =>
+            event.type === "subagent.updated" && event.subagent.nativeTaskRef?.nativeId === taskId
+              ? [event.subagent.status]
+              : [],
+          );
+        yield* harness.offerAndWait(
+          makeSubagentTaskStartedFrame({ taskId, toolUseId: "launch-task", uuid: "task-started" }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            ...makeSubagentNotificationFrame({
+              taskId,
+              toolUseId: "launch-task",
+              summary: "Previous session ended",
+              uuid: "task-stopped",
+            }),
+            status: "stopped",
+          }),
+        );
+        yield* harness.offerAndWait(
+          makeSubagentTaskStartedFrame({ taskId, toolUseId: "resume-task", uuid: "task-resumed" }),
+        );
+        yield* readThrough("before-registered-replay");
+        assert.deepEqual(taskStatuses(), ["running", "cancelled", "running"]);
+        yield* harness.offerAndWait(transcript(taskId, "registered-receipt"));
+        yield* harness.offerAndWait(transcript(taskId, "registered-receipt-replayed"));
+        yield* readThrough("after-registered-replay");
+        assert.deepEqual(taskStatuses(), ["running", "cancelled", "running"]);
+        yield* harness.offerAndWait(
+          makeSubagentNotificationFrame({
+            taskId,
+            toolUseId: "resume-task",
+            summary: "Resumed work completed",
+            uuid: "task-completed",
+          }),
+        );
         yield* harness.offerAndWait(wakeTaskStarted);
         yield* harness.offerAndWait(transcript(WAKE_TASK_ID, "shell-receipt"));
         yield* harness.offerAndWait(
@@ -10665,6 +10716,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* harness.offerAndWait(turnOneResult);
         yield* Queue.take(harness.terminalReceipts);
+        assert.deepEqual(taskStatuses(), ["running", "cancelled", "running", "completed"]);
+        assert.deepEqual(
+          providerThreadRosterEvents(harness.events).at(-1)?.providerThread.pendingBackgroundTasks,
+          [],
+        );
         assert.deepEqual(
           harness.events.flatMap((event) =>
             event.type === "subagent.native-task-ended" ? [event.nativeTaskId] : [],
@@ -10688,19 +10744,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             providerTurnOrdinal: 2,
           }),
         );
-        const readThrough = Effect.fnUntraced(function* (uuid: string) {
-          yield* harness.offerAndWait(
-            claudeSdkFrame({
-              type: "system",
-              subtype: "informational",
-              level: "warning",
-              content: uuid,
-              uuid,
-              session_id: WAKE_NATIVE_SESSION,
-            }),
-          );
-          yield* Queue.take(harness.systemNoticeReceipts);
-        });
         const hasReply = () =>
           harness.events.some(
             (event) =>
