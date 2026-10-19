@@ -75,6 +75,8 @@ export interface ProviderEventRouteIdentity {
 export interface InheritedBackgroundTurnItemRoute {
   readonly id: TurnItemId;
   readonly runId: OrchestrationV2Run["id"];
+  /** The item's native task id when it is a provider-native subagent row. */
+  readonly nativeTaskId: string | null;
 }
 
 type ProviderTerminalEvent = Extract<
@@ -137,7 +139,14 @@ export function selectInheritedBackgroundTurnItems(input: {
     settledPriorRunIds.has(turnItem.runId) &&
     backgroundCapableTurnItemTypes.has(turnItem.type) &&
     !isSettledTurnItemStatus(turnItem.status)
-      ? [{ id: turnItem.id, runId: turnItem.runId }]
+      ? [
+          {
+            id: turnItem.id,
+            runId: turnItem.runId,
+            nativeTaskId:
+              turnItem.type === "subagent" ? (turnItem.nativeItemRef?.nativeId ?? null) : null,
+          },
+        ]
       : [],
   );
 }
@@ -369,6 +378,11 @@ export function routeProviderEvent(
   });
 
   switch (event.type) {
+    case "subagent.native-task-ended":
+      // The session pump reconciles durable tasks even between runs; the
+      // owning run still observes the receipt to release inherited background
+      // tracking, without re-ingesting it.
+      return [event.threadId === input.threadId, state];
     case "provider_session.updated":
       return [false, state];
     case "app_thread.created": {
@@ -957,6 +971,18 @@ export const layer: Layer.Layer<
           const inheritedBackgroundTurnItemsById = new Map(
             inheritedBackgroundTurnItems.map((item) => [item.id, item.runId]),
           );
+          // An inherited item settled by a receipt the session pump persisted
+          // outside this run still releases that item's hold on this stream.
+          const inheritedBackgroundTurnItemsByNativeTaskId = new Map<string, Array<TurnItemId>>();
+          for (const item of inheritedBackgroundTurnItems) {
+            if (item.nativeTaskId === null) continue;
+            const ids = inheritedBackgroundTurnItemsByNativeTaskId.get(item.nativeTaskId);
+            if (ids === undefined) {
+              inheritedBackgroundTurnItemsByNativeTaskId.set(item.nativeTaskId, [item.id]);
+            } else {
+              ids.push(item.id);
+            }
+          }
           const eventRouting = yield* Ref.make<ProviderEventRoutingState>(
             makeProviderEventRoutingState({
               identity: routeIdentity,
@@ -1164,6 +1190,20 @@ export const layer: Layer.Layer<
                   });
                 }
               }
+              if (event.type === "subagent.native-task-ended") {
+                // The session pump settled the task outside this run, so its
+                // inherited item must stop holding this stream open.
+                const inherited = inheritedBackgroundTurnItemsByNativeTaskId.get(
+                  event.nativeTaskId,
+                );
+                if (inherited !== undefined) {
+                  yield* Ref.update(activeBackgroundTurnItems, (current) => {
+                    const next = new Set(current);
+                    for (const id of inherited) next.delete(id);
+                    return next;
+                  });
+                }
+              }
             });
           const shouldStopProviderEventIngestion = Effect.gen(function* () {
             if (!(yield* Ref.get(rootTerminalSeen))) {
@@ -1225,7 +1265,10 @@ export const layer: Layer.Layer<
                   event,
                   DateTime.toEpochMillis(yield* DateTime.now),
                 );
-                if (deliveredEvent) {
+                // The session pump persists a native task receipt for every
+                // run; the owning run only observes it so a receipt settled
+                // outside the run releases inherited background tracking.
+                if (deliveredEvent && event.type !== "subagent.native-task-ended") {
                   const rootTerminalAlreadySeen = yield* Ref.get(rootTerminalSeen);
                   const isRootProviderThreadUpdate =
                     event.type === "provider_thread.updated" &&
