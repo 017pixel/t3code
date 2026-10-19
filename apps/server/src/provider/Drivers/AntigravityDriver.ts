@@ -1,7 +1,7 @@
 import { withAgentDeviceEnvironment } from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { AntigravitySettings, ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import {
   NodeRuntimeUnavailableError,
@@ -17,6 +17,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { HttpClient } from "effect/http";
 import type { AcpError } from "effect-acp/errors";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
@@ -53,6 +54,7 @@ import { makeAntigravityAdapterV2 } from "../../orchestration-v2/Adapters/Antigr
 import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeAntigravityProvider } from "../AntigravityProvider.ts";
+import { makeAntigravityUsageProbe } from "../antigravityUsageLimits.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 import {
@@ -74,13 +76,13 @@ export type AntigravityDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
   | FileSystem.FileSystem
+  | HttpClient.HttpClient
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
   | ModelCatalog.ModelCatalog
   | Path.Path
   | ProviderEventLoggers.ProviderEventLoggers;
 
-/** Each instance owns its Google profile. Executable releases are shared by the environment. */
 export const AntigravityDriver: ProviderDriver<
   AntigravitySettings,
   AntigravityDriverEnv,
@@ -95,6 +97,7 @@ export const AntigravityDriver: ProviderDriver<
     Effect.gen(function* () {
       const crypto = yield* Crypto.Crypto;
       const fileSystem = yield* FileSystem.FileSystem;
+      const httpClient = yield* HttpClient.HttpClient;
       const path = yield* Path.Path;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const host = yield* ProviderHost.ProviderHost;
@@ -113,8 +116,12 @@ export const AntigravityDriver: ProviderDriver<
         gcpLocation: settings.gcpLocation,
       };
       const authConfigIssue = antigravityAuthConfigIssue(auth);
-      const processEnvironment = mergeProviderInstanceEnvironment(environment);
-      const userHome = resolveAntigravityUserHome(yield* HostProcessPlatform, processEnvironment);
+      const processEnvironment = yield* mergeProviderInstanceEnvironment(environment);
+      const userHome = resolveAntigravityUserHome(
+        yield* HostProcess.Platform,
+        processEnvironment,
+        yield* HostProcess.HomeDirectory,
+      );
       const directories = yield* resolveAntigravityInstanceDirectories(
         host.paths.stateDir,
         instanceId,
@@ -132,9 +139,6 @@ export const AntigravityDriver: ProviderDriver<
         ),
       );
       const profileDirectory = directories.profile;
-      // No process of this instance exists yet, so every runtime temp
-      // directory it owns is an orphan from a killed server. Older builds
-      // unpacked inside the profile.
       for (const directory of [
         directories.runtimeTemp,
         path.join(profileDirectory, "antigravity-acp", "tmp"),
@@ -334,14 +338,9 @@ export const AntigravityDriver: ProviderDriver<
         usesBrowser: antigravityAuthUsesBrowser(auth.authMethod),
       });
 
-      // Kick the TTL-gated manifest refresh alongside the health check, as
-      // Codex and Claude do. Without it an environment that only runs
-      // Antigravity would keep classifying against a stale disk cache.
       // The probe must not spawn. The agent is a PyInstaller one-file bundle
       // that unpacks about 1 GB per launch, and the health check runs every
-      // minute. Resolving the install on disk is enough to report installed
-      // and version. The response below is synthetic: only agentInfo.version
-      // is read from it. Sessions and manual refreshes still spawn.
+      // minute.
       const probe = Effect.gen(function* () {
         yield* modelCatalog.refreshInBackground;
         if (authConfigIssue !== null) {
@@ -380,9 +379,20 @@ export const AntigravityDriver: ProviderDriver<
         };
       });
 
+      const usage = yield* makeAntigravityUsageProbe({
+        profileDirectory,
+        authMethod: auth.authMethod,
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+      );
       const provider = yield* makeAntigravityProvider(settings, {
         stampIdentity: classifyModels,
         probe,
+        probeUsage: usage.probe,
+        clearUsage: usage.clear,
         auth: { type: auth.authMethod, label: antigravityAuthLabel(auth.authMethod) },
         supportsTextGeneration: isAntigravityTextGenerationAvailable(profileDirectory).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
