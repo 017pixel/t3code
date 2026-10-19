@@ -366,7 +366,11 @@ export default function OfficeViewer(props: {
         <>
           <FileSurfaceNotice>
             Cell values only. Charts, images, and formatting are not shown.
-            {sheet.truncated ? " Limited to 250,000 rows and 1,024 columns." : ""}
+            {sheet.truncated
+              ? props.kind === "ods"
+                ? " Limited to 500 rows and 50 columns."
+                : " Limited to 250,000 rows and 1,024 columns."
+              : ""}
           </FileSurfaceNotice>
           <VirtualTablePreview
             key={page}
