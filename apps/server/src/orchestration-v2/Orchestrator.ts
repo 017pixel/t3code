@@ -10270,7 +10270,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const outcome = runOutcome(childRun);
       const terminalStatus = delegatedTaskTerminalStatus(outcome);
       if (terminalStatus === null) {
-        if (childRun.delegatedTaskId === undefined || childRun.id !== options.syncRunId) return;
+        if (
+          (childRun.delegatedTaskId === undefined || childRun.id !== options.syncRunId) &&
+          !(steered && taskRuns.some((run) => run.id === options.syncRunId))
+        )
+          return;
         const task = options.task;
         const status: OrchestrationV2Subagent["status"] =
           childRun.status === "queued"
@@ -10382,11 +10386,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (transfer.sourcePoint.runId === childRun.id ||
             (options.task.id === forkedFrom.nodeId && transfer.sourcePoint.runId === undefined)),
       );
-      // A steered task shares its run's result transfer, so only its own result marks it settled.
+      // A promoted task may share a transfer before its own result is settled.
       if (steered ? task.result !== null : existingResultTransfer !== undefined) {
         return;
       }
 
+      const sharesResultTransfer =
+        steered && (childRun.delegatedTaskId !== undefined || existingResultTransfer !== undefined);
       const now = yield* DateTime.now;
       const result = subagentResultForRun(childProjection, { ...childRun, status: outcome });
       const parentRun =
@@ -10429,9 +10435,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : parentProjection.providerThreads.find(
               (candidate) => candidate.id === parentRun.providerThreadId,
             );
-      // The steered run's own task publishes that run's result to the parent's context.
+      // A joined run without a task needs its first promoted task to publish the result.
       const resultHandoff: OrchestrationV2ContextHandoff | null =
-        steered ||
+        sharesResultTransfer ||
         parentRun === undefined ||
         childProviderThread === undefined ||
         parentProviderThread === undefined
@@ -10581,7 +10587,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 payload: resultHandoff,
               },
             ]),
-        ...(steered
+        ...(sharesResultTransfer
           ? []
           : [
               {
