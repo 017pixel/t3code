@@ -1860,8 +1860,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       );
     });
 
-    // A shell request listed after a reconnect can arrive before its tool call's input.
+    // A shell request listed after a reconnect can arrive before its tool call's input. Tool
+    // ids are only unique per session, and an answer in flight keeps the card it answered.
     const showShellCommand = Effect.fnUntraced(function* (
+      sessionId: string,
       toolId: string,
       input: Record<string, unknown>,
     ) {
@@ -1870,7 +1872,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       for (const [requestId, entry] of pending) {
         const { native, item } = entry;
         if (native.type !== "permission" || native.action !== "shell") continue;
-        if (native.toolId !== toolId || item.type !== "approval_request") continue;
+        if (entry.sessionId !== sessionId || native.toolId !== toolId) continue;
+        if (entry.answering || item.type !== "approval_request") continue;
         if (item.prompt === command) continue;
         const updated = { ...item, prompt: command, title: null, updatedAt: yield* DateTime.now };
         pending.set(requestId, { ...entry, item: updated });
@@ -2023,7 +2026,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const tool = turn.tools.get(event.data.id);
           if (tool !== undefined) {
             tool.input = event.data.input;
-            yield* showShellCommand(event.data.id, tool.input);
+            yield* showShellCommand(event.data.sessionID, event.data.id, tool.input);
           }
           return yield* emitTool(state, turn, event.data.id, "running");
         }
@@ -2474,6 +2477,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const tool = turn.tools.get(part.id)!;
           if (typeof part.state.input === "object" && part.state.input !== null) {
             tool.input = part.state.input as Record<string, unknown>;
+            yield* showShellCommand(sessionId, part.id, tool.input);
           }
           if (part.state.status === "completed") {
             yield* emitTool(state, turn, part.id, "completed", {
