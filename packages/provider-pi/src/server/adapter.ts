@@ -2205,6 +2205,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               ? { type: "switch_session", sessionPath: resumeId }
               : { type: "new_session" },
           );
+          sessionApprovals.clear();
           if (recordField(result, "cancelled") === true) {
             return yield* protocolError("A Pi extension cancelled the session switch");
           }
@@ -2910,6 +2911,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               (barrier) =>
                 Effect.gen(function* () {
                   const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
+                  sessionApprovals.clear();
                   if (recordField(forkData, "cancelled") === true)
                     return yield* protocolError("A Pi extension cancelled the session fork");
                   const forkState = yield* request({ type: "get_state" }).pipe(

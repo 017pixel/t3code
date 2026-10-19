@@ -3200,6 +3200,53 @@ describe("PiAdapterV2", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    it.effect.each(["switch", "rollback"] as const)(
+      "revokes grants answered during a %s lifecycle hook",
+      (boundary) =>
+        Effect.gen(function* () {
+          const { fake, runtime, providerThread, grant, askAgain } = yield* setup;
+          const command = boundary === "switch" ? "switch_session" : "fork";
+          fake.deferNextLifecycle(command);
+          const operation = yield* (
+            boundary === "switch"
+              ? runtime.resumeThread({ providerThread })
+              : runtime.rollbackThread({
+                  providerThread,
+                  target: rollbackTarget,
+                  providerThreadTurns: [
+                    {
+                      id: ProviderTurnId.make("discarded-turn"),
+                      providerThreadId: providerThread.id,
+                      nodeId: NodeId.make("discarded-node"),
+                      runAttemptId: null,
+                      nativeTurnRef: {
+                        driver: PI_PROVIDER,
+                        nativeId: "user-entry",
+                        strength: "strong",
+                      },
+                      ordinal: 1,
+                      status: "completed",
+                      startedAt: null,
+                      completedAt: null,
+                    },
+                  ],
+                })
+          ).pipe(Effect.forkScoped);
+          const request = yield* fake.takeRequest(command);
+          yield* grant;
+          fake.queueState({ sessionFile: "/fake/other.jsonl" });
+          yield* fake.emit({
+            type: "response",
+            id: request["id"],
+            command,
+            success: true,
+            data: { cancelled: false },
+          });
+          yield* Fiber.join(operation);
+          assert.equal(yield* askAgain, "pending");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
     it.effect(
       "does not resolve a cancelled dialog or restore its grant after an in-flight answer",
       () =>
