@@ -81,7 +81,7 @@ let allowMetadata = false;
 const metadataResults = Atom.family((_key: string) =>
   Atom.make<AsyncResult.AsyncResult<FilesystemEntryMetadata | null, Error>>(
     AsyncResult.initial(true),
-  ),
+  ).pipe(Atom.keepAlive),
 );
 function metadataAtom(path: string) {
   return metadataResults(JSON.stringify([threadRef.environmentId, threadRef.threadId, path]));

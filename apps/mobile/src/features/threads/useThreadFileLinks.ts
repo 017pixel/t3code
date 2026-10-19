@@ -7,7 +7,7 @@ import {
 } from "@t3tools/shared/markdownLinks";
 import { collectThreadFilePaths, createThreadFilePathIndex } from "@t3tools/shared/threadFilePaths";
 import { Atom } from "effect/reactivity";
-import { createContext, useContext, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentScope, usePreparedConnection } from "../../state/session";
@@ -60,7 +60,10 @@ export function useThreadFileLinks(ref: ScopedThreadRef, cwd: string | null) {
     const current = generation.current;
     return () => generation.current === current;
   };
-  const scope = { environmentId, threadId, cwd, connection, canRead, enabled };
+  const scope = useMemo(
+    () => ({ environmentId, threadId, cwd, connection, canRead, enabled }),
+    [environmentId, threadId, cwd, connection, canRead, enabled],
+  );
   return { ...scope, index, capture, scope };
 }
 
