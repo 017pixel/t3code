@@ -65,8 +65,9 @@ const newer = {
 function usage(
   environments: readonly (Omit<typeof mac, "summary"> & {
     summary: UsageSummary | null;
-    error?: string;
+    error?: string | null;
     isConnected?: boolean;
+    canReadDiagnostics?: boolean;
   })[],
 ) {
   const merged = mergeUsage(
@@ -136,12 +137,16 @@ describe("usage availability after merging selected environments", () => {
         label: "Failed server",
         summary: null,
         error: "Request failed",
+        isConnected: true,
+        canReadDiagnostics: true,
       },
       {
         environmentId: EnvironmentId.make("loading"),
         label: "Loading server",
         summary: null,
         isConnected: true,
+        error: null,
+        canReadDiagnostics: false,
       },
       {
         environmentId: EnvironmentId.make("offline"),
@@ -165,8 +170,26 @@ describe("usage availability after merging selected environments", () => {
       { environmentId: "offline", message: "Connect to Offline server to load its usage." },
     ]);
 
-    for (const selected of [environments.slice(2), environments.slice(1)]) {
-      const pending = usage(selected).availability;
+    const denied = usage([
+      {
+        ...mac,
+        summary: null,
+        isConnected: true,
+        canReadDiagnostics: false,
+        error: "This connection does not have access to diagnostics and usage.",
+      },
+    ]).availability;
+    expect(denied.isLoading).toBe(false);
+    expect(denied.hasCompatibleSummary).toBe(false);
+    expect(denied.canRetry).toBe(false);
+
+    for (const selected of [environments.slice(3), environments.slice(2), environments.slice(1)]) {
+      const { merged, availability: pending } = usage(selected);
+      expect(merged.costUsd).toBe(0);
+      expect(merged.totalTokens).toBe(0);
+      expect(pending.canRetry).toBe(
+        selected.some((environment) => environment.environmentId === "failed"),
+      );
       expect(pending.isLoading).toBe(true);
       expect(pending.hasCompatibleSummary).toBe(false);
       expect(pending.notices).toEqual(
