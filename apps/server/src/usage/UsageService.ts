@@ -350,9 +350,19 @@ export const make = Effect.gen(function* () {
       for (const { dir: directory, transcriptDirs, fileName } of directories.flat()) {
         const sourceKey = provider + "\0" + directory;
         const previous = sourceCache.get(sourceKey);
-        const dir = yield* fileSystem
-          .realPath(directory)
-          .pipe(Effect.orElseSucceed(() => previous?.dir ?? directory));
+        const dir = yield* fileSystem.realPath(directory).pipe(
+          Effect.orElseSucceed(() => {
+            if (previous !== undefined) return previous.dir;
+            // Older caches identified a source by its transcript root, before roots were grouped.
+            for (const root of transcriptDirs ?? []) {
+              const cached = sourceCache.get(provider + "\0" + root);
+              if (cached !== undefined && isWithinDirectory(root, directory)) {
+                return path.resolve(cached.dir, path.relative(root, directory));
+              }
+            }
+            return directory;
+          }),
+        );
         const resolvedRoots = Object.fromEntries(
           yield* Effect.forEach(
             transcriptDirs ?? [directory],
