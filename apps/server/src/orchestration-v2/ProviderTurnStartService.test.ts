@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextHandoffId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -321,9 +322,7 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make(
-      "historyReadFailureAfterFallback" in input ? "claudeAgent" : "codex",
-    ),
+    driver: ProviderDriverKind.make("codex"),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -623,13 +622,31 @@ function makeLocalCommandHarness(input: {
       ),
     }),
   );
+  const getTurnStartHistory = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getTurnStartHistory"]>(
+    () =>
+      Effect.fail(
+        new ProjectionStore.ProjectionStoreReadError({
+          threadId,
+          cause: input.historyReadFailureAfterFallback,
+        }),
+      ),
+  );
   const layer = ProviderTurnStart.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
-          prepareProviderHandoff: () => Effect.die("history read must fail first"),
+        ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer)),
+        Layer.mock(EventSink.EventSinkV2)({
+          writeIfRunCurrent,
+          write: ({ events: incoming }) =>
+            Effect.sync(() => {
+              for (const event of incoming) {
+                expect(isDomainEvent(event)).toBe(true);
+                events.push(event);
+                projection = ProjectionStore.applyToProjection(projection, event);
+              }
+              return [];
+            }),
         }),
-        Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
         IdAllocator.layer,
         layerWorktreeLocation(input.worktreesDir),
         input.fileSystem === undefined
@@ -655,13 +672,7 @@ function makeLocalCommandHarness(input: {
                   (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
               ),
             }),
-          getTurnStartHistory: () =>
-            Effect.fail(
-              new ProjectionStore.ProjectionStoreReadError({
-                threadId,
-                cause: input.historyReadFailureAfterFallback,
-              }),
-            ),
+          getTurnStartHistory,
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open }),
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
@@ -675,6 +686,7 @@ function makeLocalCommandHarness(input: {
   return {
     getThreadRecords,
     getTurnStartContext,
+    getTurnStartHistory,
     setProjection: (next: OrchestrationV2ThreadProjection) => {
       projection = next;
     },
@@ -1033,7 +1045,10 @@ effectIt.effect(
         historyReadFailureAfterFallback: new Error("database unavailable"),
       });
 
-      const error = yield* harness.start.pipe(Effect.flip);
+      const result = yield* harness.start.pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      if (result._tag !== "Failure") return;
+      const error = result.failure;
 
       expect(error._tag).toBe("ProviderTurnStartError");
       expect((error.cause as { _tag?: string } | undefined)?._tag).toBe("ProjectionStoreReadError");
@@ -1180,5 +1195,101 @@ effectIt.effect("preserves the saved Codex conversation when native resume fails
     expect(harness.projection().runs.at(-1)?.status).toBe("failed");
     expect(harness.projection().turnItems.some((item) => item.type === "error")).toBe(true);
     expect(harness.events.some((event) => event.type === "context-handoff.updated")).toBe(false);
+  }),
+);
+
+effectIt.effect("recovers uncertain Codex history delivery in a fresh native conversation", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      historyReadFailureAfterFallback: undefined,
+    });
+    const projection = harness.projection();
+    const original = projection.providerThreads.at(-1)!;
+    const run = projection.runs.at(-1)!;
+    const nativeThreadRef = {
+      ...original.nativeThreadRef!,
+      nativeId: "fresh-after-uncertain-delivery",
+    };
+    const pending = {
+      id: ContextHandoffId.make("uncertain-native-injection"),
+      transferId: null,
+      threadId: projection.thread.id,
+      targetRunId: run.id,
+      fromProviderThreadIds: [original.id],
+      toProviderThreadId: original.id,
+      coveredRunOrdinals: { from: 1, to: 1 },
+      strategy: "full_thread_summary" as const,
+      status: "ready" as const,
+      summaryMessageId: null,
+      summaryText: "Retain the violet release marker.",
+      delivery: {
+        nativeThreadId: original.nativeThreadRef!.nativeId!,
+        status: "pending" as const,
+        itemIds: [],
+      },
+      createdByProviderInstanceId: null,
+      createdAt: projection.updatedAt,
+      updatedAt: projection.updatedAt,
+    };
+    harness.setProjection({ ...projection, contextHandoffs: [pending] });
+    harness.getTurnStartHistory.mockImplementation(() => Effect.succeed([]));
+    const resumeThread = vi.fn(() => Effect.succeed(original));
+    const ensureThread = vi.fn((input: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) => {
+      expect(input.existingProviderThread?.nativeThreadRef).toBeNull();
+      return Effect.succeed({ ...original, nativeThreadRef });
+    });
+    const startTurn = vi.fn<ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"]>(
+      () => Effect.void,
+    );
+    harness.open.mockReturnValue(
+      Effect.succeed({
+        driver: original.driver,
+        providerSession: {
+          id: original.providerSessionId,
+          driver: original.driver,
+          providerInstanceId: original.providerInstanceId,
+          status: "ready",
+          cwd: "/tmp/native-account-command",
+          model: run.modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: projection.updatedAt,
+          updatedAt: projection.updatedAt,
+          lastError: null,
+        },
+        resumeThread,
+        ensureThread,
+        startTurn,
+      } as never),
+    );
+    harness.startRootRun.mockImplementation((input) =>
+      input.session
+        .startTurn({
+          appThread: input.appThread,
+          threadId: input.appThread.id,
+          runId: input.run.id,
+          runOrdinal: input.run.ordinal,
+          rootNodeId: input.rootNode.id,
+          attemptId: input.attemptId,
+          providerTurnOrdinal: input.providerTurnOrdinal,
+          providerThread: input.providerThread,
+          message: input.message,
+          modelSelection: input.modelSelection,
+          runtimePolicy: input.runtimePolicy,
+        })
+        .pipe(Effect.orDie),
+    );
+
+    yield* harness.start;
+
+    expect(harness.projection().runs.at(-1)?.status).toBe("running");
+    expect(resumeThread).not.toHaveBeenCalled();
+    expect(ensureThread).toHaveBeenCalledOnce();
+    expect(startTurn).toHaveBeenCalledOnce();
+    expect(startTurn.mock.calls[0]?.[0].providerThread.nativeThreadRef).toEqual(nativeThreadRef);
+    expect(startTurn.mock.calls[0]?.[0].message.text).toContain("violet release marker");
+    expect(
+      harness.projection().contextHandoffs.find((handoff) => handoff.id === pending.id)?.delivery,
+    ).toMatchObject({ nativeThreadId: nativeThreadRef.nativeId, status: "inline" });
   }),
 );

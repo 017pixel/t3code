@@ -31,6 +31,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import { CommandPolicyCapabilityUnsupportedError } from "../CommandPolicy.ts";
@@ -1832,6 +1833,268 @@ describe("orchestration v2 provider switching", () => {
         );
       }),
     ),
+  );
+
+  it.effect(
+    "recovers a same-target account switch after native children outlast detach retries",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const name = "account-switch-child-recovery";
+          const cwd = yield* checkpointWorkspace(name);
+          const peerId = ThreadId.make(`${name}:peer`);
+          const targetSelection = {
+            ...CODEX_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("codex-recovery-target"),
+          };
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const childFinished = yield* Deferred.make<void>();
+          const peerStarted = yield* Deferred.make<void>();
+          const unloadStarted = yield* Deferred.make<void>();
+          const confirmUnload = yield* Deferred.make<void>();
+          const sourceLoaded = new Set<ThreadId>();
+          const closedSessions: ProviderInstanceId[] = [];
+          const operations: string[] = [];
+          const nativeStarts: ThreadId[] = [];
+          let targetResumeAttempts = 0;
+          const adapters = [CODEX_MODEL_SELECTION, targetSelection].map((selection) => {
+            const source = selection.instanceId === CODEX_MODEL_SELECTION.instanceId;
+            const base = makeTestAdapter({
+              instanceId: selection.instanceId,
+              driver: CODEX_DRIVER,
+              capabilities: CodexProviderCapabilitiesV2,
+              modelSelection: selection,
+              responseByRunOrdinal: {},
+              capturedTurns,
+            });
+            return {
+              ...base,
+              openSession: (input) =>
+                Effect.gen(function* () {
+                  const runtime = yield* base.openSession(input);
+                  yield* Effect.addFinalizer(() =>
+                    Effect.sync(() => {
+                      closedSessions.push(selection.instanceId);
+                    }),
+                  );
+                  return {
+                    ...runtime,
+                    hasPendingBackgroundWorkForThread: (thread) =>
+                      Effect.gen(function* () {
+                        return (
+                          source &&
+                          (thread.appThreadId === peerId ||
+                            (thread.appThreadId === threadId &&
+                              !(yield* Deferred.isDone(childFinished))))
+                        );
+                      }),
+                    ensureThread: (request) =>
+                      runtime.ensureThread(request).pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => {
+                            nativeStarts.push(request.threadId);
+                            if (source) sourceLoaded.add(request.threadId);
+                          }),
+                        ),
+                      ),
+                    unloadThread: ({ providerThread }) =>
+                      Effect.gen(function* () {
+                        assert.isTrue(source);
+                        assert.equal(
+                          providerThread.appThreadId,
+                          threadId,
+                          "the busy peer must stay loaded",
+                        );
+                        assert.isTrue(
+                          yield* Deferred.isDone(childFinished),
+                          "the native child must finish first",
+                        );
+                        yield* Deferred.succeed(unloadStarted, undefined);
+                        yield* Deferred.await(confirmUnload);
+                        sourceLoaded.delete(threadId);
+                        operations.push("source-closed");
+                      }),
+                    resumeThread: (request) =>
+                      Effect.gen(function* () {
+                        if (!source) {
+                          targetResumeAttempts += 1;
+                          if (sourceLoaded.has(threadId)) {
+                            return yield* new ProviderAdapter.ProviderAdapterResumeThreadError({
+                              driver: CODEX_DRIVER,
+                              providerSessionId: input.providerSessionId,
+                              providerThreadId: request.providerThread.id,
+                              cause: "native writer is still loaded by account A",
+                            });
+                          }
+                          operations.push("target-resumed");
+                        }
+                        return yield* runtime.resumeThread(request);
+                      }),
+                    startTurn: (turn) =>
+                      turn.threadId === peerId
+                        ? Deferred.succeed(peerStarted, undefined).pipe(Effect.asVoid)
+                        : runtime.startTurn(turn),
+                  } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
+                }),
+            } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+          });
+          const registry = Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, {
+            get: (id) => Effect.succeed(adapters.find((adapter) => adapter.instanceId === id)!),
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CODEX_DRIVER,
+                continuationKey: "codex:shared-native-account-history",
+                enabled: true,
+                capabilities: CodexProviderCapabilitiesV2,
+              }),
+          });
+          const databaseLayer = SqlitePersistence.layerMemory;
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const outbox = yield* EffectOutbox.EffectOutboxV2;
+            const dispatch = (id: ThreadId, ordinal: number, selection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(`${id}:dispatch:${ordinal}`),
+                threadId: id,
+                messageId: MessageId.make(`${id}:message:${ordinal}`),
+                text: `Continue ${ordinal}`,
+                attachments: [],
+                modelSelection: selection,
+                dispatchMode: { type: "start_immediately" },
+                createdBy: "user",
+                creationSource: "web",
+              });
+            const settle = (ordinal: number, selection: ModelSelection) =>
+              Effect.gen(function* () {
+                const terminal = yield* orchestrator.streamStoredEvents.pipe(
+                  Stream.filter(
+                    ({ event }) =>
+                      event.type === "run.updated" &&
+                      event.threadId === threadId &&
+                      event.payload.ordinal === ordinal &&
+                      ["completed", "failed"].includes(event.payload.status),
+                  ),
+                  Stream.runHead,
+                  Effect.forkScoped,
+                );
+                yield* dispatch(threadId, ordinal, selection);
+                // Exhaust both the detach and dependent start budgets before the child finishes.
+                for (let attempt = 0; attempt < 9; attempt += 1) {
+                  if (attempt > 0) yield* TestClock.adjust("1 second");
+                  yield* worker.drain();
+                }
+                yield* Fiber.join(terminal);
+                yield* worker.drain();
+                return yield* orchestrator.getThreadProjection(threadId);
+              });
+            for (const id of [threadId, peerId]) {
+              yield* orchestrator.dispatch({
+                type: "thread.create",
+                commandId: CommandId.make(`${id}:create`),
+                threadId: id,
+                projectId,
+                title: name,
+                modelSelection: CODEX_MODEL_SELECTION,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: cwd,
+                createdBy: "user",
+                creationSource: "web",
+              });
+            }
+            yield* dispatch(peerId, 1, CODEX_MODEL_SELECTION);
+            yield* worker.drain();
+            yield* Deferred.await(peerStarted);
+            const original = yield* settle(1, CODEX_MODEL_SELECTION);
+            const originalThread = original.providerThreads.find(
+              (thread) => thread.id === original.thread.activeProviderThreadId,
+            )!;
+            assert.equal(original.runs[0]?.status, "completed");
+            const failed = yield* settle(2, targetSelection);
+            const detach = (yield* outbox.listByCommandId(
+              CommandId.make(`${threadId}:dispatch:2`),
+            )).find((effect) => effect.request.type === "provider-session.detach");
+            assert.equal(detach?.status, "failed");
+            assert.equal(detach?.attemptCount, 5);
+            assert.include(detach?.lastError ?? "", "ProviderSessionBackgroundWorkError");
+            assert.equal(failed.runs.at(-1)?.status, "failed");
+            assert.deepEqual(failed.thread.modelSelection, targetSelection);
+            assert.equal(
+              failed.providerThreads.find(
+                (thread) => thread.id === failed.thread.activeProviderThreadId,
+              )?.providerInstanceId,
+              targetSelection.instanceId,
+            );
+            assert.isTrue(sourceLoaded.has(threadId));
+            assert.isFalse(yield* Deferred.isDone(unloadStarted));
+            assert.isEmpty(operations);
+            assert.isEmpty(closedSessions);
+
+            yield* Deferred.succeed(childFinished, undefined);
+            const previousResumeAttempts = targetResumeAttempts;
+            const retry = yield* settle(3, targetSelection).pipe(Effect.forkScoped);
+            const milestone = yield* Effect.raceFirst(
+              Fiber.join(retry).pipe(Effect.as("settled")),
+              Deferred.await(unloadStarted).pipe(Effect.as("unloading")),
+            );
+            if (milestone === "unloading") {
+              assert.isTrue(sourceLoaded.has(threadId));
+              assert.equal(
+                targetResumeAttempts,
+                previousResumeAttempts,
+                "target resume must wait for confirmed source closure",
+              );
+              yield* Deferred.succeed(confirmUnload, undefined);
+            }
+            const recovered = yield* Fiber.join(retry);
+            assert.isTrue(sourceLoaded.has(peerId));
+            assert.isEmpty(closedSessions);
+            const peer = yield* orchestrator.getThreadProjection(peerId);
+            assert.equal(peer.runs[0]?.status, "running");
+            assert.equal(
+              peer.providerThreads[0]?.providerSessionId,
+              originalThread.providerSessionId,
+            );
+            assert.deepEqual(
+              nativeStarts,
+              [peerId, threadId],
+              "no replacement native conversation",
+            );
+            assert.isEmpty(recovered.contextHandoffs);
+            assert.isEmpty(recovered.contextTransfers);
+            assert.deepEqual(
+              recovered.providerThreads.find(
+                (thread) => thread.id === recovered.thread.activeProviderThreadId,
+              )?.nativeThreadRef,
+              originalThread.nativeThreadRef,
+            );
+            assert.equal(
+              recovered.runs.at(-1)?.status,
+              "completed",
+              "a same-target message must recover after the native child finishes",
+            );
+            assert.deepEqual(operations, ["source-closed", "target-resumed"]);
+            assert.deepEqual(
+              (yield* Ref.get(capturedTurns)).map((turn) => turn.text),
+              ["Continue 1", "Continue 3"],
+            );
+          }).pipe(
+            Effect.provide(
+              Layer.merge(
+                ProviderReplayHarness.layerWithRegistry({ name }, registry, {
+                  databaseLayer,
+                  runEffectWorker: false,
+                }),
+                EffectOutbox.layer.pipe(Layer.provide(databaseLayer)),
+              ),
+            ),
+          );
+        }),
+      ),
   );
 
   it.live("resumes a queued account switch without requiring a portable handoff", () =>
