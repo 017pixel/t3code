@@ -495,11 +495,32 @@ export function buildBoundedThreadProjection(input: {
   };
   const latestLocalTurnOrdinal = computeLatestLocalTurnOrdinal(input.projection.turnItems);
 
+  const promptByRunId = new Map<string, OrchestrationV2ProjectedTurnItem>();
+  const unbudgetedMessages = new Map(
+    input.viewportWindow ? controlProjection.messages.map((message) => [message.id, message]) : [],
+  );
+  if (input.viewportWindow) {
+    for (const row of controlProjection.visibleTurnItems) {
+      if (
+        row.item.runId != null &&
+        !promptByRunId.has(row.item.runId) &&
+        (isThreadHistoryTurnStart(row.item) || row.item.type === "notification")
+      ) {
+        promptByRunId.set(row.item.runId, row);
+      }
+    }
+  }
   const dependencyReserve = (() => {
     let reserve = 0;
     for (const item of controlProjection.turnItems) {
       if (item.type === "run_interrupt_request") {
         reserve += bytesOfJson(item);
+      }
+    }
+    if (input.viewportWindow) {
+      for (const message of messagesForBoundedProjection(controlProjection, [])) {
+        reserve += bytesOfJson(message);
+        unbudgetedMessages.delete(message.id);
       }
     }
     return reserve;
@@ -522,27 +543,37 @@ export function buildBoundedThreadProjection(input: {
     maxEncodedBytes: windowBudget,
   };
 
+  const budgetedRowIds = new Set<TurnItemId>();
+  const chargeRow = (row: OrchestrationV2ProjectedTurnItem) => {
+    if (budgetedRowIds.has(row.sourceItemId)) return 0;
+    budgetedRowIds.add(row.sourceItemId);
+    let cost = projectedRowBoundedSnapshotEncodedBytes(row, threadId);
+    if (isLocalProjectedRow(controlProjection, row) && "messageId" in row.item) {
+      const message = unbudgetedMessages.get(row.item.messageId);
+      if (message !== undefined) {
+        cost += bytesOfJson(message);
+        unbudgetedMessages.delete(message.id);
+      }
+    }
+    return cost;
+  };
   const window = selectRecentTimelineWindow({
     items: controlProjection.visibleTurnItems,
     snapshotSequence: input.snapshotSequence,
     policy: windowPolicy,
-    rowEncodedBytes: (row) => projectedRowBoundedSnapshotEncodedBytes(row, threadId),
+    rowEncodedBytes: (row) => {
+      if (!input.viewportWindow) return projectedRowBoundedSnapshotEncodedBytes(row, threadId);
+      // Charge a run's prompt with its first admitted row, even when the prompt is outside the tail.
+      const cost = chargeRow(row);
+      const prompt = row.item.runId == null ? undefined : promptByRunId.get(row.item.runId);
+      return cost + (prompt === undefined ? 0 : chargeRow(prompt));
+    },
   });
   const windowRunIds = new Set(window.items.map(({ item }) => item.runId));
   const visibleItemIds = new Set(window.items.map((row) => row.sourceItemId));
-  const prompts = input.viewportWindow
-    ? controlProjection.visibleTurnItems.filter((row) => {
-        if (
-          row.item.runId == null ||
-          !windowRunIds.has(row.item.runId) ||
-          !(isThreadHistoryTurnStart(row.item) || row.item.type === "notification")
-        ) {
-          return false;
-        }
-        windowRunIds.delete(row.item.runId);
-        return !visibleItemIds.has(row.sourceItemId);
-      })
-    : [];
+  const prompts = [...promptByRunId.values()].filter(
+    (row) => windowRunIds.has(row.item.runId) && !visibleItemIds.has(row.sourceItemId),
+  );
   // The cursor stays at the row window so paging fills the gap below its prompt.
   for (const prompt of prompts) visibleItemIds.add(prompt.sourceItemId);
   const visibleTurnItems = renumberPositions(
