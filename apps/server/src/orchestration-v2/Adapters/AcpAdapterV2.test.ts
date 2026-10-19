@@ -2915,7 +2915,7 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.effect("replaces the ACP session and clears conversation state on rollback", () =>
+  it.effect("clears rollback snapshots without session/load", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -2935,11 +2935,30 @@ describe("AcpAdapterV2", () => {
         authorizationHeader: "Bearer rollback-target-token",
         browserToolsAvailable: false,
       });
+      const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
       const runtimeInputs: Array<AcpAdapterV2RuntimeInput> = [];
       const makeRuntime = makeMockRuntime({
         childProcessSpawner,
         mockAgentPath,
         environment: { T3_ACP_PROMPT_DELAY_MS: "100" },
+        protocolEvents,
+        wrapRuntime: (runtime, runtimeOrdinal) => ({
+          ...runtime,
+          start: () =>
+            runtime.start().pipe(
+              Effect.map((started) => ({
+                ...started,
+                sessionId: `${started.sessionId}-${runtimeOrdinal}`,
+                initializeResult: {
+                  ...started.initializeResult,
+                  agentCapabilities: {
+                    ...started.initializeResult.agentCapabilities,
+                    loadSession: false,
+                  },
+                },
+              })),
+            ),
+        }),
       });
       const adapter = yield* makeAcpAdapterV2({
         instanceId,
@@ -3011,6 +3030,7 @@ describe("AcpAdapterV2", () => {
         if (event.type === "turn.terminal" && event.providerTurnId === firstProviderTurnId) break;
       }
       const snapshotBeforeRollback = yield* runtime.readThreadSnapshot({ providerThread });
+      assert.isNotEmpty(snapshotBeforeRollback.messages);
 
       const rolledBack = yield* runtime.rollbackThread({
         providerThread: { ...providerThread, appThreadId: rollbackThreadId },
@@ -3022,6 +3042,7 @@ describe("AcpAdapterV2", () => {
         },
       });
       assert.isString(rolledBack.providerThread.nativeThreadRef?.nativeId);
+      assert.notEqual(rolledBack.providerThread.nativeThreadRef?.nativeId, firstSessionId);
       assert.deepEqual(rolledBack.providerTurns, []);
       assert.equal(
         runtimeInputs[1]?.processEnvironment?.T3_ACP_MCP_AUTHORIZATION,
@@ -3044,6 +3065,10 @@ describe("AcpAdapterV2", () => {
       });
       assert.deepEqual(snapshotAfterRollback.providerTurns, []);
       assert.deepEqual(snapshotAfterRollback.messages, []);
+      assert.notInclude(
+        (yield* Queue.clear(protocolEvents)).map(rawProtocolMethod),
+        "session/resume",
+      );
 
       yield* runtime.startTurn(
         makeTurnInput({
