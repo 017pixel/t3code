@@ -146,7 +146,11 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         if (mode === "sparse receiver") yield* fs.remove(path.join(sender, "excluded", "gone"));
         yield* git(sender, ["tag", branch]);
         if (mode === "detached subdirectory") yield* git(sender, ["checkout", "--detach"]);
-        if (mode === "sparse checkout") yield* git(sender, ["sparse-checkout", "set", "sub"]);
+        if (mode === "sparse checkout") {
+          yield* git(sender, ["sparse-checkout", "set", "sub"]);
+          yield* fs.makeDirectory(path.join(sender, "excluded"), { recursive: true });
+          yield* fs.writeFileString(path.join(sender, "excluded", "new.txt"), "outside work\n");
+        }
         if (mode !== "sparse checkout") {
           yield* git(sender, ["update-index", "--skip-worktree", "local.cfg"]);
           yield* fs.writeFileString(
@@ -207,6 +211,11 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
             "outside cone",
           );
         }
+        if (mode === "sparse checkout")
+          assert.equal(
+            yield* fs.readFileString(path.join(worktree, "excluded", "new.txt")),
+            "outside work\n",
+          );
         assert.equal(
           yield* fs.readFileString(path.join(worktree, "conf.local")),
           "force-staged work\n",
@@ -215,7 +224,9 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
           yield* git(worktree, ["status", "--porcelain"]),
           mode === "sparse receiver"
             ? " M .gitignore\n M app.ts\n D excluded/gone\n D old.ts\n D settings.txt\n?? sub/"
-            : " M .gitignore\n M app.ts\n D old.ts\n D settings.txt\n?? sub/",
+            : mode === "sparse checkout"
+              ? " M .gitignore\n M app.ts\n D old.ts\n D settings.txt\n?? excluded/new.txt\n?? sub/"
+              : " M .gitignore\n M app.ts\n D old.ts\n D settings.txt\n?? sub/",
         );
         const receiverAfter = yield* repositoryState(receiver);
         assert.deepEqual({ ...receiverAfter, refs: receiverBefore.refs }, receiverBefore);

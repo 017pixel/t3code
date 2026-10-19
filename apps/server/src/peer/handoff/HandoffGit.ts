@@ -256,8 +256,8 @@ const make = Effect.gen(function* () {
         stdin: skipped,
       });
     }
-    // The root pathspec includes edits above cwd without touching the sender index.
-    yield* git(input.cwd, ["add", "--all", "--", ":/"], { env });
+    // Include untracked files outside sparse cones without touching the sender index.
+    yield* git(input.cwd, ["-c", "core.sparseCheckout=false", "add", "--all", "--", ":/"], { env });
     const entries = yield* git(input.cwd, ["ls-files", "--stage", "-z", "--", ":/"], {
       env,
       maxOutputBytes: 16 * 1024 * 1024,
