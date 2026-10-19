@@ -492,7 +492,7 @@ export const OrchestratorMcpCapabilitiesInput = Schema.Struct({
   models: Schema.optional(
     Schema.Literals(["favorites", "all"]).annotate({
       description:
-        "favorites (default) lists the user's favorited models plus your own; all lists every model.",
+        "favorites (default) lists favorites plus your own model, or all visible models when no favorites are set; all lists every visible model.",
     }),
   ),
   providerInstanceId: Schema.optional(
@@ -501,11 +501,7 @@ export const OrchestratorMcpCapabilitiesInput = Schema.Struct({
 });
 export type OrchestratorMcpCapabilitiesInput = typeof OrchestratorMcpCapabilitiesInput.Type;
 
-/**
- * Agent-facing projection of a ProviderOptionDescriptor: only what is needed
- * to build a target's options, without the composer's labels and descriptions.
- */
-export const OrchestratorMcpModelOption = Schema.Union([
+const OrchestratorMcpModelOption = Schema.Union([
   Schema.Struct({
     id: Schema.String,
     type: Schema.Literal("select"),
@@ -528,15 +524,12 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
   models: Schema.Array(
     Schema.Struct({
       id: Schema.String,
-      /** Omitted when it is the same as the id. */
       label: Schema.optional(Schema.String),
-      /** Model options a target may select (for example reasoning effort). */
       options: Schema.optional(Schema.Array(OrchestratorMcpModelOption)),
     }),
   ),
   /** Models left out because they are not favorites; models: "all" lists them. */
   omittedModels: Schema.optional(NonNegativeInt),
-  /** Runtime modes the provider offers; omitted when it offers all of them. */
   runtimeModes: Schema.optional(Schema.Array(RuntimeMode)),
   canRunChildTask: Schema.Boolean,
   canRunCrossProviderChildTask: Schema.Boolean,

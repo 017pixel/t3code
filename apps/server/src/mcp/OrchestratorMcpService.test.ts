@@ -1079,7 +1079,7 @@ describe("OrchestratorMcpService provider resolution", () => {
   );
 
   describe("model scope", () => {
-    const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
+    const alternateInstanceId = ProviderInstanceId.make("codex-alt");
     const catalog: ReadonlyArray<ServerProvider> = [
       {
         ...providerSnapshot({
@@ -1087,7 +1087,6 @@ describe("OrchestratorMcpService provider resolution", () => {
           driver: ProviderDriverKind.make("codex"),
         }),
         models: [
-          // The caller's own model, which is not a favorite.
           { slug: "gpt-5.4", name: "gpt-5.4", isCustom: false, capabilities: null },
           {
             slug: "gpt-5.5",
@@ -1104,7 +1103,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                     { id: "low", label: "Low", description: "Fast." },
                     { id: "high", label: "High", isDefault: true },
                   ],
-                  currentValue: "high",
+                  currentValue: "low",
                   promptInjectedValues: ["high"],
                 },
                 { id: "fastMode", label: "Fast mode", type: "boolean", currentValue: false },
@@ -1112,20 +1111,14 @@ describe("OrchestratorMcpService provider resolution", () => {
             },
           },
           { slug: "gpt-5.3", name: "gpt-5.3", isCustom: false, capabilities: null },
-          // Favorited but hidden: hiding wins.
           { slug: "gpt-5.4-mini", name: "Mini", isCustom: false, capabilities: null },
         ],
       },
-      {
-        ...providerSnapshot({
-          instanceId: claudeInstanceId,
-          driver: ProviderDriverKind.make("claudeAgent"),
-        }),
-        models: [
-          { slug: "claude-opus", name: "claude-opus", isCustom: false, capabilities: null },
-          { slug: "claude-sonnet", name: "claude-sonnet", isCustom: false, capabilities: null },
-        ],
-      },
+      providerSnapshot({
+        instanceId: alternateInstanceId,
+        driver: ProviderDriverKind.make("codex"),
+        model: "gpt-5.5",
+      }),
     ];
 
     const layerFor = (
@@ -1148,7 +1141,7 @@ describe("OrchestratorMcpService provider resolution", () => {
               },
             }),
             providerRegistryLayer(catalog),
-            adapterRegistryLayer([codexInstanceId, claudeInstanceId]),
+            adapterRegistryLayer([codexInstanceId, alternateInstanceId]),
             Layer.mock(ProjectService.ProjectService)({}),
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
@@ -1156,82 +1149,51 @@ describe("OrchestratorMcpService provider resolution", () => {
         ),
       );
 
-    const modelIds = (input: {
-      readonly favorites: Parameters<typeof layerFor>[0];
-      readonly request?: OrchestratorMcpCapabilitiesInput;
-    }) =>
+    const modelIds = (
+      favorites: Parameters<typeof layerFor>[0],
+      request?: OrchestratorMcpCapabilitiesInput,
+    ) =>
       Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const capabilities = yield* service.capabilities(scope, input.request);
+        const capabilities = yield* service.capabilities(scope, request);
         return capabilities.providers.map((provider) => ({
           id: provider.providerInstanceId,
           models: provider.models.map((model) => model.id),
-          omittedModels: provider.omittedModels,
         }));
-      }).pipe(Effect.provide(layerFor(input.favorites)));
+      }).pipe(Effect.provide(layerFor(favorites)));
 
     const favorites = [
       { provider: codexInstanceId, model: "gpt-5.5" },
       { provider: codexInstanceId, model: "gpt-5.4-mini" },
-      { provider: claudeInstanceId, model: "claude-opus" },
     ];
 
-    it.effect("lists favorites plus the caller's own model by default", () =>
-      Effect.gen(function* () {
-        assert.deepEqual(yield* modelIds({ favorites }), [
-          { id: codexInstanceId, models: ["gpt-5.4", "gpt-5.5"], omittedModels: 1 },
-          { id: claudeInstanceId, models: ["claude-opus"], omittedModels: 1 },
-        ]);
-      }),
+    it.effect(
+      "defaults to instance-specific favorites and the caller model, excluding hidden models",
+      () =>
+        Effect.gen(function* () {
+          assert.deepEqual(yield* modelIds(favorites), [
+            { id: codexInstanceId, models: ["gpt-5.4", "gpt-5.5"] },
+            { id: alternateInstanceId, models: [] },
+          ]);
+        }),
     );
 
-    it.effect("lists every visible model when asked for all, optionally for one provider", () =>
-      Effect.gen(function* () {
-        assert.deepEqual(yield* modelIds({ favorites, request: { models: "all" } }), [
-          {
-            id: codexInstanceId,
-            models: ["gpt-5.4", "gpt-5.5", "gpt-5.3"],
-            omittedModels: undefined,
-          },
-          {
-            id: claudeInstanceId,
-            models: ["claude-opus", "claude-sonnet"],
-            omittedModels: undefined,
-          },
-        ]);
-        assert.deepEqual(
-          yield* modelIds({
-            favorites,
-            request: { models: "all", providerInstanceId: claudeInstanceId },
-          }),
-          [
-            {
-              id: claudeInstanceId,
-              models: ["claude-opus", "claude-sonnet"],
-              omittedModels: undefined,
-            },
-          ],
-        );
-      }),
-    );
-
-    it.effect("lists every visible model when the user has no favorites", () =>
-      Effect.gen(function* () {
-        const everything = [
-          {
-            id: codexInstanceId,
-            models: ["gpt-5.4", "gpt-5.5", "gpt-5.3"],
-            omittedModels: undefined,
-          },
-          {
-            id: claudeInstanceId,
-            models: ["claude-opus", "claude-sonnet"],
-            omittedModels: undefined,
-          },
-        ];
-        assert.deepEqual(yield* modelIds({ favorites: null }), everything);
-        assert.deepEqual(yield* modelIds({ favorites: [] }), everything);
-      }),
+    it.effect(
+      "exposes all visible models on request or without favorites, with optional provider filtering",
+      () =>
+        Effect.gen(function* () {
+          const everything = [
+            { id: codexInstanceId, models: ["gpt-5.4", "gpt-5.5", "gpt-5.3"] },
+            { id: alternateInstanceId, models: ["gpt-5.5"] },
+          ];
+          assert.deepEqual(yield* modelIds(null), everything);
+          assert.deepEqual(yield* modelIds([]), everything);
+          assert.deepEqual(yield* modelIds(favorites, { models: "all" }), everything);
+          assert.deepEqual(
+            yield* modelIds(favorites, { models: "all", providerInstanceId: alternateInstanceId }),
+            [{ id: alternateInstanceId, models: ["gpt-5.5"] }],
+          );
+        }),
     );
 
     it.effect("describes model options by id and value only", () =>
@@ -1248,12 +1210,11 @@ describe("OrchestratorMcpService provider resolution", () => {
               type: "select",
               values: ["low", "high"],
               default: "high",
-              currentValue: "high",
+              currentValue: "low",
             },
             { id: "fastMode", type: "boolean", currentValue: false },
           ],
         });
-        // Labels identical to the id are left out.
         assert.notProperty(capabilities.providers[0]?.models[0], "label");
       }).pipe(Effect.provide(layerFor(null))),
     );
