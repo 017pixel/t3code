@@ -739,6 +739,7 @@ it.live.each(["timeout", "interrupt"] as const)(
     Effect.gen(function* () {
       const ready = yield* Deferred.make<void>();
       let childPid: number | undefined;
+      let stdout = "";
       let watchdogFired = false;
       const killOwnedChild = () => {
         if (childPid === undefined) return;
@@ -773,7 +774,13 @@ it.live.each(["timeout", "interrupt"] as const)(
         cwd: process.cwd(),
         timeoutMs: 2_000,
         onStdoutChunk: (chunk) => {
-          childPid = Number(Buffer.from(chunk).toString().trim());
+          if (childPid !== undefined) return;
+          stdout += Buffer.from(chunk).toString();
+          const newline = stdout.indexOf("\n");
+          if (newline === -1) return;
+          const pid = Number(stdout.slice(0, newline));
+          if (!Number.isSafeInteger(pid) || pid <= 0) return;
+          childPid = pid;
           Deferred.doneUnsafe(ready, Effect.void);
         },
       }).pipe(Effect.forkChild);
