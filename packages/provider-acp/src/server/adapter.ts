@@ -1478,6 +1478,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveAcpTurn | null>(null);
         const activeSessionId = yield* Ref.make<string | null>(null);
+        const hydratedSessionId = yield* Ref.make<string | null>(null);
         const contextUsageBySessionId = yield* Ref.make(
           new Map<string, ThreadTokenUsageSnapshot>(),
         );
@@ -5796,6 +5797,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const canLoadSession = started.initializeResult.agentCapabilities?.loadSession === true;
         const canResumeSession =
           started.initializeResult.agentCapabilities?.sessionCapabilities?.resume != null;
+        if (
+          input.initialNativeThreadId === undefined ||
+          !flavor.preferResumeSession ||
+          !canResumeSession
+        ) {
+          yield* Ref.set(hydratedSessionId, started.sessionId);
+        }
         const supportsImagePrompts = acpSupportsImagePrompts({
           flavorSupportsImagePrompts: flavor.supportsImagePrompts,
           negotiatedImage:
@@ -5815,7 +5823,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const mcpContext = yield* readMcpContext(threadId);
           const activationOptions = acpMcpActivation(mcpContext);
           prepareTerminalEnvironment(mcpContext, sessionId);
-          const activated = canLoadSession
+          const useLoad = canLoadSession && !(flavor.preferResumeSession && canResumeSession);
+          const activated = useLoad
             ? yield* runtime.loadSession(sessionId, activationOptions)
             : canResumeSession
               ? yield* runtime.resumeSession(sessionId, activationOptions)
@@ -5823,6 +5832,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   driver,
                   detail: `ACP driver cannot load or resume session ${sessionId}`,
                 });
+          yield* Ref.set(hydratedSessionId, useLoad ? activated.sessionId : null);
           rememberTerminalEnvironment(activated.sessionId, yield* readMcpContext(threadId));
           return activated;
         });
@@ -6391,6 +6401,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           yield* restartAcpRuntime(threadId);
           yield* Ref.set(runtimeRestartRequired, false);
           yield* Ref.set(activeSessionId, null);
+          yield* Ref.set(hydratedSessionId, null);
           yield* Ref.set(activeSessionSetup, null);
           yield* Ref.set(activeSelection, null);
           yield* Ref.set(activeInteractionMode, null);
@@ -7296,7 +7307,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     snapshotInput.providerThread.appThreadId,
                   );
                   const sessionId = yield* nativeThreadId(driver, snapshotInput.providerThread);
-                  if ((yield* Ref.get(activeSessionId)) !== sessionId) {
+                  if (
+                    (yield* Ref.get(activeSessionId)) !== sessionId ||
+                    (yield* Ref.get(hydratedSessionId)) !== sessionId
+                  ) {
                     if (!capabilities.threads.canReadThreadSnapshot) {
                       return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                         driver,
@@ -7322,6 +7336,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       activated.sessionId,
                       yield* readMcpContext(snapshotInput.providerThread.appThreadId),
                     );
+                    yield* Ref.set(hydratedSessionId, activated.sessionId);
                     yield* Ref.set(activeSessionId, activated.sessionId);
                     yield* Ref.set(activeSessionSetup, activated);
                     yield* Ref.set(activeSelection, null);
