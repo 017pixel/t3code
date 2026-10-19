@@ -2,6 +2,8 @@ import type { PullRequestReviewPosition, PullRequestReviewThread } from "@t3tool
 import type { NativeReviewDiffRow } from "../diffs/nativeReviewDiffSurface";
 import type { NativeReviewDiffData } from "../review/nativeReviewDiffAdapter";
 import type { PendingReviewComment } from "./pullRequestReviewDrafts";
+import { parseMarkdownDocument } from "../../lib/markdownDocument";
+import { pullRequestDescriptionContent } from "./pullRequestDescriptionContent";
 
 export function reviewPosition(row: NativeReviewDiffRow): PullRequestReviewPosition | null {
   if (row.kind !== "line") return null;
@@ -74,11 +76,16 @@ export function annotatePullRequestDiff(
       thread.line === null
         ? firstByPath.get(thread.path)
         : lines.get(JSON.stringify([thread.path, thread.side, thread.line]));
+    if (!anchor) continue;
     const first = thread.comments[0];
+    const preview =
+      first?.displayBody === undefined
+        ? (first?.body ?? "")
+        : pullRequestDescriptionContent(parseMarkdownDocument(first.displayBody)).preview;
     attach(
       anchor,
       `discussion:${thread.id}`,
-      `${first?.author?.login ?? "Discussion"}${thread.isResolved ? " · Resolved" : ""}\n${first?.body ?? ""}\n${thread.commentCount ?? thread.comments.length} comments · Tap to open`,
+      `${first?.author?.login ?? "Discussion"}${thread.isResolved ? " · Resolved" : ""}\n${preview}\n${thread.commentCount ?? thread.comments.length} comments · Tap to open`,
       thread.line === null ? "file" : String(thread.line),
     );
   }

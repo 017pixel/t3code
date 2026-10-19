@@ -60,10 +60,11 @@ function TimelineEvent(props: {
 function TimelineComment({ comment }: { comment: PullRequestComment }) {
   const [expanded, setExpanded] = useState(false);
   const { themeVariables: colors } = useAppearancePreferences();
-  const long = comment.body.length > 450 || comment.body.split("\n").length > 8;
+  const displayBody = comment.displayBody ?? comment.body;
+  const long = displayBody.length > 450 || displayBody.split("\n").length > 8;
   const content = useMemo(
-    () => pullRequestDescriptionContent(parseMarkdownDocument(comment.body)),
-    [comment.body],
+    () => pullRequestDescriptionContent(parseMarkdownDocument(displayBody)),
+    [displayBody],
   );
   const preview = content.preview;
   const approved = comment.reviewState === "APPROVED";
@@ -94,8 +95,8 @@ function TimelineComment({ comment }: { comment: PullRequestComment }) {
         <View className="gap-2 overflow-hidden rounded-2xl bg-grouped-card p-3">
           <View style={long && !expanded ? { maxHeight: 240, overflow: "hidden" } : undefined}>
             <PullRequestMarkdown
-              markdown={long && !expanded ? comment.body.slice(0, 1200) : comment.body}
-              imageGroupMarkdown={comment.body}
+              markdown={long && !expanded ? displayBody.slice(0, 1200) : displayBody}
+              imageGroupMarkdown={displayBody}
             />
           </View>
           {long && !expanded ? (

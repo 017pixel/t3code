@@ -24,6 +24,7 @@ type MarkdownNode = {
 };
 
 function htmlContentRanges(body: string, tree: MarkdownNode) {
+  // Mask Markdown text to retain source offsets while matching inline HTML opening/closing tags.
   const fragments: string[] = [];
   let cursor = 0;
   const collect = (node: MarkdownNode) => {
@@ -79,7 +80,6 @@ function mentionLabels(html: string) {
   return labels;
 }
 
-/** Resolves prose mentions for display without changing the Markdown used for edits. */
 export function bitbucketMentionDisplayBody(body: string, html: unknown) {
   if (typeof html !== "string" || !html || !body.includes("@{")) return undefined;
   const labels = mentionLabels(html);
@@ -116,12 +116,13 @@ export function bitbucketMentionDisplayBody(body: string, html: unknown) {
   };
   visit(tree);
   if (replacements.length === 0) return undefined;
-  let displayBody = body;
-  for (const replacement of replacements.toReversed()) {
-    displayBody =
-      displayBody.slice(0, replacement.start) +
-      replacement.label +
-      displayBody.slice(replacement.end);
+  const fragments: string[] = [];
+  let cursor = 0;
+  for (const replacement of replacements) {
+    fragments.push(body.slice(cursor, replacement.start), replacement.label);
+    cursor = replacement.end;
   }
+  fragments.push(body.slice(cursor));
+  const displayBody = fragments.join("");
   return displayBody === body ? undefined : displayBody;
 }

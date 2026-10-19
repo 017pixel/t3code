@@ -202,7 +202,7 @@ function Discussion({ params }: { params: PullRequestParams & { readonly discuss
                     {relativeTime(comment.createdAt)}
                   </Text>
                 </View>
-                <PullRequestMarkdown markdown={comment.body} />
+                <PullRequestMarkdown markdown={comment.displayBody ?? comment.body} />
               </View>
             ))}
             {nextCursor ? (
