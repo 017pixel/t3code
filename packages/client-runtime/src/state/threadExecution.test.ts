@@ -3,6 +3,11 @@ import {
   NodeId,
   MessageId,
   ProviderInstanceId,
+  ProviderThreadId,
+  ProviderSessionId,
+  ProviderDriverKind,
+  ProviderTurnId,
+  RunAttemptId,
   RunId,
   ThreadId,
   type OrchestrationV2ExecutionNode,
@@ -15,6 +20,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 import {
   presentPendingBackgroundWork,
+  presentProviderGoal,
+  deriveReportedModelSelection,
   deriveLatestThreadRun,
   deriveProviderSubagentStatus,
   formatModelSelectionEffort,
@@ -96,6 +103,19 @@ describe("thread execution presentation", () => {
     ).toMatchObject({ status: "running", lastError: null, lastErrorClass: null });
   });
 
+  it("counts a wake run's activity from the start of the work it continues", () => {
+    const workStartedAt = DateTime.makeUnsafe("2026-07-28T09:20:00.000Z");
+    const wake = { ...run("wake", 2, "running"), workStartedAt };
+    expect(
+      deriveThreadRuntime({ ...v2Projection, runs: [run("prompt", 1, "completed"), wake] })
+        ?.activityStartedAt,
+    ).toBe("2026-07-28T09:20:00.000Z");
+    expect(
+      deriveThreadRuntime({ ...v2Projection, runs: [run("prompt", 1, "running")] })
+        ?.activityStartedAt,
+    ).toBe("2026-07-28T10:00:00.000Z");
+  });
+
   it("keeps a subscription limit visible while later messages stay queued", () => {
     const failed = {
       ...run("limited", 1, "failed"),
@@ -173,6 +193,34 @@ describe("thread execution presentation", () => {
     expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(true);
   });
 
+  it("marks an open run whose provider turn already ended", () => {
+    const attemptId = RunAttemptId.make("attempt-open");
+    const openRun = { ...run("run-open", 1, "running"), activeAttemptId: attemptId };
+    const providerTurn = (status: "running" | "failed") => ({
+      id: ProviderTurnId.make("provider-turn-open"),
+      providerThreadId: ProviderThreadId.make("provider-thread-open"),
+      nodeId: NodeId.make("node-open"),
+      runAttemptId: attemptId,
+      nativeTurnRef: null,
+      ordinal: 1,
+      status,
+      startedAt: now,
+      completedAt: status === "running" ? null : now,
+    });
+    const projection = (status: "running" | "failed") => ({
+      ...v2Projection,
+      runs: [openRun],
+      providerTurns: [providerTurn(status)],
+      updatedAt: now,
+    });
+
+    expect(deriveThreadActivityRun(projection("running"))?.turnEnded).toBeUndefined();
+    expect(deriveThreadActivityRun(projection("failed"))).toMatchObject({
+      status: "running",
+      turnEnded: true,
+    });
+  });
+
   it("presents a held queue as the stopped run instead of queued work", () => {
     const interrupted = { ...run("run-interrupted", 1, "interrupted"), completedAt: now };
     const held = { ...run("run-held", 2, "queued"), queueHeld: true };
@@ -185,11 +233,9 @@ describe("thread execution presentation", () => {
       activeRunId: null,
     });
 
-    // Resuming clears the hold, and the run reads as queued until it starts.
     const resumed = { ...projection, runs: [interrupted, { ...held, queueHeld: false }] };
     expect(deriveThreadRuntime(resumed)).toMatchObject({ status: "queued" });
 
-    // Recovery can hold a first message before any run executed; it is not work.
     const onlyHeld = {
       ...projection,
       runs: [held],
@@ -299,7 +345,6 @@ describe("deriveRunlessWorkStartedAt", () => {
   it("times a provider-native subagent from its runless root turn while it works", () => {
     const projection = { ...nativeChild, nodes: [rootTurn("running", later)] };
     expect(deriveRunlessWorkStartedAt(projection)).toBe("2026-07-28T10:05:00.000Z");
-    // The subagent has no run, so it stays unstoppable and unqueueable.
     expect(deriveThreadRuntime(projection)).toBeNull();
   });
 
@@ -503,6 +548,7 @@ describe("presentPendingBackgroundWork", () => {
     expect(presentation).toEqual({
       title: "Waiting on subagent Luna Window Properties",
       items: [{ taskId: "luna", kind: "subagent", label: "Luna Window Properties", childThreadId }],
+      waiting: true,
     });
   });
 
@@ -527,10 +573,34 @@ describe("presentPendingBackgroundWork", () => {
         { taskId: "a", kind: "subagent", description: "Review src/math.ts" },
       ])?.title,
     ).toBe("Waiting on subagent Review src/math.ts");
-    expect(presentPendingBackgroundWork([{ taskId: "a", kind: "command" }])?.title).toBe(
-      "Waiting on a command",
+    expect(presentPendingBackgroundWork([{ taskId: "a", kind: "monitor" }])?.title).toBe(
+      "Waiting on a monitor",
     );
     expect(presentPendingBackgroundWork([])).toBeNull();
+  });
+
+  it("says only commands are running, not waited on", () => {
+    expect(
+      presentPendingBackgroundWork([
+        { taskId: "dev", kind: "command", description: "Start the shared dev server" },
+      ]),
+    ).toMatchObject({ title: "Running: Start the shared dev server", waiting: false });
+    expect(presentPendingBackgroundWork([{ taskId: "a", kind: "command" }])).toMatchObject({
+      title: "Running a command",
+      waiting: false,
+    });
+    expect(
+      presentPendingBackgroundWork([
+        { taskId: "a", kind: "command", description: "vp run dev" },
+        { taskId: "b", kind: "command", description: "tailscale serve" },
+      ]),
+    ).toMatchObject({ title: "Running 2 commands", waiting: false });
+    expect(
+      presentPendingBackgroundWork([
+        { taskId: "a", kind: "command", description: "vp run dev" },
+        { taskId: "b", kind: "monitor", description: "Watch PR checks" },
+      ]),
+    ).toMatchObject({ title: "Waiting on 1 command and 1 monitor", waiting: true });
   });
 
   it("groups work by kind, subagents first, and keeps each name", () => {
@@ -563,5 +633,114 @@ describe("presentPendingBackgroundWork", () => {
     expect(presentPendingBackgroundWork([{ taskId: "old", kind: "background_task" }])?.title).toBe(
       "Waiting on a background task",
     );
+  });
+});
+
+describe("provider-reported model selection", () => {
+  const selected = v2Projection.thread.modelSelection;
+  const reported = { ...selected, options: [{ id: "reasoningEffort", value: "default" }] };
+  const providerThread = {
+    id: ProviderThreadId.make("active"),
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: selected.instanceId,
+    providerSessionId: ProviderSessionId.make("session"),
+    appThreadId: v2Projection.thread.id,
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    nativeConversationHeadRef: null,
+    status: "idle" as const,
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+    nativeMetadata: { modelSelection: reported },
+  };
+  const projection = {
+    ...v2Projection,
+    thread: { ...v2Projection.thread, activeProviderThreadId: providerThread.id },
+    providerThreads: [providerThread],
+  };
+
+  it("reads only the active provider thread's reported selection", () => {
+    expect(deriveReportedModelSelection(projection)).toBe(reported);
+    expect(
+      deriveReportedModelSelection({
+        ...projection,
+        thread: { ...projection.thread, activeProviderThreadId: null },
+      }),
+    ).toBeNull();
+    expect(
+      deriveReportedModelSelection({
+        ...projection,
+        providerThreads: [
+          { ...providerThread, providerInstanceId: ProviderInstanceId.make("other") },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("shows the reported default in a subagent's effort label", () => {
+    const models = [
+      {
+        slug: selected.model,
+        name: selected.model,
+        isCustom: false,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "variant",
+              label: "Reasoning",
+              type: "select" as const,
+              options: [{ id: "high", label: "High" }],
+            },
+          ],
+        },
+      },
+    ];
+    const variantReport = { ...selected, options: [{ id: "variant", value: "default" }] };
+    expect(formatModelSelectionEffort(selected, models, variantReport)).toBe("Default");
+    expect(formatModelSelectionEffort(selected, models)).toBe("Unknown");
+  });
+});
+
+describe("presentProviderGoal", () => {
+  it("summarizes Codex accounting and offers resume once the goal stops short", () => {
+    expect(
+      presentProviderGoal(
+        {
+          objective: "Ship the feature",
+          status: "paused",
+          tokensUsed: 12_400,
+          tokenBudget: 50_000,
+          timeUsedSeconds: 245,
+        },
+        false,
+      ),
+    ).toEqual({
+      title: "Goal paused",
+      objective: "Ship the feature",
+      usage: "12k / 50k tokens · 4m 5s",
+      canResume: true,
+    });
+  });
+
+  it("counts Claude evaluator checks and never offers resume", () => {
+    expect(
+      presentProviderGoal({ objective: "All tests pass", status: "active", checks: 1 }, true),
+    ).toEqual({
+      title: "Pursuing goal",
+      objective: "All tests pass",
+      usage: "1 check",
+      canResume: false,
+    });
+    expect(
+      presentProviderGoal({ objective: "All tests pass", status: "complete", checks: 0 }, false)
+        .usage,
+    ).toBeNull();
+    expect(
+      presentProviderGoal({ objective: "All tests pass", status: "active" }, false).title,
+    ).toBe("Goal set");
   });
 });

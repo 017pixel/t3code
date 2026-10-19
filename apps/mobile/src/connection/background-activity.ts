@@ -36,14 +36,14 @@ function normalizeAppState(
   return "unknown";
 }
 
-export const mobileBackgroundActivityObserverLayer = Layer.succeed(
+export const layerObserver = Layer.succeed(
   EnvironmentRpcSubscriptionObserver,
   EnvironmentRpcSubscriptionObserver.of({
     observe: observeMobileBackgroundActivitySubscription,
   }),
 );
 
-export const mobileBackgroundActivityReporterLayer = Layer.effectDiscard(
+export const layerReporter = Layer.effectDiscard(
   Effect.gen(function* () {
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
     const storage = yield* MobileStorage.MobileStorage;
@@ -81,7 +81,9 @@ export const mobileBackgroundActivityReporterLayer = Layer.effectDiscard(
                 observedAt: DateTime.makeUnsafe(observedAtMs),
               }),
             )
-            .pipe(Effect.ignore),
+            // Not `ignore`: tearing down an environment mid-request interrupts its report,
+            // and an interrupt leaking out here would end the reporting loop for good.
+            .pipe(Effect.ignoreCause),
         { concurrency: "unbounded", discard: true },
       );
     }).pipe(Effect.withSpan("mobile.backgroundActivity.report"));
