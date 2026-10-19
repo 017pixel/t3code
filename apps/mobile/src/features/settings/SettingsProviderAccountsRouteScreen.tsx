@@ -188,6 +188,11 @@ function ProviderAccount({
                   ? "No in-app sign-in advertised. Follow the provider's docs to finish setup."
                   : "Connect this provider."}
         </Text>
+        {state?.phase === "waiting" && state.inputError ? (
+          <Text accessibilityLiveRegion="polite" className="text-sm text-danger-foreground">
+            {state.inputError}
+          </Text>
+        ) : null}
         {signedIn && !active && provider.auth.email?.trim() ? (
           <ProviderAccountEmail key={provider.auth.email} email={provider.auth.email} />
         ) : null}

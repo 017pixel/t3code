@@ -227,6 +227,29 @@ describe("Antigravity setup", () => {
     expect(occurrences("Signed in.")).toBe(1);
   });
 
+  it("keeps a rejected callback reason in the account status until the flow advances", async () => {
+    const refused = "This redirect URL does not belong to the current sign-in.";
+    setup.auth = authState({ message: "Open the Google sign-in link.", inputError: refused });
+    await renderSetup();
+    const statusMessages = () =>
+      [...container.querySelectorAll("[role=status]")].map((element) => element.textContent);
+    expect(statusMessages()).toContain(refused);
+    expect(statusMessages()).toContain("Finish signing in in your browser.");
+    expect(occurrences("Open the Google sign-in link.")).toBe(0);
+
+    await act(async () =>
+      userEvent.fill(callbackInput(), "http://127.0.0.1:5555/?state=test-only&code=test-only"),
+    );
+    await click("Continue");
+    expect(statusMessages()).toContain(refused);
+
+    setup.auth = authState({ phase: "verifying", authorizationUrl: null, inputError: null });
+    await publish();
+    expect(occurrences(refused)).toBe(0);
+    expect(statusMessages()).toContain("Checking your account…");
+    expect(callbackInput()).toBeNull();
+  });
+
   it("offers sign-in again when credentials expire after a completed auth flow", async () => {
     setup.auth = authState({
       phase: "succeeded",
