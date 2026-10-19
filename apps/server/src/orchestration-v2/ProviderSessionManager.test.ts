@@ -4428,13 +4428,17 @@ it.effect(
         yield* resumeSecondThread;
         assert.equal((yield* Ref.get(state)).resumeCount, 4);
 
-        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
+        // The loaded snapshot owns cleanup even when its native row was never persisted.
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
 
         yield* manager.detach({ providerSessionId, threadId: firstThreadId });
         assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
         assert.equal((yield* Ref.get(state)).closeCount, 0);
         assert.equal((yield* Ref.get(state)).interruptCount, 1);
-        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, [
+          "native-thread",
+          "native-thread",
+        ]);
 
         yield* manager.detach({ providerSessionId, threadId: secondThreadId });
         yield* TestClock.adjust("1 second");
@@ -5047,6 +5051,65 @@ it.effect(
         },
       );
     }),
+);
+
+it.effect("reuses an idle writer only after a proven refusal before native release", () =>
+  Effect.gen(function* () {
+    const attempts = yield* Ref.make(0);
+    const refusedThread = yield* Ref.make<OrchestrationV2ProviderThread | undefined>(undefined);
+    yield* runIdleThreadUnloadScenario(
+      "proven-refusal",
+      ({ state, threadA, providerSessionId, startTurn, endTurn, resume }) =>
+        Effect.gen(function* () {
+          const ids = yield* IdAllocator.IdAllocatorV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const now = yield* DateTime.now;
+          const providerThread = makeProviderThread({
+            idAllocator: ids,
+            threadId: threadA,
+            providerSessionId,
+            now,
+            nativeThreadId: `native-${threadA}`,
+          });
+          yield* Ref.set(refusedThread, providerThread);
+          yield* sink.write({
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId: threadA }),
+                type: "provider-thread.updated",
+                threadId: threadA,
+                driver: CODEX_DRIVER,
+                occurredAt: now,
+                payload: providerThread,
+              },
+            ],
+          });
+          yield* startTurn(threadA, 1);
+          yield* endTurn(threadA, 1);
+          yield* TestClock.adjust("1 second");
+          assert.equal(yield* Ref.get(attempts), 1);
+          const resumes = (yield* Ref.get(state)).resumeCount;
+          yield* resume(threadA);
+          assert.equal((yield* Ref.get(state)).resumeCount, resumes);
+          yield* startTurn(threadA, 2);
+          yield* TestClock.adjust("30 seconds");
+          assert.equal(yield* Ref.get(attempts), 1, "the refused generation must be cancelled");
+          assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
+          assert.equal((yield* Ref.get(state)).closeCount, 0, "the busy pooled peer must survive");
+        }),
+      {
+        beforeUnload: Effect.gen(function* () {
+          yield* Ref.update(attempts, (n) => n + 1);
+          const thread = yield* Ref.get(refusedThread);
+          if (thread === undefined) return yield* Effect.die("Missing refused writer fixture");
+          return yield* new ProviderAdapter.ProviderAdapterThreadUnloadRefusedError({
+            driver: CODEX_DRIVER,
+            providerThreadId: thread.id,
+          });
+        }),
+      },
+    );
+  }),
 );
 
 it.effect("retains a failed detached writer for retry while its pooled peer remains alive", () =>
