@@ -151,11 +151,12 @@ export function normalizeGitRemoteUrl(value: string): string {
   if (/^(?:ssh|https?|git):\/\//i.test(normalized)) {
     try {
       const url = new URL(normalized);
+      const host = url.protocol === "http:" || url.protocol === "https:" ? url.host : url.hostname;
       const repositorySegments = url.pathname.split("/").filter((segment) => segment.length > 0);
-      if (url.hostname && repositorySegments.length > 1) {
+      if (host && repositorySegments.length > 1) {
         return (
-          azureDevOpsRepositoryKey(url.hostname, repositorySegments) ??
-          `${url.hostname}/${repositorySegments.join("/")}`
+          azureDevOpsRepositoryKey(host, repositorySegments) ??
+          `${host}/${repositorySegments.join("/")}`
         );
       }
     } catch {

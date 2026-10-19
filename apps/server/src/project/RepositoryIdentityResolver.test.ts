@@ -414,21 +414,30 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
           "remote",
           "add",
           "origin",
-          "git@github.example.com:julius/t3code-fork.git",
+          "https://github.example.com:8443/julius/t3code-fork.git",
         ]);
         yield* git(cwd, ["config", "remote.origin.gh-resolved", "T3Tools/t3code"]);
 
         const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
         const identity = yield* resolver.resolve(cwd);
 
-        expect(identity?.canonicalKey).toBe("github.example.com/t3tools/t3code");
+        expect(identity?.canonicalKey).toBe("github.example.com:8443/t3tools/t3code");
         expect(identity?.displayName).toBe("T3Tools/t3code");
         expect(identity?.owner).toBe("T3Tools");
         expect(identity?.name).toBe("t3code");
         expect(identity?.origin).toEqual({
-          canonicalKey: "github.example.com/julius/t3code-fork",
+          canonicalKey: "github.example.com:8443/julius/t3code-fork",
           displayName: "julius/t3code-fork",
         });
+        const remotes = yield* git(cwd, ["remote", "-v"]);
+        expect(
+          resolveGitHubRepository({
+            remotes: remotes.stdout,
+            resolved: "remote.origin.gh-resolved T3Tools/t3code",
+            hostHint: undefined,
+            defaultHost: "github.com",
+          }).locator,
+        ).toEqual({ host: "github.example.com:8443", owner: "t3tools", name: "t3code" });
       }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 

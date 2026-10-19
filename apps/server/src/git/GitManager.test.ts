@@ -4504,17 +4504,6 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       ghRepo: null,
       ghResolved: null,
     },
-    // With a port on the remote's host the provider ignores gh-resolved and picks the remote.
-    {
-      remoteUrl: "https://github.example.com:8443/pingdotgg/codething-mvp.git",
-      ghRepo: null,
-      ghResolved: "acme/demo",
-    },
-    {
-      remoteUrl: "https://github.example.com:8443/pingdotgg/codething-mvp.git",
-      ghRepo: "base",
-      ghResolved: "acme/demo",
-    },
   ] as const)(
     "reuses the open same-repository PR when the only remote is not named origin (remote $remoteUrl, GH_REPO $ghRepo, gh-resolved $ghResolved)",
     ({ remoteUrl, ghRepo, ghResolved }) =>
@@ -4684,12 +4673,17 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       ghResolved: null,
       head: "dev",
     },
-    // The provider ignores gh-resolved only when the remote's host carries a port.
     {
       remoteUrl: "https://github.example.com:8443/contributor/demo.git",
       ghRepo: null,
       ghResolved: "acme/demo",
-      head: "dev",
+      head: "contributor:dev",
+    },
+    {
+      remoteUrl: "https://github.example.com:8443/contributor/demo.git",
+      ghRepo: "base",
+      ghResolved: "acme/demo",
+      head: "contributor:dev",
     },
     {
       remoteUrl: "https://github.example.com/contributor/demo.git",

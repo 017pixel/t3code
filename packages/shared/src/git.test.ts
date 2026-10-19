@@ -38,10 +38,13 @@ describe("normalizeGitRemoteUrl", () => {
     );
   });
 
-  it("drops explicit ports from URL-shaped remotes", () => {
+  it("preserves nondefault HTTPS ports in repository identities", () => {
     expect(normalizeGitRemoteUrl("https://gitlab.company.com:8443/team/project.git")).toBe(
-      "gitlab.company.com/team/project",
+      "gitlab.company.com:8443/team/project",
     );
+  });
+
+  it("does not use SSH ports in repository identities", () => {
     expect(normalizeGitRemoteUrl("ssh://git@gitlab.company.com:2222/team/project.git")).toBe(
       "gitlab.company.com/team/project",
     );
