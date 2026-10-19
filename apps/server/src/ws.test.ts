@@ -1,5 +1,25 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
+import * as Sink from "effect/Sink";
+import * as RpcTest from "effect/rpc/RpcTest";
+import { HttpClient } from "effect/http";
+import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
+import * as ServerConfigService from "./config.ts";
+import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
+import * as ModelManifest from "./provider/ModelManifest.ts";
+import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import { makeProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
+import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
+import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
+import * as VcsProcess from "./vcs/VcsProcess.ts";
 import { assert, it } from "@effect/vitest";
 import {
+  AuthProvidersManageScope,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+  WS_METHODS,
   ORCHESTRATION_PROTOCOL_VERSION,
   ProjectId,
   ThreadId,
@@ -35,6 +55,8 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import {
+  SharedConnectionRpcGroup,
+  layerSharedConnectionRpc,
   hasCompatibleOrchestrationProtocol,
   resolveAvailableEditorsForConfig,
   shouldUseBoundedThreadSnapshot,
@@ -453,4 +475,126 @@ it.effect("thread resume across compacted history keeps message order and final 
       ),
     ),
   ),
+);
+
+it.effect("shares provider maintenance across independent connection handlers", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let processes = 0;
+    const driver = ProviderDriverKind.make("nativeCli");
+    const instanceId = ProviderInstanceId.make("nativeCli");
+    const providers: ReadonlyArray<ServerProvider> = [
+      {
+        instanceId,
+        driver,
+        enabled: true,
+        installed: true,
+        version: "1.0.0",
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-10-01T00:00:00.000Z",
+        models: [],
+        slashCommands: [],
+        skills: [],
+      },
+    ];
+    const manifest = { version: 1 as const, currentModels: {}, compatibility: [] };
+    const app = layerSharedConnectionRpc.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed(providers),
+            refreshInstance: () => Effect.succeed(providers),
+            getProviderMaintenanceCapabilitiesForInstance: () =>
+              Effect.succeed(
+                makeProviderMaintenanceCapabilities({
+                  provider: driver,
+                  packageName: null,
+                  updateExecutable: "native-agent",
+                  updateArgs: ["update"],
+                  updateLockKey: "native-agent",
+                }),
+              ),
+            setProviderMaintenanceActionState: () => Effect.succeed(providers),
+          }),
+          Layer.mock(ModelManifest.ModelManifest)({ current: Effect.succeed(manifest) }),
+          ProviderLatestVersions.layer,
+          Layer.mock(AgentSessionScanner.AgentSessionScanner)({}),
+          Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+            discover: Effect.succeed([]),
+            resolveLink: () => Effect.die("Unexpected source control lookup"),
+          }),
+          Layer.mock(VcsProcess.VcsProcess)({}),
+          ServerConfigService.layerTest(process.cwd(), { prefix: "ws-shared-services-" }),
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Unexpected HTTP request")),
+          ),
+          Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => {
+              processes += 1;
+              return Deferred.succeed(started, undefined).pipe(
+                Effect.as(
+                  ChildProcessSpawner.makeHandle({
+                    pid: ChildProcessSpawner.ProcessId(1),
+                    exitCode: Deferred.await(release).pipe(
+                      Effect.as(ChildProcessSpawner.ExitCode(0)),
+                    ),
+                    isRunning: Effect.succeed(true),
+                    kill: () => Effect.void,
+                    unref: Effect.succeed(Effect.void),
+                    stdin: Sink.drain,
+                    stdout: Stream.empty,
+                    stderr: Stream.empty,
+                    all: Stream.empty,
+                    getInputFd: () => Sink.drain,
+                    getOutputFd: () => Stream.empty,
+                  }),
+                ),
+              );
+            }),
+          ),
+        ),
+      ),
+    );
+    const shared = yield* Layer.build(app);
+    const open = Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const client = yield* RpcTest.makeClient(SharedConnectionRpcGroup).pipe(
+        Effect.provideContext(shared),
+        Effect.provide(RpcAuthorization.layer([AuthProvidersManageScope])),
+        Effect.provideService(Scope.Scope, scope),
+      );
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+      return { client, close: Scope.close(scope, Exit.void) };
+    });
+    const first = yield* open;
+    const second = yield* open;
+    const running = yield* first.client[WS_METHODS.serverUpdateProvider]({
+      provider: driver,
+      instanceId,
+    }).pipe(Effect.forkScoped);
+    yield* Deferred.await(started);
+    const blocked = yield* second.client[WS_METHODS.serverUpdateProvider]({
+      provider: driver,
+      instanceId,
+    }).pipe(Effect.flip);
+    if (blocked._tag !== "ServerProviderUpdateError")
+      return assert.fail("Expected shared update lock");
+    assert.include(blocked.reason, "already running");
+    yield* second.close;
+    const third = yield* open;
+    const stillBlocked = yield* third.client[WS_METHODS.serverUpdateProvider]({
+      provider: driver,
+      instanceId,
+    }).pipe(Effect.flip);
+    if (stillBlocked._tag !== "ServerProviderUpdateError")
+      return assert.fail("Expected shared update lock after disconnect");
+    assert.include(stillBlocked.reason, "already running");
+    assert.equal(processes, 1);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(running);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
