@@ -44,6 +44,7 @@ async function boundedArchive(bytes: ArrayBuffer) {
           length += chunk.length;
           if (
             total > OFFICE_PREVIEW_MAX_BYTES ||
+            total > Math.max(1024 * 1024, bytes.byteLength * 200) ||
             (entry.name.endsWith(".xml") && length > 8 * 1024 * 1024)
           ) {
             stream.pause();
@@ -95,7 +96,24 @@ async function handle(input: OfficeWorkerRequest) {
     reply({ type: "slide", index: input.index, frame, images, text });
     return;
   }
+  if (input.kind === "ipynb" || input.kind === "rtf") {
+    const { openNotebook, openRtf } = await import("./extendedDocumentPreview");
+    reply(input.kind === "ipynb" ? openNotebook(input.bytes) : openRtf(input.bytes));
+    return;
+  }
   const archive = await boundedArchive(input.bytes);
+  if (
+    input.kind === "odt" ||
+    input.kind === "ods" ||
+    input.kind === "odp" ||
+    input.kind === "epub"
+  ) {
+    const { openDocument, openEpub } = await import("./extendedDocumentPreview");
+    reply(
+      input.kind === "epub" ? await openEpub(archive) : await openDocument(archive, input.kind),
+    );
+    return;
+  }
   const root =
     input.kind === "docx"
       ? "word/document.xml"

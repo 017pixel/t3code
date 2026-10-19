@@ -1,3 +1,4 @@
+import { sanitizeDocumentHtml } from "./DocumentPages";
 import { EnvironmentId } from "@t3tools/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -113,5 +114,19 @@ describe("attachment HTML preview recovery", () => {
     await toggleMode("Show rendered page");
     expect(alert()).toBeNull();
     expect(container.querySelector("iframe")?.title).toBe("document.html");
+  });
+});
+
+describe("document output sanitization", () => {
+  it("preserves table content and raster data while removing scripts and network resources", () => {
+    const html = sanitizeDocumentHtml(
+      '<script>alert(1)</script><style>@import "https://example.com/style.css";</style><iframe src="https://example.com"></iframe><img src="https://example.com/tracker.png" onerror="alert(1)"><img src="data:image/png;base64,iVBORw0KGgo="><table><tr><td>Research</td></tr></table><a href="https://example.com">Results</a>',
+    );
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector("td")?.textContent).toBe("Research");
+    expect(doc.images).toHaveLength(1);
+    expect(doc.images[0]!.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+    expect(doc.querySelector("script,style,iframe,a,[onerror]")).toBeNull();
+    expect(html).not.toContain("https://");
   });
 });

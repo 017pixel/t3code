@@ -31,6 +31,12 @@ export type FilePreviewKind =
   | "docx"
   | "xlsx"
   | "pptx"
+  | "odt"
+  | "ods"
+  | "odp"
+  | "rtf"
+  | "epub"
+  | "ipynb"
   | "text"
   | "unsupported";
 
@@ -53,7 +59,6 @@ export function filePreviewKind(file: {
   // FontFace validates the actual bytes before a specimen is shown.
   if (extension === ".otf" && mime === "application/vnd.oasis.opendocument.formula-template")
     return "font";
-  if (mime === "application/rtf") return "text";
   if (mime.startsWith("image/")) return "image";
   if (mime.startsWith("video/")) return "video";
   if (mime.startsWith("audio/")) return "audio";
@@ -68,7 +73,7 @@ export function filePreviewKind(file: {
     if (media?.startsWith("video/")) return "video";
     if (audioMimeTypeFromExtension(extension) !== null) return "audio";
     if (
-      /^\.(txt|rtf|log|json|jsonc|jsonl|ndjson|yaml|yml|toml|ini|conf|config|env|csv|tsv|xml|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|mts|cts|py|pyi|rb|go|rs|swift|kt|kts|java|c|h|cc|cpp|hpp|cs|php|sh|bash|zsh|fish|sql|graphql|gql|vue|svelte|r|lua|ex|exs|erl|hs|clj|dart|diff|patch|lock|properties|gradle)$/.test(
+      /^\.(txt|log|json|jsonc|jsonl|ndjson|yaml|yml|toml|ini|conf|config|env|csv|tsv|xml|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|mts|cts|py|pyi|rb|go|rs|swift|kt|kts|java|c|h|cc|cpp|hpp|cs|php|sh|bash|zsh|fish|sql|graphql|gql|vue|svelte|r|lua|ex|exs|erl|hs|clj|dart|diff|patch|lock|properties|gradle)$/.test(
         extension,
       ) ||
       /^(dockerfile|makefile|gemfile|rakefile|license|readme|\.gitignore|\.gitattributes|\.editorconfig|\.env)(\.|$)/i.test(
@@ -93,6 +98,12 @@ const OFFICE_MIME_TYPES = {
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  rtf: "application/rtf",
+  epub: "application/epub+zip",
+  ipynb: "application/x-ipynb+json",
 } as const;
 
 export type OfficePreviewKind = keyof typeof OFFICE_MIME_TYPES;
@@ -102,10 +113,14 @@ export function officePreviewKind(file: {
   readonly mimeType?: string;
 }): OfficePreviewKind | null {
   const mime = file.mimeType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-  for (const kind of ["docx", "xlsx", "pptx"] as const) {
+  if (mime === "text/rtf") return "rtf";
+  for (const kind of Object.keys(OFFICE_MIME_TYPES) as OfficePreviewKind[]) {
     if (mime === OFFICE_MIME_TYPES[kind]) return kind;
     if (
-      (!mime || mime === "application/octet-stream" || mime === "text/plain") &&
+      (!mime ||
+        mime === "application/octet-stream" ||
+        mime === "text/plain" ||
+        (kind === "ipynb" && mime === "application/json")) &&
       file.name.toLowerCase().endsWith(`.${kind}`)
     )
       return kind;

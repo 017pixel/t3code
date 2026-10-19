@@ -1,12 +1,15 @@
 /* oxlint-disable react/no-array-index-key -- Spreadsheet rows and columns retain their source positions. */
 import type { OfficePreviewKind } from "@t3tools/shared/filePreview";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
 import { useTheme } from "~/hooks/useTheme";
 
 import { FileSurfaceAction, FileSurfaceLoading, FileSurfaceNotice } from "./fileSurfaceChrome";
 import { OFFICE_PREVIEW_MAX_BYTES, type OfficeWorkerResult } from "./officePreviewProtocol";
+
+const DocumentPages = lazy(() => import("./DocumentPages"));
+const NotebookPreview = lazy(() => import("./NotebookPreview"));
 
 type Workbook = Extract<OfficeWorkerResult, { type: "xlsx" }>;
 type Slide = Extract<OfficeWorkerResult, { type: "slide" }>;
@@ -166,6 +169,14 @@ export default function OfficeViewer(props: {
 }) {
   const [error, setError] = useState<string | null>(null);
   const [word, setWord] = useState<Awaited<ReturnType<typeof renderWord>> | null>(null);
+  const [previewDocument, setDocument] = useState<Extract<
+    OfficeWorkerResult,
+    { type: "document" }
+  > | null>(null);
+  const [notebook, setNotebook] = useState<Extract<
+    OfficeWorkerResult,
+    { type: "notebook" }
+  > | null>(null);
   const [workbook, setWorkbook] = useState<Workbook | null>(null);
   const [count, setCount] = useState(0);
   const [page, setPage] = useState(0);
@@ -201,7 +212,14 @@ export default function OfficeViewer(props: {
       if (controller.signal.aborted) return;
       const result = event.data;
       if (result.type === "error") fail(result.message);
-      else if (result.type === "docx") {
+      else if (result.type === "document") {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        setDocument(result);
+        setCount(result.pages.length > 1 ? result.pages.length : 0);
+      } else if (result.type === "notebook") {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        setNotebook(result);
+      } else if (result.type === "docx") {
         void renderWord(result.bytes)
           .then((content) => {
             if (!controller.signal.aborted) {
@@ -269,38 +287,46 @@ export default function OfficeViewer(props: {
       </div>
     );
   if (word) return <WordFrame content={word} name={props.name} />;
+  if (notebook)
+    return (
+      <Suspense fallback={<FileSurfaceLoading />}>
+        <NotebookPreview notebook={notebook} />
+      </Suspense>
+    );
   const sheet = workbook?.sheets[page];
+  const documentPage = previewDocument?.pages[page];
+  const navigation = workbook ? "sheet" : (previewDocument?.navigation ?? "slide");
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {count > 0 ? (
         <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs">
           <FileSurfaceAction
-            label={workbook ? "Previous sheet" : "Previous slide"}
+            label={`Previous ${navigation}`}
             disabled={page === 0 || (props.kind === "pptx" && slide === null)}
             onPress={() => selectPage(page - 1)}
           >
             <ChevronLeftIcon className="size-3.5" />
           </FileSurfaceAction>
-          {workbook ? (
+          {workbook || previewDocument?.navigation === "chapter" ? (
             <select
-              aria-label="Sheet"
+              aria-label={workbook ? "Sheet" : "Chapter"}
               value={page}
               onChange={(event) => selectPage(Number(event.target.value))}
               className="min-w-0 flex-1 rounded border border-input bg-background px-2 py-1 text-foreground"
             >
-              {workbook.sheets.map((item, index) => (
+              {(workbook?.sheets ?? previewDocument?.pages ?? []).map((item, index) => (
                 <option key={index} value={index}>
-                  {item.name}
+                  {"name" in item ? item.name : item.title}
                 </option>
               ))}
             </select>
           ) : (
             <span className="flex-1 text-center tabular-nums" aria-live="polite">
-              Slide {page + 1} of {count}
+              {navigation === "slide" ? "Slide" : "Page"} {page + 1} of {count}
             </span>
           )}
           <FileSurfaceAction
-            label={workbook ? "Next sheet" : "Next slide"}
+            label={`Next ${navigation}`}
             disabled={page + 1 === count || (props.kind === "pptx" && slide === null)}
             onPress={() => selectPage(page + 1)}
           >
@@ -308,7 +334,22 @@ export default function OfficeViewer(props: {
           </FileSurfaceAction>
         </div>
       ) : null}
-      {sheet ? (
+      {documentPage ? (
+        <>
+          {props.kind !== "epub" ? (
+            <FileSurfaceNotice>
+              Text and images. Layout and embedded objects may differ from the original.
+            </FileSurfaceNotice>
+          ) : null}
+          <Suspense fallback={<FileSurfaceLoading />}>
+            <DocumentPages
+              key={page}
+              html={documentPage.html}
+              name={`${props.name}: ${documentPage.title}`}
+            />
+          </Suspense>
+        </>
+      ) : sheet ? (
         <>
           <FileSurfaceNotice>
             Cell values only. Charts, images, and formatting are not shown.
