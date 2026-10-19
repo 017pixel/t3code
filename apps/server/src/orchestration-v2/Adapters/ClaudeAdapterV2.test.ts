@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 
+import { getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import type {
   Query as ClaudeQuery,
   SDKMessage,
@@ -33,7 +34,7 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
-  type OrchestrationV2ProviderThread,
+  OrchestrationV2ProviderThread,
   ProjectId,
   ProviderInstanceId,
   type ProviderInstanceEnvironment,
@@ -102,6 +103,8 @@ import {
   projectionFor,
 } from "../testkit/fixtures/shared.ts";
 
+const encodeProviderThread = Schema.encodeEffect(OrchestrationV2ProviderThread);
+const decodeProviderThread = Schema.decodeEffect(OrchestrationV2ProviderThread);
 const DEFAULT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({});
 const AUTO_COMPACT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({
   autoCompactWindow: "300000",
@@ -1042,6 +1045,7 @@ describe("ClaudeAdapterV2 Auto-accept edits", () => {
                 };
               }),
             forkSession: () => Effect.die("unused"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -1199,6 +1203,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
           };
         }),
       forkSession: () => Effect.die("unused"),
+      sessionMessageIds: () => Effect.succeed([]),
       subagentLaunchToolUseId: () => Effect.succeed(null),
       assertComplete: Effect.void,
     }),
@@ -1322,6 +1327,7 @@ describe("ClaudeAdapterV2 resumeThread", () => {
             allocateSessionId: Effect.succeed("native-thread-empty"),
             open: () => Effect.die("unused"),
             forkSession: () => Effect.die("unused"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -1411,6 +1417,7 @@ describe("ClaudeAdapterV2 resume compaction", () => {
                 };
               }),
             forkSession: () => Effect.die("unused"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -1638,6 +1645,7 @@ describe("ClaudeAdapterV2 attachments", () => {
                 close: Effect.void,
               }),
             forkSession: () => Effect.die("unused forkSession"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -1786,6 +1794,7 @@ describe("ClaudeAdapterV2 attachments", () => {
                 };
               }),
             forkSession: () => Effect.die("unused forkSession"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -1887,6 +1896,7 @@ describe("ClaudeAdapterV2 native fork", () => {
                 forkCalls.push(input);
                 return { sessionId: "forked-native-session" };
               }),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -2021,6 +2031,301 @@ describe("ClaudeAdapterV2 native fork", () => {
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
         ),
+      ),
+    ),
+  );
+});
+
+describe("ClaudeAdapterV2 rollback past compaction", () => {
+  it.effect.each([
+    "reachable",
+    "compacted",
+    "lookup failure",
+    "empty lookup",
+    "unusable fork",
+  ] as const)("handles checkpoint rollback and subsequent resume: %s", (scenario) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const configDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-claude-rollback-",
+      });
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const previous = process.env.CLAUDE_CONFIG_DIR;
+          process.env.CLAUDE_CONFIG_DIR = configDir;
+          return previous;
+        }),
+        (previous) =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+            else process.env.CLAUDE_CONFIG_DIR = previous;
+          }),
+      );
+      const sourceSessionId = "00000000-0000-4000-8000-000000000701";
+      const uuids = Array.from(
+        { length: 7 },
+        (_, index) => `00000000-0000-4000-8000-${String(710 + index).padStart(12, "0")}`,
+      );
+      const compacted = scenario === "compacted" || scenario === "unusable fork";
+      const rows = ["user", "assistant", "user", "assistant", "system", "user", "assistant"].map(
+        (type, index) => ({
+          type,
+          uuid: uuids[index],
+          parentUuid: index === 0 || (index === 4 && compacted) ? null : uuids[index - 1],
+          sessionId: sourceSessionId,
+          isSidechain: false,
+          timestamp: `2026-01-01T00:00:0${index}.000Z`,
+          ...(type === "system"
+            ? { subtype: compacted ? "compact_boundary" : "notice" }
+            : { message: { role: type, content: [{ type: "text", text: `message-${index}` }] } }),
+        }),
+      );
+      const projectDir = NodePath.join(configDir, "projects", "-workspace");
+      yield* fileSystem.makeDirectory(projectDir, { recursive: true });
+      yield* fileSystem.writeFileString(
+        NodePath.join(projectDir, `${sourceSessionId}.jsonl`),
+        rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
+      );
+      const sdk = <A>(method: string, run: () => Promise<A>) =>
+        Effect.tryPromise({
+          try: run,
+          catch: (cause) => new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({ method, cause }),
+        });
+      const historyRunner = yield* Effect.service(ClaudeAdapterV2.ClaudeAgentSdkQueryRunner).pipe(
+        Effect.provide(ClaudeAdapterV2.layerQueryRunner),
+        Effect.provideService(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      );
+      if (scenario === "compacted") {
+        assert.deepEqual(
+          yield* historyRunner.sessionMessageIds({
+            sessionId: sourceSessionId,
+            dir: "/workspace",
+            environment: { CLAUDE_CONFIG_DIR: NodePath.join(configDir, "other-instance") },
+          }),
+          [],
+          "history discovery must use the provider instance's environment",
+        );
+        assert.equal(process.env.CLAUDE_CONFIG_DIR, configDir);
+      }
+      const resumedHistories: Array<ReadonlyArray<unknown>> = [];
+      const queryRunner = {
+        allocateSessionId: Effect.succeed(sourceSessionId),
+        // Exercise the production history worker; only the query process is replaced.
+        sessionMessageIds: (
+          input: Parameters<ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerShape["sessionMessageIds"]>[0],
+        ) =>
+          scenario === "lookup failure"
+            ? Effect.fail(
+                new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                  method: "sessionMessageIds",
+                  cause: new Error("transcript unreadable"),
+                }),
+              )
+            : historyRunner.sessionMessageIds(
+                scenario === "empty lookup"
+                  ? { ...input, sessionId: "00000000-0000-4000-8000-000000000799" }
+                  : input,
+              ),
+        forkSession: (input: ClaudeAdapterV2.ClaudeAgentSdkSessionForkInput) =>
+          scenario === "unusable fork"
+            ? Effect.succeed({ sessionId: "00000000-0000-4000-8000-000000000799" })
+            : historyRunner.forkSession(input),
+        open: (input: ClaudeAdapterV2.ClaudeAgentSdkQueryOpenInput) =>
+          Effect.gen(function* () {
+            const messages = yield* sdk("resume", async () => {
+              assert.isDefined(input.options.resume, "an existing transcript must be resumed");
+              const history = await getSessionMessages(input.options.resume!, {
+                dir: "/workspace",
+              });
+              const cursor = input.options.resumeSessionAt;
+              const index =
+                cursor === undefined
+                  ? history.length - 1
+                  : history.findIndex((message) => message.uuid === cursor);
+              if (index === -1) throw new Error(`No message found with message.uuid of: ${cursor}`);
+              return history.slice(0, index + 1);
+            });
+            resumedHistories.push(messages.map((message) => message.message));
+            const queue = yield* Queue.unbounded<SDKMessage>();
+            return {
+              messages: Stream.fromQueue(queue),
+              offer: () => Effect.void,
+              setModel: () => Effect.void,
+              applyFlagSettings: () => Effect.void,
+              setPermissionMode: () => Effect.void,
+              backgroundTasks: () => Effect.succeed(false),
+              stopTask: () => Effect.void,
+              interrupt: Effect.void,
+              close: Queue.shutdown(queue),
+            };
+          }),
+        subagentLaunchToolUseId: () => Effect.succeed(null),
+        assertComplete: Effect.void,
+      };
+      const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+        instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CLAUDE_SETTINGS,
+        environment: { CLAUDE_CONFIG_DIR: configDir },
+        attachmentsDir: configDir,
+        fileSystem,
+        path: yield* Path.Path,
+        crypto: yield* Crypto.Crypto,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+        queryRunner,
+      });
+      const threadId = ThreadId.make("thread-claude-compacted-rollback");
+      const sessionInput = {
+        threadId,
+        providerSessionId: ProviderSessionId.make("session-claude-compacted-rollback"),
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+      };
+      const openRuntime = (initialNativeThreadId = sourceSessionId) =>
+        Effect.gen(function* () {
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const session = yield* adapter
+            .openSession({ ...sessionInput, initialNativeThreadId })
+            .pipe(Effect.provideService(Scope.Scope, scope));
+          return { session, close: Scope.close(scope, Exit.void) };
+        });
+      let runtime = yield* openRuntime();
+      let providerThread = yield* runtime.session.ensureThread(sessionInput);
+      const now = yield* DateTime.now;
+      const turns = [1, 2, 3].map((ordinal) => ({
+        id: ProviderTurnId.make(`claude-rollback-turn-${ordinal}`),
+        providerThreadId: providerThread.id,
+        nodeId: NodeId.make(`claude-rollback-node-${ordinal}`),
+        runAttemptId: RunAttemptId.make(`claude-rollback-attempt-${ordinal}`),
+        nativeTurnRef: {
+          driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+          nativeId: uuids[ordinal === 3 ? 6 : ordinal * 2 - 1]!,
+          strength: "weak" as const,
+        },
+        ordinal,
+        status: "completed" as const,
+        startedAt: now,
+        completedAt: now,
+      }));
+      let newTurnMessages: ReadonlyArray<unknown> = [];
+      for (const ordinal of scenario === "compacted" ? [2, 3, 1] : [2, 1]) {
+        if (ordinal === 3) {
+          const forked = yield* runtime.session.forkThread({
+            sourceProviderThread: providerThread,
+            sourceProviderTurns: turns.slice(0, 2),
+            providerTurnId: turns[0]!.id,
+            targetThreadId: ThreadId.make("claude-fork-after-recovery"),
+          });
+          const forkedHistory = yield* sdk("getSessionMessages", () =>
+            getSessionMessages(forked.nativeThreadRef!.nativeId!, { dir: "/workspace" }),
+          );
+          assert.deepEqual(
+            forkedHistory.map((message) => message.message),
+            rows.slice(0, 2).flatMap((row) => ("message" in row ? [row.message] : [])),
+          );
+          const sessionId = providerThread.nativeThreadRef!.nativeId!;
+          const history = yield* sdk("getSessionMessages", () =>
+            getSessionMessages(sessionId, { dir: "/workspace" }),
+          );
+          const newRows = ["user", "assistant", "system", "user", "assistant"].map(
+            (type, index) => ({
+              type,
+              uuid: `00000000-0000-4000-8000-${String(730 + index).padStart(12, "0")}`,
+              parentUuid:
+                index === 0
+                  ? history.at(-1)!.uuid
+                  : index === 2
+                    ? null
+                    : `00000000-0000-4000-8000-${String(729 + index).padStart(12, "0")}`,
+              sessionId,
+              isSidechain: false,
+              timestamp: `2026-01-01T00:01:0${index}.000Z`,
+              ...(type === "system"
+                ? { subtype: "compact_boundary" }
+                : {
+                    message: {
+                      role: type,
+                      content: [{ type: "text", text: `new-message-${index}` }],
+                    },
+                  }),
+            }),
+          );
+          newTurnMessages = newRows
+            .slice(0, 2)
+            .flatMap((row) => ("message" in row ? [row.message] : []));
+          yield* fileSystem.writeFileString(
+            NodePath.join(projectDir, `${sessionId}.jsonl`),
+            newRows.map((row) => JSON.stringify(row)).join("\n") + "\n",
+            { flag: "a" },
+          );
+          // The old third turn was rolled back. New turns have UUIDs from the
+          // recovered session, and a second compaction hides their target too.
+          turns.splice(
+            2,
+            1,
+            ...[3, 4].map((nextOrdinal) => ({
+              ...turns[2]!,
+              id: ProviderTurnId.make(`claude-recovered-turn-${nextOrdinal}`),
+              nativeTurnRef: {
+                ...turns[2]!.nativeTurnRef,
+                nativeId: newRows[nextOrdinal === 3 ? 1 : 4]!.uuid,
+              },
+              ordinal: nextOrdinal,
+            })),
+          );
+        }
+        const rollback = runtime.session.rollbackThread({
+          providerThread,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make(`claude-rollback-checkpoint-${ordinal}`),
+            appRunOrdinal: ordinal,
+            providerTurn: turns[ordinal - 1]!,
+          },
+          providerThreadTurns: turns.filter((turn) => turn.ordinal <= ordinal + 1),
+        });
+        if (scenario === "unusable fork") {
+          const error = yield* rollback.pipe(Effect.flip);
+          assert.instanceOf(error, ProviderAdapter.ProviderAdapterRollbackThreadError);
+          assert.deepEqual(resumedHistories, []);
+          return;
+        }
+        const snapshot = yield* rollback;
+        // CheckpointRollbackService persists the thread row, not snapshot.providerTurns.
+        // Its next rollback resolves the target from the original persisted turns.
+        assert.equal(snapshot.providerThread.id, providerThread.id);
+        providerThread = yield* encodeProviderThread(snapshot.providerThread).pipe(
+          Effect.flatMap(decodeProviderThread),
+        );
+        yield* runtime.close;
+        runtime = yield* openRuntime(providerThread.nativeThreadRef!.nativeId!);
+        yield* runtime.session.startTurn(
+          makeClaudeTestTurnInput({
+            threadId,
+            providerThread,
+            now,
+            attemptId: RunAttemptId.make(`claude-after-rollback-${ordinal}`),
+            text: "Continue from this checkpoint.",
+            attachments: [],
+            nativeThreadHasTurns: true,
+            providerTurnOrdinal: ordinal + 1,
+          }),
+        );
+        assert.deepEqual(resumedHistories.at(-1), [
+          ...rows
+            .slice(0, Math.min(ordinal, 2) * 2)
+            .flatMap((row) => ("message" in row ? [row.message] : [])),
+          ...(ordinal === 3 ? newTurnMessages : []),
+        ]);
+        yield* runtime.close;
+        runtime = yield* openRuntime(providerThread.nativeThreadRef!.nativeId!);
+      }
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
   );
@@ -2175,6 +2480,7 @@ describe("ClaudeAdapterV2 native session identity", () => {
                 };
               }),
             forkSession: () => Effect.die("unused forkSession"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -2560,6 +2866,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               };
             }),
           forkSession: () => Effect.die("unused forkSession"),
+          sessionMessageIds: () => Effect.succeed([]),
           subagentLaunchToolUseId: () => Effect.succeed(options?.subagentLaunchToolUseId ?? null),
           assertComplete: Effect.void,
         },
@@ -5765,6 +6072,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 };
               }),
             forkSession: () => Effect.die("unused forkSession"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -6019,6 +6327,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   };
                 }),
               forkSession: () => Effect.die("unused forkSession"),
+              sessionMessageIds: () => Effect.succeed([]),
               subagentLaunchToolUseId: () => Effect.succeed(null),
               assertComplete: Effect.void,
             },
@@ -11098,6 +11407,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 };
               }),
             forkSession: () => Effect.die("unused forkSession"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -11273,6 +11583,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   };
                 }),
               forkSession: () => Effect.die("unused forkSession"),
+              sessionMessageIds: () => Effect.succeed([]),
               subagentLaunchToolUseId: () => Effect.succeed(null),
               assertComplete: Effect.void,
             },
@@ -11506,6 +11817,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   };
                 }),
               forkSession: () => Effect.die("unused forkSession"),
+              sessionMessageIds: () => Effect.succeed([]),
               subagentLaunchToolUseId: () => Effect.succeed(null),
               assertComplete: Effect.void,
             },
@@ -11701,6 +12013,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 };
               }),
             forkSession: () => Effect.die("unused forkSession"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
@@ -11879,6 +12192,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 });
               },
               forkSession: () => Effect.die("unused forkSession"),
+              sessionMessageIds: () => Effect.succeed([]),
               subagentLaunchToolUseId: () => Effect.succeed(null),
               assertComplete: Effect.void,
             },
@@ -12015,6 +12329,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 });
               },
               forkSession: () => Effect.die("unused forkSession"),
+              sessionMessageIds: () => Effect.succeed([]),
               subagentLaunchToolUseId: () => Effect.succeed(null),
               assertComplete: Effect.void,
             },
@@ -12192,6 +12507,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 }),
               ),
             forkSession: () => Effect.die("unused forkSession"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },

@@ -94,6 +94,8 @@ import {
 
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -496,6 +498,11 @@ export interface ClaudeAgentSdkQueryRunnerShape {
   readonly subagentLaunchToolUseId: (
     input: ClaudeAgentSdkSubagentLookupInput,
   ) => Effect.Effect<string | null, ClaudeAgentSdkQueryRunnerError>;
+  readonly sessionMessageIds: (input: {
+    readonly sessionId: string;
+    readonly dir: string | null;
+    readonly environment: NodeJS.ProcessEnv;
+  }) => Effect.Effect<ReadonlyArray<string>, ClaudeAgentSdkQueryRunnerError>;
   readonly assertComplete: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
 }
 
@@ -505,6 +512,7 @@ export class ClaudeAgentSdkQueryRunner extends Context.Service<
 >()("t3/orchestration-v2/Adapters/ClaudeAdapterV2/ClaudeAgentSdkQueryRunner") {}
 
 export interface ClaudeAgentSdkSessionForkInput {
+  readonly environment?: NodeJS.ProcessEnv;
   readonly sessionId: string;
   readonly options: ForkSessionOptions;
   readonly threadId: ThreadId;
@@ -518,6 +526,21 @@ export interface ClaudeAgentSdkSubagentLookupInput {
   readonly threadId: ThreadId;
   readonly providerSessionId: OrchestrationV2ProviderSession["id"];
 }
+
+const encodeClaudeHistoryOptions = Schema.encodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      dir: Schema.optional(Schema.String),
+      upToMessageId: Schema.optional(Schema.String),
+    }),
+  ),
+);
+const decodeClaudeHistoryFork = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Struct({ sessionId: Schema.String })),
+);
+const decodeClaudeHistoryMessageIds = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Array(Schema.String)),
+);
 
 const isClaudeAgentSdkQueryRunnerError = Schema.is(ClaudeAgentSdkQueryRunnerError);
 const isProviderAdapterRuntimeRequestResponseError = Schema.is(
@@ -743,7 +766,10 @@ export function makeClaudeAgentSdkProtocolLogger(input: {
 export const layerQueryRunner: Layer.Layer<
   ClaudeAgentSdkQueryRunner,
   never,
-  Crypto.Crypto | ProviderEventLoggers.ProviderEventLoggers
+  | Crypto.Crypto
+  | ProviderEventLoggers.ProviderEventLoggers
+  | ChildProcessSpawner.ChildProcessSpawner
+  | Path.Path
 > = Layer.effect(
   ClaudeAgentSdkQueryRunner,
   Effect.gen(function* () {
@@ -751,6 +777,36 @@ export const layerQueryRunner: Layer.Layer<
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
     const platform = yield* HostProcess.Platform;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const path = yield* Path.Path;
+    const executablePath = yield* HostProcess.ExecutablePath;
+    const isExecutable = yield* HostProcess.IsExecutable;
+
+    // A separate process lets SDK history APIs use the provider instance's home
+    // without mutating the server environment shared by other instances.
+    const history = Effect.fn("ClaudeAgentSdkQueryRunner.history")(function* (
+      method: "getSessionMessageIds" | "forkSession",
+      sessionId: string,
+      options: { readonly dir?: string; readonly upToMessageId?: string },
+      environment: NodeJS.ProcessEnv,
+    ) {
+      const args = isExecutable
+        ? ["__claude-history"]
+        : [
+            yield* path.fromFileUrl(
+              import.meta.url.endsWith(".ts")
+                ? new URL("../../claude-history-worker.ts", import.meta.url)
+                : new URL("./claude-history-worker.mjs", import.meta.url),
+            ),
+          ];
+      const encodedOptions = yield* encodeClaudeHistoryOptions(options);
+      return yield* spawner.string(
+        ChildProcess.make(executablePath, [...args, method, sessionId, encodedOptions], {
+          env: environment,
+          extendEnv: false,
+        }),
+      );
+    });
 
     return ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: crypto
@@ -1014,10 +1070,15 @@ export const layerQueryRunner: Layer.Layer<
             options: input.options,
           },
         });
-        const result = yield* Effect.tryPromise({
-          try: () => forkClaudeSession(input.sessionId, input.options),
-          catch: (cause) => queryRunnerError(cause, "forkSession"),
-        });
+        const result = yield* input.environment === undefined
+          ? Effect.tryPromise({
+              try: () => forkClaudeSession(input.sessionId, input.options),
+              catch: (cause) => queryRunnerError(cause, "forkSession"),
+            })
+          : history("forkSession", input.sessionId, input.options, input.environment).pipe(
+              Effect.flatMap(decodeClaudeHistoryFork),
+              Effect.mapError((cause) => queryRunnerError(cause, "forkSession")),
+            );
         yield* logProtocolEvent({
           direction: "incoming",
           stage: "decoded",
@@ -1028,6 +1089,16 @@ export const layerQueryRunner: Layer.Layer<
         });
         return result;
       }),
+      sessionMessageIds: (input) =>
+        history(
+          "getSessionMessageIds",
+          input.sessionId,
+          input.dir === null ? {} : { dir: input.dir },
+          input.environment,
+        ).pipe(
+          Effect.flatMap(decodeClaudeHistoryMessageIds),
+          Effect.mapError((cause) => queryRunnerError(cause, "sessionMessageIds")),
+        ),
       subagentLaunchToolUseId: Effect.fn("ClaudeAgentSdkQueryRunner.subagentLaunchToolUseId")(
         function* (input: ClaudeAgentSdkSubagentLookupInput) {
           const protocolLogger = makeClaudeAgentSdkProtocolLogger({
@@ -9477,11 +9548,93 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 };
               }
 
-              const resumeSessionAt = yield* resolveClaudeRollbackResumeSessionAt(rollbackInput);
+              let resumeSessionAt = yield* resolveClaudeRollbackResumeSessionAt(rollbackInput);
+              const sourceSessionIds =
+                rollbackInput.providerThread.nativeMetadata?.claudeRollbackSessionIds ?? {};
+              const targetTurn = rollbackInput.target.providerTurn;
+              const sourceSessionId = sourceSessionIds[targetTurn.id] ?? nativeThreadId;
+              let resumedSessionId = sourceSessionId;
+              if (resumeSessionAt !== null) {
+                const lookup = {
+                  sessionId: sourceSessionId,
+                  dir: input.runtimePolicy.cwd,
+                  environment: adapterOptions.environment,
+                };
+                const resumableIds = yield* queryRunner.sessionMessageIds(lookup).pipe(
+                  Effect.catchTags({
+                    ClaudeAgentSdkQueryRunnerError: () =>
+                      Effect.logWarning("orchestration-v2.claude-rollback-lookup-failed", {
+                        providerThreadId: rollbackInput.providerThread.id,
+                      }).pipe(Effect.as(null)),
+                  }),
+                );
+                // An empty initial lookup can mean the transcript was not found.
+                // Only a readable chain establishes that compaction hid the cursor.
+                if (
+                  resumableIds !== null &&
+                  resumableIds.length > 0 &&
+                  !resumableIds.includes(resumeSessionAt)
+                ) {
+                  const forked = yield* queryRunner.forkSession({
+                    sessionId: sourceSessionId,
+                    options: {
+                      ...(lookup.dir === null ? {} : { dir: lookup.dir }),
+                      upToMessageId: resumeSessionAt,
+                    },
+                    environment: adapterOptions.environment,
+                    threadId: input.threadId,
+                    providerSessionId: input.providerSessionId,
+                  });
+                  const forkedHeadId = (yield* queryRunner.sessionMessageIds({
+                    ...lookup,
+                    sessionId: forked.sessionId,
+                  })).at(-1);
+                  if (forkedHeadId === undefined) {
+                    return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                      driver: CLAUDE_PROVIDER,
+                      providerThreadId: rollbackInput.providerThread.id,
+                      cause: "Recovered Claude session has no resumable message.",
+                    });
+                  }
+                  resumedSessionId = forked.sessionId;
+                  resumeSessionAt = forkedHeadId;
+                }
+              }
+              const retainedSessionIds = Object.fromEntries(
+                rollbackInput.providerThreadTurns
+                  .filter((turn) => turn.ordinal <= targetTurn.ordinal)
+                  .flatMap((turn) => {
+                    const sessionId = sourceSessionIds[turn.id] ?? nativeThreadId;
+                    return sessionId === resumedSessionId ? [] : [[turn.id, sessionId]];
+                  }),
+              );
+              if (resumedSessionId !== nativeThreadId) {
+                yield* Ref.update(
+                  openedNativeThreads,
+                  (current) => new Set([...current, resumedSessionId]),
+                );
+              }
               return {
                 providerThread: {
                   ...rollbackInput.providerThread,
                   providerSessionId: input.providerSessionId,
+                  nativeThreadRef:
+                    resumedSessionId === nativeThreadId
+                      ? rollbackInput.providerThread.nativeThreadRef
+                      : {
+                          driver: CLAUDE_PROVIDER,
+                          nativeId: resumedSessionId,
+                          strength: "strong" as const,
+                        },
+                  nativeMetadata:
+                    resumedSessionId === nativeThreadId &&
+                    rollbackInput.providerThread.nativeMetadata?.claudeRollbackSessionIds ===
+                      undefined
+                      ? rollbackInput.providerThread.nativeMetadata
+                      : {
+                          ...rollbackInput.providerThread.nativeMetadata,
+                          claudeRollbackSessionIds: retainedSessionIds,
+                        },
                   nativeConversationHeadRef:
                     resumeSessionAt === null
                       ? null
@@ -9522,8 +9675,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 });
               }
 
-              const sourceNativeThreadId = yield* getNativeThreadId(forkInput.sourceProviderThread);
-              yield* closeLiveQueryForNativeThread(sourceNativeThreadId);
+              const activeNativeThreadId = yield* getNativeThreadId(forkInput.sourceProviderThread);
+              yield* closeLiveQueryForNativeThread(activeNativeThreadId);
+              const sourceNativeThreadId =
+                (forkInput.providerTurnId === undefined
+                  ? undefined
+                  : forkInput.sourceProviderThread.nativeMetadata?.claudeRollbackSessionIds?.[
+                      forkInput.providerTurnId
+                    ]) ?? activeNativeThreadId;
               const upToMessageId = yield* resolveClaudeForkUpToMessageId(forkInput);
               const forkOptions: ForkSessionOptions = {
                 ...(input.runtimePolicy.cwd === null ? {} : { dir: input.runtimePolicy.cwd }),
@@ -9532,6 +9691,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const forked = yield* queryRunner.forkSession({
                 sessionId: sourceNativeThreadId,
                 options: forkOptions,
+                ...(forkInput.sourceProviderThread.nativeMetadata?.claudeRollbackSessionIds ===
+                undefined
+                  ? {}
+                  : { environment: adapterOptions.environment }),
                 threadId: forkInput.targetThreadId,
                 providerSessionId: input.providerSessionId,
               });

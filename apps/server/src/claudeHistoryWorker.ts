@@ -21,12 +21,14 @@ export async function runClaudeHistoryWorker(
   const options = decodeHistoryOptions(rawOptions ?? "{}");
   if (!sessionId) throw new Error("Claude history session id is required.");
   const result =
-    method === "getSessionMessages"
-      ? await getSessionMessages(sessionId, options)
-      : method === "forkSession"
-        ? await forkSession(sessionId, options)
-        : (() => {
-            throw new Error("Unknown Claude history operation.");
-          })();
+    method === "getSessionMessageIds"
+      ? (await getSessionMessages(sessionId, options)).map((message) => message.uuid)
+      : method === "getSessionMessages"
+        ? await getSessionMessages(sessionId, options)
+        : method === "forkSession"
+          ? await forkSession(sessionId, options)
+          : (() => {
+              throw new Error("Unknown Claude history operation.");
+            })();
   process.stdout.write(JSON.stringify(result));
 }

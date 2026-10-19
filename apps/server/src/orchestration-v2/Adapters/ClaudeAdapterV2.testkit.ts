@@ -952,6 +952,14 @@ function replayQueryRunnerService(
     allocateSessionId: Effect.succeed(nativeSessionIdFor(transcript)),
     open: (input) => replay(() => queryRunner.open(input)),
     forkSession: (input) => replay(() => queryRunner.forkSession(input)),
+    sessionMessageIds: () =>
+      Effect.succeed(
+        transcript.entries.flatMap((entry) => {
+          const frame = "frame" in entry ? entry.frame : undefined;
+          const uuid = isClaudeSdkReplayMessage(frame) ? Reflect.get(frame, "uuid") : undefined;
+          return typeof uuid === "string" ? [uuid] : [];
+        }),
+      ),
     subagentLaunchToolUseId: (input) => replay(() => queryRunner.subagentLaunchToolUseId(input)),
     assertComplete: replay(() => queryRunner.assertComplete()),
   });

@@ -172,6 +172,7 @@ it.effect.each(deliveries)(
                 close: Effect.void,
               }),
             forkSession: () => Effect.die("unused"),
+            sessionMessageIds: () => Effect.succeed([]),
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
