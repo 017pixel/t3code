@@ -368,6 +368,53 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         }),
     );
 
+    it.effect.skipIf(!symlinksSupported)(
+      "upgrades an inactive shadow home with a local native writer-lock directory",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("t3code-codex-upgrade-shared-");
+          const shadowHome = yield* makeTempDir("t3code-codex-upgrade-shadow-");
+          const sharedLocks = path.join(sharedHome, "thread-writer-locks");
+          const shadowLocks = path.join(shadowHome, "thread-writer-locks");
+          const sharedLockName = "01a15625-a2db-7121-baf9-1df143bf01d6.lock";
+          const rollout = path.join("sessions", "rollout.jsonl");
+          const history = '{"type":"session_meta","payload":{"id":"existing-thread"}}\n';
+
+          // No writer holds these files; native lock files can outlive their process.
+          yield* writeTextFile(
+            path.join(shadowLocks, "01a15680-5d09-7fb2-8de8-484b42421ce3.lock"),
+            "",
+          );
+          yield* writeTextFile(path.join(sharedLocks, sharedLockName), "");
+          yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"shared":true}\n');
+          yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"shadow":true}\n');
+          yield* writeTextFile(path.join(sharedHome, rollout), history);
+          yield* fileSystem.symlink(
+            path.join(sharedHome, "sessions"),
+            path.join(shadowHome, "sessions"),
+          );
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+          );
+
+          yield* materializeCodexShadowHome(layout);
+          expect(yield* fileSystem.readLink(shadowLocks)).toBe(sharedLocks);
+          yield* materializeCodexShadowHome(layout);
+
+          expect(yield* fileSystem.readLink(shadowLocks)).toBe(sharedLocks);
+          expect(yield* fileSystem.readFileString(path.join(shadowLocks, sharedLockName))).toBe("");
+          expect(yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"))).toBe(
+            '{"shadow":true}\n',
+          );
+          expect(yield* fileSystem.readFileString(path.join(sharedHome, "auth.json"))).toBe(
+            '{"shared":true}\n',
+          );
+          expect(yield* fileSystem.readFileString(path.join(shadowHome, rollout))).toBe(history);
+        }),
+    );
+
     it.effect("preserves filesystem operation, paths, and cause", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
