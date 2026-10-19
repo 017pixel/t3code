@@ -2,10 +2,12 @@ import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSetupError,
   type ProviderAuthState,
   type ProviderInstallState,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { userEvent } from "vite-plus/test/browser";
@@ -229,6 +231,15 @@ describe("Antigravity setup", () => {
 
   it("keeps a rejected callback reason in the account status until the flow advances", async () => {
     const refused = "This redirect URL does not belong to the current sign-in.";
+    const retry = deferred<{ _tag: "Success"; value: undefined }>();
+    setup.completeAuth
+      .mockResolvedValueOnce({
+        _tag: "Failure",
+        cause: Cause.fail(
+          new ProviderSetupError({ instanceId, operation: "completeAuth", detail: refused }),
+        ),
+      })
+      .mockReturnValueOnce(retry.promise);
     setup.auth = authState({ message: "Open the Google sign-in link.", inputError: refused });
     await renderSetup();
     const statusMessages = () =>
@@ -242,6 +253,16 @@ describe("Antigravity setup", () => {
     );
     await click("Continue");
     expect(statusMessages()).toContain(refused);
+    expect(occurrences(refused)).toBe(1);
+
+    await act(async () =>
+      userEvent.fill(callbackInput(), "http://127.0.0.1:5555/?state=test-only&code=retry"),
+    );
+    await click("Continue");
+    expect(statusMessages()).toContain(refused);
+    expect(occurrences(refused)).toBe(1);
+
+    await act(async () => retry.resolve({ _tag: "Success", value: undefined }));
 
     setup.auth = authState({ phase: "verifying", authorizationUrl: null, inputError: null });
     await publish();

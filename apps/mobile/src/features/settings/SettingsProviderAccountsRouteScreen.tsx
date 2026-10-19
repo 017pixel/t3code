@@ -98,6 +98,8 @@ function ProviderAccount({
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState({ id: "", values: {} as Record<string, string> });
   const state = auth.data;
+  const visibleError =
+    (state?.phase === "waiting" && error === state.inputError ? null : error) ?? auth.error;
   const interaction = state?.interaction;
   const draftId = `${state?.flowId ?? ""}:${interaction?.id ?? ""}`;
   const values = draft.id === draftId ? draft.values : {};
@@ -259,9 +261,9 @@ function ProviderAccount({
             />
           </>
         ) : null}
-        {error || auth.error ? (
+        {visibleError ? (
           <Text accessibilityRole="alert" className="text-danger-foreground">
-            {error ?? auth.error}
+            {visibleError}
           </Text>
         ) : null}
       </View>
