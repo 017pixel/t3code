@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 
 import {
   decodeScanCache,
@@ -9,7 +10,7 @@ import {
   type CachedFile,
   type ScanCache,
 } from "./usageScanCache.ts";
-import type { UsageRecord } from "@t3tools/provider-core/server/usage";
+import type { TranscriptUsageFormat, UsageRecord } from "@t3tools/provider-core/server/usage";
 
 import { TEST_FORMAT_MAP } from "./usageTestFormats.ts";
 
@@ -148,6 +149,63 @@ describe("scan cache round trip", () => {
     expect(
       decodeScanCache(JSON.parse(JSON.stringify(poisoned)), TEST_FORMAT_MAP).has("/a.jsonl"),
     ).toBe(false);
+  });
+
+  it.each([5, 4])("upgrades cached records before replaying a v%s entry", (version) => {
+    const stateSchema = Schema.Struct({ revision: Schema.optionalKey(Schema.Number) });
+    const format = {
+      selectFields: {},
+      usageMarkers: ['"usage"'],
+      parseLine: () => [],
+      parseProjected: () => [],
+      state: { initial: () => ({ revision: 2 }), schema: stateSchema },
+      upgradeCachedRecords: ({
+        records,
+        state,
+      }: {
+        readonly records: readonly UsageRecord[];
+        readonly state: unknown;
+      }) =>
+        Schema.is(stateSchema)(state) && state.revision === 2
+          ? undefined
+          : records.filter((entry) => entry.model !== "obsolete"),
+    } satisfies TranscriptUsageFormat<unknown>;
+    const kept = record();
+    const tail = record({ dedupeKey: "tail" });
+    const old: CachedFile = {
+      size: 200,
+      mtimeMs: 100,
+      provider: "claude",
+      records: [record({ model: "obsolete" }), kept],
+      tailRecords: [tail, record({ model: "obsolete", dedupeKey: "obsolete-tail" })],
+      position: position({ state: { revision: 1 } }),
+    };
+    const current = { ...old, position: position({ state: { revision: 2 } }) };
+    const cache: ScanCache = new Map([
+      ["/old.jsonl", old],
+      ["/clean.jsonl", { ...old, records: [kept], tailRecords: [] }],
+      ["/empty.jsonl", { ...old, records: [record({ model: "obsolete" })], tailRecords: [] }],
+      ["/current.jsonl", current],
+    ]);
+    const restored = decodeScanCache(
+      JSON.parse(JSON.stringify({ ...encodeScanCache(cache), version })),
+      new Map([["claude", format]]),
+    );
+
+    expect(restored.get("/old.jsonl")).toEqual({
+      ...old,
+      size: -1,
+      records: [kept, tail],
+      tailRecords: [],
+      position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+    });
+    // Even an upgrade that removes no rows (or every row) must force a replay.
+    expect(restored.get("/clean.jsonl")?.size).toBe(-1);
+    expect(restored.get("/clean.jsonl")?.records).toEqual([kept]);
+    expect(restored.get("/empty.jsonl")?.size).toBe(-1);
+    expect(restored.get("/empty.jsonl")?.records).toEqual([]);
+    if (version === 5) expect(restored.get("/current.jsonl")).toEqual(current);
+    else expect(restored.get("/current.jsonl")).toEqual(restored.get("/old.jsonl"));
   });
 
   it("rejects a document from before records carried a speed", () => {

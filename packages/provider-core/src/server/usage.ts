@@ -77,6 +77,16 @@ export interface TranscriptUsageFormat<State> {
    * records for cross-file de-duplication.
    */
   readonly sharedSessionsAcrossFiles?: true;
+  /**
+   * Returns retained records when an older parser's entry needs a cold replay,
+   * or `undefined` to keep the entry unchanged. Includes committed and tail
+   * records; deleted sources keep the returned history. `state` is `null` for
+   * entries migrated from a cache that predates persisted parser state.
+   */
+  readonly upgradeCachedRecords?: (entry: {
+    readonly records: readonly UsageRecord[];
+    readonly state: unknown;
+  }) => readonly UsageRecord[] | undefined;
 }
 
 export interface ProviderUsageInstance<Config> {
