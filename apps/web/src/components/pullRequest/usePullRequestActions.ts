@@ -127,6 +127,21 @@ function subscribePullRequestActionsPending(listener: () => void) {
   };
 }
 
+async function withPendingAction(
+  key: string,
+  action: () => Promise<void>,
+  onFailure: (failure: unknown) => void,
+) {
+  setPullRequestActionPending(key, true);
+  try {
+    await action();
+  } catch (failure) {
+    onFailure(failure);
+  } finally {
+    setPullRequestActionPending(key, false);
+  }
+}
+
 /** Whether a host action is running against this pull request. */
 export function isPullRequestActionPending(key: string): boolean {
   return pendingActionKeys.has(key);
@@ -167,28 +182,33 @@ export function usePullRequestActionRunner({
 
   const perform = async (action: PullRequestAction, method?: PullRequestMergeMethod) => {
     if (reference === null || key === null || pendingActionKeys.has(key)) return;
-    setPullRequestActionPending(key, true);
-    try {
-      const result = await runAction({
-        environmentId,
-        input: {
-          ...reference,
-          action,
-          ...(method ? { mergeMethod: method } : resolveMergeMethod ? { resolveMergeMethod } : {}),
-        },
-      });
-      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-      toastManager.add({ type: "success", title: ACTION_SUCCESS_LABELS[action] });
-      onSuccess?.(action);
-    } catch (failure) {
-      toastManager.add({
-        type: "error",
-        title: ACTION_FAILURE_LABELS[action],
-        description: readableFailure(failure, ACTION_FAILURE_HINTS[action]),
-      });
-    } finally {
-      setPullRequestActionPending(key, false);
-    }
+    await withPendingAction(
+      key,
+      async () => {
+        const result = await runAction({
+          environmentId,
+          input: {
+            ...reference,
+            action,
+            ...(method
+              ? { mergeMethod: method }
+              : resolveMergeMethod
+                ? { resolveMergeMethod }
+                : {}),
+          },
+        });
+        if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+        toastManager.add({ type: "success", title: ACTION_SUCCESS_LABELS[action] });
+        onSuccess?.(action);
+      },
+      (failure) => {
+        toastManager.add({
+          type: "error",
+          title: ACTION_FAILURE_LABELS[action],
+          description: readableFailure(failure, ACTION_FAILURE_HINTS[action]),
+        });
+      },
+    );
   };
 
   return { actionPending, perform };

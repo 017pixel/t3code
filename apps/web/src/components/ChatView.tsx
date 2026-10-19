@@ -1190,20 +1190,17 @@ export default function ChatView(props: ChatViewProps) {
   const composerRef = useRef<ChatComposerHandle | null>(null);
   const sharedComposerRef = useComposerHandleContext();
   const publishesComposerRef = useRef(false);
-  const setComposerHandle = useCallback(
-    (handle: ChatComposerHandle | null) => {
-      const previous = composerRef.current;
-      composerRef.current = handle;
-      if (
-        sharedComposerRef !== null &&
-        publishesComposerRef.current &&
-        sharedComposerRef.current === previous
-      ) {
-        sharedComposerRef.current = handle;
-      }
-    },
-    [sharedComposerRef],
-  );
+  const setComposerHandle = useStableCallback((handle: ChatComposerHandle | null) => {
+    const previous = composerRef.current;
+    composerRef.current = handle;
+    if (
+      sharedComposerRef !== null &&
+      publishesComposerRef.current &&
+      sharedComposerRef.current === previous
+    ) {
+      sharedComposerRef.current = handle;
+    }
+  });
   const queuedRunEdit = useQueuedRunEdit({
     environmentId,
     routeThreadRef,

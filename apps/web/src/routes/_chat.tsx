@@ -1,8 +1,7 @@
 import { AuthPreviewOperateScope } from "@t3tools/contracts";
 import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useLayoutEffect, useMemo } from "react";
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { registerChatSurface } from "../components/chatSurfaceSlot";

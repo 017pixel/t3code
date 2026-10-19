@@ -443,6 +443,7 @@ function TerminalSessionViewport({
   drawerHeight,
   keybindings,
 }: TerminalViewportProps) {
+  const runtimeEnvKey = runtimeEnvSignature(runtimeEnv);
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<GhosttyTerminalSurface | null>(null);
   const visibleRef = useRef(visible);

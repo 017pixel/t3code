@@ -1263,38 +1263,6 @@ function PullRequestsRouteView() {
       });
     },
   );
-  const heldPullRequestsBySurface = useMemo(
-    () =>
-      new Map(
-        groups.flatMap((group) =>
-          group.entries.map((entry) => [pullRequestListEntryId(entry), entry] as const),
-        ),
-      ),
-    [groups],
-  );
-  const listedPullRequestsBySurface = useMemo(
-    () =>
-      new Map(
-        displayGroups.flatMap((group) =>
-          group.entries.map((entry) => [pullRequestListEntryId(entry), entry] as const),
-        ),
-      ),
-    [displayGroups],
-  );
-
-  const linkedSelection = useMemo(
-    () =>
-      search.repository && search.number && selectedProject
-        ? {
-            environmentId: selectedProject.environmentId,
-            repository: search.repository,
-            number: search.number,
-            projectId: selectedProject.id,
-            ...(selectedHost ? { host: selectedHost } : {}),
-          }
-        : null,
-    [search.number, search.repository, selectedProject, selectedHost],
-  );
   const rightPanelAvailable = selectedPullRequestSurface !== null;
   const [maximized, setMaximized] = useState(false);
   const rightPanelMaximized = rightPanelState.isOpen && maximized;
@@ -1424,69 +1392,51 @@ function PullRequestsRouteView() {
     !(listQuery.error && shownCount === 0) &&
     !carriedToNothing &&
     shownCount > 0;
-  const listItems = useMemo(
-    () => (listRowsShown ? pullRequestListItems(displayGroups) : EMPTY_PULL_REQUEST_LIST_ITEMS),
-    [displayGroups, listRowsShown],
-  );
-  const renderListItem = useCallback(
-    ({ item }: { item: PullRequestListItem }) => {
-      return (
-        <PullRequestListLane
-          className={item.gap === "row" ? "pt-0.5" : item.gap === "group" ? "pt-3" : undefined}
-        >
-          {item.kind === "group" ? (
-            <PullRequestGroupHeader group={item.group} />
-          ) : (
-            <PullRequestRow
-              statsKey={item.entryKey}
-              statsRef={registerStatsRow}
-              entry={item.entry}
-              showProjectTitle
-              showProvider={showProvider}
-              {...(capableEnvironments.length > 1 &&
-              environmentLabels.get(item.entry.environmentId) !== undefined
-                ? { environmentLabel: environmentLabels.get(item.entry.environmentId)! }
-                : {})}
-              // Ten is the floor the ranking gives a row whose own fields say nothing
-              // about the search: the host matched something this row cannot show.
-              matchedElsewhere={
-                typedParsed.text.length > 0 &&
-                scorePullRequestMatch(item.entry, typedParsed.text) <= MATCHED_ELSEWHERE_SCORE
-              }
-              selected={
-                selected?.environmentId === item.entry.environmentId &&
-                selected.repository === item.entry.repository &&
-                selected.host?.toLowerCase() === item.entry.host.toLowerCase() &&
-                selected.number === item.entry.number
-              }
-              onSelect={selectEntry}
-              speedMode={speedMode}
-              hostActions={hostActionsOf(item.entry)}
-              onActed={onSpeedAction}
-              closing={closingKeys.has(item.entryKey)}
-              sweeping={closeSweepKeys.has(item.entryKey)}
-              onCloseSweepStart={startCloseSweep}
-            />
-          )}
-        </PullRequestListLane>
-      );
-    },
-    [
-      capableEnvironments.length,
-      environmentLabels,
-      typedParsed.text,
-      selected,
-      selectEntry,
-      speedMode,
-      onSpeedAction,
-      closingKeys,
-      closeSweepKeys,
-      showProvider,
-      hostActionsOf,
-      registerStatsRow,
-      startCloseSweep,
-    ],
-  );
+  const listItems = listRowsShown
+    ? pullRequestListItems(displayGroups)
+    : EMPTY_PULL_REQUEST_LIST_ITEMS;
+  const renderListItem = ({ item }: { item: PullRequestListItem }) => {
+    return (
+      <PullRequestListLane
+        className={item.gap === "row" ? "pt-0.5" : item.gap === "group" ? "pt-3" : undefined}
+      >
+        {item.kind === "group" ? (
+          <PullRequestGroupHeader group={item.group} />
+        ) : (
+          <PullRequestRow
+            statsKey={item.entryKey}
+            statsRef={registerStatsRow}
+            entry={item.entry}
+            showProjectTitle
+            showProvider={showProvider}
+            {...(capableEnvironments.length > 1 &&
+            environmentLabels.get(item.entry.environmentId) !== undefined
+              ? { environmentLabel: environmentLabels.get(item.entry.environmentId)! }
+              : {})}
+            // Ten is the floor the ranking gives a row whose own fields say nothing
+            // about the search: the host matched something this row cannot show.
+            matchedElsewhere={
+              typedParsed.text.length > 0 &&
+              scorePullRequestMatch(item.entry, typedParsed.text) <= MATCHED_ELSEWHERE_SCORE
+            }
+            selected={
+              selected?.environmentId === item.entry.environmentId &&
+              selected.repository === item.entry.repository &&
+              selected.host?.toLowerCase() === item.entry.host.toLowerCase() &&
+              selected.number === item.entry.number
+            }
+            onSelect={selectEntry}
+            speedMode={speedMode}
+            hostActions={hostActionsOf(item.entry)}
+            onActed={onSpeedAction}
+            closing={closingKeys.has(item.entryKey)}
+            sweeping={closeSweepKeys.has(item.entryKey)}
+            onCloseSweepStart={startCloseSweep}
+          />
+        )}
+      </PullRequestListLane>
+    );
+  };
   const listBody = (
     <>
       {!capabilityKnown ? (
@@ -2479,12 +2429,9 @@ function PullRequestsColumn({
   scrollRef: RefObject<HTMLDivElement | null>;
 }) {
   const markerRef = useRef<HTMLDivElement | null>(null);
-  const attachList = useCallback(
-    (list: LegendListRef | null) => {
-      scrollRef.current = (list?.getScrollableNode() as HTMLDivElement | null) ?? null;
-    },
-    [scrollRef],
-  );
+  const attachList = (list: LegendListRef | null) => {
+    scrollRef.current = (list?.getScrollableNode() as HTMLDivElement | null) ?? null;
+  };
   const [condensed, setCondensed] = useState(false);
   useEffect(() => {
     const marker = markerRef.current;

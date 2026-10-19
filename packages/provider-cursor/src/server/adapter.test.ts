@@ -36,7 +36,7 @@ import {
   nestedToolCallFromEnvelope,
 } from "./adapter.ts";
 import * as CursorAgentSdk from "./CursorAgentSdk.ts";
-import { ConfigurationError } from "./sdk.ts";
+import { loadCursorSdk } from "./sdk.ts";
 
 const decodeCursorSettings = Schema.decodeEffect(CursorSettings);
 
@@ -940,7 +940,7 @@ describe("CursorAdapterV2", () => {
           : Effect.fail(
               new CursorAgentSdk.CursorAgentSdkRunnerError({
                 method,
-                cause: new ConfigurationError(
+                cause: new (loadCursorSdk().ConfigurationError)(
                   `Cannot use this model: ${model.id}. Available models: default, composer-2.5. Use Cursor.models.list() to discover valid selections.`,
                   { isRetryable: false },
                 ),
