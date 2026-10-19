@@ -6,6 +6,8 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import * as HostProcess from "@t3tools/shared/HostProcess";
+
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 
 export const MAX_HANDOFF_BUNDLE_BYTES = 50 * 1024 * 1024;
@@ -69,7 +71,13 @@ export class HandoffGitStepError extends Schema.TaggedError<HandoffGitStepError>
   {
     step: Schema.String,
     reason: Schema.optional(
-      Schema.Literals(["bundle-not-written", "snapshot-mismatch", "gitlinks", "index-too-large"]),
+      Schema.Literals([
+        "bundle-not-written",
+        "snapshot-mismatch",
+        "gitlinks",
+        "index-too-large",
+        "invalid-path",
+      ]),
     ),
     cause: Schema.optional(Schema.Defect()),
   },
@@ -84,6 +92,8 @@ export class HandoffGitStepError extends Schema.TaggedError<HandoffGitStepError>
         return "Git handoff does not carry submodules or nested repositories. Transfer this checkout manually.";
       case "index-too-large":
         return "This checkout has too many indexed files for Git handoff. Transfer it manually.";
+      case "invalid-path":
+        return "Git handoff requires UTF-8 names for force-staged ignored files. Rename them, then try again.";
       default:
         return `git ${this.step} failed.`;
     }
@@ -142,6 +152,7 @@ const make = Effect.gen(function* () {
   const processes = yield* VcsProcess.VcsProcess;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
 
   const git = (
     cwd: string,
@@ -208,7 +219,7 @@ const make = Effect.gen(function* () {
     const env = {
       GIT_INDEX_FILE: path.join(indexDir, "index"),
       ...IDENTITY,
-      ...VcsProcess.gitConfigEnv(process.env, "core.splitIndex", "false", process.platform),
+      ...VcsProcess.gitConfigEnv(process.env, "core.splitIndex", "false", platform),
     };
     yield* git(input.cwd, ["read-tree", tip], { env });
     const ignored = yield* git(
@@ -228,6 +239,9 @@ const make = Effect.gen(function* () {
     );
     if (ignored.stdoutTruncated) {
       return yield* new HandoffGitStepError({ step: "pack", reason: "index-too-large" });
+    }
+    if (ignored.stdoutInvalidUtf8) {
+      return yield* new HandoffGitStepError({ step: "pack", reason: "invalid-path" });
     }
     // Force-staged ignored files are work; seed only their entries without copying index flags.
     if (ignored.stdout !== "") {
@@ -268,7 +282,14 @@ const make = Effect.gen(function* () {
           ? fileSystem.remove(bundlePath, { force: true }).pipe(Effect.ignore)
           : Effect.void,
     );
-    yield* git(input.cwd, ["bundle", "create", bundlePath, snapshotRef, "--not", "--remotes"]);
+    yield* git(input.cwd, [
+      "bundle",
+      "create",
+      bundlePath,
+      snapshotRef,
+      "--not",
+      "--remotes=origin",
+    ]);
     const bundleBytes = Number(
       (yield* fileSystem.stat(bundlePath).pipe(
         Effect.mapError(
@@ -328,7 +349,11 @@ const make = Effect.gen(function* () {
       input.bundlePath,
       snapshotRef,
     ]);
-    const worktreePath = path.resolve(input.worktreePath);
+    const requestedPath = path.resolve(input.worktreePath);
+    const parent = yield* fileSystem
+      .realPath(path.dirname(requestedPath))
+      .pipe(Effect.mapError((cause) => new HandoffGitStepError({ step: "worktree", cause })));
+    const worktreePath = path.join(parent, path.basename(requestedPath));
     const worktreeListArgs = ["worktree", "list", "--porcelain"];
     const listed = yield* git(input.repoRoot, [...worktreeListArgs, "-z"], {
       allowNonZeroExit: true,

@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - FileSystem accepts only string paths; this fixture needs invalid UTF-8 bytes.
+import * as NodeFSP from "node:fs/promises";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
@@ -7,6 +9,8 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import * as HandoffGit from "./HandoffGit.ts";
@@ -293,7 +297,7 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect.each(["existing origin", "no origin"])(
+  it.effect.each(["existing origin", "no origin", "fork remote"])(
     "resolves a missing bundle base with %s",
     (mode) =>
       Effect.gen(function* () {
@@ -303,19 +307,24 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         yield* fs.writeFileString(path.join(sender, "later.ts"), "pushed later\n");
         yield* git(sender, ["add", "."]);
         yield* git(sender, ["commit", "-m", "later base"]);
-        yield* git(sender, ["push", "origin", "main"]);
+        if (mode === "fork remote") {
+          const fork = path.join(path.dirname(sender), "fork.git");
+          yield* git(sender, ["clone", "--bare", origin, fork]);
+          yield* git(sender, ["remote", "add", "fork", fork]);
+        }
+        yield* git(sender, ["push", mode === "fork remote" ? "fork" : "origin", "main"]);
         yield* editSender(sender);
         const packed = yield* handoff.pack({ cwd: sender, handoffId, outDir });
         const processes = yield* VcsProcess.VcsProcess;
-        assert.notEqual(
+        assert.equal(
           (yield* processes.run({
             operation: "test.verify",
             command: "git",
             cwd: receiver,
             args: ["bundle", "verify", packed.bundlePath],
             allowNonZeroExit: true,
-          })).exitCode,
-          0,
+          })).exitCode === 0,
+          mode === "fork remote",
         );
         if (mode === "no origin") {
           yield* git(receiver, ["remote", "remove", "origin"]);
@@ -364,6 +373,32 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         "uncommitted nested work\n",
       );
     }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
+    "refuses invalid UTF-8 force-staged names",
+    () =>
+      Effect.gen(function* () {
+        const { sender, outDir, fs } = yield* fixture;
+        const handoff = yield* HandoffGit.HandoffGit;
+        const name = Buffer.concat([
+          Buffer.from(`${sender}/`),
+          Buffer.from([0xff]),
+          Buffer.from(".local"),
+        ]);
+        yield* Effect.tryPromise(() => NodeFSP.writeFile(name, "staged work\n"));
+        yield* git(sender, ["add", "-f", "--", ":/"]);
+        const before = yield* repositoryState(sender);
+        const error = yield* handoff.pack({ cwd: sender, handoffId, outDir }).pipe(Effect.flip);
+        assert.equal(error._tag, "HandoffGitStepError");
+        assert.include(error.message, "UTF-8");
+        assert.deepEqual(yield* repositoryState(sender), before);
+        assert.deepEqual(yield* fs.readDirectory(outDir), []);
+        assert.equal(
+          yield* Effect.tryPromise(() => NodeFSP.readFile(name, "utf8")),
+          "staged work\n",
+        );
+      }).pipe(Effect.scoped),
   );
 
   it.effect("rejects an incompressible bundle over 50 MiB and removes its artifacts", () =>
