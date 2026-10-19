@@ -19,6 +19,7 @@ import type {
   OrchestrationV2CheckpointScope,
   OrchestrationV2ExecutionNode,
   OrchestrationV2PlanArtifact,
+  OrchestrationV2PendingRuntimeRequestSummary,
   PlanId,
   OrchestrationV2ConversationMessage,
   OrchestrationV2DomainEvent,
@@ -220,9 +221,10 @@ const ProjectionCheckpointContext = Schema.Struct({
   ),
   checkpoints: Schema.Array(
     OrchestrationV2CheckpointJsonSchema.mapFields(
-      ({ scopeId, runId, appRunOrdinal, status, ref }) => ({
+      ({ scopeId, runId, ordinalWithinScope, appRunOrdinal, status, ref }) => ({
         scopeId,
         runId,
+        ordinalWithinScope,
         appRunOrdinal,
         status,
         ref,
@@ -422,7 +424,9 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
-  readonly getThreadWorktreePaths: () => Effect.Effect<
+  readonly getThreadWorktreePaths: (options?: {
+    readonly includeArchived?: boolean;
+  }) => Effect.Effect<
     ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
     ProjectionStoreV2Error
   >;
@@ -732,7 +736,7 @@ export function applyToProjection(
   switch (event.type) {
     case "thread.pull-request-link-updated":
       return {
-        ...base,
+        ...projection,
         thread: applyThreadPullRequestLinkUpdate(projection.thread, event.payload),
       };
     case "thread.created":
@@ -747,9 +751,7 @@ export function applyToProjection(
     case "thread.pinned":
     case "thread.unpinned":
     case "thread.pin-reordered":
-    case "thread.active-reordered":
     case "thread.metadata-updated":
-    case "thread.pull-request-synced":
     case "thread.runtime-mode-updated":
     case "thread.interaction-mode-updated":
     case "thread.model-selection-updated":
@@ -757,6 +759,14 @@ export function applyToProjection(
       return {
         ...base,
         thread: event.payload,
+      };
+    // Reordering and PR refreshes preserve the orchestrator's activity timestamp.
+    case "thread.active-reordered":
+    case "thread.pull-request-synced":
+      return {
+        ...base,
+        thread: event.payload,
+        updatedAt: event.payload.updatedAt,
       };
     case "thread.visited":
     case "thread.marked-unread":
@@ -1418,20 +1428,27 @@ function buildVisibleTurnItems(input: {
   ]);
 }
 
+function pendingRuntimeRequestSummary(
+  request: OrchestrationV2ThreadProjection["runtimeRequests"][number] | null,
+): OrchestrationV2PendingRuntimeRequestSummary | null {
+  if (request === null) return null;
+  return {
+    id: request.id,
+    kind: request.kind,
+    createdAt: request.createdAt,
+    blocking: request.responseCapability.type !== "message",
+  };
+}
+
 function secretRequestAsPendingInput(
   item: OrchestrationV2TurnItem | null,
-): OrchestrationV2ThreadProjection["runtimeRequests"][number] | null {
+): OrchestrationV2PendingRuntimeRequestSummary | null {
   if (item?.type !== "secret_request" || item.nodeId === null) return null;
   return {
     id: RuntimeRequestId.make(item.id),
-    nodeId: item.nodeId,
-    providerTurnId: item.providerTurnId,
-    nativeRequestRef: null,
     kind: "user_input",
-    status: "pending",
-    responseCapability: { type: "message" },
     createdAt: item.startedAt ?? item.updatedAt,
-    resolvedAt: null,
+    blocking: true,
   };
 }
 
@@ -1460,27 +1477,31 @@ export function threadShellFromProjection(
       .filter(isActivityRunForShell)
       .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null;
   const liveRunIds = new Set(projection.runs.filter(isActivityRunForShell).map((run) => run.id));
-  const pendingRuntimeRequest =
+  let pendingRuntimeRequest = pendingRuntimeRequestSummary(
     projection.runtimeRequests
       .filter((request) => request.status === "pending")
       .toSorted(
         (left, right) =>
           DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt),
-      )[0] ??
-    secretRequestAsPendingInput(
-      projection.turnItems
-        .filter(
-          (item) =>
-            item.type === "secret_request" &&
-            item.status === "waiting" &&
-            item.runId !== null &&
-            liveRunIds.has(item.runId),
-        )
-        .toSorted(
-          (left, right) =>
-            DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
-        )[0] ?? null,
-    );
+      )[0] ?? null,
+  );
+  if (pendingRuntimeRequest === null || pendingRuntimeRequest.blocking === false) {
+    pendingRuntimeRequest =
+      secretRequestAsPendingInput(
+        projection.turnItems
+          .filter(
+            (item) =>
+              item.type === "secret_request" &&
+              item.status === "waiting" &&
+              item.runId !== null &&
+              liveRunIds.has(item.runId),
+          )
+          .toSorted(
+            (left, right) =>
+              DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
+          )[0] ?? null,
+      ) ?? pendingRuntimeRequest;
+  }
   const userMessages = projection.messages
     .filter((message) => message.role === "user")
     .toSorted(
@@ -1537,14 +1558,7 @@ export function threadShellFromProjection(
       latestRootProviderFailure(latestRun, projection.turnItems),
       providerSession?.lastError ?? null,
     ),
-    pendingRuntimeRequest:
-      pendingRuntimeRequest === null
-        ? null
-        : {
-            id: pendingRuntimeRequest.id,
-            kind: pendingRuntimeRequest.kind,
-            createdAt: pendingRuntimeRequest.createdAt,
-          },
+    pendingRuntimeRequest,
     // Thread detail owns message bodies. Keeping them out of shell rows makes
     // initial hydration and streaming updates independent of transcript size.
     latestVisibleMessage: null,
@@ -1566,7 +1580,7 @@ export function threadShellFromProjection(
     itemCount: activeLocalTurnItems(projection).length,
     visibleItemCount: projection.visibleTurnItems.length,
     createdAt: projection.thread.createdAt,
-    updatedAt: projection.updatedAt,
+    updatedAt: projection.thread.updatedAt,
     archivedAt: projection.thread.archivedAt,
     settledOverride: projection.thread.settledOverride,
     settledAt: projection.thread.settledAt,
@@ -1639,7 +1653,7 @@ type ShellThreadState = {
   readonly lastError: string | null;
   readonly lastErrorClass: OrchestrationV2ThreadShell["lastErrorClass"];
   readonly usageLimitResetAt: OrchestrationV2ThreadShell["usageLimitResetAt"];
-  readonly pendingRuntimeRequest: OrchestrationV2ThreadProjection["runtimeRequests"][number] | null;
+  readonly pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null;
   readonly latestUserMessageAt: DateTime.Utc | null;
   readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
   readonly hasActionableProposedPlan: boolean;
@@ -1792,14 +1806,7 @@ function shellFromState(input: {
     lastError: input.state.lastError,
     lastErrorClass: input.state.lastErrorClass,
     usageLimitResetAt: input.state.usageLimitResetAt,
-    pendingRuntimeRequest:
-      input.state.pendingRuntimeRequest === null
-        ? null
-        : {
-            id: input.state.pendingRuntimeRequest.id,
-            kind: input.state.pendingRuntimeRequest.kind,
-            createdAt: input.state.pendingRuntimeRequest.createdAt,
-          },
+    pendingRuntimeRequest: input.state.pendingRuntimeRequest,
     latestVisibleMessage: null,
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
@@ -2703,9 +2710,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           event.type !== "thread.pinned" &&
           event.type !== "thread.unpinned" &&
           event.type !== "thread.pin-reordered" &&
+          event.type !== "thread.active-reordered" &&
           event.type !== "thread.visited" &&
           event.type !== "thread.marked-unread" &&
           event.type !== "thread.metadata-updated" &&
+          event.type !== "thread.pull-request-synced" &&
+          event.type !== "thread.pull-request-link-updated" &&
           event.type !== "thread.runtime-mode-updated" &&
           event.type !== "thread.interaction-mode-updated" &&
           event.type !== "thread.model-selection-updated" &&
@@ -4721,6 +4731,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `,
               sql`
               SELECT scope_id AS "scopeId", run_id AS "runId",
+                ordinal_within_scope AS "ordinalWithinScope",
                 app_run_ordinal AS "appRunOrdinal", status,
                 json_extract(payload_json, '$.ref') AS ref
               FROM orchestration_v2_projection_checkpoints
@@ -5739,12 +5750,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         );
       }).pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
 
-    const getThreadWorktreePaths: ProjectionStoreV2Shape["getThreadWorktreePaths"] = () =>
+    const getThreadWorktreePaths: ProjectionStoreV2Shape["getThreadWorktreePaths"] = (options) =>
       sql<{ readonly thread_id: string; readonly worktree_path: string }>`
         SELECT thread_id, json_extract(payload_json, '$.worktreePath') AS worktree_path
         FROM orchestration_v2_projection_threads
         WHERE deleted_at IS NULL
-          AND json_extract(payload_json, '$.archivedAt') IS NULL
+          ${options?.includeArchived === true ? sql`` : sql`AND json_extract(payload_json, '$.archivedAt') IS NULL`}
           AND json_extract(payload_json, '$.worktreePath') IS NOT NULL
       `.pipe(
         Effect.map((rows) =>
@@ -5778,14 +5789,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           pendingTurnItemsByThreadId,
         } = input;
         const thread = yield* decodeThreadPayload(row.payload_json);
-        const pendingRuntimeRequest =
+        let pendingRuntimeRequest =
           row.pending_request_payload_json !== null
-            ? yield* decodeRuntimeRequestPayload(row.pending_request_payload_json)
-            : row.pending_secret_request_payload_json !== null
-              ? secretRequestAsPendingInput(
-                  yield* decodeTurnItemPayload(row.pending_secret_request_payload_json),
-                )
-              : null;
+            ? pendingRuntimeRequestSummary(
+                yield* decodeRuntimeRequestPayload(row.pending_request_payload_json),
+              )
+            : null;
+        if (
+          (pendingRuntimeRequest === null || pendingRuntimeRequest.blocking === false) &&
+          row.pending_secret_request_payload_json !== null
+        ) {
+          pendingRuntimeRequest =
+            secretRequestAsPendingInput(
+              yield* decodeTurnItemPayload(row.pending_secret_request_payload_json),
+            ) ?? pendingRuntimeRequest;
+        }
         let terminalFailureItem =
           row.terminal_failure_payload_json === null
             ? null
@@ -6240,12 +6258,12 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 left.id.localeCompare(right.id),
             );
         }),
-      getThreadWorktreePaths: () =>
+      getThreadWorktreePaths: (options) =>
         Ref.get(replayState).pipe(
           Effect.map((state) =>
             [...state.projections.values()].flatMap(({ thread }) =>
               thread.deletedAt === null &&
-              thread.archivedAt === null &&
+              (options?.includeArchived === true || thread.archivedAt === null) &&
               thread.worktreePath !== null
                 ? [{ threadId: thread.id, worktreePath: thread.worktreePath }]
                 : [],
@@ -6583,9 +6601,10 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               cwd,
             })),
             checkpoints: projection.checkpoints.map(
-              ({ scopeId, runId, appRunOrdinal, status, ref }) => ({
+              ({ scopeId, runId, ordinalWithinScope, appRunOrdinal, status, ref }) => ({
                 scopeId,
                 runId,
+                ordinalWithinScope,
                 appRunOrdinal,
                 status,
                 ref,
