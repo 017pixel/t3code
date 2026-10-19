@@ -63,7 +63,10 @@ async function open(input: Extract<TextPreviewRequest, { type: "open" }>) {
   const response =
     input.text !== undefined
       ? new Response(new Blob([input.text]))
-      : await fetch(input.src!, { headers: { Range: `bytes=0-${LARGE_TEXT_MAX_BYTES}` } });
+      : await fetch(input.src!, {
+          headers: { Range: `bytes=0-${LARGE_TEXT_MAX_BYTES}` },
+          cache: "no-store",
+        });
   if (!response.ok || !response.body)
     throw new Error("The file could not be loaded. Close it and try again.");
   const total = Number(
@@ -78,7 +81,6 @@ async function open(input: Extract<TextPreviewRequest, { type: "open" }>) {
   let fieldStart = true;
   let cr = false;
   let rowColumns = 1;
-  let published = 0;
   let first = false;
   try {
     while (true) {
@@ -140,15 +142,14 @@ async function open(input: Extract<TextPreviewRequest, { type: "open" }>) {
         } else fieldStart = false;
       }
       size += value.length;
-      if ((!first && entries > 1) || size - published >= 4 * 1024 * 1024) {
+      if (!first && entries > 1) {
         reply({ type: "meta", count: entries - 1, columns, complete: false });
-        if (!first) {
-          await page(0);
-          first = true;
-        }
-        published = size;
+        await page(0);
+        first = true;
       }
     }
+    if (total > 0 && size !== total)
+      throw new Error("The file download was incomplete. Close it and try again.");
     if (size > at(entries - 1)) {
       if (entries > LARGE_TEXT_MAX_ROWS)
         throw new Error("Text previews support up to 5 million rows.");

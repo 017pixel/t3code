@@ -1,6 +1,5 @@
 /* oxlint-disable react/no-array-index-key -- Positions identify source rows and columns. */
-import { LegendList } from "@legendapp/list/react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { observeResize } from "~/lib/observeResize";
 import { PREVIEW_PAGE_ROWS } from "./largeTextProtocol";
 
@@ -16,16 +15,25 @@ export default function VirtualTablePreview(props: {
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [left, setLeft] = useState(0);
-  const [width, setWidth] = useState(0);
+  const [size, setSize] = useState({ width: 0, height: 600 });
+  const { width } = size;
+  const widthRef = useRef(0);
   const measureRef = useRef<HTMLTableElement>(null);
   const [measured, setMeasured] = useState<number[] | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = ref.current;
     if (!node) return;
-    return observeResize(node, () => {
-      setWidth(node.clientWidth);
-      setMeasured(null);
-    });
+    const update = () => {
+      const width = node.clientWidth;
+      const height = node.clientHeight;
+      setSize((old) => (old.width === width && old.height === height ? old : { width, height }));
+      if (widthRef.current !== width) {
+        widthRef.current = width;
+        setMeasured(null);
+      }
+    };
+    update();
+    return observeResize(node, update);
   }, []);
   useLayoutEffect(() => {
     if (!width || !props.header || !measureRef.current || measured) return;
@@ -34,10 +42,6 @@ export default function VirtualTablePreview(props: {
     );
     if (widths.length) setMeasured(widths);
   }, [measured, width, props.header]);
-  const pages = Array.from(
-    { length: Math.ceil(props.count / PREVIEW_PAGE_ROWS) },
-    (_, index) => index,
-  );
   const columnWidth = props.source
     ? 0
     : Math.max(96, Math.min(320, width / Math.min(props.columns, 6)));
@@ -63,9 +67,13 @@ export default function VirtualTablePreview(props: {
     <div
       ref={ref}
       className="relative min-h-0 flex-1 overflow-x-auto"
+      style={{ contain: "strict" }}
       onScroll={(event) => {
+        event.currentTarget.style.setProperty(
+          "--preview-scroll-left",
+          `${event.currentTarget.scrollLeft}px`,
+        );
         setLeft(event.currentTarget.scrollLeft);
-        setWidth(event.currentTarget.clientWidth);
       }}
     >
       {props.header && props.columns <= 30 && !measured && width > 0 ? (
@@ -106,65 +114,50 @@ export default function VirtualTablePreview(props: {
           </tbody>
         </table>
       ) : null}
-      <div
-        role={props.source ? "region" : "table"}
-        aria-label={props.name}
-        aria-rowcount={props.count}
-        aria-colcount={props.source ? undefined : props.columns}
-        className="flex h-full min-h-0 flex-col text-xs"
-        style={{ width: tableWidth }}
-      >
-        {!props.source ? (
-          <div
-            role="row"
-            className="relative z-10 flex min-h-[29px] shrink-0 border-b border-border bg-muted/60 font-medium backdrop-blur"
-          >
-            {!props.header ? (
-              <div className="sticky left-0 z-10 shrink-0 bg-muted" style={{ width: rowHeader }} />
-            ) : null}
-            <div style={{ width: offset(firstColumn), flexShrink: 0 }} />
-            {columns.map((column) => (
-              <div
-                key={column}
-                role="columnheader"
-                aria-colindex={column + 1}
-                className="shrink-0 overflow-hidden px-3 py-1.5 whitespace-pre"
-                style={{ width: sizes[column] }}
-              >
-                {props.header?.[column] ?? columnLabel(column)}
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {props.count > 500_000 ? (
+      {width > 0 && (!props.header || props.columns > 30 || measured) ? (
+        <div
+          role={props.source ? "region" : "table"}
+          aria-label={props.name}
+          aria-rowcount={props.count}
+          aria-colcount={props.source ? undefined : props.columns}
+          className="flex h-full min-h-0 flex-col text-xs"
+          style={{ width: tableWidth }}
+        >
+          {!props.source ? (
+            <div
+              role="row"
+              className="relative z-10 flex min-h-[29px] shrink-0 border-b border-border bg-muted/60 font-medium backdrop-blur"
+            >
+              {!props.header ? (
+                <div
+                  className="sticky left-0 z-10 shrink-0 bg-muted"
+                  style={{ width: rowHeader }}
+                />
+              ) : null}
+              <div style={{ width: offset(firstColumn), flexShrink: 0 }} />
+              {columns.map((column) => (
+                <div
+                  key={column}
+                  role="columnheader"
+                  aria-colindex={column + 1}
+                  className="shrink-0 overflow-hidden px-3 py-1.5 whitespace-pre"
+                  style={{ width: sizes[column] }}
+                >
+                  {props.header?.[column] ?? columnLabel(column)}
+                </div>
+              ))}
+            </div>
+          ) : null}
           <ScaledRows
             {...props}
             columnsVisible={columns}
             sizes={sizes}
             rowHeader={rowHeader}
             firstColumn={firstColumn}
+            viewportHeight={size.height - (props.source ? 0 : 29)}
           />
-        ) : (
-          <LegendList
-            data={pages}
-            keyExtractor={String}
-            estimatedItemSize={PREVIEW_PAGE_ROWS * 29}
-            drawDistance={100}
-            style={{ flex: 1, minHeight: 0 }}
-            extraData={[props.getRows, firstColumn, lastColumn, props.wrap]}
-            renderItem={({ item: page }) => (
-              <RowPage
-                page={page}
-                {...props}
-                columnsVisible={columns}
-                sizes={sizes}
-                rowHeader={rowHeader}
-                firstColumn={firstColumn}
-              />
-            )}
-          />
-        )}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -175,6 +168,8 @@ function RowPage(
     sizes: number[];
     rowHeader: number;
     firstColumn: number;
+    viewportHeight: number;
+    limit?: number;
   },
 ) {
   const rows = props.getRows(props.page);
@@ -184,7 +179,7 @@ function RowPage(
     if (!rows) loadPage?.(page);
   }, [rows, page, loadPage]);
   const start = props.page * PREVIEW_PAGE_ROWS;
-  const count = Math.min(PREVIEW_PAGE_ROWS, props.count - start);
+  const count = Math.min(PREVIEW_PAGE_ROWS, props.count - start, props.limit ?? PREVIEW_PAGE_ROWS);
   return (
     <div role="rowgroup">
       {Array.from({ length: count }, (_, local) => {
@@ -194,6 +189,7 @@ function RowPage(
         return (
           <div
             key={local}
+            data-preview-row={index}
             role={props.source ? undefined : "row"}
             aria-rowindex={props.source ? undefined : index + 1}
             className={
@@ -205,8 +201,13 @@ function RowPage(
             {!props.header ? (
               <div
                 role={props.source ? undefined : "rowheader"}
-                className="sticky left-0 z-1 shrink-0 bg-muted px-2 py-1.5 text-right font-normal text-muted-foreground tabular-nums select-none"
-                style={{ width: props.rowHeader }}
+                className={`${props.source ? "sticky left-0" : "relative"} z-1 shrink-0 bg-muted px-2 py-1.5 text-right font-normal text-muted-foreground tabular-nums select-none`}
+                style={{
+                  width: props.rowHeader,
+                  transform: props.source
+                    ? undefined
+                    : "translateX(var(--preview-scroll-left, 0px))",
+                }}
               >
                 {index + 1}
               </div>
@@ -244,49 +245,58 @@ function RowPage(
 function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
   const ref = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const [layout, setLayout] = useState({ offset: 0, height: 0 });
-  const [position, setPosition] = useState({ top: 0, height: 600 });
-  const scrollHeight = 8_000_000;
+  const [layout, setLayout] = useState({ offset: 0, height: 0, rowHeight: 29 });
+  const [top, setTop] = useState(0);
+  const position = { top, height: props.viewportHeight };
+  const scrollHeight = Math.min(8_000_000, props.count * 29);
   // Chromium caps a scroll surface at 33 million pixels. Scale the track for
   // multi-million-line logs while retaining real row heights in the viewport.
-  const maxFirst = Math.max(0, props.count - Math.floor(position.height / 29));
+  const headerRows = props.header ? 1 : 0;
+  const maxFirst = Math.max(0, props.count - headerRows - Math.floor(position.height / 29));
   const scale = Math.max(1, scrollHeight - position.height) / Math.max(1, maxFirst * 29);
-  const first = Math.min(maxFirst, Math.floor(position.top / scale / 29));
+  const first = Math.min(maxFirst, Math.floor(position.top / scale / 29)) + headerRows;
+  const atStart = position.top === 0;
+  const rowHeight = () =>
+    contentRef.current?.querySelector<HTMLElement>(`[data-preview-row="${first}"]`)?.offsetHeight ||
+    29;
+  const onWheel = useEffectEvent((event: WheelEvent) => {
+    const node = ref.current;
+    if (!node || event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const delta =
+      event.deltaY * (event.deltaMode === 1 ? 29 : event.deltaMode === 2 ? node.clientHeight : 1);
+    if (!delta) return;
+    event.preventDefault();
+    node.scrollTop += (delta * scale * 29) / rowHeight();
+  });
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
-    const update = () => setPosition({ top: node.scrollTop, height: node.clientHeight });
-    const stop = observeResize(node, update);
-    const wheel = (event: WheelEvent) => {
-      if (event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
-      const delta =
-        event.deltaY * (event.deltaMode === 1 ? 29 : event.deltaMode === 2 ? node.clientHeight : 1);
-      if (!delta) return;
-      event.preventDefault();
-      node.scrollTop += delta * scale;
-    };
+    const wheel = (event: WheelEvent) => onWheel(event);
     node.addEventListener("wheel", wheel, { passive: false });
     return () => {
-      stop();
       node.removeEventListener("wheel", wheel);
     };
-  }, [scale]);
+  }, []);
   const page = Math.floor(first / PREVIEW_PAGE_ROWS);
+  const visibleEnd = (first % PREVIEW_PAGE_ROWS) + Math.ceil(position.height / 29) + 1;
   useLayoutEffect(() => {
+    if (atStart) return;
     const node = contentRef.current;
     if (!node) return;
     const update = () => {
-      const rows = node.querySelectorAll<HTMLElement>("[role=rowgroup] > div");
-      const row = rows[first % PREVIEW_PAGE_ROWS];
+      const row = node.querySelector<HTMLElement>(`[data-preview-row="${first}"]`);
       const offset = row ? row.getBoundingClientRect().top - node.getBoundingClientRect().top : 0;
       const height = node.clientHeight;
+      const rowHeight = row?.offsetHeight || 29;
       setLayout((old) =>
-        old.offset === offset && old.height === height ? old : { offset, height },
+        old.offset === offset && old.height === height && old.rowHeight === rowHeight
+          ? old
+          : { offset, height, rowHeight },
       );
     };
     update();
     return observeResize(node, update);
-  }, [first]);
+  }, [first, atStart]);
   return (
     <div
       ref={ref}
@@ -306,18 +316,13 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
                   : null;
         if (delta !== null) {
           event.preventDefault();
-          node.scrollTop += delta * scale;
+          node.scrollTop += (delta * scale * 29) / rowHeight();
         } else if (event.key === "Home" || event.key === "End") {
           event.preventDefault();
           node.scrollTop = event.key === "Home" ? 0 : scrollHeight;
         }
       }}
-      onScroll={(event) =>
-        setPosition({
-          top: event.currentTarget.scrollTop,
-          height: event.currentTarget.clientHeight,
-        })
-      }
+      onScroll={(event) => setTop(event.currentTarget.scrollTop)}
     >
       <div className="relative" style={{ height: scrollHeight }}>
         <div
@@ -326,15 +331,29 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
           style={{
             top:
               position.top +
-              (position.top >= scrollHeight - position.height - 1
+              (position.top > 0 && position.top >= scrollHeight - position.height - 1
                 ? position.height - layout.height
-                : -layout.offset),
+                : atStart
+                  ? 0
+                  : -layout.offset - ((position.top / scale / 29) % 1) * layout.rowHeight),
           }}
         >
-          <RowPage {...props} page={page} />
-          {page + 1 < Math.ceil(props.count / PREVIEW_PAGE_ROWS) ? (
-            <RowPage {...props} page={page + 1} />
-          ) : null}
+          {Array.from(
+            {
+              length: Math.min(
+                Math.ceil(visibleEnd / PREVIEW_PAGE_ROWS),
+                Math.ceil(props.count / PREVIEW_PAGE_ROWS) - page,
+              ),
+            },
+            (_, offset) => (
+              <RowPage
+                key={page + offset}
+                {...props}
+                page={page + offset}
+                limit={visibleEnd - offset * PREVIEW_PAGE_ROWS}
+              />
+            ),
+          )}
         </div>
       </div>
     </div>
