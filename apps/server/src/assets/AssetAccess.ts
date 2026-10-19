@@ -18,7 +18,6 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import {
-  audioMimeTypeFromExtension,
   hostPreviewMimeTypeFromExtension,
   isWorkspaceImagePreviewPath,
   isWorkspacePreviewEntryPath,
@@ -84,7 +83,9 @@ const INLINE_PREVIEW_MIME_TYPES: Record<string, string> = {
   htm: "text/html",
 };
 const inlinePreviewMimeTypeForExtension = (extension: string) =>
-  INLINE_PREVIEW_MIME_TYPES[extension] ?? audioMimeTypeFromExtension(`.${extension}`) ?? undefined;
+  INLINE_PREVIEW_MIME_TYPES[extension] ??
+  hostPreviewMimeTypeFromExtension(`.${extension}`) ??
+  undefined;
 const PREVIEW_ASSET_EXTENSIONS = new Set([
   ...WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
   ...WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,

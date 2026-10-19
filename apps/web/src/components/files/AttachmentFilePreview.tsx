@@ -27,6 +27,8 @@ import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
 import { OfficeFilePreview } from "./OfficeFilePreview";
+import { FontFilePreview } from "./FontFilePreview";
+import { MermaidFilePreview } from "./MermaidFilePreview";
 import {
   FILE_SURFACE_SUBHEADER_CLASS,
   FileSurfaceAction,
@@ -47,7 +49,11 @@ export function ReadOnlySourcePreview(props: { name: string; text: string }) {
   );
 }
 
-function renderedToggleLabel(mode: "markdown" | "html" | "table", rendered: boolean): string {
+function renderedToggleLabel(
+  mode: "markdown" | "mermaid" | "html" | "table",
+  rendered: boolean,
+): string {
+  if (mode === "mermaid") return rendered ? "Show Mermaid source" : "Show rendered diagram";
   if (mode === "markdown") return rendered ? "Show markdown source" : "Show rendered markdown";
   if (mode === "table") return rendered ? "Show source" : "Show table";
   return rendered ? "Show HTML source" : "Show rendered page";
@@ -71,7 +77,15 @@ export function AttachmentFilePreview(props: {
   const officeKind = officePreviewKind(props);
   const delimiter = filePreviewDelimiter(props);
   const renderedMode =
-    kind === "markdown" ? "markdown" : kind === "html" ? "html" : delimiter ? "table" : null;
+    kind === "mermaid"
+      ? "mermaid"
+      : kind === "markdown"
+        ? "markdown"
+        : kind === "html"
+          ? "html"
+          : delimiter
+            ? "table"
+            : null;
   const attachmentId =
     props.asset && "attachmentId" in props.asset ? props.asset.attachmentId : undefined;
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: props.name });
@@ -133,7 +147,8 @@ export function AttachmentFilePreview(props: {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Retry must reauthorize the remote file.
   }, [props.file, refresh, revision]);
   const url = props.file ? localUrl : remoteUrl;
-  const needsText = kind === "text" || kind === "markdown" || (kind === "html" && !rendered);
+  const needsText =
+    kind === "text" || kind === "markdown" || kind === "mermaid" || (kind === "html" && !rendered);
   useEffect(() => {
     if (!needsText || !url) return;
     const controller = new AbortController();
@@ -176,7 +191,7 @@ export function AttachmentFilePreview(props: {
     needsText &&
     content !== null &&
     !(delimiter && rendered) &&
-    !(kind === "markdown" && rendered);
+    !((kind === "markdown" || kind === "mermaid") && rendered);
 
   const save = () => {
     setSaving(true);
@@ -224,6 +239,8 @@ export function AttachmentFilePreview(props: {
   ) : needsText && content ? (
     delimiter && rendered ? (
       <DelimitedTablePreview name={props.name} text={content.text} delimiter={delimiter} />
+    ) : kind === "mermaid" && rendered ? (
+      <MermaidFilePreview text={content.text} />
     ) : kind === "markdown" && rendered ? (
       <ScrollArea className="min-h-0 flex-1">
         <ChatMarkdown text={content.text} cwd={undefined} className="mx-auto max-w-4xl px-6 py-5" />
@@ -231,6 +248,8 @@ export function AttachmentFilePreview(props: {
     ) : (
       <ReadOnlySourcePreview name={props.name} text={content.text} />
     )
+  ) : kind === "font" ? (
+    <FontFilePreview src={url} name={props.name} />
   ) : officeKind ? (
     <OfficeFilePreview src={url} name={props.name} kind={officeKind} sizeBytes={props.sizeBytes} />
   ) : kind === "pdf" || kind === "html" ? (

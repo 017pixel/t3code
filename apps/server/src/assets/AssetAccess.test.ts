@@ -989,6 +989,14 @@ describe("AssetAccess", () => {
         "report.docx",
         "workbook.xlsx",
         "slides.pptx",
+        "specimen.ttf",
+        "specimen.otf",
+        "specimen.woff",
+        "specimen.woff2",
+        "image.bmp",
+        "image.heic",
+        "image.tif",
+        "image.tiff",
       ]) {
         const filePath = path.join(directory, name);
         yield* fileSystem.writeFileString(filePath, "preview fixture");
@@ -1174,6 +1182,12 @@ describe("AssetAccess", () => {
       for (const [extension, mimeType] of [
         ["pdf", "application/pdf"],
         ["svg", "image/svg+xml"],
+        ["bmp", "image/bmp"],
+        ["ttf", "font/ttf"],
+        ["otf", "font/otf"],
+        ["woff", "font/woff"],
+        ["woff2", "font/woff2"],
+        ["weba", "audio/webm"],
       ] as const) {
         const attachmentId = `thread-1-00000000-0000-4000-8000-000000000001-${extension}`;
         const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.${extension}`);
@@ -1184,7 +1198,7 @@ describe("AssetAccess", () => {
             _tag: "attachment",
             attachmentId,
             fileName: `report.${extension}`,
-            mimeType,
+            mimeType: "application/octet-stream",
             disposition: "inline",
           },
         });
