@@ -28,6 +28,7 @@ import { ThreadFilePathsContext } from "../threadFilePathsContext";
 import { FileMarkdownPreview } from "./files/FileMarkdownPreview";
 
 const state = vi.hoisted(() => ({
+  connection: { _tag: "Some", value: { httpBaseUrl: "https://host.test" } },
   allowed: true,
   canRead: true,
   listeners: new Set<() => void>(),
@@ -64,10 +65,7 @@ vi.mock(import("../state/session"), async (original) => {
   return {
     ...(await original()),
     readEnvironmentScope,
-    usePreparedConnection: (() => ({
-      _tag: "Some",
-      value: { httpBaseUrl: "https://host.test" },
-    })) as never,
+    usePreparedConnection: (() => state.connection) as never,
     useEnvironmentScope: (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>
       useSyncExternalStore(
         (listener) => {
@@ -396,6 +394,10 @@ it("uses a verified thread file for actions, preserves searchable labels, and re
   await expectPanel("docs/readme.md");
   await settleMetadata(candidate, AsyncResult.failure(Cause.fail(new Error("Metadata failed"))));
   await expectPanel("docs/readme.md");
+  await settleMetadata(candidate, AsyncResult.success({ kind: "directory" }));
+  await expectPanel("docs/readme.md");
+  await settleMetadata(candidate, AsyncResult.success({ kind: "other" }));
+  await expectPanel("docs/readme.md");
   await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
   await expectPanel(candidate);
 
@@ -423,6 +425,61 @@ it("uses a verified thread file for actions, preserves searchable labels, and re
   expect(state.copy).toHaveBeenLastCalledWith("/work/docs/readme.md:12:3");
 });
 
+it("keeps an open file menu on its captured target while evidence and sibling selection change", async () => {
+  const candidate = "/other/docs/guide.md";
+  const sibling = "/other/test/sibling.md";
+  const render = createTestRoot();
+  const markdown = (
+    <ChatMarkdown
+      cwd="/work"
+      threadRef={threadRef}
+      text="[Guide](docs/guide.md) and [Sibling](test/sibling.md)"
+    />
+  );
+  await render(markdown, createThreadFilePathIndex([candidate, sibling]));
+  const openPendingMenu = async () => {
+    let choose: (action: string) => void = () => {
+      throw new Error("Menu not opened");
+    };
+    state.choose.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          choose = resolve;
+        }),
+    );
+    await openContextMenu();
+    return async (path: string | null) => {
+      state.copy.mockClear();
+      await act(async () => choose("copy-full"));
+      if (path === null) expect(state.copy).not.toHaveBeenCalled();
+      else expect(state.copy).toHaveBeenCalledExactlyOnceWith(path);
+    };
+  };
+
+  const finishAfterEvidence = await openPendingMenu();
+  await render(markdown, createThreadFilePathIndex([candidate, sibling, "/unrelated/new.ts"]));
+  await finishAfterEvidence("/work/docs/guide.md");
+
+  const finishAfterSibling = await openPendingMenu();
+  await settleMetadata("/work/test/sibling.md", AsyncResult.success(null));
+  await settleMetadata(sibling, AsyncResult.success({ kind: "file" }));
+  await finishAfterSibling("/work/docs/guide.md");
+
+  const finishAfterOwnSelection = await openPendingMenu();
+  await settleMetadata("/work/docs/guide.md", AsyncResult.success(null));
+  await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
+  await finishAfterOwnSelection("/work/docs/guide.md");
+  state.choose.mockResolvedValue("copy-full");
+  await openContextMenu();
+  expect(state.copy).toHaveBeenLastCalledWith(candidate);
+
+  const finishAfterOwnerChange = await openPendingMenu();
+  await render(
+    <ChatMarkdown cwd="/new-root" threadRef={threadRef} text="[Guide](docs/guide.md)" />,
+  );
+  await finishAfterOwnerChange(null);
+});
+
 it("does not treat pending, failed, existing, or disabled root metadata as missing", async () => {
   const candidate = "/other/docs/guide.md";
   await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
@@ -435,6 +492,8 @@ it("does not treat pending, failed, existing, or disabled root metadata as missi
     AsyncResult.waiting(AsyncResult.success(null)),
     AsyncResult.failure(Cause.fail(new Error("Disconnected or denied"))),
     AsyncResult.success({ kind: "file" }),
+    AsyncResult.success({ kind: "directory" }),
+    AsyncResult.success({ kind: "other" }),
   ];
   for (const rootResult of rootResults) {
     await settleMetadata("/work/docs/guide.md", rootResult);

@@ -2366,14 +2366,9 @@ function useChatMarkdownState({
     const version = actionScopeVersion.current;
     return () => actionScopeVersion.current === version;
   };
-  const cancelFileRequests = () => {
-    mediaRequestId.current++;
-    actionScopeVersion.current++;
-  };
-  const threadFilePaths = use(ThreadFilePathsContext);
-  const connection = usePreparedConnection(
-    threadRef?.environmentId ?? explicitEnvironmentId ?? null,
-  );
+  const environmentId = threadRef?.environmentId ?? explicitEnvironmentId ?? null;
+  const connection = usePreparedConnection(environmentId);
+  const canRead = useEnvironmentScope(environmentId, AuthFilesystemReadScope);
   // A preview opened from another thread or workspace never carries over.
   const mediaScopeKey = JSON.stringify([
     threadRef?.environmentId,
@@ -2406,7 +2401,7 @@ function useChatMarkdownState({
       actionScopeVersion.current += 1;
     },
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Leaving the scope invalidates media requests still loading for it.
-    [mediaScopeKey, threadFilePaths, connection],
+    [mediaScopeKey, connection, canRead],
   );
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
@@ -2423,7 +2418,6 @@ function useChatMarkdownState({
     reportFailure: false,
   });
   const pullRequestLinking = usePullRequestLinking(threadRef?.environmentId);
-  const environmentId = threadRef?.environmentId ?? explicitEnvironmentId ?? null;
   const canOperateHost = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const canOperatePreview = useEnvironmentScope(environmentId, AuthPreviewOperateScope);
   const remoteOpen = useRemoteOpenResolution(environmentId);
@@ -2791,7 +2785,6 @@ function useChatMarkdownState({
   };
 
   const componentState = {
-    cancelFileRequests,
     canOperateHost,
     canOperatePreview,
     cwd,
@@ -2865,13 +2858,8 @@ function ThreadFileLinkChip(props: {
   fallback: ReactNode;
   prefix?: ReactNode;
 }) {
-  const { cwd, environmentId, fileLinkChip, cancelFileRequests } = use(ChatMarkdownRendererContext);
+  const { cwd, environmentId, fileLinkChip } = use(ChatMarkdownRendererContext);
   const selected = useThreadFilePath(props.href, cwd, environmentId);
-  useLayoutEffect(
-    () => () => cancelFileRequests(),
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A changed selected path invalidates delayed actions for the old target.
-    [selected, cancelFileRequests],
-  );
   const meta = selected
     ? { ...buildFileLinkMetaFromTarget(selected, cwd), workspaceLookupPath: null }
     : props.meta;

@@ -181,6 +181,7 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   );
   const [activeMenu, setActiveMenu] = useState<{
     url: string;
+    isCurrent: () => boolean;
     menu: NonNullable<ReturnType<NonNullable<typeof props.fileContextMenu>>>;
   } | null>(null);
   const { fileContextMenu, onLinkPress, onFileContextMenuAction } = props;
@@ -223,8 +224,7 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
                 menu.actions.map((action) => ({
                   text: action.title,
                   disabled: "disabled" in action && action.disabled,
-                  onPress: () =>
-                    menu.onAction ? menu.onAction(action.id) : performMenuAction(shown, action.id),
+                  onPress: () => performMenuAction(shown, action.id),
                 })),
               ];
             }),
@@ -261,27 +261,28 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
     () => ({ ...enrichedStyle(props.textStyle, themeAppearance === "dark"), linkVariants }),
     [props.textStyle, themeAppearance, linkVariants],
   );
+  const { href: fileHref, capture: captureImage } = fileBindings;
   const renderMedia = useCallback(
     (asset: MarkdownMediaAsset) =>
       renderImage?.({
-        href: fileBindings.href(asset.url),
+        href: fileHref(asset.url),
         alt: asset.altText || null,
         title: asset.title || null,
       }) ?? null,
-    [renderImage, fileBindings],
+    [renderImage, fileHref],
   );
   const resolveNativeImageSource = useCallback(
     async (asset: MarkdownMediaAsset) => {
-      const isCurrent = fileBindings.capture();
+      const isCurrent = captureImage();
       const source = await resolveImageSource?.({
-        href: fileBindings.href(asset.url),
+        href: fileHref(asset.url),
         alt: asset.altText || null,
         title: asset.title || null,
       });
       if (!isCurrent()) throw new Error("Markdown image request is obsolete");
       return source ?? null;
     },
-    [resolveImageSource, fileBindings],
+    [resolveImageSource, fileHref, captureImage],
   );
   const renderMarkdown = (openAndroidMenu?: () => void) => {
     const onLinkLongPress =
@@ -297,7 +298,7 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
                 { id: "enriched-copy-link", title: "Copy link" },
               ],
             };
-            setActiveMenu({ url: shown, menu });
+            setActiveMenu({ url: shown, menu, isCurrent: fileBindings.captureOwner() });
             openAndroidMenu?.();
           }
         : undefined;
@@ -368,8 +369,7 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
         })) ?? []
       }
       onPressAction={({ nativeEvent }) => {
-        if (activeMenu?.menu.onAction) activeMenu.menu.onAction(nativeEvent.event);
-        else if (activeMenu) performMenuAction(activeMenu.url, nativeEvent.event);
+        if (activeMenu?.isCurrent()) performMenuAction(activeMenu.url, nativeEvent.event);
       }}
       style={{ flexShrink: 1, minWidth: 0 }}
     >

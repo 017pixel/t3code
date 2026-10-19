@@ -54,7 +54,6 @@ export interface MarkdownFileContextMenuAction {
 }
 
 export interface MarkdownFileContextMenu {
-  readonly onAction?: (actionId: string) => void;
   readonly title?: string;
   readonly actions: ReadonlyArray<MarkdownFileContextMenuAction>;
 }

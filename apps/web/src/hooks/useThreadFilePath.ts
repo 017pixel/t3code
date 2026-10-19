@@ -22,7 +22,7 @@ export function useThreadFilePath(
   return connection._tag === "Some" &&
     candidateQuery.isSuccess &&
     !candidateQuery.isPending &&
-    candidateQuery.data !== null &&
+    candidateQuery.data?.kind === "file" &&
     (root === null || (rootQuery.isSuccess && !rootQuery.isPending && rootQuery.data === null))
     ? candidate
     : null;

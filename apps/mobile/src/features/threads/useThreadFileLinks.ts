@@ -7,7 +7,7 @@ import {
 } from "@t3tools/shared/markdownLinks";
 import { collectThreadFilePaths, createThreadFilePathIndex } from "@t3tools/shared/threadFilePaths";
 import { Atom } from "effect/reactivity";
-import { createContext, useContext, useId, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useContext, useLayoutEffect, useRef, useState } from "react";
 
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentScope, usePreparedConnection } from "../../state/session";
@@ -54,17 +54,14 @@ export function useThreadFileLinks(ref: ScopedThreadRef, cwd: string | null) {
       generation.current++;
     },
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Leaving this scope invalidates delayed native actions.
-    [environmentId, threadId, cwd, index, connection, enabled],
+    [environmentId, threadId, cwd, connection, enabled],
   );
   const capture = () => {
     const current = generation.current;
     return () => generation.current === current;
   };
-  const supersede = () => {
-    generation.current++;
-  };
-  const scope = { environmentId, threadId, cwd, index, connection, enabled };
-  return { ...scope, capture, supersede, scope };
+  const scope = { environmentId, threadId, cwd, connection, enabled };
+  return { ...scope, index, capture, scope };
 }
 
 export const ThreadFileLinksContext = createContext<ReturnType<typeof useThreadFileLinks> | null>(
@@ -72,19 +69,20 @@ export const ThreadFileLinksContext = createContext<ReturnType<typeof useThreadF
 );
 
 export function useThreadFileBindings(assets: ReadonlyArray<{ readonly url: string }>) {
-  const scope = useContext(ThreadFileLinksContext);
-  const menuId = useId();
+  const context = useContext(ThreadFileLinksContext);
+  const scope = context?.scope;
+  const captureScope = context?.capture;
   const [menuScope, setMenuScope] = useState({ scope, revision: 0 });
   let menuRevision = menuScope.revision;
   if (menuScope.scope !== scope) {
     menuRevision++;
     setMenuScope({ scope, revision: menuRevision });
   }
-  const menuKey = JSON.stringify([menuId, menuRevision]);
+  const menuKey = JSON.stringify([scope?.environmentId, scope?.threadId, scope?.cwd, menuRevision]);
   const bindingsAtom = Atom.make((get) => {
     const selected = new Map<string, string>();
-    if (!scope?.enabled) return selected;
-    const { environmentId, threadId, cwd, index } = scope;
+    if (!context?.enabled) return selected;
+    const { environmentId, threadId, cwd, index } = context;
     for (const { url: href } of assets) {
       const candidate = resolveThreadFilePathCandidate(href, cwd, index);
       if (!candidate) continue;
@@ -101,7 +99,7 @@ export function useThreadFileBindings(assets: ReadonlyArray<{ readonly url: stri
       if (
         candidateResult._tag === "Success" &&
         !candidateResult.waiting &&
-        candidateResult.value !== null &&
+        candidateResult.value?.kind === "file" &&
         (rootResult === null ||
           (rootResult._tag === "Success" && !rootResult.waiting && rootResult.value === null))
       ) {
@@ -110,8 +108,15 @@ export function useThreadFileBindings(assets: ReadonlyArray<{ readonly url: stri
     }
     return selected;
   });
-  const selected = useAtomValue(bindingsAtom);
-  const selectedKey = JSON.stringify([...selected]);
+  const resolved = useAtomValue(bindingsAtom);
+  const selectedKey = JSON.stringify([...resolved]);
+  // The native image cache resets when its selected-path resolver changes identity.
+  const [binding, setBinding] = useState({ key: selectedKey, selected: resolved });
+  let selected = binding.selected;
+  if (binding.key !== selectedKey) {
+    selected = resolved;
+    setBinding({ key: selectedKey, selected });
+  }
   const generation = useRef(0);
   useLayoutEffect(
     () => () => {
@@ -121,14 +126,15 @@ export function useThreadFileBindings(assets: ReadonlyArray<{ readonly url: stri
     [scope, selectedKey],
   );
   const capture = () => {
-    const isScopeCurrent = scope?.capture();
+    const isScopeCurrent = scope && captureScope ? captureScope() : null;
     const current = generation.current;
     return () => generation.current === current && (isScopeCurrent?.() ?? true);
   };
   const href = (url: string) => selected.get(url) ?? url;
   const unverifiedRootless = (url: string) =>
-    scope?.cwd === null &&
+    context?.cwd === null &&
     !selected.has(url) &&
-    resolveThreadFilePathCandidate(url, null, scope.index) !== null;
-  return { href, unverifiedRootless, capture, menuKey };
+    resolveThreadFilePathCandidate(url, null, context.index) !== null;
+  const captureOwner = () => (scope && captureScope ? captureScope() : () => true);
+  return { href, unverifiedRootless, capture, captureOwner, menuKey };
 }

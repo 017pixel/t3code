@@ -1793,7 +1793,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const screenColor = theme["--color-screen"];
   const userBubbleColor = theme["--color-user-bubble"];
   const onMarkdownLinkPress = (href: string, imageEmbed = false) => {
-    fileLinks.supersede();
     cancelFileShare();
     const linkedThreadId = parseThreadLinkHref(href);
     if (linkedThreadId) {
@@ -1861,7 +1860,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     workspaceRoot: props.workspaceRoot ?? null,
   });
   const performFileAction = (href: string, actionId: string) => {
-    fileLinks.supersede();
     cancelFileShare();
     const target = resolveFileChipTarget(href, props.workspaceRoot);
     if (!target) return;
@@ -1887,13 +1885,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     fileContextMenu: (href) => {
       const target = resolveFileChipTarget(href, props.workspaceRoot);
       if (!target) return undefined;
-      const isCurrent = fileLinks.capture();
-      return {
-        ...fileChipMenu(target),
-        onAction: (actionId) => {
-          if (isCurrent()) performFileAction(href, actionId);
-        },
-      };
+      return fileChipMenu(target);
     },
     onFileContextMenuAction: performFileAction,
   };
