@@ -389,6 +389,7 @@ describe("mergeUsage", () => {
           summary(
             [bucket({ costUsd: 10 })],
             [{ provider: "claude", hostId: "mac", homePath: "/a" }],
+            6,
           ),
         ),
         environment(
@@ -396,15 +397,65 @@ describe("mergeUsage", () => {
           summary(
             [bucket({ costUsd: 4, provider: "codex", model: "gpt-5.6-sol" })],
             [{ provider: "codex", hostId: "linux", homePath: "/b" }],
-            USAGE_CONTRACT_VERSION - 1,
+            5,
           ),
         ),
       ],
-      USAGE_CONTRACT_VERSION,
+      6,
     );
 
     expect(merged.costUsd).toBe(14);
     expect(merged.contractMismatches).toEqual([]);
+  });
+
+  it("excludes old Codex semantics while retaining other providers across contract versions", () => {
+    const legacy = environment(
+      "legacy",
+      summary(
+        [
+          bucket({ provider: "codex", sourcePath: "/home/.codex/sessions", costUsd: 40 }),
+          bucket({ sourcePath: "/home/.claude", costUsd: 10 }),
+        ],
+        [
+          { provider: "codex", hostId: "mac", homePath: "/home/.codex/sessions" },
+          { provider: "claude", hostId: "mac", homePath: "/home/.claude" },
+        ],
+        6,
+      ),
+    );
+    const current = environment(
+      "current",
+      summary(
+        [bucket({ provider: "codex", sourcePath: "/home/.codex", costUsd: 70 })],
+        [{ provider: "codex", hostId: "mac", homePath: "/home/.codex" }],
+        7,
+      ),
+    );
+
+    for (const ordered of [
+      [legacy, current],
+      [current, legacy],
+    ]) {
+      const merged = mergeUsage(ordered, 7);
+      expect.soft(merged.costUsd).toBe(80);
+      expect.soft(merged.contractMismatches).toEqual([
+        {
+          environmentId: "legacy",
+          direction: "serverBehind",
+          contractVersion: 6,
+          provider: "codex",
+        },
+      ]);
+      expect.soft(merged.sessions).toBe(2);
+      expect.soft(merged.totalTokens).toBe(2320);
+      expect
+        .soft(merged.providers.map(({ provider, costUsd }) => [provider, costUsd]).sort())
+        .toEqual([
+          ["claude", 10],
+          ["codex", 70],
+        ]);
+    }
+    expect(USAGE_CONTRACT_VERSION).toBe(7);
   });
 
   it("keeps known usage when newer providers and bucket variants cannot be decoded", () => {
@@ -469,19 +520,15 @@ describe("mergeUsage", () => {
 
   it("excludes a future incompatible contract even when its buckets still decode", () => {
     const decoded = decodeSummary(
-      summary(
-        [bucket()],
-        [{ provider: "claude", hostId: "mac", homePath: "/a" }],
-        USAGE_CONTRACT_VERSION + 1,
-      ),
+      summary([bucket()], [{ provider: "claude", hostId: "mac", homePath: "/a" }], 7),
     );
-    const merged = mergeUsage([environment("env-a", decoded)], USAGE_CONTRACT_VERSION);
+    const merged = mergeUsage([environment("env-a", decoded)], 6);
     expect(merged.costUsd).toBe(0);
     expect(merged.contractMismatches).toEqual([
       {
         environmentId: "env-a",
         direction: "clientBehind",
-        contractVersion: USAGE_CONTRACT_VERSION + 1,
+        contractVersion: 7,
       },
     ]);
   });
