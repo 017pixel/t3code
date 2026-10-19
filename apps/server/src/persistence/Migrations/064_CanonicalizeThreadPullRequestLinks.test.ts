@@ -52,15 +52,14 @@ const thread = (id: string) => ({
   deletedAt: null,
 });
 
-const layer = it.layer(
-  ProjectionMaintenance.layer.pipe(
-    Layer.provideMerge(
-      Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
-        Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
-      ),
+const fixtureLayer = ProjectionMaintenance.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
+      Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
     ),
   ),
 );
+const layer = it.layer(fixtureLayer);
 
 layer("064_CanonicalizeThreadPullRequestLinks", (it) => {
   it.effect.each([false, true])(
@@ -187,6 +186,6 @@ layer("064_CanonicalizeThreadPullRequestLinks", (it) => {
             [ThreadId.make(id)],
           );
         }
-      }),
+      }).pipe(Effect.provide(Layer.fresh(fixtureLayer))),
   );
 });
