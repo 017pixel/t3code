@@ -246,6 +246,58 @@ describe("orchestrator replay fixtures", () => {
     }),
   );
 
+  it.effect(
+    "preserves Grok early child tools and text after more than 1,000 assistant chunks",
+    () => {
+      const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find(
+        (candidate) => candidate.name === "grok_subagent_lineage",
+      );
+      const provider = fixture?.providers[0];
+      assert.isDefined(fixture);
+      assert.isDefined(provider);
+      const progressText =
+        "I'll audit `apps/server` by mapping its layout first, then reading entry points, WebSocket/auth/session code, and tests.\n";
+      const chunkCount = 1_001;
+
+      return runFixtureProviderWithRegisteredHarness({
+        fixtureName: fixture.name,
+        buildInput: fixture.buildInput,
+        driver: {
+          ...provider,
+          assertOutput: (result, transcript) => {
+            const parent = projectionFor(result, fixture.name);
+            const childThreadId = parent.subagents.find(
+              (subagent) => subagent.title === "Explore server architecture",
+            )?.childThreadId;
+            assert.exists(childThreadId);
+            const child = result.projections.get(childThreadId);
+            assert.exists(child);
+            assert.include(
+              child.messages.find((message) => message.role === "assistant")?.text ?? "",
+              progressText.repeat(chunkCount),
+            );
+            assert.notInclude(
+              parent.messages.map((message) => message.text).join("\n"),
+              progressText,
+            );
+            provider.assertOutput(result, transcript);
+          },
+        },
+        transformTranscript: (transcript) => ({
+          ...transcript,
+          entries: transcript.entries.flatMap((entry) =>
+            entry.type === "emit_inbound" && entry.label === "child.server.progress"
+              ? Array.from({ length: chunkCount }, (_, index) => ({
+                  ...entry,
+                  label: `${entry.label}.${index}`,
+                }))
+              : [entry],
+          ),
+        }),
+      });
+    },
+  );
+
   const steeringFixture = ORCHESTRATOR_REPLAY_FIXTURES.find(
     (fixture) => fixture.name === "message_steering",
   );
