@@ -1,4 +1,6 @@
-import { useCallback, useRef, useState } from "react";
+import { useRef, useState } from "react";
+
+import { useStableCallback } from "./useStableCallback";
 
 // Activity detaches refs while keeping DOM; retain hidden elements to avoid re-measuring on reveal.
 export function useElementState<T extends Element>(): readonly [
@@ -7,7 +9,7 @@ export function useElementState<T extends Element>(): readonly [
 ] {
   const [element, setElement] = useState<T | null>(null);
   const latestRef = useRef<T | null>(null);
-  const setRef = useCallback((next: T | null) => {
+  const setRef = useStableCallback((next: T | null) => {
     if (next !== null) {
       latestRef.current = next;
       setElement(next);
@@ -21,6 +23,6 @@ export function useElementState<T extends Element>(): readonly [
       latestRef.current = null;
       setElement(null);
     });
-  }, []);
+  });
   return [element, setRef] as const;
 }

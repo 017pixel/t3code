@@ -263,7 +263,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ).pipe(Effect.annotateLogs({ skipped }));
   }
   // ProjectionStore reads this table, so it must exist even when its migration was skipped.
-  if (toMigrationInclusive === undefined || toMigrationInclusive >= 64) {
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 66) {
     yield* ensureThreadReadProjection;
   }
   return executedMigrations;

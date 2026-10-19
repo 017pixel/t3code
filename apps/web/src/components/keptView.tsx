@@ -6,14 +6,11 @@ import {
   memo,
   useContext,
   useEffect,
-  useMemo,
   useEffectEvent,
   useLayoutEffect,
   useReducer,
-  useRef,
   useState,
   type DependencyList,
-  type RefObject,
   type ReactNode,
 } from "react";
 
@@ -69,81 +66,85 @@ export function createKeptViewLifetimes() {
   };
 }
 
-function createEditor(options: RefObject<Partial<EditorOptions>>) {
-  return new Editor({
-    ...options.current,
-    onUpdate: (event) => options.current.onUpdate?.(event),
-    onSelectionUpdate: (event) => options.current.onSelectionUpdate?.(event),
-  });
-}
-
-interface KeptEditorInstance {
-  editor: Editor;
-  deps: DependencyList;
-  mounted: boolean;
-  cancelDestroy: (() => void) | null;
-}
-
-function destroyUnlessMounted(instance: KeptEditorInstance) {
-  if (!instance.mounted && !instance.editor.isDestroyed) instance.editor.destroy();
-}
-
-function destroyAfter(instance: KeptEditorInstance, delayMs: number) {
-  const timeout = setTimeout(() => destroyUnlessMounted(instance), delayMs);
-  return () => clearTimeout(timeout);
-}
-
 // Allow transition renders to commit before freeing abandoned editors.
 const UNCOMMITTED_EDITOR_GRACE_MS = 5_000;
 
+class KeptEditorInstance {
+  editor: Editor;
+  private options: Partial<EditorOptions>;
+  private deps: DependencyList;
+  private mounted = false;
+  private cancelDestroy: (() => void) | null;
+
+  constructor(options: Partial<EditorOptions>, deps: DependencyList) {
+    this.options = options;
+    this.deps = deps;
+    this.editor = this.createEditor();
+    this.cancelDestroy = this.destroyAfter(UNCOMMITTED_EDITOR_GRACE_MS);
+  }
+
+  private createEditor() {
+    return new Editor({
+      ...this.options,
+      onUpdate: (event) => this.options.onUpdate?.(event),
+      onSelectionUpdate: (event) => this.options.onSelectionUpdate?.(event),
+    });
+  }
+
+  private destroyUnlessMounted() {
+    if (!this.mounted && !this.editor.isDestroyed) this.editor.destroy();
+  }
+
+  private destroyAfter(delayMs: number) {
+    const timeout = setTimeout(() => this.destroyUnlessMounted(), delayMs);
+    return () => clearTimeout(timeout);
+  }
+
+  update(options: Partial<EditorOptions>, deps: DependencyList): boolean {
+    this.options = options;
+    if (this.editor.isDestroyed) return false;
+    if (deps.length !== this.deps.length || deps.some((dep, i) => !Object.is(dep, this.deps[i]))) {
+      this.deps = deps;
+      this.editor.destroy();
+      this.editor = this.createEditor();
+      return true;
+    }
+    this.editor.setOptions({ editorProps: options.editorProps ?? {} });
+    return false;
+  }
+
+  mount(): boolean {
+    this.mounted = true;
+    this.cancelDestroy?.();
+    this.cancelDestroy = null;
+    if (!this.editor.isDestroyed) return false;
+    this.editor = this.createEditor();
+    return true;
+  }
+
+  unmount(lifetime: KeptViewLifetime | null) {
+    this.mounted = false;
+    // Still in the document means the kept view was hidden, not removed.
+    this.cancelDestroy =
+      lifetime !== null && this.editor.view.dom?.isConnected === true
+        ? lifetime.hold(() => this.destroyUnlessMounted())
+        : this.destroyAfter(1);
+  }
+}
+
 /** Preserves the editor and undo history across Activity hides; changed deps recreate it. */
 export function useKeptEditor(options: Partial<EditorOptions>, deps: DependencyList): Editor {
-  const optionsRef = useRef(options);
-  optionsRef.current = options;
   const lifetime = useContext(KeptViewLifetimeContext);
   const [, rerender] = useReducer((count: number) => count + 1, 0);
-  const [instance] = useState(() => {
-    const created: KeptEditorInstance = {
-      editor: createEditor(optionsRef),
-      deps,
-      mounted: false,
-      cancelDestroy: null,
-    };
-    created.cancelDestroy = destroyAfter(created, UNCOMMITTED_EDITOR_GRACE_MS);
-    return created;
+  const [instance] = useState(() => new KeptEditorInstance(options, deps));
+
+  useLayoutEffect(() => {
+    if (instance.update(options, deps)) rerender();
   });
 
   useEffect(() => {
-    if (instance.editor.isDestroyed) return;
-    if (
-      deps.some((dep, index) => !Object.is(dep, instance.deps[index])) ||
-      deps.length !== instance.deps.length
-    ) {
-      instance.deps = deps;
-      instance.editor.destroy();
-      instance.editor = createEditor(optionsRef);
-      rerender();
-      return;
-    }
-    instance.editor.setOptions({ editorProps: optionsRef.current.editorProps ?? {} });
-  });
-
-  useEffect(() => {
-    instance.mounted = true;
-    instance.cancelDestroy?.();
-    instance.cancelDestroy = null;
-    if (instance.editor.isDestroyed) {
-      instance.editor = createEditor(optionsRef);
-      rerender();
-    }
-    return () => {
-      instance.mounted = false;
-      // Still in the document means the kept view was hidden, not removed.
-      instance.cancelDestroy =
-        lifetime !== null && instance.editor.view.dom?.isConnected === true
-          ? lifetime.hold(() => destroyUnlessMounted(instance))
-          : destroyAfter(instance, 1);
-    };
+    if (instance.mount()) rerender();
+    return () => instance.unmount(lifetime);
   }, [instance, lifetime]);
 
   return instance.editor;
@@ -160,13 +161,14 @@ class KeptPureEditorContent extends PureEditorContent {
   }
 }
 
-let nextEditorContentKey = 0;
-
 export const KeptEditorContent = memo(
   forwardRef<HTMLDivElement, Omit<EditorContentProps, "ref" | "innerRef">>(
     function KeptEditorContent(props, ref) {
-      const key = useMemo(() => ++nextEditorContentKey, [props.editor]);
-      return <KeptPureEditorContent key={key} innerRef={ref} {...props} />;
+      const [content, setContent] = useState({ editor: props.editor, key: 0 });
+      if (content.editor !== props.editor) {
+        setContent({ editor: props.editor, key: content.key + 1 });
+      }
+      return <KeptPureEditorContent key={content.key} innerRef={ref} {...props} />;
     },
   ),
 );

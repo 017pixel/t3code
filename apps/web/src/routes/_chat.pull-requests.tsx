@@ -1248,7 +1248,7 @@ function PullRequestsRouteView() {
             }
             if (topmost === null || top < topmost.top) topmost = { key: rowKey, top };
           }
-          key ??= topmost?.key ?? null;
+          if (key === null) key = topmost?.key ?? null;
           if (key !== null) sweepTo(key);
         },
         onEnd: () => {

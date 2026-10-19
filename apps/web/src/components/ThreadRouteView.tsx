@@ -8,7 +8,6 @@ import {
   useDeferredValue,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -361,7 +360,7 @@ export function KeptChatSurface() {
   if (shownKey !== null && shownKey !== shownTargetKey) {
     setShownTargetKey(shownKey);
   }
-  const target = useMemo(() => threadRouteTargetFromKey(shownTargetKey), [shownTargetKey]);
+  const target = threadRouteTargetFromKey(shownTargetKey);
   if (target === null) return null;
   return (
     <Activity mode={targetKey !== null && shownKey !== null ? "visible" : "hidden"}>
