@@ -1,6 +1,7 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -38,7 +39,7 @@ export class ProviderInstallLock extends Context.Service<
      * Runs `run` while holding the lock for `lockKey`, or returns `None` without
      * running when another process holds it. `run` calls `recordChildPid` with the
      * installer's pid: a detached installer outlives this server, and the lock
-     * stays held until it exits.
+     * stays held until both `run` completes and the installer exits.
      */
     readonly tryRun: <A, E, R>(
       lockKey: string,
@@ -64,6 +65,7 @@ function isPidAlive(pid: number): boolean {
 const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const crypto = yield* Crypto.Crypto;
   const environment = yield* HostProcess.Environment;
   const homeDirectory = yield* HostProcess.HomeDirectory;
   const cacheHome = environment.XDG_CACHE_HOME || path.join(homeDirectory, ".cache");
@@ -90,17 +92,23 @@ const make = Effect.gen(function* () {
     if ((yield* Clock.currentTimeMillis) - modifiedAt >= Duration.toMillis(MAX_LOCK_AGE)) {
       return false;
     }
-    // The file holds one pid: this server's, then its installer's once spawned.
-    const pid = Number.parseInt(yield* fileSystem.readFileString(file), 10);
-    return Number.isNaN(pid) || isPidAlive(pid);
+    // The first line holds pids; the second identifies the owning run, including within one server.
+    const [pids = ""] = (yield* fileSystem.readFileString(file)).split("\n");
+    return pids.split(" ").some((value) => {
+      const pid = Number.parseInt(value, 10);
+      return Number.isNaN(pid) || isPidAlive(pid);
+    });
   });
 
-  const writePid = (file: string, pid: number, flag: "w" | "wx") =>
-    fileSystem.writeFileString(file, String(pid), { flag });
-
   /** Creates `file` exclusively; false when it already exists. */
-  const createExclusively = (file: string) =>
-    writePid(file, process.pid, "wx").pipe(
+  const createExclusively = (file: string, contents = String(process.pid)) =>
+    Effect.gen(function* () {
+      const handle = yield* fileSystem.open(file, { flag: "wx" });
+      yield* handle
+        .writeAll(new TextEncoder().encode(contents))
+        .pipe(Effect.onError(() => fileSystem.remove(file, { force: true }).pipe(Effect.ignore)));
+    }).pipe(
+      Effect.scoped,
       Effect.as(true),
       Effect.catchTags({
         PlatformError: (error) =>
@@ -131,56 +139,76 @@ const make = Effect.gen(function* () {
    * Creates the lock file exclusively; false when it exists and is held. A stale one is
    * reclaimed under a sentinel, so a second reclaimer cannot delete the first one's fresh lock.
    */
-  const acquire = Effect.fn("ProviderInstallLock.acquire")(function* (file: string) {
+  const acquire = Effect.fn("ProviderInstallLock.acquire")(function* (
+    file: string,
+    contents: string,
+  ) {
     yield* fileSystem.makeDirectory(directory, { recursive: true });
-    if (yield* createExclusively(file)) return true;
+    if (yield* createExclusively(file, contents)) return true;
     if (yield* isHeld(file).pipe(ignoreNotFound(false))) return false;
     const sentinel = `${file}.reclaim`;
     if (!(yield* claimSentinel(sentinel))) return false;
     return yield* Effect.gen(function* () {
       if (yield* isHeld(file).pipe(ignoreNotFound(false))) return false;
       yield* fileSystem.remove(file, { force: true });
-      return yield* createExclusively(file);
+      return yield* createExclusively(file, contents);
     }).pipe(Effect.ensuring(fileSystem.remove(sentinel, { force: true }).pipe(Effect.ignore)));
   });
 
-  const tryRun: ProviderInstallLock["Service"]["tryRun"] = (lockKey, run) => {
-    const file = path.join(directory, `${encodeURIComponent(lockKey)}.lock`);
-    return Effect.acquireUseRelease(
-      acquire(file).pipe(
-        Effect.mapError(toLockError),
-        // The ref holds the installer pid once `run` records it.
-        Effect.flatMap((acquired) =>
-          acquired ? Ref.make<number | undefined>(undefined) : Effect.succeed(undefined),
+  const tryRun: ProviderInstallLock["Service"]["tryRun"] = (lockKey, run) =>
+    Effect.gen(function* () {
+      const file = path.join(directory, `${encodeURIComponent(lockKey)}.lock`);
+      const owner = yield* crypto.randomUUIDv4().pipe(Effect.mapError(toLockError));
+      const contents = `${process.pid}\n${owner}`;
+      return yield* Effect.acquireUseRelease(
+        acquire(file, contents).pipe(
+          Effect.mapError(toLockError),
+          Effect.flatMap((acquired) =>
+            acquired
+              ? Ref.make<{ pid: number | undefined; contents: string }>({
+                  pid: undefined,
+                  contents,
+                })
+              : Effect.succeed(undefined),
+          ),
         ),
-      ),
-      (installerPid) =>
-        installerPid === undefined
-          ? Effect.succeedNone
-          : run((pid) =>
-              Ref.set(installerPid, pid).pipe(
-                Effect.andThen(writePid(file, pid, "w")),
-                Effect.catch((cause) =>
-                  Effect.logWarning("Could not record the provider installer in its lock", {
-                    cause,
+        (ownerState) =>
+          ownerState === undefined
+            ? Effect.succeedNone
+            : run((pid) =>
+                Ref.update(ownerState, (state) => ({ ...state, pid })).pipe(
+                  Effect.andThen(
+                    fileSystem.writeFileString(file, `${process.pid} ${pid}\n${owner}`),
+                  ),
+                  Effect.andThen(
+                    Ref.set(ownerState, { pid, contents: `${process.pid} ${pid}\n${owner}` }),
+                  ),
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Could not record the provider installer in its lock", {
+                      cause,
+                    }),
+                  ),
+                ),
+              ).pipe(Effect.map(Option.some)),
+        (ownerState) =>
+          ownerState === undefined
+            ? Effect.void
+            : Ref.get(ownerState).pipe(
+                Effect.flatMap((state) =>
+                  Effect.gen(function* () {
+                    if ((yield* fileSystem.readFileString(file)) !== state.contents) return;
+                    // Once `run` ends, only a surviving detached installer keeps the lock held.
+                    if (state.pid !== undefined && isPidAlive(state.pid)) {
+                      yield* fileSystem.writeFileString(file, `${state.pid}\n${owner}`);
+                    } else {
+                      yield* fileSystem.remove(file, { force: true });
+                    }
                   }),
                 ),
+                Effect.ignore,
               ),
-            ).pipe(Effect.map(Option.some)),
-      (installerPid) =>
-        installerPid === undefined
-          ? Effect.void
-          : Ref.get(installerPid).pipe(
-              // A detached installer outlives this server; its pid keeps the lock held.
-              Effect.flatMap((pid) =>
-                pid !== undefined && isPidAlive(pid)
-                  ? Effect.void
-                  : fileSystem.remove(file, { force: true }),
-              ),
-              Effect.ignore,
-            ),
-    );
-  };
+      );
+    });
 
   const anyHeld = Effect.gen(function* () {
     const names = yield* fileSystem.readDirectory(directory).pipe(ignoreNotFound([]));
