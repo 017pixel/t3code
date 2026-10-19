@@ -3007,6 +3007,8 @@ function formatClaudeUsageLimitWait(waitMs: number): string {
 
 interface ActiveClaudeTurnContext {
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+  // Shared with subagents after this context stops being the latest settled turn.
+  readonly rootTurnOutcome: { status: OrchestrationV2ProviderTurn["status"] };
   readonly nativeThreadId: string;
   readonly nativeTurnId: string;
   nativeMessageCursor: string | null;
@@ -3075,6 +3077,7 @@ interface ActiveClaudeProviderRetry {
 
 interface ActiveClaudeSubagent {
   task: OrchestrationV2Subagent;
+  readonly rootTurnOutcome: ActiveClaudeTurnContext["rootTurnOutcome"];
   readonly confirmedOutcome: ProviderAdapter.ProviderAdapterV2SubagentOutcome | undefined;
   readonly rootNodeId: OrchestrationV2ExecutionNode["id"];
   readonly childThreadId: ThreadId;
@@ -3588,9 +3591,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const subagentToolCalls = new Map<string, ActiveClaudeToolCall>();
         const pendingSubagentLaunchesByToolUseId = new Map<string, PendingClaudeSubagentLaunch>();
         const settledTurnByNativeThread = new Map<string, ActiveClaudeTurnContext>();
-        // Runs whose root turn ended without completing. Such a run stops
-        // ingesting at once, even while a subagent attributed to it runs on.
-        const runsEndedWithoutCompleting = new Set<RunId>();
         const subagentStopOutcomes = new Map<
           string,
           Deferred.Deferred<ProviderAdapter.ProviderAdapterV2SubagentOutcome>
@@ -4501,6 +4501,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const ids = claudeSubagentIds(resume.context, resume.taskId);
           const now = yield* DateTime.now;
           const subagent: ActiveClaudeSubagent = {
+            rootTurnOutcome: resume.context.rootTurnOutcome,
             confirmedOutcome: undefined,
             childThread: null,
             task: {
@@ -5089,9 +5090,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 compileClaudeModelSelection(input.context.input.modelSelection).effort)
               : existingSubagent.effort;
           const model = input.model ?? priorTask?.model ?? null;
-          // Between root turns, a nested subagent joins its owner's run, which
-          // keeps ingesting while the owner works; the turn that settled last
-          // may have stopped. During a turn it joins the live run.
+          // Idle launches join their owner's run even after later turns settle.
           const runOwner =
             existingSubagent === undefined && (yield* Ref.get(activeTurn)) !== input.context
               ? input.owner
@@ -5147,6 +5146,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           } satisfies OrchestrationV2Subagent;
           const subagent = {
             task,
+            rootTurnOutcome:
+              input.reopen === true && input.status === "running" && existingSubagent !== undefined
+                ? input.context.rootTurnOutcome
+                : (existingSubagent?.rootTurnOutcome ??
+                  runOwner?.rootTurnOutcome ??
+                  input.context.rootTurnOutcome),
             confirmedOutcome:
               input.nativeOutcome !== undefined
                 ? confirmedSubagentOutcome(task)
@@ -5274,9 +5279,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               },
             });
           }
-          // Ahead of the child thread and its records: the run a resume
-          // attributes the subagent to adopts its child thread from this
-          // event, and an ended run enrolls a new subagent's thread from it.
+          // Enroll the child thread before any of its records, including its creation.
           yield* emitProviderEvent({
             type: "subagent.updated",
             driver: CLAUDE_PROVIDER,
@@ -6309,12 +6312,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           yield* Ref.update(activeTurn, (current) =>
             current?.providerTurnId === input.context.providerTurnId ? null : current,
           );
+          input.context.rootTurnOutcome.status = input.status;
           if (input.status === "completed") {
             settledTurnByNativeThread.set(input.context.nativeThreadId, input.context);
-            runsEndedWithoutCompleting.delete(input.context.input.runId);
           } else {
             settledTurnByNativeThread.delete(input.context.nativeThreadId);
-            runsEndedWithoutCompleting.add(input.context.input.runId);
           }
           yield* Ref.update(interruptedTurns, (current) => {
             const next = new Set(current);
@@ -6824,10 +6826,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ) {
             return null;
           }
-          // A nested subagent's start, launched by a subagent that is already
-          // registered and running, is that subagent's own work like its tool
-          // calls. Its row joins the owner's run, so only while that run still
-          // ingests: a completed run stays open while its subagents run.
+          // Only completed owner runs keep ingesting while their subagents work.
+          // The last settled turn may belong to a later run.
           if (
             message.type === "system" &&
             message.subtype === "task_started" &&
@@ -6848,7 +6848,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 : (yield* Ref.get(sessionSubagentsByTaskId)).get(ownerTaskId);
             return owner?.task.status === "running" &&
               owner.task.runId !== null &&
-              !runsEndedWithoutCompleting.has(owner.task.runId) &&
+              owner.rootTurnOutcome.status === "completed" &&
               !bufferedStarts.some((start) => start.task_id === ownerTaskId)
               ? settled
               : null;
@@ -8734,6 +8734,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
             const context: ActiveClaudeTurnContext = {
               input: turnInput,
+              rootTurnOutcome: { status: "running" },
               nativeThreadId,
               nativeTurnId,
               nativeMessageCursor: null,

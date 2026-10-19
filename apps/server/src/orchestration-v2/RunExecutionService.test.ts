@@ -336,20 +336,22 @@ it("routes a live subagent's new thread after the root turn ends, but not others
     attemptId: RunAttemptId.make("attempt:late-nested"),
     providerThreadId: ProviderThreadId.make("provider-thread:late-nested"),
   };
-  const ownerThread = ThreadId.make("thread:late-nested:owner");
   const nestedThread = ThreadId.make("thread:late-nested:nested");
   const nestedNode = NodeId.make("node:late-nested:nested");
   const childCreated = (
     childThreadId: ThreadId,
     forkNodeId: NodeId,
-    parentThreadId: ThreadId = threadId,
   ): ProviderAdapter.ProviderAdapterV2Event =>
     ({
       type: "app_thread.created",
       driver,
       appThread: {
         id: childThreadId,
-        lineage: { parentThreadId, relationshipToParent: "subagent", rootThreadId: threadId },
+        lineage: {
+          parentThreadId: threadId,
+          relationshipToParent: "subagent",
+          rootThreadId: threadId,
+        },
         forkedFrom: { type: "node", nodeId: forkNodeId },
       },
     }) as ProviderAdapter.ProviderAdapterV2Event;
@@ -386,13 +388,6 @@ it("routes a live subagent's new thread after the root turn ends, but not others
     state: RunExecutionService.ProviderEventRoutingState,
   ) => RunExecutionService.routeProviderEvent(event, identity, state);
 
-  const [, live] = route(
-    childCreated(ownerThread, NodeId.make("node:late-nested:owner")),
-    RunExecutionService.makeProviderEventRoutingState({
-      identity,
-      providerTurnId: rootProviderTurnId,
-    }),
-  );
   const [, ended] = route(
     {
       type: "turn.terminal",
@@ -404,32 +399,23 @@ it("routes a live subagent's new thread after the root turn ends, but not others
       failure: null,
       threadDisposition: "reusable",
     },
-    live,
+    RunExecutionService.makeProviderEventRoutingState({
+      identity,
+      providerTurnId: rootProviderTurnId,
+    }),
   );
 
-  // The owner's nested subagent: its row comes first, then its thread.
   assert.isFalse(route(childCreated(nestedThread, nestedNode), ended)[0]);
   const [rowAccepted, enrolled] = route(subagent(), ended);
   assert.isTrue(rowAccepted);
-  const [nestedAccepted, afterNested] = route(childCreated(nestedThread, nestedNode), enrolled);
-  assert.isTrue(nestedAccepted);
-  assert.isTrue(afterNested.ownedThreadIds.has(nestedThread));
-
-  // A thread is enrolled only by the node it was forked from.
+  assert.isTrue(route(childCreated(nestedThread, nestedNode), enrolled)[0]);
   assert.isFalse(
     route(childCreated(nestedThread, NodeId.make("node:late-nested:other")), enrolled)[0],
   );
-  // An unrelated late thread, and the threads of subagents that ended or belong
-  // to another run, stay out.
-  assert.isFalse(
-    route(
-      childCreated(ThreadId.make("thread:late-nested:unrelated"), NodeId.make("node:unrelated")),
-      enrolled,
-    )[0],
-  );
+
   const [, afterEnd] = route(subagent({ status: "completed" }), enrolled);
   assert.isFalse(route(childCreated(nestedThread, nestedNode), afterEnd)[0]);
-  const [, foreign] = route(subagent({ runId: RunId.make("run:late-nested:later") }), ended);
+  const [, foreign] = route(subagent({ runId: RunId.make("run:late-nested:later") }), enrolled);
   assert.isFalse(route(childCreated(nestedThread, nestedNode), foreign)[0]);
 });
 

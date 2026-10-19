@@ -53,11 +53,7 @@ import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
-  // Set once this run's root turn ended. A child thread created after that
-  // belongs to the run that is live then, so this one no longer adopts it,
-  // except a thread enrolled below: a workflow member, or the thread of a
-  // live subagent attributed to this run (one its running subagent started).
-  // Their owner keeps this run open, so the thread is this run's to follow.
+  // After the root ends, only explicitly enrolled children may join this run.
   readonly rootTurnEnded: boolean;
   readonly workflowMemberParents: ReadonlyMap<ThreadId, ThreadId>;
   readonly subagentThreadNodes: ReadonlyMap<ThreadId, NodeId>;
@@ -441,24 +437,25 @@ export function routeProviderEvent(
               ownedThreadIds: new Set([...state.ownedThreadIds, coordinator.childThreadId]),
             }
           : state;
-      // A live subagent of this run enrolls the thread it creates next, so the
-      // thread still routes here if this run's root turn has ended by then.
+      // A completed root can still gain children from its running subagents.
       const childThreadId = coordinator.childThreadId;
-      const enrolls =
-        coordinator.origin === "provider_native" &&
-        childThreadId !== null &&
-        ownsRun(coordinator.runId) &&
-        isOrchestrationV2WorkActive(coordinator.status);
-      const enrolled =
-        childThreadId === null ||
-        enrolls === (adopted.subagentThreadNodes.get(childThreadId) === coordinator.id)
-          ? adopted
-          : {
-              ...adopted,
-              subagentThreadNodes: enrolls
-                ? new Map(adopted.subagentThreadNodes).set(childThreadId, coordinator.id)
-                : new Map([...adopted.subagentThreadNodes].filter(([id]) => id !== childThreadId)),
-            };
+      let enrolled = adopted;
+      if (childThreadId !== null) {
+        const enrolls =
+          coordinator.origin === "provider_native" &&
+          ownsRun(coordinator.runId) &&
+          isOrchestrationV2WorkActive(coordinator.status);
+        const isEnrolled = adopted.subagentThreadNodes.get(childThreadId) === coordinator.id;
+        if (enrolls !== isEnrolled) {
+          const subagentThreadNodes = new Map(adopted.subagentThreadNodes);
+          if (enrolls) {
+            subagentThreadNodes.set(childThreadId, coordinator.id);
+          } else {
+            subagentThreadNodes.delete(childThreadId);
+          }
+          enrolled = { ...adopted, subagentThreadNodes };
+        }
+      }
       if (
         !ownsRun(coordinator.runId) ||
         coordinator.workflow === undefined ||
