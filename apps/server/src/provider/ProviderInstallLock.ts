@@ -53,6 +53,8 @@ export class ProviderInstallLock extends Context.Service<
   }
 >()("t3/provider/ProviderInstallLock") {}
 
+const isProviderInstallLockError = Schema.is(ProviderInstallLockError);
+
 function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -80,7 +82,7 @@ const make = Effect.gen(function* () {
   const directory = path.join(cacheHome, "t3", "provider-install");
 
   const toLockError = (cause: unknown) =>
-    cause instanceof ProviderInstallLockError ? cause : new ProviderInstallLockError({ cause });
+    isProviderInstallLockError(cause) ? cause : new ProviderInstallLockError({ cause });
   const ignoreNotFound =
     <B>(fallback: B) =>
     <A>(effect: Effect.Effect<A, PlatformError>): Effect.Effect<A | B, PlatformError> =>
