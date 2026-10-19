@@ -1,3 +1,4 @@
+import { restartingWatch } from "./restartingWatch.ts";
 import {
   KeybindingRule,
   KeybindingsConfig,
@@ -585,26 +586,33 @@ const make = Effect.gen(function* () {
       ),
     );
 
+    const attached = yield* Deferred.make<void>();
+    const onStarted = () => {
+      Deferred.doneUnsafe(attached, Effect.void);
+    };
     const revalidateAndEmitSafely = revalidateAndEmit.pipe(Effect.ignoreCause({ log: true }));
 
     // Editors emit multiple events per save (truncate, write, rename) and
     // `fs.watch` can fire before the content has been flushed to disk.
-    const debouncedKeybindingsEvents = fs.watch(keybindingsConfigDir).pipe(
-      Stream.filter((event) => {
-        return (
-          event.path === keybindingsConfigFile ||
-          event.path === keybindingsConfigPath ||
-          path.resolve(keybindingsConfigDir, event.path) === keybindingsConfigPathResolved
-        );
-      }),
-      Stream.debounce(Duration.millis(100)),
-    );
+    const debouncedKeybindingsEvents = (onReady: () => void) =>
+      fs.watch(keybindingsConfigDir, { onReady }).pipe(
+        Stream.filter((event) => {
+          return (
+            event.path === keybindingsConfigFile ||
+            event.path === keybindingsConfigPath ||
+            path.resolve(keybindingsConfigDir, event.path) === keybindingsConfigPathResolved
+          );
+        }),
+        Stream.debounce(Duration.millis(100)),
+      );
 
-    yield* Stream.runForEach(debouncedKeybindingsEvents, () => revalidateAndEmitSafely).pipe(
-      Effect.ignoreCause({ log: true }),
-      Effect.forkIn(watcherScope),
-      Effect.asVoid,
-    );
+    yield* restartingWatch(
+      debouncedKeybindingsEvents,
+      revalidateAndEmit,
+      revalidateAndEmitSafely,
+      onStarted,
+    ).pipe(Effect.forkIn(watcherScope), Effect.asVoid);
+    yield* Deferred.await(attached);
   });
 
   const start = Effect.gen(function* () {
