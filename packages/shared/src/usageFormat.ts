@@ -44,8 +44,11 @@ export function formatPercent(share: number, digits = 1): string {
 
 export function formatUsageContractMismatch(
   environmentLabel: string,
-  mismatch: Pick<UsageContractMismatch, "direction">,
+  mismatch: Pick<UsageContractMismatch, "direction" | "provider">,
 ): string {
+  if (mismatch.provider === "codex") {
+    return `${environmentLabel} runs an older server version; its Codex usage is excluded from totals.`;
+  }
   return mismatch.direction === "serverBehind"
     ? `${environmentLabel} runs an older server version and is excluded from totals.`
     : `This client is older than the server on ${environmentLabel}; its usage is excluded from totals.`;

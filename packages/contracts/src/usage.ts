@@ -3,11 +3,11 @@ import * as Schema from "effect/Schema";
 import { ForwardCompatibleArray, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
- * Bumped whenever the shape of {@link UsageSummary} changes incompatibly.
+ * Bumped whenever the shape or accounting semantics of {@link UsageSummary} change incompatibly.
  * Adding providers or other array-element variants is additive: unknown entries
  * are skipped on decode and do not require a version bump.
  */
-export const USAGE_CONTRACT_VERSION = 6 as const;
+export const USAGE_CONTRACT_VERSION = 7 as const;
 
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 

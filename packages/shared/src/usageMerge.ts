@@ -87,6 +87,7 @@ export interface UsageContractMismatch {
   readonly environmentId: EnvironmentId;
   readonly direction: "serverBehind" | "clientBehind";
   readonly contractVersion: number;
+  readonly provider?: "codex";
 }
 
 export interface MergedUsage {
@@ -278,6 +279,29 @@ export function isCompatibleUsageContractVersion(version: number, expected: numb
   return version >= USAGE_MERGE_COMPATIBLE_SINCE && version <= expected;
 }
 
+export function getUsageContractMismatch(
+  summary: UsageSummary,
+  expected: number,
+): Omit<UsageContractMismatch, "environmentId"> | undefined {
+  const contractVersion = summary.contractVersion;
+  if (!isCompatibleUsageContractVersion(contractVersion, expected)) {
+    return {
+      direction: contractVersion < expected ? "serverBehind" : "clientBehind",
+      contractVersion,
+    };
+  }
+  // Version 7 identifies Codex sources by home; older directory fingerprints cannot deduplicate them.
+  if (
+    expected >= 7 &&
+    contractVersion < 7 &&
+    (summary.sources.some((source) => source.fingerprint.provider === "codex") ||
+      summary.buckets.some((bucket) => bucket.provider === "codex"))
+  ) {
+    return { direction: "serverBehind", contractVersion, provider: "codex" };
+  }
+  return undefined;
+}
+
 const EMPTY_MERGED: MergedUsage = {
   costUsd: 0,
   uncachedInputTokens: 0,
@@ -314,18 +338,22 @@ export function mergeUsage(
   const current: EnvironmentUsage[] = [];
   const contractMismatches: UsageContractMismatch[] = [];
   for (const environment of environments) {
-    if (
-      isCompatibleUsageContractVersion(environment.summary.contractVersion, expectedContractVersion)
-    ) {
+    const mismatch = getUsageContractMismatch(environment.summary, expectedContractVersion);
+    if (mismatch !== undefined) {
+      contractMismatches.push({ environmentId: environment.environmentId, ...mismatch });
+    }
+    if (mismatch === undefined) {
       current.push(environment);
-    } else {
-      contractMismatches.push({
-        environmentId: environment.environmentId,
-        direction:
-          environment.summary.contractVersion < expectedContractVersion
-            ? "serverBehind"
-            : "clientBehind",
-        contractVersion: environment.summary.contractVersion,
+    } else if (mismatch.provider === "codex") {
+      current.push({
+        ...environment,
+        summary: {
+          ...environment.summary,
+          buckets: environment.summary.buckets.filter((bucket) => bucket.provider !== "codex"),
+          sources: environment.summary.sources.filter(
+            (source) => source.fingerprint.provider !== "codex",
+          ),
+        },
       });
     }
   }

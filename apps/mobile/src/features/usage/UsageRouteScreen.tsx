@@ -10,7 +10,7 @@ import {
   usageProgress,
 } from "@t3tools/client-runtime/state/usage-progress";
 import {
-  isCompatibleUsageContractVersion,
+  getUsageContractMismatch,
   isModelCostUnknown,
   type DailyTotals,
   type MergedUsage,
@@ -862,16 +862,11 @@ function ModelsSection(props: { readonly merged: MergedUsage; readonly metric: U
 }
 
 function usageEnvironmentStatus(environment: EnvironmentUsageStatus, refreshing: boolean): string {
-  if (
-    environment.summary &&
-    !isCompatibleUsageContractVersion(environment.summary.contractVersion, USAGE_CONTRACT_VERSION)
-  ) {
-    return formatUsageContractMismatch(environment.label, {
-      direction:
-        environment.summary.contractVersion < USAGE_CONTRACT_VERSION
-          ? "serverBehind"
-          : "clientBehind",
-    });
+  const mismatch = environment.summary
+    ? getUsageContractMismatch(environment.summary, USAGE_CONTRACT_VERSION)
+    : undefined;
+  if (mismatch !== undefined) {
+    return formatUsageContractMismatch(environment.label, mismatch);
   }
   if (environment.error)
     return environment.summary ? `${environment.error} Showing saved totals.` : environment.error;
