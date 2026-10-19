@@ -6318,6 +6318,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const messageText = providerMessageTextWithAttachmentPaths({
             text: turnInput.message.text,
             attachments: turnInput.message.attachments,
+            attachmentPromptParts: turnInput.message.attachmentPromptParts,
             resolveAttachmentPath: host.resolveAttachmentPath,
           });
           const isNativeSlashCommand = turnInput.message.text.trimStart().startsWith("/");

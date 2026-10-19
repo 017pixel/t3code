@@ -3126,16 +3126,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (attachmentPath === null) {
               return yield* toProtocolError(`Invalid attachment id '${attachment.id}'`);
             }
-            yield* fileSystem
-              .access(attachmentPath)
+            const bytes = yield* fileSystem
+              .readFile(attachmentPath)
               .pipe(
                 Effect.mapError((cause) =>
-                  toProtocolError(`Failed to access attachment '${attachment.id}'.`, cause),
+                  toProtocolError(`Failed to read attachment '${attachment.id}'.`, cause),
                 ),
               );
             return {
-              type: "localImage" as const,
-              path: attachmentPath,
+              type: "image" as const,
+              url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
             } satisfies CodexSchema.V2TurnStartParams__UserInput;
           });
 
@@ -3151,6 +3151,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const text = providerMessageTextWithAttachmentPaths({
               text: codexSkillMentionText(turnInput.message.text),
               attachments: turnInput.message.attachments,
+              attachmentPromptParts: turnInput.message.attachmentPromptParts,
               resolveAttachmentPath: (attachment) =>
                 resolveAttachmentPath({ attachmentsDir: serverConfig.attachmentsDir, attachment }),
             });

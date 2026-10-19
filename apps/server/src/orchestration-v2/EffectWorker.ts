@@ -1,4 +1,5 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, type MessageId, type ThreadId, type RunId } from "@t3tools/contracts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -27,7 +28,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { continueRestartedRun } from "./RestartContinuation.ts";
+import { continueRestartedRun, restartContinuationBlocked } from "./RestartContinuation.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -97,6 +98,99 @@ export const layerExecutor: Layer.Layer<
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const followUpSteer = Effect.fn("EffectWorker.followUpSteer")(function* (
+      effectId: string,
+      threadId: ThreadId,
+      messageId: MessageId,
+      restartContinuationOfRunId?: RunId,
+    ) {
+      const projection = yield* threads.getThreadRecords(threadId, ["messages", "runs"], {
+        messageIds: [messageId],
+      });
+      const message = projection.messages.find((item) => item.id === messageId);
+      const run = projection.runs.find((item) => item.id === message?.runId);
+      if (message === undefined || run === undefined) return false;
+      // Reuse the message identity and a stable command receipt so an outbox
+      // retry cannot append a duplicate message or start a second follow-up.
+      yield* threads
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`command:steer-follow-up:${effectId}`),
+          threadId,
+          messageId: message.id,
+          text: message.text,
+          ...(restartContinuationOfRunId === undefined ? {} : { restartContinuationOfRunId }),
+          ...(message.context ? { context: message.context } : {}),
+          attachments: message.attachments,
+          ...(message.delegatedCompletion === undefined
+            ? {}
+            : { modelSelection: run.modelSelection }),
+          dispatchMode: {
+            type:
+              message.delegatedCompletion === undefined && restartContinuationOfRunId === undefined
+                ? "start_immediately"
+                : "queue_after_active",
+          },
+          createdBy: message.createdBy,
+          creationSource: message.creationSource,
+          ...(message.delegatedCompletion === undefined
+            ? {}
+            : { delegatedCompletion: message.delegatedCompletion }),
+          ...(message.notification === undefined ? {} : { notification: message.notification }),
+          ...(message.scheduledTaskId === undefined
+            ? {}
+            : { scheduledTaskId: message.scheduledTaskId }),
+          ...(message.senderThreadId === undefined
+            ? {}
+            : { senderThreadId: message.senderThreadId }),
+        })
+        .pipe(
+          // The turn that just completed leaves no further retry
+          // target once the instance is off: the completed turn
+          // stands as the thread's result instead of going
+          // through the outbox's bounded retry on a refusal that
+          // retrying cannot change.
+          Effect.catchTags({
+            ThreadManagementProviderInstanceDisabledError: (disabledError) =>
+              Effect.logInfo("orchestration-v2.effect-worker.steer-follow-up-disabled", {
+                threadId,
+                messageId: message.id,
+                projectId: disabledError.projectId,
+                instanceId: disabledError.instanceId,
+              }),
+          }),
+        );
+      return true;
+    });
+    const recoverSteering = Effect.fn("EffectWorker.recoverSteering")(function* (
+      threadId: ThreadId,
+      request: Extract<
+        EffectOutbox.OrchestrationEffectRequestV2,
+        { type: "provider-turn.steer-follow-up" }
+      >,
+    ) {
+      const enabled = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
+      if (enabled === null) return;
+      const projection = yield* threads.getThreadRecords(
+        threadId,
+        ["runs", "providerTurns", "runtimeRequests", "turnItems"],
+        { turnItemTypes: ["secret_request"] },
+      );
+      if (
+        !resolveProjectSettings(enabled, projection.thread.projectId).settings
+          .continueThreadsAfterServerUpdate
+      )
+        return;
+      const source = projection.runs.find((run) => run.id === request.sourceRunId);
+      if (
+        source === undefined ||
+        restartContinuationBlocked(projection, source, yield* DateTime.now, true)
+      )
+        return;
+      for (const steer of request.steers) {
+        yield* followUpSteer(steer.effectId, threadId, steer.messageId, source.id);
+      }
+    });
     return OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
@@ -121,6 +215,17 @@ export const layerExecutor: Layer.Layer<
               ),
             );
           }
+          case "provider-turn.steer-follow-up":
+            return recoverSteering(effect.threadId, effect.request).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
           case "provider-session.detach":
             return providerSessions
               .detach({
@@ -257,69 +362,11 @@ export const layerExecutor: Layer.Layer<
                     ) {
                       return yield* error;
                     }
-                    const projection = yield* threads.getThreadRecords(
-                      effect.threadId,
-                      ["messages", "runs"],
-                      { messageIds: [effect.request.messageId] },
-                    );
-                    const messageId = effect.request.messageId;
-                    const message = projection.messages.find((item) => item.id === messageId);
-                    const run = projection.runs.find((item) => item.id === message?.runId);
-                    if (message === undefined || run === undefined) return yield* error;
-                    // Reuse the message identity and a stable command receipt so an outbox
-                    // retry cannot append a duplicate message or start a second follow-up.
-                    yield* threads
-                      .dispatch({
-                        type: "message.dispatch",
-                        commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
-                        threadId: effect.threadId,
-                        messageId: message.id,
-                        text: message.text,
-                        ...(message.context ? { context: message.context } : {}),
-                        attachments: message.attachments,
-                        ...(message.delegatedCompletion === undefined
-                          ? {}
-                          : { modelSelection: run.modelSelection }),
-                        dispatchMode: {
-                          type:
-                            message.delegatedCompletion === undefined
-                              ? "start_immediately"
-                              : "queue_after_active",
-                        },
-                        createdBy: message.createdBy,
-                        creationSource: message.creationSource,
-                        ...(message.delegatedCompletion === undefined
-                          ? {}
-                          : { delegatedCompletion: message.delegatedCompletion }),
-                        ...(message.notification === undefined
-                          ? {}
-                          : { notification: message.notification }),
-                        ...(message.scheduledTaskId === undefined
-                          ? {}
-                          : { scheduledTaskId: message.scheduledTaskId }),
-                        ...(message.senderThreadId === undefined
-                          ? {}
-                          : { senderThreadId: message.senderThreadId }),
-                      })
-                      .pipe(
-                        // The turn that just completed leaves no further retry
-                        // target once the instance is off: the completed turn
-                        // stands as the thread's result instead of going
-                        // through the outbox's bounded retry on a refusal that
-                        // retrying cannot change.
-                        Effect.catchTags({
-                          ThreadManagementProviderInstanceDisabledError: (disabledError) =>
-                            Effect.logInfo(
-                              "orchestration-v2.effect-worker.steer-follow-up-disabled",
-                              {
-                                threadId: effect.threadId,
-                                messageId: message.id,
-                                projectId: disabledError.projectId,
-                                instanceId: disabledError.instanceId,
-                              },
-                            ),
-                        }),
-                      );
+                    if (
+                      !(yield* followUpSteer(effect.id, effect.threadId, effect.request.messageId))
+                    ) {
+                      return yield* error;
+                    }
                   }),
                 ),
                 Effect.mapError(

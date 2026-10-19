@@ -2815,6 +2815,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           const text = providerMessageTextWithAttachmentPaths({
             text: turnInput.message.text,
             attachments: turnInput.message.attachments,
+            attachmentPromptParts: turnInput.message.attachmentPromptParts,
             resolveAttachmentPath: host.resolveAttachmentPath,
           }).trim();
           const files = OpenCodeRuntime.toOpenCodeFileParts({
@@ -3312,6 +3313,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               const text = providerMessageTextWithAttachmentPaths({
                 text: steerInput.message.text,
                 attachments: steerInput.message.attachments,
+                attachmentPromptParts: steerInput.message.attachmentPromptParts,
                 resolveAttachmentPath: host.resolveAttachmentPath,
               }).trim();
               const files = OpenCodeRuntime.toOpenCodeFileParts({

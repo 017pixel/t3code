@@ -935,17 +935,40 @@ export const layer: Layer.Layer<
       const continuationSource = projection.runs.find(
         (source) => source.id === run.restartContinuationOfRunId,
       );
-      const steeringContinuation =
-        continuationSource !== undefined &&
-        restartPendingMessageIds(
-          continuationSource,
-          projection.runs,
-          projection.providerTurns,
-          projection.attempts,
-        ).length > 0;
-      // Carried messages were expanded individually before joining; projecting
-      // again would rewrite literal context links inside their captured payloads.
-      const userText = steeringContinuation
+      const pendingSteeringIds =
+        continuationSource === undefined
+          ? []
+          : restartPendingMessageIds(
+              continuationSource,
+              projection.runs,
+              projection.providerTurns,
+              projection.attempts,
+            );
+      const steeringContinuation = pendingSteeringIds.length > 0;
+      const carriedSteering = steeringContinuation && !pendingSteeringIds.includes(message.id);
+      const pendingSteeringMessages = carriedSteering
+        ? (yield* projectionStore.getThreadRecords(input.threadId, ["messages"], {
+            messageIds: pendingSteeringIds,
+          })).messages
+        : steeringContinuation
+          ? [message]
+          : [];
+      // Resolve attachment hints at the adapter, budgeting each accepted message
+      // separately. Project originals, never the continuation's expanded context.
+      const attachmentPromptParts = (
+        carriedSteering ? pendingSteeringIds : steeringContinuation ? [message.id] : []
+      ).flatMap((id) =>
+        pendingSteeringMessages
+          .filter((candidate) => candidate.id === id)
+          .map((candidate) => ({
+            textLength: projectComposerContextForProvider({
+              text: candidate.text,
+              records: candidate.context?.records ?? [],
+            }).length,
+            attachments: candidate.attachments,
+          })),
+      );
+      const userText = carriedSteering
         ? message.text
         : projectComposerContextForProvider({
             text: message.text,
@@ -970,7 +993,12 @@ export const layer: Layer.Layer<
             )
             .map((candidate) => candidate.id),
         ),
-        run,
+        // This accepted message contains its original text, so the normal
+        // next-message path must also supply any cancelled background work.
+        run:
+          steeringContinuation && !carriedSteering
+            ? { ...run, restartContinuationOfRunId: undefined }
+            : run,
         attempts: projection.attempts,
       });
       const restartNote =
@@ -1253,6 +1281,7 @@ export const layer: Layer.Layer<
         message: {
           messageId: message.id,
           text: userText,
+          ...(attachmentPromptParts.length === 0 ? {} : { attachmentPromptParts }),
           attachments: message.attachments,
           createdBy: message.createdBy,
           creationSource: message.creationSource,

@@ -58,6 +58,15 @@ export type ProviderAdapterV2RuntimePolicy = typeof ProviderAdapterV2RuntimePoli
 export const ProviderAdapterV2TurnMessage = Schema.Struct({
   messageId: MessageId,
   text: Schema.String,
+  // A recovery prompt can combine independently budgeted accepted messages.
+  attachmentPromptParts: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        textLength: Schema.Number,
+        attachments: Schema.Array(ChatAttachment),
+      }),
+    ),
+  ),
   attachments: Schema.Array(ChatAttachment),
   createdBy: OrchestrationV2ConversationMessage.fields.createdBy,
   creationSource: OrchestrationV2ConversationMessage.fields.creationSource,

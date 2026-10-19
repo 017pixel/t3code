@@ -2917,6 +2917,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       providerMessageTextWithAttachmentPaths({
         text: turnInput.message.text,
         attachments: turnInput.message.attachments,
+        attachmentPromptParts: turnInput.message.attachmentPromptParts,
         resolveAttachmentPath: host.resolveAttachmentPath,
       }).trim();
 
@@ -3593,6 +3594,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               text: providerMessageTextWithAttachmentPaths({
                 text: steerInput.message.text,
                 attachments: steerInput.message.attachments,
+                attachmentPromptParts: steerInput.message.attachmentPromptParts,
                 resolveAttachmentPath: host.resolveAttachmentPath,
               }).trim(),
               delivery: "steer",

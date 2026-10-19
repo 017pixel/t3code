@@ -4664,9 +4664,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
       if (command.restartContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.restartContinuationOfRunId);
+        // A completed turn can still own an accepted, undelivered steer. Its
+        // exact recorded identity is allowed through the normal restart guards.
+        const pendingSteer =
+          source?.restartPendingMessageIds?.includes(command.messageId) === true &&
+          (source.status === "waiting" || source.status === "completed") &&
+          latestProviderTurnForAttempt(projection.providerTurns, source.activeAttemptId)?.status ===
+            "completed";
         if (
           !source ||
-          !isRestartContinuationSource(source, projection.providerTurns) ||
+          (!pendingSteer && !isRestartContinuationSource(source, projection.providerTurns)) ||
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
           projection.thread.providerInstanceId !== source.providerInstanceId ||
@@ -4675,7 +4682,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               run.id !== source.id &&
               run.status !== "queued" &&
               !cancelledBeforeStart(run) &&
-              runRanAfter(run, source),
+              runRanAfter(run, source) &&
+              !(
+                pendingSteer &&
+                source.restartPendingMessageIds?.includes(run.userMessageId) &&
+                run.status !== "interrupted" &&
+                run.status !== "cancelled" &&
+                run.status !== "rolled_back"
+              ),
           ) ||
           (yield* stopReachedRun(command, command.threadId, source.id))
         ) {

@@ -2177,6 +2177,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                   ? rawText
                   : rewriteCursorSkillMentions(rawText, cursorSkillNames),
               attachments: turnInput.message.attachments,
+              attachmentPromptParts: turnInput.message.attachmentPromptParts,
               resolveAttachmentPath: host.resolveAttachmentPath,
             }),
             runOrdinal: turnInput.runOrdinal,

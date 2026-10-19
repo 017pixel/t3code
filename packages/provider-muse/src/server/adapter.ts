@@ -1861,6 +1861,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         const text = providerMessageTextWithAttachmentPaths({
           text: message.text,
           attachments: message.attachments,
+          attachmentPromptParts: message.attachmentPromptParts,
           resolveAttachmentPath: providerHost.resolveAttachmentPath,
         });
         if (text) parts.push({ type: "text", text });

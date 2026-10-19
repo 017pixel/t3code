@@ -643,6 +643,41 @@ export const make = Effect.gen(function* () {
           },
         });
       }
+      // Checkpoint-waiting and completed runs are not cancelled above. Keep
+      // their accepted input on the source as well, in case another restart
+      // cuts the follow-up after admission but before provider start.
+      const steeringFollowUps: Array<EffectOutbox.PendingOrchestrationEffectV2> = [];
+      for (const run of projection.runs) {
+        if (runs.some((cancelled) => cancelled.id === run.id)) continue;
+        if (run.status !== "waiting" && run.status !== "completed") continue;
+        const steers = (projection.pendingSteering ?? [])
+          .filter((steer) => steer.runId === run.id)
+          .map(({ effectId, messageId }) => ({ effectId, messageId }));
+        if (steers.length === 0) continue;
+        events.push({
+          id: yield* allocateEventId(),
+          type: "run.updated",
+          threadId: projection.thread.id,
+          runId: run.id,
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            ...run,
+            restartPendingMessageIds: [
+              ...new Set([
+                ...(run.restartPendingMessageIds ?? []),
+                ...steers.map((steer) => steer.messageId),
+              ]),
+            ],
+          },
+        });
+        steeringFollowUps.push({
+          id: "effect:steer-follow-up:" + run.id,
+          commandId,
+          threadId: projection.thread.id,
+          request: { type: "provider-turn.steer-follow-up", sourceRunId: run.id, steers },
+        });
+      }
       const continuationRun =
         continueAfterRestart && trigger === "startup"
           ? restartContinuationRun(
@@ -660,11 +695,12 @@ export const make = Effect.gen(function* () {
             },
           ]
         : [];
+      if (continueAfterRestart) effects.unshift(...steeringFollowUps);
       const stoppedSessions = projection.providerSessions.filter(
         (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
       ).length;
       let retiredEffects: number;
-      if (events.length === 0) {
+      if (events.length === 0 && effects.length === 0) {
         const retiredEffectIds = yield* outbox
           .cancelUnsettled({
             threadId: projection.thread.id,

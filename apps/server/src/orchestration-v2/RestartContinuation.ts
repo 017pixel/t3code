@@ -34,7 +34,7 @@ const CONTINUE_PROMPT = "Continue where you left off.";
 
 const MAX_CONTINUATION_CHAIN = 3;
 
-function restartContinuationBlocked(
+export function restartContinuationBlocked(
   projection: Pick<
     ProjectionRuntimeRecoveryState,
     "thread" | "runtimeRequests" | "providerTurns" | "turnItems"

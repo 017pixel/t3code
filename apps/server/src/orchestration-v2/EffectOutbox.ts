@@ -34,6 +34,11 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     sourceRunId: RunId,
   }),
   Schema.Struct({
+    type: Schema.Literal("provider-turn.steer-follow-up"),
+    sourceRunId: RunId,
+    steers: Schema.Array(Schema.Struct({ effectId: Schema.String, messageId: MessageId })),
+  }),
+  Schema.Struct({
     type: Schema.Literal("provider-session.detach"),
     providerSessionId: ProviderSessionId,
     detail: Schema.optional(Schema.String),
@@ -119,6 +124,7 @@ export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.T
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "provider-runtime.continue",
+  "provider-turn.steer-follow-up",
   "provider-session.detach",
   "provider-thread.rollback",
   "checkpoint.capture",
@@ -337,7 +343,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
                 AND active.rowid < candidate.rowid
                 AND ${
                   excludeRestartContinuations
-                    ? sql`active.effect_type != 'provider-runtime.continue'`
+                    ? sql`active.effect_type NOT IN ('provider-runtime.continue', 'provider-turn.steer-follow-up')`
                     : sql`1 = 1`
                 }
               )
@@ -549,7 +555,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               SELECT candidate.effect_id
               FROM orchestration_v2_effect_outbox AS candidate
               WHERE ${claimableCandidatePredicate(nowIso, excludeRestartContinuations)}
-                AND ${excludeRestartContinuations ? sql`candidate.effect_type != 'provider-runtime.continue'` : sql`1 = 1`}
+                AND ${excludeRestartContinuations ? sql`candidate.effect_type NOT IN ('provider-runtime.continue', 'provider-turn.steer-follow-up')` : sql`1 = 1`}
               ORDER BY candidate.available_at ASC, candidate.created_at ASC, candidate.effect_id ASC
               LIMIT 1
             )
