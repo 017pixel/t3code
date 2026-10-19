@@ -1457,49 +1457,50 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ? windowsProcessTableSnapshot()
       : posixProcessTableSnapshot(yield* resolvePosixPsCommand())
   ).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner));
+  // Primary failures still back off polling even when the fallback succeeds.
   const fetchProcessTableSnapshot: Effect.Effect<
     {
       readonly snapshot: TerminalProcessTableSnapshot;
-      readonly snapshotSucceeded: boolean;
+      readonly primarySnapshotSucceeded: boolean;
     },
     TerminalSubprocessCheckError
   > = options.processTable
     ? options.processTable.pipe(
         Effect.map((entries) => ({
           snapshot: processTableSnapshotFromProcesses(entries),
-          snapshotSucceeded: true,
+          primarySnapshotSucceeded: true,
         })),
         Effect.catch(() =>
           fallbackProcessTableSnapshot.pipe(
-            Effect.map((snapshot) => ({ snapshot, snapshotSucceeded: false })),
+            Effect.map((snapshot) => ({ snapshot, primarySnapshotSucceeded: false })),
           ),
         ),
       )
     : fallbackProcessTableSnapshot.pipe(
-        Effect.map((snapshot) => ({ snapshot, snapshotSucceeded: true })),
+        Effect.map((snapshot) => ({ snapshot, primarySnapshotSucceeded: true })),
       );
   const customSubprocessInspector = options.subprocessInspector;
   const acquireSubprocessInspector: Effect.Effect<
     {
       readonly inspector: TerminalSubprocessInspector;
-      readonly snapshotSucceeded: boolean;
+      readonly primarySnapshotSucceeded: boolean;
     },
     TerminalSubprocessCheckError
   > =
     customSubprocessInspector !== undefined
-      ? Effect.succeed({ inspector: customSubprocessInspector, snapshotSucceeded: true })
+      ? Effect.succeed({ inspector: customSubprocessInspector, primarySnapshotSucceeded: true })
       : Effect.map(
           fetchProcessTableSnapshot,
           ({
             snapshot,
-            snapshotSucceeded,
+            primarySnapshotSucceeded,
           }): {
             readonly inspector: TerminalSubprocessInspector;
-            readonly snapshotSucceeded: boolean;
+            readonly primarySnapshotSucceeded: boolean;
           } => ({
             inspector: (terminalPid) =>
               Effect.succeed(deriveSubprocessInspectResult(snapshot, terminalPid, platform)),
-            snapshotSucceeded,
+            primarySnapshotSucceeded,
           }),
         );
   const subprocessPollIntervalMs =
@@ -2407,7 +2408,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           Effect.as(
             Option.none<{
               readonly inspector: TerminalSubprocessInspector;
-              readonly snapshotSucceeded: boolean;
+              readonly primarySnapshotSucceeded: boolean;
             }>(),
           ),
         ),
@@ -2418,7 +2419,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return false;
     }
 
-    const { inspector: subprocessInspector, snapshotSucceeded } = inspectorOption.value;
+    const { inspector: subprocessInspector, primarySnapshotSucceeded } = inspectorOption.value;
 
     const checkSubprocessActivity = Effect.fn("terminal.checkSubprocessActivity")(function* (
       session: TerminalSessionState & { pid: number },
@@ -2487,7 +2488,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       concurrency: "unbounded",
       discard: true,
     });
-    return snapshotSucceeded;
+    return primarySnapshotSucceeded;
   });
 
   const hasRunningSessions = readManagerState.pipe(
@@ -2503,7 +2504,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (running.length === 0) return false;
     // A cached idle result must not let a restart kill a command started since the last poll.
     const inspection = yield* acquireSubprocessInspector.pipe(Effect.option);
-    if (Option.isNone(inspection) || !inspection.value.snapshotSucceeded) return true;
+    if (Option.isNone(inspection)) return true;
     const { inspector } = inspection.value;
     for (const session of running) {
       if (
@@ -2525,8 +2526,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       Effect.flatMap((active) =>
         active
           ? pollSubprocessActivity().pipe(
-              Effect.flatMap((snapshotSucceeded) => {
-                subprocessSnapshotFailureCount = snapshotSucceeded
+              Effect.flatMap((primarySnapshotSucceeded) => {
+                subprocessSnapshotFailureCount = primarySnapshotSucceeded
                   ? 0
                   : Math.min(subprocessSnapshotFailureCount + 1, 30);
                 const delayMs = subprocessSnapshotPollDelayMs(

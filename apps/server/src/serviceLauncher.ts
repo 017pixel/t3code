@@ -19,6 +19,7 @@ import type {
   ServiceUpdateRecord,
 } from "./cloud/serviceProtocol.ts";
 import {
+  CLI_LAUNCHER_FILE,
   compareExactServiceVersions,
   decodeServiceLauncherChildMessage,
   isExactServiceVersion,
@@ -392,7 +393,7 @@ async function runtimeExists(baseDir: string, version: string): Promise<boolean>
  * Removes completed runtimes nothing can return to, so unattended updates do
  * not fill the disk. Keep both the running launcher and a deferred CLI/service
  * install, which may name different executables. Recovery also needs the active
- * version, the version an update came from, and a pending target.
+ * version, the version an update came from, a pending target, and the CLI's runtime.
  */
 export async function pruneServiceRuntimes(
   baseDir: string,
@@ -401,18 +402,38 @@ export async function pruneServiceRuntimes(
 ): Promise<void> {
   const keep = new Set([state.activeVersion]);
   if (launcherVersion !== undefined) keep.add(launcherVersion);
-  const installedVersion = await NodeFSP.readFile(restartPendingPath(baseDir), "utf8").catch(
-    (error: unknown) => {
+  const readOptionalText = (filePath: string) =>
+    NodeFSP.readFile(filePath, "utf8").catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
-    },
-  );
+    });
+  const installedVersion = await readOptionalText(restartPendingPath(baseDir));
   if (installedVersion !== undefined) keep.add(installedVersion.trim());
+  const versionsDir = NodePath.join(baseDir, "runtime", "versions");
+  const cliLauncher = await readOptionalText(NodePath.join(baseDir, "runtime", CLI_LAUNCHER_FILE));
+  if (cliLauncher !== undefined) {
+    const cliPath = cliLauncher.trim();
+    const cliEntry =
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+      process.platform === "win32"
+        ? /^"([^"]+)"/m.exec((await readOptionalText(cliPath)) ?? "")?.[1]
+        : await NodeFSP.readlink(cliPath)
+            .then((target) => NodePath.resolve(NodePath.dirname(cliPath), target))
+            .catch((error: unknown) => {
+              const code = (error as NodeJS.ErrnoException).code;
+              if (code === "ENOENT" || code === "EINVAL") return undefined;
+              throw error;
+            });
+    const cliVersion =
+      cliEntry === undefined
+        ? undefined
+        : NodePath.relative(versionsDir, cliEntry).split(NodePath.sep)[0];
+    if (cliVersion !== undefined && isExactServiceVersion(cliVersion)) keep.add(cliVersion);
+  }
   if (state.update !== undefined) {
     keep.add(state.update.fromVersion);
     if (state.update.status === "pending") keep.add(state.update.targetVersion);
   }
-  const versionsDir = NodePath.join(baseDir, "runtime", "versions");
   for (const entry of await NodeFSP.readdir(versionsDir, { withFileTypes: true })) {
     if (!entry.isDirectory() || !isExactServiceVersion(entry.name) || keep.has(entry.name)) {
       continue;
@@ -420,6 +441,8 @@ export async function pruneServiceRuntimes(
     // An incomplete directory is a staging in progress, not an old runtime.
     if (!(await runtimeExists(baseDir, entry.name))) continue;
     const versionDir = NodePath.join(versionsDir, entry.name);
+    // Standalone launcher has no Effect runtime.
+    // @effect-diagnostics-next-line globalDate:off
     if (Date.now() - (await NodeFSP.stat(versionDir)).mtimeMs < PRUNE_MIN_AGE_MS) continue;
     await NodeFSP.rm(versionDir, { recursive: true, force: true });
   }

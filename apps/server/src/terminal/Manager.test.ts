@@ -1289,7 +1289,7 @@ it.layer(
   );
 
   it.effect(
-    "checks fresh terminal activity and keeps the restart window closed on inspection failure",
+    "uses the process fallback for fresh activity and blocks restarts only when both paths fail",
     () =>
       Effect.gen(function* () {
         let output = "  9000  1 bash";
@@ -1307,7 +1307,12 @@ it.layer(
               stderrInvalidUtf8: false,
             }),
         };
-        const { manager } = yield* createManager(5, { subprocessPollIntervalMs: 60_000 }).pipe(
+        const { manager } = yield* createManager(5, {
+          subprocessPollIntervalMs: 60_000,
+          processTable: Effect.fail("sidecar unavailable").pipe(
+            Effect.mapError((cause) => cause as never),
+          ),
+        }).pipe(
           Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
           Effect.provide(layerWithHostPlatform("linux")),
         );

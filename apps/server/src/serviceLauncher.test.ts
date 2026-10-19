@@ -5,6 +5,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeFSP from "node:fs/promises";
 import { assert, it } from "@effect/vitest";
 import { SERVER_EXIT_CODE_STATE_DIR_OWNED } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -349,7 +350,7 @@ if (context.update?.status === "pending") {
         );
       }
       // Pruning leaves runtimes published within the last hour.
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000);
+      const twoHoursAgo = DateTime.toDate(DateTime.subtract(yield* DateTime.now, { hours: 2 }));
       yield* fs.utimes(path.join(root, "runtime", "versions", "0.5.0"), twoHoursAgo, twoHoursAgo);
       yield* Effect.promise(() =>
         writeServiceState(statePath, {
@@ -806,7 +807,7 @@ setInterval(() => {}, 1_000);
         const names = yield* fs.readDirectory(path.join(root, "runtime", "versions"));
         return names.toSorted();
       });
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000);
+      const twoHoursAgo = DateTime.toDate(DateTime.subtract(yield* DateTime.now, { hours: 2 }));
       const seed = (versions: ReadonlyArray<string>) =>
         Effect.forEach(versions, (version) =>
           writeFakeRuntime(fs, path, versionDir(version), "").pipe(
