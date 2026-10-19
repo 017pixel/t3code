@@ -1580,7 +1580,77 @@ it.effect("renames a temporary branch on an existing worktree to a generated nam
   }),
 );
 
-it.effect("shows the fetch diagnosis when preparing a worktree from origin fails", () => {
+it.effect.each(["root", "worktree"] as const)(
+  "prepares the requested %s workspace when freshly reusing an empty worktree thread",
+  (workspace) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const input = {
+        ...launchInput({
+          command: "command:launch:replace-workspace",
+          thread: "thread:launch:replace-workspace",
+          message: "Use the requested checkout",
+          workspace:
+            workspace === "root"
+              ? { type: "root" }
+              : { type: "worktree", baseRef: "main", branch: "requested-feature" },
+        }),
+        reuseExistingThread: true,
+      };
+      yield* threads.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("command:launch:replace-workspace:create"),
+        threadId: input.threadId,
+        projectId,
+        title: "Empty thread in another checkout",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "old-feature",
+        worktreePath: "/repo-worktrees/old-feature",
+        createdBy: "user",
+        creationSource: "web",
+      });
+
+      const launched = yield* launches.launch(input);
+      yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.commandId === CommandId.make(`${input.commandId}:release`) &&
+            stored.event.type === "run.updated",
+        ),
+        Stream.runHead,
+      );
+      const prepared = yield* threads.getThreadProjection(launched.threadId);
+      assert.equal(prepared.runs[0]?.status, "starting");
+      assert.deepEqual(
+        {
+          setupPaths: harness.runSetup.mock.calls.map(([setup]) => setup.worktreePath),
+          createdWorktrees: harness.createWorktree.mock.calls.length,
+          worktreePath: prepared.thread.worktreePath,
+          checkpointCwd: prepared.checkpointScopes[0]?.cwd,
+        },
+        workspace === "root"
+          ? {
+              setupPaths: [],
+              createdWorktrees: 0,
+              worktreePath: null,
+              checkpointCwd: process.cwd(),
+            }
+          : {
+              setupPaths: ["/repo-worktrees/feature"],
+              createdWorktrees: 1,
+              worktreePath: "/repo-worktrees/feature",
+              checkpointCwd: "/repo-worktrees/feature",
+            },
+      );
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("preserves the draft branch and fetch diagnosis when worktree preparation fails", () => {
   const detail =
     "Git could not authenticate with the remote. Check Git credentials or SSH access on the server, then retry.";
   const harness = makeHarness({
@@ -1598,14 +1668,27 @@ it.effect("shows the fetch diagnosis when preparing a worktree from origin fails
   return Effect.gen(function* () {
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const threads = yield* ThreadManagement.ThreadManagementService;
-    const launched = yield* launches.launch(
-      launchInput({
-        command: "command:launch:fetch-failure",
-        thread: "thread:launch:fetch-failure",
-        message: "Start from origin",
-        workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
-      }),
-    );
+    const input = launchInput({
+      command: "command:launch:fetch-failure",
+      thread: "thread:launch:fetch-failure",
+      message: "Start from origin",
+      workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
+    });
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:launch:fetch-failure:create"),
+      threadId: input.threadId,
+      projectId,
+      title: "Unprepared draft",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: "draft-branch",
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const launched = yield* launches.launch({ ...input, reuseExistingThread: true });
     yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
       Stream.filter(
         (stored) => stored.event.type === "run.updated" && stored.event.payload.status === "failed",
@@ -1615,6 +1698,7 @@ it.effect("shows the fetch diagnosis when preparing a worktree from origin fails
     const projection = yield* threads.getThreadProjection(launched.threadId);
     assert.equal(projection.messages[0]?.text, "Start from origin");
     assert.equal(projection.runs[0]?.status, "failed");
+    assert.equal(projection.thread.branch, "draft-branch");
     assert.equal(projection.thread.worktreePath, null);
     assert.equal(
       projection.turnItems.find((item) => item.type === "command_execution")?.status,
