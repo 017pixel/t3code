@@ -5,8 +5,7 @@ import * as Schema from "effect/Schema";
  */
 export const CONNECT_ONBOARDING_OPT_OUT_STORAGE_KEY = "t3code:connect-onboarding-opt-out:v1";
 
-export const CONNECT_ONBOARDING_AUTH_PENDING_STORAGE_KEY =
-  "t3code:connect-onboarding-auth-pending:v1";
+const CONNECT_ONBOARDING_AUTH_PENDING_STORAGE_KEY = "t3code:connect-onboarding-auth-pending:v1";
 
 export function markConnectOnboardingAuthPending() {
   try {
