@@ -538,6 +538,65 @@ it.effect.each(["thread.stop", "run.interrupt"] as const)(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("a message the user sends after Stop releases the held queue; an agent's does not", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:stop-release");
+    const agentSend = (text: string) =>
+      orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`agent-send:${text}`),
+        threadId,
+        messageId: MessageId.make(`message:${threadId}:${text}`),
+        text,
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+    yield* createWatchingThread(threadId, 6);
+    yield* send(threadId, "active", "start_immediately");
+    yield* send(threadId, "queued before the stop", "queue_after_active");
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("stop-release"),
+      threadId,
+    });
+    assert.deepEqual((yield* threadState(threadId)).runs, ["interrupted", "queued:held"]);
+
+    // An agent's message starts on the idle thread, but the hold is the user's.
+    yield* agentSend("agent nudge");
+    assert.deepEqual((yield* threadState(threadId)).runs, [
+      "interrupted",
+      "queued:held",
+      "starting",
+    ]);
+    const nudge = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make("event:stop-release:nudge-completed"),
+      type: "run.updated",
+      threadId,
+      runId: nudge.id,
+      occurredAt: now,
+      payload: { ...nudge, status: "completed", completedAt: now },
+    });
+
+    // The user is back: the held message follows their run, and a wake that
+    // queues behind it is not held by the old Stop.
+    yield* send(threadId, "back", "start_immediately");
+    yield* agentSend("task finished");
+    assert.deepEqual((yield* threadState(threadId)).runs, [
+      "interrupted",
+      "queued",
+      "completed",
+      "starting",
+      "queued",
+    ]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect(
   "thread.stop ends an idle thread's watches and accepts a thread with nothing to stop",
   () =>

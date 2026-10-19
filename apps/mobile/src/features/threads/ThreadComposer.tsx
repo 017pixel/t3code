@@ -58,6 +58,9 @@ import {
   useComposerDraft,
 } from "../../state/use-composer-drafts";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { threadEnvironment } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { useThreadQueueWorkflow } from "./ThreadQueueControl";
 import type { ComposerDocumentAttachment } from "../../lib/composerContext";
 import { useProject, useThreadShells } from "../../state/entities";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -357,6 +360,25 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     (queuedEdit?.existingAttachments.length ?? 0) > 0;
   const stripAttachments = composerStripAttachments(draftAttachments);
   const showStopAction = !hasContent && props.canStopThread && queuedEdit === null;
+  // A stop or a restart holds the queue, completion wakes included, until it
+  // is resumed; the queue sheet lists only the user's own messages.
+  const queueWorkflow = useThreadQueueWorkflow({
+    environmentId: props.environmentId,
+    threadId: props.selectedThread.id,
+  });
+  const resumeQueue = useAtomCommand(threadEnvironment.resumeThreadQueue, "resume queue");
+  const [resumingQueue, setResumingQueue] = useState(false);
+  const showResumeAction =
+    !hasContent && !showStopAction && queuedEdit === null && queueWorkflow?.isHeld === true;
+  const handleResumeQueue = async () => {
+    if (resumingQueue) return;
+    setResumingQueue(true);
+    await resumeQueue({
+      environmentId: props.environmentId,
+      input: { threadId: props.selectedThread.id },
+    });
+    setResumingQueue(false);
+  };
 
   const uploadStates = useAtomValue(composerAttachmentUploadsAtom);
   const attachmentsUploading =
@@ -955,6 +977,13 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                     disabled={!props.canOperateThread}
                     onPress={props.onStopThread}
                   />
+                ) : showResumeAction ? (
+                  <ComposerActionButton
+                    accessibilityLabel="Resume queue"
+                    icon="play"
+                    disabled={!props.canOperateThread || resumingQueue}
+                    onPress={() => void handleResumeQueue()}
+                  />
                 ) : (
                   <SendActionButton
                     accessibilityLabel={sendBlockedReason ?? sendLabel}
@@ -1049,6 +1078,13 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                       variant="danger"
                       disabled={!props.canOperateThread}
                       onPress={props.onStopThread}
+                    />
+                  ) : showResumeAction && voicePresentation.showsSend ? (
+                    <ComposerActionButton
+                      accessibilityLabel="Resume queue"
+                      icon="play"
+                      disabled={!props.canOperateThread || resumingQueue}
+                      onPress={() => void handleResumeQueue()}
                     />
                   ) : voicePresentation.showsSend ? (
                     <SendActionButton
