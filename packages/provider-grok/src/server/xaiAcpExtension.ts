@@ -86,6 +86,16 @@ export function isXAiTaskCompletedWakeNotification(
   return typeof promptId === "string" && promptId.startsWith(XAI_TASK_COMPLETED_PROMPT_ID_PREFIX);
 }
 
+/** Grok never sends `usage_update`; each update's metadata carries the live context size. */
+export function xAiContextTokensFromNotification(
+  notification: EffectAcpSchema.SessionNotification,
+): number | undefined {
+  const totalTokens = notification._meta?.totalTokens;
+  return typeof totalTokens === "number" && Number.isSafeInteger(totalTokens) && totalTokens >= 0
+    ? totalTokens
+    : undefined;
+}
+
 interface PendingXAiPromptCompletion {
   readonly sessionId: string;
   readonly promptId: string;

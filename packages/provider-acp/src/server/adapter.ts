@@ -303,6 +303,10 @@ export interface AcpAdapterV2Flavor {
   readonly isProviderWakeNotification?: (
     notification: EffectAcpSchema.SessionNotification,
   ) => boolean;
+  /** Context occupancy an agent reports outside `usage_update`, such as in update metadata. */
+  readonly contextTokensFromNotification?: (
+    notification: EffectAcpSchema.SessionNotification,
+  ) => number | undefined;
   readonly deferFinalizeForBackgroundWork?: boolean;
   readonly assertComplete?: Effect.Effect<void, EffectAcpErrors.AcpError>;
   /** Interrupt the local prompt fiber before `session/cancel` (Grok wedged prompts). */
@@ -3756,16 +3760,28 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const context = yield* Ref.get(activeTurn);
           const update = notification.update;
           if (yield* projectAgentTerminalUpdate(notification, context)) return;
-          if (
+          const isStateUpdate =
             update.sessionUpdate === "usage_update" ||
             update.sessionUpdate === "session_info_update" ||
             (update.sessionUpdate === "state_update" &&
               update.state === "idle" &&
-              update.usage != null)
-          ) {
-            const stateEvent = parseSessionUpdateEvent(notification).events.find(
-              (event) => event._tag === "UsageUpdated" || event._tag === "SessionInfoUpdated",
-            );
+              update.usage != null);
+          const reportedTokens = isStateUpdate
+            ? undefined
+            : flavor.contextTokensFromNotification?.(notification);
+          const reportedUsage =
+            reportedTokens === undefined ||
+            (yield* Ref.get(contextUsageBySessionId)).get(notification.sessionId)?.usedTokens ===
+              reportedTokens
+              ? undefined
+              : { usedTokens: reportedTokens };
+          if (isStateUpdate || reportedUsage !== undefined) {
+            const stateEvent =
+              reportedUsage === undefined
+                ? parseSessionUpdateEvent(notification).events.find(
+                    (event) => event._tag === "UsageUpdated" || event._tag === "SessionInfoUpdated",
+                  )
+                : { _tag: "UsageUpdated" as const, usage: reportedUsage, rawPayload: notification };
             if (stateEvent === undefined) return;
             if (stateEvent._tag === "UsageUpdated") {
               yield* Ref.update(contextUsageBySessionId, (current) =>
@@ -3812,7 +3828,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 providerThread,
               });
             }
-            return;
+            // Metadata usage rides on ordinary updates, which still need handling.
+            if (isStateUpdate) return;
           }
           if (
             context?.finalized === true &&
