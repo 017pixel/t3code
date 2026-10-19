@@ -206,10 +206,10 @@ Queued messages appear above the composer. Rows show a thumbnail of any attached
 the text. Drag a row by its handle to reorder it, use the handle's arrow keys, promote the message
 to a steer, or remove it.
 
-If you stop the agent or the server restarts, queued messages keep their order and are held,
-along with results from subagents that finish meanwhile. Press **Resume** in an empty composer to
-continue. Sending a new message also resumes the queue, unless it steers a turn that is already
-running. You can edit, reorder, or remove held messages without starting them.
+If you stop the agent or the server restarts, queued messages keep their order and are held.
+Press **Resume** in an empty composer to continue. Sending a new message also resumes the queue,
+unless it steers a turn that is already running. You can edit, reorder, or remove held messages
+without starting them.
 
 The pencil on a queued row opens that message in the composer for editing. The original message
 stays in the queue until you save, and its row is highlighted while you edit. The message's

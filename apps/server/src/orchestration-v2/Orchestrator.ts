@@ -5004,8 +5004,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         dispatchMode.type === "start_immediately" ||
         dispatchMode.type === "queue_after_active";
       const shouldQueue = queueBehindRun !== undefined && startsOrQueuesRun;
-      // A message the user sends from a client means they are back, so what a
-      // stop or a restart held follows it rather than waiting for a Resume.
+      // A message the user sends from a client means they are back, so the
+      // queue a stop or a restart held runs again, in its order, rather than
+      // waiting for a Resume.
       // Continuations and scheduled tasks the server sends for them are not
       // them coming back. Starting the queue still re-holds it for a failed
       // provider or a usage limit; a queue held after worktree setup failed
