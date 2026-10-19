@@ -79,8 +79,6 @@ export const make = Effect.gen(function* () {
         return yield* apnsDeliveries.sendForTarget({
           target,
           aggregate: liveActivityAggregate,
-          // An environment linked without notifications still drives the card
-          // but must never ring the device.
           state: input.deliveryUser.notificationsEnabled ? input.state : null,
           nowMs: input.nowMs,
         });

@@ -197,9 +197,7 @@ function shouldUpdateLiveActivity(input: {
   );
 }
 
-// A push describes only the thread whose publish caused it. The aggregate's top
-// row is often another thread's recent Done, so alerting from it re-rang that
-// completion for every unrelated publish (subagent tombstones, other threads).
+// Aggregate rows may belong to unrelated threads; fallback pushes use the published state.
 function notificationForState(input: {
   readonly target: LiveActivities.TargetRow;
   readonly state?: RelayAgentActivityState | null;
@@ -507,7 +505,6 @@ export class ApnsDeliveries extends Context.Service<
     readonly sendForTarget: (input: {
       readonly target: LiveActivities.TargetRow;
       readonly aggregate: RelayAgentActivityAggregateState | null;
-      /** The published thread's state; the only thread a push may describe. */
       readonly state?: RelayAgentActivityState | null;
       readonly nowMs: number;
       readonly replay?: boolean;
@@ -1080,13 +1077,7 @@ export const make = Effect.gen(function* () {
     processSignedJob,
     sendForTarget: Effect.fnUntraced(function* (input) {
       if (!config.apns) return null;
-      const delivery = chooseDelivery({
-        target: input.target,
-        aggregate: input.aggregate,
-        state: input.state ?? null,
-        nowMs: input.nowMs,
-        replay: input.replay ?? false,
-      });
+      const delivery = chooseDelivery(input);
       if (!delivery) {
         return null;
       }
@@ -1101,13 +1092,7 @@ export const make = Effect.gen(function* () {
         });
         return result;
       }
-      const notification = input.replay
-        ? null
-        : notificationForState({
-            target: input.target,
-            state: input.state ?? null,
-            nowMs: input.nowMs,
-          });
+      const notification = input.replay ? null : notificationForState(input);
       // The end event doubles as the "task finished" moment. When a companion
       // push notification is about to ring the device (below), the activity end
       // stays silent; otherwise the end itself carries the alert so LA-only
