@@ -9,8 +9,11 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Electron from "electron";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopPreReadyPlatform from "../app/DesktopPreReadyPlatform.ts";
 
 type EnvironmentPatch = Record<string, string>;
 
@@ -66,7 +69,7 @@ export class DesktopShellEnvironment extends Context.Service<
   {
     /** Imports the login shell's environment into process.env once; later calls wait for that run. */
     readonly installIntoProcess: Effect.Effect<boolean>;
-    /** safeStorage's first use needs the session bus, which Linux may get from the shell. */
+    /** Linux safeStorage waits for the hydrated session and password-store selection. */
     readonly secretStorageReady: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/shell/DesktopShellEnvironment") {}
@@ -536,6 +539,8 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const preReadyOptions = yield* DesktopPreReadyPlatform.DesktopPreReadyElectronOptions;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
   const installIntoProcess: DesktopShellEnvironment["Service"]["installIntoProcess"] =
     yield* Effect.cached(
       installShellEnvironment({
@@ -548,11 +553,22 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const secretStorageReady = Effect.suspend(() =>
-    environment.platform === "linux" &&
-    Option.isNone(trimNonEmpty(process.env.DBUS_SESSION_BUS_ADDRESS))
-      ? installIntoProcess.pipe(Effect.asVoid)
-      : Effect.void,
+  const secretStorageReady = yield* Effect.cached(
+    Effect.gen(function* () {
+      if (environment.platform !== "linux") return;
+      yield* installIntoProcess;
+      if (preReadyOptions.linuxPasswordStoreCommandLine !== null) return;
+      const linux =
+        DesktopPreReadyPlatform.resolveEarlyLinuxElectronOptionsFromProcess(homeDirectory);
+      // safeStorage selects lazily on first use. The shell can correct desktop
+      // hints or the settings path even when a session bus was already present.
+      if (linux.passwordStore !== null || preReadyOptions.linux?.passwordStore !== null) {
+        Electron.app.commandLine.removeSwitch("password-store");
+      }
+      if (linux.passwordStore !== null) {
+        Electron.app.commandLine.appendSwitch("password-store", linux.passwordStore);
+      }
+    }),
   );
 
   return DesktopShellEnvironment.of({ installIntoProcess, secretStorageReady });

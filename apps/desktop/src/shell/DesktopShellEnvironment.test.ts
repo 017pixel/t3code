@@ -13,9 +13,17 @@ import * as NodeOS from "node:os";
 import { vi } from "vite-plus/test";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopPreReadyPlatform from "../app/DesktopPreReadyPlatform.ts";
 import * as DesktopShellEnvironment from "./DesktopShellEnvironment.ts";
 
 vi.mock("node:os", { spy: true });
+const { appendSwitch, removeSwitch } = vi.hoisted(() => ({
+  appendSwitch: vi.fn(),
+  removeSwitch: vi.fn(),
+}));
+vi.mock("electron", () => ({
+  app: { commandLine: { appendSwitch, removeSwitch } },
+}));
 
 const textEncoder = new TextEncoder();
 
@@ -76,6 +84,8 @@ function runShellEnvironment(input: {
     command: ChildProcess.Command,
   ) => string | { output: string; exitCode: number };
   readonly failure?: PlatformError.PlatformError;
+  readonly secretStorage?: boolean;
+  readonly passwordStoreCommandLine?: string;
 }) {
   const layerEnvironment = Layer.succeed(
     DesktopEnvironment.DesktopEnvironment,
@@ -98,13 +108,27 @@ function runShellEnvironment(input: {
 
   const program = Effect.gen(function* () {
     const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
+    if (input.secretStorage) {
+      yield* shellEnvironment.secretStorageReady;
+      yield* shellEnvironment.secretStorageReady;
+    }
     const prepared = yield* shellEnvironment.installIntoProcess;
     assert.equal(yield* shellEnvironment.installIntoProcess, prepared);
     return prepared;
   }).pipe(
     Effect.provide(
       DesktopShellEnvironment.layer.pipe(
-        Layer.provide(Layer.mergeAll(layerEnvironment, NodeServices.layer, layerSpawner)),
+        Layer.provide(
+          Layer.mergeAll(
+            layerEnvironment,
+            NodeServices.layer,
+            layerSpawner,
+            Layer.succeed(DesktopPreReadyPlatform.DesktopPreReadyElectronOptions, {
+              linux: null,
+              linuxPasswordStoreCommandLine: input.passwordStoreCommandLine ?? null,
+            }),
+          ),
+        ),
       ),
     ),
   );
@@ -122,6 +146,53 @@ function runShellEnvironment(input: {
 }
 
 describe("DesktopShellEnvironment", () => {
+  it.effect.each([
+    { bus: undefined, label: "missing" },
+    { bus: "unix:path=/tmp/stale-bus", label: "stale" },
+  ])("selects secret storage after shell hydration with a $label bus", ({ bus }) => {
+    appendSwitch.mockClear();
+    removeSwitch.mockClear();
+    const env = {
+      PATH: "/usr/bin",
+      DBUS_SESSION_BUS_ADDRESS: bus,
+      XDG_CURRENT_DESKTOP: "GNOME",
+    };
+    return runShellEnvironment({
+      env,
+      platform: "linux",
+      secretStorage: true,
+      handler: () =>
+        envOutput({
+          PATH: "/usr/bin",
+          DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/hydrated-bus",
+          XDG_CURRENT_DESKTOP: "LXQt",
+        }),
+    }).pipe(
+      Effect.map(() => {
+        assert.equal(env.DBUS_SESSION_BUS_ADDRESS, "unix:path=/tmp/hydrated-bus");
+        assert.deepEqual(removeSwitch.mock.calls, [["password-store"]]);
+        assert.deepEqual(appendSwitch.mock.calls, [["password-store", "gnome-libsecret"]]);
+      }),
+    );
+  });
+
+  it.effect("preserves an explicit password-store after shell hydration", () => {
+    appendSwitch.mockClear();
+    removeSwitch.mockClear();
+    return runShellEnvironment({
+      env: { PATH: "/usr/bin", DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/stale-bus" },
+      platform: "linux",
+      secretStorage: true,
+      passwordStoreCommandLine: "basic",
+      handler: () => envOutput({ PATH: "/usr/bin", XDG_CURRENT_DESKTOP: "LXQt" }),
+    }).pipe(
+      Effect.map(() => {
+        assert.deepEqual(removeSwitch.mock.calls, []);
+        assert.deepEqual(appendSwitch.mock.calls, []);
+      }),
+    );
+  });
+
   it.effect("rejects PATH output from a failed shell and tries the next candidate", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = { SHELL: "/bin/failing", PATH: "/usr/bin" };

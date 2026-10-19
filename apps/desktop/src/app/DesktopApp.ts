@@ -24,7 +24,6 @@ import * as DesktopLegacyLocalStorage from "./DesktopLegacyLocalStorage.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopLinuxUrlHandler from "./DesktopLinuxUrlHandler.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
-import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -290,25 +289,12 @@ const startup = Effect.gen(function* () {
   const clerk = yield* DesktopClerk.DesktopClerk;
   const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
-  const preReadyElectronOptions = yield* DesktopPreReadyPlatform.DesktopPreReadyElectronOptions;
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const previewPasskeys = yield* PreviewPasskeys.PreviewPasskeys;
   const state = yield* DesktopState.DesktopState;
 
-  // Chromium already chose secret storage from the pre-ready environment.
-  const linuxElectronOptions = preReadyElectronOptions.linux;
-  if (linuxElectronOptions !== null) {
-    yield* logStartupInfo("linux password store configured", {
-      passwordStore:
-        preReadyElectronOptions.linuxPasswordStoreCommandLine !== null
-          ? "command-line"
-          : (linuxElectronOptions.passwordStore ?? "electron-default"),
-      xdgCurrentDesktop: process.env.XDG_CURRENT_DESKTOP ?? null,
-      xdgSessionDesktop: process.env.XDG_SESSION_DESKTOP ?? null,
-    });
-  }
   // Open the window while the shell loads; spawning work awaits the same run.
   yield* Effect.forkScoped(shellEnvironment.installIntoProcess);
   const userDataPath = yield* appIdentity.resolveUserDataPath;
