@@ -7,8 +7,10 @@ import * as Schema from "effect/Schema";
 const isPaused = Schema.is(SourceControlRateLimitPausedError);
 const isPullRequestProviderError = Schema.is(PullRequestProviderError);
 
+// A pause surfaces wrapped: the branch lookup nests SourceControlRateLimitPausedError inside
+// SourceControlProviderError, and the summary read nests a rate-limited PullRequestProviderError
+// inside PullRequestOperationError. A defect or a second failure next to the pause still warns.
 function rateLimitRetryAt(cause: Cause.Cause<unknown>): number | undefined {
-  // Do not hide a defect or another failure alongside an expected pause.
   if (cause.reasons.length !== 1 || !Cause.isFailReason(cause.reasons[0]!)) return undefined;
   let error: unknown = cause.reasons[0].error;
   const seen = new Set<Error>();
@@ -21,6 +23,10 @@ function rateLimitRetryAt(cause: Cause.Cause<unknown>): number | undefined {
   return undefined;
 }
 
+/**
+ * Quota admission already refuses background GitHub reads until the reset time, so every sweep
+ * during a pause would otherwise repeat the full warning stack.
+ */
 export function logThreadPullRequestFailure(
   message: string,
   cause: Cause.Cause<unknown>,

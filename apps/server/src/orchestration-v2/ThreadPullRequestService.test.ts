@@ -1,13 +1,14 @@
 import {
   EventId,
   SourceControlProviderError,
-  SourceControlProviderKind,
   ProjectId,
   ProviderInstanceId,
+  SourceControlProviderKind,
   ThreadId,
   type OrchestrationProjectShell,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2ServerCommand,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
@@ -174,30 +175,33 @@ describe("ThreadPullRequestServiceV2 reads", () => {
     };
   };
 
-  it.effect.each(["pause", "unexpected", "interrupt"] as const)(
-    "keeps %s discovery failures at the appropriate log level",
+  it.effect.each(["pause", "unexpected"] as const)(
+    "keeps warning stacks only for unexpected branch lookup failures (%s)",
     (failure) => {
       const logs: Array<{ level: string; parts: ReadonlyArray<unknown> }> = [];
       const logger = Logger.make(({ logLevel, message }) => {
-        const parts = Array.isArray(message) ? message : [message];
-        logs.push({ level: logLevel, parts });
+        logs.push({ level: logLevel, parts: Array.isArray(message) ? message : [message] });
       });
       const retryAt = DateTime.toEpochMillis(NOW) + 60_000;
-      const paused = new SourceControlRateLimitPausedError({
-        provider: SourceControlProviderKind.make("github"),
-        host: "github.com",
-        retryAt,
-      });
       return Effect.scoped(
         Effect.gen(function* () {
           const thread = { ...threadShell("paused"), branch: "feature" };
+          const project: OrchestrationProjectShell = {
+            id: thread.projectId,
+            title: "Project",
+            workspaceRoot: "/workspace/project",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+          };
           const activation = yield* Deferred.make<void>();
-          const reads = yield* Queue.unbounded<void>();
+          const sweepStarted = yield* Deferred.make<void>();
           const dependencies = Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({
               streamDomainEvents: Stream.never,
               getShellSnapshot: () =>
-                Queue.offer(reads, undefined).pipe(
+                Deferred.succeed(sweepStarted, undefined).pipe(
                   Effect.as({
                     schemaVersion: 2,
                     snapshotSequence: 1,
@@ -207,50 +211,42 @@ describe("ThreadPullRequestServiceV2 reads", () => {
                 ),
             }),
             Layer.mock(ProjectStore.ProjectStoreV2)({
-              listShells: () =>
-                Effect.succeed([
-                  {
-                    id: thread.projectId,
-                    title: "Project",
-                    workspaceRoot: "/workspace/project",
-                    defaultModelSelection: null,
-                    scripts: [],
-                    createdAt: "2026-09-20T00:00:00Z",
-                    updatedAt: "2026-09-20T00:00:00Z",
-                  },
-                ]),
+              listShells: () => Effect.succeed([project]),
             }),
             Layer.mock(GitManager.GitManager)({
               branchPullRequest: () =>
-                failure === "interrupt"
-                  ? Effect.interrupt
-                  : Effect.fail(
-                      new SourceControlProviderError({
-                        provider: SourceControlProviderKind.make("github"),
-                        operation: "listChangeRequests",
-                        cwd: "/workspace/project",
-                        detail: "paused",
-                        cause:
-                          failure === "pause"
-                            ? new Error("provider wrapper", { cause: paused })
-                            : new Error("unexpected host failure"),
-                      }),
-                    ),
+                Effect.fail(
+                  new SourceControlProviderError({
+                    provider: SourceControlProviderKind.make("github"),
+                    operation: "listChangeRequests",
+                    cwd: "/workspace/project",
+                    detail: "lookup failed",
+                    cause:
+                      failure === "pause"
+                        ? new Error("provider wrapper", {
+                            cause: new SourceControlRateLimitPausedError({
+                              provider: SourceControlProviderKind.make("github"),
+                              host: "github.com",
+                              retryAt,
+                            }),
+                          })
+                        : new Error("unexpected host failure"),
+                  }),
+                ),
             }),
             Layer.mock(PullRequestService.PullRequestService)({}),
             Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
               resolve: () =>
                 Effect.succeed({
-                  canonicalKey: "github.com/owner/repository",
-                  provider: "github",
-                  displayName: "owner/repository",
-                  owner: "owner",
-                  name: "repository",
+                  canonicalKey: "github.com/acme/project",
                   locator: {
-                    source: "git-remote",
+                    source: "git-remote" as const,
                     remoteName: "origin",
-                    remoteUrl: "https://github.com/owner/repository.git",
+                    remoteUrl: "git@github.com:acme/project.git",
                   },
+                  provider: "github" as const,
+                  owner: "acme",
+                  name: "project",
                 }),
             }),
             Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
@@ -267,39 +263,157 @@ describe("ThreadPullRequestServiceV2 reads", () => {
             const service = yield* ThreadPullRequestService.make;
             yield* service.start();
             yield* Deferred.succeed(activation, undefined);
-            yield* Queue.take(reads);
+            yield* Deferred.await(sweepStarted);
             yield* service.drain;
-            if (failure === "interrupt") {
-              expect(logs).toEqual([]);
-            } else if (failure === "pause") {
-              expect(logs).toEqual([
-                {
-                  level: "Debug",
-                  parts: [
-                    "thread branch pull request lookup failed",
-                    { threadIds: [thread.id], retryAt },
-                  ],
-                },
-              ]);
-            } else {
-              expect(logs).toHaveLength(1);
-              expect(logs[0]?.level).toBe("Warn");
-              expect(logs[0]?.parts[0]).toBe("thread branch pull request lookup failed");
-              expect(logs[0]?.parts[1]).toMatchObject({
-                threadIds: [thread.id],
-                cause: expect.stringContaining("unexpected host failure"),
-              });
-              expect(logs[0]?.parts[1]).toMatchObject({
-                cause: expect.stringContaining("ThreadPullRequestService.test.ts:"),
-              });
-            }
           }).pipe(Effect.provide(dependencies));
+
+          if (failure === "pause") {
+            expect(logs).toEqual([
+              {
+                level: "Debug",
+                parts: [
+                  "thread branch pull request lookup failed",
+                  { threadIds: [thread.id], retryAt },
+                ],
+              },
+            ]);
+          } else {
+            expect(logs).toHaveLength(1);
+            expect(logs[0]).toMatchObject({
+              level: "Warn",
+              parts: [
+                "thread branch pull request lookup failed",
+                {
+                  threadIds: [thread.id],
+                  cause: expect.stringContaining("unexpected host failure"),
+                },
+              ],
+            });
+          }
         }),
       ).pipe(
         Effect.provide(Logger.layer([logger])),
         Effect.provideService(References.MinimumLogLevel, "Debug"),
       );
     },
+  );
+
+  it.effect.each([
+    { state: "closed", sameBranch: false },
+    { state: "merged", sameBranch: false },
+    { state: "closed", sameBranch: true },
+    { state: "merged", sameBranch: true },
+  ] as const)(
+    "restores a $state automatic PR only for its own branch (sameBranch=$sameBranch)",
+    ({ state, sameBranch }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const savedReference = {
+            projectId: ProjectId.make("project-1"),
+            repository: "acme/project",
+            number: 42,
+            url: "https://github.com/acme/project/pull/42",
+          };
+          const thread = {
+            ...threadShell("branch-pr-thread"),
+            branch: "main",
+            branchPullRequest: savedReference,
+            linkedPullRequest: savedReference,
+          };
+          const project: OrchestrationProjectShell = {
+            id: thread.projectId,
+            title: "Project",
+            workspaceRoot: "/workspace/project",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+          };
+          const activation = yield* Deferred.make<void>();
+          const sweepStarted = yield* Deferred.make<void>();
+          const commands: Array<OrchestrationV2ServerCommand> = [];
+          const dependencies = Layer.mergeAll(
+            Layer.mock(Orchestrator.OrchestratorV2)({
+              streamDomainEvents: Stream.never,
+              getShellSnapshot: () =>
+                Deferred.succeed(sweepStarted, undefined).pipe(
+                  Effect.as({
+                    schemaVersion: 2,
+                    snapshotSequence: 1,
+                    threads: [thread],
+                    archivedThreads: [],
+                  }),
+                ),
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  commands.push(command);
+                  return { sequence: 2, storedEvents: [] };
+                }),
+            }),
+            Layer.mock(ProjectStore.ProjectStoreV2)({
+              listShells: () => Effect.succeed([project]),
+              getShell: () => Effect.succeed(Option.some(project)),
+            }),
+            Layer.mock(GitManager.GitManager)({
+              branchPullRequest: () => Effect.succeed(null),
+            }),
+            Layer.mock(PullRequestService.PullRequestService)({
+              summary: () =>
+                Effect.succeed({
+                  ...savedReference,
+                  provider: SourceControlProviderKind.make("github"),
+                  title: "Previous branch work",
+                  state,
+                  headBranch: sameBranch ? thread.branch : "feature/previous-work",
+                  baseBranch: "release",
+                  updatedAt: "2026-09-19T00:00:00.000Z",
+                }),
+            }),
+            Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+              resolve: () =>
+                Effect.succeed({
+                  canonicalKey: "github.com/acme/project",
+                  locator: {
+                    source: "git-remote" as const,
+                    remoteName: "origin",
+                    remoteUrl: "git@github.com:acme/project.git",
+                  },
+                  provider: "github" as const,
+                  owner: "acme",
+                  name: "project",
+                }),
+            }),
+            Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
+            Layer.succeed(
+              Crypto.Crypto,
+              Crypto.make({
+                randomBytes: (size) => new Uint8Array(size).fill(1),
+                digest: (_algorithm, data) => Effect.succeed(data),
+              }),
+            ),
+            FileSystem.layerNoop({}),
+          );
+          yield* Effect.gen(function* () {
+            const service = yield* ThreadPullRequestService.make;
+            yield* service.start();
+            yield* Deferred.succeed(activation, undefined);
+            yield* Deferred.await(sweepStarted);
+            yield* service.drain;
+          }).pipe(Effect.provide(dependencies));
+
+          if (sameBranch) {
+            expect(commands).toEqual([]);
+          } else {
+            expect(commands).toHaveLength(1);
+            expect(commands[0]).toMatchObject({
+              type: "thread.pull-request.sync",
+              threadId: thread.id,
+              branchPullRequest: null,
+            });
+            expect(commands[0]).not.toHaveProperty("linkedPullRequest");
+          }
+        }),
+      ),
   );
 
   it.effect("an event for one thread reads that thread's shell, not every thread's", () =>

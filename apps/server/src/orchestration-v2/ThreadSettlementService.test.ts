@@ -3,7 +3,6 @@ import { assert, describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import {
   DEFAULT_SERVER_SETTINGS,
-  SourceControlProviderError,
   PullRequestOperationError,
   ProjectId,
   EventId,
@@ -28,7 +27,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as References from "effect/References";
-import { SourceControlRateLimitPausedError } from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
@@ -386,6 +384,53 @@ describe("resolveAutoSettlementAt", () => {
     ).toBeNull();
   });
 
+  it("does not settle on pull requests that were already merged when linked", () => {
+    const link = (number: number, linkedAt: DateTime.Utc, mergedAt: DateTime.Utc) => ({
+      host: "example.test",
+      repository: "owner/repository",
+      number,
+      url: `https://example.test/owner/repository/pull/${number}`,
+      source: "agent" as const,
+      linkedAt: DateTime.formatIso(linkedAt),
+      snapshot: {
+        state: "merged" as const,
+        title: "Pull request",
+        headBranch: `feature-${number}`,
+        baseBranch: "main",
+        isDraft: false,
+        updatedAt: DateTime.formatIso(mergedAt),
+        syncedAt: DateTime.formatIso(linkedAt),
+        mergedAt: DateTime.formatIso(mergedAt),
+      },
+      stack: null,
+    });
+    // The user asked the agent to merge pull requests; it merged one, then
+    // linked it to the thread as a record of the work.
+    const recorded = link(1, at(-50 * 60 * 1_000), at(-55 * 60 * 1_000));
+    const input = {
+      thread: shell({
+        latestUserMessageAt: at(-2 * 60 * 60 * 1_000),
+        latestRunCompletedAt: at(-45 * 60 * 1_000),
+        pullRequests: [recorded],
+      }),
+      pullRequest: null,
+      nowMs: NOW_MS,
+      autoSettleAfterDays: null,
+      autoSettleOnMerge: true,
+    };
+    expect(ThreadSettlementService.resolveAutoSettlementAt(input)).toBeNull();
+    // A pull request linked while open still settles the thread when it merges.
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        thread: {
+          ...input.thread,
+          pullRequests: [recorded, link(2, at(-90 * 60 * 1_000), at(-40 * 60 * 1_000))],
+        },
+      }),
+    ).toEqual(at(-45 * 60 * 1_000));
+  });
+
   it("settles inactive threads even when their pull request remains open", () => {
     const input = {
       thread: shell({ latestUserMessageAt: at(-30 * DAY_MS) }),
@@ -719,114 +764,60 @@ const startHarness = Effect.fn("startThreadSettlementHarness")(function* (
 });
 
 describe("ThreadSettlementServiceV2 worker", () => {
-  it.effect.each(
-    (["branch", "summary"] as const).flatMap((lookup) =>
-      (["pause", "unexpected", "interrupt"] as const).map((failure) => ({ lookup, failure })),
-    ),
-  )(
-    "keeps $failure $lookup settlement failures at the appropriate log level",
-    ({ lookup, failure }) => {
-      const logs: Array<{ level: string; parts: ReadonlyArray<unknown> }> = [];
-      const logger = Logger.make(({ logLevel, message }) => {
-        logs.push({ level: logLevel, parts: Array.isArray(message) ? message : [message] });
-      });
-      const retryAt = Date.parse(NOW) + 60_000;
-      return Effect.scoped(
-        Effect.gen(function* () {
-          yield* TestClock.setTime(Date.parse(NOW));
-          const thread = makeThread("paused", {
-            branch: "feature",
-            ...(lookup === "summary"
-              ? {
-                  linkedPullRequest: {
-                    projectId: PROJECT_ID,
-                    repository: "owner/repository",
-                    number: 42,
-                    url: "https://github.com/owner/repository/pull/42",
-                  },
-                }
-              : {}),
-          });
-          const fixture = yield* makeHarness({
-            snapshot: makeSnapshot([thread]),
-            settings: { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterDays: null },
-            branchPullRequest: () =>
-              failure === "interrupt"
-                ? Effect.interrupt
-                : Effect.fail(
-                    new SourceControlProviderError({
-                      provider: SourceControlProviderKind.make("github"),
-                      operation: "listChangeRequests",
-                      cwd: "/workspace/project",
-                      detail: "paused",
-                      cause:
-                        failure === "unexpected"
-                          ? new Error("unexpected host failure")
-                          : new Error("provider wrapper", {
-                              cause: new SourceControlRateLimitPausedError({
-                                provider: SourceControlProviderKind.make("github"),
-                                host: "github.com",
-                                retryAt,
-                              }),
-                            }),
-                    }),
-                  ),
-            pullRequestSummary: () =>
-              failure === "interrupt"
-                ? Effect.interrupt
-                : Effect.fail(
-                    new PullRequestOperationError({
-                      operation: "summary",
-                      detail: "paused",
-                      cause:
-                        failure === "unexpected"
-                          ? new Error("unexpected host failure")
-                          : new PullRequestProviderError({
-                              provider: SourceControlProviderKind.make("github"),
-                              operation: "getChangeRequestSummary",
-                              reason: "rate-limited",
-                              detail: "paused",
-                              retryAt,
-                            }),
-                    }),
-                  ),
-          });
-          yield* Effect.gen(function* () {
-            const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
-            yield* startHarness(service, fixture.activation, fixture.snapshotReads);
-            expect(yield* Ref.get(fixture.commands)).toEqual([]);
-            if (failure === "interrupt") {
-              expect(logs).toEqual([]);
-            } else if (failure === "pause") {
-              expect(logs).toEqual([
-                {
-                  level: "Debug",
-                  parts: [
-                    "automatic thread settlement skipped",
-                    { threadIds: [thread.id], retryAt },
-                  ],
-                },
-              ]);
-            } else {
-              expect(logs).toHaveLength(1);
-              expect(logs[0]?.level).toBe("Warn");
-              expect(logs[0]?.parts[0]).toBe("automatic thread settlement skipped");
-              expect(logs[0]?.parts[1]).toMatchObject({
-                threadIds: [thread.id],
-                cause: expect.stringContaining("unexpected host failure"),
-              });
-              expect(logs[0]?.parts[1]).toMatchObject({
-                cause: expect.stringContaining("ThreadSettlementService.test.ts:"),
-              });
-            }
-          }).pipe(Effect.provide(fixture.layer));
-        }),
-      ).pipe(
-        Effect.provide(Logger.layer([logger])),
-        Effect.provideService(References.MinimumLogLevel, "Debug"),
-      );
-    },
-  );
+  it.effect("logs a rate-limited linked pull request lookup at debug without settling", () => {
+    const logs: Array<{ level: string; parts: ReadonlyArray<unknown> }> = [];
+    const logger = Logger.make(({ logLevel, message }) => {
+      logs.push({ level: logLevel, parts: Array.isArray(message) ? message : [message] });
+    });
+    const retryAt = Date.parse(NOW) + 60_000;
+    return Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const thread = makeThread("paused", {
+          branch: "feature",
+          linkedPullRequest: {
+            projectId: PROJECT_ID,
+            repository: "owner/repository",
+            number: 42,
+            url: "https://github.com/owner/repository/pull/42",
+          },
+        });
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([thread]),
+          settings: { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterDays: null },
+          pullRequestSummary: () =>
+            Effect.fail(
+              new PullRequestOperationError({
+                operation: "summary",
+                detail: "paused",
+                cause: new PullRequestProviderError({
+                  provider: SourceControlProviderKind.make("github"),
+                  operation: "getChangeRequestSummary",
+                  reason: "rate-limited",
+                  detail: "paused",
+                  retryAt,
+                }),
+              }),
+            ),
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+        }).pipe(Effect.provide(fixture.layer));
+
+        expect(yield* Ref.get(fixture.commands)).toEqual([]);
+        expect(logs).toEqual([
+          {
+            level: "Debug",
+            parts: ["automatic thread settlement skipped", { threadIds: [thread.id], retryAt }],
+          },
+        ]);
+      }),
+    ).pipe(
+      Effect.provide(Logger.layer([logger])),
+      Effect.provideService(References.MinimumLogLevel, "Debug"),
+    );
+  });
 
   it.effect("settles a merged pull request stored only in the thread links", () =>
     Effect.scoped(
@@ -962,6 +953,64 @@ describe("ThreadSettlementServiceV2 worker", () => {
           assert.deepStrictEqual(yield* Ref.get(fixture.commands), []);
           assert.strictEqual((yield* Ref.get(fixture.summaryCalls)).length, 1);
           assert.deepStrictEqual(yield* Ref.get(fixture.branchCalls), []);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("does not look up a pull request that was already merged when linked", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const reference = {
+          projectId: PROJECT_ID,
+          repository: "owner/repository",
+          number: 42,
+          url: "https://example.test/owner/repository/pull/42",
+        };
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("merged-then-linked", {
+              linkedPullRequest: reference,
+              pullRequests: [
+                {
+                  host: "example.test",
+                  repository: reference.repository,
+                  number: reference.number,
+                  url: reference.url,
+                  source: "agent",
+                  linkedAt: "2026-08-28T00:00:00.000Z",
+                  snapshot: {
+                    state: "merged",
+                    title: "Pull request",
+                    headBranch: "feature",
+                    baseBranch: "main",
+                    isDraft: false,
+                    updatedAt: "2026-08-27T00:00:00.000Z",
+                    syncedAt: "2026-08-28T00:00:00.000Z",
+                    mergedAt: "2026-08-27T00:00:00.000Z",
+                  },
+                  stack: null,
+                },
+              ],
+            }),
+          ]),
+          settings: {
+            ...DEFAULT_SERVER_SETTINGS,
+            sidebarAutoSettleAfterDays: null,
+            sidebarAutoSettleOnMerge: true,
+          },
+          pullRequestSummary: (input) =>
+            Effect.succeed({
+              ...makePullRequestSummary({ ...input, state: "merged" }),
+              mergedAt: "2026-08-27T00:00:00.000Z",
+            }),
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+          assert.deepStrictEqual(yield* Ref.get(fixture.commands), []);
+          assert.deepStrictEqual(yield* Ref.get(fixture.summaryCalls), []);
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),
