@@ -4980,6 +4980,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly effort?: string;
           readonly owner?: ActiveClaudeSubagent;
           readonly progress?: string;
+          readonly usage?: { readonly total_tokens: number; readonly tool_uses: number };
           readonly workflowFrame?: unknown;
           readonly workflowName?: string;
           readonly workflowRunHandles?: OrchestrationV2WorkflowRunHandles;
@@ -5063,9 +5064,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             existingSubagent === undefined
               ? undefined
               : isReopen
-                ? (({ progress: _staleProgress, ...rest }) => ({ ...rest, result: null }))(
-                    existingSubagent.task,
-                  )
+                ? (({ progress: _staleProgress, usage: _staleUsage, ...rest }) => ({
+                    ...rest,
+                    result: null,
+                  }))(existingSubagent.task)
                 : existingSubagent.task;
           const workflow = mergeClaudeWorkflowProgress({
             previous: priorTask?.workflow,
@@ -5129,6 +5131,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 }
               : {}),
             ...(input.progress === undefined ? {} : { progress: input.progress }),
+            ...(input.usage === undefined
+              ? {}
+              : {
+                  usage: {
+                    contextTokens: input.usage.total_tokens,
+                    toolUses: input.usage.tool_uses,
+                  },
+                }),
             ...(workflowWithThreads === undefined ? {} : { workflow: workflowWithThreads }),
             ...(input.result === undefined ? {} : { result: input.result }),
             ...(isReopen ? { startedAt: now } : {}),
@@ -6409,7 +6419,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   : "failed",
               ...(completion === undefined
                 ? {}
-                : { workflowFrame: completion, result: completion.summary }),
+                : {
+                    workflowFrame: completion,
+                    result: completion.summary,
+                    ...(completion.usage === undefined ? {} : { usage: completion.usage }),
+                  }),
               onlyIfRunningInRun: subagent.task.runId,
             });
           }
@@ -6453,6 +6467,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const task = {
             ...registered.task,
             ...(progress === undefined ? {} : { progress }),
+            ...(message.usage === undefined
+              ? {}
+              : {
+                  usage: {
+                    contextTokens: message.usage.total_tokens,
+                    toolUses: message.usage.tool_uses,
+                  },
+                }),
             workflow: workflowWithThreads,
             updatedAt: now,
           } satisfies OrchestrationV2Subagent;
@@ -6529,7 +6551,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               if (registered === undefined || registered.task.status === "running") {
                 return current;
               }
-              const { progress: _staleProgress, ...priorTask } = registered.task;
+              const {
+                progress: _staleProgress,
+                usage: _staleUsage,
+                ...priorTask
+              } = registered.task;
               return new Map(current).set(message.task_id, {
                 ...registered,
                 confirmedOutcome: undefined,
@@ -6974,6 +7000,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   context: settled,
                   taskId: message.task_id,
                   ...(message.tool_use_id === undefined ? {} : { toolUseId: message.tool_use_id }),
+                  ...(message.usage === undefined ? {} : { usage: message.usage }),
                   workflowFrame: message,
                   nativeOutcome: message,
                   result: message.summary,
@@ -7505,7 +7532,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               (yield* Ref.get(sessionSubagentsByTaskId)).get(message.task_id)?.task.workflow !==
               undefined;
             if (
-              (carriesWorkflowTelemetry || (progress.length > 0 && !isWorkflowCoordinator)) &&
+              (carriesWorkflowTelemetry ||
+                ((progress.length > 0 || message.usage !== undefined) && !isWorkflowCoordinator)) &&
               !context.ignoredTaskIds.has(message.task_id) &&
               !isBackgroundTask
             ) {
@@ -7514,6 +7542,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 taskId: message.task_id,
                 ...(message.tool_use_id === undefined ? {} : { toolUseId: message.tool_use_id }),
                 ...(progress.length === 0 ? {} : { progress }),
+                usage: message.usage,
                 workflowFrame: message,
                 status: "running",
               });
@@ -7575,6 +7604,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 context,
                 taskId: message.task_id,
                 ...(message.tool_use_id === undefined ? {} : { toolUseId: message.tool_use_id }),
+                ...(message.usage === undefined ? {} : { usage: message.usage }),
                 workflowFrame: message,
                 nativeOutcome: message,
                 result: message.summary,
