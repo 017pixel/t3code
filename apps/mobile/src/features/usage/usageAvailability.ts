@@ -16,6 +16,10 @@ export function usageAvailability(
   const hasCompatibleSummary = environments.some(
     ({ environmentId, summary }) => summary != null && !incompatibleIds.has(environmentId),
   );
+  const isLoading = environments.some(
+    ({ summary, error, isConnected, canReadDiagnostics }) =>
+      summary == null && !error && isConnected !== false && canReadDiagnostics !== false,
+  );
   const notices = environments.flatMap((environment) => {
     const { environmentId, label, summary, error, isConnected } = environment;
     const mismatch = mismatches.find((entry) => entry.environmentId === environmentId);
@@ -49,6 +53,7 @@ export function usageAvailability(
   );
   return {
     hasCompatibleSummary,
+    isLoading,
     notices,
     canRetry: environments.some(
       ({ environmentId, error, isConnected, canReadDiagnostics }) =>
@@ -61,8 +66,10 @@ export function usageAvailability(
       ? excluded
         ? "Totals below exclude unavailable environments."
         : "Totals below include saved usage."
-      : mismatches.length > 0
-        ? "Usage cannot be displayed until a compatible environment reports usage."
-        : "No usage totals are available yet. This does not mean there was no activity.",
+      : isLoading
+        ? null
+        : mismatches.length > 0
+          ? "Usage cannot be displayed until a compatible environment reports usage."
+          : "No usage totals are available yet. This does not mean there was no activity.",
   };
 }

@@ -17,11 +17,19 @@ export function UsageCompatibilityNotice({
   const detail = [
     ...availability.notices.map(({ message }) => message),
     availability.coverageMessage,
-  ].join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   return (
     <View accessibilityRole="alert" accessibilityLiveRegion="polite">
       <EmptyState
-        title={availability.hasCompatibleSummary ? "Usage may be incomplete" : "Usage unavailable"}
+        title={
+          availability.hasCompatibleSummary
+            ? "Usage may be incomplete"
+            : availability.isLoading
+              ? "Loading usage"
+              : "Usage unavailable"
+        }
         detail={detail}
         action={
           availability.canRetry && onRetry ? (
