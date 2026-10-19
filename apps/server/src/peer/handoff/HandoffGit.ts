@@ -223,7 +223,7 @@ const make = Effect.gen(function* () {
     };
     const staged = yield* git(
       input.cwd,
-      ["ls-files", "--cached", "--stage", "--full-name", "-z", "--", ":/"],
+      ["ls-files", "--cached", "--stage", "-t", "--full-name", "-z", "--", ":/"],
       { maxOutputBytes: 16 * 1024 * 1024 },
     );
     if (staged.stdoutTruncated) {
@@ -232,12 +232,28 @@ const make = Effect.gen(function* () {
     if (staged.stdoutInvalidUtf8) {
       return yield* new HandoffGitStepError({ step: "pack", reason: "invalid-path" });
     }
-    // Preserve tracked paths and staged deletions without copying flags that can hide edits.
+    // Keep indexed contents for deliberately skipped files; refresh ordinary working edits.
     yield* git(input.cwd, ["read-tree", "--empty"], { env });
     if (staged.stdout !== "") {
       yield* git(input.cwd, ["update-index", "-z", "--index-info"], {
         env,
-        stdin: staged.stdout,
+        stdin: staged.stdout
+          .split("\0")
+          .filter((entry) => entry !== "")
+          .map((entry) => entry.slice(2) + "\0")
+          .join(""),
+      });
+    }
+    const skipped = staged.stdout
+      .split("\0")
+      .filter((entry) => entry.startsWith("S "))
+      .map((entry) => entry.slice(entry.indexOf("\t") + 1) + "\0")
+      .join("");
+    if (skipped !== "") {
+      const root = yield* out(input.cwd, ["rev-parse", "--show-toplevel"]);
+      yield* git(root, ["update-index", "-z", "--skip-worktree", "--stdin"], {
+        env,
+        stdin: skipped,
       });
     }
     // The root pathspec includes edits above cwd without touching the sender index.

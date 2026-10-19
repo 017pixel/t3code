@@ -53,6 +53,7 @@ const fixture = Effect.gen(function* () {
   yield* fs.writeFileString(path.join(sender, "app.ts"), "initial\n");
   yield* fs.writeFileString(path.join(sender, "old.ts"), "delete me\n");
   yield* fs.writeFileString(path.join(sender, "settings.txt"), "public configuration\n");
+  yield* fs.writeFileString(path.join(sender, "local.cfg"), "shared configuration\n");
   yield* fs.writeFileString(path.join(sender, ".gitignore"), ".env\n*.local\n");
   yield* git(sender, ["add", "."]);
   yield* git(sender, ["commit", "-m", "base"]);
@@ -144,6 +145,13 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         yield* git(sender, ["tag", branch]);
         if (mode === "detached subdirectory") yield* git(sender, ["checkout", "--detach"]);
         if (mode === "sparse checkout") yield* git(sender, ["sparse-checkout", "set", "sub"]);
+        if (mode !== "sparse checkout") {
+          yield* git(sender, ["update-index", "--skip-worktree", "local.cfg"]);
+          yield* fs.writeFileString(
+            path.join(sender, "local.cfg"),
+            "hidden private configuration\n",
+          );
+        }
         if (mode === "branch") {
           yield* git(sender, ["config", "core.splitIndex", "true"]);
           yield* git(sender, ["config", "splitIndex.sharedIndexExpire", "now"]);
@@ -184,6 +192,10 @@ it.layer(layer)("Git bundle pack/apply", (it) => {
         assert.equal(yield* fs.readFileString(path.join(worktree, "sub", "new.ts")), "untracked\n");
         assert.isFalse(yield* fs.exists(path.join(worktree, "old.ts")));
         assert.isFalse(yield* fs.exists(path.join(worktree, ".env")));
+        assert.equal(
+          yield* fs.readFileString(path.join(worktree, "local.cfg")),
+          "shared configuration\n",
+        );
         assert.isFalse(yield* fs.exists(path.join(worktree, "settings.txt")));
         if (mode === "sparse checkout") {
           assert.equal(
