@@ -2272,7 +2272,7 @@ export const layerWithOptions = (
         ),
       );
 
-      return ProviderSessionManagerV2.of({
+      const manager: ProviderSessionManagerV2Shape = ProviderSessionManagerV2.of({
         shutdown,
         open: (input) =>
           sessionOpen.withLock(
@@ -2288,6 +2288,24 @@ export const layerWithOptions = (
                   return yield* new ProviderWorkspaceMissingError({
                     threadId: input.threadId,
                     cwd,
+                  });
+                }
+              }
+              if (input.initialNativeThreadId !== undefined) {
+                const owners = [...(yield* Ref.get(sessions)).values()].filter(
+                  (entry) =>
+                    entry.runtime.driver === "codex" &&
+                    entry.runtime.instanceId !== input.modelSelection.instanceId &&
+                    entry.loadedProviderThreadByThread.get(input.threadId)?.providerThread
+                      .nativeThreadRef?.nativeId === input.initialNativeThreadId,
+                );
+                // Projections can already name the target after a failed detach. The
+                // live owner must still confirm release before any target load.
+                for (const owner of owners) {
+                  yield* manager.detach({
+                    providerSessionId: owner.runtime.providerSessionId,
+                    threadId: input.threadId,
+                    expectedTargetInstanceId: input.modelSelection.instanceId,
                   });
                 }
               }
@@ -2528,6 +2546,7 @@ export const layerWithOptions = (
             const loaded = currentEntry?.loadedProviderThreadByThread.get(input.threadId);
             const loadedProviderThread = loaded?.providerThread;
             let bindingChanged = false;
+            let nativeBindingTransferred = false;
             let detachedProviderThreads: ReadonlyArray<OrchestrationV2ProviderThread> =
               pendingRelease?.providerThreads ??
               (loadedProviderThread === undefined ? [] : [loadedProviderThread]);
@@ -2567,6 +2586,12 @@ export const layerWithOptions = (
                       (thread.providerInstanceId !== currentEntry.runtime.instanceId ||
                         thread.providerSessionId !== input.providerSessionId),
                   );
+                nativeBindingTransferred =
+                  bindingChanged &&
+                  activeThread?.driver === currentEntry.runtime.driver &&
+                  activeThread.nativeThreadRef?.nativeId != null &&
+                  activeThread.nativeThreadRef.nativeId ===
+                    loadedProviderThread?.nativeThreadRef?.nativeId;
                 const providerThreads = new Map(
                   projection.value.providerThreads
                     .filter((thread) => thread.providerSessionId === input.providerSessionId)
@@ -2578,7 +2603,7 @@ export const layerWithOptions = (
                 }
                 detachedProviderThreads = [...ownedProviderThreads.values()];
                 // Account transfer must not terminate the source's background work.
-                if (currentEntry.runtime.unloadThread !== undefined && bindingChanged) {
+                if (currentEntry.runtime.unloadThread !== undefined && nativeBindingTransferred) {
                   const ownedThread =
                     loadedProviderThread ??
                     detachedProviderThreads.find(
@@ -2742,7 +2767,20 @@ export const layerWithOptions = (
                   yield* confirmPendingThreadRelease(
                     entry,
                     input.threadId,
-                    input.expectedTargetInstanceId !== undefined,
+                    input.expectedTargetInstanceId !== undefined && nativeBindingTransferred,
+                  ).pipe(
+                    Effect.catchCause((cause) =>
+                      bindingChanged && !nativeBindingTransferred
+                        ? Effect.logWarning(
+                            "orchestration-v2.driver-session.detach-unload-failed",
+                            {
+                              providerSessionId: input.providerSessionId,
+                              threadId: input.threadId,
+                              cause,
+                            },
+                          )
+                        : Effect.failCause(cause),
+                    ),
                   );
                 }),
               );
@@ -2759,7 +2797,8 @@ export const layerWithOptions = (
               ),
             ),
           ),
-      } satisfies ProviderSessionManagerV2Shape);
+      });
+      return manager;
     }),
   );
 
