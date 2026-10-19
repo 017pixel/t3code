@@ -252,7 +252,7 @@ function mergeProjectMcpServers(
 }
 
 /** The environment's disabled skills with a project's per-name switches applied. */
-export function mergeProjectDisabledSkills(
+function mergeProjectDisabledSkills(
   environment: DisabledSkills,
   project: DisabledSkillsProjectOverride | undefined,
 ): DisabledSkills {
@@ -283,7 +283,10 @@ export function clearProjectSettingsOverrides(
   const current = settings.projectSettingsOverrides[projectId];
   if (current === undefined) return null;
   const next = { ...current };
-  for (const key of keys) delete next[key];
+  for (const key of keys) {
+    if (key === "mcpServers" || key === "disabledSkills") next[key] = {};
+    else delete next[key];
+  }
   return Object.keys(next).length === 0 ? null : next;
 }
 

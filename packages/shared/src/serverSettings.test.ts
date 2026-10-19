@@ -10,6 +10,7 @@ import {
 import * as Duration from "effect/Duration";
 import { describe, expect, it } from "vite-plus/test";
 import { resolveServerBackgroundActivitySettings } from "./backgroundActivitySettings.ts";
+import { clearProjectSettingsOverrides } from "./projectSettings.ts";
 import { createModelSelection } from "./model.ts";
 import { resolveProjectScripts, projectScriptsInheritDefaults } from "./projectScripts.ts";
 import {
@@ -719,6 +720,26 @@ describe("serverSettings helpers", () => {
           disabledSkills: {},
         },
       },
+    });
+
+    const resetSkills = applyServerSettingsPatch(current, {
+      projectSettingsOverrides: {
+        [projectId]: clearProjectSettingsOverrides(current, projectId, ["disabledSkills"]),
+      },
+    });
+    expect(resetSkills.projectSettingsOverrides[projectId]).toEqual({
+      ...current.projectSettingsOverrides[projectId],
+      disabledSkills: {},
+    });
+    const resetServers = applyServerSettingsPatch(resetSkills, {
+      projectSettingsOverrides: {
+        [projectId]: clearProjectSettingsOverrides(resetSkills, projectId, ["mcpServers"]),
+      },
+    });
+    expect(resetServers.projectSettingsOverrides[projectId]).toEqual({
+      ...current.projectSettingsOverrides[projectId],
+      disabledSkills: {},
+      mcpServers: {},
     });
 
     expect(patched.projectSettingsOverrides[projectId]).toEqual({

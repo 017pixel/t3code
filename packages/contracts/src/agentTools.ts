@@ -21,9 +21,6 @@ export const McpServerName = TrimmedNonEmptyString.check(
 );
 export type McpServerName = typeof McpServerName.Type;
 
-export const isValidMcpServerName: (name: unknown) => name is McpServerName =
-  Schema.is(McpServerName);
-
 /**
  * An environment variable or HTTP header. A `sensitive` value is moved into
  * the environment's secret store on save; settings and clients then see an
@@ -87,21 +84,4 @@ export type DisabledSkillsProjectOverride = typeof DisabledSkillsProjectOverride
 export interface ResolvedMcpServer {
   readonly name: McpServerName;
   readonly transport: McpServerTransport;
-}
-
-export function mcpServerVariableRecord(
-  variables: ReadonlyArray<McpServerVariable>,
-): Record<string, string> {
-  const record: Record<string, string> = {};
-  for (const variable of variables) {
-    if (variable.valueRedacted === true && variable.value.length === 0) continue;
-    record[variable.name] = variable.value;
-  }
-  return record;
-}
-
-export function mcpServerTransportSummary(transport: McpServerTransport): string {
-  return transport.type === "stdio"
-    ? [transport.command, ...transport.args].join(" ")
-    : transport.url;
 }
