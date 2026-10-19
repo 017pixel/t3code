@@ -735,6 +735,7 @@ export const layer = Layer.effect(
       task: ScheduledTask,
       trigger: "scheduled" | "manual" | "webhook",
       webhook?: { readonly deliveryId: string; readonly prompt: string },
+      projectId?: ScheduledTask["projectId"],
     ) {
       const reserved = yield* Ref.modify(activeRuns, (active) => {
         if (active.has(task.id)) return [false, active] as const;
@@ -749,6 +750,7 @@ export const layer = Layer.effect(
         return task;
       }
 
+      let reservedAt: string | undefined;
       return yield* Effect.gen(function* () {
         const startedAt = yield* localNow;
         const startedAtIso = iso(startedAt);
@@ -757,7 +759,7 @@ export const layer = Layer.effect(
         // state. The task may have been deleted, paused, or postponed since
         // the poll loaded it — none of those may fire.
         const active = yield* findTask(task.id);
-        if (active === null) {
+        if (active === null || (projectId !== undefined && active.projectId !== projectId)) {
           if (webhook !== undefined) {
             return yield* new WebhookDeliverySkipped({
               reason: "The task was deleted before this delivery ran.",
@@ -794,6 +796,7 @@ export const layer = Layer.effect(
         }
 
         yield* markRunning(active.id, startedAtIso);
+        reservedAt = startedAtIso;
         yield* notifyChanged;
 
         const fireKey =
@@ -877,7 +880,9 @@ export const layer = Layer.effect(
         }
         return completed;
       }).pipe(
-        Effect.onError((cause) => releaseStuckRun(task, errorMessage(cause))),
+        Effect.onError((cause) =>
+          reservedAt === undefined ? Effect.void : releaseStuckRun(task, errorMessage(cause)),
+        ),
         Effect.ensuring(
           Ref.update(activeRuns, (active) => {
             const next = new Set(active);
@@ -1265,7 +1270,7 @@ export const layer = Layer.effect(
             taskId: input.id,
           });
         }
-        const next = yield* runTask(task, "manual").pipe(
+        const next = yield* runTask(task, "manual", undefined, input.projectId).pipe(
           Effect.mapError((cause) =>
             taskError("Could not run schedule task.", { taskId: input.id, cause }),
           ),
