@@ -53,8 +53,10 @@ const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFil
       }
     });
     const real = yield* resolvePath(input.requestPath);
-    const roots = yield* Effect.forEach(input.allowedRoots, resolvePath);
-    if (!roots.some((root) => isInsideRoot(path, root, real))) {
+    const roots = yield* Effect.forEach(input.allowedRoots, (root) =>
+      resolvePath(root).pipe(Effect.option),
+    );
+    if (!roots.some((root) => root._tag === "Some" && isInsideRoot(path, root.value, real))) {
       return yield* outside;
     }
     return real;

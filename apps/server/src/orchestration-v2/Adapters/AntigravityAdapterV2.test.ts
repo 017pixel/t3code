@@ -149,11 +149,13 @@ describe("AntigravityAdapterV2 client file system", () => {
       const alias = path.join(directory, "alias");
       yield* fileSystem.makeDirectory(realRoot);
       yield* fileSystem.symlink(realRoot, alias);
+      const danglingRoot = path.join(directory, "dangling");
+      yield* fileSystem.symlink(path.join(directory, "missing"), danglingRoot);
       const write = (root: string, target: string) =>
         writeAntigravityClientTextFile({
           fileSystem,
           path,
-          allowedRoots: [root],
+          allowedRoots: [danglingRoot, root],
           request: { sessionId: "session-1", path: target, content: "task output" },
         });
       const nested = path.join(alias, "brain", "session-1", "tasks", "output.txt");
@@ -161,7 +163,7 @@ describe("AntigravityAdapterV2 client file system", () => {
       const read = yield* readAntigravityClientTextFile({
         fileSystem,
         path,
-        allowedRoots: [realRoot],
+        allowedRoots: [danglingRoot, realRoot],
         request: { sessionId: "session-1", path: nested },
       });
       assert.equal(read.content, "task output");
