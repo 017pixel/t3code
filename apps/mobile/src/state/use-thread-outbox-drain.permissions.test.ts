@@ -83,7 +83,7 @@ vi.mock("./threads", async () => {
 vi.mock("./use-atom-command", () => ({ useAtomCommand: <A>(command: A) => command }));
 vi.mock("./git", () => ({ gitEnvironment: { preparePullRequestThread: state.checkout } }));
 vi.mock("../lib/modelOptions", () => ({ isModelSelectionUnavailable: () => false }));
-vi.mock("../lib/uuid", () => ({ uuidv4: () => "uuid", randomHex: () => "abcd" }));
+vi.mock("../lib/uuid", () => ({ uuidv4: () => "uuid", randomHex: vi.fn(() => "abcd") }));
 vi.mock("../lib/attachmentUpload", () => ({ prepareTurnAttachments: state.prepare }));
 vi.mock("./use-remote-environment-registry", () => ({
   setPendingConnectionError: vi.fn(),
@@ -144,6 +144,7 @@ vi.mock("./use-composer-drafts", async () => {
   };
 });
 
+import { randomHex } from "../lib/uuid";
 import { appAtomRegistry } from "./atom-registry";
 import { dispatchingQueuedMessageIdAtom } from "./use-thread-outbox";
 import { useThreadOutboxDrain } from "./use-thread-outbox-drain";
@@ -173,6 +174,7 @@ function runDrain() {
 beforeEach(() => {
   state.grantedEnvironments = new Set(["primary"]);
   state.draftText = "Keep this draft separate";
+  vi.mocked(randomHex).mockReset().mockReturnValue("abcd");
   appAtomRegistry.set(state.manager.queuedMessagesByThreadKeyAtom, {});
   appAtomRegistry.set(dispatchingQueuedMessageIdAtom, null);
   for (const command of [
@@ -190,6 +192,60 @@ beforeEach(() => {
     draftAttachments: attachments,
     pendingAttachmentIds: [],
   }));
+});
+
+describe("queued worktree creation", () => {
+  it("preserves the complete launch payload when retrying after a lost response and remount", async () => {
+    state.grantedEnvironments.add("secondary");
+    vi.mocked(randomHex).mockReturnValueOnce("1234abcd").mockReturnValueOnce("5678efab");
+    const queued = message({
+      threadId: ThreadId.make("new-worktree-thread"),
+      commandId: CommandId.make("f91ff41c-ec58-40a1-b4b5-0fa1ff071888"),
+      messageId: MessageId.make("a20338ba-08a3-41ad-b95e-be8ce887ea31"),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      creation: {
+        projectId: ProjectId.make("project"),
+        projectCwd: "/repo",
+        workspaceMode: "worktree",
+        branch: "main",
+        worktreePath: null,
+        startFromOrigin: true,
+      },
+    });
+    await state.manager.enqueue(queued);
+    state.start.mockResolvedValueOnce(
+      AsyncResult.failure(Cause.fail(new Error("Socket is not connected"))),
+    );
+    await runDrain();
+    expect(state.start).toHaveBeenCalledOnce();
+    const firstAttempt = state.start.mock.calls[0]?.[0];
+    expect(firstAttempt).toMatchObject({
+      environmentId: queued.environmentId,
+      input: {
+        commandId: queued.commandId,
+        threadId: queued.threadId,
+        message: { messageId: queued.messageId, text: queued.text },
+        bootstrap: {
+          prepareWorktree: {
+            projectCwd: "/repo",
+            baseBranch: "main",
+            branch: expect.stringMatching(/^t3\/[0-9a-f]{8}$/),
+            startFromOrigin: true,
+          },
+        },
+      },
+    });
+    expect(remaining()).toEqual([queued]);
+    expect(state.draftText).toBe("Keep this draft separate");
+
+    // The app remounts with a live shell before the first launch publishes its thread.
+    state.cleanups.splice(0).forEach((cleanup) => cleanup());
+    await runDrain();
+    expect(state.start).toHaveBeenCalledTimes(2);
+    expect(remaining()).toEqual([]);
+    expect(state.draftText).toBe("Keep this draft separate");
+    expect(state.start.mock.calls[1]?.[0]).toEqual(firstAttempt);
+  });
 });
 
 describe("queued PR checkout", () => {
