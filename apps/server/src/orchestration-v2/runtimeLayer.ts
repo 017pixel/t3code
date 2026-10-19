@@ -201,6 +201,7 @@ const layerCheckpointCaptureServiceProvided = CheckpointCaptureService.layer.pip
       layerCheckpointServiceProvided,
       layerEventSinkProvided,
       IdAllocator.layer,
+      ThreadCommandExecutor.layer,
       ProjectionStore.layer,
     ),
   ),

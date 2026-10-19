@@ -1462,9 +1462,9 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect(
-  "Stop cancels running checkpoint work without interrupting the completed provider and the held queue resumes",
-  () =>
+it.effect.each(["run.interrupt", "thread.stop"] as const)(
+  "%s cancels checkpoint work without interrupting the completed provider and the held queue resumes",
+  (stopCommand) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const sql = yield* SqlClient.SqlClient;
@@ -1483,7 +1483,7 @@ it.effect(
           ),
         );
         yield* orchestrator.dispatch({
-          type: "run.interrupt",
+          type: stopCommand,
           commandId: CommandId.make("stop:checkpoint"),
           threadId,
           runId: run.id,
