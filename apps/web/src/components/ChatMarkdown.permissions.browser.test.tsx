@@ -524,6 +524,7 @@ it("verifies a rootless candidate before opening its literal path and position",
     "[Read the file](docs/guide.ts:12:3)",
     "[docs/guide.ts:12:3](docs/guide.ts:12:3)",
     "`docs/guide.ts:12:3`",
+    "[](docs/guide.ts:12:3)",
   ]) {
     await settleMetadata(candidate, AsyncResult.initial(true));
     state.openFile.mockClear();
@@ -539,13 +540,20 @@ it("verifies a rootless candidate before opening its literal path and position",
     expect(container.textContent).toBe(indexedText);
     expect(state.openFile).not.toHaveBeenCalled();
     await settleMetadata(candidate, AsyncResult.success({ kind: "file" }));
-    expect.soft(container.textContent).toBe(indexedText);
-    expect.soft(anchor().textContent).toBe(indexedText);
+    if (indexedText) {
+      expect.soft(container.textContent).toBe(indexedText);
+      expect.soft(anchor().textContent).toBe(indexedText);
+    } else {
+      expect.soft(anchor().textContent).toBe("guide.ts · L12:C3");
+    }
     await act(async () => anchor().click());
     expect(state.openFile).toHaveBeenCalledExactlyOnceWith(threadRef, candidate, 12);
     state.choose.mockResolvedValue("copy-full");
     await openContextMenu();
     expect(state.copy).toHaveBeenLastCalledWith(`${candidate}:12:3`);
+    if (!indexedText) {
+      await expect.element(anchor()).toHaveAccessibleName("guide.ts · L12:C3");
+    }
   }
 });
 

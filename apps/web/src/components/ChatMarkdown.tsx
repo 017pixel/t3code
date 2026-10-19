@@ -2868,11 +2868,12 @@ function ThreadFileLinkChip(props: {
     ? { ...buildFileLinkMetaFromTarget(selected, cwd), workspaceLookupPath: null }
     : props.meta;
   if (!meta) return props.fallback;
+  const authored = nodeToPlainText(props.fallback);
   const chip = fileLinkChip(
     meta,
     props.copyMarkdown,
     props.href,
-    props.meta ?? nodeToPlainText(props.fallback),
+    props.meta ?? (authored.trim() ? authored : meta),
     selected !== null,
   );
   return props.meta && props.prefix ? (
