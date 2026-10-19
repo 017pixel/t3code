@@ -83,7 +83,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
           method: "watch",
           description: "test watcher disconnected",
         });
-        const controlled = FileSystem.make({
+        const controlled = FileSystem.FileSystem.of({
           ...fs,
           watch: () =>
             Stream.unwrap(

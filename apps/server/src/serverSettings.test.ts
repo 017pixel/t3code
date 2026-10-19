@@ -125,7 +125,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         method: "watch",
         description: "test target watcher disconnected",
       });
-      const controlled = FileSystem.make({
+      const controlled = FileSystem.FileSystem.of({
         ...fs,
         watch: (directory) => {
           if (directory === path.dirname(first)) {
