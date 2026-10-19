@@ -13,12 +13,18 @@ const [Effect, Stream, Layer, Deferred, Fiber] = await Promise.all(
   ["Effect", "Stream", "Layer", "Deferred", "Fiber"].map(load),
 );
 const app = (file) => import(NodeURL.pathToFileURL(root + "/apps/server/src/" + file + ".ts"));
-const [Prefix, Ws, Threads, Events] = await Promise.all([
-  app("rpcInitialItems"),
-  app("ws"),
-  app("orchestration-v2/ThreadManagementService"),
-  app("persistence/OrchestrationEventStore"),
-]);
+const [Prefix, Ws, Threads, Events, Orchestrator, Sessions, Receipts, Settings] = await Promise.all(
+  [
+    app("rpcInitialItems"),
+    app("ws"),
+    app("orchestration-v2/ThreadManagementService"),
+    app("persistence/OrchestrationEventStore"),
+    app("orchestration-v2/Orchestrator"),
+    app("orchestration-v2/ProviderSessionManager"),
+    app("orchestration-v2/CommandReceiptStore"),
+    app("serverSettings"),
+  ],
+);
 const refs = [];
 const fibers = [];
 const checkpoints = [];
@@ -37,20 +43,28 @@ function start(ready) {
     Stream.concat(Stream.never),
   );
   const dependencies = Layer.mergeAll(
-    Layer.mock(Threads.ThreadManagementService)({
-      ensureLegacyTranscript: () => Effect.void,
-      getThreadSnapshot: () =>
-        Effect.sync(() => ({
-          snapshotSequence: 1,
-          projection: {
-            messages: [history()],
-            contextHandoffs: [],
-            turnItems: [],
-            visibleTurnItems: [],
-          },
-        })),
-      streamStoredEventsFrom: () => live,
-    }),
+    Threads.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadSnapshot: () =>
+              Effect.sync(() => ({
+                snapshotSequence: 1,
+                projection: {
+                  messages: [history()],
+                  contextHandoffs: [],
+                  turnItems: [],
+                  visibleTurnItems: [],
+                },
+              })),
+            streamStoredEventsFrom: () => live,
+          }),
+          Layer.mock(Sessions.ProviderSessionManagerV2)({}),
+          Layer.mock(Receipts.CommandReceiptStoreV2)({}),
+          Layer.mock(Settings.ServerSettingsService)({}),
+        ),
+      ),
+    ),
     Layer.mock(Events.OrchestrationEventStore)({
       latestAgentSequence: () => Effect.succeed(1),
       getAgentReplayStats: () =>
