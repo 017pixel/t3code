@@ -23,6 +23,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
@@ -66,6 +67,9 @@ const environmentLayer = (descriptor: Effect.Effect<ExecutionEnvironmentDescript
 const servePeer = Effect.gen(function* () {
   const descriptor = yield* Ref.make(box);
   const beforeDescriptor = yield* Ref.make(Effect.void);
+  const redirect = yield* Ref.make<
+    { path: string; location: string; status: 307 | 308 } | undefined
+  >(undefined);
   const describe = Effect.gen(function* () {
     const gate = yield* Ref.getAndSet(beforeDescriptor, Effect.void);
     yield* gate;
@@ -92,6 +96,11 @@ const servePeer = Effect.gen(function* () {
           ...seen,
           { url: request.url, authorization: request.headers.authorization },
         ]);
+        const destination = yield* Ref.get(redirect);
+        if (destination?.path === request.url) {
+          yield* request.text;
+          return HttpServerResponse.redirect(destination.location, { status: destination.status });
+        }
         return yield* effect;
       }),
     { global: true },
@@ -115,6 +124,7 @@ const servePeer = Effect.gen(function* () {
     url,
     descriptor,
     beforeDescriptor,
+    redirect,
     requests,
     auth: Context.get(context, EnvironmentAuth.EnvironmentAuth),
     authenticate: (token: string) =>
@@ -296,11 +306,74 @@ it.effect(
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("refuses incompatible, changed or expired peers and repairs a revoked link", () =>
+it.effect("refuses unsafe peers and repairs a revoked link", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const peer = yield* servePeer;
       const local = yield* makeLaptop;
+      const receiverContext = yield* Layer.build(Layer.fresh(NodeHttpServer.layerTest));
+      const receiver = Context.get(receiverContext, HttpServer.HttpServer);
+      const received = yield* Ref.make<
+        ReadonlyArray<{ method: string; url: string; body: string }>
+      >([]);
+      yield* receiver.serve(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const body = yield* request.text;
+          yield* Ref.update(received, (requests) => [
+            ...requests,
+            { method: request.method, url: request.url, body },
+          ]);
+          return HttpServerResponse.empty({ status: 502 });
+        }),
+      );
+      if (receiver.address._tag === "UnixPathAddress") {
+        return yield* Effect.die("expected TCP address");
+      }
+      // Reaches this native listener without DNS, but is not an allowed plain-HTTP peer origin.
+      const receiverUrl = `http://0.0.0.0:${receiver.address.port}`;
+      expect(
+        yield* local.links
+          .link({ url: receiverUrl, pairingCode: "synthetic-pairing-code", access: "auto" })
+          .pipe(Effect.flip),
+      ).toMatchObject({ _tag: "PeerLinkError", reason: "unreachable" });
+      expect(yield* Ref.get(received)).toEqual([]);
+      for (const [phase, status] of [
+        ["decision", 307],
+        ["token", 308],
+      ] as const) {
+        yield* Ref.set(peer.requests, []);
+        yield* Ref.set(received, []);
+        yield* Ref.set(peer.redirect, {
+          path: `/oauth/mcp/${phase}`,
+          location: `${receiverUrl}/${phase}`,
+          status,
+        });
+        const result = yield* local.links
+          .link({
+            url: peer.url,
+            pairingCode: (yield* peer.auth.issuePairingCredential()).credential,
+            access: "auto",
+          })
+          .pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "PeerLinkError", reason: "unreachable" },
+        });
+        expect((yield* Ref.get(peer.requests)).map((request) => request.url)).toEqual([
+          "/.well-known/t3/environment",
+          "/oauth/mcp/register",
+          "/oauth/mcp/decision",
+          ...(phase === "token" ? ["/oauth/mcp/token"] : []),
+        ]);
+        expect(yield* local.links.list).toEqual([]);
+        expect(yield* local.sql`SELECT * FROM peer_environment_links`).toEqual([]);
+        expect
+          .soft(yield* Ref.get(received), `${status} ${phase} must not forward its body`)
+          .toEqual([]);
+      }
+      yield* Ref.set(peer.redirect, undefined);
+      yield* Ref.set(peer.requests, []);
       const pairing = yield* peer.auth.issuePairingCredential();
       const incompatible = [
         { ...box, capabilities: { repositoryIdentity: true, linkFence: true } },

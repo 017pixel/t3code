@@ -70,9 +70,10 @@ describe("attachment HTML preview recovery", () => {
     now = 61 * 60_000;
     await toggleMode("Show HTML source");
     expect(fetch).toHaveBeenCalledExactlyOnceWith(renewedUrl, expect.any(Object));
-    await vi.waitFor(() =>
-      expect(container.querySelector("pre")?.textContent).toBe("<p>Captured HTML</p>"),
-    );
+    await act(async () => {
+      await import("./ReadOnlySourcePreview");
+    });
+    expect(container.querySelector("pre")?.textContent).toBe("<p>Captured HTML</p>");
 
     await toggleMode("Show rendered page");
     expect(container.querySelector("iframe")?.getAttribute("src")).toBe(renewedUrl);
