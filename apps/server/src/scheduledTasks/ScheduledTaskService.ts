@@ -1049,43 +1049,6 @@ export const layer = Layer.effect(
                 maxDeliveryAgeMinutes: input.schedule.maxDeliveryAgeMinutes ?? null,
               }
             : input.schedule;
-        const webhook =
-          input.schedule.type === "webhook"
-            ? yield* Effect.gen(function* () {
-                const existing = existingTask === null ? null : yield* findWebhookCredentials(id);
-                const token = existing?.token ?? (yield* newWebhookToken);
-                const signature =
-                  input.schedule.type === "webhook" ? input.schedule.signature : null;
-                // A secretRef is a value the user entered for an agent; this
-                // save consumes it, so it cannot be used again. A replay of a
-                // save that already used it keeps the secret that save stored.
-                const replay = input.commandId !== undefined && existing?.secret != null;
-                const fromRef =
-                  signature?.secretRef === undefined
-                    ? undefined
-                    : yield* secretRequests
-                        .consume({ ref: signature.secretRef, projectId: input.projectId })
-                        .pipe(
-                          Effect.catch((error) =>
-                            replay
-                              ? Effect.succeed(undefined)
-                              : Effect.fail(taskError(error.message, { taskId: id, cause: error })),
-                          ),
-                        );
-                // A ref, when given, is the only source: a plain secret sent
-                // alongside it must not replace what a replayed save stored.
-                const provided = signature?.secretRef === undefined ? signature?.secret : fromRef;
-                const secret = signature == null ? null : (provided ?? existing?.secret ?? null);
-                const secretChanged =
-                  signature == null || provided !== undefined || existing === null;
-                if (signature != null && secret === null) {
-                  return yield* taskError("A webhook signature check needs a signing secret.", {
-                    taskId: id,
-                  });
-                }
-                return { token, secret, secretChanged };
-              })
-            : { token: null, secret: null, secretChanged: true };
         const scheduleUnchanged =
           existingTask !== null &&
           existingTask.enabled === input.enabled &&
@@ -1123,6 +1086,43 @@ export const layer = Layer.effect(
         ) {
           yield* requireThreadInProject(task);
         }
+        const webhook =
+          input.schedule.type === "webhook"
+            ? yield* Effect.gen(function* () {
+                const existing = existingTask === null ? null : yield* findWebhookCredentials(id);
+                const token = existing?.token ?? (yield* newWebhookToken);
+                const signature =
+                  input.schedule.type === "webhook" ? input.schedule.signature : null;
+                // A secretRef is a value the user entered for an agent; this
+                // save consumes it, so it cannot be used again. A replay of a
+                // save that already used it keeps the secret that save stored.
+                const replay = input.commandId !== undefined && existing?.secret != null;
+                const fromRef =
+                  signature?.secretRef === undefined
+                    ? undefined
+                    : yield* secretRequests
+                        .consume({ ref: signature.secretRef, projectId: input.projectId })
+                        .pipe(
+                          Effect.catch((error) =>
+                            replay
+                              ? Effect.succeed(undefined)
+                              : Effect.fail(taskError(error.message, { taskId: id, cause: error })),
+                          ),
+                        );
+                // A ref, when given, is the only source: a plain secret sent
+                // alongside it must not replace what a replayed save stored.
+                const provided = signature?.secretRef === undefined ? signature?.secret : fromRef;
+                const secret = signature == null ? null : (provided ?? existing?.secret ?? null);
+                const secretChanged =
+                  signature == null || provided !== undefined || existing === null;
+                if (signature != null && secret === null) {
+                  return yield* taskError("A webhook signature check needs a signing secret.", {
+                    taskId: id,
+                  });
+                }
+                return { token, secret, secretChanged };
+              })
+            : { token: null, secret: null, secretChanged: true };
         yield* saveTask(task, input.requireExisting === true, webhook);
         return { task: (yield* findTask(id)) ?? task };
       });
@@ -1147,6 +1147,10 @@ export const layer = Layer.effect(
         if (row === undefined || row.project_id !== input.projectId) return Option.none();
         yield* checkAuthorizedTask(row, input);
         const existing = yield* decodeRow(row, yield* readWebhookOrigin);
+        const threadId = input.threadId === undefined ? existing.threadId : input.threadId;
+        if (threadId !== existing.threadId) {
+          yield* checkAuthorizedTask({ ...row, thread_id: threadId }, { id: input.id });
+        }
         const workspaceStrategy =
           input.workspaceStrategy ??
           (input.workspaceStrategyPatch === undefined
@@ -1167,7 +1171,7 @@ export const layer = Layer.effect(
           enabled: input.enabled ?? existing.enabled,
           schedule: input.schedule ?? existing.schedule,
           projectId: input.nextProjectId ?? existing.projectId,
-          threadId: input.threadId === undefined ? existing.threadId : input.threadId,
+          threadId,
           workspaceStrategy,
           modelSelection: input.modelSelection ?? existing.modelSelection,
           runtimeMode: input.runtimeMode ?? existing.runtimeMode,

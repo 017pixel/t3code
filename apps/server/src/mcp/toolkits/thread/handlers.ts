@@ -85,9 +85,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           code: "invalid_request",
           message: "The scheduled task was not found.",
         });
-      // The listed project rides into the dispatch transaction: a task moved
-      // to another project after this check is a missing row, never a run
-      // fired in a project the caller was not checked against.
+      // Pin the listed project so a concurrent move rejects the run at reservation.
       const { task } = yield* scheduler
         .runNow({ id: input.taskId, projectId: listed.projectId })
         .pipe(Effect.mapError(unavailable));

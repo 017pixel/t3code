@@ -2055,14 +2055,16 @@ const layerWsRpc = (
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.delete(input)),
             Effect.flatMap((deleted) =>
-              Option.isNone(deleted)
-                ? Effect.fail(
-                    new ScheduledTaskError({
-                      message: "Schedule task not found.",
-                      taskId: input.id,
-                    }),
-                  )
-                : Effect.succeed(deleted.value),
+              Option.isSome(deleted)
+                ? Effect.succeed(deleted.value)
+                : input.projectId === undefined
+                  ? Effect.succeed({ id: input.id })
+                  : Effect.fail(
+                      new ScheduledTaskError({
+                        message: "Schedule task not found.",
+                        taskId: input.id,
+                      }),
+                    ),
             ),
           ),
         [WS_METHODS.scheduledTasksRunNow]: (input) =>
