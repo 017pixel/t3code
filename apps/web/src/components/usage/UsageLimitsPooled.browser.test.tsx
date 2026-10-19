@@ -18,6 +18,7 @@ vi.mock("../../state/session", () => ({
   useEnvironmentScope: () => true,
   readEnvironmentScope: () => true,
 }));
+vi.mock("../../state/environments", () => ({ useEnvironmentProviders: () => new Map() }));
 vi.mock("../../state/server", () => ({ serverEnvironment: { consumeResetCredit: null } }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => consume }));
 vi.mock("../../hooks/useSettings", () => ({ usePrimarySettings: () => "24h" }));

@@ -19,6 +19,8 @@ import { Fragment, type ReactNode, useState } from "react";
 import { ensureLocalApi } from "../../localApi";
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
+import { deriveProviderInstanceEntries, shouldShowInstanceBadge } from "../../providerInstances";
+import { useEnvironmentProviders } from "../../state/environments";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { providerClients } from "../settings/providerDriverMeta";
@@ -69,17 +71,25 @@ function AccountAvatar({
   readonly account: LimitAccount;
   readonly className?: string;
 }) {
-  if (account.redeem) {
+  const providersByEnvironment = useEnvironmentProviders();
+  const target = account.redeem;
+  const entries = deriveProviderInstanceEntries(
+    target ? (providersByEnvironment.get(target.environmentId) ?? []) : [],
+  );
+  const instanceId = target && "instanceId" in target.input ? target.input.instanceId : null;
+  const entry = entries.find((candidate) => candidate.instanceId === instanceId);
+  if (target) {
     return (
       <ProviderInstanceIcon
         driverKind={account.driver}
         displayName={
+          entry?.displayName ??
           account.displayName ??
           providerClients.get(account.driver)?.label ??
           String(account.driver)
         }
-        accentColor={account.accentColor}
-        showBadge={Boolean(account.displayName)}
+        accentColor={entry ? entry.accentColor : account.accentColor}
+        showBadge={entry ? shouldShowInstanceBadge(entry, entries) : Boolean(account.displayName)}
         indicatorBackground="var(--popover)"
         className={cn("size-5", className)}
         iconClassName="size-4 text-foreground/80"
