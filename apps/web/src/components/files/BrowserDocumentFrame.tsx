@@ -12,6 +12,8 @@ import {
   htmlRenderThemeFragment,
   htmlRenderThemeMessage,
   htmlRenderResult,
+  htmlRenderError,
+  readHtmlRenderMessageRequest,
   readHtmlRenderContentHeight,
   readHtmlRenderImageRequest,
   readHtmlRenderKeyDown,
@@ -71,6 +73,7 @@ export function BrowserDocumentFrame(props: {
   readonly pdf: boolean;
   readonly htmlRender?: boolean;
   readonly threadRef?: ScopedThreadRef | undefined;
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
 }) {
   const className = "min-h-0 flex-1 border-0 bg-white";
   return props.pdf ? (
@@ -87,6 +90,7 @@ export function BrowserDocumentFrame(props: {
       src={props.src}
       title={props.title}
       threadRef={props.threadRef}
+      onSendMessage={props.onSendMessage}
       className="min-h-0 flex-1"
     />
   ) : (
@@ -109,6 +113,7 @@ export function HtmlRenderDocument(props: {
   readonly title: string;
   readonly className?: string;
   readonly threadRef?: ScopedThreadRef | undefined;
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
   readonly onContentHeight?: (height: number) => void;
   /** Reports the image viewer opening and closing, so a virtualized row can stay mounted. */
   readonly onFullscreenChange?: ((fullscreen: boolean) => void) | undefined;
@@ -260,6 +265,45 @@ export function HtmlRenderDocument(props: {
     };
     window.addEventListener("message", openImage);
     return () => window.removeEventListener("message", openImage);
+  }, []);
+  const sendMessage = useEffectEvent(async (text: string) => {
+    if (props.onSendMessage === undefined) throw new Error("Messages are not available here.");
+    await props.onSendMessage(text);
+  });
+  useEffect(() => {
+    // The listener outlives callback changes, so rerenders cannot reset the limit.
+    let lastSentAt = -Infinity;
+    const send = (event: MessageEvent) => {
+      const frame = frameRef.current;
+      const request = readHtmlRenderMessageRequest(event.data);
+      if (request === undefined || frame === null || event.source !== frame.contentWindow) return;
+      const source = frame.contentWindow;
+      const reply = (message: unknown) => source?.postMessage(message, "*");
+      if (document.activeElement !== frame || navigator.userActivation?.isActive !== true) {
+        reply(
+          htmlRenderError(request.id, "Messages send only from a click or key press in the page."),
+        );
+        return;
+      }
+      const now = Date.now();
+      if (now - lastSentAt < 1_000) {
+        reply(htmlRenderError(request.id, "Send at most one message per second."));
+        return;
+      }
+      lastSentAt = now;
+      void sendMessage(request.text).then(
+        () => reply(htmlRenderResult(request.id)),
+        (error: unknown) =>
+          reply(
+            htmlRenderError(
+              request.id,
+              error instanceof Error ? error.message : "The message was not sent.",
+            ),
+          ),
+      );
+    };
+    window.addEventListener("message", send);
+    return () => window.removeEventListener("message", send);
   }, []);
   const { onFullscreenChange } = props;
   useEffect(() => {

@@ -54,6 +54,7 @@ export interface RightPanelFileProps {
   readonly availableEditors: ReadonlyArray<EditorId>;
   readonly pendingSurfaceIds: ReadonlySet<string>;
   readonly onOpenFile: (relativePath: string) => void;
+  readonly onSendRenderMessage?: ((text: string) => Promise<void>) | undefined;
   readonly onPendingChange: (relativePath: string, pending: boolean) => void;
 }
 
@@ -201,6 +202,7 @@ export function RightPanelSurfaceContent(props: {
             revealLine={surface.kind === "file" ? (surface.revealLine ?? null) : null}
             revealRequestId={surface.kind === "file" ? surface.revealRequestId : 0}
             onOpenFile={files.onOpenFile}
+            onSendRenderMessage={files.onSendRenderMessage}
             onNavigateFolder={(relativePath, folderTrail, keepSource) =>
               useRightPanelStore
                 .getState()

@@ -125,6 +125,7 @@ interface FilePreviewPanelProps {
   projectName: string;
   relativePath: string | null;
   attachment?: ChatFileAttachment;
+  onSendRenderMessage?: ((text: string) => Promise<void>) | undefined;
   threadRef: ScopedThreadRef;
   composerDraftTarget: ScopedThreadRef | DraftId;
   keybindings: ResolvedKeybindingsConfig;
@@ -975,6 +976,7 @@ export default function FilePreviewPanel({
   projectName,
   relativePath: requestedPath,
   attachment,
+  onSendRenderMessage,
   threadRef,
   composerDraftTarget,
   keybindings,
@@ -1315,6 +1317,7 @@ export default function FilePreviewPanel({
               sizeBytes={attachment.sizeBytes}
               asset={{ environmentId, attachmentId: attachment.id }}
               htmlRender={attachment.htmlRender === true}
+              onSendMessage={onSendRenderMessage}
               threadRef={threadRef}
             />
           ) : relativePath && isVideo && absolutePath ? (

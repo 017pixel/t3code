@@ -1,7 +1,16 @@
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useNavigation } from "@react-navigation/native";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
+  AuthOrchestrationOperateScope,
+  CommandId,
+  MessageId,
+  type EnvironmentId,
+  type ThreadId,
+} from "@t3tools/contracts";
+import {
+  htmlRenderError,
+  htmlRenderResult,
+  readHtmlRenderMessageRequest,
   htmlRenderFileName,
   htmlRenderFrameHeight,
   htmlRenderThemeFragment,
@@ -17,6 +26,9 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
 import { mobileHtmlRenderTheme } from "../../lib/htmlRenderTheme";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
+import { uuidv4 } from "../../lib/uuid";
+import { readEnvironmentScope } from "../../state/session";
+import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { useAssetUrlState, useRefreshAssetUrl } from "../../state/assets";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 
@@ -43,10 +55,32 @@ function useHtmlRenderTheme() {
   );
 }
 
+export async function sendHtmlRenderMessage(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  text: string,
+): Promise<void> {
+  if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
+    throw new Error("You do not have permission to send messages in this environment.");
+  }
+  await enqueueThreadOutboxMessage({
+    environmentId,
+    threadId,
+    messageId: MessageId.make(uuidv4()),
+    commandId: CommandId.make(uuidv4()),
+    text,
+    attachments: [],
+    dispatchMode: "queue",
+    createdAt: new Date().toISOString(),
+  });
+}
+
+function postToPage(view: WebView<object> | null, message: unknown) {
+  view?.injectJavaScript(`window.postMessage(${JSON.stringify(message)}, "*"); true;`);
+}
+
 function postTheme(view: WebView<object> | null, theme: HtmlRenderTheme) {
-  view?.injectJavaScript(
-    `window.postMessage(${JSON.stringify(htmlRenderThemeMessage(theme))}, "*"); true;`,
-  );
+  postToPage(view, htmlRenderThemeMessage(theme));
 }
 
 const OVERFLOW_MESSAGE_TYPE = "t3-html-render-overflow";
@@ -82,7 +116,9 @@ export function HtmlRenderWebView(props: {
   readonly title: string;
   readonly nested: boolean;
   readonly onLoadError?: () => void;
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
 }) {
+  const navigation = useNavigation();
   const theme = useHtmlRenderTheme();
   const [initialTheme] = useState(theme);
   const [generation, setGeneration] = useState(0);
@@ -90,6 +126,7 @@ export function HtmlRenderWebView(props: {
   const [overflow, setOverflow] = useState(NO_OVERFLOW);
   const webView = useRef<WebView<object>>(null);
   const crashes = useRef(0);
+  const lastTouchAt = useRef<number | null>(null);
   const shownTheme = useRef<HtmlRenderTheme | null>(null);
   const source = useMemo(
     () => ({ uri: props.uri + htmlRenderThemeFragment(initialTheme) }),
@@ -112,8 +149,52 @@ export function HtmlRenderWebView(props: {
     setGeneration((value) => value + 1);
   };
   const scrollable = !props.nested || overflow.x || overflow.y;
+  const handleMessage = (event: WebViewMessageEvent) => {
+    const { data } = event.nativeEvent;
+    if (props.nested) {
+      const next = readOverflowMessage(data);
+      if (next !== null) {
+        setOverflow(next);
+        return;
+      }
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return;
+    }
+    const request = readHtmlRenderMessageRequest(parsed);
+    if (request === undefined) return;
+    const view = webView.current;
+    const reply = (message: unknown) => postToPage(view, message);
+    const send = async () => {
+      if (props.onSendMessage === undefined || !navigation.isFocused()) {
+        throw new Error("Messages are not available here.");
+      }
+      if (lastTouchAt.current === null || Date.now() - lastTouchAt.current > 5_000) {
+        throw new Error("Messages send only from a tap in the page.");
+      }
+      // Consume before awaiting, so one touch cannot enqueue several messages.
+      lastTouchAt.current = null;
+      await props.onSendMessage(request.text);
+    };
+    void send().then(
+      () => reply(htmlRenderResult(request.id)),
+      (error: unknown) =>
+        reply(
+          htmlRenderError(
+            request.id,
+            error instanceof Error ? error.message : "The message was not sent.",
+          ),
+        ),
+    );
+  };
   return (
     <View
+      onTouchStart={() => {
+        lastTouchAt.current = Date.now();
+      }}
       style={
         props.nested
           ? { flex: 1 }
@@ -158,15 +239,8 @@ export function HtmlRenderWebView(props: {
         onHttpError={props.onLoadError}
         onContentProcessDidTerminate={restart}
         onRenderProcessGone={restart}
-        {...(props.nested
-          ? {
-              injectedJavaScript: OVERFLOW_SCRIPT,
-              onMessage: (event: WebViewMessageEvent) => {
-                const next = readOverflowMessage(event.nativeEvent.data);
-                if (next !== null) setOverflow(next);
-              },
-            }
-          : {})}
+        onMessage={handleMessage}
+        {...(props.nested ? { injectedJavaScript: OVERFLOW_SCRIPT } : {})}
       />
       {loaded ? null : (
         <View pointerEvents="none" className="absolute inset-0 items-center justify-center">
@@ -229,6 +303,9 @@ export function ThreadHtmlRender(props: {
             title={title}
             nested
             onLoadError={handleLoadError}
+            onSendMessage={(text) =>
+              sendHtmlRenderMessage(props.environmentId, props.threadId, text)
+            }
           />
         ) : failed || asset._tag === "Failure" ? (
           <Pressable

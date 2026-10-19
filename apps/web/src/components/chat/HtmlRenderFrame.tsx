@@ -23,6 +23,7 @@ export function HtmlRenderFrame(props: {
   readonly environmentId: EnvironmentId;
   readonly htmlRender: HtmlRenderReference;
   readonly threadRef: ScopedThreadRef | undefined;
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
   readonly onFullscreenChange?: (fullscreen: boolean) => void;
 }) {
   const { attachmentId, title } = props.htmlRender;
@@ -97,6 +98,7 @@ export function HtmlRenderFrame(props: {
             src={src}
             title={title}
             threadRef={props.threadRef}
+            onSendMessage={props.onSendMessage}
             className="block size-full"
             onContentHeight={setContentHeight}
             onFullscreenChange={onFullscreenChange}
@@ -135,6 +137,7 @@ export function HtmlRenderFrame(props: {
               src={expandedSrc}
               title={title}
               threadRef={props.threadRef}
+              onSendMessage={props.onSendMessage}
               onClose={() => setExpandedSrc(null)}
             />
           ) : null}

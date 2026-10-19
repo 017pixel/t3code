@@ -56,6 +56,7 @@ export function AttachmentFilePreview(props: {
   asset?: { environmentId: EnvironmentId; attachmentId: string };
   htmlRender?: boolean;
   threadRef?: ScopedThreadRef;
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
   origin?: string;
   onRemove?: () => void;
   onClose?: () => void;
@@ -226,6 +227,7 @@ export function AttachmentFilePreview(props: {
       pdf={kind === "pdf"}
       htmlRender={props.htmlRender === true}
       threadRef={props.threadRef}
+      onSendMessage={props.onSendMessage}
     />
   ) : kind === "audio" ? (
     <AudioPreview src={url} name={props.name} onError={() => setError("Unable to load audio.")} />
