@@ -938,8 +938,9 @@ const make = Effect.gen(function* () {
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 expectedEmpty: true,
-                branch: initialBranch,
-                worktreePath: initialWorktreePath,
+                ...(initialWorktreePath === null
+                  ? {}
+                  : { branch: initialBranch, worktreePath: initialWorktreePath }),
               })
             : threads.dispatch({
                 type: "thread.create",

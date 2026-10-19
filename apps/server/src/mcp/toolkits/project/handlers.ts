@@ -179,6 +179,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 message: error.message,
               });
             }
+            if (error._tag === "ThreadLaunchError" && error.operation === "validate-intent") {
+              return new OrchestratorMcpFailure({
+                code: "invalid_request",
+                message:
+                  "The original launch intent for this clientRequestId does not match or cannot be verified. Inspect the accepted thread with t3_thread_list/t3_thread_read. Retry with the original arguments when their intent is recorded, or use a new clientRequestId for a fresh launch.",
+              });
+            }
             return unavailable();
           }),
         );
