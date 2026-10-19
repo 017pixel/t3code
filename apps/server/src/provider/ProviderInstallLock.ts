@@ -12,8 +12,8 @@ import type { PlatformError } from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
-// The wrapper's go deadline + install backstop stay below this cap, so an
-// expired record cannot start or retain an installer even if its pid was reused.
+// The wrapper's go deadline + install backstop stay below this cap; the
+// generation handshake fences owners paused before creating their wrapper.
 const MAX_LOCK_AGE = Duration.hours(1);
 const IDLE_POLL_INTERVAL = Duration.seconds(1);
 
@@ -93,23 +93,28 @@ const make = Effect.gen(function* () {
         }),
       );
 
-  /** Live pids and incomplete records hold the lock until the age cap. */
-  const isHeld = Effect.fn("ProviderInstallLock.isHeld")(function* (file: string) {
+  const readRecord = Effect.fn("ProviderInstallLock.readRecord")(function* (file: string) {
     const info = yield* fileSystem.stat(file);
     const modifiedAt = Option.match(info.mtime, {
       onNone: () => 0,
       onSome: (date) => date.getTime(),
     });
-    if ((yield* Clock.currentTimeMillis) - modifiedAt >= Duration.toMillis(MAX_LOCK_AGE)) {
-      return false;
-    }
+    const expired =
+      (yield* Clock.currentTimeMillis) - modifiedAt >= Duration.toMillis(MAX_LOCK_AGE);
     // The first line holds pids; the second identifies the owning run, including within one server.
-    const [pids = ""] = (yield* fileSystem.readFileString(file)).split("\n");
-    if (pids === "released") return false;
+    const contents = yield* fileSystem.readFileString(file);
+    const [pids = ""] = contents.split("\n");
     const recorded = pids.split(" ").map(Number);
     const valid = (pid: number) => Number.isSafeInteger(pid) && pid > 0;
-    return recorded.some((pid) => !valid(pid) || isPidAlive(pid));
+    const live = recorded.some((pid) => valid(pid) && isPidAlive(pid));
+    return {
+      contents,
+      modifiedAt,
+      held: !expired && pids !== "released" && (live || recorded.some((pid) => !valid(pid))),
+      expiredLive: expired && live,
+    };
   });
+  const isHeld = (file: string) => readRecord(file).pipe(Effect.map((record) => record.held));
 
   /** Publishes a complete record exclusively; a paused writer must never look abandoned. */
   const createExclusively = (file: string, contents: string, owner: string) => {
@@ -152,18 +157,50 @@ const make = Effect.gen(function* () {
     if (yield* isHeld(path.join(directory, key)).pipe(ignoreNotFound(false))) return undefined;
     const previous = (yield* generations).filter((entry) => entry.key === key);
     const highest = previous.reduce((max, entry) => Math.max(max, entry.generation), 0);
-    if (
-      highest > 0 &&
-      (yield* isHeld(path.join(directory, `${key}.${highest}`)).pipe(ignoreNotFound(false)))
-    )
-      return undefined;
+    const previousFile = highest > 0 ? path.join(directory, `${key}.${highest}`) : undefined;
+    const previousRecord =
+      previousFile === undefined
+        ? undefined
+        : yield* readRecord(previousFile).pipe(ignoreNotFound(undefined));
+    if (previousRecord?.held) return undefined;
     const next = highest + 1;
     const file = path.join(directory, `${key}.${next}`);
     if (!(yield* createExclusively(file, contents, owner))) return undefined;
     // Our directory snapshot may predate a successor that already pruned this
     // number. A recreated lower generation must never run an installer.
     if ((yield* generations).some((entry) => entry.key === key && entry.generation > next)) {
+      yield* fileSystem.remove(file, { force: true });
       return undefined;
+    }
+    if (
+      previousFile !== undefined &&
+      (previousRecord === undefined || previousRecord.expiredLive)
+    ) {
+      // On one host these fs operations are linearizable: owner writes N then
+      // reads the directory; successor links N+1 then reads N. At least one
+      // sees the other, so both can back off but cannot both start installers.
+      const current = yield* readRecord(previousFile).pipe(ignoreNotFound(undefined));
+      if (
+        current !== undefined &&
+        (previousRecord === undefined ||
+          current.contents !== previousRecord.contents ||
+          current.modifiedAt !== previousRecord.modifiedAt)
+      ) {
+        // Restore N as highest; a released N+1 would hide its resumed owner.
+        yield* fileSystem.remove(file, { force: true });
+        return undefined;
+      }
+    }
+    // A rejected successor can disappear after another contender snapshots it.
+    // That contender must not skip the resumed owner below the missing generation.
+    for (const entry of previous) {
+      if (
+        entry.generation < highest &&
+        (yield* isHeld(path.join(directory, entry.name)).pipe(ignoreNotFound(false)))
+      ) {
+        yield* fileSystem.remove(file, { force: true });
+        return undefined;
+      }
     }
     yield* Effect.forEach(
       previous,
@@ -244,18 +281,11 @@ const make = Effect.gen(function* () {
 
   const anyHeld = Effect.gen(function* () {
     const names = yield* fileSystem.readDirectory(directory).pipe(ignoreNotFound([]));
-    const highest = new Map<string, NonNullable<ReturnType<typeof parseGeneration>>>();
+    // A provisional successor must not hide a resumed older owner from turn starts.
     for (const name of names) {
-      if (name.endsWith(".lock")) {
+      if (name.endsWith(".lock") || parseGeneration(name) !== undefined) {
         if (yield* isHeld(path.join(directory, name)).pipe(ignoreNotFound(false))) return true;
       }
-      const entry = parseGeneration(name);
-      if (entry && entry.generation > (highest.get(entry.key)?.generation ?? 0)) {
-        highest.set(entry.key, entry);
-      }
-    }
-    for (const entry of highest.values()) {
-      if (yield* isHeld(path.join(directory, entry.name)).pipe(ignoreNotFound(false))) return true;
     }
     return false;
   }).pipe(Effect.mapError(toLockError));
