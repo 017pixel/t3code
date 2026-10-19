@@ -3123,7 +3123,10 @@ describe("PreviewManager", () => {
           const reply = yield* Queue.poll(replies);
           expect(Option.isSome(reply)).toBe(true);
           if (Option.isSome(reply))
-            expect(reply.value).toMatchObject({ id: 1, error: expect.anything() });
+            expect(reply.value).toMatchObject({
+              id: 1,
+              error: { code: -32000, message: "compositor unavailable" },
+            });
         } else if (outcome === "timeout") {
           // The server gives snapshots ten seconds; desktop painting must stop before that.
           yield* TestClock.adjust(9_000);

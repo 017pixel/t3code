@@ -82,6 +82,7 @@ import {
   START_PICK_CHANNEL,
 } from "./GuestProtocol.ts";
 import { isPreviewAnnotationPayload } from "./PickedElementPayload.ts";
+import { sendPageCommand } from "./GuestInput.ts";
 import { captureFavicon, safeHttpOrigin, selectFaviconCandidates } from "./FaviconCapture.ts";
 import { DEFAULT_RECORDING_INPUT_OPTIONS, type RecordingInputOptions } from "./RecordingInput.ts";
 
@@ -375,7 +376,7 @@ interface ManagedListeners {
   readonly webContents: Electron.WebContents;
 }
 
-type FrameCaptureConsumer = "picture-in-picture" | "recording";
+type FrameCaptureConsumer = "picture-in-picture" | "recording" | symbol;
 
 interface FrameCaptureSession {
   readonly recordingInputOptions?: RecordingInputOptions;
@@ -2348,6 +2349,26 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     );
   });
 
+  const captureAgentScreenshot = Effect.fn("PreviewManager.captureAgentScreenshot")(function* (
+    tabId: string,
+    wc: Electron.WebContents,
+    debuggee: Electron.Debugger,
+    params: Record<string, unknown>,
+  ) {
+    const consumer = Symbol("agent-screenshot");
+    return yield* Effect.acquireUseRelease(
+      startFrameCapture(tabId, consumer),
+      () =>
+        Effect.tryPromise((signal) =>
+          sendPageCommand(wc, debuggee, "Page.captureScreenshot", params, signal),
+        ).pipe(
+          // ServerBrowserPage gives the whole snapshot ten seconds.
+          Effect.timeout("8 seconds"),
+        ),
+      () => stopFrameCapture(tabId, consumer),
+    );
+  });
+
   // The scheme is read after the session attaches so a concurrent setColorScheme is not
   // overwritten with a stale snapshot.
   const restoreControlSession = (tabId: string, wc: Electron.WebContents) =>
@@ -2362,7 +2383,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       }
       if (afterAttach.serverTab) {
         yield* listenForAgentPointers;
-        browserHost.attach(afterAttach.serverTab, { webContents: wc, debugger: control.debugger });
+        browserHost.attach(afterAttach.serverTab, {
+          webContents: wc,
+          debugger: control.debugger,
+          captureScreenshot: (params) =>
+            captureAgentScreenshot(tabId, wc, control.debugger, params),
+        });
       }
       if (afterAttach.colorScheme !== "system") {
         yield* attemptPromise({ operation: "applyColorScheme", tabId, webContentsId: wc.id }, () =>

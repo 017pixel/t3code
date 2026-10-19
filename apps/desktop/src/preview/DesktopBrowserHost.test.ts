@@ -38,6 +38,8 @@ const makeDebuggee = () => {
     tab: {
       webContents: webContents as unknown as Electron.WebContents,
       debugger: debuggee as unknown as Electron.Debugger,
+      captureScreenshot: () =>
+        Effect.promise((_signal) => debuggee.sendCommand("Page.captureScreenshot")),
     },
     emit: (method: string, params: unknown) => emitter.emit("message", {}, method, params, ""),
     release: () => pending.splice(0).forEach((resolve) => resolve()),

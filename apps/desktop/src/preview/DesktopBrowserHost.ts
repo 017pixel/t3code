@@ -9,6 +9,7 @@ import {
   type DesktopBrowserEvent as DesktopBrowserEventType,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -35,6 +36,7 @@ export interface DesktopBrowserTabKey {
 export interface DesktopBrowserTabDebugger {
   readonly webContents: Electron.WebContents;
   readonly debugger: Electron.Debugger;
+  readonly captureScreenshot: (params: Record<string, unknown>) => Effect.Effect<unknown, Error>;
 }
 
 const keyOf = ({ threadId, tabId }: DesktopBrowserTabKey) => `${threadId}\u0000${tabId}`;
@@ -43,6 +45,7 @@ interface AttachedTab {
   readonly key: DesktopBrowserTabKey;
   readonly debuggee: DesktopBrowserTabDebugger;
   relay: CdpRelayConnection | null;
+  captureController: AbortController | null;
   downloadDirectory: string | null;
   pendingDownloadGuid: string | null;
   agentInputAt: number;
@@ -80,19 +83,36 @@ export const make = Effect.gen(function* () {
     readonly x: number;
     readonly y: number;
   }>(16);
-  const runFork = Effect.runForkWith(yield* Effect.context<never>());
+  const context = yield* Effect.context<never>();
+  const runFork = Effect.runForkWith(context);
+  const runPromise = Effect.runPromiseWith(context);
   const tabs = new Map<string, AttachedTab>();
   const emit = (event: DesktopBrowserEventType) => runFork(PubSub.publish(outbox, event));
+
+  const releaseRelay = (tab: AttachedTab) => {
+    tab.relay = null;
+    tab.captureController?.abort();
+    tab.captureController = null;
+  };
 
   const relayFor = (tab: AttachedTab) => {
     if (tab.relay) return tab.relay;
     const { webContents, debugger: debuggee } = tab.debuggee;
+    const controller = new AbortController();
+    tab.captureController = controller;
     const relay: CdpRelayConnection = createCdpRelayConnection(
       {
         send: (method, params, sessionId) =>
-          sessionId === undefined
-            ? sendPageCommand(webContents, debuggee, method, params)
-            : debuggee.sendCommand(method, params, sessionId),
+          sessionId === undefined && method === "Page.captureScreenshot"
+            ? runPromise(tab.debuggee.captureScreenshot(params), {
+                signal: controller.signal,
+              }).catch((cause: unknown) => {
+                // Preserve native CDP errors across the Effect/Promise boundary.
+                throw Cause.isUnknownError(cause) ? cause.cause : cause;
+              })
+            : sessionId === undefined
+              ? sendPageCommand(webContents, debuggee, method, params)
+              : debuggee.sendCommand(method, params, sessionId),
         targetId: () =>
           debuggee
             .sendCommand("Target.getTargetInfo")
@@ -133,6 +153,7 @@ export const make = Effect.gen(function* () {
     const tab = tabs.get(id);
     if (!tab) return;
     tabs.delete(id);
+    releaseRelay(tab);
     tab.debuggee.debugger.off("message", tab.onMessage);
     emit({ type: "detached", ...key });
   };
@@ -145,6 +166,7 @@ export const make = Effect.gen(function* () {
       key,
       debuggee,
       relay: null,
+      captureController: null,
       downloadDirectory: null,
       pendingDownloadGuid: null,
       agentInputAt: Number.NEGATIVE_INFINITY,
@@ -173,7 +195,7 @@ export const make = Effect.gen(function* () {
         return;
       }
       if (command.value.type === "release") {
-        tab.relay = null;
+        releaseRelay(tab);
         return;
       }
       if (AGENT_INPUT_COMMAND.test(command.value.message)) tab.agentInputAt = performance.now();
@@ -189,7 +211,7 @@ export const make = Effect.gen(function* () {
     Effect.forEach(
       [...tabs.values()],
       (tab) => {
-        tab.relay = null;
+        releaseRelay(tab);
         return PubSub.publish(outbox, { type: "attached", ...tab.key });
       },
       { discard: true },
