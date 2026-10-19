@@ -1263,6 +1263,9 @@ export const make = (
   ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
 > =>
   Effect.gen(function* () {
+    const additionalDirectories = options.additionalDirectories?.length
+      ? { additionalDirectories: options.additionalDirectories }
+      : {};
     const crypto = yield* Crypto.Crypto;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.fork(yield* Scope.Scope);
@@ -2174,9 +2177,6 @@ export const make = (
           | EffectAcpSchema.LoadSessionResponse
           | EffectAcpSchema.NewSessionResponse
           | EffectAcpSchema.ResumeSessionResponse;
-        const additionalDirectories = options.additionalDirectories?.length
-          ? { additionalDirectories: options.additionalDirectories }
-          : {};
         if (options.resumeSessionId) {
           sessionId = options.resumeSessionId;
           if (
@@ -2422,6 +2422,7 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...additionalDirectories,
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.LoadSessionRequest;
             return runLoadSessionWithReplayIdle(requestPayload, started.initializeResult);
@@ -2434,6 +2435,7 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...additionalDirectories,
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.ResumeSessionRequest;
             return runLoggedRequest(
@@ -2450,6 +2452,7 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...additionalDirectories,
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.ForkSessionRequest;
             return runLoggedRequest(

@@ -5815,14 +5815,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const mcpContext = yield* readMcpContext(threadId);
           const activationOptions = acpMcpActivation(mcpContext);
           prepareTerminalEnvironment(mcpContext, sessionId);
-          const activated = canLoadSession
-            ? yield* runtime.loadSession(sessionId, activationOptions)
-            : canResumeSession
+          const activated =
+            canResumeSession && (flavor.preferResumeSession === true || !canLoadSession)
               ? yield* runtime.resumeSession(sessionId, activationOptions)
-              : yield* new ProviderAdapter.ProviderAdapterProtocolError({
-                  driver,
-                  detail: `ACP driver cannot load or resume session ${sessionId}`,
-                });
+              : canLoadSession
+                ? yield* runtime.loadSession(sessionId, activationOptions)
+                : yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver,
+                    detail: `ACP driver cannot load or resume session ${sessionId}`,
+                  });
           rememberTerminalEnvironment(activated.sessionId, yield* readMcpContext(threadId));
           return activated;
         });

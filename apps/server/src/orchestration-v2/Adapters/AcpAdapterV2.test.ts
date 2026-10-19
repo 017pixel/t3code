@@ -12107,6 +12107,121 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.effect(
+    "prefers resume during activation and preserves directories across session operations",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const additionalDirectories = [path.join(process.cwd(), "runtime-files")];
+        const instanceId = ProviderInstanceId.make("acp-resume-preference");
+        let nativeRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
+        const makeRuntime = makeMockRuntime({
+          childProcessSpawner,
+          mockAgentPath,
+          protocolEvents,
+          wrapRuntime: (runtime) => {
+            nativeRuntime = runtime;
+            return {
+              ...runtime,
+              start: () =>
+                runtime.start().pipe(
+                  Effect.map((started) => ({
+                    ...started,
+                    initializeResult: {
+                      ...started.initializeResult,
+                      agentCapabilities: {
+                        ...started.initializeResult.agentCapabilities,
+                        loadSession: true,
+                      },
+                    },
+                  })),
+                ),
+              // Some agents advertise load but only resume can activate their saved sessions.
+              loadSession: () =>
+                Effect.fail(EffectAcpErrors.AcpRequestError.internalError("load is unsupported")),
+            };
+          },
+        });
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            preferResumeSession: true,
+            makeRuntime: (input) => {
+              const runtimeOptions = { ...input, additionalDirectories };
+              return makeRuntime(runtimeOptions);
+            },
+          },
+        });
+        const threadId = ThreadId.make("thread-acp-resume-preference");
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const session = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("session-acp-resume-preference"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const initialThread = yield* session.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = {
+          ...initialThread,
+          nativeThreadRef: {
+            driver: ACP_TEST_DRIVER,
+            nativeId: "saved-session",
+            strength: "strong" as const,
+          },
+        };
+        yield* Queue.takeAll(protocolEvents);
+        const resumed = yield* session.resumeThread({
+          providerThread,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal(resumed.status, "idle");
+        const resumeRequests = (yield* Queue.takeAll(protocolEvents)).filter(
+          (event) =>
+            event.direction === "outgoing" && rawProtocolMethod(event) === "session/resume",
+        );
+        assert.lengthOf(resumeRequests, 1);
+        assert.equal(rawProtocolRequestParam(resumeRequests[0]!, "sessionId"), "saved-session");
+        assert.deepEqual(
+          rawProtocolRequestParam(resumeRequests[0]!, "additionalDirectories"),
+          additionalDirectories,
+        );
+
+        assert.isDefined(nativeRuntime);
+        yield* nativeRuntime!.loadSession("loaded-session");
+        yield* nativeRuntime!.forkSession("loaded-session");
+        const requests = (yield* Queue.takeAll(protocolEvents)).filter(
+          (event) =>
+            event.direction === "outgoing" &&
+            ["session/resume", "session/fork"].includes(rawProtocolMethod(event) ?? ""),
+        );
+        assert.lengthOf(requests, 2);
+        for (const request of requests) {
+          assert.deepEqual(
+            rawProtocolRequestParam(request, "additionalDirectories"),
+            additionalDirectories,
+          );
+        }
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.effect("restarts the ACP child process before the next prompt after interrupt", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
