@@ -4792,6 +4792,10 @@ it.effect("caches silent repository coverage for ten minutes before probing agai
   Effect.gen(function* () {
     const separately: string[] = [];
     let coverageFails = false;
+    let coverageAnswers = [
+      { repository: "acme/docs", covered: true },
+      { repository: "acme/old", covered: false },
+    ];
     const coverageAsks: Array<ReadonlyArray<string>> = [];
     const service = yield* makeService({
       projects: [
@@ -4813,14 +4817,7 @@ it.effect("caches silent repository coverage for ten minutes before probing agai
           searchCoverage: ({ repositories }) =>
             Effect.suspend(() => {
               coverageAsks.push(repositories);
-              return coverageFails
-                ? Effect.fail(requestFailed)
-                : Effect.succeed(
-                    repositories.map((repository) => ({
-                      repository,
-                      covered: repository !== "acme/old",
-                    })),
-                  );
+              return coverageFails ? Effect.fail(requestFailed) : Effect.succeed(coverageAnswers);
             }),
         }),
       ],
@@ -4841,6 +4838,23 @@ it.effect("caches silent repository coverage for ten minutes before probing agai
       ["acme/docs", "acme/old"],
     ]);
     assert.deepStrictEqual(separately, ["acme/docs", "acme/old"]);
+    separately.length = 0;
+
+    coverageFails = false;
+    coverageAnswers = [{ repository: "acme/docs", covered: true }];
+    yield* service.invalidate({});
+    yield* service.list({ state: "open", involvement: "all" });
+    assert.deepStrictEqual(coverageAsks, [
+      ["acme/docs", "acme/old"],
+      ["acme/docs", "acme/old"],
+      ["acme/docs", "acme/old"],
+    ]);
+    assert.deepStrictEqual(separately.splice(0), ["acme/old"]);
+
+    yield* service.invalidate({});
+    yield* service.list({ state: "open", involvement: "all" });
+    assert.strictEqual(coverageAsks.length, 3);
+    assert.deepStrictEqual(separately, ["acme/old"]);
   }),
 );
 it.effect("reads the repositories one at a time when the search itself fails", () =>
