@@ -2777,12 +2777,27 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect("shows the command being approved, not only Codex's reason", () =>
+  it.effect.each([
+    {
+      name: "the command, not only Codex's reason",
+      params: { command: "/bin/bash -lc 'ls ~/.t3'", reason: "Inspect T3 Code install files" },
+      prompt: "/bin/bash -lc 'ls ~/.t3'",
+      title: "Inspect T3 Code install files",
+    },
+    {
+      name: "the host a network approval grants, with the command that wants it",
+      params: {
+        command: "node task.js",
+        networkApprovalContext: { protocol: "https", host: "example.com" },
+      },
+      prompt: "https example.com",
+      title: "node task.js",
+    },
+  ])("approval shows $name", ({ params, prompt, title }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const nativeThreadId = "command-reason-thread";
         const nativeTurnId = "command-reason-turn";
-        const command = "/bin/bash -lc 'ls ~/.t3'";
         const transcript = makeCodexReplayTranscript({
           scenario: "command-approval-with-reason",
           entries: [
@@ -2798,8 +2813,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   turnId: nativeTurnId,
                   itemId: "reason-command",
                   startedAtMs: 1782622441000,
-                  command,
-                  reason: "Inspect T3 Code install files",
+                  ...params,
                 },
               },
             },
@@ -2838,15 +2852,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
         yield* awaitUntil(() => approvalItem() !== undefined, "approval request");
         const item = approvalItem();
-        assert.equal(
-          item?.type === "turn_item.updated" && item.turnItem.title,
-          "Inspect T3 Code install files",
-        );
+        assert.equal(item?.type === "turn_item.updated" && item.turnItem.title, title);
         assert.equal(
           item?.type === "turn_item.updated" &&
             item.turnItem.type === "approval_request" &&
             item.turnItem.prompt,
-          command,
+          prompt,
         );
         const request = harness.events.findLast(
           (event) => event.type === "runtime_request.updated",

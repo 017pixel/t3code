@@ -1711,6 +1711,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               { type: "approval_request" }
             >["requestKind"];
             readonly prompt: string;
+            readonly title: string | null;
             readonly options: Extract<
               OrchestrationV2TurnItem,
               { type: "approval_request" }
@@ -1779,7 +1780,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         body.type === "approval_request"
           ? {
               ...base,
-              title: native.type === "permission" ? native.action : null,
+              title: body.title,
               type: "approval_request",
               requestId,
               requestKind: body.requestKind,
@@ -1819,13 +1820,18 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const toolName =
         data.source === undefined ? undefined : turn?.tools.get(data.source.id)?.name;
       const save = data.save ?? [];
+      // Resources split a pipeline into its commands; the command keeps it whole.
+      const command = stringField(data.metadata, "command");
       yield* showRequest(
         data.sessionID,
         { type: "permission", id: data.id, action: data.action, resources: data.resources, save },
         {
           type: "approval_request",
           requestKind: openCodePermissionRequestKind(data.action, toolName),
-          prompt: data.resources.length === 0 ? data.action : data.resources.join("\n"),
+          prompt:
+            command ?? (data.resources.length === 0 ? data.action : data.resources.join("\n")),
+          // "bash" beside its own command explains nothing.
+          title: command === undefined ? data.action : null,
           options: [
             { decision: "cancel", label: "Cancel" },
             { decision: "decline", label: "Decline" },

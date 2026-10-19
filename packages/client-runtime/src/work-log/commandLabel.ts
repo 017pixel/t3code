@@ -1377,10 +1377,16 @@ const BARE_SHELL_WRAPPER =
 
 /** The command an approval asks about, unwrapped only when nothing else can run. */
 export function approvalCommandDisplayText(command: string): string {
-  const trimmed = command.trim();
+  const trimmed = trimShellBlanks(command);
   const match = BARE_SHELL_WRAPPER.exec(trimmed);
-  const script = (match?.[1] ?? match?.[2]?.replace(/\\(["\\$`])/gu, "$1") ?? match?.[3])?.trim();
-  return withVisibleControlCharacters(script || trimmed);
+  const script = match?.[1] ?? match?.[2]?.replace(/\\(["\\$`])/gu, "$1") ?? match?.[3];
+  return withVisibleControlCharacters((script && trimShellBlanks(script)) || trimmed);
+}
+
+// Shells split words only on ASCII blanks; a leading U+00A0 is part of the command name,
+// so `String.trim` would hide it.
+function trimShellBlanks(text: string): string {
+  return text.replace(/^[ \t\n]+|[ \t\n]+$/gu, "");
 }
 
 export function withVisibleControlCharacters(text: string): string {
