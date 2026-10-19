@@ -156,8 +156,11 @@ describe("IssueService", () => {
       expect(detail).toMatchObject({ writable: false, scope: "other/backend", key: "7" });
 
       yield* service.comment({ ...own, body: "ok" });
-      const refused = yield* Effect.flip(service.comment({ ...external, body: "no" }));
-      expect(refused).toMatchObject({ _tag: "IssueOperationError", reason: "read-only" });
+      const refused = yield* service.comment({ ...external, body: "no" }).pipe(Effect.result);
+      expect(refused).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "IssueOperationError", reason: "read-only" },
+      });
       expect(writes).toEqual(["acme/web#1"]);
 
       // Another host is not reachable through this project's credentials at all.
@@ -204,7 +207,7 @@ describe("IssueService", () => {
     }),
   );
 
-  it.effect("lists each repository once and reports unusable trackers per host", () =>
+  it.effect("deduplicates and pages repositories despite partial failures", () =>
     Effect.gen(function* () {
       const listed: string[] = [];
       const service = yield* makeService({
@@ -212,7 +215,13 @@ describe("IssueService", () => {
           project({ id: "web", repository: "acme/web" }),
           project({ id: "web-worktree", repository: "acme/web" }),
           project({ id: "api", repository: "acme/api" }),
-          project({ id: "gitlab", repository: "acme/gl", provider: "gitlab", host: "gitlab.com" }),
+          project({ id: "docs", repository: "acme/docs" }),
+          project({
+            id: "gitlab",
+            repository: "acme/gl",
+            provider: "gitlab",
+            host: "gitlab.com",
+          }),
           project({ id: "plain" }),
         ],
         trackers: [
@@ -227,8 +236,12 @@ describe("IssueService", () => {
                     reason: "failed",
                     detail: "boom",
                   });
+                if (input.scope === "acme/docs")
+                  return { items: [issue("3", "2026-07-04T00:00:00Z")], nextCursor: null };
+                if (input.cursor === "next")
+                  return { items: [issue("4", "2026-07-01T00:00:00Z")], nextCursor: null };
                 return {
-                  items: [issue("2", "2026-07-05T00:00:00Z"), issue("1")],
+                  items: [issue("1"), issue("2", "2026-07-05T00:00:00Z")],
                   nextCursor: "next",
                 };
               }),
@@ -236,16 +249,17 @@ describe("IssueService", () => {
         ],
       });
       const result = yield* service.list({ state: "open" });
-      expect(listed.sort()).toEqual(["acme/api", "acme/web"]);
+      expect(listed.sort()).toEqual(["acme/api", "acme/docs", "acme/web"]);
       expect(result.entries.map((entry) => [entry.projectId, entry.key])).toEqual([
         ["web", "2"],
+        ["docs", "3"],
         ["web", "1"],
       ]);
       expect(result.nextCursors).toEqual({ "github.com acme/web": "next" });
       expect(result.errors).toEqual([{ projectId: "api", projectTitle: "api", message: "boom" }]);
       expect(result.viewers).toEqual({ "github.com": "julius" });
       expect(result.trackers).toEqual([
-        expect.objectContaining({ host: "github.com", projectCount: 3, configured: true }),
+        expect.objectContaining({ host: "github.com", projectCount: 4, configured: true }),
         expect.objectContaining({
           host: "gitlab.com",
           tracker: "gitlab",
@@ -262,6 +276,8 @@ describe("IssueService", () => {
         cursors: { "github.com acme/web": "next" },
       });
       expect(listed).toEqual(["acme/web"]);
+      expect(next.entries.map((entry) => [entry.projectId, entry.key])).toEqual([["web", "4"]]);
+      expect(next.nextCursors).toEqual({});
       expect(next.errors).toEqual([]);
     }),
   );

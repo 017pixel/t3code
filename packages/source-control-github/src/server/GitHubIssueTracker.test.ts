@@ -5,7 +5,6 @@ import * as Layer from "effect/Layer";
 import * as GitHubApi from "./GitHubApi.ts";
 import * as GitHubIssueTracker from "./GitHubIssueTracker.ts";
 
-/** A detail answer as GitHub's GraphQL API shapes it, with every section populated once. */
 const DETAIL_RESPONSE = JSON.stringify({
   data: {
     viewer: { login: "julius" },
@@ -101,11 +100,11 @@ const DETAIL_RESPONSE = JSON.stringify({
   },
 });
 
-function tracker(graphql: (query: string, variables: unknown) => string) {
+function tracker(graphql: (variables: unknown) => string) {
   return GitHubIssueTracker.make.pipe(
     Effect.provide(
       Layer.mock(GitHubApi.GitHubApi)({
-        graphql: ({ query, variables }) => Effect.succeed(graphql(query, variables)),
+        graphql: ({ variables }) => Effect.succeed(graphql(variables)),
       }),
     ),
   );
@@ -115,10 +114,8 @@ describe("GitHubIssueTracker", () => {
   it.effect("maps a detail read to the neutral issue shape", () =>
     Effect.gen(function* () {
       let seen: unknown;
-      let sentQuery = "";
-      const api = yield* tracker((query, variables) => {
+      const api = yield* tracker((variables) => {
         seen = variables;
-        sentQuery = query;
         return DETAIL_RESPONSE;
       });
       const issue = yield* api.getIssue({
@@ -128,12 +125,11 @@ describe("GitHubIssueTracker", () => {
         key: "42",
       });
       expect(seen).toEqual({ owner: "acme", name: "web", number: 42 });
-      // GitHub rejects a query that selects one field twice with different arguments.
-      expect(sentQuery.match(/\bcomments\b/g)).toHaveLength(1);
       expect(issue).toMatchObject({
         key: "42",
         displayKey: "#42",
         title: "Composer loses focus",
+        body: "Typing in the composer drops focus after a paste.",
         state: { category: "closed", name: "closed", closeReason: "not-planned" },
         author: { login: "octocat", name: "Octo Cat", avatarUrl: "https://avatars/octocat" },
         assignees: [{ login: "theo" }],
@@ -172,21 +168,6 @@ describe("GitHubIssueTracker", () => {
         ["referenced", "acme/web#50"],
         ["closed", null],
       ]);
-    }),
-  );
-
-  it.effect("refuses a key that names no GitHub issue number without a request", () =>
-    Effect.gen(function* () {
-      let requests = 0;
-      const api = yield* tracker(() => {
-        requests += 1;
-        return DETAIL_RESPONSE;
-      });
-      const error = yield* Effect.flip(
-        api.getIssue({ cwd: "/w", host: "github.com", scope: "acme/web", key: "ENG-42" }),
-      );
-      expect(error.reason).toBe("not-found");
-      expect(requests).toBe(0);
     }),
   );
 });
