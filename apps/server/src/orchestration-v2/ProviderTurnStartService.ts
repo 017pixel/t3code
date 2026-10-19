@@ -1,3 +1,4 @@
+import * as TemporaryBranchNaming from "./TemporaryBranchNaming.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
@@ -87,6 +88,7 @@ export class ProviderTurnStartServiceV2 extends Context.Service<
 export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   never,
+  | TemporaryBranchNaming.TemporaryBranchNaming
   | EventSink.EventSinkV2
   | ContextHandoffService.ContextHandoffServiceV2
   | IdAllocator.IdAllocatorV2
@@ -104,6 +106,7 @@ export const layer: Layer.Layer<
 > = Layer.effect(
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
+    const branchNaming = yield* TemporaryBranchNaming.TemporaryBranchNaming;
     const eventSink = yield* EventSink.EventSinkV2;
     const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -119,6 +122,15 @@ export const layer: Layer.Layer<
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+
+    const withBranchNaming = (
+      session: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      naming: Parameters<typeof branchNaming.schedule>[0],
+    ): ProviderAdapter.ProviderAdapterV2SessionRuntime => ({
+      ...session,
+      startTurn: (turn) =>
+        session.startTurn(turn).pipe(Effect.tap(() => branchNaming.schedule(naming))),
+    });
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -1071,6 +1083,14 @@ export const layer: Layer.Layer<
                 !coveredItemIds.has(item.id) &&
                 historicalMessage(item) !== null,
             );
+      const branchNamingInput = {
+        threadId: projection.thread.id,
+        projectId: projection.thread.projectId,
+        commandId: CommandId.make(`${run.id}:branch-name`),
+        branch: projection.thread.branch,
+        worktreePath: projection.thread.worktreePath,
+        message: { text: userText, attachments: message.attachments },
+      };
       const startWithHandoffs = (
         turnInput: Parameters<typeof session.startTurn>[0],
         compact = false,
@@ -1206,7 +1226,7 @@ export const layer: Layer.Layer<
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         appThread: projection.thread,
         providerSessionId,
-        session: deliverySession,
+        session: withBranchNaming(deliverySession, branchNamingInput),
         run: runningRun,
         rootNode: runningRootNode,
         checkpointScope,

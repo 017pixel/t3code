@@ -1,3 +1,5 @@
+import * as Orchestrator from "./Orchestrator.ts";
+import * as BranchNaming from "./TemporaryBranchNaming.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -143,7 +145,12 @@ function makeHarness(options: HarnessOptions = {}) {
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "thread-launch" },
     layerRegistry,
-    { databaseLayer: layerDatabase, runEffectWorker: false },
+    {
+      databaseLayer: layerDatabase,
+      runEffectWorker: false,
+      branchNamingDependencies: Layer.suspend(() => layerExternalServices.pipe(Layer.orDie)),
+      turnStartServices: Layer.suspend(() => layerExternalServices.pipe(Layer.orDie)),
+    },
   );
   const layerServerSettings = ServerSettings.layerTest(options.serverSettings);
   const layerReceipts = CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase));
@@ -265,6 +272,7 @@ function makeHarness(options: HarnessOptions = {}) {
   );
   return {
     layer: Layer.mergeAll(
+      BranchNaming.layer.pipe(Layer.provide(Layer.merge(layerOrchestrator, layerExternalServices))),
       layerOrchestrator,
       layerLaunch,
       layerRegistry,
@@ -327,6 +335,27 @@ function waitUntil<E, R>(predicate: () => Effect.Effect<boolean, E, R>): Effect.
     assert.fail("Condition was not reached before timeout.");
   });
 }
+
+const nameAcceptedTurn = Effect.fnUntraced(function* (threadId: ThreadId) {
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  yield* threads.streamStoredEventsFrom({ threadId, eventType: "run.updated" }).pipe(
+    Stream.filter(
+      ({ event }) => event.type === "run.updated" && event.payload.status === "starting",
+    ),
+    Stream.runHead,
+  );
+  const projection = yield* threads.getThreadProjection(threadId);
+  const message = projection.messages[0]!;
+  const naming = yield* BranchNaming.TemporaryBranchNaming;
+  yield* naming.schedule({
+    threadId,
+    projectId: projection.thread.projectId,
+    commandId: CommandId.make(`command:accepted:${threadId}`),
+    branch: projection.thread.branch,
+    worktreePath: projection.thread.worktreePath,
+    message: { text: message.text, attachments: message.attachments },
+  });
+});
 
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>
@@ -1096,7 +1125,7 @@ it.effect("uses the available source control writer for generated worktree branc
 
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
-      yield* launches.launch(
+      const launched = yield* launches.launch(
         launchInput({
           command: "command:launch:source-control-writer",
           thread: "thread:launch:source-control-writer",
@@ -1104,6 +1133,7 @@ it.effect("uses the available source control writer for generated worktree branc
           workspace: { type: "worktree", baseRef: "main" },
         }),
       );
+      yield* nameAcceptedTurn(launched.threadId);
       yield* waitUntil(() => Effect.sync(() => harness.generateBranchName.mock.calls.length === 1));
       assert.deepEqual(
         harness.generateBranchName.mock.calls[0]?.[0]?.modelSelection,
@@ -1134,7 +1164,7 @@ it.effect("falls back when the source control writer is unavailable", () =>
 
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
-      yield* launches.launch(
+      const launched = yield* launches.launch(
         launchInput({
           command: "command:launch:source-control-writer-fallback",
           thread: "thread:launch:source-control-writer-fallback",
@@ -1142,6 +1172,7 @@ it.effect("falls back when the source control writer is unavailable", () =>
           workspace: { type: "worktree", baseRef: "main" },
         }),
       );
+      yield* nameAcceptedTurn(launched.threadId);
       yield* waitUntil(() => Effect.sync(() => harness.generateBranchName.mock.calls.length === 1));
       assert.deepEqual(
         harness.generateBranchName.mock.calls[0]?.[0]?.modelSelection,
@@ -1424,6 +1455,7 @@ it.effect("names the worktree itself when the client provides no branch", () =>
           workspace: { type: "worktree", baseRef: "main" },
         }),
       );
+      yield* nameAcceptedTurn(launched.threadId);
       yield* waitUntil(() => Effect.sync(() => harness.createWorktree.mock.calls.length === 1));
       assert.match(
         harness.createWorktree.mock.calls[0]?.[0]?.newRefName ?? "",
@@ -1496,6 +1528,7 @@ it.effect.each(
           workspace: { type: "worktree", baseRef: "main", branch: "t3/abcd1234" },
         }),
       );
+      yield* nameAcceptedTurn(launched.threadId);
       const renameFiber = yield* Deferred.await(branchNameStarted);
       assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3/abcd1234");
       yield* waitUntil(() =>
@@ -1645,6 +1678,7 @@ it.effect("provisions under t3-<hash> when a plain t3 branch blocks t3/*", () =>
           workspace: { type: "worktree", baseRef: "main", branch: "t3/abcd1234" },
         }),
       );
+      yield* nameAcceptedTurn(launched.threadId);
       yield* waitUntil(() =>
         threads
           .getThreadProjection(launched.threadId)
@@ -1661,7 +1695,7 @@ it.effect("keeps an explicit branch name instead of generating one", () =>
     const harness = makeHarness();
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
-      yield* launches.launch(
+      const launched = yield* launches.launch(
         launchInput({
           command: "command:launch:explicit-branch",
           thread: "thread:launch:explicit-branch",
@@ -1669,6 +1703,7 @@ it.effect("keeps an explicit branch name instead of generating one", () =>
           workspace: { type: "worktree", baseRef: "main", branch: "my-feature" },
         }),
       );
+      yield* nameAcceptedTurn(launched.threadId);
       yield* waitUntil(() => Effect.sync(() => harness.createWorktree.mock.calls.length === 1));
       assert.equal(harness.generateBranchName.mock.calls.length, 0);
       assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "my-feature");
@@ -1696,6 +1731,7 @@ it.effect("keeps the temporary branch when branch generation fails", () =>
           workspace: { type: "worktree", baseRef: "main", branch: "t3/abcd1234" },
         }),
       );
+      yield* nameAcceptedTurn(launched.threadId);
       yield* waitUntil(() => Effect.sync(() => harness.generateBranchName.mock.calls.length === 1));
       assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3/abcd1234");
       yield* waitUntil(() =>
@@ -1730,6 +1766,7 @@ it.effect("renames a temporary branch on an existing worktree to a generated nam
           },
         }),
       );
+      yield* nameAcceptedTurn(launched.threadId);
       yield* waitUntil(() =>
         threads
           .getThreadProjection(launched.threadId)
@@ -2063,6 +2100,29 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
         workspace: { type: "worktree", baseRef: "main" },
       }),
     );
+    yield* threads
+      .streamStoredEventsFrom({ threadId: launched.threadId, eventType: "run.updated" })
+      .pipe(
+        Stream.filter(
+          ({ event }) => event.type === "run.updated" && event.payload.status === "failed",
+        ),
+        Stream.runHead,
+      );
+    const original = (yield* threads.getThreadProjection(launched.threadId)).thread;
+    const git = yield* GitWorkflow.GitWorkflowService;
+    yield* git.renameBranch({
+      cwd: original.worktreePath!,
+      oldBranch: original.branch!,
+      newBranch: "generated-branch",
+    });
+    yield* threads.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("command:launch:reuse:rename"),
+      threadId: launched.threadId,
+      branch: "generated-branch",
+      expectedBranch: original.branch,
+      expectedWorktreePath: original.worktreePath,
+    });
     yield* waitUntil(() =>
       threads
         .getThreadProjection(launched.threadId)
@@ -2918,23 +2978,11 @@ it.effect("cancels tracked setup before provider work is released", () =>
   }),
 );
 
-it.effect("stops an in-flight branch rename when tracked setup is cancelled", () =>
+it.effect("does not spend branch naming on cancelled setup", () =>
   Effect.gen(function* () {
     const setupEntered = yield* Deferred.make<void>();
-    const branchNameStarted = yield* Deferred.make<void>();
-    const allowBranchName = yield* Deferred.make<void>();
-    const branchNameInterrupted = yield* Deferred.make<void>();
-    const renameAttempted = yield* Deferred.make<void>();
     const harness = makeHarness({
-      renameBranch: (input) =>
-        Deferred.succeed(renameAttempted, undefined).pipe(Effect.as({ branch: input.newBranch })),
       runSetup: () => Deferred.succeed(setupEntered, undefined).pipe(Effect.andThen(Effect.never)),
-      generateBranchName: () =>
-        Deferred.succeed(branchNameStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(allowBranchName)),
-          Effect.as({ branch: "generated-branch" }),
-          Effect.onInterrupt(() => Deferred.succeed(branchNameInterrupted, undefined)),
-        ),
     });
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
@@ -2949,18 +2997,8 @@ it.effect("stops an in-flight branch rename when tracked setup is cancelled", ()
         }),
       );
       yield* Deferred.await(setupEntered);
-      yield* Deferred.await(branchNameStarted);
       assert.isTrue(yield* tracker.cancel(launched.threadId));
-      // Let a rename that survived the cancel finish, then check it never ran.
-      yield* Deferred.succeed(allowBranchName, undefined);
-      yield* Effect.raceFirst(
-        Deferred.await(branchNameInterrupted),
-        Deferred.await(renameAttempted),
-      );
-      assert.isTrue(
-        yield* Deferred.isDone(branchNameInterrupted),
-        "the cancelled setup's branch rename kept running",
-      );
+      assert.equal(harness.generateBranchName.mock.calls.length, 0);
       assert.equal(harness.renameBranch.mock.calls.length, 0);
       assert.isNull((yield* threads.getThreadProjection(launched.threadId)).thread.worktreePath);
     }).pipe(Effect.provide(harness.layer));
@@ -3630,4 +3668,101 @@ it.effect("names an empty launch only after its first provider-reaching message"
       assert.equal((yield* threads.getThreadProjection(launched.threadId)).thread.branch, branch);
     }).pipe(Effect.provide(harness.layer));
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("restores the temporary Git branch when branch metadata cannot be persisted", () =>
+  Effect.gen(function* () {
+    let branch = "t3/abcd1234";
+    const started = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+    const failures = yield* Queue.unbounded<void>();
+    const harness = makeHarness({
+      generateBranchName: () =>
+        Effect.fiber.pipe(
+          Effect.tap((fiber) => Deferred.succeed(started, fiber)),
+          Effect.as({ branch: "generated-branch" }),
+        ),
+      renameBranch: (input) =>
+        Effect.sync(() => {
+          branch = input.newBranch;
+          return { branch };
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: "command:rename-persistence",
+          thread: "thread:rename-persistence",
+          message: "Implement the editor",
+          workspace: { type: "worktree", baseRef: "main", branch },
+        }),
+      );
+      yield* threads
+        .streamStoredEventsFrom({
+          threadId: launched.threadId,
+          eventType: "thread.metadata-updated",
+        })
+        .pipe(
+          Stream.filter(
+            ({ event }) =>
+              event.type === "thread.metadata-updated" &&
+              event.payload.worktreePath === "/repo-worktrees/feature",
+          ),
+          Stream.runHead,
+        );
+      yield* threads
+        .streamStoredEventsFrom({ threadId: launched.threadId, eventType: "run.updated" })
+        .pipe(
+          Stream.filter(
+            ({ event }) => event.type === "run.updated" && event.payload.status === "starting",
+          ),
+          Stream.runHead,
+        );
+      const namingLayer = Layer.fresh(BranchNaming.layer).pipe(
+        Layer.provide(
+          Layer.succeed(Orchestrator.OrchestratorV2, {
+            ...orchestrator,
+            dispatch: (command) =>
+              command.type === "thread.metadata.update" && command.branch === "generated-branch"
+                ? Queue.offer(failures, undefined).pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        new Orchestrator.OrchestratorDispatchError({
+                          commandId: command.commandId,
+                          commandType: command.type,
+                          cause: "storage unavailable",
+                        }),
+                      ),
+                    ),
+                  )
+                : orchestrator.dispatch(command),
+          }),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const naming = yield* BranchNaming.TemporaryBranchNaming;
+        const projection = yield* threads.getThreadProjection(launched.threadId);
+        yield* naming.schedule({
+          threadId: launched.threadId,
+          projectId,
+          commandId: CommandId.make("command:rename-persistence:accepted"),
+          branch: projection.thread.branch,
+          worktreePath: projection.thread.worktreePath,
+          message: { text: "Implement the editor", attachments: [] },
+        });
+        const fiber = yield* Deferred.await(started);
+        for (let attempt = 0; attempt < 3; attempt++) {
+          yield* Queue.take(failures);
+          yield* Effect.yieldNow;
+          if (attempt < 2) yield* TestClock.adjust("100 millis");
+        }
+        yield* Fiber.await(fiber);
+        assert.equal(branch, "t3/abcd1234");
+        assert.equal((yield* threads.getThreadProjection(launched.threadId)).thread.branch, branch);
+        assert.equal(harness.renameBranch.mock.calls.length, 2);
+      }).pipe(Effect.provide(namingLayer));
+    }).pipe(Effect.provide(harness.layer));
+  }),
 );

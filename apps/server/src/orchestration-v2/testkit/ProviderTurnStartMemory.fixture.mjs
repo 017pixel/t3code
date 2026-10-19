@@ -30,6 +30,7 @@ const [
   Auth,
   Config,
   Settings,
+  BranchNaming,
 ] = await Promise.all([
   app("orchestration-v2/ProviderTurnStartService"),
   app("orchestration-v2/ProjectionStore"),
@@ -44,6 +45,7 @@ const [
   app("provider/ProviderAuthService"),
   app("config"),
   app("serverSettings"),
+  app("orchestration-v2/TemporaryBranchNaming"),
 ]);
 let current;
 let fullReads = 0;
@@ -62,6 +64,7 @@ const session = {
   compactThread: () => Effect.void,
 };
 const dependencies = Layer.mergeAll(
+  Layer.mock(BranchNaming.TemporaryBranchNaming)({ schedule: () => Effect.void }),
   Layer.mock(Handoff.ContextHandoffServiceV2)({}),
   Id.layer,
   FileSystem.layerNoop({}),

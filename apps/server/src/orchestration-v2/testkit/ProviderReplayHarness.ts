@@ -1,3 +1,9 @@
+import * as TemporaryBranchNaming from "../TemporaryBranchNaming.ts";
+import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
+import * as ProviderRegistryMock from "../../provider/testUtils/providerRegistryMock.ts";
+import * as GitWorkflow from "../../git/GitWorkflowService.ts";
+import * as ProjectService from "../../project/ProjectService.ts";
+import type * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -191,6 +197,14 @@ export function runOrchestratorV2ProviderReplayScenario<
       SqlClient.SqlClient,
       MigrationError | PlatformError.PlatformError | SqlError
     >;
+    readonly branchNamingDependencies?: Layer.Layer<
+      | TextGeneration.TextGeneration
+      | ProviderRegistry.ProviderRegistry
+      | ServerSettings.ServerSettingsService
+    >;
+    readonly turnStartServices?: Layer.Layer<
+      GitWorkflow.GitWorkflowService | ProjectService.ProjectService
+    >;
     readonly runEffectWorker?: boolean;
     readonly runContinuationWorker?: boolean;
     readonly recoverOnStartup?: boolean;
@@ -233,6 +247,14 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
       SqlClient.SqlClient,
       MigrationError | PlatformError.PlatformError | SqlError
     >;
+    readonly branchNamingDependencies?: Layer.Layer<
+      | TextGeneration.TextGeneration
+      | ProviderRegistry.ProviderRegistry
+      | ServerSettings.ServerSettingsService
+    >;
+    readonly turnStartServices?: Layer.Layer<
+      GitWorkflow.GitWorkflowService | ProjectService.ProjectService
+    >;
     readonly runEffectWorker?: boolean;
     readonly runContinuationWorker?: boolean;
     readonly recoverOnStartup?: boolean;
@@ -265,6 +287,14 @@ export function layerWithRegistry<Error>(
     readonly databaseLayer?: Layer.Layer<
       SqlClient.SqlClient,
       MigrationError | PlatformError.PlatformError | SqlError
+    >;
+    readonly branchNamingDependencies?: Layer.Layer<
+      | TextGeneration.TextGeneration
+      | ProviderRegistry.ProviderRegistry
+      | ServerSettings.ServerSettingsService
+    >;
+    readonly turnStartServices?: Layer.Layer<
+      GitWorkflow.GitWorkflowService | ProjectService.ProjectService
     >;
     readonly runEffectWorker?: boolean;
     readonly runContinuationWorker?: boolean;
@@ -389,24 +419,6 @@ export function layerWithRegistry<Error>(
       ),
     ),
   );
-  const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        layerContextHandoffServiceProvided,
-        layerEventSinkProvided,
-        IdAllocator.layer,
-        layerStores,
-        layerProviderSessionManagerProvided,
-        Layer.mock(ProviderAuthService.ProviderAuthService)({
-          tryHandlePromptCommand: () => Effect.succeed(false),
-        }),
-        layerRunExecutionServiceProvided,
-        layerRuntime,
-        layerServerConfig,
-        layerServerSettings,
-      ),
-    ),
-  );
   const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
     Layer.provide(Layer.merge(layerStores, layerProviderSessionManagerProvided)),
   );
@@ -465,6 +477,37 @@ export function layerWithRegistry<Error>(
       ),
     ),
   );
+  const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        TemporaryBranchNaming.layer.pipe(
+          Layer.provide(layerOrchestratorProvided),
+          Layer.provide(
+            options.branchNamingDependencies ??
+              Layer.mergeAll(
+                Layer.mock(TextGeneration.TextGeneration)({
+                  generateBranchName: () => Effect.succeed({ branch: "generated-branch" }),
+                }),
+                ProviderRegistryMock.layer(),
+                layerServerSettings,
+              ),
+          ),
+        ),
+        layerContextHandoffServiceProvided,
+        layerEventSinkProvided,
+        IdAllocator.layer,
+        layerStores,
+        layerProviderSessionManagerProvided,
+        Layer.mock(ProviderAuthService.ProviderAuthService)({
+          tryHandlePromptCommand: () => Effect.succeed(false),
+        }),
+        layerRunExecutionServiceProvided,
+        layerRuntime,
+        layerServerConfig,
+        layerServerSettings,
+      ),
+    ),
+  );
   const layerThreadManagementProvided = Layer.unwrap(
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -514,7 +557,10 @@ export function layerWithRegistry<Error>(
     layerEventSinkProvided,
     layerContinuationWorkerProvided,
     layerCommandOutputHubProvided,
-  ).pipe(Layer.provide(ProviderTurnStartServiceTestkit.layer), Layer.provide(NodeServices.layer));
+  ).pipe(
+    Layer.provide(options.turnStartServices ?? ProviderTurnStartServiceTestkit.layer),
+    Layer.provide(NodeServices.layer),
+  );
 
   if (options.runEffectWorker === false) {
     return layerReplayRuntime;

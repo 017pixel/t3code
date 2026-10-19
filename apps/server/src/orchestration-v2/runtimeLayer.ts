@@ -1,3 +1,4 @@
+import * as TemporaryBranchNaming from "./TemporaryBranchNaming.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -160,21 +161,6 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
   ),
 );
 
-const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      layerContextHandoffServiceProvided,
-      layerEventSinkProvided,
-      IdAllocator.layer,
-      ProjectionStore.layer,
-      layerProviderSessionManagerProvided,
-      layerProviderAuthServiceProvided,
-      layerRunExecutionServiceProvided,
-      layerRuntimePolicyProvided,
-    ),
-  ),
-);
-
 const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
@@ -230,6 +216,22 @@ const layerOrchestratorProvided = Orchestrator.layer.pipe(
       layerProviderSwitchServiceProvided,
       layerRunExecutionServiceProvided,
       ThreadForkService.layer,
+    ),
+  ),
+);
+
+const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      TemporaryBranchNaming.layer.pipe(Layer.provide(layerOrchestratorProvided)),
+      layerContextHandoffServiceProvided,
+      layerEventSinkProvided,
+      IdAllocator.layer,
+      ProjectionStore.layer,
+      layerProviderSessionManagerProvided,
+      layerProviderAuthServiceProvided,
+      layerRunExecutionServiceProvided,
+      layerRuntimePolicyProvided,
     ),
   ),
 );
