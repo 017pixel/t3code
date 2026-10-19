@@ -1810,6 +1810,62 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             (node) => node.id === NodeId.make("node:bounded-node-history:1"),
           ),
         );
+
+        const queuedRunId = RunId.make("run:bounded-node-history:queued");
+        const queuedPromptId = TurnItemId.make("item:bounded-node-history:queued-prompt");
+        yield* sql`INSERT INTO orchestration_v2_projection_runs (
+            run_id, thread_id, ordinal, provider, provider_instance_id, provider_thread_id,
+            status, requested_at, completed_at, payload_json
+          )
+          SELECT ${queuedRunId}, thread_id, ordinal + 1, provider, provider_instance_id, provider_thread_id,
+            'completed', requested_at, ${DateTime.formatIso(now)},
+            json_set(payload_json, '$.id', ${queuedRunId}, '$.ordinal', ordinal + 1,
+              '$.status', 'completed', '$.completedAt', ${DateTime.formatIso(now)},
+              '$.rootNodeId', NULL, '$.userMessageId', ${queuedPromptId})
+          FROM orchestration_v2_projection_runs WHERE run_id = ${runId}`;
+        // A queued prompt precedes the previous run's final activity in thread ordinal order.
+        yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+          SELECT ${queuedPromptId}, thread_id, ${queuedRunId}, NULL, provider_thread_id,
+            provider_turn_id, parent_item_id, 1002, type, status, updated_at,
+            json_set(payload_json, '$.id', ${queuedPromptId}, '$.messageId', ${queuedPromptId},
+              '$.runId', ${queuedRunId}, '$.nodeId', NULL, '$.ordinal', 1002,
+              '$.inputIntent', 'queued_turn', '$.text', 'Start the queued run')
+          FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${promptId}`;
+        for (let index = 0; index < 77; index++) {
+          const id = TurnItemId.make(`item:bounded-node-history:interleaved:${index}`);
+          const ownerRunId = index < 2 ? runId : queuedRunId;
+          yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+            SELECT ${id}, thread_id, ${ownerRunId}, NULL, provider_thread_id,
+              provider_turn_id, parent_item_id, ${1003 + index}, type, status, updated_at,
+              json_set(payload_json, '$.id', ${id}, '$.runId', ${ownerRunId},
+                '$.nodeId', NULL, '$.ordinal', ${1003 + index})
+            FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${duplicateItemId}`;
+        }
+        yield* sql`UPDATE orchestration_v2_projection_runs
+          SET status = 'completed', payload_json = json_set(payload_json,
+            '$.status', 'completed', '$.completedAt', ${DateTime.formatIso(now)})
+          WHERE run_id = ${runId}`;
+        const interleaved = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: 77,
+          deferHistoricalSupport: true,
+        });
+        assert.deepEqual(
+          interleaved.projection.visibleTurnItems.slice(-77).map((row) => row.item.runId),
+          [runId, runId, ...Array.from({ length: 75 }, () => queuedRunId)],
+        );
+        assert.strictEqual(
+          interleaved.projection.runs.find((run) => run.id === queuedRunId)?.status,
+          "completed",
+        );
+        const boundedInterleaved = buildBoundedThreadProjection({
+          ...interleaved,
+          viewportWindow: true,
+        });
+        assert.strictEqual(
+          boundedInterleaved.projection.visibleTurnItems[0]?.sourceItemId,
+          queuedPromptId,
+        );
+        assert.lengthOf(boundedInterleaved.projection.visibleTurnItems, 76);
       }),
   );
 

@@ -1,7 +1,12 @@
 import { assert, it, describe } from "@effect/vitest";
 import {
+  CheckpointId,
+  CheckpointRef,
+  CheckpointScopeId,
   EventId,
   MessageId,
+  NodeId,
+  RunAttemptId,
   PlanId,
   RunId,
   RuntimeRequestId,
@@ -12,6 +17,7 @@ import {
   type OrchestrationV2ThreadHistoryPage,
   ProjectId,
   ProviderInstanceId,
+  ProviderThreadId,
   ThreadId,
   type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
@@ -695,9 +701,12 @@ describe("V2 thread find", () => {
       }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect(
-    "searches inherited fork history through the fork boundary, using source item identities",
-    () =>
+  it.effect.each([
+    { storeName: "SQL", projectionLayer: ProjectionStore.layer },
+    { storeName: "memory", projectionLayer: ProjectionStore.layerMemory },
+  ])(
+    "$storeName searches inherited fork history without importing parent support",
+    ({ projectionLayer }) =>
       Effect.gen(function* () {
         const projection = yield* setup;
         const parent = ThreadId.make("thread:parent");
@@ -708,8 +717,96 @@ describe("V2 thread find", () => {
           run(parent, parentRun),
           run(parent, laterRun, 2),
         ]);
+        for (const [owner, ownerRun] of [
+          [parent, parentRun],
+          [threadId, runId],
+        ] as const) {
+          const nodeId = NodeId.make(`node:${owner}`);
+          const attemptId = RunAttemptId.make(`attempt:${owner}`);
+          const checkpointId = CheckpointId.make(`checkpoint:${owner}`);
+          const createdRun = run(owner, ownerRun);
+          yield* commit([
+            {
+              ...createdRun,
+              id: EventId.make(`support-run:${owner}`),
+              type: "run.updated",
+              payload: {
+                ...createdRun.payload,
+                rootNodeId: nodeId,
+                activeAttemptId: attemptId,
+                checkpointId,
+              },
+            },
+            {
+              id: EventId.make(`node:${owner}`),
+              threadId: owner,
+              occurredAt: at(1),
+              type: "node.updated",
+              payload: {
+                id: nodeId,
+                threadId: owner,
+                runId: ownerRun,
+                rootNodeId: nodeId,
+                parentNodeId: null,
+                kind: "root_turn",
+                status: "completed",
+                countsForRun: true,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: at(1),
+                completedAt: at(2),
+              },
+            },
+            {
+              id: EventId.make(`attempt:${owner}`),
+              threadId: owner,
+              occurredAt: at(1),
+              type: "run-attempt.created",
+              payload: {
+                id: attemptId,
+                runId: ownerRun,
+                attemptOrdinal: 1,
+                rootNodeId: nodeId,
+                providerInstanceId,
+                providerThreadId: ProviderThreadId.make(`provider-thread:${owner}`),
+                providerTurnId: null,
+                reason: "initial",
+                status: "completed",
+                startedAt: at(1),
+                completedAt: at(2),
+              },
+            },
+            {
+              id: EventId.make(`checkpoint:${owner}`),
+              threadId: owner,
+              occurredAt: at(2),
+              type: "checkpoint.captured",
+              payload: {
+                id: checkpointId,
+                threadId: owner,
+                runId: ownerRun,
+                nodeId,
+                scopeId: CheckpointScopeId.make(`scope:${owner}`),
+                parentCheckpointId: null,
+                ordinalWithinScope: 1,
+                appRunOrdinal: 1,
+                ref: CheckpointRef.make(`refs/t3/${owner}`),
+                status: "ready",
+                capturedAt: at(2),
+                files: [{ path: `${owner}.ts`, kind: "modified", additions: 1, deletions: 0 }],
+              },
+            },
+          ]);
+        }
         yield* putItems([
-          { ...item("inherited", 1, "needle", "assistant_message", parent), runId: parentRun },
+          {
+            ...item("inherited", 1, "needle", "assistant_message", parent),
+            runId: parentRun,
+            nodeId: NodeId.make(`node:${parent}`),
+          },
           { ...item("after-fork", 2, "needle", "assistant_message", parent), runId: laterRun },
         ]);
         const child = thread(threadId, projectId);
@@ -725,7 +822,10 @@ describe("V2 thread find", () => {
             },
           },
         ]);
-        yield* putItems([item("local", 1, "needle")]);
+        yield* putItems([
+          { ...item("local", 1, "needle"), nodeId: NodeId.make(`node:${threadId}`) },
+          item("local-later", 2, "after the history page"),
+        ]);
         const inherited = yield* projection.searchThread({ threadId, query: "needle" });
         assert.equal(inherited.totalMatches, 2);
         assert.equal(inherited.match?.entryId, "inherited");
@@ -739,9 +839,12 @@ describe("V2 thread find", () => {
           encodeThreadHistoryCursor({
             snapshotSequence: snapshot.snapshotSequence,
             sourceThreadId: threadId,
-            sourceItemId: "local",
-            position: 2,
+            sourceItemId: "local-later",
+            position: 3,
           }),
+          undefined,
+          false,
+          true,
         );
         assert.deepEqual(
           history.items,
@@ -750,7 +853,34 @@ describe("V2 thread find", () => {
             .map((row) => ({ ...row, item: projectTurnItemForWire(row.item) })),
         );
         assert.equal(history.items[0]?.sourceThreadId, parent);
-        assert.equal(history.items.at(-1)?.item.type, "fork");
+        assert.equal(history.items[1]?.item.type, "fork");
+        assert.equal(history.items.at(-1)?.sourceItemId, "local");
+        assert.deepEqual(
+          {
+            runs: history.support?.runs.map((run) => [run.id, run.threadId, run.ordinal]),
+            nodes: history.support?.nodes.map((node) => [node.id, node.threadId]),
+            attempts: history.support?.attempts.map((attempt) => [attempt.id, attempt.runId]),
+            checkpoints: history.support?.checkpoints.map((checkpoint) => [
+              checkpoint.id,
+              checkpoint.threadId,
+              checkpoint.appRunOrdinal,
+              checkpoint.files,
+            ]),
+          },
+          {
+            runs: [[runId, threadId, 1]],
+            nodes: [[`node:${threadId}`, threadId]],
+            attempts: [[`attempt:${threadId}`, runId]],
+            checkpoints: [
+              [
+                `checkpoint:${threadId}`,
+                threadId,
+                1,
+                [{ path: `${threadId}.ts`, kind: "modified", additions: 1, deletions: 0 }],
+              ],
+            ],
+          },
+        );
         yield* putItems(
           [{ ...item("inherited", 1, "gone", "assistant_message", parent), runId: parentRun }],
           "parent-update",
@@ -759,7 +889,13 @@ describe("V2 thread find", () => {
           (yield* projection.searchThread({ threadId, query: "needle" })).totalMatches,
           1,
         );
-      }).pipe(Effect.provide(layerTest)),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(EventStore.layer, ProjectStore.layer, projectionLayer).pipe(
+            Layer.provideMerge(SqlitePersistence.layerMemory),
+          ),
+        ),
+      ),
   );
 
   it.effect("rejects deleted threads and keeps results scoped to their thread", () =>
