@@ -268,6 +268,14 @@ describe("AssetAccess", () => {
         ["report.pdf", "application/pdf"],
         ["tone.wav", "audio/wav"],
         ["tone.webm-audio", "audio/webm"],
+        ["archive.zip", "application/zip"],
+        ["archive.jar", "application/java-archive"],
+        ["archive.tar", "application/x-tar"],
+        ["archive.gz", "application/gzip"],
+        ["archive.tgz", "application/gzip"],
+        ["data.sqlite", "application/vnd.sqlite3"],
+        ["data.sqlite3", "application/vnd.sqlite3"],
+        ["data.db", "application/vnd.sqlite3"],
       ] as const) {
         const filePath = path.join(outside, name);
         yield* fs.writeFileString(filePath, "media");
