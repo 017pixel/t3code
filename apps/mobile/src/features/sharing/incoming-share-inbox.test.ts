@@ -5,7 +5,7 @@ import {
   EMPTY_INCOMING_SHARE_PRESENTATION_STATE,
   transitionIncomingSharePresentation,
 } from "./incoming-share-presentation";
-import type { IncomingShareDraft } from "./incoming-share-model";
+import { decodeIncomingShareDraft, type IncomingShareDraft } from "./incoming-share-model";
 import { IncomingShareInbox, type IncomingShareInboxDependencies } from "./incoming-share-inbox";
 
 const PAYLOAD: SharePayload = {
@@ -36,8 +36,9 @@ function deferred() {
 function createHarness(overrides: Partial<IncomingShareInboxDependencies> = {}) {
   const persisted = new Map<string, IncomingShareDraft>();
   let payloads: ReadonlyArray<SharePayload> = [PAYLOAD];
+  let nextId = 0;
   const dependencies: IncomingShareInboxDependencies = {
-    loadDrafts: async () => [...persisted.values()],
+    loadDrafts: async () => [...persisted.values()].map(decodeIncomingShareDraft),
     writeDraft: async (value) => {
       persisted.set(value.id, value);
     },
@@ -52,7 +53,8 @@ function createHarness(overrides: Partial<IncomingShareInboxDependencies> = {}) 
       draft: draft(id, createdAt),
       cleanup: async () => undefined,
     }),
-    idForPayloads: async () => "share-stable",
+    fingerprintForPayloads: async () => "share-stable",
+    createId: () => `share-entry-${++nextId}`,
     now: () => "2026-07-16T08:00:00.000Z",
     ...overrides,
   };
@@ -80,15 +82,20 @@ describe("IncomingShareInbox", () => {
       await building.promise;
       return { draft: draft(id, createdAt), cleanup: async () => undefined };
     });
-    const { inbox } = createHarness({ buildDraft });
+    const { inbox } = createHarness({
+      buildDraft,
+      clearPayloads: () => {
+        throw new Error("native acknowledgement failed");
+      },
+    });
 
     const first = inbox.refresh({ ingestNative: true });
     const second = inbox.refresh({ ingestNative: true });
     building.resolve();
 
     await expect(Promise.all([first, second])).resolves.toEqual([
-      [draft("share-stable")],
-      [draft("share-stable")],
+      [{ ...draft("share-entry-1"), payloadFingerprint: "share-stable" }],
+      [{ ...draft("share-entry-1"), payloadFingerprint: "share-stable" }],
     ]);
     expect(buildDraft).toHaveBeenCalledTimes(1);
   });
@@ -103,10 +110,12 @@ describe("IncomingShareInbox", () => {
     });
 
     const refresh = inbox.refresh({ ingestNative: true });
-    const consume = inbox.consume("share-stable");
+    const consume = inbox.consume("share-entry-1");
     building.resolve();
 
-    await expect(refresh).resolves.toEqual([draft("share-stable")]);
+    await expect(refresh).resolves.toEqual([
+      { ...draft("share-entry-1"), payloadFingerprint: "share-stable" },
+    ]);
     await expect(consume).resolves.toEqual([]);
     expect([...persisted.values()]).toEqual([]);
   });

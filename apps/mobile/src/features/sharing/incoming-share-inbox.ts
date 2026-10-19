@@ -23,7 +23,8 @@ export interface IncomingShareInboxDependencies {
     readonly rollback?: () => Promise<void>;
   }>;
   readonly cleanupReplayedPayloads?: (payloads: ReadonlyArray<SharePayload>) => Promise<void>;
-  readonly idForPayloads: (payloads: ReadonlyArray<SharePayload>) => Promise<string>;
+  readonly fingerprintForPayloads: (payloads: ReadonlyArray<SharePayload>) => Promise<string>;
+  readonly createId: () => string;
   readonly now: () => string;
   readonly onClearError?: (error: unknown) => void;
   readonly onCleanupError?: (error: unknown) => void;
@@ -86,11 +87,10 @@ export class IncomingShareInbox {
         return persisted;
       }
 
-      // A share extension payload remains available until the containing app
-      // acknowledges it. Use a content-derived id so a crash after the durable
-      // write but before acknowledgement reuses the same inbox item.
-      const shareId = await this.dependencies.idForPayloads(payloads);
-      if (loaded.some((draft) => draft.id === shareId)) {
+      // Persist replay detection separately from entry identity: a later identical
+      // handoff must not be addressed by an earlier sheet's dismissal or import.
+      const payloadFingerprint = await this.dependencies.fingerprintForPayloads(payloads);
+      if (loaded.some((draft) => (draft.payloadFingerprint ?? draft.id) === payloadFingerprint)) {
         if (this.dependencies.cleanupReplayedPayloads) {
           await this.cleanup(() => this.dependencies.cleanupReplayedPayloads!(payloads));
         }
@@ -100,10 +100,10 @@ export class IncomingShareInbox {
 
       const built = await this.dependencies.buildDraft({
         payloads,
-        id: shareId,
+        id: this.dependencies.createId(),
         createdAt: this.dependencies.now(),
       });
-      const { draft } = built;
+      const draft = { ...built.draft, payloadFingerprint };
       if (!hasIncomingShareContent(draft)) {
         await this.cleanup(built.cleanup);
         this.clearNativePayloads();
@@ -131,9 +131,6 @@ export class IncomingShareInbox {
 
   consume(shareId: string): Promise<ReadonlyArray<IncomingShareDraft>> {
     return this.runExclusive(async () => {
-      // The stable payload-derived id already coalesces retries of the same
-      // native handoff. Payload equality cannot identify duplicate handoffs:
-      // users may intentionally share identical content more than once.
       await this.dependencies.removeDraft(shareId);
       return sortAndDedupeIncomingShares(await this.dependencies.loadDrafts());
     });

@@ -39,7 +39,6 @@ type IncomingShareContextValue = {
     expectedDestination: IncomingShareDestination,
   ) => Promise<void>;
   readonly consumeShare: (shareId: string) => Promise<void>;
-  /** Drops a share the user walked away from, along with the files it owned. */
   readonly discardShare: (shareId: string) => Promise<void>;
   readonly refresh: () => Promise<void>;
 };
@@ -74,7 +73,9 @@ async function resolvedPayloadsForFiles(): Promise<ReadonlyArray<ResolvedSharePa
   }
 }
 
-async function incomingShareIdForPayloads(payloads: ReadonlyArray<SharePayload>): Promise<string> {
+async function incomingShareFingerprintForPayloads(
+  payloads: ReadonlyArray<SharePayload>,
+): Promise<string> {
   const fingerprint = JSON.stringify(
     payloads.map((payload) => ({
       shareType: payload.shareType,
@@ -198,7 +199,8 @@ const incomingShareInbox = new IncomingShareInbox({
     };
   },
   cleanupReplayedPayloads: removeReplayedPayloadFiles,
-  idForPayloads: incomingShareIdForPayloads,
+  fingerprintForPayloads: incomingShareFingerprintForPayloads,
+  createId: () => `share-${Crypto.randomUUID()}`,
   now: () => new Date().toISOString(),
   onClearError: (error) => {
     console.warn("[incoming-share] could not acknowledge native payload", error);
@@ -305,7 +307,6 @@ export function IncomingShareProvider(props: React.PropsWithChildren) {
       const discarded = drafts.find((draft) => draft.id === shareId);
       const snapshot = await incomingShareInbox.consume(shareId);
       if (discarded) {
-        // The inbox entry was the only owner of these files.
         scheduleUnusedComposerAttachmentCleanup(discarded.attachments);
       }
       if (mountedRef.current) {
