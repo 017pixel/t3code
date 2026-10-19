@@ -158,7 +158,7 @@ export const CheckpointMcpRestoreInput = Schema.Struct({
   clientRequestId: Schema.String.check(
     Schema.isMinLength(1),
     Schema.isMaxLength(256),
-    Schema.makeFilter((value) => value.isWellFormed()),
+    Schema.makeFilter((value) => !/[\uD800-\uDFFF]/u.test(value)),
   ).annotate({
     description:
       "Stable request key. Reuse it to read the prior outcome; use a new key for a new restore.",
