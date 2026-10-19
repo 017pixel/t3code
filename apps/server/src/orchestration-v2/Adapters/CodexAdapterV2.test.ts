@@ -2269,13 +2269,17 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect.each(["success", "parent and child rejected"] as const)(
+  it.effect.each(["success", "parent and child rejected", "child only"] as const)(
     "unloads only the native subagent subtree and reports the first failure: %s",
     (outcome) =>
       Effect.gen(function* () {
         const nativeThreadId = "unload-root";
         const nativeTurnId = "unload-turn";
         const prompt = "Use subagents.";
+        const expectedThreadIds =
+          outcome === "child only"
+            ? ["unload-child", "unload-grandchild"]
+            : [nativeThreadId, "unload-child", "unload-grandchild", "unload-sibling"];
         const notification = (method: string, params: unknown) =>
           ({
             type: "emit_inbound",
@@ -2309,6 +2313,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               turn: makeCodexReplayTurn({ id: "child-turn", status: "inProgress" }),
             }),
             spawn("unload-child", "unload-grandchild", "child-turn"),
+            spawn(nativeThreadId, "unload-sibling", nativeTurnId),
             notification("turn/completed", {
               threadId: nativeThreadId,
               turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
@@ -2317,7 +2322,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ...unrelatedPreamble.slice(5, 7).map((entry) => withReplayRequestId(entry, 5)),
             ...unrelatedPreamble.slice(7),
             spawn("unrelated-root", "unrelated-child", "unrelated-turn"),
-            ...[nativeThreadId, "unload-child", "unload-grandchild"].flatMap((threadId, index) => {
+            ...expectedThreadIds.flatMap((threadId, index) => {
               const id = 6 + index;
               return [
                 {
@@ -2329,7 +2334,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   type: "emit_inbound",
                   label: `unsubscribe-${threadId}`,
                   frame:
-                    outcome !== "success" && index < 2
+                    outcome === "parent and child rejected" && index < 2
                       ? { id, error: { code: -32600, message: `Cannot unload ${threadId}` } }
                       : { id, result: { status: "unsubscribed" } },
                 },
@@ -2339,12 +2344,21 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         });
         const registered = yield* Deferred.make<void>();
         const unsubscribed: Array<unknown> = [];
+        let childProviderThread: OrchestrationV2ProviderThread | undefined;
         const harness = yield* makeCodexReplayHarness(
           transcript,
-          (event) =>
-            event.type === "subagent.updated" && event.subagent.title === "/root/unrelated-child"
+          (event) => {
+            if (
+              event.type === "provider_thread.updated" &&
+              event.providerThread.nativeThreadRef?.nativeId === "unload-child"
+            ) {
+              childProviderThread = event.providerThread;
+            }
+            return event.type === "subagent.updated" &&
+              event.subagent.title === "/root/unrelated-child"
               ? Deferred.succeed(registered, undefined)
-              : Effect.void,
+              : Effect.void;
+          },
           (method, params) =>
             Effect.sync(() => {
               if (method === "thread/unsubscribe") unsubscribed.push(params);
@@ -2370,15 +2384,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
         }
         yield* Deferred.await(registered);
+        assert.isDefined(childProviderThread);
         const unloaded = yield* harness.runtime.unloadThread!({
-          providerThread: harness.providerThread,
+          providerThread: outcome === "child only" ? childProviderThread! : harness.providerThread,
         }).pipe(Effect.result);
-        assert.deepEqual(unsubscribed, [
-          { threadId: nativeThreadId },
-          { threadId: "unload-child" },
-          { threadId: "unload-grandchild" },
-        ]);
-        if (outcome === "success") {
+        assert.deepEqual(
+          unsubscribed,
+          expectedThreadIds.map((threadId) => ({ threadId })),
+        );
+        if (outcome !== "parent and child rejected") {
           assert.isTrue(Result.isSuccess(unloaded));
         } else {
           assert.isTrue(Result.isFailure(unloaded));
