@@ -298,7 +298,6 @@ describe("authenticated environment HTTP requests", () => {
       const response = {
         ...THREAD_HISTORY,
         items,
-        support: { nodes: [], checkpoints: [], runs: [], attempts: [] },
       };
       const expected = yield* decodeThreadHistory(response);
       const body = JSON.stringify(response);
