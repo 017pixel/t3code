@@ -24,9 +24,9 @@ function openWalReader(databasePath: string) {
 export async function prepareServiceDatabaseBackup(databasePath: string, stagingDir: string) {
   const source = openWalReader(databasePath);
   if (source === undefined) return undefined;
-  await NodeFSP.rm(stagingDir, { recursive: true, force: true });
-  await NodeFSP.mkdir(stagingDir, { recursive: true, mode: 0o700 });
   try {
+    await NodeFSP.rm(stagingDir, { recursive: true, force: true });
+    await NodeFSP.mkdir(stagingDir, { recursive: true, mode: 0o700 });
     const destination = NodePath.join(stagingDir, "database");
     await NodeSqlite.backup(source, destination, { rate: 256 });
     // Enable WAL before installing it; do not open the destination again before restore.

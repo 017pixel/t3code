@@ -8,8 +8,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as NodeSqlite from "node:sqlite";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - injects staging failures into the standalone Node backup helper.
+import * as NodeFSP from "node:fs/promises";
 import { prepareServiceDatabaseBackup } from "./serviceDatabaseBackup.ts";
-import { vi } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 
 import {
   databaseBackupBlocker,
@@ -29,6 +31,8 @@ import {
 } from "./cloud/serviceProtocol.ts";
 
 const spawnedChildren = vi.hoisted((): Array<NodeChildProcess.ChildProcess> => []);
+
+vi.mock("node:fs/promises", { spy: true });
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeChildProcess>();
@@ -128,6 +132,41 @@ const writeFakeRuntime = (
   });
 
 it.layer(NodeServices.layer)("service state persistence", (it) => {
+  it.effect.each([
+    { operation: "rm", code: "ENOTDIR" },
+    { operation: "mkdir", code: "EACCES" },
+  ] as const)(
+    "online backup releases its WAL reader when staging $operation fails",
+    ({ operation, code }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-backup-staging-" });
+        const sourcePath = path.join(root, "source.sqlite");
+        const writer = yield* Effect.acquireRelease(
+          Effect.sync(() => new NodeSqlite.DatabaseSync(sourcePath)),
+          (db) => Effect.sync(() => db.close()),
+        );
+        writer.exec(
+          "PRAGMA journal_mode=WAL; CREATE TABLE records(value TEXT); INSERT INTO records VALUES('before'); PRAGMA wal_checkpoint(TRUNCATE)",
+        );
+        assert.equal(writer.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()?.busy, 0);
+        yield* Effect.promise(async () => {
+          const failure = Object.assign(new Error(`staging ${operation} failed`), { code });
+          const setup = vi.mocked(NodeFSP[operation]).mockRejectedValueOnce(failure);
+          try {
+            await expect(
+              prepareServiceDatabaseBackup(sourcePath, path.join(root, "backup")),
+            ).rejects.toMatchObject({ code });
+          } finally {
+            setup.mockRestore();
+          }
+        });
+        writer.exec("INSERT INTO records VALUES('after')");
+        assert.equal(writer.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()?.busy, 0);
+      }),
+  );
+
   it.effect("online update backups retain acknowledged writes after the snapshot", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
