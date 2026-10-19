@@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   DEFAULT_TERMINAL_ID,
+  type CodexSettings,
+  type ProviderInstanceEnvironment,
   type TerminalAttachStreamEvent,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
@@ -36,6 +38,11 @@ import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
+import * as NodeModule from "node:module";
+import * as NodeOS from "node:os";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import * as PortScanner from "../preview/PortScanner.ts";
+import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import { expect, vi } from "vite-plus/test";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -327,6 +334,96 @@ const createManager = (
       };
     }),
   );
+
+const mutableOS: typeof NodeOS = NodeModule.createRequire(import.meta.url)("node:os");
+
+const createCodexTerminal = Effect.fn("test.createCodexTerminal")(function* (
+  root: string,
+  options: {
+    config?: Partial<CodexSettings>;
+    inherited?: Record<string, string>;
+    environment?: ProviderInstanceEnvironment;
+  } = {},
+) {
+  const path = yield* Path.Path;
+  const home = path.join(root, "home");
+  const providerInstanceId = ProviderInstanceId.make("codex_sqlite");
+  const account = vi.spyOn(mutableOS, "userInfo").mockReturnValue({
+    homedir: path.join(root, "account"),
+    username: "fixture",
+    uid: 1000,
+    gid: 1000,
+    shell: "/bin/bash",
+  });
+  NodeModule.syncBuiltinESMExports();
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      account.mockRestore();
+      NodeModule.syncBuiltinESMExports();
+      vi.unstubAllEnvs();
+    }),
+  );
+  for (const key of Object.keys(process.env)) {
+    if (["CODEX_HOME", "CODEX_SQLITE_HOME", "HOME", "USERPROFILE"].includes(key.toUpperCase()))
+      vi.stubEnv(key, undefined);
+  }
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("SHELL", "/bin/bash");
+  for (const [key, value] of Object.entries(options.inherited ?? {})) vi.stubEnv(key, value);
+  const ptyAdapter = new FakePtyAdapter();
+  const config = yield* ServerConfig.ServerConfig.pipe(
+    Effect.provide(ServerConfig.layerTest(root, path.join(root, "t3"))),
+  );
+  const manager = yield* TerminalManager.make().pipe(
+    Effect.provideService(HostProcess.HomeDirectory, home),
+    Effect.provideService(ServerConfig.ServerConfig, config),
+    Effect.provideService(PtyAdapter.PtyAdapter, ptyAdapter),
+    Effect.provide(
+      Layer.mock(PortScanner.PortDiscovery)({
+        registerTerminalProcesses: () => Effect.void,
+        unregisterTerminal: () => Effect.void,
+      }),
+    ),
+    Effect.provide(NativeTelemetryClient.layerTest({ processTable: Effect.succeed([]) })),
+    Effect.provide(
+      ServerSettings.layerTest({
+        providerInstances: {
+          [providerInstanceId]: {
+            driver: ProviderDriverKind.make("codex"),
+            config: { setupMode: "managed", homePath: "", shadowHomePath: "", ...options.config },
+            environment: options.environment ?? [],
+          },
+        },
+      }),
+    ),
+  );
+  return {
+    manager: {
+      open: (input: TerminalOpenInput) =>
+        manager.open(input).pipe(Effect.provideService(HostProcess.HomeDirectory, home)),
+      restart: (input: TerminalRestartInput) =>
+        manager.restart(input).pipe(Effect.provideService(HostProcess.HomeDirectory, home)),
+      attachStream: (...args: Parameters<typeof manager.attachStream>) =>
+        manager.attachStream(...args).pipe(Effect.provideService(HostProcess.HomeDirectory, home)),
+    },
+    ptyAdapter,
+    account,
+    home,
+    input: openInput({ providerInstanceId, cwd: root }),
+    generated: path.join(config.stateDir, "providers", "codex", providerInstanceId, "shadow"),
+  };
+});
+
+const legacySqliteLink = Effect.fn("test.legacySqliteLink")(function* (home: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.makeDirectory(home, { recursive: true });
+  const link = path.join(home, "future.SQLITE-SHM");
+  const target = path.join(home, "missing-shm");
+  yield* fs.symlink(target, link);
+  yield* fs.writeFileString(path.join(home, "state.sqlite-wal"), "private WAL");
+  return { link, target };
+});
 
 const layerWithHostPlatform = (platform: NodeJS.Platform) =>
   Layer.succeed(HostProcess.Platform, platform);
@@ -2476,6 +2573,389 @@ it.layer(
       expect(snapshot).not.toHaveProperty("env");
       expect(snapshot).not.toHaveProperty("providerInstanceId");
     }),
+  );
+
+  it.effect.each([
+    {
+      winner: "default",
+      platform: "linux",
+      inheritedKey: "CODEX_SQLITE_HOME",
+      providerKey: "CODEX_SQLITE_HOME",
+    },
+    {
+      winner: "inherited",
+      platform: "linux",
+      inheritedKey: "CODEX_SQLITE_HOME",
+      providerKey: "CODEX_SQLITE_HOME",
+    },
+    {
+      winner: "request",
+      platform: "win32",
+      inheritedKey: "codex_sqlite_home",
+      providerKey: "CODEX_SQLITE_HOME",
+    },
+    {
+      winner: "provider",
+      platform: "win32",
+      inheritedKey: "CODEX_SQLITE_HOME",
+      providerKey: "codex_sqlite_home",
+    },
+    {
+      winner: "provider",
+      platform: "win32",
+      inheritedKey: "codex_sqlite_home",
+      providerKey: "CODEX_SQLITE_HOME",
+    },
+  ] as const)(
+    "Codex SQLite terminal default and source precedence: $winner $platform $providerKey",
+    ({ winner, platform, inheritedKey, providerKey }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-sqlite-" });
+        const shared = path.join(root, "shared");
+        const shadow = path.join(root, "shadow");
+        const { manager, ptyAdapter, input } = yield* createCodexTerminal(root, {
+          config: { homePath: shared, shadowHomePath: shadow },
+          inherited:
+            winner === "default"
+              ? {}
+              : { [inheritedKey]: "/inherited/sqlite", T3CODE_SECRET: "server-only" },
+          environment:
+            winner === "provider"
+              ? [{ name: providerKey, value: "/provider/sqlite", sensitive: false }]
+              : [],
+        });
+        yield* manager.open({
+          ...input,
+          env: {
+            ...(winner === "request" || winner === "provider"
+              ? { CODEX_SQLITE_HOME: "/request/sqlite" }
+              : {}),
+            ACCESS_TOKEN: "cli-auth",
+          },
+        });
+        const env = ptyAdapter.spawnInputs[0]?.env ?? {};
+        expect(
+          Object.entries(env)
+            .filter(([key]) => key.toUpperCase() === "CODEX_SQLITE_HOME")
+            .map(([, value]) => value),
+        ).toEqual([winner === "default" ? shared : `/${winner}/sqlite`]);
+        expect(env.CODEX_HOME).toBe(shadow);
+        expect(env.ACCESS_TOKEN).toBe("cli-auth");
+        expect(env.T3CODE_SECRET).toBeUndefined();
+        expect(yield* fs.exists(shared)).toBe(false);
+        expect(yield* fs.exists(shadow)).toBe(false);
+      }).pipe(Effect.provideService(HostProcess.Platform, platform)),
+  );
+
+  it.effect.each(["configured", "generated"] as const)(
+    "Codex SQLite checks the $0 shadow before resolving the selected account home",
+    (mode) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-recovery-" });
+        const shadow = path.join(root, "shadow");
+        const { manager, ptyAdapter, input, generated, account } = yield* createCodexTerminal(
+          root,
+          {
+            config: mode === "configured" ? { shadowHomePath: shadow } : {},
+            inherited: { HOME: "" },
+          },
+        );
+        const unsafe = mode === "configured" ? shadow : generated;
+        const { link, target } = yield* legacySqliteLink(unsafe);
+        account.mockImplementation(() => {
+          throw new Error("account lookup must not run");
+        });
+        for (const attempt of [1, 2]) {
+          const result = yield* manager.open(input).pipe(Effect.result);
+          expect(result, `attempt ${attempt}`).toMatchObject({
+            _tag: "Failure",
+            failure: {
+              _tag: "TerminalProviderEnvironmentError",
+              cause: { _tag: "CodexShadowHomeSqliteRecoveryRequiredError", linkPath: link },
+            },
+          });
+          if (result._tag === "Failure") {
+            expect(result.failure.message).toContain("Stop all Codex processes");
+            expect(result.failure.message).not.toContain(root);
+          }
+          expect(ptyAdapter.spawnInputs).toHaveLength(0);
+          expect(account).not.toHaveBeenCalled();
+          expect(yield* fs.readLink(link)).toBe(target);
+          expect(yield* fs.readFileString(path.join(unsafe, "state.sqlite-wal"))).toBe(
+            "private WAL",
+          );
+          expect((yield* fs.readDirectory(unsafe)).sort()).toEqual([
+            "future.SQLITE-SHM",
+            "state.sqlite-wal",
+          ]);
+        }
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+    { skip: !symlinksSupported },
+  );
+
+  it.effect.each([
+    { source: "inherited", platform: "linux" },
+    { source: "request", platform: "linux" },
+    { source: "provider", platform: "linux" },
+    { source: "request", platform: "win32" },
+    { source: "provider", platform: "win32" },
+  ] as const)(
+    "Codex SQLite inspects the actual $source home ($platform) and preserves a running shell on unsafe restart",
+    ({ source, platform }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-selected-" });
+        const selected = path.join(root, "selected");
+        const decoy = path.join(root, "decoy");
+        const expands = source === "request" && platform === "linux";
+        const value = expands ? "~/selected" : selected;
+        const key = platform === "win32" ? "codex_home" : "CODEX_HOME";
+        const { manager, ptyAdapter, input, home, generated } = yield* createCodexTerminal(root, {
+          inherited: { [key]: source === "inherited" ? value : decoy },
+          environment: source === "provider" ? [{ name: key, value, sensitive: false }] : [],
+        });
+        const actual = expands ? path.join(home, "selected") : selected;
+        yield* legacySqliteLink(decoy);
+        const request = {
+          ...input,
+          env:
+            source === "inherited"
+              ? undefined
+              : { CODEX_HOME: source === "request" ? value : decoy },
+        };
+        const before = JSON.stringify(request);
+        yield* manager.open(request);
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        expect(
+          Object.entries(ptyAdapter.spawnInputs[0]?.env ?? {})
+            .filter(([key]) => key.toUpperCase() === "CODEX_HOME")
+            .map(([, value]) => value),
+        ).toEqual([expands ? actual : value]);
+        expect(ptyAdapter.spawnInputs[0]?.env.CODEX_SQLITE_HOME).toBeUndefined();
+        const { link, target } = yield* legacySqliteLink(actual);
+        const unsubscribe = yield* manager.attachStream(request, () => Effect.void);
+        yield* Effect.sync(unsubscribe);
+        const result = yield* manager
+          .restart({ ...request, cols: 100, rows: 24 })
+          .pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "TerminalProviderEnvironmentError", cause: { linkPath: link } },
+        });
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        expect(ptyAdapter.processes[0]?.killed).toBe(false);
+        expect(yield* fs.readLink(link)).toBe(target);
+        expect(yield* fs.readFileString(path.join(actual, "state.sqlite-wal"))).toBe("private WAL");
+        expect(yield* fs.exists(generated)).toBe(false);
+        expect(JSON.stringify(request)).toBe(before);
+      }).pipe(Effect.provideService(HostProcess.Platform, platform)),
+    { skip: !symlinksSupported },
+  );
+
+  it.effect.each([
+    { selection: "explicit", unsafeSelected: true },
+    { selection: "explicit", unsafeSelected: false },
+    { selection: "native", unsafeSelected: true },
+    { selection: "native", unsafeSelected: false },
+    { selection: "tilde", unsafeSelected: true },
+    { selection: "tilde", unsafeSelected: false },
+  ] as const)(
+    "Codex SQLite follows $selection home semantics (unsafe selected: $unsafeSelected)",
+    ({ selection, unsafeSelected }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-home-semantics-" });
+        yield* fs.makeDirectory(path.join(root, "physical", "child"), { recursive: true });
+        yield* fs.symlink(path.join(root, "physical", "child"), path.join(root, "hop"));
+        const explicit = selection === "explicit";
+        const selected =
+          selection === "tilde"
+            ? path.join(root, "~", "legacy", "legacy", ".codex")
+            : explicit
+              ? path.join(root, "physical", "legacy")
+              : path.join(root, "legacy", ".codex");
+        const decoy =
+          selection === "tilde"
+            ? path.join(root, "~", "legacy", ".codex")
+            : explicit
+              ? path.join(root, "legacy")
+              : path.join(root, "physical", "legacy", ".codex");
+        const value = selection === "tilde" ? "~//legacy" : "hop/../legacy";
+        const { manager, ptyAdapter, input, generated } = yield* createCodexTerminal(root, {
+          inherited: { [explicit ? "CODEX_HOME" : "HOME"]: value },
+        });
+        const { link, target } = yield* legacySqliteLink(unsafeSelected ? selected : decoy);
+        const result = yield* manager.open(input).pipe(Effect.result);
+        expect(result._tag).toBe(unsafeSelected ? "Failure" : "Success");
+        if (result._tag === "Failure") {
+          expect(result.failure).toMatchObject({
+            _tag: "TerminalProviderEnvironmentError",
+            cause: { _tag: "CodexShadowHomeSqliteRecoveryRequiredError" },
+          });
+        }
+        expect(ptyAdapter.spawnInputs).toHaveLength(unsafeSelected ? 0 : 1);
+        if (!unsafeSelected)
+          expect(ptyAdapter.spawnInputs[0]?.env[explicit ? "CODEX_HOME" : "HOME"]).toBe(value);
+        expect(yield* fs.readLink(link)).toBe(target);
+        expect(
+          yield* fs.readFileString(
+            path.join(unsafeSelected ? selected : decoy, "state.sqlite-wal"),
+          ),
+        ).toBe("private WAL");
+        expect(yield* fs.exists(generated)).toBe(false);
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+    { skip: !symlinksSupported || HostProcess.Platform.defaultValue() === "win32" },
+  );
+
+  it.effect.each(["known", "missing", "zero"] as const)(
+    "Codex SQLite allows direct shared-directory aliases only with $0 identity",
+    (identity) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-shared-alias-" });
+        const filesystem =
+          identity === "known"
+            ? fs
+            : {
+                ...fs,
+                stat: (candidate: string) =>
+                  fs.stat(candidate).pipe(
+                    Effect.map((info) => ({
+                      ...info,
+                      ino: identity === "missing" ? Option.none() : Option.some(0n),
+                    })),
+                  ),
+              };
+        const { manager, ptyAdapter, input, home, generated } = yield* createCodexTerminal(
+          root,
+        ).pipe(Effect.provideService(FileSystem.FileSystem, filesystem));
+        const shared = path.join(home, ".codex");
+        const { link, target } = yield* legacySqliteLink(shared);
+        const alias = path.join(root, "alias");
+        yield* fs.symlink(shared, alias);
+        const request = { ...input, env: { CODEX_HOME: alias } };
+        const result = yield* manager
+          .open(request)
+          .pipe(Effect.provideService(FileSystem.FileSystem, filesystem), Effect.result);
+        expect(result._tag).toBe(identity === "known" ? "Success" : "Failure");
+        expect(ptyAdapter.spawnInputs).toHaveLength(identity === "known" ? 1 : 0);
+        if (identity === "known") {
+          expect(ptyAdapter.spawnInputs[0]?.env.CODEX_HOME).toBe(alias);
+          expect(ptyAdapter.spawnInputs[0]?.env.CODEX_SQLITE_HOME).toBeUndefined();
+          const generatedLink = yield* legacySqliteLink(generated);
+          expect(
+            yield* manager.restart({ ...request, cols: 100, rows: 24 }).pipe(Effect.result),
+          ).toMatchObject({
+            _tag: "Failure",
+            failure: { cause: { linkPath: generatedLink.link } },
+          });
+          expect(ptyAdapter.processes[0]?.killed).toBe(false);
+        }
+        expect(yield* fs.readLink(link)).toBe(target);
+        expect(yield* fs.readFileString(path.join(shared, "state.sqlite-wal"))).toBe("private WAL");
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+    { skip: !symlinksSupported || HostProcess.Platform.defaultValue() === "win32" },
+  );
+
+  it.effect.each(["", undefined])(
+    "Codex SQLite uses the POSIX account home when HOME is %s",
+    (childHome) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-account-home-" });
+        const { manager, ptyAdapter, input, account } = yield* createCodexTerminal(root);
+        vi.stubEnv("HOME", childHome);
+        const { link, target } = yield* legacySqliteLink(path.join(root, "account", ".codex"));
+        expect(yield* manager.open(input).pipe(Effect.result)).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "TerminalProviderEnvironmentError", cause: { linkPath: link } },
+        });
+        expect(account).toHaveBeenCalled();
+        expect(ptyAdapter.spawnInputs).toHaveLength(0);
+        expect(yield* fs.readLink(link)).toBe(target);
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+    { skip: !symlinksSupported },
+  );
+
+  it.effect.skipIf(!symlinksSupported)(
+    "Codex SQLite leaves Windows native home selection independent of HOME and passwd",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-windows-home-" });
+        const decoy = path.join(root, "unused");
+        const { manager, ptyAdapter, input, account, generated } = yield* createCodexTerminal(
+          root,
+          {
+            inherited: { HOME: decoy, USERPROFILE: decoy },
+          },
+        );
+        const { link, target } = yield* legacySqliteLink(path.join(decoy, ".codex"));
+        account.mockImplementation(() => {
+          throw new Error("POSIX passwd must not be used");
+        });
+        yield* manager.open(input);
+        expect(account).not.toHaveBeenCalled();
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        expect(ptyAdapter.spawnInputs[0]?.env).toMatchObject({ HOME: decoy, USERPROFILE: decoy });
+        expect(ptyAdapter.spawnInputs[0]?.env.CODEX_HOME).toBeUndefined();
+        expect(ptyAdapter.spawnInputs[0]?.env.CODEX_SQLITE_HOME).toBeUndefined();
+        expect(yield* fs.readLink(link)).toBe(target);
+        expect(yield* fs.exists(generated)).toBe(false);
+      }).pipe(Effect.provideService(HostProcess.Platform, "win32")),
+  );
+
+  it.effect(
+    "Codex SQLite keeps missing-account failures typed and refuses restart before killing",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-missing-account-" });
+        const { manager, ptyAdapter, input, account } = yield* createCodexTerminal(root);
+        const cause = Object.assign(new Error("private passwd diagnostic"), {
+          code: "ERR_SYSTEM_ERROR",
+        });
+        account.mockImplementation(() => {
+          throw cause;
+        });
+        yield* manager.open(input);
+        expect(account).not.toHaveBeenCalled();
+        vi.stubEnv("HOME", "");
+        const unsubscribe = yield* manager.attachStream(input, () => Effect.void);
+        yield* Effect.sync(unsubscribe);
+        expect(account).not.toHaveBeenCalled();
+        const failed = yield* manager.restart(restartInput(input)).pipe(Effect.result);
+        expect(failed).toMatchObject({
+          _tag: "Failure",
+          failure: {
+            _tag: "TerminalProviderEnvironmentError",
+            cause: { _tag: "AccountHomeDirectoryError", cause },
+          },
+        });
+        if (failed._tag === "Failure") {
+          expect(failed.failure.message).not.toContain(cause.message);
+          expect(failed.failure).toHaveProperty("cause.cause", cause);
+        }
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        expect(ptyAdapter.processes[0]?.killed).toBe(false);
+        expect(
+          yield* manager.open({ ...input, terminalId: "new" }).pipe(Effect.result),
+        ).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "TerminalProviderEnvironmentError" },
+        });
+        yield* manager.open({ ...input, terminalId: "explicit", env: { CODEX_HOME: root } });
+        expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("fails closed when a provider instance is missing", () =>
