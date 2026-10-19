@@ -127,7 +127,12 @@ export const make = Effect.fn("CuaDriver.make")(function* (
         yield* stop(entry);
         return;
       }
-      const mcp = yield* entry.host.start;
+      const mcp = yield* entry.host.start.pipe(
+        Effect.timeoutOrElse({
+          duration: "30 seconds",
+          orElse: () => Effect.fail(new CuaDriverHostError({ operation: "timeout" })),
+        }),
+      );
       if (entry.revoked) return;
       failure = Option.none();
       yield* Deferred.succeed(entry.result, Option.some(mcp));
@@ -189,13 +194,7 @@ export const make = Effect.fn("CuaDriver.make")(function* (
       active = entry;
       yield* start(entry).pipe(Effect.forkDetach);
     }
-    const result = yield* Deferred.await(entry.result).pipe(Effect.timeoutOption("30 seconds"));
-    if (Option.isSome(result)) return result.value;
-    if (active === entry) {
-      failure = Option.some(new CuaDriverHostError({ operation: "timeout" }));
-      yield* revoke(entry);
-    }
-    return Option.none<CuaDriverMcpConfiguration>();
+    return yield* Deferred.await(entry.result);
   });
   return CuaDriver.of({ acquire, enabled, lastFailure: Effect.sync(() => failure) });
 });

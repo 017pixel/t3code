@@ -81,22 +81,28 @@ it.layer(ServerSettings.layerTest())("CuaDriver lifecycle", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("shares a lazy start, survives one caller cancellation, and owns cleanup", () =>
+  it.effect("shares slow preparation, survives one caller cancellation, and owns cleanup", () =>
     Effect.gen(function* () {
       const h = yield* makeHost();
+      const preparing = yield* Deferred.make<void>();
+      const prepared = yield* Deferred.make<void>();
       let creates = 0;
       yield* Effect.gen(function* () {
         const { service } = yield* makeService(
-          Effect.sync(() => {
+          Effect.gen(function* () {
             creates++;
+            yield* Deferred.succeed(preparing, undefined);
+            yield* Deferred.await(prepared);
             return h.host;
           }),
         );
         expect(creates).toBe(0);
         const first = yield* service.acquire.pipe(Effect.forkChild);
-        yield* Deferred.await(h.started);
+        yield* Deferred.await(preparing);
         const second = yield* service.acquire.pipe(Effect.forkChild({ startImmediately: true }));
         yield* Fiber.interrupt(first);
+        yield* TestClock.adjust("31 seconds");
+        yield* Deferred.succeed(prepared, undefined);
         yield* Deferred.succeed(h.ready, mcp);
         expect(yield* Fiber.join(second)).toEqual(Option.some(mcp));
         expect(yield* service.acquire).toEqual(Option.some(mcp));
@@ -262,6 +268,28 @@ const nativeFixture = Effect.fnUntraced(function* () {
 });
 
 it.layer(ServerSettings.layerTest())("CuaDriver native ownership", (it) => {
+  it.effect("times out native startup after 30 seconds and cleans up when it settles", () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const { service } = yield* makeService(f.factory);
+      const acquiring = yield* service.acquire.pipe(Effect.forkChild);
+      yield* Deferred.await(f.started);
+      yield* TestClock.adjust("29 seconds");
+      expect(yield* service.lastFailure).toEqual(Option.none());
+      yield* TestClock.adjust("1 second");
+      expect(yield* service.lastFailure).toEqual(
+        Option.some(new CuaDriver.CuaDriverHostError({ operation: "timeout" })),
+      );
+      expect(f.destroys()).toBe(0);
+      f.start.resolve(f.connection);
+      yield* Deferred.await(f.stopping);
+      f.stop.resolve();
+      yield* Deferred.await(f.destroyed);
+      expect(yield* Fiber.join(acquiring)).toEqual(Option.none());
+      expect(f.destroys()).toBe(1);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect.each(["start", "stop"] as const)(
     "bounds shutdown with native %s pending without destroying or reusing its owner",
     (pending) =>
