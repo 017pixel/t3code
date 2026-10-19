@@ -373,27 +373,52 @@ const make = Effect.gen(function* () {
         // No-overlay checkout carries deletions; read-tree unstages edits without moving the branch.
         yield* git(input.worktreePath, ["checkout", "--no-overlay", input.snapshot, "--", "."]);
         yield* git(input.worktreePath, ["read-tree", "-m", input.tip]);
-        // Keep carried force-added ignored files visible to the next commit or handoff.
-        const ignored = yield* git(
+        // Only snapshot additions qualify; checkout hooks can also produce ignored local files.
+        // Prefix paths so check-ignore does not interpret literal names as pathspec magic.
+        const added = yield* git(
           input.worktreePath,
-          ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
+          [
+            "diff",
+            "-z",
+            "--name-only",
+            "--line-prefix=./",
+            "--no-renames",
+            "--diff-filter=A",
+            input.tip,
+            input.snapshot,
+          ],
           { maxOutputBytes: 16 * 1024 * 1024, outputMode: "error" },
         );
-        if (ignored.stdout !== "") {
-          yield* git(
+        if (added.stdout !== "") {
+          const ignored = yield* git(
             input.worktreePath,
-            [
-              "--literal-pathspecs",
-              "add",
-              "--intent-to-add",
-              "--force",
-              "--pathspec-from-file=-",
-              "--pathspec-file-nul",
-            ],
-            { stdin: ignored.stdout },
+            ["check-ignore", "-z", "--stdin", "--no-index"],
+            {
+              stdin: added.stdout,
+              allowNonZeroExit: true,
+              maxOutputBytes: 16 * 1024 * 1024,
+              outputMode: "error",
+            },
           );
-          // An intent entry can displace a tracked ancestor in a file-to-directory replacement.
-          yield* git(input.worktreePath, ["diff", "--cached", "--quiet", input.tip]);
+          if (ignored.exitCode !== 0 && ignored.exitCode !== 1) {
+            return yield* new HandoffGitStepError({ step: "check-ignore", cause: ignored });
+          }
+          if (ignored.stdout !== "") {
+            yield* git(
+              input.worktreePath,
+              [
+                "--literal-pathspecs",
+                "add",
+                "--intent-to-add",
+                "--force",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+              ],
+              { stdin: ignored.stdout },
+            );
+            // An intent entry can displace a tracked ancestor in a file-to-directory replacement.
+            yield* git(input.worktreePath, ["diff", "--cached", "--quiet", input.tip]);
+          }
         }
         return {
           branch,

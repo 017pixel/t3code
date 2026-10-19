@@ -143,6 +143,12 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
         assert.equal(missingTip._tag, "VcsProcessExitError");
         assert.deepEqual(yield* f.fs.readDirectory(f.outDir), [f.path.basename(packed.bundlePath)]);
 
+        yield* f.write(
+          f.receiver,
+          ".git/hooks/post-checkout",
+          "#!/bin/sh\nprintf 'receiver-only hook output\\n' > secret.txt\n",
+        );
+        yield* f.fs.chmod(f.path.join(f.receiver, ".git/hooks/post-checkout"), 0o755);
         const input = {
           ...packed,
           repoRoot: f.receiver,
@@ -171,14 +177,16 @@ it.layer(nativeLayer)("HandoffGit", (it) => {
           "library\n",
         );
         assert.isFalse(yield* f.fs.exists(f.path.join(f.worktreePath, "deleted.txt")));
-        assert.isFalse(yield* f.fs.exists(f.path.join(f.worktreePath, "secret.txt")));
+        assert.equal(
+          yield* f.fs.readFileString(f.path.join(f.worktreePath, "secret.txt")),
+          "receiver-only hook output\n",
+        );
         assert.equal(
           yield* f.fs.readFileString(f.path.join(f.worktreePath, "forced.txt")),
           "source forced\n",
         );
         assert.equal(yield* git(f.worktreePath, ["diff", "--cached"]), "");
 
-        yield* f.write(f.worktreePath, "secret.txt", "receiver secret\n");
         const acceptedBefore = yield* checkoutState(f.worktreePath);
         const repacked = yield* handoff.pack({
           cwd: f.worktreePath,
