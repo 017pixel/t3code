@@ -41,6 +41,9 @@ const CRASH_RESTART_BASE_MS = 1_000;
 const CRASH_RESTART_MAX_MS = 30_000;
 /** A child that ran this long before exiting was not crash-looping. */
 const STABLE_RUN_MS = 60_000;
+// `t3 update` publishes a runtime before it records the restart that selects
+// it, so a runtime that just appeared may be about to become the active one.
+const PRUNE_MIN_AGE_MS = 60 * 60_000;
 // Matches SERVER_EXIT_CODE_STATE_DIR_OWNED in contracts. The standalone
 // launcher stays independent of the Effect-backed contracts package.
 const STATE_DIR_OWNED_EXIT_CODE = 78;
@@ -416,7 +419,9 @@ export async function pruneServiceRuntimes(
     }
     // An incomplete directory is a staging in progress, not an old runtime.
     if (!(await runtimeExists(baseDir, entry.name))) continue;
-    await NodeFSP.rm(NodePath.join(versionsDir, entry.name), { recursive: true, force: true });
+    const versionDir = NodePath.join(versionsDir, entry.name);
+    if (Date.now() - (await NodeFSP.stat(versionDir)).mtimeMs < PRUNE_MIN_AGE_MS) continue;
+    await NodeFSP.rm(versionDir, { recursive: true, force: true });
   }
 }
 

@@ -348,6 +348,9 @@ if (context.update?.status === "pending") {
           childSource,
         );
       }
+      // Pruning leaves runtimes published within the last hour.
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000);
+      yield* fs.utimes(path.join(root, "runtime", "versions", "0.5.0"), twoHoursAgo, twoHoursAgo);
       yield* Effect.promise(() =>
         writeServiceState(statePath, {
           protocol: SERVICE_LAUNCHER_PROTOCOL,
@@ -803,11 +806,18 @@ setInterval(() => {}, 1_000);
         const names = yield* fs.readDirectory(path.join(root, "runtime", "versions"));
         return names.toSorted();
       });
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000);
       const seed = (versions: ReadonlyArray<string>) =>
-        Effect.forEach(versions, (version) => writeFakeRuntime(fs, path, versionDir(version), ""));
+        Effect.forEach(versions, (version) =>
+          writeFakeRuntime(fs, path, versionDir(version), "").pipe(
+            Effect.andThen(fs.utimes(versionDir(version), twoHoursAgo, twoHoursAgo)),
+          ),
+        );
       // A directory without the completion marker is a staging in progress.
       yield* fs.makeDirectory(versionDir("0.4.0"), { recursive: true });
       yield* seed(["0.5.0", "0.6.0", "0.7.0", "0.8.0", "1.0.0", "1.1.0"]);
+      // Just published by `t3 update`, which has not recorded its restart yet.
+      yield* writeFakeRuntime(fs, path, versionDir("1.2.0"), "");
       // The running launcher is 0.6.0, but a deferred CLI update repointed the unit to 0.8.0.
       yield* fs.writeFileString(
         path.join(root, "runtime", SERVICE_RESTART_PENDING_FILE),
@@ -830,7 +840,7 @@ setInterval(() => {}, 1_000);
           "0.6.0",
         ),
       );
-      assert.deepEqual(yield* remaining, ["0.4.0", "0.6.0", "0.7.0", "0.8.0", "1.0.0"]);
+      assert.deepEqual(yield* remaining, ["0.4.0", "0.6.0", "0.7.0", "0.8.0", "1.0.0", "1.2.0"]);
 
       yield* seed(["0.5.0", "1.1.0"]);
       yield* Effect.promise(() =>
@@ -850,7 +860,7 @@ setInterval(() => {}, 1_000);
           "0.6.0",
         ),
       );
-      assert.deepEqual(yield* remaining, ["0.4.0", "0.6.0", "0.8.0", "1.0.0", "1.1.0"]);
+      assert.deepEqual(yield* remaining, ["0.4.0", "0.6.0", "0.8.0", "1.0.0", "1.1.0", "1.2.0"]);
     }),
   );
 
