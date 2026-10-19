@@ -9,6 +9,9 @@ import { isHeicImageFile } from "../../lib/imageCompression";
 
 type AttachmentImageProps = ComponentProps<"img"> & { name: string; mimeType?: string | undefined };
 
+// Keep import expressions outside hooks until React Compiler supports them.
+const loadImageDecoder = () => import("../files/decodeImagePreview");
+
 export function AttachmentImage({ name, mimeType, ...props }: AttachmentImageProps) {
   const fallback =
     isHeicImageFile({ name, type: mimeType ?? "" }) ||
@@ -29,7 +32,7 @@ function DecodedImage({ name, mimeType, src, onError, ...props }: AttachmentImag
     if (!decodeError || !src) return;
     const controller = new AbortController();
     let objectUrl: string | undefined;
-    void import("../files/decodeImagePreview")
+    void loadImageDecoder()
       .then(async ({ decodeImagePreview }) => {
         if (controller.signal.aborted) return;
         const blob = await decodeImagePreview(

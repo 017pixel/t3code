@@ -1188,6 +1188,14 @@ describe("AssetAccess", () => {
         ["woff", "font/woff"],
         ["woff2", "font/woff2"],
         ["weba", "audio/webm"],
+        ["zip", "application/zip"],
+        ["jar", "application/java-archive"],
+        ["tar", "application/x-tar"],
+        ["gz", "application/gzip"],
+        ["tgz", "application/gzip"],
+        ["sqlite", "application/vnd.sqlite3"],
+        ["sqlite3", "application/vnd.sqlite3"],
+        ["db", "application/vnd.sqlite3"],
       ] as const) {
         const attachmentId = `thread-1-00000000-0000-4000-8000-000000000001-${extension}`;
         const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.${extension}`);
@@ -1198,7 +1206,7 @@ describe("AssetAccess", () => {
             _tag: "attachment",
             attachmentId,
             fileName: `report.${extension}`,
-            mimeType: "application/octet-stream",
+            mimeType: "text/html",
             disposition: "inline",
           },
         });
@@ -1256,8 +1264,8 @@ describe("AssetAccess", () => {
       const config = yield* ServerConfig.ServerConfig;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const attachmentId = "thread-1-00000000-0000-4000-8000-000000000002-zip";
-      const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.zip`);
+      const attachmentId = "thread-1-00000000-0000-4000-8000-000000000002-7z";
+      const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.7z`);
       yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
       yield* fileSystem.writeFile(attachmentPath, new Uint8Array([1, 2, 3]));
 
@@ -1265,7 +1273,7 @@ describe("AssetAccess", () => {
         resource: {
           _tag: "attachment",
           attachmentId,
-          fileName: "archive.zip",
+          fileName: "archive.7z",
           mimeType: "text/html",
           disposition: "inline",
         },
