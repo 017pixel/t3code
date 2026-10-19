@@ -300,4 +300,27 @@ it("preserves different destination headers in a URL-only bulk edit", () => {
       transport: mixedTarget,
     }),
   ).toThrow("each environment");
+
+  const blankInitial = {
+    ...initial,
+    headers: [{ name: "Authorization", value: "", sensitive: true }],
+  };
+  const blankDraft = mcpServerDraftFrom("docs", { enabled: true, transport: blankInitial });
+  const blankRename = mcpServerFromDraft(
+    {
+      ...blankDraft,
+      headers: blankDraft.headers.map((variable) => ({ ...variable, name: "X-Auth" })),
+    },
+    new Set(),
+    "docs",
+  );
+  if (!blankRename.ok) throw new Error("Expected a valid empty variable rename");
+  for (const renamedFrom of [undefined, "docs"]) {
+    expect(
+      mcpServerTransportForTarget(blankRename.transport, blankInitial, blankInitial, renamedFrom),
+    ).toEqual(blankRename.transport);
+    expect(() =>
+      mcpServerTransportForTarget(blankRename.transport, blankInitial, initial, renamedFrom),
+    ).toThrow("each environment");
+  }
 });

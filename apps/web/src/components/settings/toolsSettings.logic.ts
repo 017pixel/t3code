@@ -450,7 +450,9 @@ export function mcpServerTransportForTarget(
       removed.some((variable) => {
         const destination = current.get(variable.name);
         return (
-          destination?.value !== variable.value || destination?.sensitive !== variable.sensitive
+          destination?.value !== variable.value ||
+          destination?.sensitive !== variable.sensitive ||
+          Boolean(destination?.valueRedacted) !== Boolean(variable.valueRedacted)
         );
       })
     ) {
