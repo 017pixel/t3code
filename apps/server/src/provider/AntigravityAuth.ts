@@ -96,7 +96,12 @@ function visibleSnapshot(snapshot: AuthSnapshot, ownerSessionId: string): Provid
     authorizationUrl: null,
     interaction: null,
     expiresAt: null,
-    ...(busy ? { message: "Sign-in is in progress in another client." } : {}),
+    inputError: null,
+    ...(busy
+      ? { message: "Sign-in is in progress in another client." }
+      : snapshot.state.phase === "failed"
+        ? { message: "Sign-in failed in another client." }
+        : {}),
   };
 }
 
@@ -109,7 +114,8 @@ function safeRejectionReason(message: string): string | undefined {
     text.length <= 300 &&
     /\p{L}/u.test(text) &&
     /^[\p{L}\p{N} .,;:!?'"()-]+$/u.test(text) &&
-    !/\S{20,}|\d{6,}/.test(text);
+    !/[\p{L}\p{N}][.:][\p{L}\p{N}]/u.test(text) &&
+    !/\S{20,}|\d{6,}|\bsk-[a-z0-9-]+/i.test(text);
   return plainProse ? text : undefined;
 }
 
@@ -160,6 +166,7 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
     authorizationUrl: null,
     expiresAt: null,
     message: null,
+    inputError: null,
   };
   const snapshot = yield* SubscriptionRef.make<AuthSnapshot>({
     ownerSessionId: null,
@@ -243,6 +250,7 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
           phase: Exit.isSuccess(result) ? "succeeded" : "failed",
           authorizationUrl: null,
           expiresAt: null,
+          inputError: null,
           message: Exit.isSuccess(result)
             ? usesBrowser
               ? "Signed in with Google."
@@ -293,6 +301,7 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
             ...flow.state,
             phase: "verifying",
             authorizationUrl: null,
+            inputError: null,
             message: "Checking Antigravity access and models.",
           });
         }),
@@ -323,6 +332,7 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
               phase,
               authorizationUrl: null,
               expiresAt: null,
+              inputError: null,
               message,
             });
             return true;
@@ -415,12 +425,17 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
             options.instanceId,
             flow.pending,
             input.callbackUrl,
+          ).pipe(
+            Effect.tapError((error) =>
+              publishFlow(flow, { ...flow.state, inputError: error.detail }),
+            ),
           );
           flow.callbackSent = true;
           yield* publishFlow(flow, {
             ...flow.state,
             phase: "verifying",
             authorizationUrl: null,
+            inputError: null,
             message: "Waiting for Google to finish sign-in.",
           });
           const forwarding = yield* (
@@ -469,6 +484,7 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
                   phase: "cancelled",
                   authorizationUrl: null,
                   expiresAt: null,
+                  inputError: null,
                   message: "Google sign-in was cancelled by sign-out.",
                 });
               }
