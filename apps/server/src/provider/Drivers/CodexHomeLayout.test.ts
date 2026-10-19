@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Real WAL preservation uses only disposable test homes.
+import * as NodeSqlite from "node:sqlite";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -85,6 +87,138 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
   });
 
   describe("materializeCodexShadowHome", () => {
+    it.effect.each([false, true])(
+      "leaves SQLite families unlinked and preserves real shadow files (existing: %s)",
+      (existing) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("codex-sqlite-shared-");
+          const shadowHome = yield* makeTempDir("codex-sqlite-shadow-");
+          const names = [
+            "state_5.sqlite",
+            "future_42.SQLITE-WAL",
+            "logs.sqlite-shm",
+            "other.sqlite-journal",
+          ];
+          for (const name of names) {
+            yield* fs.writeFileString(path.join(sharedHome, name), `shared:${name}`);
+            if (existing) yield* fs.writeFileString(path.join(shadowHome, name), `private:${name}`);
+          }
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+          );
+          yield* materializeCodexShadowHome(layout);
+          yield* materializeCodexShadowHome(layout);
+          for (const name of names) {
+            expect(yield* fs.readFileString(path.join(sharedHome, name))).toBe(`shared:${name}`);
+            expect(yield* fs.exists(path.join(shadowHome, name))).toBe(existing);
+            if (existing)
+              expect(yield* fs.readFileString(path.join(shadowHome, name))).toBe(`private:${name}`);
+          }
+        }),
+      { skip: !symlinksSupported },
+    );
+
+    it.effect.each([
+      "state_5.sqlite",
+      "future.SQLITE-WAL",
+      "orphan.sqlite-SHM",
+      "future.sqlite-journal",
+    ])(
+      "refuses legacy %s links before preparation, even dangling, without changing files",
+      (name) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("codex-sqlite-shared-");
+          const shadowHome = yield* makeTempDir("codex-sqlite-shadow-");
+          const target = path.join(sharedHome, name);
+          const linkPath = path.join(shadowHome, name);
+          yield* fs.symlink(target, linkPath);
+          yield* fs.writeFileString(path.join(shadowHome, "private.sqlite-wal"), "uncheckpointed");
+          yield* fs.writeFileString(path.join(sharedHome, "config.toml"), "shared config");
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+          );
+          for (const attempt of [1, 2]) {
+            const result = yield* materializeCodexShadowHome(layout).pipe(Effect.result);
+            expect(result, `attempt ${attempt}`).toMatchObject({
+              _tag: "Failure",
+              failure: { _tag: "CodexShadowHomeSqliteRecoveryRequiredError", linkPath },
+            });
+            if (result._tag === "Failure") {
+              expect(result.failure.message).toContain("Stop all Codex processes");
+              expect(result.failure.message).not.toContain(sharedHome);
+            }
+            expect(yield* fs.readLink(linkPath)).toBe(target);
+            expect(yield* fs.exists(target)).toBe(false);
+            expect(yield* fs.readFileString(path.join(shadowHome, "private.sqlite-wal"))).toBe(
+              "uncheckpointed",
+            );
+            expect((yield* fs.readDirectory(shadowHome)).sort()).toEqual(
+              [name, "private.sqlite-wal"].sort(),
+            );
+            expect(yield* fs.readDirectory(sharedHome)).toEqual(["config.toml"]);
+          }
+        }),
+      { skip: !symlinksSupported },
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "preserves live WAL commits and shadow sidecars until manual recovery",
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("codex-sqlite-shared-");
+          const shadowHome = yield* makeTempDir("codex-sqlite-shadow-");
+          const database = path.join(sharedHome, "state_5.sqlite");
+          const link = path.join(shadowHome, "state_5.sqlite");
+          yield* fs.writeFileString(database, "");
+          yield* fs.symlink(database, link);
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+          );
+          yield* Effect.gen(function* () {
+            const writer = yield* Effect.acquireRelease(
+              Effect.sync(() => new NodeSqlite.DatabaseSync(database)),
+              (db) => Effect.sync(() => db.close()),
+            );
+            expect(yield* materializeCodexShadowHome(layout).pipe(Effect.result)).toMatchObject({
+              _tag: "Failure",
+              failure: { _tag: "CodexShadowHomeSqliteRecoveryRequiredError" },
+            });
+            writer.exec(
+              "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE writes (value TEXT); INSERT INTO writes VALUES ('legacy');",
+            );
+            const wal = path.join(sharedHome, "state_5.sqlite-wal");
+            const before = yield* fs.readFile(wal);
+            const shadowWal = path.join(shadowHome, "state_5.sqlite-wal");
+            yield* fs.writeFile(shadowWal, before);
+            const databaseBefore = yield* fs.readFile(database);
+            expect(before.length).toBeGreaterThan(0);
+            expect(yield* materializeCodexShadowHome(layout).pipe(Effect.result)).toMatchObject({
+              _tag: "Failure",
+              failure: { _tag: "CodexShadowHomeSqliteRecoveryRequiredError" },
+            });
+            expect(yield* fs.readFile(wal)).toEqual(before);
+            expect(yield* fs.readFile(shadowWal)).toEqual(before);
+            expect(yield* fs.readFile(database)).toEqual(databaseBefore);
+            expect(yield* fs.readLink(link)).toBe(database);
+            expect(writer.prepare("SELECT value FROM writes").all()).toEqual([{ value: "legacy" }]);
+          }).pipe(Effect.scoped);
+          // Only the operator unlinks the legacy database after the writer closes and checkpoints.
+          yield* fs.remove(link);
+          yield* materializeCodexShadowHome(layout);
+          const reopened = yield* Effect.acquireRelease(
+            Effect.sync(() => new NodeSqlite.DatabaseSync(database)),
+            (db) => Effect.sync(() => db.close()),
+          );
+          expect(reopened.prepare("SELECT value FROM writes").all()).toEqual([{ value: "legacy" }]);
+          expect(yield* fs.exists(link)).toBe(false);
+        }),
+    );
     it.effect.skipIf(!symlinksSupported)(
       "keeps Finder metadata local across repeated shadow home setup",
       () =>

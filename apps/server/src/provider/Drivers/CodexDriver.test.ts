@@ -1,3 +1,4 @@
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as CodexInstallation from "../CodexInstallation.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
@@ -97,6 +98,46 @@ const noSpawn = ChildProcessSpawner.make(() =>
 const encodeCredentials = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 it.layer(layerTest)("CodexDriver", (it) => {
+  it.effect.skipIf(!symlinksSupported)(
+    "refuses a native provider with a legacy SQLite shadow before probing or spawning",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "codex-native-recovery-" });
+        const sharedHome = NodePath.join(root, "shared");
+        const shadowHome = NodePath.join(root, "shadow");
+        yield* fs.makeDirectory(shadowHome);
+        const linkPath = NodePath.join(shadowHome, "future.SQLITE-WAL");
+        const target = NodePath.join(root, "missing-wal");
+        yield* fs.symlink(target, linkPath);
+        const result = yield* CodexDriver.create({
+          instanceId: ProviderInstanceId.make("native-recovery"),
+          displayName: undefined,
+          enabled: true,
+          environment: [],
+          config: {
+            ...CodexDriver.defaultConfig(),
+            setupMode: "existing",
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          },
+        }).pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { cause: { _tag: "CodexShadowHomeSqliteRecoveryRequiredError", linkPath } },
+        });
+        if (result._tag === "Failure") {
+          expect(result.failure.detail).toContain("Stop all Codex processes");
+          expect(result.failure.detail).not.toContain(root);
+        }
+        expect(yield* fs.readLink(linkPath)).toBe(target);
+        expect(yield* fs.exists(sharedHome)).toBe(false);
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn),
+        Effect.scoped,
+      ),
+  );
+
   it.effect("reports a disabled managed account as disabled", () =>
     Effect.gen(function* () {
       const instance = yield* CodexDriver.create({
@@ -229,7 +270,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
         expect(restored.auth.email).toBe("account@example.test");
         expect(restored.runtimePaths?.homePath).toBe(sharedHome);
         expect(restored.runtimePaths?.shadowHomePath).toContain(
-          `providers/codex/${instanceId}/shadow`,
+          NodePath.join("providers", "codex", instanceId, "shadow"),
         );
         // The fixture app-server cannot start, so the workspace scan fails
         // instead of passing the machine snapshot off as the workspace's skills.
@@ -265,8 +306,47 @@ it.layer(layerTest)("CodexDriver", (it) => {
         expect(launch.environment.ACCESS_TOKEN).toBe("dummy-owned-access");
         expect(launch.environment.OPENAI_API_KEY).toBeUndefined();
         expect(launch.environment.CODEX_HOME).toBe(launch.settings.homePath);
+        expect(launch.environment.CODEX_SQLITE_HOME).toBe(sharedHome);
         const before = yield* instance.auth!.subscribe("test-owner").pipe(Stream.runHead);
         expect(Option.getOrThrow(before).phase).toBe("idle");
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.writeFileString(NodePath.join(sharedHome, "state_5.sqlite"), "");
+        yield* fs.symlink(
+          NodePath.join(sharedHome, "state_5.sqlite"),
+          NodePath.join(launch.settings.homePath, "state_5.sqlite"),
+        );
+        const blocked = yield* instance.snapshot.refresh;
+        expect(blocked.message).toContain("Codex SQLite recovery is required");
+        expect(blocked.message).toContain("Stop all Codex processes");
+        expect(blocked.message).not.toContain(sharedHome);
+        expect(blocked.message).not.toContain(launch.settings.homePath);
+        // An explicitly configured shadow is checked during construction, not only
+        // later runtime probes. The registry must receive the same recovery guidance.
+        const explicit = yield* CodexDriver.create({
+          instanceId,
+          displayName: "Explicit shadow account",
+          enabled: true,
+          environment: [],
+          config: {
+            ...CodexDriver.defaultConfig(),
+            setupMode: "managed",
+            homePath: sharedHome,
+            shadowHomePath: launch.settings.homePath,
+          },
+        }).pipe(Effect.scoped, Effect.flip);
+        expect(explicit.detail).toContain("Codex SQLite recovery is required");
+        expect(explicit.detail).toContain("Stop all Codex processes");
+        expect(explicit.detail).not.toContain(sharedHome);
+        expect(explicit.detail).not.toContain(launch.settings.homePath);
+        expect(explicit.cause).toMatchObject({
+          cause: {
+            _tag: "CodexShadowHomeSqliteRecoveryRequiredError",
+            linkPath: NodePath.join(launch.settings.homePath, "state_5.sqlite"),
+          },
+        });
+        expect(yield* fs.readLink(NodePath.join(launch.settings.homePath, "state_5.sqlite"))).toBe(
+          NodePath.join(sharedHome, "state_5.sqlite"),
+        );
         yield* instance.auth!.logout(Effect.void);
         const after = Option.getOrThrow(yield* Fiber.join(disconnected));
         expect(after.auth.status).toBe("unauthenticated");
