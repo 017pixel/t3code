@@ -2933,7 +2933,9 @@ it.layer(
         const unsubscribe = yield* manager.attachStream(input, () => Effect.void);
         yield* Effect.sync(unsubscribe);
         expect(account).not.toHaveBeenCalled();
-        const failed = yield* manager.restart(restartInput(input)).pipe(Effect.result);
+        const failed = yield* manager
+          .restart({ ...input, cols: input.cols ?? 100, rows: input.rows ?? 24 })
+          .pipe(Effect.result);
         expect(failed).toMatchObject({
           _tag: "Failure",
           failure: {
@@ -3004,6 +3006,8 @@ it.layer(
       });
 
       const error = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        stateDir: "/isolated-test/state",
+        cwd: "/isolated-test/cwd",
         serverSettings,
         path,
         rawProviderInstanceId: providerInstanceId,
@@ -3047,6 +3051,8 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        stateDir: "/isolated-test/state",
+        cwd: "/isolated-test/cwd",
         serverSettings,
         path,
         rawProviderInstanceId: "configured_home",
@@ -3074,6 +3080,8 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        stateDir: "/isolated-test/state",
+        cwd: "/isolated-test/cwd",
         serverSettings,
         path,
         rawProviderInstanceId: "codex",
@@ -3100,6 +3108,8 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        stateDir: "/isolated-test/state",
+        cwd: "/isolated-test/cwd",
         serverSettings,
         path,
         rawProviderInstanceId: "claudeAgent",
@@ -3126,6 +3136,8 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        stateDir: "/isolated-test/state",
+        cwd: "/isolated-test/cwd",
         serverSettings,
         path,
         rawProviderInstanceId: "codex",
@@ -3143,6 +3155,8 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const error = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        stateDir: "/isolated-test/state",
+        cwd: "/isolated-test/cwd",
         serverSettings,
         path,
         rawProviderInstanceId: "codex_unknown",
@@ -3184,6 +3198,8 @@ it.layer(
         historyByteLimit: 8,
         resolveProviderInstanceEnvironment: (rawProviderInstanceId, env) =>
           TerminalManager.resolveProviderInstanceTerminalEnvironment({
+            stateDir: "/isolated-test/state",
+            cwd: "/isolated-test/cwd",
             serverSettings,
             path,
             rawProviderInstanceId,

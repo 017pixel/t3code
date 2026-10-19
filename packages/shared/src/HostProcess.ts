@@ -1,5 +1,6 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as NodeDns from "node:dns";
 import * as NodeOS from "node:os";
 import * as NodeSea from "node:sea";
@@ -25,6 +26,26 @@ export const HomeDirectory = Context.Reference<string>(
     defaultValue: () => NodeOS.homedir(),
   },
 );
+
+export class AccountHomeDirectoryError extends Schema.TaggedError<AccountHomeDirectoryError>()(
+  "AccountHomeDirectoryError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not resolve the OS account home directory.";
+  }
+}
+
+// Unlike homedir(), account metadata must not fall back to the server's ambient HOME.
+export const AccountHomeDirectory = Context.Reference<
+  Effect.Effect<string, AccountHomeDirectoryError>
+>("@t3tools/shared/HostProcess/AccountHomeDirectory", {
+  defaultValue: () =>
+    Effect.try({
+      try: () => NodeOS.userInfo().homedir,
+      catch: (cause) => new AccountHomeDirectoryError({ cause }),
+    }),
+});
 
 export const Environment = Context.Reference<NodeJS.ProcessEnv>(
   "@t3tools/shared/HostProcess/Environment",

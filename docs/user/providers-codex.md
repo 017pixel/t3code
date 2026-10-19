@@ -56,6 +56,13 @@ Both instances must use the same **CODEX_HOME path**. T3 Code prepares the share
 state in the shadow directory; do not populate it by copying your whole Codex
 home.
 
+If an older shadow home reports **SQLite recovery is required**, stop every
+Codex process using either home and back up both directories. Recover or
+checkpoint any shadow WAL/journal data before removing the old shadow SQLite
+symlinks, including dangling or orphaned sidecar links. Do not delete real
+databases or sidecars to force startup. T3 Code does not repair or merge them
+automatically.
+
 The shadow account needs its own `auth.json` file. If Codex uses an OS credential
 store, configure file storage for this setup. See
 [OpenAI's credential storage guide](https://learn.chatgpt.com/docs/auth#credential-storage).
