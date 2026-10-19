@@ -2058,7 +2058,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       <TooltipPopup side="top">Unsent draft</TooltipPopup>
     </Tooltip>
   ) : null;
-  // Quiet marker for threads an agent opened; the hover card and thread details name it.
   const agentOpenedIndicator = isAgentOpenedThread(thread.source) ? (
     <BotIcon
       aria-label="Opened by an agent"

@@ -86,7 +86,6 @@ export interface ThreadLaunchInput {
   readonly interactionMode: ProviderInteractionMode;
   readonly workspaceStrategy: ThreadLaunchWorkspaceStrategy;
   readonly initialMessage?: ThreadLaunchInitialMessage;
-  /** Thread whose agent launched this one, recorded on the new thread. */
   readonly openedByThreadId?: ThreadId;
   readonly importedNativeThread?: {
     readonly ref: {

@@ -42,11 +42,7 @@ export function resolveMergeBackTargetThreadId(
     : projection.thread.lineage.parentThreadId;
 }
 
-/**
- * Who opened an agent-opened thread. `null` when a person opened it.
- * `threadId` is null when the opener is unknown: a caller outside a T3
- * thread, a task an agent scheduled, or a thread from an older server.
- */
+/** Older servers and agents outside a T3 thread may not identify the opener. */
 export function resolveThreadOpener(
   thread: Pick<OrchestrationV2ThreadShell, "createdBy" | "lineage" | "openedByThreadId">,
 ): { readonly threadId: ThreadId | null } | null {

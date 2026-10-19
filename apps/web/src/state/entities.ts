@@ -343,8 +343,8 @@ function shellParentThreadId(
 
 /**
  * The live shells the panel's immediate relationships can reach: the thread,
- * its parent, its children, and the threads its subagents, workflow members and
- * context transfers name. Keeps its array while those shells are unchanged, so
+ * its parent, its children, its opener, and the threads its subagents, workflow
+ * members and context transfers name. Keeps its array while those shells are unchanged, so
  * another thread streaming in the same environment does not re-render the panel.
  */
 /** Exported for tests. */
@@ -360,6 +360,9 @@ export function selectThreadRelationshipShells(
   if (projection !== null) {
     const parentThreadId = shellParentThreadId(projection.thread);
     if (parentThreadId !== null) named.add(parentThreadId);
+    if (projection.thread.openedByThreadId !== undefined) {
+      named.add(projection.thread.openedByThreadId);
+    }
     for (const subagent of projection.subagents) {
       if (subagent.childThreadId !== null) named.add(subagent.childThreadId);
       for (const agent of subagent.workflow?.agents ?? []) {
@@ -374,6 +377,7 @@ export function selectThreadRelationshipShells(
   const current = threads.find((thread) => thread.id === threadId);
   const currentParentId = current === undefined ? null : shellParentThreadId(current);
   if (currentParentId !== null) named.add(currentParentId);
+  if (current?.openedByThreadId !== undefined) named.add(current.openedByThreadId);
   return threads.filter(
     (thread) => named.has(thread.id) || shellParentThreadId(thread) === threadId,
   );

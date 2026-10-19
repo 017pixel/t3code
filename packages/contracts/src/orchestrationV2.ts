@@ -370,7 +370,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   lineage: OrchestrationV2AppThreadLineage,
-  /** Thread whose agent opened this one through T3 tools; absent otherwise. */
+  /** Optional provenance, independent of parentage and lifecycle. */
   openedByThreadId: Schema.optional(ThreadId),
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -435,11 +435,7 @@ export function isProviderNativeSubagentThread(
   return thread.lineage.relationshipToParent === "subagent" && thread.creationSource === "provider";
 }
 
-/**
- * A top-level thread an agent opened through T3 tools (t3_thread_launch,
- * create_threads, or a task an agent scheduled). Subagents and forks are
- * excluded because their lineage already names the parent.
- */
+/** Subagents and forks already name their parent through lineage. */
 export function isAgentOpenedThread(
   thread: Pick<OrchestrationV2AppThread, "createdBy" | "lineage">,
 ): boolean {

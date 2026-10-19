@@ -160,7 +160,6 @@ function ThreadLineageGroup(props: {
   );
 }
 
-/** First Lineage row for a thread an agent opened, linking the opener when known. */
 function ThreadOpenerRow(props: {
   readonly openerTitle: string | null;
   readonly onOpen: (() => void) | null;
@@ -314,7 +313,8 @@ export function ThreadRelationshipsPanel(props: {
       : { ...row, edge: { ...row.edge, status: workflowGroup.workflow.status } };
   });
   const opener = currentThread ? resolveThreadOpener(currentThread) : null;
-  const openerThread = opener?.threadId ? graph.nodes.get(opener.threadId)?.thread : null;
+  const openerShell = opener?.threadId ? graph.nodes.get(opener.threadId)?.thread : null;
+  const openerThread = openerShell?.deletedAt === null ? openerShell : null;
   const canMerge = mergeTargetThreadId !== null && latestMergeBackRun !== null;
   const canDetach = projection ? canDetachThreadProviderSession(projection) : false;
 

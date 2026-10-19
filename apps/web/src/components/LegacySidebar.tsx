@@ -753,11 +753,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </Tooltip>
           )}
           {isAgentOpenedThread(thread.source) ? (
-            <BotIcon
-              aria-label="Opened by an agent"
-              role="img"
-              className="size-3 shrink-0 text-muted-foreground/65"
-            />
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span
+                    aria-label="Opened by an agent"
+                    role="img"
+                    className="inline-flex shrink-0 text-muted-foreground/65"
+                  />
+                }
+              >
+                <BotIcon aria-hidden className="size-3" />
+              </TooltipTrigger>
+              <TooltipPopup side="top">Opened by an agent</TooltipPopup>
+            </Tooltip>
           ) : null}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
