@@ -378,6 +378,12 @@ export interface OrchestratorV2Shape {
   readonly getThreadEventSequence: (
     threadId: ThreadId,
   ) => Effect.Effect<number, OrchestratorV2Error>;
+  /** Committed history at a fixed sequence, without subscribing to live events. */
+  readonly readStoredEvents: (input: {
+    readonly threadId: ThreadId;
+    readonly throughSequence: number;
+    readonly eventType: OrchestrationV2DomainEvent["type"];
+  }) => Stream.Stream<OrchestrationV2StoredEvent, OrchestratorV2Error>;
   readonly streamStoredEvents: Stream.Stream<OrchestrationV2StoredEvent, OrchestratorV2Error>;
   readonly streamStoredEventsFrom: (input?: {
     readonly threadId?: ThreadId;
@@ -9717,6 +9723,37 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
       const latestRun = projection.runs.findLast((run) => run.status !== "queued");
+      if (command.throughSequence !== undefined && latestRun !== undefined) {
+        // A child Stop may have failed before committing its receipt. Retrying
+        // it must not reach a run that started after the parent's original Stop.
+        const hadStarted = yield* eventSink
+          .read({
+            threadId: command.threadId,
+            throughSequence: command.throughSequence,
+            eventType: "run.created",
+          })
+          .pipe(
+            Stream.concat(
+              eventSink.read({
+                threadId: command.threadId,
+                throughSequence: command.throughSequence,
+                eventType: "run.updated",
+              }),
+            ),
+            Stream.runFold(
+              () => false,
+              (found, stored) =>
+                found ||
+                ((stored.event.type === "run.created" || stored.event.type === "run.updated") &&
+                  stored.event.runId === latestRun.id &&
+                  stored.event.payload.status !== "queued"),
+            ),
+            Effect.mapError(
+              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+            ),
+          );
+        if (!hadStarted) return undefined;
+      }
       const target =
         projection.runs.findLast(
           (run) =>
@@ -11772,6 +11809,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       eventSink
         .latestSequence({ threadId })
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
+    readStoredEvents: (input) =>
+      eventSink
+        .read(input)
+        .pipe(Stream.mapError((cause) => new OrchestratorDomainEventStreamError({ cause }))),
     streamStoredEvents: eventSink.stream().pipe(
       Stream.mapError(
         (cause) =>
@@ -11926,6 +11967,12 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
         cause: "Orchestration V2 live runtime is not configured.",
       }),
     ),
+    readStoredEvents: () =>
+      Stream.fail(
+        new OrchestratorDomainEventStreamError({
+          cause: "Orchestration V2 live runtime is not configured.",
+        }),
+      ),
     streamStoredEventsFrom: () =>
       Stream.fail(
         new OrchestratorDomainEventStreamError({

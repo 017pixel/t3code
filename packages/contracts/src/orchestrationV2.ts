@@ -3034,6 +3034,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     reason: Schema.optional(Schema.String),
+    throughSequence: Schema.optional(NonNegativeInt),
   }),
   /**
    * Internal so no client can mark a request saved without the value being

@@ -43,6 +43,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -1092,20 +1093,64 @@ const make = Effect.gen(function* () {
 
   const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = (input) =>
     Effect.gen(function* () {
-      const { subagents } = yield* orchestrator.getThreadRecords(input.threadId, ["subagents"]);
+      const receipt = yield* receipts
+        .getByCommandId(input.commandId)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+          ),
+        );
+      return yield* stopDelegatedTasksThrough(
+        input,
+        Option.isSome(receipt) ? receipt.value.resultSequence : undefined,
+      );
+    });
+
+  const stopDelegatedTasksThrough = (
+    input: Parameters<ThreadManagementServiceShape["stopDelegatedTasks"]>[0],
+    throughSequence: number | undefined,
+  ): ReturnType<ThreadManagementServiceShape["stopDelegatedTasks"]> =>
+    Effect.gen(function* () {
+      // A retry must not stop tasks delegated after the original Stop, including
+      // when an earlier walk stopped some children and failed on another.
+      const childThreadIds = new Set(
+        throughSequence === undefined
+          ? (yield* orchestrator.getThreadRecords(input.threadId, ["subagents"])).subagents.flatMap(
+              (task) =>
+                task.origin === "app_owned" && task.childThreadId !== null
+                  ? [task.childThreadId]
+                  : [],
+            )
+          : yield* orchestrator
+              .readStoredEvents({
+                threadId: input.threadId,
+                throughSequence,
+                eventType: "subagent.updated",
+              })
+              .pipe(
+                Stream.filterMap((stored) =>
+                  stored.event.type === "subagent.updated" &&
+                  stored.event.payload.origin === "app_owned" &&
+                  stored.event.payload.childThreadId !== null
+                    ? Result.succeed(stored.event.payload.childThreadId)
+                    : Result.failVoid,
+                ),
+                Stream.runCollect,
+              ),
+      );
       const failures: Array<
         Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
       > = [];
-      for (const task of subagents) {
-        if (task.origin !== "app_owned" || task.childThreadId === null) continue;
-        const threadId = task.childThreadId;
+      for (const threadId of childThreadIds) {
         yield* dispatch({
           type: "thread.stop",
           commandId: CommandId.make(`${input.commandId}:stop:${threadId}`),
           threadId,
+          ...(throughSequence === undefined ? {} : { throughSequence }),
           ...(input.reason === undefined ? {} : { reason: input.reason }),
         }).pipe(
-          Effect.andThen(stopDelegatedTasks({ ...input, threadId })),
+          Effect.andThen(stopDelegatedTasksThrough({ ...input, threadId }, throughSequence)),
           Effect.catch((error) =>
             Effect.logWarning("Unable to stop a delegated task", {
               parentThreadId: input.threadId,

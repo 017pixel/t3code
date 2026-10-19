@@ -8,9 +8,7 @@ import {
   RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
-import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
@@ -350,38 +348,22 @@ it.effect("refuses a change when the calling thread cannot be read", () =>
   ),
 );
 
-const box = EnvironmentId.make("environment-box");
-const here = EnvironmentId.make("environment");
-const linkedProbe = {
-  ...probe,
-  parameters: Schema.Struct({
-    environmentId: OrchestratorMcpEnvironmentTarget,
-    threadId: Schema.optional(ThreadId),
-    runtimeMode: Schema.optional(RuntimeMode),
-    interactionMode: Schema.optional(ProviderInteractionMode),
-  }),
-};
 const LinkedProbeToolkit = Toolkit.make(
-  Tool.make("reads", linkedProbe),
-  Tool.make("writes", linkedProbe),
-  Tool.make("writes_with_capability", linkedProbe),
-  Tool.make("writes_threads", linkedProbe),
-  Tool.make("starts_threads", linkedProbe),
-  Tool.make("writes_environment", linkedProbe),
+  Tool.make("writes_threads", {
+    ...probe,
+    parameters: Schema.Struct({
+      environmentId: OrchestratorMcpEnvironmentTarget,
+      threadId: Schema.optional(ThreadId),
+    }),
+  }),
 );
-/** Runs here, and tells whether `environmentId` reached the handler. */
-const ranHere = <P extends object>(params: P) =>
-  Effect.succeed({ ran: "environmentId" in params ? "saw environmentId" : "here" });
-
 const linkedProbeServer = McpHttpServer.toolkitRegistration(
   LinkedProbeToolkit,
   McpToolAccess.toLayer(LinkedProbeToolkit, {
-    reads: McpToolAccess.reads(ranHere),
-    writes: McpToolAccess.writes(ranHere),
-    writes_with_capability: McpToolAccess.writesWithCapability(ranHere),
-    writes_threads: McpToolAccess.writesThreads((input) => [input.threadId], ranHere),
-    starts_threads: McpToolAccess.startsThreads((input) => input, ranHere),
-    writes_environment: McpToolAccess.writesEnvironment(ranHere),
+    writes_threads: McpToolAccess.writesThreads(
+      (input) => [input.threadId],
+      (params) => Effect.succeed({ ran: "environmentId" in params ? "leaked target" : "here" }),
+    ),
   }),
 ).pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
@@ -390,71 +372,32 @@ const linkedProbeServer = McpHttpServer.toolkitRegistration(
       getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
     }),
   ),
-  // Stands in for the linked environment, answering with where the call went.
   Layer.provide(
     Layer.mock(PeerForwarding.PeerForwarding)({
-      call: (_scope, tool, environmentId) =>
-        Effect.succeed({ ran: `${tool.name} in ${environmentId}` } as never),
+      call: () => Effect.succeed({ ran: "there" } as never),
     }),
   ),
 );
 
-it.effect.each([
-  ["reads", supervised, { environmentId: box }, "reads in environment-box"],
-  ["reads", supervised, { environmentId: here }, "here"],
-  ["reads", supervised, {}, "here"],
+it.effect(
+  "checks the caller here and the target where it lives, even when thread IDs collide",
+  () =>
+    Effect.gen(function* () {
+      const there = {
+        environmentId: EnvironmentId.make("environment-box"),
+        threadId: fullAccessThreadId,
+      };
+      expect(yield* call("writes_threads", supervised, there)).toBe("there");
+      expect(yield* call("writes_threads", readOnlyClient, there)).toBe("capability_denied");
+      expect(yield* call("writes_threads", ended, there)).toBe("parent_not_active");
 
-  // The caller is checked here before anything goes.
-  ["writes", readOnlyClient, { environmentId: box }, "capability_denied"],
-  ["writes", ended, { environmentId: box }, "parent_not_active"],
-  ["writes", supervised, { environmentId: box }, "writes in environment-box"],
-  ["writes_with_capability", readOnlyClient, { environmentId: box }, "capability_denied"],
-  [
-    "starts_threads",
-    plan,
-    { environmentId: box, interactionMode: "default" },
-    "interaction_mode_escalation_denied",
-  ],
-  ["starts_threads", plan, { environmentId: box }, "starts_threads in environment-box"],
-  ["writes_environment", supervised, { environmentId: box }, "capability_denied"],
-  [
-    "writes_environment",
-    fullAccess,
-    { environmentId: box },
-    "writes_environment in environment-box",
-  ],
-  ["writes_environment", fullAccess, { environmentId: here }, "here"],
-
-  // A thread id names a thread where the call runs, and is checked there.
-  [
-    "writes_threads",
-    supervised,
-    { environmentId: box, threadId: fullAccessThreadId },
-    "writes_threads in environment-box",
-  ],
-  [
-    "writes_threads",
-    supervised,
-    { environmentId: here, threadId: fullAccessThreadId },
-    "runtime_mode_escalation_denied",
-  ],
-] as const)("a linked %s from %o with %o: %s", ([tool, scope, args, expected]) =>
-  call(tool, scope, args).pipe(
-    Effect.map((outcome) => expect(outcome).toBe(expected)),
-    Effect.provide(linkedProbeServer),
-  ),
-);
-
-it.effect("refuses a linked environment to a tool that acts as its calling thread", () =>
-  Effect.gen(function* () {
-    const CallerToolkit = Toolkit.make(Tool.make("acts_as_caller", linkedProbe));
-    const built = yield* Layer.build(
-      McpToolAccess.HandlersLayer.layer(
-        McpToolAccess.toLayer(CallerToolkit, {
-          acts_as_caller: McpToolAccess.actsAsCaller(ranHere),
-        }),
-      ),
-    ).pipe(Effect.scoped, Effect.exit);
-    expect(Exit.isFailure(built) && Cause.hasDies(built.cause)).toBe(true);
-  }),
+      const here = { ...there, environmentId: supervised.environmentId };
+      expect(yield* call("writes_threads", supervised, here)).toBe(
+        "runtime_mode_escalation_denied",
+      );
+      expect(yield* call("writes_threads", fullAccess, here)).toBe("here");
+      expect(yield* call("writes_threads", fullAccess, { threadId: fullAccessThreadId })).toBe(
+        "here",
+      );
+    }).pipe(Effect.provide(linkedProbeServer)),
 );

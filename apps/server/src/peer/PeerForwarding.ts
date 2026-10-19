@@ -25,7 +25,7 @@ import * as PeerMcpClient from "./PeerMcpClient.ts";
  * anything, and T3 Connect's edge drops a request idle for about 100 s, so a
  * forwarded wait goes out in pieces no longer than this.
  */
-export const FORWARDED_WAIT_CHUNK_MS = 50_000;
+const FORWARDED_WAIT_CHUNK_MS = 50_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
 
@@ -50,12 +50,6 @@ export class PeerForwarding extends Context.Service<
       environmentId: EnvironmentId,
       params: Tool.Parameters<T>,
     ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
-    /** `t3_thread_wait` there, in pieces short enough to survive any route. */
-    readonly waitForThread: (
-      scope: Scope,
-      environmentId: EnvironmentId,
-      input: OrchestratorMcpThreadWaitInput,
-    ) => Effect.Effect<OrchestratorMcpThreadWaitResult, OrchestratorMcpFailure>;
     /** The environments this one links to, as an agent sees them. */
     readonly links: (
       scope: Scope,
@@ -130,7 +124,11 @@ const make = Effect.gen(function* () {
       });
     });
 
-  const waitForThread: PeerForwarding["Service"]["waitForThread"] = (scope, environmentId, input) =>
+  const waitForThread = (
+    scope: Scope,
+    environmentId: EnvironmentId,
+    input: OrchestratorMcpThreadWaitInput,
+  ) =>
     Effect.gen(function* () {
       let remaining = Math.min(
         MAX_WAIT_TIMEOUT_MS,
@@ -185,7 +183,7 @@ const make = Effect.gen(function* () {
       };
     });
 
-  return PeerForwarding.of({ call, waitForThread, links: listLinks });
+  return PeerForwarding.of({ call, links: listLinks });
 });
 
 export const layer = Layer.effect(PeerForwarding, make);

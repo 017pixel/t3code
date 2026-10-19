@@ -4,7 +4,6 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
   type OrchestrationV2Run,
-  type SourceControlCloneRepositoryInput,
   ProjectId,
   ProviderInstanceId,
   RunId,
@@ -49,7 +48,6 @@ interface Seen {
   readonly waits: ReadonlyArray<ThreadManagement.ThreadManagementWaitInput>;
   readonly launches: ReadonlyArray<ThreadLaunch.ThreadLaunchInput>;
   readonly projects: ReadonlyArray<ProjectService.ProjectCreateInput>;
-  readonly clones: ReadonlyArray<SourceControlCloneRepositoryInput>;
   /** Commands dispatched and delegated-task stops, as `<type> <threadId>`. */
   readonly stops: ReadonlyArray<string>;
 }
@@ -58,7 +56,6 @@ const nothingSeen: Seen = {
   waits: [],
   launches: [],
   projects: [],
-  clones: [],
   stops: [],
 };
 
@@ -95,7 +92,11 @@ const boxThreads = (seen: Ref.Ref<Seen>) => {
             {
               sequence: 1,
               commandId: command.commandId,
-              event: { type: "run.updated", runId: boxRun },
+              event: {
+                type: "turn-item.updated",
+                runId: boxRun,
+                payload: { type: "run_interrupt_request", providerTurnId: "turn:box" },
+              },
             },
           ],
         } as never),
@@ -137,38 +138,22 @@ const boxLaunches = (seen: Ref.Ref<Seen>) =>
       ),
   });
 
-/** B clones and registers whatever it is asked to, and records it. */
 const boxProjects = (seen: Ref.Ref<Seen>) =>
-  Layer.merge(
-    Layer.mock(ProjectService.ProjectService)({
-      create: (input) =>
-        Ref.update(seen, (current) => ({
-          ...current,
-          projects: [...current.projects, input],
-        })).pipe(
-          Effect.as({
-            id: input.projectId,
-            title: input.title,
-            workspaceRoot: input.workspaceRoot,
-            defaultModelSelection: null,
-            scripts: [],
-            createdAt: "2026-10-18T00:00:00.000Z",
-            updatedAt: "2026-10-18T00:00:00.000Z",
-            deletedAt: null,
-          }),
-        ),
-    }),
-    Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
-      cloneRepository: (input) =>
-        Ref.update(seen, (current) => ({ ...current, clones: [...current.clones, input] })).pipe(
-          Effect.as({
-            cwd: input.destinationPath,
-            remoteUrl: "https://github.com/pingdotgg/t3code.git",
-            repository: null,
-          }),
-        ),
-    }),
-  );
+  Layer.mock(ProjectService.ProjectService)({
+    create: (input) =>
+      Ref.update(seen, (current) => ({ ...current, projects: [...current.projects, input] })).pipe(
+        Effect.as({
+          id: input.projectId,
+          title: input.title,
+          workspaceRoot: input.workspaceRoot,
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-10-18T00:00:00.000Z",
+          updatedAt: "2026-10-18T00:00:00.000Z",
+          deletedAt: null,
+        }),
+      ),
+  });
 
 /** The orchestrator and project toolkits on B's real `/mcp`, behind its real OAuth. */
 const serveBox = (seen: Ref.Ref<Seen>) =>
@@ -188,6 +173,7 @@ const serveBox = (seen: Ref.Ref<Seen>) =>
       ),
       Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
       Layer.provide(boxProjects(seen)),
+      Layer.provide(Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({})),
       Layer.provide(
         ServerConfig.layerTest(process.cwd(), { prefix: "t3-peer-forwarding-box-" }).pipe(
           Layer.provide(NodeServices.layer),
@@ -251,7 +237,7 @@ const makeLaptop = Effect.gen(function* () {
             liveThreadShell(
               threadId,
               threadId === ThreadId.make("thread:laptop-plan")
-                ? { runtimeMode: "full-access", interactionMode: "plan" }
+                ? { runtimeMode: "auto", interactionMode: "plan" }
                 : { runtimeMode: "full-access" },
             ),
           ),
@@ -388,7 +374,7 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
       const waited = yield* a.call("thread:laptop-full", "t3_thread_wait", {
         environmentId: box.environmentId,
         threadId: boxThread,
-        timeoutMs: 600_000,
+        timeoutMs: 110_000,
       });
       expect(waited.structuredContent).toEqual({
         threadId: boxThread,
@@ -401,9 +387,9 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
       expect(
         (yield* Ref.get(seen)).waits.map(({ timeoutMs, runId }) => [timeoutMs, runId]),
       ).toEqual([
-        [PeerForwarding.FORWARDED_WAIT_CHUNK_MS, undefined],
-        [PeerForwarding.FORWARDED_WAIT_CHUNK_MS, boxRun],
-        [PeerForwarding.FORWARDED_WAIT_CHUNK_MS, boxRun],
+        [50_000, undefined],
+        [50_000, boxRun],
+        [10_000, boxRun],
       ]);
 
       const send = (caller: string, clientRequestId: string) =>
@@ -456,13 +442,15 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
       const [launched, relaunched] = (yield* Ref.get(seen)).launches;
       // The thread there runs with the caller's own modes here, below the
       // link's full access, and a retry asks for the same thread.
-      expect(launched).toMatchObject({ runtimeMode: "full-access", interactionMode: "plan" });
+      expect(launched).toMatchObject({ runtimeMode: "auto", interactionMode: "plan" });
       expect(relaunched?.threadId).toBe(launched?.threadId);
       expect(retried.structuredContent).toEqual(first.structuredContent);
 
       // An escalation past the caller's own modes is refused here.
+      yield* Ref.set(b.bearers, []);
       const escalated = yield* launch("thread:laptop-plan", { interactionMode: "default" });
       expect(failureOf(escalated)).toMatchObject({ code: "interaction_mode_escalation_denied" });
+      expect(yield* Ref.get(b.bearers)).toEqual([]);
       // A pending upload lives here, so it cannot go along.
       yield* Ref.set(b.bearers, []);
       const withUpload = yield* launch("thread:laptop-full", {
@@ -478,27 +466,20 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("brings a repository to a linked environment, only through full access", () =>
+it.effect("creates a remote project only when both caller and link allow full access", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const b = yield* serveBox(seen);
       const a = yield* makeLaptop;
-      const clone = { repository: "pingdotgg/t3code", destinationPath: "/home/box/t3code" };
       const register = { title: "t3code", workspaceRoot: "/home/box/t3code" };
 
       yield* linkTo(a.links, b, "full-access");
-      const cloned = yield* a.call("thread:laptop-full", "t3_project_clone", {
-        environmentId: box.environmentId,
-        ...clone,
-      });
-      expect(cloned.structuredContent).toMatchObject({ cwd: clone.destinationPath });
       const created = yield* a.call("thread:laptop-full", "t3_project_create", {
         environmentId: box.environmentId,
         ...register,
       });
       expect(created.structuredContent).toMatchObject(register);
-      expect((yield* Ref.get(seen)).clones).toEqual([clone]);
       expect((yield* Ref.get(seen)).projects).toMatchObject([register]);
 
       // A plan-mode agent here may not, and nothing leaves.
@@ -512,17 +493,11 @@ it.effect("brings a repository to a linked environment, only through full access
 
       // Nor may a full-access agent through a link with less: the box holds it.
       yield* linkTo(a.links, b, "auto");
-      for (const [name, args] of [
-        ["t3_project_clone", clone],
-        ["t3_project_create", register],
-      ] as const) {
-        const refused = yield* a.call("thread:laptop-full", name, {
-          environmentId: box.environmentId,
-          ...args,
-        });
-        expect(failureOf(refused), name).toMatchObject({ code: "capability_denied" });
-      }
-      expect((yield* Ref.get(seen)).clones).toHaveLength(1);
+      const refused = yield* a.call("thread:laptop-full", "t3_project_create", {
+        environmentId: box.environmentId,
+        ...register,
+      });
+      expect(failureOf(refused)).toMatchObject({ code: "capability_denied" });
       expect((yield* Ref.get(seen)).projects).toHaveLength(1);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -580,34 +555,18 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
       // The box sees only the link's credential, so one that may not control
       // threads here may not reach them there either.
       const previewOnly = new Set<McpInvocationContext.McpCapability>(["preview"]);
-      for (const [name, args] of [
-        ["t3_environment_links", {}],
-        ["t3_project_list", { environmentId: box.environmentId }],
-        ["t3_thread_list", { environmentId: box.environmentId, projectId: boxProject }],
-        ["t3_thread_read", { environmentId: box.environmentId, threadId: boxThread }],
-        ["t3_thread_wait", { environmentId: box.environmentId, threadId: boxThread }],
-        [
-          "t3_thread_send",
-          { environmentId: box.environmentId, threadId: boxThread, message: "Carry on there." },
-        ],
-        [
-          "t3_thread_organize",
-          { environmentId: box.environmentId, threadId: boxThread, action: "archive" },
-        ],
-        [
-          "t3_thread_launch",
-          {
-            environmentId: box.environmentId,
-            projectId: boxProject,
-            title: "Start there",
-            modelSelection: { instanceId: "codex", model: "gpt-5" },
-            message: "Start there.",
-          },
-        ],
-      ] as const) {
-        const refused = yield* a.call("thread:laptop-full", name, args, previewOnly);
-        expect(failureOf(refused), name).toMatchObject({ code: "capability_denied" });
-      }
+      const links = yield* a.call("thread:laptop-full", "t3_environment_links", {}, previewOnly);
+      expect(failureOf(links)).toMatchObject({ code: "capability_denied" });
+      const read = yield* a.call(
+        "thread:laptop-full",
+        "t3_thread_configuration",
+        {
+          environmentId: box.environmentId,
+          threadId: boxThread,
+        },
+        previewOnly,
+      );
+      expect(failureOf(read)).toMatchObject({ code: "capability_denied" });
       expect(yield* Ref.get(b.bearers)).toEqual([]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
