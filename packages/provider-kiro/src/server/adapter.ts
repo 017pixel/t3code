@@ -348,6 +348,10 @@ function makeKiroAcpAdapterFlavor(options: KiroAdapterV2Options): AcpAdapterV2Fl
     driver: KIRO_PROVIDER,
     runtimeHarness: "Kiro",
     capabilities: KiroProviderCapabilitiesV2,
+    // Kiro V3 loads the user's hooks only when the client opts in. `v2` makes
+    // Kiro run them itself; `enabled` alone hands them to the client as
+    // `_kiro/hooks/*` requests, which T3 does not answer.
+    clientCapabilitiesMeta: { kiro: { hooks: { enabled: true, v2: true } } },
     makeRuntime,
     promptFailure: kiroPromptFailure,
     ignoreSessionUpdate: makeKiroCloudConfigFilter(),

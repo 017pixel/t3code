@@ -1,7 +1,7 @@
 # Kiro
 
 T3 Code runs the [Kiro CLI](https://kiro.dev/docs/cli/) as an agent, using your own Kiro account,
-custom agents, steering, and MCP configuration.
+custom agents, steering, hooks, and MCP configuration.
 
 ## Set Up Kiro
 
