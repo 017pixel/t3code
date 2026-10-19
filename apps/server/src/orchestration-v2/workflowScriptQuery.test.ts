@@ -3,7 +3,11 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
-import { OrchestrationWorkflowFileError } from "@t3tools/contracts";
+import {
+  OrchestrationWorkflowFileError,
+  ProviderInstanceId,
+  ProviderDriverKind,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -48,13 +52,16 @@ if (symlinksSupported) NodeFS.symlinkSync(outside, customLink);
 effectIt.layer(
   Settings.layerTest({
     providerInstances: {
-      "claude-missing": {
-        driver: "claudeAgent",
+      [ProviderInstanceId.make("claude-missing")]: {
+        driver: ProviderDriverKind.make("claudeAgent"),
         config: { homePath: NodePath.join(sandbox, "missing") },
       },
-      "claude-custom": { driver: "claudeAgent", config: { homePath: customHome } },
-      "claude-env": {
-        driver: "claudeAgent",
+      [ProviderInstanceId.make("claude-custom")]: {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        config: { homePath: customHome },
+      },
+      [ProviderInstanceId.make("claude-env")]: {
+        driver: ProviderDriverKind.make("claudeAgent"),
         environment: [{ name: "CLAUDE_CONFIG_DIR", value: envHome }],
       },
     },
