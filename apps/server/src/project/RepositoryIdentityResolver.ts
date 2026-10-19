@@ -245,16 +245,17 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
           }),
         ),
       ).pipe(
-        Effect.map(([remotes, resolved]) => ({
-          remotes: remotes?.code === 0 ? remotes.stdout : "",
-          resolved: resolved?.code === 0 ? resolved.stdout : "",
-        })),
-        Effect.orElseSucceed(() => ({ remotes: "", resolved: "" })),
+        Effect.map(([remotes, resolved]) =>
+          remotes?.code === 0 && remotes.stdout.trim().length > 0
+            ? {
+                remotes: remotes.stdout,
+                resolved: resolved?.code === 0 ? resolved.stdout : "",
+              }
+            : null,
+        ),
+        Effect.orElseSucceed(() => null),
       ),
-    {
-      capacity: cacheCapacity,
-      timeToLive: () => options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL,
-    },
+    { capacity: cacheCapacity, timeToLive },
   );
 
   const resolveGitHub: RepositoryIdentityResolver["Service"]["resolveGitHubRepository"] =
@@ -266,11 +267,10 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
       const rootPath = yield* Cache.get(repositoryRootCache, cwd);
       if (rootPath === null) return null;
       if (resolveOptions?.refresh) yield* Cache.invalidate(gitHubRemotesCache, rootPath);
-      return resolveGitHubRepository({
-        ...(yield* Cache.get(gitHubRemotesCache, rootPath)),
-        hostHint: undefined,
-        defaultHost,
-      }).locator;
+      const remotes = yield* Cache.get(gitHubRemotesCache, rootPath);
+      return remotes === null
+        ? null
+        : resolveGitHubRepository({ ...remotes, hostHint: undefined, defaultHost }).locator;
     });
 
   const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fnUntraced(

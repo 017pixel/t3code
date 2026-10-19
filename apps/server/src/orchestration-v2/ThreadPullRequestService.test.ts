@@ -47,6 +47,7 @@ describe("ThreadPullRequestServiceV2 project guard", () => {
       const result = yield* ThreadPullRequestService.resolveProjectForPullRequestDiscovery(
         project,
         {
+          resolveGitHubRepository: () => Effect.succeed(null),
           resolve: (root) => {
             resolvedRoot = root;
             return Effect.succeed({
@@ -84,6 +85,7 @@ describe("ThreadPullRequestServiceV2 project guard", () => {
       };
       const refreshes: Array<boolean | undefined> = [];
       const resolver = {
+        resolveGitHubRepository: () => Effect.succeed(null),
         resolve: (_root: string, options?: { readonly refresh?: boolean }) => {
           refreshes.push(options?.refresh);
           return Effect.succeed(null);

@@ -54,7 +54,7 @@ const layerServices = Layer.mergeAll(
     ProjectEnrichmentService.layer.pipe(
       Layer.provide(
         Layer.merge(
-          Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+          Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
             resolve: () => Effect.succeed(null),
           }),
           Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {

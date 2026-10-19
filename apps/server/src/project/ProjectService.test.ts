@@ -33,7 +33,7 @@ const layerWorkspacePaths = Layer.succeed(WorkspacePaths.WorkspacePaths, {
 });
 
 const layerMetadata = Layer.merge(
-  Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+  Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
     resolve: (workspaceRoot) =>
       Effect.succeed({
         canonicalKey: `github.com/t3tools/${workspaceRoot.split("/").at(-1)}`,
@@ -495,7 +495,7 @@ it.effect(
       const faviconCalls = yield* Ref.make(0);
 
       const layerSlowMetadata = Layer.merge(
-        Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
           resolve: (workspaceRoot) =>
             Effect.gen(function* () {
               yield* Ref.update(repositoryCalls, (count) => count + 1);
@@ -593,7 +593,7 @@ it.effect(
 it.effect("keeps project snapshots available when optional metadata enrichment fails", () =>
   Effect.gen(function* () {
     const layerFailingMetadata = Layer.merge(
-      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+      Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
         resolve: () => Effect.succeed(null),
       }),
       Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
@@ -632,7 +632,7 @@ it.effect("invalidates workspace-derived metadata when a project moves", () =>
   Effect.gen(function* () {
     const metadataVersion = yield* Ref.make(1);
     const layerVersionedMetadata = Layer.merge(
-      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+      Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
         resolve: (workspaceRoot) =>
           Ref.get(metadataVersion).pipe(
             Effect.map((version) => ({
