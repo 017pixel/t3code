@@ -1121,6 +1121,42 @@ describe("KiroAdapterV2 early Stop", () => {
     }),
   );
 
+  it.effect("does not take Kiro's background cloud-config fetch as the start", () =>
+    releaseInOrder({
+      // Kiro 2.31 fetches an Identity Center account's cloud config as a tool
+      // call of its own, which can arrive once `session/prompt` went out
+      // (frames reported by @hstern; the tool call id is invented).
+      gates: ["cloud-config", "cloud-config-done", "turn-start"],
+      expectCancel: true,
+      frames: [
+        {
+          ...update({
+            sessionUpdate: "tool_call",
+            toolCallId: "tooluse_cloud_config",
+            title: "Fetching your cloud config",
+            kind: "other",
+            status: "in_progress",
+            _meta: { kiro: { toolId: "fetch_cloud_config" } },
+          }),
+          label: "cloud-config",
+        },
+        messageIdEcho,
+        {
+          ...update({
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tooluse_cloud_config",
+            status: "completed",
+            rawOutput: { kind: "upToDate" },
+          }),
+          label: "cloud-config-done",
+        },
+        turnStart,
+        cancel,
+        cancelled,
+      ],
+    }),
+  );
+
   it.effect("cancels on Kiro's first reply text when it sends no turn_start", () =>
     releaseInOrder({
       gates: ["message-id", "reply"],

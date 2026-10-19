@@ -204,6 +204,12 @@ export interface AcpAdapterV2Flavor {
   readonly normalizeSessionUpdate?: (
     notification: EffectAcpSchema.SessionNotification,
   ) => EffectAcpSchema.SessionNotification;
+  /**
+   * Agent updates that belong to no turn (Kiro's own cloud-config fetch). They
+   * are dropped before anything reads them, so they neither show in the turn
+   * nor count as it starting.
+   */
+  readonly ignoreSessionUpdate?: (notification: EffectAcpSchema.SessionNotification) => boolean;
   readonly onAvailableCommandsUpdate?: (
     commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
   ) => Effect.Effect<void>;
@@ -5094,6 +5100,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           rawNotification: EffectAcpSchema.SessionNotification,
         ) =>
           Effect.gen(function* () {
+            if (flavor.ignoreSessionUpdate?.(rawNotification) === true) return;
             yield* markPromptStarted(rawNotification);
             if (clientTerminals !== undefined) {
               const embedded = embeddedTerminalIdsFromSessionUpdate(rawNotification);

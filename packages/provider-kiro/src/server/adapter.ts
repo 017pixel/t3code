@@ -288,6 +288,38 @@ function isKiroPromptActivity(update: EffectAcpSchema.SessionUpdate): boolean {
 const KIRO_CANCEL_HOLD_BOUND = "2 seconds";
 
 /**
+ * Kiro 2.31 fetches an Identity Center account's cloud config as a tool call
+ * of its own around session start (reported by @hstern), which can land inside
+ * the user's turn. Only the call carries this id; its updates name the call.
+ */
+const KIRO_CLOUD_CONFIG_TOOL_ID = "fetch_cloud_config";
+
+/** Drops Kiro's cloud-config tool call and every update that follows it. */
+function makeKiroCloudConfigFilter() {
+  const running = new Set<string>();
+  return (notification: EffectAcpSchema.SessionNotification): boolean => {
+    const { update } = notification;
+    if (
+      update.sessionUpdate !== "tool_call" &&
+      update.sessionUpdate !== "tool_call_update" &&
+      update.sessionUpdate !== "tool_call_content_chunk"
+    ) {
+      return false;
+    }
+    const key = `${notification.sessionId}\n${update.toolCallId}`;
+    const kiro = update._meta?.kiro;
+    const toolId =
+      typeof kiro === "object" && kiro !== null && "toolId" in kiro ? kiro.toolId : null;
+    if (toolId === KIRO_CLOUD_CONFIG_TOOL_ID) running.add(key);
+    else if (!running.has(key)) return false;
+    if ("status" in update && (update.status === "completed" || update.status === "failed")) {
+      running.delete(key);
+    }
+    return true;
+  };
+}
+
+/**
  * Kiro's prompt errors carry a message meant for the user (live 2.27: -32000
  * "The model 'x' is not available. Please select a different model and try
  * again. (Request ID: …)"). Show it instead of the generic failure text;
@@ -318,6 +350,7 @@ function makeKiroAcpAdapterFlavor(options: KiroAdapterV2Options): AcpAdapterV2Fl
     capabilities: KiroProviderCapabilitiesV2,
     makeRuntime,
     promptFailure: kiroPromptFailure,
+    ignoreSessionUpdate: makeKiroCloudConfigFilter(),
     // See applyKiroModelSelection: `model` arrives after session/new.
     modelOptionArrivesLate: true,
     applyModelSelection: applyKiroModelSelection(
