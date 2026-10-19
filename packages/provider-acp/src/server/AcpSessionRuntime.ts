@@ -1706,17 +1706,26 @@ export const make = (
 
     const acp = yield* Effect.service(EffectAcpClient.AcpClient).pipe(Effect.provide(acpContext));
 
+    // Counts applied `config_option_update`s; see setConfigOption.
+    const configOptionUpdates = yield* Ref.make(0);
     const processSessionUpdate = (notification: EffectAcpSchema.SessionNotification) =>
-      handleSessionUpdate({
-        queue: eventQueue,
-        modeStateRef,
-        configOptionsRef,
-        toolCallsRef,
-        shownToolCallIds,
-        assistantSegmentRef,
-        assistantItemRuntimeId,
-        params: notification,
-      });
+      (notification.update.sessionUpdate === "config_option_update"
+        ? Ref.update(configOptionUpdates, (count) => count + 1)
+        : Effect.void
+      ).pipe(
+        Effect.andThen(
+          handleSessionUpdate({
+            queue: eventQueue,
+            modeStateRef,
+            configOptionsRef,
+            toolCallsRef,
+            shownToolCallIds,
+            assistantSegmentRef,
+            assistantItemRuntimeId,
+            params: notification,
+          }),
+        ),
+      );
 
     yield* acp.handleSessionUpdate((notification) =>
       notificationSemaphore.withPermit(
@@ -2067,11 +2076,29 @@ export const make = (
                       configId,
                       value: String(value),
                     } satisfies EffectAcpSchema.SetSessionConfigOptionRequest);
-              return runLoggedRequest(
-                "session/set_config_option",
-                requestPayload,
-                acp.agent.setSessionConfigOption(requestPayload),
-              ).pipe(Effect.tap((response) => updateConfigOptions(response)));
+              // An update the agent pushed while the write was in flight is
+              // newer than its result: Kiro 2.32 answers a `model` write
+              // without `model`, then advertises it, and that update can be
+              // handled before this fiber resumes. The result then stays out.
+              return Ref.get(configOptionUpdates).pipe(
+                Effect.flatMap((updatesBefore) =>
+                  runLoggedRequest(
+                    "session/set_config_option",
+                    requestPayload,
+                    acp.agent.setSessionConfigOption(requestPayload),
+                  ).pipe(
+                    Effect.tap((response) =>
+                      Ref.get(configOptionUpdates).pipe(
+                        Effect.flatMap((updatesNow) =>
+                          updatesNow === updatesBefore
+                            ? updateConfigOptions(response)
+                            : Effect.void,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
             }),
           ),
         ),
