@@ -454,6 +454,39 @@ export function boundedTimelineEncodedBytes(input: {
   return total;
 }
 
+function checkpointsForViewport(
+  projection: OrchestrationV2ThreadProjection,
+  items: ReadonlyArray<OrchestrationV2TurnItem>,
+) {
+  const retainedRunIds = new Set(items.map((item) => item.runId));
+  for (const run of projection.runs) {
+    if (["queued", "preparing", "starting", "running", "waiting"].includes(run.status)) {
+      retainedRunIds.add(run.id);
+    }
+  }
+  const retainedNodeIds = new Set(items.map((item) => item.nodeId));
+  for (const node of projection.nodes) {
+    if (["pending", "running", "waiting"].includes(node.status)) {
+      retainedNodeIds.add(node.id);
+    }
+  }
+  for (const request of projection.runtimeRequests) {
+    if (request.status === "pending") retainedNodeIds.add(request.nodeId);
+  }
+  const retainedCheckpointIds = new Set(
+    items.flatMap((item) => ("checkpointId" in item ? [item.checkpointId] : [])),
+  );
+  return projection.checkpoints.map((checkpoint) =>
+    ["pending", "capturing"].includes(checkpoint.status) ||
+    (checkpoint.runId !== null && retainedRunIds.has(checkpoint.runId)) ||
+    (checkpoint.nodeId !== null && retainedNodeIds.has(checkpoint.nodeId)) ||
+    retainedCheckpointIds.has(checkpoint.id) ||
+    checkpoint.deferredFileCount !== undefined
+      ? checkpoint
+      : { ...checkpoint, files: [], deferredFileCount: checkpoint.files.length },
+  );
+}
+
 export function buildBoundedThreadProjection(input: {
   readonly projection: OrchestrationV2ThreadProjection;
   readonly snapshotSequence: number;
@@ -462,29 +495,13 @@ export function buildBoundedThreadProjection(input: {
 }): BoundedProjectionResult {
   const policy = input.policy ?? THREAD_HISTORY_PAGE_POLICY;
   const threadId = input.projection.thread.id;
-  const recentRows = input.projection.visibleTurnItems.slice(-policy.maxItems);
-  const retainedRunIds = new Set(recentRows.map(({ item }) => item.runId));
-  for (const run of input.projection.runs) {
-    if (["queued", "preparing", "starting", "running", "waiting"].includes(run.status)) {
-      retainedRunIds.add(run.id);
-    }
-  }
-  const retainedNodeIds = new Set(recentRows.map(({ item }) => item.nodeId));
-  const retainedCheckpointIds = new Set(
-    recentRows.flatMap(({ item }) => ("checkpointId" in item ? [item.checkpointId] : [])),
-  );
   const controlProjection = {
     ...input.projection,
     ...(input.viewportWindow
       ? {
-          checkpoints: input.projection.checkpoints.map((checkpoint) =>
-            ["pending", "capturing"].includes(checkpoint.status) ||
-            (checkpoint.runId !== null && retainedRunIds.has(checkpoint.runId)) ||
-            (checkpoint.nodeId !== null && retainedNodeIds.has(checkpoint.nodeId)) ||
-            retainedCheckpointIds.has(checkpoint.id) ||
-            checkpoint.deferredFileCount !== undefined
-              ? checkpoint
-              : { ...checkpoint, files: [], deferredFileCount: checkpoint.files.length },
+          checkpoints: checkpointsForViewport(
+            input.projection,
+            input.projection.visibleTurnItems.slice(-policy.maxItems).map(({ item }) => item),
           ),
         }
       : {}),
@@ -593,6 +610,7 @@ export function buildBoundedThreadProjection(input: {
   for (const item of dependencyTurnItems) {
     turnItemById.set(String(item.id), item);
   }
+  const checkpointItems = visibleTurnItems.map(({ item }) => item);
   if (input.viewportWindow) {
     const activeRunIds = new Set(
       controlProjection.runs
@@ -616,6 +634,7 @@ export function buildBoundedThreadProjection(input: {
         ("requestId" in item && pendingRequestIds.has(item.requestId))
       ) {
         turnItemById.set(String(item.id), item);
+        checkpointItems.push(item);
       }
     }
   }
@@ -653,6 +672,10 @@ export function buildBoundedThreadProjection(input: {
 
   const projection = {
     ...controlProjection,
+    // Byte trimming can remove runs that were eligible when reserving control state.
+    ...(input.viewportWindow
+      ? { checkpoints: checkpointsForViewport(input.projection, checkpointItems) }
+      : {}),
     plans,
     contextHandoffs,
     messages: messagesForBoundedProjection(controlProjection, turnItems),
@@ -664,7 +687,6 @@ export function buildBoundedThreadProjection(input: {
     historyCursor: window.nextCursor,
     hasMoreHistory: window.hasMoreHistory,
     latestLocalTurnOrdinal,
-    payloadBudgetExceeded:
-      controlBytes > policy.maxEncodedBytes || bytesOfJson(projection) > policy.maxEncodedBytes,
+    payloadBudgetExceeded: bytesOfJson(projection) > policy.maxEncodedBytes,
   };
 }
