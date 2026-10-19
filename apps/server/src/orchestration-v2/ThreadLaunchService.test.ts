@@ -123,6 +123,7 @@ const claudeAdapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
 interface HarnessOptions {
+  readonly afterThreadCreate?: Effect.Effect<void>;
   readonly closeTerminal?: TerminalManager.TerminalManager["Service"]["close"];
   readonly adapters?: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>;
   readonly managedFolders?: Layer.Layer<ManagedProjectFolders.ManagedProjectFolders>;
@@ -227,14 +228,29 @@ function makeHarness(options: HarnessOptions = {}) {
         folderForThread: () => Effect.succeed(Option.none()),
       }),
   );
+  const layerLaunchThreads =
+    options.afterThreadCreate === undefined
+      ? layerThreadManagement
+      : Layer.effect(
+          ThreadManagement.ThreadManagementService,
+          Effect.gen(function* () {
+            const threads = yield* ThreadManagement.ThreadManagementService;
+            return {
+              ...threads,
+              dispatch: (command: Parameters<typeof threads.dispatch>[0]) =>
+                threads
+                  .dispatch(command)
+                  .pipe(
+                    Effect.tap(() =>
+                      command.type === "thread.create" ? options.afterThreadCreate! : Effect.void,
+                    ),
+                  ),
+            };
+          }),
+        ).pipe(Layer.provide(layerThreadManagement));
   const layerLaunch = ThreadLaunch.layer.pipe(
     Layer.provide(
-      Layer.mergeAll(
-        layerExternalServices,
-        layerThreadManagement,
-        layerReceipts,
-        IdAllocator.layer,
-      ),
+      Layer.mergeAll(layerExternalServices, layerLaunchThreads, layerReceipts, IdAllocator.layer),
     ),
   );
   const layerProjectedProjects = Layer.mock(ProjectStore.ProjectStoreV2)({
@@ -271,6 +287,8 @@ function makeHarness(options: HarnessOptions = {}) {
       layerTitleRegeneration,
       layerOutbox,
       layerDatabase,
+      layerReceipts,
+      IdAllocator.layer,
       layerExternalServices,
     ),
     createWorktree,
@@ -2423,6 +2441,112 @@ it.effect("schedules an accepted preparing message exactly once across concurren
       assert.isTrue(second.resumed);
       assert.equal(harness.runSetup.mock.calls.length, 1);
       yield* Deferred.succeed(allowSetup, undefined);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect.each([
+  { scenario: "crash after create before initial message", crash: true },
+  { scenario: "accepted launch without an initial message", crash: false },
+])("keeps the first launch intent on a same-key retry: $scenario", ({ crash }) =>
+  Effect.gen(function* () {
+    const created = yield* Deferred.make<void>();
+    const setupEntered = yield* Deferred.make<void>();
+    const allowSetup = yield* Deferred.make<void>();
+    let stopAfterCreate = crash;
+    const harness = makeHarness({
+      hasCommit: () => Effect.succeed(true),
+      afterThreadCreate: Effect.suspend(() => {
+        if (!stopAfterCreate) return Effect.void;
+        stopAfterCreate = false;
+        return Deferred.succeed(created, undefined).pipe(Effect.andThen(Effect.never));
+      }),
+      runSetup: () =>
+        Deferred.succeed(setupEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(allowSetup)),
+          Effect.as({ status: "no-script" as const }),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const input = launchInput({
+        command: "command:launch:first-intent",
+        thread: "thread:launch:first-intent",
+        ...(crash ? { message: "Accepted message A" } : {}),
+        workspace: crash
+          ? { type: "worktree", baseRef: "accepted-base", branch: "accepted-branch" }
+          : { type: "root" },
+      });
+      if (crash) {
+        // Interrupt only after the real create transaction (including any launch metadata) commits.
+        const first = yield* launches.launch(input).pipe(Effect.forkScoped);
+        yield* Deferred.await(created);
+        yield* Fiber.interrupt(first);
+      } else {
+        yield* launches.launch(input);
+      }
+      const accepted = yield* threads.getThreadProjection(input.threadId);
+      assert.isFalse(accepted.messages.some((message) => message.text === "Retry message B"));
+      assert.lengthOf(harness.createWorktree.mock.calls, 0);
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const freshLaunches = yield* ThreadLaunch.ThreadLaunchService;
+          const { threadId: _, ...retryInput } = input;
+          const retry = yield* freshLaunches
+            .launch({
+              ...retryInput,
+              initialMessage: {
+                messageId: MessageId.make("retry-message-B"),
+                text: "Retry message B",
+                attachments: [],
+              },
+              workspaceStrategy: {
+                type: "worktree",
+                baseRef: "different-base",
+                branch: "different-branch",
+              },
+            })
+            .pipe(Effect.exit);
+          if (Exit.isFailure(retry)) {
+            assert.isTrue(Cause.hasFails(retry.cause), "conflicts must be typed failures");
+            assert.isFalse(Cause.hasDies(retry.cause));
+            assert.lengthOf(harness.createWorktree.mock.calls, 0);
+          } else {
+            assert.equal(retry.value.threadId, input.threadId);
+            assert.isTrue(retry.value.resumed);
+          }
+          const current = yield* threads.getThreadProjection(input.threadId);
+          assert.deepEqual(
+            current.messages.map((message) => message.text),
+            crash && Exit.isSuccess(retry)
+              ? ["Accepted message A"]
+              : accepted.messages.map((m) => m.text),
+            "an accepted launch key cannot acquire retry message B",
+          );
+          if (!crash) assert.lengthOf(harness.createWorktree.mock.calls, 0);
+          if (!crash || Exit.isFailure(retry)) {
+            assert.deepEqual(
+              current.runs.map((run) => run.id),
+              accepted.runs.map((run) => run.id),
+            );
+          } else {
+            assert.lengthOf(current.runs, 1);
+            yield* Deferred.await(setupEntered);
+            assert.lengthOf(harness.createWorktree.mock.calls, 1);
+            assert.include(harness.createWorktree.mock.calls[0]?.[0], {
+              refName: "accepted-base",
+              baseRefName: "accepted-base",
+              newRefName: "accepted-branch",
+            });
+          }
+          assert.deepEqual(
+            (yield* threads.getShellSnapshot()).threads.map((thread) => thread.id),
+            [input.threadId],
+          );
+          yield* Deferred.succeed(allowSetup, undefined);
+        }).pipe(Effect.provide(ThreadLaunch.layer)),
+      );
     }).pipe(Effect.provide(harness.layer));
   }),
 );
