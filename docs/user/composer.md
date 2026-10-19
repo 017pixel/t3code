@@ -344,3 +344,7 @@ including filenames or folders containing `#` or `?`.
 
 On mobile, select a PDF attachment or link to open it. iOS uses the native viewer;
 Android opens a compatible installed file viewer.
+
+Agents can inspect durable file checkpoints with `t3_checkpoint_list` and page through
+their patches with `t3_checkpoint_diff`. Checkpoints report whether their stored files
+are still available and whether the current provider can restore the conversation.

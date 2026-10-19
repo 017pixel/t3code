@@ -1,3 +1,17 @@
+import {
+  CheckpointId,
+  CheckpointScopeId,
+  CheckpointRef,
+  NodeId,
+  CheckpointMcpListResult,
+  CheckpointMcpDiffResult,
+} from "@t3tools/contracts";
+import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as ServerConfig from "../config.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
@@ -109,6 +123,8 @@ const createdThreadPrompt = "Complete the newly created ordinary thread.";
 const queuedFollowupPrompt = "Complete the queued follow-up and return the final result.";
 const queuedFollowupResult = "Queued delegated follow-up completed.";
 
+const decodeCheckpointListResult = Schema.decodeUnknownEffect(CheckpointMcpListResult);
+const decodeCheckpointDiffResult = Schema.decodeUnknownEffect(CheckpointMcpDiffResult);
 const decodeCreateThreadsResult = Schema.decodeUnknownEffect(OrchestratorMcpCreateThreadsResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
 const decodeTaskCancelResult = Schema.decodeUnknownEffect(OrchestratorMcpTaskCancelResult);
@@ -530,6 +546,175 @@ const layerUnusedScheduledTaskStub = Layer.succeed(
 );
 
 describe("orchestrator MCP toolkit", () => {
+  it.live("pages durable checkpoint identities and complete UTF-16 patches through MCP", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("mcp-checkpoint-discovery");
+        const scopeId = CheckpointScopeId.make("checkpoint-scope:mcp-discovery");
+        const now = DateTime.makeUnsafe("2026-07-01T00:00:00Z");
+        const scope = {
+          id: scopeId,
+          threadId: parentThreadId,
+          runId: null,
+          nodeId: NodeId.make("node:checkpoint-discovery"),
+          parentScopeId: null,
+          providerThreadId: null,
+          kind: "root_run" as const,
+          ordinalWithinParent: 0,
+          advancesAppRunCount: true,
+          cwd,
+          createdAt: now,
+        };
+        const checkpoints = [0, 1, 2].map((ordinal) => ({
+          id: CheckpointId.make(`checkpoint:mcp-discovery:${ordinal}`),
+          threadId: parentThreadId,
+          scopeId,
+          runId: null,
+          nodeId: scope.nodeId,
+          parentCheckpointId:
+            ordinal === 0 ? null : CheckpointId.make(`checkpoint:mcp-discovery:${ordinal - 1}`),
+          ordinalWithinScope: ordinal,
+          appRunOrdinal: null,
+          ref: CheckpointRef.make(`refs/t3/test/mcp-discovery/${ordinal}`),
+          status: "ready" as const,
+          files: [{ path: "README.md", kind: "modified", additions: 1, deletions: 1 }],
+          capturedAt: now,
+        }));
+        const projection = {
+          thread: {
+            id: parentThreadId,
+            projectId,
+            worktreePath: cwd,
+            archivedAt: null,
+            deletedAt: null,
+            modelSelection: codexSelection,
+            activeProviderThreadId: null,
+          },
+          runs: [],
+          attempts: [],
+          providerTurns: [],
+          providerThreads: [],
+          providerSessions: [],
+          checkpointScopes: [scope],
+          checkpoints,
+        } as unknown as OrchestrationV2ThreadProjection;
+        const threadLayer = Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadShell: (id) =>
+            Effect.succeed(
+              id === parentThreadId
+                ? (projection.thread as never)
+                : ({
+                    ...projection.thread,
+                    id,
+                    projectId: ProjectId.make("project:foreign"),
+                  } as never),
+            ),
+          getProjectThreadRecords: () => Effect.succeed(projection),
+        });
+        const vcsLayer = VcsDriverRegistry.layer.pipe(
+          Layer.provide(VcsProcess.layer),
+          Layer.provide(ServerConfig.ServerConfig.layerTest(cwd, { prefix: "mcp-checkpoints-" })),
+          Layer.provide(NodeServices.layer),
+        );
+        const storeLayer = CheckpointStore.layer.pipe(Layer.provide(vcsLayer));
+        const serviceDependencies = Layer.mergeAll(
+          threadLayer,
+          storeLayer,
+          Layer.mock(ProjectStore.ProjectStoreV2)({}),
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getShellSnapshot: () =>
+              Effect.succeed({
+                schemaVersion: 1,
+                snapshotSequence: 0,
+                threads: [],
+                archivedThreads: [],
+              }),
+          }),
+        );
+        const layer = McpHttpServer.layerCheckpointToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(serviceDependencies),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        yield* Effect.gen(function* () {
+          const store = yield* CheckpointStore.CheckpointStore;
+          const fs = yield* FileSystem.FileSystem;
+          const server = yield* McpServer.McpServer;
+          yield* store.captureCheckpoint({ cwd, checkpointRef: checkpoints[0]!.ref });
+          yield* fs.writeFileString(`${cwd}/README.md`, "😀 checkpoint patch\n".repeat(20));
+          yield* store.captureCheckpoint({ cwd, checkpointRef: checkpoints[1]!.ref });
+          const invocation: McpInvocationContext.McpInvocationScope = {
+            environmentId: EnvironmentId.make("environment:checkpoint-test"),
+            requestNamespace: "checkpoint-test",
+            thread: {
+              threadId: parentThreadId,
+              providerInstanceId: codexInstanceId,
+              providerSessionId: "test",
+            },
+            client: undefined,
+            capabilities: new Set(["orchestration"]),
+            issuedAt: 1,
+          };
+          const invoke = (name: string, args: Record<string, unknown>) =>
+            server
+              .callTool({ name, arguments: args })
+              .pipe(
+                Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+                Effect.provideService(McpSchema.McpServerClient, client),
+              );
+          const first = yield* invoke("t3_checkpoint_list", { limit: 1, fileLimit: 0 });
+          expect(first).toMatchObject({ isError: false });
+          const page = yield* decodeCheckpointListResult(first.structuredContent);
+          expect(page.total).toBe(3);
+          expect(page.nextCursor).toBe(1);
+          expect(page.checkpoints[0]?.files).toEqual([]);
+          expect(page.checkpoints[0]?.filesTruncated).toBe(true);
+          const last = yield* invoke("t3_checkpoint_list", { cursor: 0, limit: 1 });
+          const missing = yield* decodeCheckpointListResult(last.structuredContent);
+          expect(missing.checkpoints[0]?.availability).toBe("ref_missing");
+          expect(missing.checkpoints[0]?.restoreSupport.supported).toBe(false);
+          const args = {
+            scopeId,
+            checkpointId: checkpoints[1]!.id,
+            fromCheckpointId: checkpoints[0]!.id,
+            ignoreWhitespace: false,
+          };
+          let cursor = 0;
+          let complete = "";
+          for (;;) {
+            const result = yield* invoke("t3_checkpoint_diff", { ...args, cursor, limit: 17 });
+            const patch = yield* decodeCheckpointDiffResult(result.structuredContent);
+            expect(patch.diff).not.toMatch(/[\uD800-\uDBFF]$/u);
+            complete += patch.diff;
+            if (patch.nextCursor === null) break;
+            cursor = patch.nextCursor;
+          }
+          expect(complete).toBe(
+            yield* store.diffCheckpoints({
+              cwd,
+              fromCheckpointRef: checkpoints[0]!.ref,
+              toCheckpointRef: checkpoints[1]!.ref,
+              ignoreWhitespace: false,
+              requireCompleteOutput: true,
+            }),
+          );
+          expect(
+            declaredFailure(
+              yield* invoke("t3_checkpoint_diff", {
+                ...args,
+                scopeId: "checkpoint-scope:foreign",
+                fromCheckpointId: checkpoints[1]!.id,
+              }),
+            ),
+          ).toMatchObject({ code: "scope_mismatch" });
+          expect(
+            declaredFailure(yield* invoke("t3_checkpoint_list", { threadId: "thread:foreign" })),
+          ).toMatchObject({ code: "thread_not_found" });
+        }).pipe(Effect.provide(layer));
+      }),
+    ),
+  );
+
   it.live(
     "delegates cross-provider tasks, polls and cancels children, and creates ordinary threads",
     () =>

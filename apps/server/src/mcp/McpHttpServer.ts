@@ -1,3 +1,6 @@
+import * as CheckpointMcpService from "./CheckpointMcpService.ts";
+import * as CheckpointHandlers from "./toolkits/checkpoint/handlers.ts";
+import { CheckpointToolkit } from "./toolkits/checkpoint/tools.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -998,6 +1001,11 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
+export const layerCheckpointToolkit = toolkitRegistration(
+  CheckpointToolkit,
+  CheckpointHandlers.layer,
+).pipe(Layer.provide(CheckpointMcpService.layer));
+
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
@@ -1053,6 +1061,7 @@ export const layerMcpTransport = McpServer.layerHttp({
 export const layer = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
+  layerCheckpointToolkit,
   layerThreadToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,

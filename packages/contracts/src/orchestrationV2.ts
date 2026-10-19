@@ -1188,6 +1188,19 @@ export const OrchestrationV2Checkpoint = Schema.Struct({
 });
 export type OrchestrationV2Checkpoint = typeof OrchestrationV2Checkpoint.Type;
 
+export function checkpointRollbackAppRunOrdinal(
+  checkpoint: OrchestrationV2Checkpoint,
+  scope: OrchestrationV2CheckpointScope,
+): number | null {
+  if (checkpoint.appRunOrdinal !== null) return checkpoint.appRunOrdinal;
+  return checkpoint.ordinalWithinScope === 0 &&
+    scope.kind === "root_run" &&
+    scope.parentScopeId === null &&
+    scope.advancesAppRunCount
+    ? 0
+    : null;
+}
+
 export const OrchestrationV2CheckpointRollbackRequest = Schema.Struct({
   scopeId: CheckpointScopeId,
   checkpointId: CheckpointId,

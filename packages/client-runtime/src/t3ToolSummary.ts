@@ -302,6 +302,12 @@ export function summarizeT3ToolCalls(
     case "worktree-list":
       label = phrase("Listed", "list", `workspace branches ${times}`);
       break;
+    case "checkpoint-list":
+      label = phrase("Listed", "list", `checkpoints ${times}`);
+      break;
+    case "checkpoint-diff":
+      label = phrase("Read", "read", `checkpoint diffs ${times}`);
+      break;
     case "worktree-status":
       label = phrase("Checked", "check", `worktree status ${times}`);
       break;

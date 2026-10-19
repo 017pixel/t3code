@@ -43,6 +43,8 @@ export type T3McpToolSummaryAction =
   | "worktree-handoff"
   | "worktree-list"
   | "worktree-status"
+  | "checkpoint-list"
+  | "checkpoint-diff"
   | "project-list"
   | "project-read"
   | "project-create"
@@ -162,6 +164,8 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Hand off", "Handing off", "Handed off", "thread to a git worktree"],
     "worktree-handoff",
   ),
+  t3_checkpoint_list: tool(["List", "Listing", "Listed", "thread checkpoints"], "checkpoint-list"),
+  t3_checkpoint_diff: tool(["Read", "Reading", "Read", "a checkpoint diff"], "checkpoint-diff"),
   t3_worktree_status: tool(["Get", "Getting", "Got", "thread worktree status"], "worktree-status"),
   preview_status: tool(["Get", "Getting", "Got", "preview browser status"], "browser", "browser"),
   preview_open: tool(
