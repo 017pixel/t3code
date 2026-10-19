@@ -874,7 +874,6 @@ export const make = Effect.gen(function* () {
         maxResponseBytes: 1_000_000,
       })
       .pipe(
-        Effect.timeout("3 seconds"),
         Effect.mapError(
           (cause) =>
             new SourceControlProviderError({
@@ -924,6 +923,20 @@ export const make = Effect.gen(function* () {
       return asAccountOf(
         { host: input.url.host, owner: match[1]!, name: match[2]! },
         readLinkSubject(input, `repos/${match[1]}/${match[2]}/issues/${match[3]}`),
+      ).pipe(
+        Effect.timeout("3 seconds"),
+        Effect.catchTags({
+          TimeoutError: (cause) =>
+            Effect.fail(
+              new SourceControlProviderError({
+                provider: SourceControlProviderKind.make("github"),
+                operation: "resolveLink",
+                cwd: input.cwd,
+                detail: "The linked subject could not be read.",
+                cause,
+              }),
+            ),
+        }),
       );
     },
     listChangeRequests: (input) =>
