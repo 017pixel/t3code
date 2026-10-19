@@ -7,6 +7,7 @@ import {
   initialTargetSelection,
   isRetryableReason,
   formatSkippedDomains,
+  fullDiskAccessRecheckStep,
   outcomeToStep,
   refreshedSourceProfileDirectory,
   refreshedSourceStep,
@@ -49,6 +50,15 @@ describe("initialWizardStep", () => {
 
   it("opens on configure when the source is ready", () => {
     expect(initialWizardStep(source())).toEqual({ step: "configure" });
+  });
+
+  it("asks for Full Disk Access before choosing an import target", () => {
+    expect(initialWizardStep(source({ profiles: [], unavailable: "needsFullDiskAccess" }))).toEqual(
+      {
+        step: "fullDiskAccess",
+        resume: "configure",
+      },
+    );
   });
 
   it("blocks on a reason nothing local can fix", () => {
@@ -103,6 +113,14 @@ describe("outcomeToStep", () => {
     expect(outcomeToStep({ kind: "blocked", reason: "browserRunning" })).toEqual({ step: "quit" });
   });
 
+  it("routes a Full Disk Access refusal to its own screen", () => {
+    expect(outcomeToStep({ kind: "blocked", reason: "needsFullDiskAccess" })).toEqual({
+      step: "fullDiskAccess",
+      resume: "import",
+      checked: true,
+    });
+  });
+
   it("surfaces every other failure on the blocked screen", () => {
     expect(outcomeToStep({ kind: "blocked", reason: "readFailed" })).toEqual({
       step: "blocked",
@@ -134,6 +152,20 @@ describe("refreshedSourceStep", () => {
   });
 });
 
+describe("fullDiskAccessRecheckStep", () => {
+  it("marks a still-denied access check for visible feedback", () => {
+    expect(fullDiskAccessRecheckStep(source({ unavailable: "needsFullDiskAccess" }))).toEqual({
+      step: "fullDiskAccess",
+      resume: "configure",
+      checked: true,
+    });
+  });
+
+  it("moves on once access reveals the source profiles", () => {
+    expect(fullDiskAccessRecheckStep(source())).toEqual({ step: "configure" });
+  });
+});
+
 describe("refreshedSourceProfileDirectory", () => {
   const refreshed = source({
     profiles: [
@@ -162,13 +194,10 @@ describe("isRetryableReason", () => {
   it("does not offer a retry for a permanent failure", () => {
     expect(isRetryableReason("unsupportedPlatform")).toBe(false);
     expect(isRetryableReason("unknownSourceProfile")).toBe(false);
-    // Retrying the same new-profile import cannot lower the profile count.
     expect(isRetryableReason("profileLimitReached")).toBe(false);
   });
 
   it("offers a retry once the user has signed in to create the missing key", () => {
-    // The blocked copy tells the user to sign in and retry, so the screen
-    // has to offer the retry it asks for.
     expect(isRetryableReason("keychainItemMissing")).toBe(true);
   });
 
