@@ -23,6 +23,12 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
+import * as RemoteAuthorization from "../authorization/service.ts";
+import * as ManagedRelay from "../relay/managedRelay.ts";
+import * as RpcHttp from "../rpc/http.ts";
+import { fetchEnvironmentSessionState } from "../state/session.ts";
+import * as Onboarding from "./onboarding.ts";
+import * as ConnectionResolver from "./resolver.ts";
 import {
   BearerConnectionCredential,
   BearerConnectionProfile,
@@ -56,8 +62,6 @@ import {
 import * as Persistence from "../platform/persistence.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as EnvironmentRegistry from "./registry.ts";
-import { addT3ConnectRoute } from "./onboarding.ts";
-import * as RpcHttp from "../rpc/http.ts";
 import {
   GitHubRoutingPermissions,
   type StoredGitHubRoutingPermission,
@@ -474,6 +478,12 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     disconnectedSshTargets,
     networkStatus,
     connectedRoutes,
+    connectionStores: Layer.mergeAll(
+      Layer.succeed(ConnectionProfileStore.ConnectionProfileStore, profileStore),
+      Layer.succeed(ConnectionCredentialStore.ConnectionCredentialStore, credentialStore),
+      Layer.succeed(TokenStore.RemoteDpopAccessTokenStore, tokenStore),
+      Layer.succeed(ClientCapabilities.SshEnvironmentGateway, sshGateway),
+    ),
   };
 });
 
@@ -1881,7 +1891,344 @@ describe("EnvironmentRegistry", () => {
   );
 });
 
+function routeOnboardingHttp(environmentId = RELAY_TARGET.environmentId) {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const layer = RpcHttp.layerRemoteHttpClient(((input, init = {}) => {
+    const url = String(input);
+    calls.push({ url, init });
+    const headers = new Headers(init.headers);
+    const dpopAuthorized =
+      headers.get("authorization") === "DPoP connect-access-token" &&
+      headers.get("dpop") === `proof:${url}`;
+    if (url.endsWith("/.well-known/t3/environment")) {
+      return Promise.resolve(
+        Response.json({
+          environmentId,
+          label: "Route environment",
+          platform: { os: "linux", arch: "x64" },
+          serverVersion: "0.0.0-test",
+          orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+          capabilities: { repositoryIdentity: true },
+        }),
+      );
+    }
+    if (url.endsWith("/oauth/token")) {
+      const body =
+        init.body instanceof Uint8Array ? new TextDecoder().decode(init.body) : String(init.body);
+      const credential = new URLSearchParams(body).get("subject_token");
+      const managed = credential === "connect-bootstrap" && headers.get("dpop") === `proof:${url}`;
+      if (managed || credential === "pairing-code") {
+        return Promise.resolve(
+          Response.json({
+            access_token: managed ? "connect-access-token" : "paired-access-token",
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+            token_type: managed ? "DPoP" : "Bearer",
+            expires_in: 3600,
+            scope: "orchestration:read",
+          }),
+        );
+      }
+    }
+    if (url.endsWith("/api/auth/websocket-ticket") && dpopAuthorized) {
+      return Promise.resolve(
+        Response.json({ ticket: "direct-ticket", expiresAt: "2099-01-01T00:00:00.000Z" }),
+      );
+    }
+    if (url.endsWith("/api/auth/session")) {
+      return Promise.resolve(
+        Response.json({
+          authenticated: dpopAuthorized,
+          auth: {
+            policy: "remote-reachable",
+            bootstrapMethods: ["one-time-token"],
+            sessionMethods: ["dpop-access-token"],
+            sessionCookieName: "t3_session",
+          },
+          scopes: dpopAuthorized ? ["orchestration:read"] : [],
+          ...(dpopAuthorized ? { sessionMethod: "dpop-access-token" } : {}),
+        }),
+      );
+    }
+    return Promise.reject(new Error(`Unexpected or unauthenticated request: ${url}`));
+  }) satisfies typeof fetch);
+  return { layer, calls };
+}
+
+const routeClientPresentation = Layer.succeed(ClientCapabilities.ClientPresentation, {
+  metadata: { label: "Test Client", deviceType: "desktop" },
+});
+
 describe("EnvironmentRegistry routes", () => {
+  it.effect.each([
+    { host: "192.168.1.20:3773", address: "http://192.168.1.20:3773" },
+    { host: "https://direct.example.test", address: "https://direct.example.test" },
+  ])(
+    "authenticates through a manually added $address route using T3 Connect",
+    ({ host, address }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness([RELAY_TARGET], [], [], {
+          initialDisabled: [RELAY_TARGET.environmentId],
+        });
+        const http = routeOnboardingHttp();
+        const bootstrapRequests: Array<EnvironmentId> = [];
+        const signer = ManagedRelay.ManagedRelayDpopSigner.of({
+          thumbprint: Effect.succeed("test-thumbprint"),
+          createProof: ({ url }) => Effect.succeed(`proof:${url}`),
+        });
+        const dependencies = Layer.mergeAll(
+          harness.connectionStores,
+          http.layer,
+          routeClientPresentation,
+          Layer.succeed(ClientCapabilities.PrimaryEnvironmentAuth, {
+            bearerToken: Effect.succeedNone,
+          }),
+          Layer.succeed(ClientCapabilities.CloudSession, {
+            identity: Effect.succeedSome({ accountId: "account-1" }),
+            clerkToken: Effect.succeed("cloud-session"),
+          }),
+          Layer.succeed(ClientCapabilities.RelayDeviceIdentity, {
+            deviceId: Effect.succeedSome("device-1"),
+          }),
+          Layer.succeed(ManagedRelay.ManagedRelayDpopSigner, signer),
+          Layer.mock(ManagedRelay.ManagedRelayClient)({
+            relayUrl: "https://relay.example.test",
+            connectEnvironment: (request) =>
+              Effect.sync(() => {
+                bootstrapRequests.push(request.environmentId);
+                expect(request.clerkToken).toBe("cloud-session");
+                return {
+                  environmentId: request.environmentId,
+                  endpoint: {
+                    httpBaseUrl: "https://tunnel.example.test/",
+                    wsBaseUrl: "wss://tunnel.example.test/",
+                    providerKind: "cloudflare_tunnel" as const,
+                  },
+                  credential: "connect-bootstrap",
+                  expiresAt: "2099-01-01T00:00:00.000Z",
+                };
+              }),
+          }),
+        );
+        const authorizationLayer = RemoteAuthorization.layer.pipe(Layer.provide(dependencies));
+        // RPC is stubbed; readiness requires authenticated HTTP on the selected route.
+        const sessionLayer = Layer.effect(
+          RpcSession.RpcSessionFactory,
+          Effect.gen(function* () {
+            const remote = yield* RemoteAuthorization.RemoteEnvironmentAuthorization;
+            return RpcSession.RpcSessionFactory.of({
+              connect: (prepared) =>
+                Effect.succeed({
+                  client: {} as RpcSession.RpcSession["client"],
+                  initialConfig: Effect.never,
+                  subscribeServerConfig: () => Stream.never,
+                  ready: fetchEnvironmentSessionState({
+                    prepared,
+                    signer: Option.some(signer),
+                    remoteAuthorization: Option.some(remote),
+                  }).pipe(
+                    Effect.provide(http.layer),
+                    Effect.orDie,
+                    Effect.tap((session) =>
+                      Effect.sync(() => {
+                        expect(session.authenticated).toBe(true);
+                        expect(session.scopes).toEqual(["orchestration:read"]);
+                      }),
+                    ),
+                    Effect.asVoid,
+                  ),
+                  probe: Effect.void,
+                  closed: Effect.never,
+                }),
+            });
+          }),
+        ).pipe(Layer.provide(authorizationLayer));
+        const driverLayer = ConnectionDriver.layer.pipe(
+          Layer.provide(
+            ConnectionResolver.layer.pipe(
+              Layer.provide(authorizationLayer),
+              Layer.provide(dependencies),
+            ),
+          ),
+          Layer.provide(Layer.mergeAll(dependencies, sessionLayer)),
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const onboarding = yield* Onboarding.make;
+          expect(
+            yield* onboarding.registerPairing({
+              host,
+              expectedEnvironmentId: RELAY_TARGET.environmentId,
+            }),
+          ).toBe(RELAY_TARGET.environmentId);
+          const entry = (yield* SubscriptionRef.get(registry.entries)).get(
+            RELAY_TARGET.environmentId,
+          )!;
+          expect(entry.enabled).toBe(true);
+          const driver = yield* ConnectionDriver.ConnectionDriver;
+          const { prepared } = yield* driver.connect(entry, () => Effect.void);
+          expect(prepared.httpBaseUrl).toBe(`${address}/`);
+          expect(new URL(prepared.socketUrl).origin).toBe(address.replace(/^http/, "ws"));
+          expect(new URL(prepared.socketUrl).searchParams.get("wsTicket")).toBe("direct-ticket");
+          expect(prepared.httpAuthorization).toMatchObject({
+            _tag: "Dpop",
+            accessToken: "connect-access-token",
+          });
+          expect(bootstrapRequests).toEqual([RELAY_TARGET.environmentId]);
+          expect(yield* Ref.get(harness.storedCredentials)).toEqual(new Map());
+          expect(
+            (yield* Ref.get(harness.storedRemoteTokens)).get(RELAY_TARGET.environmentId),
+          ).toMatchObject({ accountId: "account-1" });
+          expect(
+            http.calls.filter(({ url }) => url.endsWith("/api/auth/session")).map(({ url }) => url),
+          ).toEqual([`${address}/api/auth/session`]);
+        }).pipe(
+          Effect.provide(Layer.mergeAll(harness.layer, driverLayer, dependencies)),
+          Effect.scoped,
+        );
+      }),
+  );
+
+  it.effect(
+    "explicit pairing replaces Connect authorization and survives adding the same address again",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness([RELAY_TARGET]);
+        const http = routeOnboardingHttp();
+        yield* Effect.gen(function* () {
+          const onboarding = yield* Onboarding.make;
+          const input = {
+            host: "http://192.168.1.20:3773",
+            expectedEnvironmentId: RELAY_TARGET.environmentId,
+          };
+          yield* onboarding.registerPairing(input);
+          yield* onboarding.registerPairing({ ...input, pairingCode: "pairing-code" });
+          const pairedProfiles = yield* Ref.get(harness.storedProfiles);
+          const pairedCredentials = yield* Ref.get(harness.storedCredentials);
+          expect([...pairedProfiles.values()]).toHaveLength(1);
+          expect([...pairedProfiles.values()][0]).not.toHaveProperty("authorization");
+          expect([...pairedCredentials.values()]).toEqual([
+            new BearerConnectionCredential({ token: "paired-access-token" }),
+          ]);
+          yield* onboarding.registerPairing(input);
+          expect(yield* Ref.get(harness.storedProfiles)).toEqual(pairedProfiles);
+          expect(yield* Ref.get(harness.storedCredentials)).toEqual(pairedCredentials);
+          expect(
+            routesOf(yield* Ref.get(harness.storedTargets), RELAY_TARGET.environmentId),
+          ).toHaveLength(2);
+          expect(http.calls.filter(({ url }) => url.endsWith("/oauth/token"))).toHaveLength(1);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              harness.layer,
+              harness.connectionStores,
+              http.layer,
+              routeClientPresentation,
+            ),
+          ),
+          Effect.scoped,
+        );
+      }),
+  );
+
+  it.effect.each(["different machine", "no Connect route"] as const)(
+    "rejects a codeless address with %s without saving credentials or a route",
+    (boundary) =>
+      Effect.gen(function* () {
+        const targets = boundary === "different machine" ? [RELAY_TARGET] : [LAN_TARGET];
+        const initialCredentials =
+          boundary === "different machine"
+            ? []
+            : [[LAN_TARGET.connectionId, BEARER_CREDENTIAL] as const];
+        const harness = yield* makeHarness(
+          targets,
+          boundary === "different machine" ? [] : [LAN_PROFILE],
+          initialCredentials,
+        );
+        const http = routeOnboardingHttp(
+          boundary === "different machine"
+            ? EnvironmentId.make("other-machine")
+            : RELAY_TARGET.environmentId,
+        );
+        yield* Effect.gen(function* () {
+          const onboarding = yield* Onboarding.make;
+          const error = yield* onboarding
+            .registerPairing({
+              host: "192.168.1.20:3773",
+              expectedEnvironmentId: RELAY_TARGET.environmentId,
+            })
+            .pipe(Effect.flip);
+          expect(error).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });
+          if (boundary === "different machine")
+            expect(error.message).toContain("different machine");
+          expect(yield* Ref.get(harness.storedTargets)).toEqual(targets);
+          expect(yield* Ref.get(harness.storedProfiles)).toEqual(
+            new Map(
+              boundary === "different machine" ? [] : [[LAN_PROFILE.connectionId, LAN_PROFILE]],
+            ),
+          );
+          expect(yield* Ref.get(harness.storedCredentials)).toEqual(new Map(initialCredentials));
+          expect(
+            http.calls.every(
+              ({ url, init }) =>
+                url.endsWith("/.well-known/t3/environment") &&
+                !new Headers(init.headers).has("authorization"),
+            ),
+          ).toBe(true);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              harness.layer,
+              harness.connectionStores,
+              http.layer,
+              routeClientPresentation,
+            ),
+          ),
+          Effect.scoped,
+        );
+      }),
+  );
+
+  it.effect.each(["remove route", "sign out"] as const)(
+    "%s removes manually added Connect routes while preserving independently paired routes",
+    (action) =>
+      Effect.gen(function* () {
+        const dependentTarget = new BearerConnectionTarget({
+          ...LAN_TARGET,
+          connectionId: "manual-connect",
+        });
+        const dependentProfile = new BearerConnectionProfile({
+          ...LAN_PROFILE,
+          connectionId: dependentTarget.connectionId,
+          httpBaseUrl: "https://direct.example.test/",
+          wsBaseUrl: "wss://direct.example.test/",
+          authorization: "t3-connect",
+        });
+        const harness = yield* makeHarness(
+          [LAN_TARGET, dependentTarget, RELAY_TARGET],
+          [LAN_PROFILE, dependentProfile],
+          [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          if (action === "remove route")
+            yield* registry.removeRoute(RELAY_TARGET.environmentId, "relay");
+          else yield* registry.removeRelayEnvironments();
+          expect(
+            routesOf(yield* Ref.get(harness.storedTargets), RELAY_TARGET.environmentId),
+          ).toEqual([LAN_TARGET]);
+          expect((yield* Ref.get(harness.storedProfiles)).get(LAN_TARGET.connectionId)).toEqual(
+            LAN_PROFILE,
+          );
+          expect(yield* Ref.get(harness.storedCredentials)).toEqual(
+            new Map([[LAN_TARGET.connectionId, BEARER_CREDENTIAL]]),
+          );
+          expect(
+            (yield* SubscriptionRef.get(registry.entries)).get(RELAY_TARGET.environmentId),
+          ).toMatchObject({ target: LAN_TARGET });
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
   const LAN_TARGET = new BearerConnectionTarget({
     environmentId: RELAY_TARGET.environmentId,
     label: RELAY_TARGET.label,
@@ -1998,121 +2345,6 @@ describe("EnvironmentRegistry routes", () => {
           ).toEqual([again]);
         }).pipe(Effect.provide(harness.layer), Effect.scoped);
       }),
-  );
-
-  // Answers the descriptor request as `environmentId`.
-  const layerDescriptorHttp = (environmentId: EnvironmentId, label = "Relay environment") =>
-    RpcHttp.layerRemoteHttpClient(((input) =>
-      String(input).endsWith("/.well-known/t3/environment")
-        ? Promise.resolve(
-            Response.json({
-              environmentId,
-              label,
-              platform: { os: "linux", arch: "x64" },
-              serverVersion: "0.0.0-test",
-              orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
-              capabilities: { repositoryIdentity: true },
-            }),
-          )
-        : Promise.reject(
-            new Error(`Unexpected request: ${String(input)}`),
-          )) satisfies typeof fetch);
-
-  it.effect("adds an address without a code as a T3 Connect route and drops it on sign-out", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness([RELAY_TARGET]);
-      yield* Effect.gen(function* () {
-        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        const added = yield* addT3ConnectRoute({
-          host: "192.168.1.10:3773",
-          pairingCode: "",
-          expectedEnvironmentId: RELAY_TARGET.environmentId,
-        }).pipe(Effect.provide(layerDescriptorHttp(RELAY_TARGET.environmentId)));
-        expect(added).toBe(RELAY_TARGET.environmentId);
-
-        const connectionId = "bearer:environment-relay:http://192.168.1.10:3773";
-        expect(routesOf(yield* Ref.get(harness.storedTargets), RELAY_TARGET.environmentId)).toEqual(
-          [
-            new BearerConnectionTarget({
-              environmentId: RELAY_TARGET.environmentId,
-              label: RELAY_TARGET.label,
-              connectionId,
-            }),
-            RELAY_TARGET,
-          ],
-        );
-        expect((yield* Ref.get(harness.storedProfiles)).get(connectionId)).toMatchObject({
-          httpBaseUrl: "http://192.168.1.10:3773/",
-          wsBaseUrl: "ws://192.168.1.10:3773/",
-          authorization: "t3-connect",
-        });
-
-        // Without T3 Connect the address has no way to sign in.
-        yield* registry.removeRelayEnvironments();
-        expect(hasRoutes(yield* Ref.get(harness.storedTargets), RELAY_TARGET.environmentId)).toBe(
-          false,
-        );
-      }).pipe(Effect.provide(harness.layer), Effect.scoped);
-    }),
-  );
-
-  it.effect("keeps a paired address's token when it is added again without a code", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness(
-        [LAN_TARGET, RELAY_TARGET],
-        [LAN_PROFILE],
-        [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
-      );
-      yield* Effect.gen(function* () {
-        const added = yield* addT3ConnectRoute({
-          host: "192.168.1.10:3773",
-          expectedEnvironmentId: RELAY_TARGET.environmentId,
-        }).pipe(Effect.provide(layerDescriptorHttp(RELAY_TARGET.environmentId)));
-        expect(added).toBe(RELAY_TARGET.environmentId);
-        expect(routesOf(yield* Ref.get(harness.storedTargets), RELAY_TARGET.environmentId)).toEqual(
-          [LAN_TARGET, RELAY_TARGET],
-        );
-        expect((yield* Ref.get(harness.storedProfiles)).get(LAN_TARGET.connectionId)).toEqual(
-          LAN_PROFILE,
-        );
-      }).pipe(Effect.provide(harness.layer), Effect.scoped);
-    }),
-  );
-
-  it.effect("refuses a codeless address that reaches a different machine", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness([RELAY_TARGET]);
-      yield* Effect.gen(function* () {
-        const error = yield* addT3ConnectRoute({
-          host: "192.168.1.20:3773",
-          expectedEnvironmentId: RELAY_TARGET.environmentId,
-        }).pipe(
-          Effect.provide(layerDescriptorHttp(EnvironmentId.make("environment-other"), "Other")),
-          Effect.flip,
-        );
-        expect(error.message).toContain("Other, a different machine");
-        expect(routesOf(yield* Ref.get(harness.storedTargets), RELAY_TARGET.environmentId)).toEqual(
-          [RELAY_TARGET],
-        );
-      }).pipe(Effect.provide(harness.layer), Effect.scoped);
-    }),
-  );
-
-  it.effect("leaves a codeless address to pairing when the machine has no T3 Connect route", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness(
-        [LAN_TARGET],
-        [LAN_PROFILE],
-        [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
-      );
-      yield* Effect.gen(function* () {
-        const added = yield* addT3ConnectRoute({
-          host: "192.168.1.20:3773",
-          expectedEnvironmentId: LAN_TARGET.environmentId,
-        }).pipe(Effect.provide(layerDescriptorHttp(LAN_TARGET.environmentId)));
-        expect(added).toBeNull();
-      }).pipe(Effect.provide(harness.layer), Effect.scoped);
-    }),
   );
 
   it.effect("signing out of T3 Connect keeps an environment that still has a LAN route", () =>
