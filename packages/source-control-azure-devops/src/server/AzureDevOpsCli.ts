@@ -350,13 +350,15 @@ function decodeAzureDevOpsJson<S extends Schema.Top>(
   );
 }
 
-function checkoutScopeFromConfig(output: string, remoteName: string | undefined) {
-  if (!output.endsWith("\0")) return null;
+function checkoutScopeFromRemotes(output: string, remoteName: string | undefined) {
+  if (!output.endsWith("\n")) return null;
   const remotes = new Map<string, string>();
-  for (const entry of output.slice(0, -1).split("\0")) {
-    const match = /^remote\.(.+)\.url\n([^\r\n]+)$/u.exec(entry);
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/u.exec(trimmed);
     if (!match?.[1] || !match[2]) return null;
-    if (!remotes.has(match[1])) remotes.set(match[1], match[2]);
+    if (match[3] === "fetch" && !remotes.has(match[1])) remotes.set(match[1], match[2]);
   }
   // Match RepositoryIdentityResolver's primary remote, even if its URL is unsupported.
   const selected =
@@ -375,6 +377,7 @@ function checkoutScopeFromConfig(output: string, remoteName: string | undefined)
       remote.includes("://") ? remote : scp ? `ssh://${scp[1]}/${scp[2]}` : remote,
     );
     if (url.search || url.hash) return null;
+    const legacy = url.hostname.endsWith(".visualstudio.com");
     const parts = url.pathname.slice(1).split("/").map(decodeURIComponent);
     let organization: string | undefined;
     if (
@@ -398,8 +401,13 @@ function checkoutScopeFromConfig(output: string, remoteName: string | undefined)
     if ([organization, project, repository].some((part) => /[\p{Cc}/\\]/u.test(part))) {
       return null;
     }
+    if (legacy && !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/u.test(organization))
+      return null;
     return {
-      organization: `https://dev.azure.com/${encodeURIComponent(organization)}`,
+      // az keys organization-scoped credentials by the original host family.
+      organization: legacy
+        ? `https://${organization}.visualstudio.com`
+        : `https://dev.azure.com/${encodeURIComponent(organization)}`,
       project,
       repository,
     };
@@ -423,11 +431,11 @@ export const make = Effect.gen(function* () {
         !args.some((arg) => /^(?:--organization|--org)(?:=|$)/u.test(arg))
       ) {
         // Windows az running in WSL cannot inspect the server's Linux checkout.
-        const config = yield* process
+        const remotes = yield* process
           .run({
             operation: "AzureDevOpsCli.resolveScope",
             command: "git",
-            args: ["config", "--null", "--get-regexp", "^remote\\..*\\.url$"],
+            args: ["remote", "-v"],
             cwd: input.cwd,
             env: {
               GIT_DIR: undefined,
@@ -451,8 +459,8 @@ export const make = Effect.gen(function* () {
               ? remoteArg.slice("--remote-name=".length)
               : (args[remoteIndex + 1] ?? "");
         const scope =
-          config?.exitCode === 0 && !config.stdoutTruncated && !config.stdoutInvalidUtf8
-            ? checkoutScopeFromConfig(config.stdout, remoteName)
+          remotes?.exitCode === 0 && !remotes.stdoutTruncated && !remotes.stdoutInvalidUtf8
+            ? checkoutScopeFromRemotes(remotes.stdout, remoteName)
             : null;
         if (scope) {
           const scoped = [...args, "--organization", scope.organization];

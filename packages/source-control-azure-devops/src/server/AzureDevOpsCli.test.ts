@@ -180,15 +180,30 @@ describe("AzureDevOpsCli.layer", () => {
     Effect.gen(function* () {
       const { git, execute } = yield* checkoutFixture;
       yield* git("remote", "add", "origin", "https://dev.azure.com/placeholder/Project/_git/Repo");
-      for (const remote of [
-        "https://dev.azure.com/acme/My%20Project/_git/My%20Repo",
-        "https://user@dev.azure.com/acme/My%20Project/_git/My%20Repo",
-        "https://acme.visualstudio.com/DefaultCollection/My%20Project/_git/My%20Repo",
-        "https://acme.visualstudio.com/My%20Project/_git/My%20Repo",
-        "git@ssh.dev.azure.com:v3/acme/My%20Project/My%20Repo",
-        "ssh://git@ssh.dev.azure.com:22/v3/acme/My%20Project/My%20Repo",
-        "git@vs-ssh.visualstudio.com:v3/acme/My%20Project/My%20Repo",
-      ]) {
+      for (const [remote, organization] of [
+        ["https://dev.azure.com/acme/My%20Project/_git/My%20Repo", "https://dev.azure.com/acme"],
+        [
+          "https://user@dev.azure.com/acme/My%20Project/_git/My%20Repo",
+          "https://dev.azure.com/acme",
+        ],
+        [
+          "https://acme.visualstudio.com/DefaultCollection/My%20Project/_git/My%20Repo",
+          "https://acme.visualstudio.com",
+        ],
+        [
+          "https://acme.visualstudio.com/My%20Project/_git/My%20Repo",
+          "https://acme.visualstudio.com",
+        ],
+        ["git@ssh.dev.azure.com:v3/acme/My%20Project/My%20Repo", "https://dev.azure.com/acme"],
+        [
+          "ssh://git@ssh.dev.azure.com:22/v3/acme/My%20Project/My%20Repo",
+          "https://dev.azure.com/acme",
+        ],
+        [
+          "git@vs-ssh.visualstudio.com:v3/acme/My%20Project/My%20Repo",
+          "https://acme.visualstudio.com",
+        ],
+      ] as const) {
         yield* git("remote", "set-url", "origin", remote);
         const args = yield* execute(["repos", "show", "--detect", "true"]);
         expect(args).toEqual(
@@ -196,7 +211,7 @@ describe("AzureDevOpsCli.layer", () => {
             "--detect",
             "false",
             "--organization",
-            "https://dev.azure.com/acme",
+            organization,
             "--project",
             "My Project",
             "--repository",
@@ -249,6 +264,37 @@ describe("AzureDevOpsCli.layer", () => {
         );
         yield* git("remote", "remove", name);
       }
+      yield* git(
+        "remote",
+        "set-url",
+        "--push",
+        "zebra",
+        "https://dev.azure.com/push/Wrong/_git/Wrong",
+      );
+      for (const [remote, prefix] of [
+        ["ado:Project/_git/Repo", "ado:"],
+        ["https://dev.azure.com/raw/Project/_git/Repo", "https://dev.azure.com/raw/"],
+      ] as const) {
+        yield* git("remote", "set-url", "zebra", remote);
+        yield* git("config", "url.https://dev.azure.com/effective/.insteadOf", prefix);
+        const args = yield* execute(["repos", "show", "--detect", "true"]);
+        expect(args).toEqual([
+          "repos",
+          "show",
+          "--detect",
+          "false",
+          "--organization",
+          "https://dev.azure.com/effective",
+          "--project",
+          "Project",
+          "--repository",
+          "Repo",
+        ]);
+        yield* git("config", "--unset", "url.https://dev.azure.com/effective/.insteadOf");
+      }
+      const restored = yield* execute(["repos", "show", "--detect", "true"]);
+      expect(restored).toContain("https://dev.azure.com/raw");
+      expect(restored).not.toContain("https://dev.azure.com/effective");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -311,6 +357,7 @@ describe("AzureDevOpsCli.layer", () => {
         "https://dev.azure.com/acme",
         "https://dev.azure.com/acme/%XX/_git/Repo",
         "git@ssh.dev.azure.com:v4/acme/Project/Repo",
+        "git@vs-ssh.visualstudio.com:v3/acme.invalid/Project/Repo",
       ]) {
         yield* git("remote", "set-url", "origin", url);
         expect(yield* execute(args)).toEqual(args);
