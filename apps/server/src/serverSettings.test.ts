@@ -116,6 +116,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const disconnect = yield* Deferred.make<void>();
         const disconnected = yield* Deferred.make<void>();
         const repointComplete = yield* Deferred.make<void>();
+        const staleTargetReleased = yield* Deferred.make<void>();
         const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
         const failedRecoveryRead = yield* Deferred.make<void>();
         const recovered = yield* Deferred.make<void>();
@@ -147,8 +148,13 @@ it.layer(NodeServices.layer)("server settings", (it) => {
                       yield* Deferred.await(repointComplete);
                     activeTargets.add(first);
                     options?.onReady?.();
+                    return ending === "attachment-repoint" && recovering;
                   }),
-                  () => Effect.sync(() => activeTargets.delete(first)),
+                  (staleReplacement) =>
+                    Effect.sync(() => {
+                      activeTargets.delete(first);
+                      if (staleReplacement) Deferred.doneUnsafe(staleTargetReleased, Effect.void);
+                    }),
                 ).pipe(
                   Effect.andThen(Deferred.succeed(attached, undefined)),
                   Effect.as(
@@ -256,6 +262,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           }
           failRead = true;
           yield* TestClock.adjust("1 second");
+          if (ending === "attachment-repoint") {
+            yield* Deferred.await(staleTargetReleased);
+            yield* TestClock.adjust("1 second");
+          }
           yield* Deferred.await(failedRecoveryRead);
           yield* TestClock.adjust("1 minute");
           yield* Deferred.await(recovered);

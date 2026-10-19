@@ -1,4 +1,5 @@
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
@@ -27,7 +28,15 @@ export const restartingWatch = <A, E, R, E2, R2>(
           onStarted();
           if (recovering)
             yield* Effect.raceFirst(
-              reconcile.pipe(Effect.retry({ schedule: Schedule.spaced("100 millis") })),
+              reconcile.pipe(
+                Effect.retry({
+                  schedule: Schedule.exponential("100 millis").pipe(
+                    Schedule.modifyDelay(({ duration }) =>
+                      Effect.succeed(Math.min(Duration.toMillis(duration), 5000)),
+                    ),
+                  ),
+                }),
+              ),
               Fiber.join(watcher),
             );
           yield* Fiber.join(watcher);
