@@ -106,7 +106,7 @@ function usePersistToolsPatch() {
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "update tools",
   });
-  const queues = useRef(new Map<EnvironmentId, Promise<void>>());
+  const queues = useRef(new Map<EnvironmentId, Promise<boolean>>());
   const written = useRef(
     new Map<
       string,
@@ -116,10 +116,13 @@ function usePersistToolsPatch() {
   return (
     apply: (input: {
       readonly settings: ToolsSettingsSnapshot;
+      readonly environmentId: EnvironmentId;
       readonly projectId: ProjectId | null;
     }) => ServerSettingsPatch | null,
+    onSaved?: (target: ToolsTarget) => void,
+    writeTargets: ReadonlyArray<ToolsTarget> = targets,
   ) => {
-    for (const target of targets) {
+    const saves = writeTargets.map((target) => {
       const save = async () => {
         const config = appAtomRegistry.get(serverEnvironment.configValueAtom(target.environmentId));
         if (!config?.environment.capabilities.agentTools) {
@@ -128,23 +131,27 @@ function usePersistToolsPatch() {
             title: "Tools not saved",
             description: `Update ${target.label} to manage skills and MCP servers.`,
           });
-          return;
+          return false;
         }
         const pushed = config.settings;
         const pending = written.current.get(target.environmentId);
         const settings = pending?.base === pushed ? pending.next : pushed;
         let patch: ServerSettingsPatch | null;
         try {
-          patch = apply({ settings, projectId: target.projectId });
+          patch = apply({
+            settings,
+            environmentId: target.environmentId,
+            projectId: target.projectId,
+          });
         } catch (error) {
           toastManager.add({
             type: "warning",
             title: "Tools not saved",
             description: error instanceof Error ? error.message : "Could not update tools.",
           });
-          return;
+          return false;
         }
-        if (patch === null) return;
+        if (patch === null) return true;
         const missing = requiredScopesForServerSettingsPatch(patch, settings).find(
           (scope) => !readEnvironmentScope(target.environmentId, scope),
         );
@@ -154,7 +161,7 @@ function usePersistToolsPatch() {
             title: "Tools not saved",
             description: `This connection lacks permission to change tools on ${target.label}.`,
           });
-          return;
+          return false;
         }
         const result = await updateSettings({
           environmentId: target.environmentId,
@@ -162,20 +169,34 @@ function usePersistToolsPatch() {
         });
         if (result._tag === "Failure") {
           written.current.delete(target.environmentId);
-          return;
+          return false;
         }
         written.current.set(target.environmentId, {
           base: pushed,
           next: result.value,
         });
+        onSaved?.(target);
+        return true;
       };
-      const next = (queues.current.get(target.environmentId) ?? Promise.resolve()).then(save);
+      const next = (queues.current.get(target.environmentId) ?? Promise.resolve(true))
+        .then(save)
+        .catch((error: unknown) => {
+          written.current.delete(target.environmentId);
+          toastManager.add({
+            type: "warning",
+            title: "Tools not saved",
+            description: error instanceof Error ? error.message : "Could not update tools.",
+          });
+          return false;
+        });
       queues.current.set(target.environmentId, next);
-      void next.finally(() => {
+      void next.then(() => {
         if (queues.current.get(target.environmentId) === next)
           queues.current.delete(target.environmentId);
       });
-    }
+      return next;
+    });
+    return Promise.all(saves).then((results) => results.length > 0 && results.every(Boolean));
   };
 }
 
@@ -202,6 +223,8 @@ export function ToolsSettings({
   readonly onTabChange: (tab: ToolsTab) => void;
 }) {
   const selectTab = onTabChange;
+  const persist = usePersistToolsPatch();
+  const { search } = useSettingsScope();
   const unsupported = useToolsTargets().filter((target) => !target.supportsAgentTools);
   return (
     <SettingsPageContainer>
@@ -227,15 +250,18 @@ export function ToolsSettings({
           />
         </SettingsSection>
       ) : tab === "mcp" ? (
-        <McpServersPanel />
+        <McpServersPanel
+          key={JSON.stringify([search.project, search.machine, search.checkout])}
+          persist={persist}
+        />
       ) : (
-        <SkillsPanel />
+        <SkillsPanel persist={persist} />
       )}
     </SettingsPageContainer>
   );
 }
 
-function SkillsPanel() {
+function SkillsPanel({ persist }: { readonly persist: ReturnType<typeof usePersistToolsPatch> }) {
   const { scope, target } = useSettingsScope();
   const environmentId = target?.environmentId ?? null;
   const targets = useToolsTargets();
@@ -245,7 +271,6 @@ function SkillsPanel() {
     EMPTY_PROVIDERS;
   const disabledSkills = useScopedSettings((settings) => settings.disabledSkills);
   const canWrite = useScopedSettingsWriteAllowed();
-  const persist = usePersistToolsPatch();
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
@@ -457,14 +482,21 @@ function SkillSettingsRow({
   );
 }
 
-type ServerEditor =
-  | { readonly mode: "add" }
-  | { readonly mode: "edit"; readonly row: McpServerRow };
+const toolsTargetKey = (target: Pick<ToolsTarget, "environmentId" | "projectId">) =>
+  JSON.stringify([target.environmentId, target.projectId]);
 
-function McpServersPanel() {
+type ServerEditor = { readonly targets: ReadonlyArray<ToolsTarget> } & (
+  | { readonly mode: "add" }
+  | { readonly mode: "edit"; readonly row: McpServerRow }
+);
+
+function McpServersPanel({
+  persist,
+}: {
+  readonly persist: ReturnType<typeof usePersistToolsPatch>;
+}) {
   const { scope, target, connectedEnvironments } = useSettingsScope();
   const targets = useToolsTargets();
-  const persist = usePersistToolsPatch();
   const canWriteSettings = useScopedSettingsWriteAllowed();
   const managers = useEnvironmentsWithScope(connectedEnvironments, AuthProvidersManageScope);
   const canManageServers =
@@ -486,6 +518,11 @@ function McpServersPanel() {
   });
   const [editor, setEditor] = useState<ServerEditor | null>(null);
   const [removing, setRemoving] = useState<McpServerRow | null>(null);
+  // A successful destination may already have moved its secrets; retry only the failed ones.
+  const saveProgress = useRef<{ editor: ServerEditor | null; completed: Set<string> }>({
+    editor: null,
+    completed: new Set(),
+  });
   const scopeLabel = isProjectScope
     ? scope.kind === "project" || scope.kind === "checkout"
       ? scope.group.displayName
@@ -494,16 +531,22 @@ function McpServersPanel() {
       ? scope.label
       : "every environment";
 
-  const writeServer = (
+  const writeServer = async (
     name: string,
     transport: McpServerTransport,
     enabled: boolean,
     previousName?: string,
   ) => {
+    if (saveProgress.current.editor !== editor) {
+      saveProgress.current = { editor, completed: new Set() };
+    }
+    const { completed } = saveProgress.current;
+    const writeTargets = editor?.targets ?? targets;
     const initial = editor?.mode === "edit" ? editor.row.config.transport : undefined;
     const renamedFrom = previousName !== name ? previousName : undefined;
     try {
-      for (const target of targets) {
+      for (const target of writeTargets) {
+        if (completed.has(toolsTargetKey(target))) continue;
         const settings = connectedEnvironments.find(
           (environment) => environment.environmentId === target.environmentId,
         )?.serverConfig?.settings;
@@ -522,38 +565,42 @@ function McpServersPanel() {
       });
       return false;
     }
-    persist(({ settings, projectId: targetProject }) => {
-      const existing =
-        targetProject === null
-          ? settings.mcpServers
-          : (settings.projectSettingsOverrides[targetProject]?.mcpServers ?? {});
-      // An edit changes the server where it exists; it does not create a copy,
-      // without the stored secrets, on a target that never had it.
-      if (previousName !== undefined && existing[previousName]?.transport === undefined) {
-        return null;
-      }
-      const targetConfig = mcpServerForTarget(
-        { enabled, transport },
-        initial,
-        existing[previousName ?? name],
-        renamedFrom,
-      );
-      if (targetProject === null) {
-        return {
-          mcpServers: {
-            ...(previousName !== undefined && previousName !== name
-              ? { [previousName]: null }
-              : {}),
-            [name]: targetConfig,
-          },
-        };
-      }
-      const entries: Record<string, McpServerProjectOverride> = { ...existing };
-      if (previousName !== undefined && previousName !== name) delete entries[previousName];
-      entries[name] = targetConfig;
-      return projectOverridePatch(settings, targetProject, "mcpServers", entries);
-    });
-    return true;
+    return persist(
+      ({ settings, environmentId, projectId: targetProject }) => {
+        if (completed.has(toolsTargetKey({ environmentId, projectId: targetProject }))) return null;
+        const existing =
+          targetProject === null
+            ? settings.mcpServers
+            : (settings.projectSettingsOverrides[targetProject]?.mcpServers ?? {});
+        // An edit changes the server where it exists; it does not create a copy,
+        // without the stored secrets, on a target that never had it.
+        if (previousName !== undefined && existing[previousName]?.transport === undefined) {
+          return null;
+        }
+        const targetConfig = mcpServerForTarget(
+          { enabled, transport },
+          initial,
+          existing[previousName ?? name],
+          renamedFrom,
+        );
+        if (targetProject === null) {
+          return {
+            mcpServers: {
+              ...(previousName !== undefined && previousName !== name
+                ? { [previousName]: null }
+                : {}),
+              [name]: targetConfig,
+            },
+          };
+        }
+        const entries: Record<string, McpServerProjectOverride> = { ...existing };
+        if (previousName !== undefined && previousName !== name) delete entries[previousName];
+        entries[name] = targetConfig;
+        return projectOverridePatch(settings, targetProject, "mcpServers", entries);
+      },
+      (target) => completed.add(toolsTargetKey(target)),
+      writeTargets,
+    );
   };
 
   const setEnabled = (row: McpServerRow, enabled: boolean) =>
@@ -610,7 +657,7 @@ function McpServersPanel() {
         title={isProjectScope ? "This project" : "MCP servers"}
         headerAction={
           canEditServers ? (
-            <Button size="xs" variant="outline" onClick={() => setEditor({ mode: "add" })}>
+            <Button size="xs" variant="outline" onClick={() => setEditor({ mode: "add", targets })}>
               <PlusIcon className="size-3" aria-hidden />
               Add server
             </Button>
@@ -635,7 +682,7 @@ function McpServersPanel() {
               canSwitch={isProjectScope ? canWriteSettings : canEditServers}
               canEdit={canEditServers}
               onEnabledChange={(enabled) => setEnabled(row, enabled)}
-              onEdit={() => setEditor({ mode: "edit", row })}
+              onEdit={() => setEditor({ mode: "edit", row, targets })}
               onRemove={() => setRemoving(row)}
             />
           ))
@@ -680,7 +727,7 @@ function McpServersPanel() {
             // Every target, not only the one shown: a name another environment
             // already uses would otherwise overwrite its server and secrets.
             new Set(
-              targets
+              editor.targets
                 .flatMap((writeTarget) => {
                   const settings = connectedEnvironments.find(
                     (environment) => environment.environmentId === writeTarget.environmentId,
@@ -699,14 +746,15 @@ function McpServersPanel() {
                 .filter((name) => editor.mode === "add" || name !== editor.row.name),
             )
           }
-          onSave={({ name, transport }) => {
-            const saved = writeServer(
+          onSave={async ({ name, transport }) => {
+            const saved = await writeServer(
               name,
               transport,
               editor.mode === "edit" ? editor.row.config.enabled : true,
               editor.mode === "edit" ? editor.row.name : undefined,
             );
-            if (saved) setEditor(null);
+            if (saved) setEditor((current) => (current === editor ? null : current));
+            return { saved, partial: saveProgress.current.completed.size > 0 };
           }}
         />
       ) : null}

@@ -3,6 +3,7 @@ import { LockIcon, LockOpenIcon, PlusIcon, XIcon } from "lucide-react";
 import { useId, useState } from "react";
 
 import { Button } from "../ui/button";
+import { toastManager } from "../ui/toast";
 import {
   Dialog,
   DialogDescription,
@@ -46,7 +47,10 @@ export function McpServerDialog({
   readonly scopeLabel: string;
   readonly initial: { readonly name: string; readonly config: McpServerConfig } | null;
   readonly takenNames: ReadonlySet<string>;
-  readonly onSave: (server: { name: string; transport: McpServerTransport }) => void;
+  readonly onSave: (server: { name: string; transport: McpServerTransport }) => Promise<{
+    saved: boolean;
+    partial: boolean;
+  }>;
 }) {
   const id = useId();
   const [draft, setDraft] = useState<McpServerDraft>(() =>
@@ -55,7 +59,13 @@ export function McpServerDialog({
   const [paste, setPaste] = useState("");
   const [pasteError, setPasteError] = useState(false);
   const [attempted, setAttempted] = useState(false);
-  const result = mcpServerFromDraft(draft, takenNames, initial?.name ?? null);
+  const [pending, setPending] = useState(false);
+  const [retryOnly, setRetryOnly] = useState(false);
+  const result = mcpServerFromDraft(
+    draft,
+    pending || retryOnly ? new Set() : takenNames,
+    initial?.name ?? null,
+  );
   const error = attempted && !result.ok ? result : null;
 
   const update = (patch: Partial<McpServerDraft>) =>
@@ -77,14 +87,26 @@ export function McpServerDialog({
     }
   };
 
-  const save = () => {
+  const save = async () => {
+    if (pending) return;
     setAttempted(true);
     if (!result.ok) return;
-    onSave({ name: result.name, transport: result.transport });
+    setPending(true);
+    try {
+      const saved = await onSave({ name: result.name, transport: result.transport });
+      setRetryOnly(!saved.saved && saved.partial);
+    } catch (error) {
+      toastManager.add({
+        type: "warning",
+        title: "Tools not saved",
+        description: error instanceof Error ? error.message : "Could not update tools.",
+      });
+    }
+    setPending(false);
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => !pending && onOpenChange(next)}>
       <DialogPopup className="max-w-lg">
         <DialogHeader>
           <DialogTitle>{initial ? `Edit ${initial.name}` : "Add MCP server"}</DialogTitle>
@@ -92,12 +114,12 @@ export function McpServerDialog({
             Saved for {scopeLabel}. Agents get it in their next session.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel>
+        <DialogPanel inert={pending || retryOnly}>
           <form
             className="grid gap-4"
             onSubmit={(event) => {
               event.preventDefault();
-              save();
+              void save();
             }}
           >
             {initial === null ? (
@@ -209,11 +231,19 @@ export function McpServerDialog({
             ) : null}
           </form>
         </DialogPanel>
+        {retryOnly ? (
+          <p role="status" className="px-6 text-sm text-muted-foreground">
+            Some environments were updated. Retry to finish saving, or close and reopen the editor
+            to make further changes.
+          </p>
+        ) : null}
         <DialogFooter variant="bare">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button onClick={save}>{initial ? "Save" : "Add server"}</Button>
+          <Button disabled={pending} onClick={() => void save()}>
+            {pending ? "Saving…" : retryOnly ? "Retry save" : initial ? "Save" : "Add server"}
+          </Button>
         </DialogFooter>
       </DialogPopup>
     </Dialog>
