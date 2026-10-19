@@ -332,6 +332,7 @@ interface PendingRequest {
         readonly action: string;
         readonly resources: ReadonlyArray<string>;
         readonly save: ReadonlyArray<string>;
+        readonly toolId?: string | undefined;
       }
     | { readonly type: "form"; readonly id: string; readonly form: NativeForm };
 }
@@ -1827,7 +1828,14 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         (data.action === "shell" ? stringField(tool?.input, "command") : undefined);
       yield* showRequest(
         data.sessionID,
-        { type: "permission", id: data.id, action: data.action, resources: data.resources, save },
+        {
+          type: "permission",
+          id: data.id,
+          action: data.action,
+          resources: data.resources,
+          save,
+          toolId: data.source?.id,
+        },
         {
           type: "approval_request",
           requestKind: openCodePermissionRequestKind(data.action, toolName),
@@ -1850,6 +1858,24 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           ],
         },
       );
+    });
+
+    // A shell request listed after a reconnect can arrive before its tool call's input.
+    const showShellCommand = Effect.fnUntraced(function* (
+      toolId: string,
+      input: Record<string, unknown>,
+    ) {
+      const command = stringField(input, "command");
+      if (command === undefined) return;
+      for (const [requestId, entry] of pending) {
+        const { native, item } = entry;
+        if (native.type !== "permission" || native.action !== "shell") continue;
+        if (native.toolId !== toolId || item.type !== "approval_request") continue;
+        if (item.prompt === command) continue;
+        const updated = { ...item, prompt: command, title: null, updatedAt: yield* DateTime.now };
+        pending.set(requestId, { ...entry, item: updated });
+        yield* emit({ type: "turn_item.updated", driver, turnItem: updated });
+      }
     });
 
     const onFormCreated = Effect.fnUntraced(function* (form: NativeForm) {
@@ -1995,7 +2021,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             return yield* emitSubagent(call);
           }
           const tool = turn.tools.get(event.data.id);
-          if (tool !== undefined) tool.input = event.data.input;
+          if (tool !== undefined) {
+            tool.input = event.data.input;
+            yield* showShellCommand(event.data.id, tool.input);
+          }
           return yield* emitTool(state, turn, event.data.id, "running");
         }
         case "session.tool.progress": {
