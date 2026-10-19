@@ -252,8 +252,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     );
   }
 
+  const awaitStartupProbe = host.awaitStartupProbe ?? Effect.void;
   yield* Stream.runForEach(input.streamSettings, (nextSettings) =>
-    Effect.asVoid(applySnapshot(nextSettings)),
+    awaitStartupProbe.pipe(Effect.andThen(applySnapshot(nextSettings)), Effect.asVoid),
   ).pipe(Effect.forkScoped);
 
   yield* Effect.forever(
@@ -283,9 +284,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       ),
       Effect.ignoreCause({ log: true }),
     ),
-  ).pipe(Effect.forkScoped);
+  ).pipe((effect) => Effect.andThen(awaitStartupProbe, effect), Effect.forkScoped);
 
-  yield* applySnapshot(initialSettings, { forceRefresh: true }).pipe(
+  yield* awaitStartupProbe.pipe(
+    Effect.andThen(refreshSnapshot()),
     Effect.ignoreCause({ log: true }),
     Effect.forkScoped,
   );

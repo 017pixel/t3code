@@ -3,7 +3,10 @@ import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
+import {
+  guardHttpResponseWriteErrors,
+  holdRequestsUntilServing,
+} from "./httpResponseErrorGuard.ts";
 
 const servers: NodeHttp.Server[] = [];
 
@@ -100,4 +103,40 @@ describe("guardHttpResponseWriteErrors", () => {
     expect(responseErrorListeners).toBeGreaterThan(0);
     expect(writeErrors).toEqual([]);
   });
+});
+
+it("serves HTTP and websocket requests received before handlers attach", async () => {
+  const server = holdRequestsUntilServing(guardHttpResponseWriteErrors(NodeHttp.createServer()));
+  const port = await listen(server);
+  const parsed = Promise.withResolvers<void>();
+  let received = 0;
+  server.on("connection", (socket) =>
+    socket.once("data", () => {
+      if (++received === 2) parsed.resolve();
+    }),
+  );
+  const response = fetchStatus(port, "/early");
+  const client = NodeNet.connect(port, "127.0.0.1");
+  const upgrade = new Promise<string>((resolve, reject) => {
+    client.once("connect", () =>
+      client.write(
+        "GET /ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+      ),
+    );
+    client.once("data", (data) => resolve(data.toString().split("\r\n")[0]!));
+    client.once("error", reject);
+  });
+  try {
+    await parsed.promise;
+    server.on("request", (_, outgoing) => {
+      outgoing.writeHead(204);
+      outgoing.end();
+    });
+    server.on("upgrade", (_, socket) => socket.end("HTTP/1.1 101 Switching Protocols\r\n\r\n"));
+    await expect(response).resolves.toBe(204);
+    await expect(upgrade).resolves.toBe("HTTP/1.1 101 Switching Protocols");
+  } finally {
+    client.destroy();
+    server.closeAllConnections();
+  }
 });

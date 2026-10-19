@@ -140,6 +140,35 @@ const enrichedSnapshotSecond: ServerProvider = {
 };
 
 describe("makeManagedServerProvider", () => {
+  it.effect("defers startup probes while allowing an explicit refresh", () =>
+    Effect.gen(function* () {
+      const host = yield* ProviderHost.ProviderHost;
+      const startup = yield* Deferred.make<void>();
+      const checks = yield* Ref.make(0);
+      const provider = yield* makeManagedServerProvider<TestSettings>({
+        resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+        getSettings: Effect.succeed({ enabled: true }),
+        streamSettings: Stream.empty,
+        haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+        initialSnapshot: () => Effect.succeed(initialSnapshot),
+        checkProvider: Ref.update(checks, (count) => count + 1).pipe(Effect.as(refreshedSnapshot)),
+        refreshOnInterval: false,
+      }).pipe(
+        Effect.provideService(ProviderHost.ProviderHost, {
+          ...host,
+          awaitStartupProbe: Deferred.await(startup),
+        }),
+      );
+      yield* Effect.yieldNow;
+      assert.strictEqual(yield* Ref.get(checks), 0);
+      assert.deepStrictEqual(yield* provider.getSnapshot, initialSnapshot);
+
+      assert.deepStrictEqual(yield* provider.refresh, refreshedSnapshot);
+      assert.strictEqual(yield* Ref.get(checks), 1);
+      assert.isFalse(yield* Deferred.isDone(startup));
+    }).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
   it.effect(
     "runs the initial provider check in the background and streams the refreshed snapshot",
     () =>
