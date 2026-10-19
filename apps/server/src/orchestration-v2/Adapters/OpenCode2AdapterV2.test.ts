@@ -2343,6 +2343,60 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("shows a shell approval's whole command, not its split resources", () =>
+    Effect.gen(function* () {
+      const command = "curl -sI https://example.com | head -n 1";
+      const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call_1" };
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.tool.input.started", { ...tool, name: "shell" }),
+          event("session.tool.called", {
+            ...tool,
+            name: "shell",
+            input: { command },
+            executed: false,
+          }),
+          event("permission.asked", {
+            ...shellAsk.data,
+            resources: ["curl -sI https://example.com", "head -n 1"],
+          }),
+          out("permission.reply", {
+            sessionID: SESSION,
+            requestID: shellAsk.data.id,
+            decision: "once",
+          }),
+          reply("permission.reply", null),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { supervised: true },
+      );
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.tap((event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending"
+            ? runtime.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision: "accept",
+              })
+            : Effect.void,
+        ),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
+      const collected = yield* Fiber.join(events);
+      const approval = collected.findLast(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "approval_request",
+      );
+      const item = approval?.type === "turn_item.updated" ? approval.turnItem : undefined;
+      assert.equal(item?.type === "approval_request" ? item.prompt : undefined, command);
+      assert.equal(item?.title, null);
+      assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("counts an answer to a request OpenCode already dropped as delivered", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed(

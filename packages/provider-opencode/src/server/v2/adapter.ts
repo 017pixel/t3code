@@ -1817,11 +1817,14 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
 
     const onPermissionAsked = Effect.fnUntraced(function* (data: Permission.Request) {
       const turn = threads.get(data.sessionID)?.active;
-      const toolName =
-        data.source === undefined ? undefined : turn?.tools.get(data.source.id)?.name;
+      const tool = data.source === undefined ? undefined : turn?.tools.get(data.source.id);
+      const toolName = tool?.name;
       const save = data.save ?? [];
-      // Resources split a pipeline into its commands; the command keeps it whole.
-      const command = stringField(data.metadata, "command");
+      // Resources split a pipeline into its commands, and 2.x sends no command metadata,
+      // so a shell request shows the command from its tool call.
+      const command =
+        stringField(data.metadata, "command") ??
+        (data.action === "shell" ? stringField(tool?.input, "command") : undefined);
       yield* showRequest(
         data.sessionID,
         { type: "permission", id: data.id, action: data.action, resources: data.resources, save },
