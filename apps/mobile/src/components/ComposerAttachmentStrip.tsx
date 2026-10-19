@@ -119,7 +119,9 @@ async function materializeDataUrlPreview(id: string, dataUrl: string): Promise<s
   return file.uri;
 }
 
-function useComposerImagePreviewUri(attachment: DraftComposerImageAttachment): string | null {
+export function useComposerImagePreviewUri(
+  attachment: DraftComposerImageAttachment,
+): string | null {
   const { id, fileUri, previewUri } = attachment;
   const [rebased, setRebased] = useState<{ fileUri: string; uri: string } | null>(null);
   const [materialized, setMaterialized] = useState<{ id: string; uri: string | null } | null>(null);

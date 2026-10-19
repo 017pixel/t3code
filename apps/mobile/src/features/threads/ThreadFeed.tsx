@@ -103,7 +103,12 @@ import { useResolveClassNames } from "uniwind";
 import { useFilePreviewGallery, FilePreviewGallery } from "../../components/FilePreviewGallery";
 import { assetImageSource } from "../../lib/assetImageSource";
 import { composerImageGallery } from "../../lib/composerImageGallery";
-import { isFileBackedComposerAttachment } from "../../lib/composerImages";
+import {
+  isFileBackedComposerAttachment,
+  type DraftComposerImageAttachment,
+  type DraftComposerAttachment,
+} from "../../lib/composerImages";
+import { useComposerImagePreviewUri } from "../../components/ComposerAttachmentStrip";
 import { messageImageGallery } from "./messageImageGallery";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
 import { isPdfFile } from "../../lib/filePreview";
@@ -698,6 +703,36 @@ function MessageAttachmentFile(props: {
   );
 }
 
+function PendingMessageImage(props: {
+  readonly attachment: DraftComposerImageAttachment;
+  readonly attachments: ReadonlyArray<DraftComposerAttachment>;
+  readonly onPressPreview: (source: FilePreviewSource) => void;
+}) {
+  const { attachment } = props;
+  const previewUri = useComposerImagePreviewUri(attachment);
+  return (
+    <Pressable
+      accessibilityRole="imagebutton"
+      accessibilityLabel={`Open ${attachment.name}`}
+      onPress={() =>
+        props.onPressPreview({
+          kind: "image",
+          name: attachment.name,
+          ...(isFileBackedComposerAttachment(attachment)
+            ? { attachment }
+            : { uri: attachment.dataUrl ?? attachment.previewUri }),
+          gallery: composerImageGallery(props.attachments),
+        })
+      }
+    >
+      <Image
+        source={previewUri === null ? undefined : { uri: previewUri }}
+        style={{ width: 180, height: 140, borderRadius: 14 }}
+      />
+    </Pressable>
+  );
+}
+
 function MessageAttachmentUnknown(props: { readonly name: string }) {
   return (
     <View className="flex-row items-center gap-2 py-1">
@@ -1225,26 +1260,12 @@ function renderFeedEntry(
                   onPressPreview={props.onPressPreview}
                 />
               ) : attachment.type === "image" ? (
-                <Pressable
+                <PendingMessageImage
                   key={attachment.id}
-                  accessibilityRole="imagebutton"
-                  accessibilityLabel={`Open ${attachment.name}`}
-                  onPress={() =>
-                    props.onPressPreview({
-                      kind: "image",
-                      name: attachment.name,
-                      ...(isFileBackedComposerAttachment(attachment)
-                        ? { attachment }
-                        : { uri: attachment.dataUrl ?? attachment.previewUri }),
-                      gallery: composerImageGallery(entry.pendingMessage?.attachments ?? []),
-                    })
-                  }
-                >
-                  <Image
-                    source={{ uri: attachment.previewUri }}
-                    style={{ width: 180, height: 140, borderRadius: 14 }}
-                  />
-                </Pressable>
+                  attachment={attachment}
+                  attachments={entry.pendingMessage?.attachments ?? []}
+                  onPressPreview={props.onPressPreview}
+                />
               ) : (
                 <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
               ),
