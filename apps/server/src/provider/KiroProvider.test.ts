@@ -218,7 +218,14 @@ describe("KiroProvider", () => {
 
   // `--list-models` names no effort levels, so the picker's come from Kiro's ids.
   const KIRO_EFFORT_MODEL_LIST = JSON.stringify({
-    models: ["auto", "claude-opus-5.5", "claude-opus-4.6", "claude-sonnet-4.5"].map((id) => ({
+    models: [
+      "auto",
+      "claude-fable-5.1",
+      "claude-opus-5.5",
+      "claude-opus-4.6",
+      "kimi-k3",
+      "claude-sonnet-4.5",
+    ].map((id) => ({
       model_name: id,
       model_id: id,
     })),
@@ -249,6 +256,13 @@ describe("KiroProvider", () => {
         // Kiro default and models without effort get no Reasoning select.
         { slug: "default", descriptors: 0 },
         {
+          slug: "claude-fable-5.1",
+          label: "Reasoning",
+          levels: ["low", "medium", "high", "xhigh", "max"],
+          defaults: ["high"],
+          currentValue: "high",
+        },
+        {
           slug: "claude-opus-5.5",
           label: "Reasoning",
           levels: ["low", "medium", "high", "xhigh", "max"],
@@ -262,6 +276,14 @@ describe("KiroProvider", () => {
           levels: ["low", "medium", "high", "max"],
           defaults: ["high"],
           currentValue: "high",
+        },
+        // Kimi K3 skips medium and runs at max by default.
+        {
+          slug: "kimi-k3",
+          label: "Reasoning",
+          levels: ["low", "high", "max"],
+          defaults: ["max"],
+          currentValue: "max",
         },
         { slug: "claude-sonnet-4.5", descriptors: 0 },
       ]);
