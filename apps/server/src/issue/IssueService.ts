@@ -31,6 +31,7 @@ import {
   type IssueUpdateInput,
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
+import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import {
   IssueTrackerError,
@@ -43,6 +44,11 @@ import * as IssueTrackerRegistry from "./IssueTrackerRegistry.ts";
 
 const DEFAULT_LIST_LIMIT = 50;
 const SCOPE_CONCURRENCY = 4;
+
+const interactive =
+  <I, A>(call: (input: I) => Effect.Effect<A, IssueError>) =>
+  (input: I) =>
+    call(input).pipe(Effect.provideService(SourceControlRateLimit.Interactive, true));
 
 /** One project's resolved tracker: which driver, where it is served from, and its container. */
 interface ProjectTrackerBinding {
@@ -536,12 +542,12 @@ const make = Effect.gen(function* () {
     detail,
     comments,
     templates,
-    candidates,
-    create,
-    comment,
-    update,
-    setState,
-    react,
+    candidates: interactive(candidates),
+    create: interactive(create),
+    comment: interactive(comment),
+    update: interactive(update),
+    setState: interactive(setState),
+    react: interactive(react),
   });
 });
 

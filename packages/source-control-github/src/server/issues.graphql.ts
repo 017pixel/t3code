@@ -661,50 +661,6 @@ export declare namespace IssueComments {
 }
 
 /** An Issue is a place to discuss ideas, enhancements, tasks, and bugs for a project. */
-export const IssueViewerPermissionsRepositoryIssueIssue = Schema.Struct({
-  /** Check if the current viewer can update this object. */
-  viewerCanUpdate: Schema.Boolean
-})
-export interface IssueViewerPermissionsRepositoryIssueIssue extends Schema.Struct.Type<typeof IssueViewerPermissionsRepositoryIssueIssue.fields> {}
-
-/** A repository contains the content for a project. */
-export const IssueViewerPermissionsRepositoryRepository = Schema.Struct({
-  /** The users permission level on the repository. Will return null if authenticated as an GitHub App. */
-  viewerPermission: Schema.NullOr(GraphQL.enumLiterals(Shared.RepositoryPermission.literals)),
-  /** Returns a single issue from the current repository by number. */
-  issue: Schema.NullOr(IssueViewerPermissionsRepositoryIssueIssue)
-})
-export interface IssueViewerPermissionsRepositoryRepository extends Schema.Struct.Type<typeof IssueViewerPermissionsRepositoryRepository.fields> {}
-
-/** `query IssueViewerPermissions` */
-export const IssueViewerPermissions = GraphQL.query("IssueViewerPermissions", {
-  document: {
-    variables: [
-      { name: "owner", body: "String!" },
-      { name: "name", body: "String!" },
-      { name: "number", body: "Int!" }
-    ],
-    selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){viewerPermission issue(number:$", "number", "){viewerCanUpdate}}"] }
-    ],
-    fragments: []
-  },
-  variables: {
-    owner: Schema.String,
-    name: Schema.String,
-    number: Shared.Int
-  },
-  result: Schema.Struct({
-    /** Lookup a given repository by the owner and repository name. */
-    repository: Schema.NullOr(IssueViewerPermissionsRepositoryRepository)
-  })
-})
-export declare namespace IssueViewerPermissions {
-  export type Variables = typeof IssueViewerPermissions.variables.Type
-  export type Result = typeof IssueViewerPermissions.result.Type
-}
-
-/** An Issue is a place to discuss ideas, enhancements, tasks, and bugs for a project. */
 export const IssueNodeIdRepositoryIssueIssue = Schema.Struct({
   /** The Node ID of the Issue object */
   id: Shared.ID
@@ -867,6 +823,48 @@ export declare namespace IssueCandidates {
   export type Result = typeof IssueCandidates.result.Type
 }
 
+/** Represents a Git blob. */
+export const Blob = Schema.Struct({
+  __typename: Schema.Literal("Blob"),
+  /** UTF8 text data or null if the Blob is binary */
+  text: Schema.NullOr(Schema.String),
+  /** Indicates whether the contents is truncated */
+  isTruncated: Schema.Boolean
+})
+export interface Blob extends Schema.Struct.Type<typeof Blob.fields> {}
+
+/** Represents a Git object. */
+export const ObjectGitObjectOther = Schema.Struct({
+  __typename: GraphQL.otherTypename<Shared.Typename.GitObject>()(["Blob"])
+})
+export interface ObjectGitObjectOther extends Schema.Struct.Type<typeof ObjectGitObjectOther.fields> {}
+
+/** Represents a Git tree entry. */
+export const TreeEntry = Schema.Struct({
+  /** Entry file name. */
+  name: Schema.String,
+  /** Entry file object. */
+  object: Schema.NullOr(Schema.Union([
+    Blob,
+    ObjectGitObjectOther
+  ]))
+})
+export interface TreeEntry extends Schema.Struct.Type<typeof TreeEntry.fields> {}
+
+/** Represents a Git tree. */
+export const Tree = Schema.Struct({
+  __typename: Schema.Literal("Tree"),
+  /** A list of tree entries. */
+  entries: Schema.NullOr(Schema.Array(TreeEntry))
+})
+export interface Tree extends Schema.Struct.Type<typeof Tree.fields> {}
+
+/** Represents a Git object. */
+export const TemplateDirectoryGitObjectOther = Schema.Struct({
+  __typename: GraphQL.otherTypename<Shared.Typename.GitObject>()(["Tree"])
+})
+export interface TemplateDirectoryGitObjectOther extends Schema.Struct.Type<typeof TemplateDirectoryGitObjectOther.fields> {}
+
 /** A list of users. */
 export const IssueTemplatesAssigneesUserConnection = Schema.Struct({
   /** A list of nodes. */
@@ -902,6 +900,11 @@ export interface IssueTemplate extends Schema.Struct.Type<typeof IssueTemplate.f
 
 /** A repository contains the content for a project. */
 export const IssueTemplatesRepositoryRepository = Schema.Struct({
+  /** A Git object in the repository */
+  templateDirectory: Schema.NullOr(Schema.Union([
+    Tree,
+    TemplateDirectoryGitObjectOther
+  ])),
   /** Returns a list of issue templates associated to the repository */
   issueTemplates: Schema.NullOr(Schema.Array(IssueTemplate))
 })
@@ -915,7 +918,7 @@ export const IssueTemplates = GraphQL.query("IssueTemplates", {
       { name: "name", body: "String!" }
     ],
     selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){issueTemplates{filename name about title body assignees(first:25){nodes{login}}labels(first:50){nodes{name}}}}"] }
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){templateDirectory:object(expression:\"HEAD:.github/ISSUE_TEMPLATE\"){__typename...on Tree{entries{name object{__typename...on Blob{text isTruncated}}}}}issueTemplates{filename name about title body assignees(first:25){nodes{login}}labels(first:50){nodes{name}}}}"] }
     ],
     fragments: []
   },
@@ -1001,4 +1004,4 @@ export declare namespace IssueCollections {
 }
 
 /** Every operation in issues.graphql. */
-export const IssuesGraphQLGroup = GraphQLGroup.make(IssueSearch, IssueDetail, IssueComments, IssueViewerPermissions, IssueNodeId, IssueCommentScope, IssueCandidates, IssueTemplates, IssueViewer, IssueCollections)
+export const IssuesGraphQLGroup = GraphQLGroup.make(IssueSearch, IssueDetail, IssueComments, IssueNodeId, IssueCommentScope, IssueCandidates, IssueTemplates, IssueViewer, IssueCollections)

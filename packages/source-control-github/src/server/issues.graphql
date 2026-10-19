@@ -264,15 +264,6 @@ query IssueComments($owner: String!, $name: String!, $number: Int!, $cursor: Str
   }
 }
 
-query IssueViewerPermissions($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    viewerPermission
-    issue(number: $number) {
-      viewerCanUpdate
-    }
-  }
-}
-
 query IssueNodeId($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
@@ -323,6 +314,19 @@ query IssueCandidates($owner: String!, $name: String!) {
 
 query IssueTemplates($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
+    templateDirectory: object(expression: "HEAD:.github/ISSUE_TEMPLATE") {
+      ... on Tree {
+        entries {
+          name
+          object {
+            ... on Blob {
+              text
+              isTruncated
+            }
+          }
+        }
+      }
+    }
     issueTemplates {
       filename
       name

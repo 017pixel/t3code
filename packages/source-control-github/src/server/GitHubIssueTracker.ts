@@ -12,6 +12,7 @@ import {
 } from "@t3tools/issue-tracker-core/server/IssueTracker";
 
 import * as GitHubRest from "./GitHubRest.ts";
+import { readIssueTemplates } from "./gitHubIssueTemplates.ts";
 import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
 import * as GitHubGraphQlClient from "./gitHubGraphQlClient.ts";
 import { IssuesGraphQLGroup } from "./issues.graphql.ts";
@@ -23,8 +24,6 @@ import {
   toIssueComments,
   toIssueDetail,
   toIssueSearch,
-  toIssueTemplates,
-  toViewerPermissions,
 } from "./gitHubIssueJson.ts";
 
 const KIND = IssueTrackerKind.make("github");
@@ -47,7 +46,6 @@ const CAPABILITIES: IssueCapabilities = {
   closeReasons: ["completed", "not-planned"],
 };
 
-const TEMPLATE_CONFIG_PATH = ".github/ISSUE_TEMPLATE/config.yml";
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+$/;
 
 function searchTerms(query: string): ReadonlyArray<string> {
@@ -275,20 +273,6 @@ export const make = Effect.gen(function* () {
         ),
       ),
 
-    getViewerPermissions: (input) =>
-      issue(input, "getViewerPermissions").pipe(
-        Effect.flatMap(({ owner, name, number }) =>
-          client
-            .IssueViewerPermissions({ owner, name, number })
-            .pipe(graphql(input.host, "getViewerPermissions")),
-        ),
-        Effect.flatMap(({ repository }) =>
-          repository?.issue == null
-            ? Effect.fail(notFound("getViewerPermissions"))
-            : Effect.succeed(toViewerPermissions(repository)),
-        ),
-      ),
-
     create: (input) =>
       repository(input.scope, "create").pipe(
         Effect.flatMap(({ owner, name }) =>
@@ -398,35 +382,13 @@ export const make = Effect.gen(function* () {
     listTemplates: (input) =>
       repository(input.scope, "listTemplates").pipe(
         Effect.flatMap(({ owner, name }) =>
-          Effect.all(
-            [
-              client.IssueTemplates({ owner, name }).pipe(
-                graphql(input.host, "listTemplates"),
-                Effect.flatMap(({ repository }) =>
-                  repository === null
-                    ? Effect.fail(notFound("listTemplates"))
-                    : Effect.succeed(toIssueTemplates(repository)),
-                ),
-              ),
-              api
-                .rest({
-                  host: input.host,
-                  operation: "listTemplateConfig",
-                  accept: "application/vnd.github.raw",
-                  path: `repos/${owner}/${name}/contents/${TEMPLATE_CONFIG_PATH}`,
-                })
-                .pipe(
-                  Effect.map(
-                    (response) => !/^\s*blank_issues_enabled\s*:\s*false\s*$/m.test(response.body),
-                  ),
-                  Effect.catchTags({ GitHubApiNotFoundError: () => Effect.succeed(true) }),
-                  Effect.mapError(fail("listTemplateConfig")),
-                ),
-            ],
-            { concurrency: 2 },
-          ),
+          client.IssueTemplates({ owner, name }).pipe(graphql(input.host, "listTemplates")),
         ),
-        Effect.map(([templates, blankIssuesEnabled]) => ({ templates, blankIssuesEnabled })),
+        Effect.flatMap(({ repository }) =>
+          repository === null
+            ? Effect.fail(notFound("listTemplates"))
+            : readIssueTemplates(repository),
+        ),
       ),
 
     listCandidates: (input) =>

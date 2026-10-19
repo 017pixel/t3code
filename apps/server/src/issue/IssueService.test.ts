@@ -2,8 +2,16 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
+import * as GitHubQuota from "@t3tools/source-control-github/server/GitHubQuota";
+import * as GitHubRest from "@t3tools/source-control-github/server/GitHubRest";
+import * as GitHubIssueTracker from "@t3tools/source-control-github/server/GitHubIssueTracker";
 import {
   IssueTrackerKind,
+  SourceControlProviderKind,
   type OrchestrationProjectShell,
   type ProjectId,
 } from "@t3tools/contracts";
@@ -100,7 +108,6 @@ function fakeTracker(overrides: Partial<IssueTrackerApi> = {}): IssueTrackerApi 
     listIssues: () => Effect.succeed({ items: [], nextCursor: null }),
     getIssue: (input) => Effect.succeed(issue(input.key)),
     getComments: () => Effect.succeed({ comments: [], nextCursor: null }),
-    getViewerPermissions: () => Effect.die("unused"),
     comment: () => Effect.void,
     update: () => Effect.void,
     setState: () => Effect.void,
@@ -177,6 +184,60 @@ describe("IssueService", () => {
       });
     }),
   );
+
+  it.effect("posts a comment while background requests to GitHub are paused", () => {
+    const requests: string[] = [];
+    return Effect.gen(function* () {
+      const limits = yield* SourceControlRateLimit.SourceControlRateLimit;
+      const key = { provider: SourceControlProviderKind.make("github"), host: "github.com" };
+      yield* limits
+        .recordRateLimit({ ...key, lease: 0 })
+        .pipe(Effect.provideService(SourceControlRateLimit.CredentialScope, "test"));
+      const tracker = yield* GitHubIssueTracker.make;
+      expect(
+        yield* Effect.flip(tracker.getViewer({ cwd: "/w/web", host: key.host })),
+      ).toMatchObject({ reason: "rate-limited" });
+      const service = yield* makeService({
+        projects: [project({ id: "web", repository: "acme/web" })],
+        trackers: [tracker],
+      });
+      yield* service.comment({
+        projectId: "web" as ProjectId,
+        tracker: GITHUB,
+        scope: "acme/web",
+        key: "42",
+        body: "Repro attached.",
+      });
+      expect(requests).toEqual(["POST https://api.github.com/repos/acme/web/issues/42/comments"]);
+    }).pipe(
+      Effect.provide(
+        GitHubRest.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              SourceControlRateLimit.layer,
+              GitHubQuota.layer,
+              Layer.mock(GitHubCredentials.GitHubCredentials)({
+                get: (host) =>
+                  Effect.succeed({
+                    host,
+                    token: Redacted.make("test-token"),
+                    source: "gh" as const,
+                    fingerprint: "test",
+                  }),
+              }),
+              Layer.succeed(
+                HttpClient.HttpClient,
+                HttpClient.make((request) => {
+                  requests.push(`${request.method} ${request.url}`);
+                  return Effect.succeed(HttpClientResponse.fromWeb(request, new Response("{}")));
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
 
   it.effect("refuses what the tracker did not declare before calling it", () =>
     Effect.gen(function* () {

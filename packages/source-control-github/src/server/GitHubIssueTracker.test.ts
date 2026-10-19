@@ -133,7 +133,7 @@ const decodeVariables = Schema.decodeUnknownSync(
   ),
 );
 
-function tracker(onRequest: (variables: unknown) => void) {
+function tracker(onRequest: (variables: unknown) => void, templateRepository?: unknown) {
   return GitHubIssueTracker.make.pipe(
     Effect.provide(
       GitHubRest.layer.pipe(
@@ -158,24 +158,26 @@ function tracker(onRequest: (variables: unknown) => void) {
                 const { variables } = decodeVariables(new TextDecoder().decode(request.body.body));
                 onRequest(variables);
                 const body =
-                  "labelsCursor" in variables
-                    ? JSON.stringify({
-                        data: {
-                          repository: {
-                            issue: {
-                              labels: {
-                                pageInfo: { hasNextPage: false, endCursor: null },
-                                nodes: [{ name: "needs repro", color: "ffffff" }],
-                              },
-                              assignees: {
-                                pageInfo: { hasNextPage: false, endCursor: null },
-                                nodes: [],
+                  templateRepository !== undefined
+                    ? JSON.stringify({ data: { repository: templateRepository } })
+                    : "labelsCursor" in variables
+                      ? JSON.stringify({
+                          data: {
+                            repository: {
+                              issue: {
+                                labels: {
+                                  pageInfo: { hasNextPage: false, endCursor: null },
+                                  nodes: [{ name: "needs repro", color: "ffffff" }],
+                                },
+                                assignees: {
+                                  pageInfo: { hasNextPage: false, endCursor: null },
+                                  nodes: [],
+                                },
                               },
                             },
                           },
-                        },
-                      })
-                    : DETAIL_RESPONSE;
+                        })
+                      : DETAIL_RESPONSE;
                 return Effect.succeed(
                   HttpClientResponse.fromWeb(
                     request,
@@ -194,6 +196,113 @@ function tracker(onRequest: (variables: unknown) => void) {
 }
 
 describe("GitHubIssueTracker", () => {
+  it.effect("offers YAML issue forms when blank issues are disabled", () =>
+    Effect.gen(function* () {
+      const form = {
+        __typename: "Blob",
+        isTruncated: false,
+        text: `name: Bug report
+description: Report broken behavior.
+title: "[Bug]: "
+labels: [bug, needs-triage]
+assignees: "octocat, theo"
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues first.
+  - type: checkboxes
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues.
+          required: true
+  - type: dropdown
+    attributes:
+      label: Area
+      description: Which part is affected?
+      options: [Web, Server]
+      default: 1
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      placeholder: Start the app.
+  - type: input
+    attributes:
+      label: Version
+      value: main
+  - type: upload
+    attributes:
+      label: Supporting files
+      description: Redact secrets before uploading.
+`,
+      };
+      const config = {
+        __typename: "Blob",
+        isTruncated: false,
+        text: '"blank_issues_enabled": false # use a template',
+      };
+      const repository = {
+        issueTemplates: [],
+        templateDirectory: {
+          __typename: "Tree",
+          entries: [
+            { name: "config.yml", object: config },
+            { name: "bug_report.yml", object: form },
+          ],
+        },
+      };
+      const api = yield* tracker(() => {}, repository);
+      const input = { cwd: "/w", host: "github.com", scope: "acme/web" };
+      const result = yield* api.listTemplates!(input);
+      expect(result.blankIssuesEnabled).toBe(false);
+      expect(result.templates).toHaveLength(1);
+      expect(result.templates[0]).toMatchObject({
+        key: "bug_report.yml",
+        name: "Bug report",
+        about: "Report broken behavior.",
+        title: "[Bug]: ",
+        labels: ["bug", "needs-triage"],
+        assignees: ["octocat", "theo"],
+      });
+      expect(result.templates[0]?.body).toBe(`Search existing issues first.
+
+### Before submitting
+
+- [ ] I searched existing issues. (required)
+
+### Area
+
+Which part is affected?
+
+Required.
+
+Choose one:
+
+- Web
+- Server (default)
+
+### Steps to reproduce
+
+Example:
+> Start the app.
+
+### Version
+
+main
+
+### Supporting files
+
+Redact secrets before uploading.`);
+      config.isTruncated = true;
+      expect(yield* Effect.flip(api.listTemplates!(input))).toMatchObject({
+        reason: "failed",
+        detail: "GitHub returned incomplete issue template contents.",
+      });
+    }),
+  );
+
   it.effect("maps a detail read to the neutral issue shape", () =>
     Effect.gen(function* () {
       const seen: unknown[] = [];
