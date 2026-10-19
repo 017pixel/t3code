@@ -4,7 +4,7 @@ import {
   type RuntimeRequestId,
 } from "@t3tools/contracts";
 import { memo } from "react";
-import { CheckIcon, EllipsisIcon, TriangleAlertIcon, XIcon } from "lucide-react";
+import { EllipsisIcon, TriangleAlertIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -46,40 +46,39 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
 
   return (
     <>
-      {primaryOptions.map((option) => (
-        <Tooltip key={option.decision}>
-          <TooltipTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant={option.decision === "accept" ? "soft-warning" : "ghost-muted"}
-                disabled={disabled || isResponding || !canRespond}
-                aria-label={option.label}
-                aria-description={option.warning}
-                onClick={() => {
-                  if (!disabled && !isResponding) {
-                    void onRespondToApproval(requestId, option.decision);
-                  }
-                }}
-              />
-            }
+      {primaryOptions.map((option) => {
+        const button = (
+          <Button
+            key={option.decision}
+            size="xs"
+            variant={option.decision === "accept" ? "warning-outline" : "ghost-warning"}
+            disabled={disabled || isResponding || !canRespond}
+            aria-description={option.warning}
+            onClick={() => {
+              if (!disabled && !isResponding) {
+                void onRespondToApproval(requestId, option.decision);
+              }
+            }}
           >
-            {option.decision === "accept" ? <CheckIcon /> : <XIcon />}
-          </TooltipTrigger>
-          <TooltipPopup side="top">
-            {option.label}
-            {option.warning ? (
-              <span className="block text-muted-foreground">{option.warning}</span>
-            ) : null}
-          </TooltipPopup>
-        </Tooltip>
-      ))}
+            {option.warning ? <TriangleAlertIcon className="size-3 shrink-0" /> : null}
+            <span className="max-w-40 truncate">{option.label}</span>
+          </Button>
+        );
+        return option.warning ? (
+          <Tooltip key={option.decision}>
+            <TooltipTrigger render={button} />
+            <TooltipPopup side="top">{option.warning}</TooltipPopup>
+          </Tooltip>
+        ) : (
+          button
+        );
+      })}
       {moreOptions.length > 0 ? (
         <Menu>
           <MenuTrigger
             disabled={disabled || isResponding}
             render={
-              <Button size="icon-xs" variant="ghost-muted" aria-label="More approval options" />
+              <Button size="icon-xs" variant="ghost-warning" aria-label="More approval options" />
             }
           >
             <EllipsisIcon />

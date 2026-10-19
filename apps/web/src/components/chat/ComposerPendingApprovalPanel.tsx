@@ -1,26 +1,8 @@
 import { approvalRequestLabel } from "@t3tools/client-runtime/state/thread-requests";
 import { approvalCommandDisplayText } from "@t3tools/client-runtime/work-log/command-label";
-import { EyeIcon, ShieldIcon, SquarePenIcon, TerminalIcon } from "lucide-react";
 import { memo } from "react";
 import { type PendingApproval } from "../../session-logic";
 import { cn } from "~/lib/utils";
-
-export function ComposerPendingApprovalKindIcon({
-  requestKind,
-}: {
-  requestKind: PendingApproval["requestKind"];
-}) {
-  switch (requestKind) {
-    case "command":
-      return <TerminalIcon />;
-    case "file-change":
-      return <SquarePenIcon />;
-    case "file-read":
-      return <EyeIcon />;
-    default:
-      return <ShieldIcon />;
-  }
-}
 
 interface ComposerPendingApprovalPanelProps {
   approval: PendingApproval;
@@ -52,20 +34,19 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       className={cn("flex min-w-0 flex-1 flex-col items-start gap-1", className)}
       role="group"
     >
-      <span className="flex w-full min-w-0 items-center gap-2">
-        <span className="min-w-0 truncate font-medium text-foreground">
-          {approval.appName ?? approval.title ?? fallbackLabel}
-        </span>
+      <span className="flex w-full min-w-0 items-center gap-2 text-2xs text-muted-foreground">
+        <span className="shrink-0 font-medium text-warning">{fallbackLabel}</span>
+        {approval.appName || approval.title ? (
+          <span className="min-w-0 truncate">{approval.appName ?? approval.title}</span>
+        ) : null}
         {pendingCount > 1 ? (
-          <span className="ml-auto shrink-0 text-2xs text-muted-foreground tabular-nums">
-            1/{pendingCount}
-          </span>
+          <span className="ml-auto shrink-0 tabular-nums">1/{pendingCount}</span>
         ) : null}
       </span>
       <Detail
         aria-label={detailAriaLabel}
         className={cn(
-          "block w-full min-w-0 overflow-auto text-xs text-muted-foreground [scrollbar-width:thin] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-scrollbar]:w-1.5",
+          "block w-full min-w-0 overflow-auto text-xs text-foreground [scrollbar-width:thin] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-scrollbar]:w-1.5",
           approval.requestKind === "mcp-elicitation"
             ? "max-h-20 whitespace-pre-wrap font-sans wrap-break-word"
             : "max-h-40 whitespace-pre-wrap font-mono wrap-anywhere",

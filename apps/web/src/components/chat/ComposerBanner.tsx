@@ -193,8 +193,7 @@ function Row({
       "[&:is(button)]:cursor-pointer [&:is(button)]:rounded-md [&:is(button)]:focus-visible:outline-2 [&:is(button)]:focus-visible:-outline-offset-2 [&:is(button)]:focus-visible:outline-ring",
       layout === "wrap-actions" &&
         "flex flex-wrap *:data-[slot=composer-banner-content]:max-w-[calc(100%-var(--composer-banner-icon-column)-var(--spacing))] *:data-[slot=composer-banner-content]:grow",
-      layout === "approval" &&
-        "items-start gap-x-2.5 gap-y-3 [--composer-banner-icon-column:--spacing(7)]",
+      layout === "approval" && "items-start gap-x-2 gap-y-3",
       className,
     ),
     "data-composer-banner-row": "true",
@@ -214,7 +213,7 @@ function Icon({ className, ...props }: ComponentProps<"span">) {
       data-slot="composer-banner-icon"
       className={cn(
         "col-start-1 row-start-1 flex w-(--composer-banner-icon-column) min-w-0 flex-none items-center justify-center text-muted-foreground [&>svg]:size-3",
-        "group-data-[composer-banner-layout=approval]/banner-row:h-7 group-data-[composer-banner-layout=approval]/banner-row:rounded-lg group-data-[composer-banner-layout=approval]/banner-row:bg-warning/14 group-data-[composer-banner-layout=approval]/banner-row:text-warning-foreground group-data-[composer-banner-layout=approval]/banner-row:[&>svg]:size-4",
+        "group-data-[composer-banner-layout=approval]/banner-row:pt-0.5 group-data-[composer-banner-layout=approval]/banner-row:text-warning group-data-[composer-banner-layout=approval]/banner-row:[&>svg]:size-4",
         className,
       )}
       {...props}
