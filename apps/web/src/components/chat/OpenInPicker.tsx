@@ -296,8 +296,8 @@ export const OpenInPicker = memo(function OpenInPicker({
       void openInEditor(preferredEditor);
     };
     // The file preview's shortcut takes precedence over the chat workspace shortcut.
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
   }, [
     canOpenEditor,
     enableShortcut,

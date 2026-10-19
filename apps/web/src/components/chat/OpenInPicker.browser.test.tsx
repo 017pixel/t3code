@@ -155,7 +155,7 @@ async function pressOpenFavorite() {
     bubbles: true,
     cancelable: true,
   });
-  await act(async () => window.dispatchEvent(event));
+  await act(async () => document.body.dispatchEvent(event));
   return event;
 }
 
