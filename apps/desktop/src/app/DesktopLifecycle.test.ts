@@ -19,7 +19,6 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 function layerElectronApp(
   appListeners: Map<string, (...args: readonly unknown[]) => void>,
   quit: Effect.Effect<void> = Effect.void,
-  relaunch: Effect.Effect<void> = Effect.void,
 ) {
   const registerListener = (eventName: string, listener: (...args: readonly unknown[]) => void) =>
     Effect.acquireRelease(
@@ -40,7 +39,7 @@ function layerElectronApp(
     requestSingleInstanceLock: Effect.succeed(true),
     quit,
     exit: () => Effect.void,
-    relaunch: () => relaunch,
+    relaunch: () => Effect.void,
     setPath: () => Effect.void,
     setName: () => Effect.void,
     setAboutPanelOptions: () => Effect.void,
@@ -223,48 +222,56 @@ describe("DesktopLifecycle", () => {
     }),
   );
 
-  it.effect("disarms install-on-quit before a settings relaunch", () =>
+  it.effect("disarms a queued installer before a settings relaunch exits", () =>
     Effect.gen(function* () {
-      const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
-      const relaunched = yield* Deferred.make<void>();
+      const exited = yield* Deferred.make<void>();
       const events: string[] = [];
-      const layerElectronUpdater = Layer.succeed(ElectronUpdater.ElectronUpdater, {
-        setAutoInstallOnAppQuit: (value: boolean) =>
-          Effect.sync(() => {
-            events.push(`autoInstallOnAppQuit=${value}`);
-          }),
-      } as unknown as ElectronUpdater.ElectronUpdater["Service"]);
-      const layerEnvironment = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
-        platform: "win32",
-        isDevelopment: false,
-      } as DesktopEnvironment.DesktopEnvironment["Service"]);
-      const layerShutdown = Layer.succeed(DesktopShutdown.DesktopShutdown, {
-        request: Effect.void,
-        awaitRequest: Effect.void,
-        markComplete: Effect.void,
-        awaitComplete: Effect.void,
-        isComplete: Effect.succeed(true),
-      });
-      const relaunch = Effect.sync(() => {
-        events.push("relaunch");
-      }).pipe(Effect.andThen(Deferred.succeed(relaunched, undefined)), Effect.asVoid);
+      let armed = true;
       const layer = DesktopLifecycle.layer.pipe(
-        Layer.provideMerge(layerElectronApp(appListeners, Effect.void, relaunch)),
+        Layer.provideMerge(
+          Layer.mock(ElectronApp.ElectronApp, {
+            relaunch: () =>
+              Effect.sync(() => {
+                events.push("relaunch");
+              }),
+            exit: () =>
+              Effect.sync(() => {
+                events.push(armed ? "install" : "exit");
+              }).pipe(Effect.andThen(Deferred.succeed(exited, undefined)), Effect.asVoid),
+          }),
+        ),
         Layer.provideMerge(layerElectronTheme),
+        Layer.provideMerge(
+          Layer.mock(ElectronUpdater.ElectronUpdater, {
+            setAutoInstallOnAppQuit: (value) =>
+              Effect.sync(() => {
+                armed = value;
+              }),
+          }),
+        ),
         Layer.provideMerge(layerElectronWindow()),
         Layer.provideMerge(layerDesktopWindow()),
-        Layer.provideMerge(layerEnvironment),
-        Layer.provideMerge(layerShutdown),
-        Layer.provideMerge(layerElectronUpdater),
+        Layer.provideMerge(
+          Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+            platform: "win32",
+            isDevelopment: false,
+          } as DesktopEnvironment.DesktopEnvironment["Service"]),
+        ),
+        Layer.provideMerge(DesktopShutdown.layer),
         Layer.provideMerge(DesktopState.layer),
       );
 
       yield* Effect.gen(function* () {
         const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+        const shutdown = yield* DesktopShutdown.DesktopShutdown;
         yield* lifecycle.relaunch("serverExposureMode=network-accessible");
-        yield* Deferred.await(relaunched);
+        yield* shutdown.awaitRequest;
+        const beforeShutdown = [...events];
+        yield* shutdown.markComplete;
+        yield* Deferred.await(exited);
 
-        assert.deepEqual(events, ["autoInstallOnAppQuit=false", "relaunch"]);
+        assert.deepEqual(beforeShutdown, []);
+        assert.deepEqual(events, ["relaunch", "exit"]);
       }).pipe(Effect.provide(layer));
     }),
   );

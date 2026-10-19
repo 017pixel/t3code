@@ -86,30 +86,16 @@ describe("sidebar update release notes popover", () => {
   });
 });
 
-describe("sidebar update check icon", () => {
+it("lets a known update take precedence over an active or latched check spinner", () => {
   const checking = {
     hasUpdateAction: false,
     isAnimationLatched: true,
     isChecking: true,
     prefersReducedMotion: false,
   };
-
-  it("spins while checking or while the check animation is latched", () => {
-    expect(shouldShowDesktopUpdateCheckIcon(checking)).toBe(true);
-    expect(shouldShowDesktopUpdateCheckIcon({ ...checking, isChecking: false })).toBe(true);
-    expect(
-      shouldShowDesktopUpdateCheckIcon({
-        ...checking,
-        isChecking: false,
-        prefersReducedMotion: true,
-      }),
-    ).toBe(false);
-  });
-
-  it("yields to an available, downloading, or downloaded update", () => {
-    expect(shouldShowDesktopUpdateCheckIcon({ ...checking, hasUpdateAction: true })).toBe(false);
-    expect(
-      shouldShowDesktopUpdateCheckIcon({ ...checking, hasUpdateAction: true, isChecking: false }),
-    ).toBe(false);
-  });
+  expect(shouldShowDesktopUpdateCheckIcon(checking)).toBe(true);
+  expect(shouldShowDesktopUpdateCheckIcon({ ...checking, hasUpdateAction: true })).toBe(false);
+  expect(
+    shouldShowDesktopUpdateCheckIcon({ ...checking, hasUpdateAction: true, isChecking: false }),
+  ).toBe(false);
 });

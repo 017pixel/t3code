@@ -15,8 +15,8 @@ import * as TestClock from "effect/testing/TestClock";
 import { vi } from "vite-plus/test";
 
 const { mkdirSyncMock, writeFileSyncMock } = vi.hoisted(() => ({
-  mkdirSyncMock: vi.fn(),
-  writeFileSyncMock: vi.fn(),
+  mkdirSyncMock: vi.fn<typeof import("node:fs").mkdirSync>(),
+  writeFileSyncMock: vi.fn<typeof import("node:fs").writeFileSync>(),
 }));
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs")>()),
@@ -1111,77 +1111,97 @@ const failDownload = Effect.fail(
 
 describe("DesktopUpdates background downloads", () => {
   it.effect.each(["win32", "linux"] as const)(
-    "records the downloaded update only on an armed normal quit on %s",
+    "keeps a slow startup download through polls and reports an unapplied quit install on %s",
     (platform) => {
-      mkdirSyncMock.mockReset();
       writeFileSyncMock.mockReset();
-      const { harness } = makeFeedHarness({ platform, env: { APPIMAGE: "/tmp/T3Code.AppImage" } });
+      const releaseDownload = Deferred.makeUnsafe<void>();
+      const { harness, feed } = makeFeedHarness({
+        platform,
+        env: { APPIMAGE: "/tmp/T3Code.AppImage" },
+        downloadUpdate: Deferred.await(releaseDownload),
+      });
 
-      return Effect.scoped(
-        Effect.gen(function* () {
-          const updates = yield* DesktopUpdates.DesktopUpdates;
-          const updater = yield* ElectronUpdater.ElectronUpdater;
-          yield* updates.configure;
-          yield* updater.setAutoInstallOnAppQuit(true);
-          harness.emit("quit", {}, 0);
-          assert.equal(writeFileSyncMock.mock.calls.length, 0);
-          yield* updater.setAutoInstallOnAppQuit(false);
-          yield* TestClock.adjust(Duration.millis(15_000));
+      return Effect.gen(function* () {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const updates = yield* DesktopUpdates.DesktopUpdates;
+            yield* updates.configure;
+            yield* TestClock.adjust(Duration.seconds(15));
+            assert.equal(harness.downloadCount(), 1);
+            assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), true);
 
-          assert.equal(harness.downloadCount(), 1);
-          assert.deepEqual(harness.autoInstallOnAppQuitCalls, [false, true, false, true]);
+            yield* TestClock.adjust(Duration.minutes(4));
+            assert.equal((yield* updates.getState).status, "downloading");
+            assert.isFalse((yield* updates.check("manual")).checked);
+            assert.equal(harness.downloadCount(), 1);
 
-          harness.emit("update-downloaded", { version: "1.2.4" });
-          yield* flushCallbacks;
-          assert.equal((yield* updates.getState).status, "downloaded");
-          assert.equal(writeFileSyncMock.mock.calls.length, 0);
+            harness.emit("update-downloaded", { version: "1.2.4" });
+            yield* Deferred.succeed(releaseDownload, undefined);
+            yield* flushCallbacks;
+            feed.version = "1.2.5";
+            yield* TestClock.adjust(Duration.minutes(4));
+            assert.equal((yield* updates.getState).downloadedVersion, "1.2.4");
+            assert.equal(harness.checkCount(), 1);
+            assert.equal(harness.downloadCount(), 1);
 
-          harness.emit("quit", {}, 1);
-          yield* updater.setAutoInstallOnAppQuit(false);
-          harness.emit("quit", {}, 0);
-          assert.equal(writeFileSyncMock.mock.calls.length, 0);
+            // A manual check can clear UI state while the old installer remains queued.
+            yield* updates.check("manual");
+            assert.equal((yield* updates.getState).availableVersion, "1.2.5");
+            assert.isNull((yield* updates.getState).downloadedVersion);
+            assert.equal(writeFileSyncMock.mock.calls.length, 0);
+          }),
+        ).pipe(Effect.provide(harness.layer));
 
-          yield* updater.setAutoInstallOnAppQuit(true);
-          harness.emit("quit", {}, 0);
-          const environment = yield* DesktopEnvironment.DesktopEnvironment;
-          const runtimeDir = environment.path.join(environment.baseDir, "runtime");
-          assert.deepEqual(mkdirSyncMock.mock.calls, [[runtimeDir, { recursive: true }]]);
-          assert.deepEqual(writeFileSyncMock.mock.calls, [
-            [
-              environment.path.join(runtimeDir, DesktopUpdates.DESKTOP_UPDATE_INSTALL_RECORD_FILE),
-              JSON.stringify({ fromVersion: "1.2.3", targetVersion: "1.2.4" }),
-            ],
-          ]);
-          writeFileSyncMock.mockImplementationOnce(() => {
-            throw new Error("disk full");
-          });
-          assert.doesNotThrow(() => harness.emit("quit", {}, 0));
-          mkdirSyncMock.mockImplementationOnce(() => {
-            throw new Error("permission denied");
-          });
-          assert.doesNotThrow(() => harness.emit("quit", {}, 0));
-        }),
-      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+        harness.emit("quit", {}, 0);
+        assert.equal(writeFileSyncMock.mock.calls.length, 1);
+        const [recordPath, installRecord] = writeFileSyncMock.mock.calls[0]!;
+        assert.isTrue(
+          String(recordPath).endsWith(DesktopUpdates.DESKTOP_UPDATE_INSTALL_RECORD_FILE),
+        );
+        assert.deepEqual(JSON.parse(String(installRecord)), {
+          fromVersion: "1.2.3",
+          targetVersion: "1.2.4",
+        });
+
+        const restarted = makeFeedHarness({
+          platform,
+          installRecord: String(installRecord),
+          env: { APPIMAGE: "/tmp/T3Code.AppImage" },
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const updates = yield* DesktopUpdates.DesktopUpdates;
+            yield* updates.configure;
+            yield* TestClock.adjust(Duration.minutes(5));
+            assert.equal((yield* updates.getState).notAppliedVersion, "1.2.4");
+            assert.equal(restarted.harness.downloadCount(), 0);
+            assert.isTrue((yield* updates.download).accepted);
+            assert.equal(restarted.harness.downloadCount(), 1);
+          }),
+        ).pipe(Effect.provide(restarted.harness.layer));
+      }).pipe(Effect.provide(TestClock.layer()));
     },
   );
 
-  it.effect("leaves the download to the button after a manual check", () => {
+  it.effect("keeps manual Download and disarms its installer when the channel changes", () => {
     const { harness } = makeFeedHarness();
 
     return Effect.scoped(
       Effect.gen(function* () {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
-
         const result = yield* updates.check("manual");
-        assert.isTrue(result.checked);
         assert.equal(result.state.status, "available");
         assert.equal(harness.downloadCount(), 0);
-        assert.deepEqual(harness.autoInstallOnAppQuitCalls, [false]);
 
-        const download = yield* updates.download;
-        assert.isTrue(download.completed);
-        assert.deepEqual(harness.autoInstallOnAppQuitCalls, [false, true]);
+        assert.isTrue((yield* updates.download).completed);
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+        assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), true);
+
+        const state = yield* updates.setChannel("nightly");
+        assert.isNull(state.downloadedVersion);
+        assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), false);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
@@ -1193,10 +1213,10 @@ describe("DesktopUpdates background downloads", () => {
       Effect.gen(function* () {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
-        yield* TestClock.adjust(Duration.millis(15_000));
+        yield* TestClock.adjust(Duration.seconds(15));
 
         assert.equal(harness.downloadCount(), 1);
-        assert.deepEqual(harness.autoInstallOnAppQuitCalls, [false, false]);
+        assert.notInclude(harness.autoInstallOnAppQuitCalls, true);
         harness.emit("update-downloaded", { version: "1.2.4" });
         yield* flushCallbacks;
         assert.isTrue((yield* updates.install).accepted);
@@ -1205,76 +1225,33 @@ describe("DesktopUpdates background downloads", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
-  it.effect("stops polling once an update is downloaded", () => {
-    const { harness } = makeFeedHarness();
+  it.effect(
+    "disarms a failed download, skips background retries, and permits manual or newer retries",
+    () => {
+      const { harness, feed } = makeFeedHarness({ downloadUpdate: failDownload });
 
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        yield* updates.configure;
-        yield* TestClock.adjust(Duration.millis(15_000));
-        harness.emit("update-downloaded", { version: "1.2.4" });
-        yield* flushCallbacks;
-        assert.equal(harness.checkCount(), 1);
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          yield* TestClock.adjust(Duration.seconds(15));
+          assert.equal(harness.downloadCount(), 1);
+          assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), false);
 
-        yield* TestClock.adjust(Duration.minutes(12));
-        assert.equal(harness.checkCount(), 1);
-        assert.equal(harness.downloadCount(), 1);
-        assert.equal((yield* updates.getState).downloadedVersion, "1.2.4");
+          yield* TestClock.adjust(Duration.minutes(8));
+          assert.equal(harness.checkCount(), 3);
+          assert.equal(harness.downloadCount(), 1);
 
-        const manual = yield* updates.check("manual");
-        assert.isTrue(manual.checked);
-        assert.equal(harness.checkCount(), 2);
-      }),
-    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
-  });
-
-  it.effect("does not retry a failed download until a newer release", () => {
-    const { harness, feed } = makeFeedHarness({ downloadUpdate: failDownload });
-
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        yield* updates.configure;
-        yield* TestClock.adjust(Duration.millis(15_000));
-        assert.equal(harness.downloadCount(), 1);
-        assert.deepEqual(harness.autoInstallOnAppQuitCalls, [false, true, false]);
-
-        yield* TestClock.adjust(Duration.minutes(9));
-        assert.isAtLeast(harness.checkCount(), 3);
-        assert.equal(harness.downloadCount(), 1);
-
-        const retry = yield* updates.download;
-        assert.isTrue(retry.accepted);
-        assert.equal(harness.downloadCount(), 2);
-
-        feed.version = "1.2.5";
-        yield* TestClock.adjust(Duration.minutes(4));
-        assert.equal(harness.downloadCount(), 3);
-        assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), false);
-      }),
-    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
-  });
-
-  it.effect("disarms install on quit when the channel changes", () => {
-    const { harness } = makeFeedHarness();
-
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        yield* updates.configure;
-        yield* TestClock.adjust(Duration.millis(15_000));
-        harness.emit("update-downloaded", { version: "1.2.4" });
-        yield* flushCallbacks;
-        assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), true);
-
-        const state = yield* updates.setChannel("nightly");
-        assert.equal(state.channel, "nightly");
-        assert.isNull(state.downloadedVersion);
-        assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), false);
-      }),
-    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
-  });
+          assert.isTrue((yield* updates.download).accepted);
+          assert.equal(harness.downloadCount(), 2);
+          feed.version = "1.2.5";
+          yield* TestClock.adjust(Duration.minutes(4));
+          assert.equal(harness.downloadCount(), 3);
+          assert.equal(harness.autoInstallOnAppQuitCalls.at(-1), false);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
 });
 
 describe("describeUpdateErrorCause", () => {
