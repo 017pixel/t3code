@@ -10,7 +10,7 @@ import type {
   ProviderInstanceId,
   ServerProvider,
 } from "@t3tools/contracts";
-import { lazy, Suspense, useRef, useState } from "react";
+import { lazy, Suspense, useId, useRef, useState } from "react";
 import { CopyIcon } from "lucide-react";
 
 import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
@@ -48,6 +48,7 @@ export function ProviderAuthenticationSection({
   const complete = useAtomCommand(serverEnvironment.completeProviderAuth, commands);
   const cancel = useAtomCommand(serverEnvironment.cancelProviderAuth, commands);
   const logout = useAtomCommand(serverEnvironment.logoutProviderAuth, commands);
+  const statusId = useId();
   const [methodId, setMethodId] = useState("");
   const [draft, setDraft] = useState({ id: "", values: {} as Record<string, string> });
   const [error, setError] = useState<string | null>(null);
@@ -90,8 +91,8 @@ export function ProviderAuthenticationSection({
         : needsExternalSetup
           ? "No in-app sign-in advertised. Follow the provider's docs to finish setup."
           : `Sign in on ${environmentLabel}.`;
-  const statusMessage =
-    auth?.phase === "failed" ? auth.message : auth?.phase === "waiting" ? auth.inputError : null;
+  const inputError = auth?.phase === "waiting" ? auth.inputError : null;
+  const statusMessage = auth?.phase === "failed" ? auth.message : inputError;
   const visibleError =
     (auth?.phase === "waiting" && error === auth.inputError ? null : error) ?? query.error;
   const disabled = readOnly || pending || query.error !== null || isDiscovering;
@@ -182,7 +183,7 @@ export function ProviderAuthenticationSection({
       }
       status={
         statusMessage ? (
-          <p role="status" className="[overflow-wrap:anywhere]">
+          <p id={statusId} role="status" className="[overflow-wrap:anywhere]">
             {statusMessage}
           </p>
         ) : undefined
@@ -445,6 +446,8 @@ export function ProviderAuthenticationSection({
                   size="sm"
                   id={`provider-callback-${instanceId}`}
                   type="url"
+                  aria-invalid={inputError ? true : undefined}
+                  aria-describedby={inputError ? statusId : undefined}
                   autoComplete="off"
                   value={values.callback ?? ""}
                   disabled={disabled}

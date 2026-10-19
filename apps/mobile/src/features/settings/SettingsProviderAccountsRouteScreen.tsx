@@ -6,8 +6,16 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type { ProviderAuthResponse, ServerProvider } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { useRef, useState } from "react";
-import { Linking, Pressable, ScrollView, TextInput, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import {
+  AccessibilityInfo,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  TextInput,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -98,6 +106,7 @@ function ProviderAccount({
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState({ id: "", values: {} as Record<string, string> });
   const state = auth.data;
+  const inputError = state?.phase === "waiting" ? state.inputError : null;
   const visibleError =
     (state?.phase === "waiting" && error === state.inputError ? null : error) ?? auth.error;
   const interaction = state?.interaction;
@@ -124,6 +133,10 @@ function ProviderAccount({
       ? interaction.url
       : state?.authorizationUrl;
   const disabled = pending || auth.error !== null || isDiscovering;
+  useEffect(() => {
+    if (Platform.OS === "ios" && inputError) AccessibilityInfo.announceForAccessibility(inputError);
+  }, [inputError]);
+
   async function run(command: () => Promise<AtomCommandResult<unknown, unknown>>) {
     if (pendingRef.current) return false;
     pendingRef.current = true;
@@ -190,9 +203,9 @@ function ProviderAccount({
                   ? "No in-app sign-in advertised. Follow the provider's docs to finish setup."
                   : "Connect this provider."}
         </Text>
-        {state?.phase === "waiting" && state.inputError ? (
+        {inputError ? (
           <Text accessibilityLiveRegion="polite" className="text-sm text-danger-foreground">
-            {state.inputError}
+            {inputError}
           </Text>
         ) : null}
         {signedIn && !active && provider.auth.email?.trim() ? (
