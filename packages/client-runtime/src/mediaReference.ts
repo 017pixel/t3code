@@ -1,6 +1,7 @@
 import { isWindowsAbsolutePath } from "@t3tools/shared/path";
 
-/** The authored media location, never the temporary URL used to load its bytes. */
+import { safeDecodeURIComponent } from "@t3tools/shared/markdownLinks";
+
 export type MediaReference =
   | {
       readonly kind: "file";
@@ -29,7 +30,6 @@ function absolutePathParts(path: string) {
   return { root: windows ? root.toLowerCase() : root, segments, windows };
 }
 
-/** Compares paths lexically for the copy menu; it does not resolve filesystem symlinks. */
 export function mediaFileReference(
   path: string,
   workspaceRoot?: string | null,
@@ -86,10 +86,5 @@ export function mediaReferenceFileName(reference: MediaReference): string | unde
   } catch {
     return undefined;
   }
-  if (!basename) return undefined;
-  try {
-    return decodeURIComponent(basename);
-  } catch {
-    return basename;
-  }
+  return basename ? safeDecodeURIComponent(basename) : undefined;
 }

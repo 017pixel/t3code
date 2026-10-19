@@ -30,7 +30,7 @@ export function getProviderModels(
   return getProviderSnapshot(providers, provider)?.models ?? [];
 }
 
-export function getProviderSnapshot(
+function getProviderSnapshot(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,
 ): ServerProvider | undefined {
@@ -38,34 +38,6 @@ export function getProviderSnapshot(
   return providers.find((candidate) => candidate.instanceId === defaultInstanceId);
 }
 
-export function getProviderDisplayName(
-  providers: ReadonlyArray<ServerProvider>,
-  provider: ProviderDriverKind,
-): string {
-  const snapshot = getProviderSnapshot(providers, provider);
-  return snapshot?.displayName?.trim() || formatProviderDriverKindLabel(provider);
-}
-
-export function getProviderInteractionModeToggle(
-  providers: ReadonlyArray<ServerProvider>,
-  provider: ProviderDriverKind,
-): boolean {
-  return getProviderSnapshot(providers, provider)?.showInteractionModeToggle ?? true;
-}
-
-export function isProviderEnabled(
-  providers: ReadonlyArray<ServerProvider>,
-  provider: ProviderDriverKind,
-): boolean {
-  if (providers.length === 0) {
-    return true;
-  }
-  return getProviderSnapshot(providers, provider)?.enabled ?? false;
-}
-
-// Resolve an instance selection to the correlated live driver. If the
-// instance is absent, fall back to a live enabled provider instead of
-// inferring a driver from the missing instance id.
 export function resolveSelectableProvider(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind | ProviderInstanceId | null | undefined,
@@ -92,11 +64,6 @@ export function getProviderModelCapabilities(
   return withoutPlanAgentOption(caps);
 }
 
-// The opencode "plan" agent is only reachable while legacy plan mode is on.
-// With it off, drop the option so it cannot be selected or dispatched, and
-// drop the descriptor entirely when nothing remains selectable. currentValue
-// is re-resolved against the surviving options so a stale or defaulted "plan"
-// value cannot leak back into dispatch.
 function withoutPlanAgentOption(caps: ModelCapabilities): ModelCapabilities {
   return {
     ...caps,

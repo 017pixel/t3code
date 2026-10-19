@@ -1,7 +1,8 @@
 import type { AssetResource, ChatFileAttachment, EnvironmentId } from "@t3tools/contracts";
+import { videoMimeType } from "@t3tools/shared/video";
 
 import type { DraftComposerFileAttachment } from "./composerImages";
-import type { MediaActionsSource } from "./mediaActions";
+import type { MediaActionsSource } from "./mediaActionsSource";
 
 export type MediaVideoPreviewSource = {
   readonly type: "media";
@@ -14,11 +15,13 @@ export type MediaVideoPreviewSource = {
   | { readonly uri: string }
   | {
       readonly environmentId: EnvironmentId;
-      readonly resource: Extract<AssetResource, { readonly _tag: "media-file" }>;
+      readonly resource: Extract<
+        AssetResource,
+        { readonly _tag: "attachment" | "media-file" | "draft-workspace-file" | "github-media" }
+      >;
     }
 );
 
-/** Resolves the current capability without making it the identity of the video. */
 export function mediaVideoPreviewUri(
   source: MediaVideoPreviewSource,
   assetUrl: string | null,
@@ -27,28 +30,73 @@ export function mediaVideoPreviewUri(
   return assetUrl === null ? null : assetUrl + (source.srcFragment ?? "");
 }
 
-/** Keeps thumbnails independent of refreshed asset signatures and scoped to their environment. */
 export function mediaVideoThumbnailKey(source: MediaVideoPreviewSource): string {
   return JSON.stringify(
     "uri" in source
       ? ["media-video", source.uri]
-      : [
-          "media-video",
-          source.environmentId,
-          source.resource.threadId,
-          source.resource.path,
-          source.srcFragment ?? "",
-        ],
+      : source.resource._tag === "attachment"
+        ? ["media-video", source.environmentId, "attachment", source.resource.attachmentId]
+        : source.resource._tag === "media-file"
+          ? [
+              "media-video",
+              "media-file",
+              source.environmentId,
+              source.resource.threadId,
+              source.resource.path,
+              source.srcFragment ?? "",
+            ]
+          : source.resource._tag === "github-media"
+            ? [
+                "media-video",
+                "github-media",
+                source.environmentId,
+                source.resource.cwd,
+                source.resource.url,
+              ]
+            : [
+                "media-video",
+                "draft-workspace-file",
+                source.environmentId,
+                source.resource.cwd,
+                source.resource.path,
+                source.srcFragment ?? "",
+              ],
   );
 }
 
-export type AttachmentVideoPreviewSource = (
-  | { readonly type: "local"; readonly attachment: DraftComposerFileAttachment }
-  | {
-      readonly type: "remote";
-      readonly environmentId: EnvironmentId;
-      readonly attachment: ChatFileAttachment;
-    }
-) & { readonly sourceIdentifier?: string };
+export interface LocalVideoPreviewSource {
+  readonly type: "local";
+  readonly attachment: DraftComposerFileAttachment;
+  readonly sourceIdentifier?: string;
+}
 
-export type VideoPreviewSource = AttachmentVideoPreviewSource | MediaVideoPreviewSource;
+export type VideoPreviewSource = LocalVideoPreviewSource | MediaVideoPreviewSource;
+
+export function attachmentVideoPreviewSource(
+  environmentId: EnvironmentId,
+  attachment: ChatFileAttachment,
+  sourceIdentifier?: string,
+): MediaVideoPreviewSource {
+  const mimeType = videoMimeType(attachment) ?? attachment.mimeType;
+  const resource = {
+    _tag: "attachment" as const,
+    attachmentId: attachment.id,
+    fileName: attachment.name,
+    mimeType,
+  };
+  return {
+    type: "media",
+    name: attachment.name,
+    mimeType,
+    ...(sourceIdentifier ? { sourceIdentifier } : {}),
+    environmentId,
+    resource,
+    actionsSource: {
+      name: attachment.name,
+      mimeType,
+      ...(sourceIdentifier ? { sourceIdentifier } : {}),
+      environmentId,
+      resource,
+    },
+  };
+}

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
+import {
+  collectAssistantCitations,
+  serializeAssistantCitation,
+} from "@t3tools/shared/assistantCitations";
 
 import { removeLocalStorageItem } from "./hooks/useLocalStorage";
 
@@ -103,6 +107,34 @@ describe("promptStashStore", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["second", "first"]);
   });
 
+  it("restores citations and bound comments from a persisted stash", () => {
+    const citation = {
+      version: 1 as const,
+      environmentId: EnvironmentId.make("remote-source"),
+      threadId: ThreadId.make("source-thread"),
+      messageId: MessageId.make("source-message"),
+      text: "A quote to revisit later.",
+      comment: "Revisit this tomorrow.\nCheck whether the example still applies.",
+      start: 0,
+      end: 24,
+      prefix: "",
+      suffix: " Next.",
+    };
+    const prompt = `Revisit ${serializeAssistantCitation(citation)}`;
+    writePromptStashStorageForTest(
+      JSON.stringify({
+        version: 2,
+        state: { entries: [makeEntry({ id: "citation-stash", prompt })] },
+      }),
+    );
+    const restored = usePromptStashStore.getState().takeEntry("citation-stash").entry;
+    expect(restored?.prompt).toBe(prompt);
+    expect(
+      collectAssistantCitations(restored?.prompt ?? "").map((entry) => entry.citation),
+    ).toEqual([citation]);
+    expect(usePromptStashStore.getState().takeEntry("citation-stash").entry).toBeNull();
+  });
+
   it("evicts the oldest entry past the cap and returns it", () => {
     const store = usePromptStashStore.getState();
     for (let index = 0; index < MAX_STASH_ENTRIES; index += 1) {
@@ -115,9 +147,6 @@ describe("promptStashStore", () => {
     expect(entries[0]?.id).toBe("overflow");
   });
 
-  // This test environment has no `localStorage`, so the store runs on its
-  // in-memory fallback — the exact "kept for this session, gone on reload"
-  // case the composer must distinguish from an outright write failure.
   it("distinguishes a memory-only write (written, not durable) from a failed one", () => {
     const store = usePromptStashStore.getState();
     const result = store.stashEntry(makeEntry({ id: "memory-only" }));
@@ -222,7 +251,6 @@ describe("promptStashStore", () => {
   it("finalizeEntryImages reports false when the entry was already taken", () => {
     const store = usePromptStashStore.getState();
     store.stashEntry({ ...makeEntry({ id: "racing" }), pendingImageCount: 1 });
-    // Restored (or deleted) while its images were still encoding.
     store.takeEntry("racing");
 
     const { attached } = store.finalizeEntryImages("racing", {
@@ -244,16 +272,12 @@ describe("promptStashStore", () => {
       }),
     );
 
-    // Hydration must settle the stale count, or the entry would stay stuck
-    // showing "saving…" with images that no longer exist anywhere.
     const entry = usePromptStashStore.getState().entries[0];
     expect(entry?.pendingImageCount).toBe(0);
     expect(entry?.unreadableImageNames).toHaveLength(2);
   });
 
   it("ignores an unreadable v1 payload seeded under the current key", () => {
-    // The v1 shape (per-provider queues) does not decode as v2; hydration
-    // must fall back to an empty stash rather than throw.
     writePromptStashStorageForTest(
       JSON.stringify({
         version: 1,
@@ -261,5 +285,34 @@ describe("promptStashStore", () => {
       }),
     );
     expect(usePromptStashStore.getState().entries).toEqual([]);
+  });
+});
+
+describe("prompt stash context records", () => {
+  it("keeps the records behind a stashed prompt's chips", () => {
+    const store = usePromptStashStore.getState();
+    const records = [
+      {
+        version: 1 as const,
+        contextId: "ctx-1" as never,
+        kind: "terminal" as const,
+        label: "Terminal 1 line 4",
+        terminalId: "default",
+        terminalLabel: "Terminal 1",
+        lineStart: 4,
+        lineEnd: 4,
+        text: "boom",
+      },
+    ];
+    store.stashEntry({
+      id: "entry-records",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      prompt: "see [Terminal 1 line 4](t3-context://v1/terminal/ctx-1)",
+      attachments: [],
+      droppedImageNames: [],
+      records,
+    });
+    const taken = usePromptStashStore.getState().takeEntry("entry-records");
+    expect(taken.entry?.records).toEqual(records);
   });
 });

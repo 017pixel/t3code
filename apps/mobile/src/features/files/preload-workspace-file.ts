@@ -1,9 +1,15 @@
+import { AuthFilesystemReadScope } from "@t3tools/contracts";
+import { readEnvironmentScope } from "../../state/session";
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
+import {
+  isWorkspaceBrowserPreviewPath,
+  isWorkspaceImagePreviewPath,
+} from "@t3tools/shared/filePreview";
 
 import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
-import { isBrowserPreviewFile, isImagePreviewFile, isVideoPreviewFile } from "./filePath";
+import { isVideoPreviewFile } from "./filePath";
 import { prepareSourceFileDocument } from "./source-file-document";
 import { sourceHighlightAtom } from "./sourceHighlightingState";
 import type { ReviewDiffTheme } from "../review/shikiReviewHighlighter";
@@ -26,8 +32,9 @@ export function preloadWorkspaceFileContents(input: {
   readonly theme: ReviewDiffTheme;
 }): void {
   if (
-    isBrowserPreviewFile(input.relativePath) ||
-    isImagePreviewFile(input.relativePath) ||
+    !readEnvironmentScope(input.environmentId, AuthFilesystemReadScope) ||
+    isWorkspaceBrowserPreviewPath(input.relativePath) ||
+    isWorkspaceImagePreviewPath(input.relativePath) ||
     isVideoPreviewFile(input.relativePath)
   ) {
     return;
