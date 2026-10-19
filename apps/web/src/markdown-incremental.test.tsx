@@ -1,9 +1,14 @@
-import { CHAT_MARKDOWN_REHYPE_PLUGINS } from "@t3tools/shared/markdownPipeline";
+import {
+  CHAT_MARKDOWN_REHYPE_PLUGINS,
+  chatMarkdownRemarkPlugins,
+} from "@t3tools/shared/markdownPipeline";
 import type { Root } from "mdast";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Plugin } from "unified";
+import remarkParse from "remark-parse";
+import remarkRehype from "remark-rehype";
+import { unified, type Plugin } from "unified";
 import { describe, expect, it } from "vite-plus/test";
 
 import { remarkCodexDirectives } from "@t3tools/shared/codexMarkdownDirectives";
@@ -47,6 +52,39 @@ function render(source: string, incremental?: Plugin<[], Root>, parsedSources?: 
 const prefix = "# Before\n\n```ts\nconst values = [1, 2];\n```\n\n";
 
 describe("incremental Markdown parsing", () => {
+  it("preserves citation IDs and numbering across a cached closed fence", () => {
+    const incremental = createIncrementalMarkdownPlugin();
+    const parse = (source: string, plugin?: Plugin<[], Root>) => {
+      const processor = unified()
+        .use(remarkParse)
+        .use(chatMarkdownRemarkPlugins({ isStreaming: true }))
+        .use(plugin ? [plugin] : [])
+        .use(remarkRehype, { allowDangerousHtml: true })
+        .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
+      return processor.runSync(processor.parse(source), { value: source });
+    };
+    type Node = { type: string; value?: string; children?: Node[] };
+    const text = (node: Node): string => node.value ?? node.children?.map(text).join("") ?? "";
+    const before = "Before \uE200cite\uE202turn0search1\uE201.\n\n```js\ncode\n```\n\n";
+    const after =
+      "After \uE200cite\uE202turn0search2\uE201, again \uE200cite\uE202turn0search1\uE201.";
+    for (const [tail, expectedTail] of [
+      ["After", "After"],
+      [after, "After [Source 2: turn0search2], again [Source 1: turn0search1]."],
+      [
+        `${after} Also \uE200cite\uE202turn0search2\uE201.`,
+        "After [Source 2: turn0search2], again [Source 1: turn0search1]. Also [Source 2: turn0search2].",
+      ],
+    ]) {
+      const source = before + tail;
+      const full = parse(source);
+      const cached = parse(source, incremental);
+      expect(text(full)).toBe(`Before [Source 1: turn0search1].\ncode\n\n${expectedTail}`);
+      expect(text(cached)).toBe(text(full));
+      expect(cached).toEqual(full);
+    }
+  });
+
   it("keeps the document prefix cached when list recovery parses contain fences", () => {
     const source =
       prefix +

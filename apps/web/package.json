@@ -93,6 +93,8 @@
     "compression": "^1.8.2",
     "oxc-transform-react": "~0.152.0",
     "playwright": "1.60.0",
+    "remark-parse": "catalog:",
+    "remark-rehype": "catalog:",
     "tailwindcss": "^4.0.0",
     "unified": "catalog:",
     "vite": "catalog:",

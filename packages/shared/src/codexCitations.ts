@@ -43,13 +43,12 @@ interface MarkdownNode {
   position?: { readonly start: MarkdownPoint; readonly end: MarkdownPoint };
   data?: {
     codexCitationMarkdown?: string;
+    codexCitationRaw?: string;
     hName?: string;
     hProperties?: Record<string, unknown>;
   };
   children?: MarkdownNode[];
 }
-
-const citationTokens = new WeakMap<MarkdownNode, string>();
 
 export const CODEX_CITATION_HAST_PROPERTIES = ["dataCodexCitation"] as const;
 
@@ -155,9 +154,9 @@ function transformCitations(tree: MarkdownNode, source: string, options: Citatio
       return [node];
     }
 
-    const raw = citationTokens.get(node);
+    const raw = node.data?.codexCitationRaw;
     if (raw !== undefined && node.position !== undefined) {
-      citationTokens.delete(node);
+      delete node.data?.codexCitationRaw;
       const end = {
         line: node.position.start.line,
         column: node.position.start.column + raw.length,
@@ -241,8 +240,11 @@ function attachCodexCitations(this: Processor, options: CitationOptions = {}) {
     enter: {
       codexCitation(token) {
         const raw = this.sliceSerialize(token);
-        const node = { type: "text" as const, value: raw };
-        citationTokens.set(node, raw);
+        const node: Extract<Parameters<typeof this.enter>[0], { type: "text" }> & MarkdownNode = {
+          type: "text",
+          value: raw,
+          data: { codexCitationRaw: raw },
+        };
         this.enter(node, token);
       },
     },

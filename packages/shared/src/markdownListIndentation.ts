@@ -167,7 +167,6 @@ function recoverIndentedCode(
     }
     return current.children?.every(remap) ?? true;
   };
-  // Preserve node identity for syntax extensions that associate metadata with nodes.
   return remap(document) ? blocks : null;
 }
 
