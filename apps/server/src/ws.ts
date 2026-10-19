@@ -1716,14 +1716,7 @@ const layerWsRpc = (
           const completeProviders = options.usageLimitsCommand
             ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
             : currentProviders;
-          const providers =
-            options.deferCatalogs === true
-              ? completeProviders.map(({ workspaceSnapshots: _workspaces, ...provider }) => ({
-                  ...provider,
-                  skills: [],
-                  slashCommands: [],
-                }))
-              : completeProviders;
+          const providers = ProviderRegistry.selectProvidersForConfig(completeProviders, options);
           const settings = ServerSettings.redactServerSettingsForClient(
             yield* serverSettings.getSettings,
           );

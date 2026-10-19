@@ -45,6 +45,19 @@ import type { ProviderSnapshotSource } from "./builtInProviderCatalog.ts";
 
 export type ProviderMaintenanceActionKind = "update";
 
+export function selectProvidersForConfig(
+  providers: ReadonlyArray<ServerProvider>,
+  options: { readonly deferCatalogs?: boolean },
+): ReadonlyArray<ServerProvider> {
+  return options.deferCatalogs === true
+    ? providers.map(({ workspaceSnapshots: _workspaces, ...provider }) => ({
+        ...provider,
+        skills: [],
+        slashCommands: [],
+      }))
+    : providers;
+}
+
 export class ProviderRegistry extends Context.Service<
   ProviderRegistry,
   {

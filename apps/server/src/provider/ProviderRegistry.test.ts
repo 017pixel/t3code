@@ -630,6 +630,38 @@ it.layer(
   });
 
   describe("ProviderRegistry.layer", () => {
+    it("defers catalogs in config without changing the full provider snapshot", () => {
+      const provider = {
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        status: "ready",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        checkedAt: "2026-03-25T00:00:00.000Z",
+        version: "1.0.0",
+        models: [
+          { slug: "gpt-live-codex", name: "GPT Live Codex", isCustom: false, capabilities: null },
+        ],
+        slashCommands: [{ name: "global" }],
+        skills: [{ name: "global", path: "/global/SKILL.md", enabled: true }],
+      } satisfies ServerProvider;
+      const providers = [{ ...provider, workspaceSnapshots: [{ ...provider, cwd: "/project" }] }];
+
+      assert.deepStrictEqual(
+        ProviderRegistry.selectProvidersForConfig(providers, { deferCatalogs: true }),
+        [{ ...provider, skills: [], slashCommands: [] }],
+      );
+      assert.strictEqual(
+        ProviderRegistry.selectProvidersForConfig(providers, { deferCatalogs: false }),
+        providers,
+      );
+      assert.strictEqual(ProviderRegistry.selectProvidersForConfig(providers, {}), providers);
+      assert.deepStrictEqual(providers[0]?.skills, provider.skills);
+      assert.deepStrictEqual(providers[0]?.slashCommands, provider.slashCommands);
+      assert.strictEqual(providers[0]?.workspaceSnapshots.length, 1);
+    });
+
     it("stores workspace skills and commands without changing machine metadata", () => {
       const provider = {
         instanceId: ProviderInstanceId.make("codex"),
