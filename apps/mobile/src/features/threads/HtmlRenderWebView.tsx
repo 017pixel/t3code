@@ -1,33 +1,28 @@
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useNavigation } from "@react-navigation/native";
-import { CommandId, MessageId, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
-  htmlRenderError,
   htmlRenderFileName,
   htmlRenderFrameHeight,
   htmlRenderThemeFragment,
   htmlRenderThemeMessage,
-  htmlRenderResult,
-  readHtmlRenderMessageRequest,
   type HtmlRenderReference,
   type HtmlRenderTheme,
 } from "@t3tools/shared/htmlRender";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Platform, Pressable, View, type ColorValue } from "react-native";
+import { Platform, Pressable, View, type ColorValue } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
-import { SymbolView } from "../../components/AppSymbol";
-import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
 import { mobileHtmlRenderTheme } from "../../lib/htmlRenderTheme";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
-import { uuidv4 } from "../../lib/uuid";
 import { useAssetUrlState, useRefreshAssetUrl } from "../../state/assets";
-import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 
 const ROW_BOTTOM_MARGIN = 8;
 const FULL_SCREEN_GUTTER = 16;
 
-/** A render row is its frame's height plus spacing; the page's content never sizes it. */
 export function htmlRenderRowHeight(frameHeight: number) {
   return frameHeight + ROW_BOTTOM_MARGIN;
 }
@@ -48,55 +43,32 @@ function useHtmlRenderTheme() {
   );
 }
 
-function postToPage(view: WebView<object> | null, message: unknown) {
-  view?.injectJavaScript(`window.postMessage(${JSON.stringify(message)}, "*"); true;`);
-}
-
 function postTheme(view: WebView<object> | null, theme: HtmlRenderTheme) {
-  postToPage(view, htmlRenderThemeMessage(theme));
+  view?.injectJavaScript(
+    `window.postMessage(${JSON.stringify(htmlRenderThemeMessage(theme))}, "*"); true;`,
+  );
 }
-
-/**
- * Sends a render's `t3.send` text to its thread through the outbox, like a
- * typed message, so it survives a dropped connection.
- */
-export function sendHtmlRenderMessage(
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-  text: string,
-): Promise<void> {
-  return enqueueThreadOutboxMessage({
-    environmentId,
-    threadId,
-    messageId: MessageId.make(uuidv4()),
-    commandId: CommandId.make(uuidv4()),
-    text,
-    attachments: [],
-    dispatchMode: "queue",
-    createdAt: new Date().toISOString(),
-  });
-}
-
-// The page is the top document here, so the client cannot see focus or user
-// activation. A message counts only this soon after the reader touched it.
-const MESSAGE_TOUCH_WINDOW_MS = 5_000;
 
 const OVERFLOW_MESSAGE_TYPE = "t3-html-render-overflow";
 
-// Reports whether the page overflows its frame, so a feed row only takes scroll
-// gestures from a page that can use them.
-const OVERFLOW_SCRIPT = `(function(){var last;function report(){var d=document.documentElement,b=document.body;var o=Math.max(d.scrollHeight,b?b.scrollHeight:0)>window.innerHeight+1||Math.max(d.scrollWidth,b?b.scrollWidth:0)>window.innerWidth+1;if(o===last)return;last=o;window.ReactNativeWebView.postMessage(JSON.stringify({type:${JSON.stringify(OVERFLOW_MESSAGE_TYPE)},overflow:o}));}report();if(window.ResizeObserver){var r=new ResizeObserver(report);r.observe(document.documentElement);if(document.body)r.observe(document.body);}window.addEventListener("resize",report);})();true;`;
+const OVERFLOW_SCRIPT = `(function(){var last;function report(){var d=document.documentElement,b=document.body;var x=Math.max(d.scrollWidth,b?b.scrollWidth:0)>window.innerWidth+1,y=Math.max(d.scrollHeight,b?b.scrollHeight:0)>window.innerHeight+1,o=x+","+y;if(o===last)return;last=o;window.ReactNativeWebView.postMessage(JSON.stringify({type:${JSON.stringify(OVERFLOW_MESSAGE_TYPE)},x:x,y:y}));}report();if(window.ResizeObserver){var r=new ResizeObserver(report);r.observe(document.documentElement);if(document.body)r.observe(document.body);}window.addEventListener("resize",report);})();true;`;
 
-function readOverflowMessage(data: string) {
+type Overflow = { readonly x: boolean; readonly y: boolean };
+
+const NO_OVERFLOW: Overflow = { x: false, y: false };
+
+function readOverflowMessage(data: string): Overflow | null {
   try {
     const message: unknown = JSON.parse(data);
     return typeof message === "object" &&
       message !== null &&
       "type" in message &&
       message.type === OVERFLOW_MESSAGE_TYPE &&
-      "overflow" in message &&
-      typeof message.overflow === "boolean"
-      ? message.overflow
+      "x" in message &&
+      typeof message.x === "boolean" &&
+      "y" in message &&
+      typeof message.y === "boolean"
+      ? { x: message.x, y: message.y }
       : null;
   } catch {
     return null;
@@ -105,28 +77,19 @@ function readOverflowMessage(data: string) {
 
 const withoutFragment = (url: string) => url.split("#", 1)[0];
 
-/**
- * An agent's HTML page, themed before first paint and kept in step with the app theme.
- * The page may move within its own document; links leave for the browser.
- */
 export function HtmlRenderWebView(props: {
   readonly uri: string;
   readonly title: string;
-  /** Inside the feed, the page takes scroll gestures only when it overflows its frame. */
   readonly nested: boolean;
   readonly onLoadError?: () => void;
-  /** Sends a render's `t3.send` text to its thread; the page is refused without one. */
-  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
 }) {
   const theme = useHtmlRenderTheme();
   const [initialTheme] = useState(theme);
   const [generation, setGeneration] = useState(0);
   const [loaded, setLoaded] = useState(false);
-  const [overflows, setOverflows] = useState(false);
+  const [overflow, setOverflow] = useState(NO_OVERFLOW);
   const webView = useRef<WebView<object>>(null);
   const crashes = useRef(0);
-  const lastTouchAt = useRef(0);
-  // The theme the loaded document shows; null until it loads.
   const shownTheme = useRef<HtmlRenderTheme | null>(null);
   const source = useMemo(
     () => ({ uri: props.uri + htmlRenderThemeFragment(initialTheme) }),
@@ -138,7 +101,6 @@ export function HtmlRenderWebView(props: {
     postTheme(webView.current, theme);
   }, [theme]);
   const restart = () => {
-    // A page that keeps crashing its web process is not reloaded forever.
     crashes.current += 1;
     if (crashes.current > 1) {
       props.onLoadError?.();
@@ -146,57 +108,12 @@ export function HtmlRenderWebView(props: {
     }
     shownTheme.current = null;
     setLoaded(false);
-    setOverflows(false);
+    setOverflow(NO_OVERFLOW);
     setGeneration((value) => value + 1);
   };
-  const scrollable = !props.nested || overflows;
-  const handleMessage = (event: WebViewMessageEvent) => {
-    const { data } = event.nativeEvent;
-    if (props.nested) {
-      const overflow = readOverflowMessage(data);
-      if (overflow !== null) {
-        setOverflows(overflow);
-        return;
-      }
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      return;
-    }
-    const request = readHtmlRenderMessageRequest(parsed);
-    if (request === undefined) return;
-    const reply = (message: unknown) => postToPage(webView.current, message);
-    const send = props.onSendMessage;
-    if (send === undefined) {
-      reply(htmlRenderError(request.id, "Messages are not available here."));
-      return;
-    }
-    if (Date.now() - lastTouchAt.current > MESSAGE_TOUCH_WINDOW_MS) {
-      reply(htmlRenderError(request.id, "Messages send only from a tap in the page."));
-      return;
-    }
-    // One tap sends one message.
-    lastTouchAt.current = 0;
-    send(request.text).then(
-      () => reply(htmlRenderResult(request.id)),
-      (error: unknown) =>
-        reply(
-          htmlRenderError(
-            request.id,
-            error instanceof Error ? error.message : "The message was not sent.",
-          ),
-        ),
-    );
-  };
-  // Pages have no horizontal padding of their own, so full screen adds the
-  // feed's gutter in the page's background color.
+  const scrollable = !props.nested || overflow.x || overflow.y;
   return (
     <View
-      onTouchStart={() => {
-        lastTouchAt.current = Date.now();
-      }}
       style={
         props.nested
           ? { flex: 1 }
@@ -219,11 +136,11 @@ export function HtmlRenderWebView(props: {
         showsVerticalScrollIndicator={!props.nested}
         showsHorizontalScrollIndicator={!props.nested}
         scrollEnabled={scrollable}
-        nestedScrollEnabled={props.nested && overflows}
+        // Android only: the page holds vertical drags until it reaches an edge,
+        // then hands them to the feed (patches/react-native-webview). A page
+        // that only overflows sideways leaves vertical drags to the feed.
+        nestedScrollEnabled={props.nested && overflow.y}
         overScrollMode={props.nested ? "never" : "always"}
-        // Only the page itself loads here; other top-frame navigations are
-        // dropped. A link the reader taps opens as a new window, which the
-        // platform allows only from a tap, and goes to the browser.
         onShouldStartLoadWithRequest={(request) =>
           request.isTopFrame === false ||
           withoutFragment(request.url) === withoutFragment(props.uri)
@@ -241,24 +158,29 @@ export function HtmlRenderWebView(props: {
         onHttpError={props.onLoadError}
         onContentProcessDidTerminate={restart}
         onRenderProcessGone={restart}
-        onMessage={handleMessage}
-        {...(props.nested ? { injectedJavaScript: OVERFLOW_SCRIPT } : {})}
+        {...(props.nested
+          ? {
+              injectedJavaScript: OVERFLOW_SCRIPT,
+              onMessage: (event: WebViewMessageEvent) => {
+                const next = readOverflowMessage(event.nativeEvent.data);
+                if (next !== null) setOverflow(next);
+              },
+            }
+          : {})}
       />
       {loaded ? null : (
         <View pointerEvents="none" className="absolute inset-0 items-center justify-center">
-          <ActivityIndicator />
+          <AppActivityIndicator />
         </View>
       )}
     </View>
   );
 }
 
-/** A completed `html_render` call in the thread feed: the page itself, at a fixed height. */
 export function ThreadHtmlRender(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly render: HtmlRenderReference;
-  /** The feed's content width; the frame's height follows the page's measured height there. */
   readonly frameWidth: number;
   readonly iconColor: ColorValue;
 }) {
@@ -282,8 +204,6 @@ export function ThreadHtmlRender(props: {
   const [uri, setUri] = useState<string | null>(null);
   if (uri === null && asset._tag === "Success") setUri(asset.url);
   const [failed, setFailed] = useState(false);
-  // A failed load retries once with a fresh URL, or remounts on the same one,
-  // since the failure may have been the connection rather than the URL.
   const [attempt, setAttempt] = useState(0);
   const retried = useRef(false);
   const handleLoadError = () => {
@@ -309,9 +229,6 @@ export function ThreadHtmlRender(props: {
             title={title}
             nested
             onLoadError={handleLoadError}
-            onSendMessage={(text) =>
-              sendHtmlRenderMessage(props.environmentId, props.threadId, text)
-            }
           />
         ) : failed || asset._tag === "Failure" ? (
           <Pressable
@@ -328,7 +245,7 @@ export function ThreadHtmlRender(props: {
           </Pressable>
         ) : (
           <View className="flex-1 items-center justify-center">
-            <ActivityIndicator />
+            <AppActivityIndicator />
           </View>
         )}
         {uri !== null && !failed ? (
@@ -336,7 +253,7 @@ export function ThreadHtmlRender(props: {
             accessibilityRole="button"
             accessibilityLabel={`Open ${title}`}
             hitSlop={8}
-            className="absolute right-1.5 top-1.5 h-7 w-7 items-center justify-center rounded-full border border-border/60 bg-surface/80"
+            className="absolute right-1.5 top-1.5 h-7 w-7 items-center justify-center rounded-full border border-border/60 bg-card/80"
             onPress={() =>
               navigation.navigate("ThreadAttachment", {
                 environmentId: String(props.environmentId),

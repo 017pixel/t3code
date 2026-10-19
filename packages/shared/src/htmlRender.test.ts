@@ -9,8 +9,9 @@ import {
   injectHtmlRenderBootstrap,
   htmlRenderThemeMessage,
   readHtmlRenderContentHeight,
+  readHtmlRenderImageRequest,
+  readHtmlRenderKeyDown,
   readHtmlRenderLinkRequest,
-  readHtmlRenderMessageRequest,
   readHtmlRenderReference,
 } from "./htmlRender.ts";
 import { T3_CODE_DARK_THEME_COLORS, T3_CODE_LIGHT_THEME_COLORS } from "./themePalettes.ts";
@@ -77,16 +78,21 @@ describe("injectHtmlRenderBootstrap", () => {
 
 describe("readHtmlRenderLinkRequest", () => {
   it("accepts only http(s) URLs in an MCP Apps ui/open-link request", () => {
-    const link = (url: unknown) => ({
+    const link = (url: unknown, modifiers = {}) => ({
       jsonrpc: "2.0",
       id: 1,
       method: "ui/open-link",
-      params: { url },
+      params: { url, ...modifiers },
     });
     expect(readHtmlRenderLinkRequest(link("https://example.com/a"))).toEqual({
       id: 1,
       url: "https://example.com/a",
+      metaKey: false,
+      ctrlKey: false,
     });
+    expect(
+      readHtmlRenderLinkRequest(link("https://example.com/a", { metaKey: true, ctrlKey: "yes" })),
+    ).toEqual({ id: 1, url: "https://example.com/a", metaKey: true, ctrlKey: false });
     expect(readHtmlRenderLinkRequest(link("javascript:alert(1)"))).toBeUndefined();
     expect(readHtmlRenderLinkRequest(link("file:///etc/passwd"))).toBeUndefined();
     expect(
@@ -102,90 +108,49 @@ describe("readHtmlRenderLinkRequest", () => {
   });
 });
 
-describe("readHtmlRenderMessageRequest", () => {
-  it("reads user text from a ui/message request in either content form", () => {
-    const request = (content: unknown, role = "user") => ({
+describe("readHtmlRenderImageRequest", () => {
+  it("accepts http(s) and inline image URLs in an open-image notification", () => {
+    const image = (params: unknown) => ({
       jsonrpc: "2.0",
-      id: "t3-message-1",
-      method: "ui/message",
-      params: { role, content },
-    });
-    expect(readHtmlRenderMessageRequest(request({ type: "text", text: " Option B " }))).toEqual({
-      id: "t3-message-1",
-      text: "Option B",
+      method: "t3/notifications/open-image",
+      params,
     });
     expect(
-      readHtmlRenderMessageRequest(
-        request([
-          { type: "text", text: "a" },
-          { type: "text", text: "b" },
-        ]),
-      ),
-    ).toEqual({ id: "t3-message-1", text: "a\nb" });
-    expect(readHtmlRenderMessageRequest(request({ type: "text", text: "x" }, "assistant"))).toBe(
-      undefined,
-    );
-    expect(readHtmlRenderMessageRequest(request([{ type: "image", data: "" }]))).toBe(undefined);
-    expect(readHtmlRenderMessageRequest(request({ type: "text", text: "  " }))).toBe(undefined);
+      readHtmlRenderImageRequest(image({ src: "data:image/png;base64,AA", name: " Chart " })),
+    ).toEqual({
+      src: "data:image/png;base64,AA",
+      name: "Chart",
+    });
+    expect(readHtmlRenderImageRequest(image({ src: "https://example.com/a.png" }))).toEqual({
+      src: "https://example.com/a.png",
+      name: "Image",
+    });
+    expect(readHtmlRenderImageRequest(image({ src: "javascript:alert(1)" }))).toBeUndefined();
+    expect(readHtmlRenderImageRequest(image({ src: "data:text/html,<p>" }))).toBeUndefined();
+    expect(readHtmlRenderImageRequest(image({ src: "blob:null/1" }))).toBeUndefined();
   });
 });
 
-/**
- * Runs the injected bootstrap against a minimal browser, framed in a parent
- * window, and returns the page's `t3` global with what it posted.
- */
-function runFramedBootstrap(options: { readonly activated: boolean }) {
-  const html = injectHtmlRenderBootstrap("<p>x</p>");
-  const script = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? "";
-  const posted: Array<{ readonly id?: unknown }> = [];
-  const listeners: Array<(event: { data: unknown; source: unknown }) => void> = [];
-  const parent = { postMessage: (message: { readonly id?: unknown }) => posted.push(message) };
-  const window: { t3?: { send: (text: string) => Promise<void> } } & Record<string, unknown> = {
-    parent,
-    addEventListener: (type: string, listener: (typeof listeners)[number]) => {
-      if (type === "message") listeners.push(listener);
-    },
-  };
-  const document = {
-    getElementById: () => ({ textContent: "" }),
-    addEventListener: () => {},
-    documentElement: {},
-  };
-  new Function("window", "document", "location", "history", "navigator", script)(
-    window,
-    document,
-    { hash: "", pathname: "/", search: "", href: "https://render/" },
-    { replaceState: () => {} },
-    { userActivation: { isActive: options.activated } },
-  );
-  const deliver = (data: unknown, source: unknown = parent) => {
-    for (const listener of listeners) listener({ data, source });
-  };
-  const { t3 } = window;
-  if (t3 === undefined) throw new Error("The bootstrap did not define t3.");
-  return { t3, posted, deliver };
-}
-
-describe("t3.send", () => {
-  it("posts a ui/message and settles with the client's answer", async () => {
-    const page = runFramedBootstrap({ activated: true });
-    const sent = page.t3.send("Go with B");
-    const [request] = page.posted;
-    expect(readHtmlRenderMessageRequest(request)).toEqual({ id: request?.id, text: "Go with B" });
-    // A reply from anywhere but the parent is ignored.
-    page.deliver({ jsonrpc: "2.0", id: request?.id, error: { message: "spoof" } }, {});
-    page.deliver({ jsonrpc: "2.0", id: request?.id, result: {} });
-    await expect(sent).resolves.toBeUndefined();
-
-    const refused = page.t3.send("Again");
-    page.deliver({ jsonrpc: "2.0", id: page.posted[1]?.id, error: { message: "Not here." } });
-    await expect(refused).rejects.toThrow("Not here.");
-  });
-
-  it("refuses outside a click or key press without posting", async () => {
-    const page = runFramedBootstrap({ activated: false });
-    await expect(page.t3.send("Go")).rejects.toThrow("click or key press");
-    expect(page.posted).toEqual([]);
+describe("readHtmlRenderKeyDown", () => {
+  it("reads the key of a keydown notification and nothing else", () => {
+    const notification = (params: unknown) => ({
+      jsonrpc: "2.0",
+      method: "t3/notifications/keydown",
+      params,
+    });
+    expect(readHtmlRenderKeyDown(notification({ key: "k", code: "KeyK", metaKey: true }))).toEqual({
+      key: "k",
+      code: "KeyK",
+      metaKey: true,
+      ctrlKey: false,
+      shiftKey: false,
+      altKey: false,
+      repeat: false,
+    });
+    expect(readHtmlRenderKeyDown(notification({ key: 1, code: "KeyK" }))).toBeUndefined();
+    expect(
+      readHtmlRenderKeyDown({ jsonrpc: "2.0", method: "ui/open-link", params: { key: "k" } }),
+    ).toBeUndefined();
   });
 });
 
@@ -286,7 +251,6 @@ describe("htmlRenderFrameHeight", () => {
   });
 
   it("takes the taller layout when a breakpoint falls between measured widths", () => {
-    // 900px tall below a 600px media query, 450px above it.
     const responsive = readHtmlRenderReference({
       ...reference,
       height: 2000,
@@ -300,7 +264,6 @@ describe("htmlRenderFrameHeight", () => {
   });
 
   it("fits a page the client lays out taller than the server measured", () => {
-    // The agent passed contentHeight at the column width, so the page should never scroll.
     const fitted = { ...measured, height: 1403 };
     expect(htmlRenderFrameHeight(fitted, 728, 1415)).toBe(1415);
     expect(htmlRenderFrameHeight(fitted, 1400)).toBe(1660);
