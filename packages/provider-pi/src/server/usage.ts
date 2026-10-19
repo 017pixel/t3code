@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -15,7 +16,11 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { PiSettings } from "../settings.ts";
 
-const PiScanState = Schema.Struct({ sessionId: Schema.mutableKey(Schema.String) });
+const PiScanState = Schema.Struct({
+  sessionId: Schema.mutableKey(Schema.String),
+  // Optional so older states decode and can be upgraded before resuming.
+  faux: Schema.mutableKey(Schema.optionalKey(Schema.Boolean)),
+});
 const Usage = Schema.Struct({
   input: Schema.optional(Schema.Unknown),
   output: Schema.optional(Schema.Unknown),
@@ -28,6 +33,7 @@ const Identity = { id: Schema.NonEmptyString, timestamp: Schema.String };
 const Model = { provider: Schema.NonEmptyString, model: Schema.NonEmptyString };
 const Entry = Schema.Union([
   Schema.Struct({ type: Schema.Literal("session"), id: Schema.NonEmptyString }),
+  Schema.Struct({ type: Schema.Literal("model_change"), provider: Schema.NonEmptyString }),
   Schema.Struct({
     ...Identity,
     type: Schema.Literal("message"),
@@ -56,11 +62,25 @@ function parseRecord(parsed: unknown, state: typeof PiScanState.Type): readonly 
   const entry = decoded.value;
   if (entry.type === "session") {
     state.sessionId = entry.id;
+    state.faux = false;
+    return [];
+  }
+  // Summaries use the selected model, even before its first assistant response.
+  if (entry.type === "model_change") {
+    state.faux = entry.provider === "faux";
+    return [];
+  }
+  const source = entry.type === "message" ? entry.message : entry;
+  if ("role" in source && source.role === "assistant") {
+    state.faux = source.provider === "faux";
+  }
+  if ("provider" in source && source.provider === "faux") return [];
+  // Tool results may include real model usage while the session is faux.
+  if ((entry.type === "compaction" || entry.type === "branch_summary") && state.faux === true) {
     return [];
   }
   const timestampMs = parseTimestampMs(entry.timestamp);
   if (timestampMs === null) return [];
-  const source = entry.type === "message" ? entry.message : entry;
   const usage = source.usage;
   // Pi's auxiliary tool and summary records carry no model attribution. Match
   // Pi's own breakdown rather than assigning them to the conversation model.
@@ -114,7 +134,7 @@ export const piUsageFormat: TranscriptUsageFormat<typeof PiScanState.Type> = {
     usage: true,
     message: { role: true, provider: true, model: true, responseModel: true, usage: true },
   },
-  usageMarkers: ['"usage"', '"session"'],
+  usageMarkers: ['"usage"', '"session"', '"model_change"'],
   parseLine: (line, state) => {
     let parsed: unknown;
     try {
@@ -125,7 +145,13 @@ export const piUsageFormat: TranscriptUsageFormat<typeof PiScanState.Type> = {
     return parseRecord(parsed, state);
   },
   parseProjected: parseRecord,
-  state: { initial: () => ({ sessionId: "" }), schema: PiScanState },
+  state: { initial: () => ({ sessionId: "", faux: false }), schema: PiScanState },
+  // Every pre-faux state needs replay to recover model changes. Deleted sources
+  // keep unattributed tool/summary rows because their provenance is lost.
+  upgradeCachedRecords: ({ records, state }) =>
+    Predicate.isObject(state) && typeof state.faux === "boolean"
+      ? undefined
+      : records.filter((record) => !record.model.startsWith("faux/")),
 };
 
 export const piUsageReader: ProviderUsageReader<PiSettings, Path.Path> = {

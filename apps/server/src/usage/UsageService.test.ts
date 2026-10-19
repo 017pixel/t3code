@@ -42,6 +42,14 @@ import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as ProviderHostLive from "../provider/ProviderHostLive.ts";
 import { totalTokens, type UsageRecord } from "@t3tools/provider-core/server/usage";
 import * as UsageService from "./UsageService.ts";
+import {
+  decodeScanCache,
+  encodeScanCache,
+  SCAN_CACHE_FILE_NAME,
+  type ScanCache,
+} from "./usageScanCache.ts";
+import { readTranscriptRecords } from "./usageTranscriptReader.ts";
+import { TEST_FORMAT_MAP, TEST_FORMATS } from "./usageTestFormats.ts";
 
 const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -307,6 +315,17 @@ describe("UsageService", () => {
           { type: "compaction", id: "compact", usage },
           { type: "branch_summary", id: "summary", usage },
         ].map((entry) => ({ ...entry, timestamp: "2026-08-01T11:00:00Z" }));
+        const summary = (type: "compaction" | "branch_summary", id: string) => ({
+          type,
+          id,
+          timestamp: parent.timestamp,
+          usage,
+        });
+        const fauxAssistant = {
+          ...parent,
+          id: "faux-assistant",
+          message: { ...parent.message, provider: "faux", responseModel: "faux-1" },
+        };
         yield* Effect.promise(async () => {
           await NodeFSP.mkdir(dir, { recursive: true });
           await NodeFSP.writeFile(
@@ -340,6 +359,43 @@ describe("UsageService", () => {
                 timestamp: "2026-08-01T13:00:00Z",
                 message: { ...parent.message, provider: "openai", responseModel: "another-model" },
               },
+              { type: "model_change", provider: "faux", modelId: "faux-1" },
+              summary("compaction", "faux-selected"),
+              // Large lines exercise field projection; short model changes exercise the line gate.
+              {
+                type: "model_change",
+                provider: "anthropic",
+                modelId: "actual-model",
+                padding: "x".repeat(9 * 1024 * 1024),
+              },
+              summary("branch_summary", "real-selected"),
+              { ...fauxAssistant, padding: "x".repeat(9 * 1024 * 1024) },
+              summary("compaction", "faux-compaction"),
+              summary("branch_summary", "faux-branch"),
+              {
+                type: "message",
+                id: "real-tool-in-faux-session",
+                timestamp: parent.timestamp,
+                message: { role: "toolResult", usage },
+              },
+              {
+                type: "usage",
+                id: "faux-standalone",
+                timestamp: parent.timestamp,
+                provider: "faux",
+                model: "faux-2",
+                usage,
+              },
+              { type: "session", id: "reset" },
+              summary("compaction", "reset-summary"),
+              fauxAssistant,
+              {
+                ...parent,
+                id: "real-again",
+                message: { ...parent.message, provider: "openai", responseModel: "another-model" },
+              },
+              summary("branch_summary", "real-assistant-summary"),
+              { type: "model_change", provider: "faux", modelId: "faux-1" },
               { type: "get_session_stats", usage: { ...usage, cost: { total: 1000 } } },
             ]
               .map((line) => encodeUnknownJsonString(line))
@@ -352,11 +408,11 @@ describe("UsageService", () => {
           const pi = first.buckets.filter((bucket) => bucket.provider === "pi");
           assert.strictEqual(
             pi.reduce((total, bucket) => total + bucket.costUsd, 0),
-            44,
+            49,
           );
           assert.strictEqual(
             pi.reduce((total, bucket) => total + totalTokens(bucket.totals), 0),
-            228,
+            418,
           );
           assert.deepStrictEqual(pi.map((bucket) => bucket.model).sort(), [
             "Tools/summaries",
@@ -395,12 +451,15 @@ describe("UsageService", () => {
           yield* Effect.promise(() =>
             NodeFSP.appendFile(
               NodePath.join(dir, "fork.jsonl"),
-              encodeUnknownJsonString({
-                ...parent,
-                id: "new",
-                timestamp: "2026-08-01T14:00:00Z",
-                message: { ...parent.message, responseModel: "latest-model" },
-              }) + "\n",
+              encodeUnknownJsonString(summary("compaction", "faux-after-resume")) +
+                "\n" +
+                encodeUnknownJsonString({
+                  ...parent,
+                  id: "new",
+                  timestamp: "2026-08-01T14:00:00Z",
+                  message: { ...parent.message, responseModel: "latest-model" },
+                }) +
+                "\n",
             ),
           );
           const grown = yield* service.readSummary(WINDOW);
@@ -408,7 +467,7 @@ describe("UsageService", () => {
             grown.buckets
               .filter((bucket) => bucket.provider === "pi")
               .reduce((total, bucket) => total + bucket.costUsd, 0),
-            45,
+            50,
           );
           yield* service.awaitPersisted;
           const restarted = yield* UsageService.make;
@@ -448,6 +507,149 @@ describe("UsageService", () => {
           ),
         );
       }).pipe(Effect.scoped),
+  );
+
+  it.live("replays old Pi caches and preserves ambiguous usage from deleted transcripts", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const dir = NodePath.join(home, "pi", "sessions");
+      const live = NodePath.join(dir, "live.jsonl");
+      const growing = NodePath.join(dir, "growing.jsonl");
+      const deleted = NodePath.join(dir, "deleted.jsonl");
+      const timestamp = "2026-08-01T10:00:00Z";
+      const real = {
+        type: "message",
+        id: "real",
+        timestamp,
+        message: {
+          role: "assistant",
+          provider: "anthropic",
+          model: "real-model",
+          usage: { output: 1, cost: { total: 1 } },
+        },
+      };
+      const fauxSummary = {
+        type: "compaction",
+        id: "faux-summary",
+        timestamp,
+        usage: { output: 100, cost: { total: 100 } },
+      };
+      const record = (id: string, model: string, outputTokens: number): UsageRecord => ({
+        provider: "pi",
+        timestampMs: Date.parse(timestamp),
+        model,
+        sessionId: id,
+        totals: {
+          uncachedInputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens,
+          reasoningTokens: 0,
+        },
+        reportedCostUsd: outputTokens,
+        speed: "standard",
+        dedupeKey: id,
+      });
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(dir, { recursive: true });
+        const prefix = (id: string) => [
+          { type: "session", id: "old-session" },
+          { ...real, id },
+          { type: "model_change", provider: "faux", modelId: "faux-1" },
+        ];
+        await NodeFSP.writeFile(
+          growing,
+          prefix("growing-real")
+            .map((line) => encodeUnknownJsonString(line))
+            .join("\n") + "\n",
+        );
+        await NodeFSP.writeFile(
+          live,
+          [
+            ...prefix("live-real"),
+            {
+              ...real,
+              id: "faux",
+              message: { ...real.message, provider: "faux", model: "faux-1" },
+            },
+            fauxSummary,
+          ]
+            .map((line) => encodeUnknownJsonString(line))
+            .join("\n") + "\n",
+        );
+      });
+
+      yield* Effect.gen(function* () {
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const cachePath = NodePath.join(stateDir, SCAN_CACHE_FILE_NAME);
+        const cache: ScanCache = new Map();
+        yield* Effect.promise(async () => {
+          for (const path of [live, growing]) {
+            const stat = await NodeFSP.stat(path);
+            const parsed = await readTranscriptRecords(path, TEST_FORMATS.pi);
+            assert.isNotNull(parsed);
+            cache.set(path, {
+              size: stat.size,
+              mtimeMs: stat.mtimeMs,
+              provider: "pi",
+              records: [record(path, "anthropic/real-model", 1)],
+              tailRecords: [],
+              // Retain a valid byte guard, but simulate the old parser's missing model state.
+              position: { ...parsed!.position, state: { sessionId: "old-session" } },
+            });
+          }
+          const oldLive = cache.get(live)!;
+          cache.set(live, {
+            ...oldLive,
+            records: [...oldLive.records, record("live-faux", "faux/faux-1", 1)],
+            tailRecords: [record("live-summary", "Tools/summaries", 100)],
+          });
+          cache.set(deleted, {
+            ...oldLive,
+            records: [
+              record("deleted-real", "anthropic/real-model", 1),
+              record("deleted-faux", "faux/faux-1", 100),
+              record("deleted-tool", "Tools/summaries", 2),
+              record("deleted-summary", "Tools/summaries", 3),
+            ],
+            tailRecords: [record("deleted-ambiguous", "Tools/summaries", 4)],
+            position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+          });
+          await NodeFSP.mkdir(stateDir, { recursive: true });
+          await NodeFSP.writeFile(cachePath, encodeUnknownJsonString(encodeScanCache(cache)));
+          // There were no faux rows in this entry: only replay can recover its model_change.
+          await NodeFSP.appendFile(
+            growing,
+            [fauxSummary, { type: "model_change", provider: "anthropic", modelId: "real-model" }]
+              .map((line) => encodeUnknownJsonString(line))
+              .join("\n") + "\n",
+          );
+        });
+
+        const service = yield* UsageService.make;
+        const first = yield* service.readSummary(WINDOW);
+        const pi = first.buckets.filter((bucket) => bucket.provider === "pi");
+        assert.deepStrictEqual(
+          pi.map((bucket) => [bucket.model, bucket.totals.outputTokens, bucket.costUsd]).sort(),
+          [
+            ["Tools/summaries", 9, 9],
+            ["anthropic/real-model", 3, 3],
+          ],
+        );
+        yield* service.awaitPersisted;
+        const saved = yield* Effect.promise(async () =>
+          decodeScanCache(
+            decodeUnknownJsonString(await NodeFSP.readFile(cachePath, "utf8")),
+            TEST_FORMAT_MAP,
+          ),
+        );
+        assert.isAbove(saved.get(live)?.position.resumeOffset ?? 0, 0);
+        assert.isAbove(saved.get(growing)?.position.resumeOffset ?? 0, 0);
+        assert.strictEqual(saved.get(live)?.size, cache.get(live)?.size);
+        const restarted = yield* UsageService.make;
+        assert.deepStrictEqual((yield* restarted.readSummary(WINDOW)).buckets, first.buckets);
+      }).pipe(Effect.provide(layerService({ prefix: "usage-pi-cache-upgrade", home, settings })));
+    }).pipe(Effect.scoped),
   );
 
   it.live("reports missing Pi history and skips malformed records without losing valid usage", () =>
