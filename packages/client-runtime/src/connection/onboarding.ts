@@ -35,14 +35,7 @@ import {
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
-import {
-  connectionRoutes,
-  hasRelayRoute,
-  isLearned,
-  routeEntry,
-  routeHttpBaseUrl,
-  sshTargetKey,
-} from "./routes.ts";
+import { connectionRoutes, hasRelayRoute, routeEntry, sshTargetKey } from "./routes.ts";
 
 export interface PairingConnectionInput {
   readonly pairingUrl?: string;
@@ -157,12 +150,7 @@ export const preparePairingRegistration = Effect.fn(
 const notAddable = (error: { readonly message: string }) =>
   Effect.fail(new ConnectionBlockedError({ reason: "configuration", detail: error.message }));
 
-/**
- * Adding a route to a machine this client reaches through T3 Connect needs no
- * pairing code: an address given without one is saved as a route that signs
- * in with T3 Connect. Returns null when the input should pair as usual.
- */
-export const addT3ConnectRoute = Effect.fn("clientRuntime.connection.onboarding.addT3ConnectRoute")(
+const addT3ConnectRoute = Effect.fn("clientRuntime.connection.onboarding.addT3ConnectRoute")(
   function* (input: PairingConnectionInput) {
     const environmentId = input.expectedEnvironmentId;
     if (environmentId === undefined) return null;
@@ -171,17 +159,6 @@ export const addT3ConnectRoute = Effect.fn("clientRuntime.connection.onboarding.
     if (entry === undefined || !hasRelayRoute(entry)) return null;
     const address = resolveRemoteAddressWithoutCredential(input);
     if (address === null) return null;
-    // An address the user already saved keeps how it signs in, so a paired
-    // token is never swapped for T3 Connect.
-    const base = (url: string) => url.replace(/\/+$/, "");
-    if (
-      connectionRoutes(entry).some(
-        (route) =>
-          !isLearned(route) && base(routeHttpBaseUrl(route) ?? "") === base(address.httpBaseUrl),
-      )
-    ) {
-      return environmentId;
-    }
     if (
       address.httpBaseUrl.startsWith("http:") &&
       typeof globalThis.location !== "undefined" &&
@@ -232,16 +209,10 @@ const registerPairingConnection = Effect.fn(
   let environmentId = yield* addT3ConnectRoute(input);
   if (environmentId === null) {
     const registration = yield* preparePairingRegistration(input);
-    // A platform-managed environment belongs to the host, so pairing leaves it alone.
     if (!(yield* registry.register(registration))) return registration.target.environmentId;
     environmentId = registration.target.environmentId;
   }
-  // Registering keeps a previous entry's switched-off flag and unsupported
-  // reason, which is right for label or URL edits. A pairing, or a route added
-  // through T3 Connect, is an explicit request to connect, so the stale reason
-  // is cleared and the environment turned on after it succeeded; a server that
-  // is still incompatible, such as an outdated one awaiting an update, is
-  // flagged again on connect.
+  // Adding a route is an explicit request to reconnect a disabled environment.
   yield* registry.setCompatibility(environmentId, null);
   yield* registry
     .setEnabled(environmentId, true)

@@ -49,9 +49,12 @@ import {
   connectionRoutes,
   credentialConnectionId,
   entryWithRoutes,
+  findRouteToSameAddress,
+  hasRelayRoute,
+  isLearned,
   mergeLearnedRoutes,
   routesAfterRemoving,
-  routesWithAdded,
+  upsertRoute,
   type ReportedEndpoint,
 } from "./routes.ts";
 
@@ -119,9 +122,7 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     /**
-     * Adds a route that needs no stored credential, such as an address that
-     * signs in with T3 Connect, to a saved environment. It replaces a route
-     * with the same id or address.
+     * Adds a credential-free route. Existing paired addresses keep their credentials.
      */
     readonly addRoute: (
       environmentId: EnvironmentId,
@@ -134,8 +135,8 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     /**
-     * Drops one route. Removing an environment's last route removes the
-     * environment, the same as `remove`.
+     * Removing an environment's last route removes the environment, the same as
+     * `remove`.
      */
     readonly removeRoute: (
       environmentId: EnvironmentId,
@@ -570,7 +571,7 @@ export const make = Effect.gen(function* () {
         let entry = registered;
         if (previous !== undefined) {
           const route: ConnectionRoute = { target: registered.target, profile: registered.profile };
-          const next = withRoutes(previous, routesWithAdded(connectionRoutes(previous), route));
+          const next = withRoutes(previous, upsertRoute(connectionRoutes(previous), route));
           if (next.addressesChanged) {
             yield* forgetRoutingTrust(environmentId, "register-connection");
           }
@@ -951,9 +952,24 @@ export const make = Effect.gen(function* () {
       environmentId,
       Effect.gen(function* () {
         const entry = yield* userEntry(environmentId);
+        const routes = connectionRoutes(entry);
         const profile = Option.getOrNull(route.profile);
+        // The relay may have been removed while onboarding fetched the descriptor.
+        if (
+          profile?._tag === "BearerConnectionProfile" &&
+          profile.authorization === "t3-connect" &&
+          !hasRelayRoute(entry)
+        ) {
+          return yield* new ConnectionBlockedError({
+            reason: "configuration",
+            detail:
+              "This machine no longer has a T3 Connect route. Add it again with a pairing code.",
+          });
+        }
+        const existing = findRouteToSameAddress(routes, route);
+        if (existing !== undefined && !isLearned(existing)) return;
         if (profile !== null) yield* profiles.put(profile);
-        yield* replaceRoutesLocked(entry, routesWithAdded(connectionRoutes(entry), route));
+        yield* replaceRoutesLocked(entry, upsertRoute(routes, route));
       }),
     );
   });

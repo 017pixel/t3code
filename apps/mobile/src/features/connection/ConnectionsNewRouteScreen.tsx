@@ -53,8 +53,6 @@ export function ConnectionsNewRouteScreen({
   const routeName = useRoute().name;
   const params = route.params ?? {};
   const { environments } = useEnvironments();
-  // A new route to a machine on T3 Connect signs in with T3 Connect, so the
-  // address alone is enough.
   const viaT3Connect = environments.some(
     (environment) => environment.environmentId === params.routeFor && environment.relayManaged,
   );

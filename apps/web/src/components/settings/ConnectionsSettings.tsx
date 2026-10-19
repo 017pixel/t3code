@@ -375,8 +375,6 @@ function parseRemotePairingFields(input: { readonly host: string; readonly pairi
   if (!host) {
     throw new Error("Enter a backend host.");
   }
-  // A missing code is reported when connecting: a new route to a machine on
-  // T3 Connect needs none.
   return { host, pairingCode: input.pairingCode.trim() };
 }
 

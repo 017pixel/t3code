@@ -20,6 +20,7 @@ import * as Scheduler from "effect/Scheduler";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as HttpClient from "effect/http/HttpClient";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
@@ -2186,6 +2187,58 @@ describe("EnvironmentRegistry routes", () => {
           Effect.scoped,
         );
       }),
+  );
+
+  it.effect("rejects a Connect route when its relay is removed during the descriptor fetch", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [LAN_TARGET, RELAY_TARGET],
+        [LAN_PROFILE],
+        [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
+      );
+      const descriptorStarted = yield* Deferred.make<void>();
+      const continueDescriptor = yield* Deferred.make<void>();
+      const http = Layer.effect(
+        HttpClient.HttpClient,
+        Effect.gen(function* () {
+          const client = yield* HttpClient.HttpClient;
+          return HttpClient.tapRequest(client, () =>
+            Deferred.succeed(descriptorStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(continueDescriptor)),
+            ),
+          );
+        }),
+      ).pipe(Layer.provide(routeOnboardingHttp().layer));
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const onboarding = yield* Onboarding.make;
+        const adding = yield* onboarding
+          .registerPairing({
+            host: "https://direct.example.test",
+            expectedEnvironmentId: RELAY_TARGET.environmentId,
+          })
+          .pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(descriptorStarted);
+        yield* registry.removeRoute(RELAY_TARGET.environmentId, "relay");
+        yield* Deferred.succeed(continueDescriptor, undefined);
+        expect(yield* Fiber.join(adding)).toMatchObject({
+          _tag: "ConnectionBlockedError",
+          reason: "configuration",
+        });
+        expect(yield* Ref.get(harness.storedTargets)).toEqual([LAN_TARGET]);
+        expect(yield* Ref.get(harness.storedProfiles)).toEqual(
+          new Map([[LAN_TARGET.connectionId, LAN_PROFILE]]),
+        );
+        expect(yield* Ref.get(harness.storedCredentials)).toEqual(
+          new Map([[LAN_TARGET.connectionId, BEARER_CREDENTIAL]]),
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(harness.layer, harness.connectionStores, http, routeClientPresentation),
+        ),
+        Effect.scoped,
+      );
+    }),
   );
 
   it.effect.each(["remove route", "sign out"] as const)(
