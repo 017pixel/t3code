@@ -6,9 +6,7 @@ export type ConnectionWakeup =
   | "application-active"
   | "application-active-probe"
   | "application-active-reconnect"
-  // The app came back from an inactive state, such as Control Center or Face
-  // ID, without a background visit. Inactive apps keep running, so the socket
-  // was never suspended, but a pending retry should still run now.
+  // Inactive-only mobile returns wake retries without probing or resubscribing.
   | "application-refocused"
   | "credentials-changed"
   | "network-changed";

@@ -18,14 +18,17 @@ failures wait for a wakeup instead of spending attempts on unchanged conditions.
 
 Foregrounding, an explicit retry, and an offline report probe the established
 session, and only a failed probe reconnects. Offline reports are often wrong, for
-example for a loopback server. On a slow link the answer can wait behind other
-data, so a probe that times out while frames still arrive waits another window,
-up to the full probe timeout. A long mobile background suspension replaces the
-session at once instead, because the OS can kill a socket without reporting
+example for a loopback server. Probe replies share the RPC read loop with
+subscriptions, so a full stream buffer can delay the reply while WebSocket
+messages still arrive. Measure progress before that read loop and allow it to
+extend a quick probe, with an absolute deadline so unrelated traffic cannot
+keep a stuck probe alive forever. A long mobile background suspension replaces
+the session at once instead, because the OS can kill a socket without reporting
 closure, and a probe would hold a dead socket in "Resuming" until it times out.
-That fresh attempt runs even while the network reports offline. A mobile return
-without a background visit, such as from Control Center, never suspended the
-socket, so it neither probes nor resubscribes. Foregrounding also wakes a
+That fresh attempt runs even while the network reports offline. An inactive-only
+mobile return, such as from Control Center, must stay distinct from a background
+resume: its socket and subscriptions were not suspended. It wakes retries and
+route checks without probing or resubscribing. Foregrounding also wakes a
 pending retry immediately and leaves an ordinary in-flight attempt alone.
 
 The [registry](../../packages/client-runtime/src/connection/registry.ts) scopes

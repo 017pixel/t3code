@@ -45,10 +45,7 @@ const CONNECTION_ESTABLISHMENT_TIMEOUT = "15 seconds";
 const establishmentTimeout = Duration.fromInputUnsafe(CONNECTION_ESTABLISHMENT_TIMEOUT);
 const synchronizationTimeout = Duration.fromInputUnsafe("75 seconds");
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
-// Mobile resumes, explicit retries, and offline events want a fast answer:
-// the user is waiting, or the network may be gone. It still has to cover a
-// lost packet and its retransmit on a 500ms round trip, or a slow link reads
-// as a dead socket and every resume tears down a working session.
+// Leave room for packet retransmission before replacing a slow but working link.
 const QUICK_CONNECTION_PROBE_TIMEOUT = "6 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
 const BETTER_ROUTE_CHECK_INTERVAL = "60 seconds";
@@ -595,13 +592,12 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
       yield* Ref.set(probeUnanswered, true);
-      const probe = yield* Effect.forkChild(lease.session.probe);
-      // Monotonic nanoseconds, so a wall-clock correction cannot move the deadline.
       const probeStartedAt = yield* Clock.monotonicTimeNanos;
       const latestDeadline = probeStartedAt + Duration.toNanosUnsafe(CONNECTION_PROBE_TIMEOUT);
       let probeWindow = probeTimeout;
       let deadline = probeStartedAt + Duration.toNanosUnsafe(probeWindow);
       let receivedFrames = yield* lease.session.receivedFrames;
+      const probe = yield* Effect.forkChild(lease.session.probe);
       for (;;) {
         const remaining = deadline - (yield* Clock.monotonicTimeNanos);
         const probeEvent = yield* Effect.raceAllFirst([
@@ -614,9 +610,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           ),
         ]);
         if (probeEvent._tag === "TimedOut") {
-          // Frames still arriving mean a slow link, not a dead one: the answer
-          // may be queued behind them. Wait another window, up to the full
-          // probe timeout.
+          // The reply may be behind other traffic; the absolute cap still bounds a stuck probe.
           const received = yield* lease.session.receivedFrames;
           const now = yield* Clock.monotonicTimeNanos;
           if (received > receivedFrames && now < latestDeadline) {

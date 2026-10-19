@@ -7,11 +7,6 @@ export type MobileApplicationActiveWakeup = Extract<
   "application-active-probe" | "application-active-reconnect" | "application-refocused"
 >;
 
-/**
- * The wakeup for returning to the foreground. Without a background visit the
- * app only went inactive, such as for Control Center or Face ID, and its
- * socket was never suspended, so it skips the probe.
- */
 export function mobileApplicationActiveWakeup(
   backgroundedAtMs: number | null,
   activeAtMs: number,
