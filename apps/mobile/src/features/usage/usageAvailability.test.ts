@@ -109,6 +109,7 @@ describe("usage availability after merging selected environments", () => {
     const failed = usage([{ ...mac, summary: null, error: "Request failed" }]);
     expect(failed.merged.costUsd).toBe(0);
     expect(failed.availability.hasCompatibleSummary).toBe(false);
+    expect(failed.availability.isLoading).toBe(false);
     expect(failed.availability.canRetry).toBe(true);
     expect(failed.availability.notices).toEqual([
       {
@@ -121,12 +122,13 @@ describe("usage availability after merging selected environments", () => {
     expect(empty.merged.costUsd).toBe(0);
     expect(empty.merged.totalTokens).toBe(0);
     expect(empty.availability.hasCompatibleSummary).toBe(true);
+    expect(empty.availability.isLoading).toBe(false);
     expect(empty.availability.notices).toEqual([]);
     expect(empty.availability.canRetry).toBe(false);
   });
 
   it("keeps healthy totals while naming incompatible, failed, loading and disconnected omissions", () => {
-    const { merged, availability } = usage([
+    const environments = [
       mac,
       newer,
       {
@@ -135,14 +137,20 @@ describe("usage availability after merging selected environments", () => {
         summary: null,
         error: "Request failed",
       },
-      { environmentId: EnvironmentId.make("loading"), label: "Loading server", summary: null },
+      {
+        environmentId: EnvironmentId.make("loading"),
+        label: "Loading server",
+        summary: null,
+        isConnected: true,
+      },
       {
         environmentId: EnvironmentId.make("offline"),
         label: "Offline server",
         summary: null,
         isConnected: false,
       },
-    ]);
+    ];
+    const { merged, availability } = usage(environments);
     expect(merged.costUsd).toBe(10);
     expect(merged.totalTokens).toBe(150);
     expect(availability.hasCompatibleSummary).toBe(true);
@@ -156,6 +164,20 @@ describe("usage availability after merging selected environments", () => {
       { environmentId: "loading", message: "Waiting for usage from Loading server." },
       { environmentId: "offline", message: "Connect to Offline server to load its usage." },
     ]);
+
+    for (const selected of [environments.slice(2), environments.slice(1)]) {
+      const pending = usage(selected).availability;
+      expect(pending.isLoading).toBe(true);
+      expect(pending.hasCompatibleSummary).toBe(false);
+      expect(pending.notices).toEqual(
+        availability.notices.filter(({ environmentId }) =>
+          selected.some((environment) => environment.environmentId === environmentId),
+        ),
+      );
+      expect(pending.coverageMessage ?? "").not.toMatch(
+        /No usage totals are available|until a compatible environment/i,
+      );
+    }
   });
 
   it("keeps saved totals visibly stale after a failure or disconnect and retries only while connected", () => {
