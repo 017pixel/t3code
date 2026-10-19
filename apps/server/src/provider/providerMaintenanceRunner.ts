@@ -9,6 +9,7 @@ import {
   type ServerProviderUpdateState,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { resolveNodeExecutable } from "@t3tools/shared/nodeRuntime";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Cause from "effect/Cause";
@@ -21,6 +22,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -109,8 +111,8 @@ export interface ProviderInstallInput {
   readonly args: ReadonlyArray<string>;
   readonly env?: NodeJS.ProcessEnv | undefined;
   readonly onProgress?: ((line: string) => Effect.Effect<void>) | undefined;
-  /** Called with the installer's pid once it is running, for the install lock. */
-  readonly recordChildPid: (pid: number) => Effect.Effect<void>;
+  /** Must record the gated wrapper's pid before allowing it to start the installer. */
+  readonly recordChildPid: (pid: number) => Effect.Effect<void, Error>;
 }
 
 /** Runs one provider installer to completion. */
@@ -124,6 +126,39 @@ export class ProviderInstaller extends Context.Service<
 >()("t3/provider/providerMaintenanceRunner/ProviderInstaller") {}
 
 const noop = () => {};
+
+const encodeInstallWrapperInput = Schema.encodeSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      command: Schema.String,
+      args: Schema.Array(Schema.String),
+      shell: Schema.Boolean,
+      runAsNode: Schema.optional(Schema.String),
+    }),
+  ),
+);
+
+// EOF before "g" aborts without touching the install target. The installer
+// inherits this wrapper's process group and log descriptors, but no parent pipe.
+const INSTALL_WRAPPER = `
+const { spawn } = require("node:child_process");
+const { command, args, shell, runAsNode } = JSON.parse(process.argv[1]);
+let started = false;
+process.stdin.once("end", () => { if (!started) process.exit(1); });
+process.stdin.once("data", (data) => {
+  if (data[0] !== 103) process.exit(1);
+  started = true;
+  process.stdin.destroy();
+  const env = { ...process.env };
+  if (runAsNode === undefined) delete env.ELECTRON_RUN_AS_NODE;
+  else env.ELECTRON_RUN_AS_NODE = runAsNode;
+  const installer = spawn(command, args, {
+    shell, windowsHide: true, stdio: ["ignore", 1, 2], env,
+  });
+  installer.once("error", (error) => { console.error(error); process.exitCode = 1; });
+  installer.once("exit", (code) => { process.exitCode = code ?? 1; });
+});
+`;
 
 /**
  * Runs an installer as a detached process whose output goes to a log file. It
@@ -139,6 +174,8 @@ export const runDetachedInstall = Effect.fn("ProviderMaintenanceRunner.runDetach
     const fileSystem = yield* FileSystem.FileSystem;
     const platform = yield* HostProcess.Platform;
     const environment = yield* HostProcess.Environment;
+    const childEnvironment = { ...environment, ...input.env };
+    const node = yield* resolveNodeExecutable("Provider CLI updates", childEnvironment);
     // Resolve the executable for the host platform before spawning. On
     // Windows the update tools are batch shims (e.g. `npm` -> `npm.cmd`),
     // which a bare spawn cannot launch (spawn npm ENOENT); resolveSpawnCommand
@@ -162,27 +199,53 @@ export const runDetachedInstall = Effect.fn("ProviderMaintenanceRunner.runDetach
 
     // Listeners are registered in the spawn tick: Node emits `spawn` and `exit`
     // asynchronously, and a late listener would wait forever.
-    const { spawned, exited } = yield* Effect.try({
-      try: () => {
-        const child = spawnProcess(resolved.command, resolved.args, {
-          shell: resolved.shell,
-          detached: true,
-          windowsHide: true,
-          stdio: ["ignore", logFd, logFd],
-          ...(input.env ? { env: { ...environment, ...input.env } } : {}),
-        });
-        const spawned = Deferred.makeUnsafe<number, Error>();
-        const exited = Deferred.makeUnsafe<number | null>();
-        child.on("error", (cause) => Deferred.doneUnsafe(spawned, Effect.fail(toError(cause))));
-        child.once("spawn", () => Deferred.doneUnsafe(spawned, Effect.succeed(child.pid ?? 0)));
-        child.once("exit", (code) => Deferred.doneUnsafe(exited, Effect.succeed(code)));
-        child.unref();
-        return { spawned, exited };
-      },
-      catch: toError,
-    });
+    const { child, spawned, exited } = yield* Effect.acquireRelease(
+      Effect.try({
+        try: () => {
+          const child = spawnProcess(
+            node,
+            [
+              "-e",
+              INSTALL_WRAPPER,
+              encodeInstallWrapperInput({
+                ...resolved,
+                runAsNode: childEnvironment.ELECTRON_RUN_AS_NODE,
+              }),
+            ],
+            {
+              detached: true,
+              windowsHide: true,
+              stdio: ["pipe", logFd, logFd],
+              env: {
+                ...childEnvironment,
+                ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+              },
+            },
+          );
+          const spawned = Deferred.makeUnsafe<number, Error>();
+          const exited = Deferred.makeUnsafe<number | null>();
+          child.on("error", (cause) => Deferred.doneUnsafe(spawned, Effect.fail(toError(cause))));
+          child.once("spawn", () => Deferred.doneUnsafe(spawned, Effect.succeed(child.pid ?? 0)));
+          child.once("exit", (code) => Deferred.doneUnsafe(exited, Effect.succeed(code)));
+          child.stdin!.on("error", noop);
+          child.unref();
+          return { child, spawned, exited };
+        },
+        catch: toError,
+      }),
+      ({ child }) => Effect.sync(() => child.stdin!.destroy()),
+    );
     const pid = yield* Deferred.await(spawned);
-    yield* input.recordChildPid(pid);
+    yield* input.recordChildPid(pid).pipe(
+      Effect.andThen(
+        Effect.callback<void, Error>((resume) => {
+          child.stdin!.end("g", (error?: Error | null) =>
+            resume(error ? Effect.fail(toError(error)) : Effect.void),
+          );
+        }),
+      ),
+      Effect.uninterruptible,
+    );
 
     const readLog = fileSystem.readFile(logPath).pipe(Effect.orElseSucceed(() => new Uint8Array()));
     const onProgress = input.onProgress;
@@ -237,9 +300,13 @@ export const layerInstaller = Layer.effect(
   ProviderInstaller,
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     return ProviderInstaller.of({
       run: (input) =>
-        runDetachedInstall(input).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem)),
+        runDetachedInstall(input).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        ),
     });
   }),
 );
@@ -462,7 +529,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         const startedAtRef = yield* Ref.make<string | null>(null);
 
         const runCommandAndVerify = Effect.fn("ProviderMaintenanceRunner.runCommandAndVerify")(
-          function* (recordChildPid: (pid: number) => Effect.Effect<void>) {
+          function* (recordChildPid: ProviderInstallInput["recordChildPid"]) {
             const startedAt = yield* nowIso;
             yield* Ref.set(startedAtRef, startedAt);
             const setRunningMessage = (message: string) =>

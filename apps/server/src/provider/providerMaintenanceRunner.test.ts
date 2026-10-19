@@ -31,6 +31,7 @@ import * as Scope from "effect/Scope";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeEvents from "node:events";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../config.ts";
@@ -918,7 +919,8 @@ describe("providerMaintenanceRunner", () => {
       ),
   );
 
-  it.effect("spawns a win32 .cmd shim through the shell, hidden and detached", () => {
+  it.effect("gates a detached wrapper carrying the resolved win32 .cmd command", () => {
+    const recorded: Array<number> = [];
     const captured: Array<{
       readonly command: string;
       readonly args: ReadonlyArray<string>;
@@ -930,15 +932,25 @@ describe("providerMaintenanceRunner", () => {
       options: NodeChildProcess.SpawnOptions,
     ) => {
       captured.push({ command, args, options });
-      const child = Object.assign(new NodeEvents.EventEmitter(), { pid: 4242, unref: () => {} });
+      const stdin = new NodeStream.Writable({
+        write(chunk, _encoding, callback) {
+          assert.deepStrictEqual(recorded, [4242]);
+          assert.strictEqual(chunk.toString(), "g");
+          callback();
+        },
+      });
+      const child = Object.assign(new NodeEvents.EventEmitter(), {
+        pid: 4242,
+        stdin,
+        unref: () => {},
+      });
+      stdin.once("finish", () => child.emit("exit", 0));
       setImmediate(() => {
         child.emit("spawn");
-        child.emit("exit", 0);
       });
       return child;
     }) as unknown as typeof NodeChildProcess.spawn;
     return Effect.gen(function* () {
-      const recorded: Array<number> = [];
       const result = yield* ProviderMaintenanceRunner.runDetachedInstall(
         {
           command: "npm",
@@ -953,13 +965,16 @@ describe("providerMaintenanceRunner", () => {
       const call = captured[0];
       assert.ok(call, "expected the spawner to be invoked once");
       assert.strictEqual(
-        call.command,
+        JSON.parse(call.args[2]!).command,
         '^"C:\\fake\\npm\\npm.cmd^" ^"install^" ^"-g^" ^"@openai/codex@latest^"',
       );
-      assert.strictEqual(call.options.shell, true);
+      assert.strictEqual(call.command, process.execPath);
+      assert.strictEqual(call.options.shell, undefined);
+      assert.strictEqual(JSON.parse(call.args[2]!).shell, true);
       assert.strictEqual(call.options.detached, true);
       assert.strictEqual(call.options.windowsHide, true);
-      assert.deepEqual(call.args, []);
+      assert.deepEqual(JSON.parse(call.args[2]!).args, []);
+      assert.strictEqual(call.options.stdio?.[0], "pipe");
       assert.deepStrictEqual(recorded, [4242]);
       assert.strictEqual(result.exitCode, 0);
     }).pipe(
@@ -1232,6 +1247,7 @@ describe("ProviderInstallLock", () => {
         Effect.provide(layerLockAt(home)),
       );
     return {
+      home,
       directory: NodePath.join(home, "t3", "provider-install"),
       first: yield* instance(),
       second: yield* instance(),
@@ -1281,31 +1297,30 @@ describe("ProviderInstallLock", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("leaves a replacement lock owned by another run when releasing an expired lock", () =>
+  it.effect("never reclaims an aged live owner, including while it records its child", () =>
     Effect.gen(function* () {
       const { directory, first, second } = yield* withHome;
       const fileSystem = yield* FileSystem.FileSystem;
       const entered = yield* Deferred.make<void>();
       const finish = yield* Deferred.make<void>();
       const original = yield* first
-        .tryRun("k", () =>
-          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(finish))),
+        .tryRun("k", (recordChildPid) =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(finish);
+            yield* recordChildPid(process.pid);
+          }),
         )
         .pipe(Effect.forkScoped);
       yield* Deferred.await(entered);
-      yield* fileSystem.utimes(lockFile(directory, "k"), 0, 0);
+      yield* fileSystem.utimes(`${lockFile(directory, "k")}.1`, 0, 0);
       yield* TestClock.adjust(Duration.hours(1));
-      const replacement = yield* second.tryRun("k", () =>
-        Effect.gen(function* () {
-          const contents = yield* fileSystem.readFileString(lockFile(directory, "k"));
-          yield* Deferred.succeed(finish, undefined);
-          yield* Fiber.join(original);
-          assert.strictEqual(yield* fileSystem.readFileString(lockFile(directory, "k")), contents);
-          assert.isTrue(yield* second.anyHeld);
-        }),
-      );
-      assert.isTrue(Option.isSome(replacement));
-      assert.isFalse(yield* second.anyHeld);
+      assert.isTrue(yield* second.anyHeld);
+      assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
+      yield* Deferred.succeed(finish, undefined);
+      yield* Fiber.join(original);
+      // The recorded child is still this live process after run completes.
+      assert.isTrue(yield* second.anyHeld);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -1340,7 +1355,9 @@ describe("ProviderInstallLock", () => {
         );
       }
       assert.isFalse(
-        yield* fileSystem.exists(lockFile(NodePath.join(home, "t3", "provider-install"), "k")),
+        yield* fileSystem.exists(
+          `${lockFile(NodePath.join(home, "t3", "provider-install"), "k")}.1`,
+        ),
       );
       assert.isFalse(yield* lock.anyHeld);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -1362,6 +1379,90 @@ describe("ProviderInstallLock", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("honors a live legacy lock and retains only the highest released generation", () =>
+    Effect.gen(function* () {
+      const { directory, first, second } = yield* withHome;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const legacy = lockFile(directory, "k");
+      yield* fileSystem.makeDirectory(directory, { recursive: true });
+      yield* fileSystem.writeFileString(legacy, String(process.pid));
+      yield* fileSystem.utimes(legacy, 0, 0);
+      yield* TestClock.adjust(Duration.hours(1));
+      assert.isTrue(yield* first.anyHeld);
+      assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
+      yield* fileSystem.remove(legacy);
+      for (let generation = 1; generation <= 3; generation += 1) {
+        assert.isTrue(Option.isSome(yield* first.tryRun("k", () => Effect.void)));
+        assert.deepStrictEqual(yield* fileSystem.readDirectory(directory), [
+          `k.lock.${generation}`,
+        ]);
+        assert.strictEqual(
+          (yield* fileSystem.readFileString(`${legacy}.${generation}`)).split("\n")[0],
+          "released",
+        );
+        assert.isFalse(yield* second.anyHeld);
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("does not start an installer when recording its pid fails", () =>
+    Effect.gen(function* () {
+      const { home, directory, second } = yield* withHome;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const marker = NodePath.join(home, "must-not-install");
+      let failRename = true;
+      const lock = yield* Effect.service(ProviderInstallLock.ProviderInstallLock).pipe(
+        Effect.provide(ProviderInstallLock.layer),
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.FileSystem.of({
+            ...fileSystem,
+            rename: (from, to) => {
+              if (!failRename) return fileSystem.rename(from, to);
+              failRename = false;
+              return Effect.fail(
+                PlatformError.systemError({
+                  _tag: "Unknown",
+                  module: "FileSystem",
+                  method: "rename",
+                  description: "No space left on device",
+                }),
+              );
+            },
+          }),
+        ),
+        Effect.provideService(HostProcess.Environment, { XDG_CACHE_HOME: home }),
+      );
+      const wrapperExited = yield* Deferred.make<void>();
+      const result = yield* lock
+        .tryRun("k", (recordChildPid) =>
+          ProviderMaintenanceRunner.runDetachedInstall(
+            {
+              command: process.execPath,
+              args: ["-e", "require('node:fs').writeFileSync(process.argv[1],'bad')", marker],
+              recordChildPid,
+            },
+            ((
+              command: string,
+              args: ReadonlyArray<string>,
+              options: NodeChildProcess.SpawnOptions,
+            ) => {
+              const child = NodeChildProcess.spawn(command, args, options);
+              child.once("exit", () => Deferred.doneUnsafe(wrapperExited, Effect.void));
+              return child;
+            }) as typeof NodeChildProcess.spawn,
+          ),
+        )
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
+      yield* Deferred.await(wrapperExited);
+      assert.isFalse(yield* fileSystem.exists(marker));
+      assert.isFalse(yield* second.anyHeld);
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(directory), ["k.lock.1"]);
+      assert.isTrue(Option.isSome(yield* second.tryRun("k", () => Effect.void)));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("two servers reclaiming the same stale lock leave exactly one owner", () =>
     Effect.gen(function* () {
       const { directory, first, second } = yield* withHome;
@@ -1370,6 +1471,8 @@ describe("ProviderInstallLock", () => {
       yield* fileSystem.makeDirectory(directory, { recursive: true });
       yield* fileSystem.writeFileString(lockFile(directory, "k"), String(deadPid));
       const runs = yield* Ref.make(0);
+      yield* fileSystem.writeFileString(`${lockFile(directory, "k")}.reclaim`, String(deadPid));
+      yield* fileSystem.utimes(`${lockFile(directory, "k")}.reclaim`, 0, 0);
       // Hold the lock long enough for the other reclaimer to finish its attempt.
       // @effect-diagnostics-next-line globalTimers:off
       const hold = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)));

@@ -12,10 +12,8 @@ import type { PlatformError } from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
-/** A lock file this old is stale even if a process with its pid is alive (pid reuse). */
+/** An incomplete record left by a crashed writer eventually stops blocking installs. */
 const MAX_LOCK_AGE = Duration.hours(1);
-/** A reclaim sentinel this old was left by a process that died mid-reclaim. */
-const MAX_SENTINEL_AGE = Duration.seconds(10);
 const IDLE_POLL_INTERVAL = Duration.seconds(1);
 
 export class ProviderInstallLockError extends Schema.TaggedError<ProviderInstallLockError>()(
@@ -43,7 +41,9 @@ export class ProviderInstallLock extends Context.Service<
      */
     readonly tryRun: <A, E, R>(
       lockKey: string,
-      run: (recordChildPid: (pid: number) => Effect.Effect<void>) => Effect.Effect<A, E, R>,
+      run: (
+        recordChildPid: (pid: number) => Effect.Effect<void, ProviderInstallLockError>,
+      ) => Effect.Effect<A, E, R>,
     ) => Effect.Effect<Option.Option<A>, E | ProviderInstallLockError, R>;
     /** Completes once no installer holds any lock, or when the lock directory cannot be read. */
     readonly untilIdle: Effect.Effect<void>;
@@ -62,6 +62,13 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+function parseGeneration(name: string) {
+  const match = /^(.+\.lock)\.([1-9]\d*)$/.exec(name);
+  if (!match) return undefined;
+  const generation = Number(match[2]);
+  return Number.isSafeInteger(generation) ? { key: match[1]!, generation, name } : undefined;
+}
+
 const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -71,7 +78,8 @@ const make = Effect.gen(function* () {
   const cacheHome = environment.XDG_CACHE_HOME || path.join(homeDirectory, ".cache");
   const directory = path.join(cacheHome, "t3", "provider-install");
 
-  const toLockError = (cause: unknown) => new ProviderInstallLockError({ cause });
+  const toLockError = (cause: unknown) =>
+    cause instanceof ProviderInstallLockError ? cause : new ProviderInstallLockError({ cause });
   const ignoreNotFound =
     <B>(fallback: B) =>
     <A>(effect: Effect.Effect<A, PlatformError>): Effect.Effect<A | B, PlatformError> =>
@@ -89,80 +97,91 @@ const make = Effect.gen(function* () {
       onNone: () => 0,
       onSome: (date) => date.getTime(),
     });
-    if ((yield* Clock.currentTimeMillis) - modifiedAt >= Duration.toMillis(MAX_LOCK_AGE)) {
-      return false;
-    }
     // The first line holds pids; the second identifies the owning run, including within one server.
     const [pids = ""] = (yield* fileSystem.readFileString(file)).split("\n");
-    return pids.split(" ").some((value) => {
-      const pid = Number.parseInt(value, 10);
-      return Number.isNaN(pid) || isPidAlive(pid);
-    });
+    if (pids === "released") return false;
+    const recorded = pids.split(" ").map(Number);
+    const valid = (pid: number) => Number.isSafeInteger(pid) && pid > 0;
+    // Age cannot fence a stopped live owner: it could resume and send "go"
+    // after a successor starts. Only dead pids permit reclaiming a complete record.
+    if (recorded.some((pid) => valid(pid) && isPidAlive(pid))) return true;
+    return (
+      recorded.some((pid) => !valid(pid)) &&
+      (yield* Clock.currentTimeMillis) - modifiedAt < Duration.toMillis(MAX_LOCK_AGE)
+    );
   });
 
-  /** Creates `file` exclusively; false when it already exists. */
-  const createExclusively = (file: string, contents = String(process.pid)) =>
-    Effect.gen(function* () {
-      const handle = yield* fileSystem.open(file, { flag: "wx" });
-      yield* handle
-        .writeAll(new TextEncoder().encode(contents))
-        .pipe(Effect.onError(() => fileSystem.remove(file, { force: true }).pipe(Effect.ignore)));
+  /** Publishes a complete record exclusively; a paused writer must never look abandoned. */
+  const createExclusively = (file: string, contents: string, owner: string) => {
+    const temporary = `${file}.${owner}.tmp`;
+    return Effect.gen(function* () {
+      const handle = yield* fileSystem.open(temporary, { flag: "wx" });
+      yield* handle.writeAll(new TextEncoder().encode(contents));
     }).pipe(
       Effect.scoped,
+      // Unlike rename, link cannot overwrite another contender's generation.
+      Effect.andThen(fileSystem.link(temporary, file)),
       Effect.as(true),
+      Effect.ensuring(fileSystem.remove(temporary, { force: true }).pipe(Effect.ignore)),
       Effect.catchTags({
         PlatformError: (error) =>
           error.reason._tag === "AlreadyExists" ? Effect.succeed(false) : Effect.fail(error),
       }),
     );
+  };
 
-  /** Takes the short-lived sentinel that serializes reclaimers; one left by a crashed process is removed. */
-  const claimSentinel = Effect.fn("ProviderInstallLock.claimSentinel")(function* (
-    sentinel: string,
-  ) {
-    if (yield* createExclusively(sentinel)) return true;
-    const info = yield* fileSystem.stat(sentinel).pipe(ignoreNotFound(undefined));
-    if (info !== undefined) {
-      const modifiedAt = Option.match(info.mtime, {
-        onNone: () => 0,
-        onSome: (date) => date.getTime(),
-      });
-      if ((yield* Clock.currentTimeMillis) - modifiedAt < Duration.toMillis(MAX_SENTINEL_AGE)) {
-        return false;
-      }
-      yield* fileSystem.remove(sentinel, { force: true });
-    }
-    return yield* createExclusively(sentinel);
+  const generations = Effect.gen(function* () {
+    const names = yield* fileSystem.readDirectory(directory).pipe(ignoreNotFound([]));
+    return names.flatMap((name) => {
+      const parsed = parseGeneration(name);
+      return parsed ? [parsed] : [];
+    });
   });
 
   /**
-   * Creates the lock file exclusively; false when it exists and is held. A stale one is
-   * reclaimed under a sentinel, so a second reclaimer cannot delete the first one's fresh lock.
+   * Only exclusive creation elects an owner. The highest generation is retained
+   * even after release, so a delayed reclaimer cannot reuse its number.
    */
   const acquire = Effect.fn("ProviderInstallLock.acquire")(function* (
-    file: string,
+    key: string,
     contents: string,
+    owner: string,
   ) {
     yield* fileSystem.makeDirectory(directory, { recursive: true });
-    if (yield* createExclusively(file, contents)) return true;
-    if (yield* isHeld(file).pipe(ignoreNotFound(false))) return false;
-    const sentinel = `${file}.reclaim`;
-    if (!(yield* claimSentinel(sentinel))) return false;
-    return yield* Effect.gen(function* () {
-      if (yield* isHeld(file).pipe(ignoreNotFound(false))) return false;
-      yield* fileSystem.remove(file, { force: true });
-      return yield* createExclusively(file, contents);
-    }).pipe(Effect.ensuring(fileSystem.remove(sentinel, { force: true }).pipe(Effect.ignore)));
+    // Older servers wrote an unnumbered lock. Never ignore their live owner.
+    if (yield* isHeld(path.join(directory, key)).pipe(ignoreNotFound(false))) return undefined;
+    const previous = (yield* generations).filter((entry) => entry.key === key);
+    const highest = previous.reduce((max, entry) => Math.max(max, entry.generation), 0);
+    if (
+      highest > 0 &&
+      (yield* isHeld(path.join(directory, `${key}.${highest}`)).pipe(ignoreNotFound(false)))
+    )
+      return undefined;
+    const next = highest + 1;
+    const file = path.join(directory, `${key}.${next}`);
+    if (!(yield* createExclusively(file, contents, owner))) return undefined;
+    // Our directory snapshot may predate a successor that already pruned this
+    // number. A recreated lower generation must never run an installer.
+    if ((yield* generations).some((entry) => entry.key === key && entry.generation > next)) {
+      return undefined;
+    }
+    yield* Effect.forEach(
+      previous,
+      (entry) =>
+        fileSystem.remove(path.join(directory, entry.name), { force: true }).pipe(Effect.ignore),
+      { discard: true },
+    );
+    return file;
   });
 
   const tryRun: ProviderInstallLock["Service"]["tryRun"] = (lockKey, run) =>
     Effect.gen(function* () {
-      const file = path.join(directory, `${encodeURIComponent(lockKey)}.lock`);
+      const key = `${encodeURIComponent(lockKey)}.lock`;
       const owner = yield* crypto.randomUUIDv4().pipe(Effect.mapError(toLockError));
       const contents = `${process.pid}\n${owner}`;
       // Written aside and renamed over the lock, so a failed write (disk full)
       // leaves the previous complete record instead of an empty, held file.
-      const replace = (next: string) => {
+      const replace = (file: string, next: string) => {
         const temporary = `${file}.${owner}.tmp`;
         return fileSystem.writeFileString(temporary, next).pipe(
           Effect.andThen(fileSystem.rename(temporary, file)),
@@ -170,11 +189,12 @@ const make = Effect.gen(function* () {
         );
       };
       return yield* Effect.acquireUseRelease(
-        acquire(file, contents).pipe(
+        acquire(key, contents, owner).pipe(
           Effect.mapError(toLockError),
           Effect.flatMap((acquired) =>
-            acquired
-              ? Ref.make<{ pid: number | undefined; contents: string }>({
+            acquired !== undefined
+              ? Ref.make<{ file: string; pid: number | undefined; contents: string }>({
+                  file: acquired,
                   pid: undefined,
                   contents,
                 })
@@ -185,17 +205,23 @@ const make = Effect.gen(function* () {
           ownerState === undefined
             ? Effect.succeedNone
             : run((pid) =>
-                Ref.update(ownerState, (state) => ({ ...state, pid })).pipe(
-                  Effect.andThen(replace(`${process.pid} ${pid}\n${owner}`)),
-                  Effect.andThen(
-                    Ref.set(ownerState, { pid, contents: `${process.pid} ${pid}\n${owner}` }),
-                  ),
-                  Effect.catch((cause) =>
-                    Effect.logWarning("Could not record the provider installer in its lock", {
-                      cause,
-                    }),
-                  ),
-                ),
+                Effect.gen(function* () {
+                  const state = yield* Ref.get(ownerState);
+                  if ((yield* fileSystem.readFileString(state.file)) !== state.contents) {
+                    return yield* toLockError(new Error("Provider install lock ownership changed"));
+                  }
+                  const next = `${process.pid} ${pid}\n${owner}`;
+                  yield* replace(state.file, next);
+                  yield* Ref.set(ownerState, { ...state, pid, contents: next });
+                  const generation = parseGeneration(path.basename(state.file))!;
+                  if (
+                    (yield* generations).some(
+                      (entry) => entry.key === key && entry.generation > generation.generation,
+                    )
+                  ) {
+                    return yield* toLockError(new Error("Provider install lock ownership expired"));
+                  }
+                }).pipe(Effect.mapError(toLockError), Effect.uninterruptible),
               ).pipe(Effect.map(Option.some)),
         (ownerState) =>
           ownerState === undefined
@@ -203,13 +229,12 @@ const make = Effect.gen(function* () {
             : Ref.get(ownerState).pipe(
                 Effect.flatMap((state) =>
                   Effect.gen(function* () {
-                    if ((yield* fileSystem.readFileString(file)) !== state.contents) return;
+                    if ((yield* fileSystem.readFileString(state.file)) !== state.contents) return;
                     // Once `run` ends, only a surviving detached installer keeps the lock held.
-                    if (state.pid !== undefined && isPidAlive(state.pid)) {
-                      yield* replace(`${state.pid}\n${owner}`);
-                    } else {
-                      yield* fileSystem.remove(file, { force: true });
-                    }
+                    yield* replace(
+                      state.file,
+                      `${state.pid !== undefined && isPidAlive(state.pid) ? state.pid : "released"}\n${owner}`,
+                    );
                   }),
                 ),
                 Effect.ignore,
@@ -219,9 +244,18 @@ const make = Effect.gen(function* () {
 
   const anyHeld = Effect.gen(function* () {
     const names = yield* fileSystem.readDirectory(directory).pipe(ignoreNotFound([]));
+    const highest = new Map<string, NonNullable<ReturnType<typeof parseGeneration>>>();
     for (const name of names) {
-      if (!name.endsWith(".lock")) continue;
-      if (yield* isHeld(path.join(directory, name)).pipe(ignoreNotFound(false))) return true;
+      if (name.endsWith(".lock")) {
+        if (yield* isHeld(path.join(directory, name)).pipe(ignoreNotFound(false))) return true;
+      }
+      const entry = parseGeneration(name);
+      if (entry && entry.generation > (highest.get(entry.key)?.generation ?? 0)) {
+        highest.set(entry.key, entry);
+      }
+    }
+    for (const entry of highest.values()) {
+      if (yield* isHeld(path.join(directory, entry.name)).pipe(ignoreNotFound(false))) return true;
     }
     return false;
   }).pipe(Effect.mapError(toLockError));
