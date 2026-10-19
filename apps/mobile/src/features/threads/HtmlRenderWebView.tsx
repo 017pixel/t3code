@@ -128,9 +128,10 @@ export function HtmlRenderWebView(props: {
   const crashes = useRef(0);
   const lastTouchAt = useRef<number | null>(null);
   const shownTheme = useRef<HtmlRenderTheme | null>(null);
+  const canSendMessage = props.onSendMessage !== undefined;
   const source = useMemo(
-    () => ({ uri: props.uri + htmlRenderThemeFragment(initialTheme) }),
-    [props.uri, initialTheme],
+    () => ({ uri: props.uri + htmlRenderThemeFragment(initialTheme, canSendMessage) }),
+    [props.uri, initialTheme, canSendMessage],
   );
   useEffect(() => {
     if (shownTheme.current === null || shownTheme.current === theme) return;

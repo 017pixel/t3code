@@ -4,7 +4,7 @@ Agents can answer with a page instead of only text: a chart, table, diagram, ima
 
 Pages use your current theme, including custom themes, and follow light and dark mode as you switch. Scripts run inside the page, but it is sandboxed away from T3 Code and your session. Links you click in a page open in your browser. Use the expand button to open a page full screen. On web and desktop, use the zoom controls to see more detail.
 
-Pages can offer choices or a short form. Clicking a send button posts your answer to the same thread as your message, queued after any running turn. This works inline and full screen on web, desktop, and mobile.
+Pages can offer choices or a short form. Clicking a send button posts your answer to the same thread as your message, queued after any running turn. This works inline and full screen on web, desktop, and mobile. Older clients reject replies as unavailable; update the client to send them.
 
 Agents can place local images in a page by file path. T3 Code embeds them when the page is published, so the page keeps working after the original files move or are deleted. Deleting the thread deletes its pages.
 

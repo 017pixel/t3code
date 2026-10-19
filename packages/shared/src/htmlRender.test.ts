@@ -150,7 +150,11 @@ describe("readHtmlRenderMessageRequest", () => {
   });
 });
 
-function runSendBootstrap(transport: "web" | "mobile" | "standalone", activated = true) {
+function runSendBootstrap(
+  transport: "web" | "mobile" | "standalone",
+  activated = true,
+  canSendMessage = true,
+) {
   const html = injectHtmlRenderBootstrap("<button>Option B</button>");
   const script = html.slice(html.indexOf("<script>") + 8, html.indexOf("</script>"));
   const posted: Array<{ id?: string | number }> = [];
@@ -169,10 +173,22 @@ function runSendBootstrap(transport: "web" | "mobile" | "standalone", activated 
       postMessage: (message: string) => posted.push(JSON.parse(message)),
     };
   }
+  const theme = htmlRenderTheme(T3_CODE_LIGHT_THEME_COLORS, "light");
+  const themeStyle = { textContent: "" };
+  const location = {
+    hash: htmlRenderThemeFragment(theme, canSendMessage),
+    pathname: "/page.html",
+    search: "",
+  };
   NodeVM.runInNewContext(script, {
     window,
-    document: { getElementById: () => ({ textContent: "" }), addEventListener: () => {} },
-    location: { hash: "" },
+    document: { getElementById: () => themeStyle, addEventListener: () => {} },
+    location,
+    history: {
+      replaceState: () => {
+        location.hash = "";
+      },
+    },
     navigator: transport === "mobile" ? {} : { userActivation: { isActive: activated } },
     setTimeout,
     clearTimeout,
@@ -181,6 +197,8 @@ function runSendBootstrap(transport: "web" | "mobile" | "standalone", activated 
   return {
     send: (text: unknown) => window.t3!.send(text),
     posted,
+    location,
+    themeStyle,
     reply: (data: unknown, source = window.parent) => {
       for (const listener of listeners) listener({ data, source });
     },
@@ -191,7 +209,19 @@ describe("t3.send", () => {
   it.each(["web", "mobile"] as const)(
     "waits for the matching host answer over the %s transport",
     async (transport) => {
+      const legacy = runSendBootstrap(transport, true, false);
+      const legacySettled = vi.fn();
+      void legacy.send("Option B").then(
+        () => legacySettled("sent"),
+        (error: Error) => legacySettled(error.message),
+      );
+      expect(legacy.posted).toEqual([]);
+      await Promise.resolve();
+      expect(legacySettled).toHaveBeenCalledExactlyOnceWith("Messages are not available here.");
+
       const page = runSendBootstrap(transport);
+      expect(page.location.hash).toBe("");
+      expect(page.themeStyle.textContent).toContain("color-scheme:light;");
       const settled = vi.fn();
       const sent = page.send("Option B");
       const refused = page.send("Keep the existing name.");
