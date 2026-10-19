@@ -10,6 +10,7 @@ import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
 
 import * as Deferred from "effect/Deferred";
 import * as Ref from "effect/Ref";
@@ -435,23 +436,53 @@ it.effect("a deleted task stays deleted after concurrent and stale edits", () =>
   }).pipe(Effect.provide(atomicLayer)),
 );
 
-it.effect("the old project cannot edit, delete or run a moved task", () =>
-  Effect.gen(function* () {
-    const service = yield* ScheduledTaskService.ScheduledTaskService;
-    yield* seedAtomicTask;
-    const moved = Option.getOrThrow(
-      yield* service.update({
+it.effect.each(["before request", "before dispatch re-read"] as const)(
+  "the old project cannot edit, delete or run a task moved %s",
+  (timing) =>
+    Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      yield* seedAtomicTask;
+      const move = service.update({
         ...atomicScope,
         nextProjectId: ProjectId.make("project:destination"),
-      }),
-    ).task;
-    assert.isTrue(Option.isNone(yield* service.update({ ...atomicScope, title: "Stale edit" })));
-    assert.isTrue(Option.isNone(yield* service.delete(atomicScope)));
-    // The launch dependency is deliberately unimplemented: dispatch would defect.
-    const rejected = yield* service.runNow(atomicScope).pipe(Effect.flip);
-    assert.isTrue(isScheduledTaskError(rejected));
-    assert.deepEqual((yield* service.list()).tasks, [moved]);
-  }).pipe(Effect.provide(atomicLayer)),
+      });
+      let reads = 0;
+      if (timing === "before request") yield* move;
+      const moveBeforeReread: Statement.Transformer = (statement) =>
+        Effect.gen(function* () {
+          const [query, params] = statement.compile();
+          if (query.includes("FROM scheduled_tasks") && params[0] === atomicTaskId) {
+            reads++;
+            if (reads === 2) {
+              yield* move.pipe(
+                Effect.provideService(Statement.CurrentTransformer, undefined),
+                Effect.orDie,
+              );
+            }
+          }
+          return statement;
+        });
+      // The launch dependency is deliberately unimplemented: dispatch must be rejected.
+      const rejected = yield* service
+        .runNow(atomicScope)
+        .pipe(
+          Effect.provideService(
+            Statement.CurrentTransformer,
+            timing === "before dispatch re-read" ? moveBeforeReread : undefined,
+          ),
+          Effect.flip,
+        );
+      assert.isTrue(isScheduledTaskError(rejected));
+      if (timing === "before dispatch re-read") assert.equal(reads, 2);
+      const task = (yield* service.list()).tasks[0]!;
+      assert.equal(task.projectId, "project:destination");
+      assert.equal(task.lastRunStatus, "never");
+      assert.equal(task.runCount, 0);
+      assert.isNull(task.lastRunAt);
+      assert.isTrue(Option.isNone(yield* service.update({ ...atomicScope, title: "Stale edit" })));
+      assert.isTrue(Option.isNone(yield* service.delete(atomicScope)));
+      assert.deepEqual((yield* service.list()).tasks, [task]);
+    }).pipe(Effect.provide(atomicLayer)),
 );
 
 it.effect("guarded mutations reject changed bindings and current or new bound-thread modes", () =>
