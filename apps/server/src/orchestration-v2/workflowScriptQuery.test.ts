@@ -7,15 +7,19 @@ import { OrchestrationWorkflowFileError } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { afterAll, assert, describe } from "vite-plus/test";
+import { afterAll, assert } from "vite-plus/test";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { readWorkflowScript } from "./workflowScriptQuery.ts";
+import * as Settings from "../serverSettings.ts";
+import * as Layer from "effect/Layer";
 
-const root = NodePath.join(NodeOS.homedir(), ".claude", "projects", "__wf_script_test__");
+const sandbox = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "wf-script-"));
+const home = NodePath.join(sandbox, "home");
+const root = NodePath.join(home, ".claude", "projects", "test");
 NodeFS.mkdirSync(root, { recursive: true });
 const scriptPath = NodePath.join(root, "run.js");
 NodeFS.writeFileSync(scriptPath, "export const meta = {};\n");
-const outside = NodePath.join(NodeOS.tmpdir(), "wf-outside.js");
+const outside = NodePath.join(sandbox, "outside.js");
 NodeFS.writeFileSync(outside, "evil\n");
 const link = NodePath.join(root, "sneaky.js");
 if (symlinksSupported) {
@@ -27,11 +31,54 @@ if (symlinksSupported) {
 }
 
 afterAll(() => {
-  NodeFS.rmSync(root, { recursive: true, force: true });
-  NodeFS.rmSync(outside, { force: true });
+  NodeFS.rmSync(sandbox, { recursive: true, force: true });
 });
 
-describe("workflow script containment", () => {
+const customHome = NodePath.join(sandbox, "custom");
+const envHome = NodePath.join(sandbox, "environment");
+const customScript = NodePath.join(customHome, "projects", "test", "run.js");
+const envScript = NodePath.join(envHome, "projects", "test", "run.js");
+NodeFS.mkdirSync(NodePath.dirname(customScript), { recursive: true });
+NodeFS.mkdirSync(NodePath.dirname(envScript), { recursive: true });
+NodeFS.writeFileSync(customScript, "custom home");
+NodeFS.writeFileSync(envScript, "environment home");
+const customLink = NodePath.join(NodePath.dirname(customScript), "escape.js");
+if (symlinksSupported) NodeFS.symlinkSync(outside, customLink);
+
+effectIt.layer(
+  Settings.layerTest({
+    providerInstances: {
+      "claude-missing": {
+        driver: "claudeAgent",
+        config: { homePath: NodePath.join(sandbox, "missing") },
+      },
+      "claude-custom": { driver: "claudeAgent", config: { homePath: customHome } },
+      "claude-env": {
+        driver: "claudeAgent",
+        environment: [{ name: "CLAUDE_CONFIG_DIR", value: envHome }],
+      },
+    },
+  }).pipe(Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, home))),
+)("workflow script containment", (effectIt) => {
+  effectIt.effect("reads configured Claude homes while rejecting escapes", () =>
+    Effect.gen(function* () {
+      assert.equal(
+        (yield* readWorkflowScript({ scriptPath: customScript })).contents,
+        "custom home",
+      );
+      assert.equal(
+        (yield* readWorkflowScript({ scriptPath: envScript })).contents,
+        "environment home",
+      );
+      const escaped = yield* readWorkflowScript({ scriptPath: outside }).pipe(Effect.flip);
+      assert.equal(escaped.reason, "outside-root");
+      if (symlinksSupported) {
+        const linked = yield* readWorkflowScript({ scriptPath: customLink }).pipe(Effect.flip);
+        assert.equal(linked.reason, "outside-root");
+      }
+    }),
+  );
+
   effectIt.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     "rejects a FIFO without waiting for a writer",
     () =>
