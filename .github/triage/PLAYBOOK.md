@@ -99,6 +99,12 @@ API if `gh` is missing or not logged in). Then check whether the problem is alre
 fixed in a release newer than the version the bug happened on: compare versions,
 read release notes and recent commits touching the relevant code.
 
+When a matching issue is closed, including closed as not planned, read its
+closure reason, the maintainer's response, and any canonical duplicate they
+name. State that closure reason and response to the user before you recommend
+a comment on the issue. For intentional behavior or a not-planned decision,
+default to the local workaround or the destination the maintainer requested.
+
 If the user is behind and the fix likely shipped, say so plainly and give them the
 exact update command for how they run the CLI (the context file records how it was
 launched).
@@ -142,4 +148,9 @@ user's home directory path. When in doubt, leave it out.
 
 If an existing issue matches what you found, offer to comment there with this
 user's environment and evidence instead of filing a new issue. A confirmed
-duplicate with fresh evidence is more useful than a second thread.
+duplicate with fresh evidence is more useful than a second thread. When the
+matching issue is closed, including closed as not planned, state its closure
+reason and the maintainer's response before that offer. Recommend another
+comment only when the evidence could change that diagnosis or decision, and
+explain the difference before asking for approval. Treat evidence of a
+regression differently from an unchanged report of intentional behavior.
