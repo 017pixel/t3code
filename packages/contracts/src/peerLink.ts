@@ -4,10 +4,8 @@ import { AuthMcpClientAccess } from "./auth.ts";
 import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
- * A link from this environment to another one (the peer). This environment
- * signed in to the peer's `/mcp` as an outside agent, with a pairing code from
- * the peer, so its agents can work there. The peer enforces the access chosen
- * at linking, and revokes the link from its own Connections.
+ * An outgoing link authenticated through the peer's MCP pairing flow.
+ * The peer enforces its access ceiling and can revoke its session in Connections.
  */
 export const PeerLink = Schema.Struct({
   environmentId: EnvironmentId,
@@ -38,11 +36,11 @@ export const PeerLinkSummary = Schema.Struct({
 export type PeerLinkSummary = typeof PeerLinkSummary.Type;
 
 export const PeerLinkCreateInput = Schema.Struct({
-  /** Where the peer answers: an HTTPS base URL, or HTTP over Tailscale or loopback. */
+  /** HTTPS, or HTTP with loopback, a Tailscale .ts.net name, or Tailscale IPv6. */
   url: TrimmedNonEmptyString,
   /** More addresses for the same peer, tried after `url`. */
   alternateUrls: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
-  /** A pairing code from the peer (`t3 pair` there, or its Connections settings). */
+  /** A pairing code from the peer (`t3 auth pairing create`, or its Connections settings). */
   pairingCode: TrimmedNonEmptyString,
   access: AuthMcpClientAccess,
 });

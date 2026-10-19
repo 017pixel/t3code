@@ -96,7 +96,7 @@ const failStorage = (cause: unknown) =>
     ),
   );
 
-// Pairing codes and bearer tokens require HTTPS outside loopback and Tailscale.
+// Only loopback and Tailscale-specific hosts can use HTTP for credentials.
 const peerOrigin = (url: string) => {
   const parsed = URL.parse(url);
   if (parsed === null || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
@@ -115,7 +115,7 @@ const peerOrigin = (url: string) => {
     return Effect.fail(
       new PeerLinkError({
         reason: "unreachable",
-        message: `${url} is plain http, which would send the link's credentials unencrypted. Use its https address, or its Tailscale address.`,
+        message: `${url} is plain http, which would send the link's credentials unencrypted. Use HTTPS, or HTTP with loopback, a Tailscale .ts.net name, or Tailscale IPv6.`,
       }),
     );
   }

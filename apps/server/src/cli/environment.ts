@@ -78,7 +78,7 @@ const environmentLinkCommand = Command.make("link", {
   ...authLocationFlags,
   url: Argument.String("url").pipe(
     Argument.withDescription(
-      "Where the other environment answers: its HTTPS address, or HTTP over Tailscale or loopback.",
+      "Where the other environment answers: HTTPS, or HTTP with loopback, a Tailscale .ts.net name, or Tailscale IPv6.",
     ),
   ),
   alternateUrl: Flag.String("url").pipe(
