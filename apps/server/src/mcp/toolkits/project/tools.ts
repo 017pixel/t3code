@@ -1,5 +1,7 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
+  OrchestratorMcpThreadImportInput,
+  OrchestratorMcpThreadImportResult,
   NonNegativeInt,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpClientRequestId,
@@ -22,6 +24,7 @@ import {
 import * as FileSystem from "effect/FileSystem";
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
+import * as ThreadImportService from "../../../orchestration-v2/ThreadImportService.ts";
 import * as ThreadLaunchService from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
@@ -171,8 +174,23 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadImportTool = Tool.make("t3_thread_import", {
+  ...shared,
+  description:
+    "Import a conversation into a registered project locally or in a linked environment with environmentId. Reuse source environmentId, threadId and handoffId for retries; the first accepted body is preserved. History becomes context for the first provider turn. worktreePath must already be one of the project's Git worktrees; omit it for the project root. Omit continuationPrompt to leave the thread idle. Modes cannot exceed the caller's.",
+  parameters: Schema.Struct({
+    ...OrchestratorMcpThreadImportInput.fields,
+    environmentId: OrchestratorMcpEnvironmentTarget,
+  }),
+  success: OrchestratorMcpThreadImportResult,
+  dependencies: [...shared.dependencies, ThreadImportService.ThreadImportService],
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
 export const ProjectToolkit = Toolkit.make(
   ThreadLaunchTool,
+  ThreadImportTool,
   ProjectListTool,
   ProjectReadTool,
   ProjectCreateTool,

@@ -2565,6 +2565,13 @@ export const OrchestrationV2StoredEventJson = Schema.Struct({
 });
 export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
 
+export const OrchestrationV2ImportedMessage = Schema.Struct({
+  role: Schema.Literals(["user", "assistant"]),
+  text: Schema.String.check(Schema.isMaxLength(200_000)),
+  createdAt: IsoDateTime,
+});
+export type OrchestrationV2ImportedMessage = typeof OrchestrationV2ImportedMessage.Type;
+
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
@@ -2579,6 +2586,14 @@ export const OrchestrationV2Command = Schema.Union([
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
     linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
+    importedConversation: Schema.optional(
+      Schema.Struct({
+        messages: Schema.Array(OrchestrationV2ImportedMessage).check(Schema.isMaxLength(2_000)),
+        continuationPrompt: Schema.optional(
+          TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)),
+        ),
+      }),
+    ),
     importedNativeThread: Schema.optional(
       Schema.Struct({
         ref: Schema.Struct({

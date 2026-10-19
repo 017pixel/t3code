@@ -68,6 +68,8 @@ import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexA
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ThreadImport from "../orchestration-v2/ThreadImportService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
@@ -279,6 +281,9 @@ const makeEnvironment = Effect.fnUntraced(function* (id: EnvironmentId) {
     ThreadMetadataMcpService.layer.pipe(Layer.provide(threads)),
     Repositories.layer.pipe(Layer.provide(external)),
     launch,
+    ThreadImport.layer.pipe(
+      Layer.provide(Layer.merge(base, ProjectStore.layer.pipe(Layer.provide(database)))),
+    ),
     schedules,
     base,
     McpOAuth.layerMcpClientAuthenticator.pipe(Layer.provideMerge(EnvironmentAuth.layer)),

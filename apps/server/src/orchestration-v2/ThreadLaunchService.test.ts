@@ -68,6 +68,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as ThreadImportService from "./ThreadImportService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
@@ -2063,6 +2064,7 @@ it.effect("replays MCP launches durably within each caller's request namespace",
         Layer.provide(NodeServices.layer),
       ),
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(ThreadImportService.ThreadImportService)({}),
       Layer.mock(SourceControlRepositories.SourceControlRepositoryService)({}),
     );
     const layerToolkit = McpHttpServer.toolkitRegistration(

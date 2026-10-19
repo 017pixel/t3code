@@ -8,6 +8,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as ThreadImport from "../../../orchestration-v2/ThreadImportService.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
@@ -57,6 +58,24 @@ const access = Effect.gen(function* () {
   return yield* Project.ProjectService;
 });
 export const layer = McpToolAccess.toLayer(ProjectToolkit, {
+  t3_thread_import: McpToolAccess.startsThreads(
+    (input) => input,
+    (input, modes) =>
+      Effect.gen(function* () {
+        const imports = yield* ThreadImport.ThreadImportService;
+        return yield* imports.importThread({ ...input, ...modes }).pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({
+                code:
+                  error._tag === "ThreadImportError" ? "orchestration_error" : "invalid_request",
+                message: error.message,
+              }),
+          ),
+        );
+      }),
+    "stamped",
+  ),
   t3_thread_launch: McpToolAccess.startsThreads(
     (input) => input,
     (input, { runtimeMode, interactionMode, linkOrigin }) =>

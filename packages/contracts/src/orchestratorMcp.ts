@@ -33,6 +33,7 @@ import {
 } from "./threadPullRequest.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
+  OrchestrationV2ImportedMessage,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
@@ -43,6 +44,7 @@ import {
   ProviderOptionSelection,
   ProviderOptionSelectionValue,
 } from "./model.ts";
+import { ModelSelection } from "./modelSelection.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 import { OrchestratorMcpEnvironmentTarget } from "./environment.ts";
@@ -536,6 +538,35 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
   constraints: Schema.Array(Schema.String),
 });
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
+
+export const OrchestratorMcpImportedMessage = OrchestrationV2ImportedMessage;
+export type OrchestratorMcpImportedMessage = typeof OrchestratorMcpImportedMessage.Type;
+
+export const OrchestratorMcpThreadImportInput = Schema.Struct({
+  source: Schema.Struct({
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    handoffId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  }),
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(512)),
+  modelSelection: ModelSelection,
+  runtimeMode: Schema.optional(RuntimeMode),
+  interactionMode: Schema.optional(ProviderInteractionMode),
+  worktreePath: Schema.optional(TrimmedNonEmptyString),
+  branch: Schema.optional(TrimmedNonEmptyString),
+  messages: Schema.Array(OrchestratorMcpImportedMessage).check(Schema.isMaxLength(2_000)),
+  continuationPrompt: Schema.optional(OrchestratorMcpPrompt),
+});
+export type OrchestratorMcpThreadImportInput = typeof OrchestratorMcpThreadImportInput.Type;
+
+export const OrchestratorMcpThreadImportResult = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  created: Schema.Boolean,
+  runId: Schema.NullOr(RunId),
+});
+export type OrchestratorMcpThreadImportResult = typeof OrchestratorMcpThreadImportResult.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),

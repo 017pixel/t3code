@@ -70,8 +70,12 @@ export function withCreationProvenance(
 ): OrchestrationV2Command {
   switch (command.type) {
     case "thread.create": {
-      // Client creation cannot supply server-owned link provenance.
-      const { linkOrigin: _linkOrigin, ...rest } = command;
+      // Client creation cannot supply server-owned provenance or imported history.
+      const {
+        linkOrigin: _linkOrigin,
+        importedConversation: _importedConversation,
+        ...rest
+      } = command;
       return { ...rest, ...provenance };
     }
     case "message.dispatch":

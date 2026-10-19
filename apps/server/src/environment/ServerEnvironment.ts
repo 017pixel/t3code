@@ -219,6 +219,7 @@ export const make = Effect.gen(function* () {
       repositoryIdentity: true,
       mcpModeLimitHeader: true,
       linkFence: true,
+      threadImport: true,
       connectionProbe: true,
       attachmentUploads: true,
       questionAttachments: true,

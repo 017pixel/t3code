@@ -60,7 +60,7 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadId,
-  type TurnItemId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
@@ -2272,6 +2272,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       branch: command.branch,
       worktreePath: command.worktreePath,
       activeProviderThreadId: null,
+      ...(command.importedConversation === undefined
+        ? {}
+        : { historyOrigin: "v1_import" as const }),
       ...(command.linkOrigin === undefined ? {} : { linkOrigin: command.linkOrigin }),
       pullRequests: [],
       lineage: {
@@ -5384,7 +5387,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
       const legacyImportItems =
         projection.thread.historyOrigin === "v1_import"
-          ? yield* readHandoffItems(command.threadId, [null])
+          ? (yield* Ref.get(events)).some(
+              (event) => event.threadId === command.threadId && event.type === "thread.created",
+            )
+            ? projection.turnItems.filter((item) => item.runId === null)
+            : yield* readHandoffItems(command.threadId, [null])
           : [];
       const isProviderSwitch =
         activeProviderThread !== undefined &&
@@ -10977,6 +10984,95 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     switch (command.type) {
       case "thread.create":
         yield* dispatchThreadCreate(command, events);
+        if (command.importedConversation !== undefined) {
+          const importedAt = yield* DateTime.now;
+          for (const [index, message] of command.importedConversation.messages.entries()) {
+            const messageId = MessageId.make(`${command.threadId}:history:${index}`);
+            const at = DateTime.makeUnsafe(message.createdAt);
+            const common = {
+              id: TurnItemId.make(`${command.threadId}:history:${index}`),
+              threadId: command.threadId,
+              runId: null,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: index + 1,
+              status: "completed" as const,
+              title: null,
+              startedAt: at,
+              completedAt: at,
+              updatedAt: importedAt,
+            };
+            yield* emit(
+              events,
+              command,
+            )({
+              type: "message.updated",
+              threadId: command.threadId,
+              occurredAt: importedAt,
+              payload: {
+                id: messageId,
+                threadId: command.threadId,
+                runId: null,
+                nodeId: null,
+                createdBy: message.role === "user" ? "user" : "agent",
+                creationSource: "server",
+                role: message.role,
+                text: message.text,
+                attachments: [],
+                streaming: false,
+                createdAt: at,
+                updatedAt: importedAt,
+              },
+            });
+            yield* emit(
+              events,
+              command,
+            )({
+              type: "turn-item.updated",
+              threadId: command.threadId,
+              occurredAt: importedAt,
+              payload:
+                message.role === "user"
+                  ? {
+                      ...common,
+                      type: "user_message",
+                      messageId,
+                      text: message.text,
+                      attachments: [],
+                      createdBy: "user",
+                      creationSource: "server",
+                      inputIntent: "turn_start",
+                    }
+                  : {
+                      ...common,
+                      type: "assistant_message",
+                      messageId,
+                      text: message.text,
+                      streaming: false,
+                    },
+            });
+          }
+          if (command.importedConversation.continuationPrompt !== undefined) {
+            yield* dispatchMessage(
+              {
+                type: "message.dispatch",
+                commandId: command.commandId,
+                threadId: command.threadId,
+                messageId: MessageId.make(`${command.threadId}:continuation`),
+                text: command.importedConversation.continuationPrompt,
+                attachments: [],
+                dispatchMode: { type: "start_immediately" },
+                createdBy: command.createdBy,
+                creationSource: command.creationSource,
+              },
+              events,
+              effects,
+            );
+          }
+        }
         break;
       case "thread.visit":
         yield* dispatchThreadVisit(command, events);

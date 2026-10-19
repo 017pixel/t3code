@@ -801,6 +801,7 @@ const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
   "delegate_task",
   "create_threads",
   "t3_thread_launch",
+  "t3_thread_import",
   "t3_thread_send",
   "t3_thread_send_attachments",
   "t3_thread_fork",
