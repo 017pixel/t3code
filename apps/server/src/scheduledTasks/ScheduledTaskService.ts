@@ -21,6 +21,7 @@ import {
   type ScheduledTaskRunNowResult,
   type ScheduledTaskSetEnabledInput,
   type ScheduledTaskUpsertInput,
+  type ScheduledTaskUpdateInput,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -40,6 +41,10 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+} from "../orchestration-v2/DispatchModeLimit.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -136,6 +141,7 @@ const decodeTaskId = Schema.decodeUnknownOption(ScheduledTaskId);
 const decodeScheduleJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ScheduledTask.fields.schedule),
 );
+const decodeWorkspaceStrategy = Schema.decodeUnknownEffect(ScheduledTask.fields.workspaceStrategy);
 const decodeWorkspaceStrategyJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ScheduledTask.fields.workspaceStrategy),
 );
@@ -199,12 +205,15 @@ export class ScheduledTaskService extends Context.Service<
     readonly upsert: (
       input: ScheduledTaskUpsertInput,
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
+    readonly update: (
+      input: ScheduledTaskUpdateInput,
+    ) => Effect.Effect<Option.Option<ScheduledTaskMutationResult>, ScheduledTaskError>;
     readonly setEnabled: (
       input: ScheduledTaskSetEnabledInput,
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
     readonly delete: (
       input: ScheduledTaskDeleteInput,
-    ) => Effect.Effect<ScheduledTaskDeleteResult, ScheduledTaskError>;
+    ) => Effect.Effect<Option.Option<ScheduledTaskDeleteResult>, ScheduledTaskError>;
     readonly runNow: (
       input: ScheduledTaskRunNowInput,
     ) => Effect.Effect<ScheduledTaskRunNowResult, ScheduledTaskError>;
@@ -476,6 +485,79 @@ export const layer = Layer.effect(
       return task;
     });
 
+    const requireThreadInProject = Effect.fn("ScheduledTaskService.requireThreadInProject")(
+      function* (task: ScheduledTask) {
+        const rows = yield* sql<{ thread_id: string }>`
+          SELECT thread_id FROM orchestration_v2_projection_threads
+          WHERE thread_id = ${task.threadId} AND project_id = ${task.projectId}
+            AND deleted_at IS NULL AND archived_at IS NULL
+        `.pipe(
+          Effect.mapError((cause) =>
+            taskError("Could not validate the schedule task's thread binding.", {
+              taskId: task.id,
+              cause,
+            }),
+          ),
+        );
+        if (rows.length === 0) {
+          return yield* taskError(
+            "The task's thread binding is not a live thread in the task's project; unbind it or rebind to a thread in the project.",
+            { taskId: task.id },
+          );
+        }
+      },
+    );
+
+    const checkAuthorizedTask = Effect.fn("ScheduledTaskService.checkAuthorizedTask")(function* (
+      row: ScheduledTaskRow,
+      input: Pick<
+        ScheduledTaskUpdateInput,
+        "id" | "expectedThreadId" | "expectedRuntimeMode" | "expectedInteractionMode"
+      >,
+    ) {
+      if (
+        (input.expectedRuntimeMode !== undefined &&
+          row.runtime_mode !== input.expectedRuntimeMode) ||
+        (input.expectedInteractionMode !== undefined &&
+          row.interaction_mode !== input.expectedInteractionMode) ||
+        (input.expectedThreadId !== undefined && row.thread_id !== input.expectedThreadId)
+      ) {
+        return yield* taskError(
+          "Scheduled task changed since it was loaded; retry the operation.",
+          { taskId: input.id },
+        );
+      }
+      const limit = yield* DispatchModeLimit;
+      if (limit === undefined || row.thread_id === null) return;
+      // The bound thread's modes can change independently of the task definition.
+      const bound = yield* sql<{
+        runtime_mode: ScheduledTask["runtimeMode"];
+        interaction_mode: ScheduledTask["interactionMode"];
+      }>`
+        SELECT runtime_mode, interaction_mode FROM orchestration_v2_projection_threads
+        WHERE thread_id = ${row.thread_id} AND deleted_at IS NULL
+      `.pipe(
+        Effect.mapError((cause) =>
+          taskError("Could not validate the schedule task's thread binding.", {
+            taskId: input.id,
+            cause,
+          }),
+        ),
+      );
+      if (
+        bound[0] !== undefined &&
+        exceededDispatchModeLimit(limit, {
+          runtimeMode: bound[0].runtime_mode,
+          interactionMode: bound[0].interaction_mode,
+        }) !== undefined
+      ) {
+        return yield* taskError(
+          "Scheduled task changed since it was loaded; retry the operation.",
+          { taskId: input.id },
+        );
+      }
+    });
+
     // Run-state columns (last_run_*, run_count) are intentionally absent from
     // the conflict clause: they are owned by the run transitions below, and a
     // concurrent settings save must not overwrite an in-flight increment.
@@ -576,19 +658,6 @@ export const layer = Layer.effect(
             : taskError("Schedule task not found.", { taskId: task.id }),
         ),
       );
-
-    const deleteRow = (id: ScheduledTaskId) =>
-      sql
-        .withTransaction(
-          sql`DELETE FROM scheduled_task_webhook_deliveries WHERE task_id = ${id}`.pipe(
-            Effect.andThen(sql`DELETE FROM scheduled_tasks WHERE task_id = ${id}`),
-          ),
-        )
-        .pipe(
-          Effect.mapError((cause) =>
-            taskError("Could not delete schedule task.", { taskId: id, cause }),
-          ),
-        );
 
     const markRunning = (id: ScheduledTaskId, startedAtIso: string) =>
       sql<{ task_id: string }>`
@@ -933,7 +1002,7 @@ export const layer = Layer.effect(
         }),
       );
 
-    const upsert: ScheduledTaskService["Service"]["upsert"] = (input) =>
+    const upsertTask: ScheduledTaskService["Service"]["upsert"] = (input) =>
       Effect.gen(function* () {
         const now = yield* localNow;
         const uuid =
@@ -955,6 +1024,13 @@ export const layer = Layer.effect(
         // keep their run history, and so real load failures propagate instead
         // of silently resetting an existing row.
         const existingTask = yield* findTask(id);
+        if (
+          input.id === undefined &&
+          existingTask !== null &&
+          existingTask.projectId !== input.projectId
+        ) {
+          return yield* taskError("Schedule task not found.", { taskId: id });
+        }
         // Keep the existing next_run_at when the schedule itself is untouched:
         // editing a title or prompt must not postpone (or resurrect) a due
         // run — only schedule/enabled changes restart the clock.
@@ -993,7 +1069,7 @@ export const layer = Layer.effect(
                           Effect.catch((error) =>
                             replay
                               ? Effect.succeed(undefined)
-                              : Effect.fail(taskError(error.message, { taskId: id })),
+                              : Effect.fail(taskError(error.message, { taskId: id, cause: error })),
                           ),
                         );
                 // A ref, when given, is the only source: a plain secret sent
@@ -1038,63 +1114,148 @@ export const layer = Layer.effect(
           lastRunError: existingTask?.lastRunError ?? null,
           runCount: existingTask?.runCount ?? 0,
         };
+        // Unchanged bindings may have been archived since the editor opened.
+        if (
+          task.threadId !== null &&
+          (existingTask === null ||
+            existingTask.threadId !== task.threadId ||
+            existingTask.projectId !== task.projectId)
+        ) {
+          yield* requireThreadInProject(task);
+        }
         yield* saveTask(task, input.requireExisting === true, webhook);
-        yield* notifyChanged;
         return { task: (yield* findTask(id)) ?? task };
       });
 
-    const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = (input) =>
+    const upsert: ScheduledTaskService["Service"]["upsert"] = (input) =>
+      sql.withTransaction(upsertTask(input)).pipe(
+        Effect.catchTags({
+          SqlError: (cause) => Effect.fail(taskError("Could not save schedule task.", { cause })),
+        }),
+        Effect.tap(() => notifyChanged),
+      );
+
+    // The write transaction owns both the scoped read and the merge. Reusing
+    // upsert's persistence rules here is safe because requireExisting forbids insertion.
+    const updateTask: ScheduledTaskService["Service"]["update"] = (input) =>
       Effect.gen(function* () {
-        const existing = yield* loadTask(input.id);
-        if (existing.enabled === input.enabled) return { task: existing };
-        const now = yield* localNow;
-        const next = nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
-        // RETURNING so a task deleted between the load and this UPDATE is a
-        // visible not-found error, not a false success.
-        const updated = yield* sql<{ task_id: string }>`
-          UPDATE scheduled_tasks
-          SET enabled = ${input.enabled ? 1 : 0},
-              next_run_at = ${next},
-              updated_at = ${iso(now)}
-          WHERE task_id = ${input.id}
-          RETURNING task_id
-        `.pipe(
+        const row = (yield* getRows(input.id).pipe(
           Effect.mapError((cause) =>
-            taskError("Could not update schedule task.", { taskId: input.id, cause }),
+            taskError("Could not load schedule task.", { taskId: input.id, cause }),
           ),
-        );
-        if (updated.length === 0) {
-          return yield* taskError("Schedule task not found.", { taskId: input.id });
-        }
-        yield* notifyChanged;
-        return {
-          task: { ...existing, enabled: input.enabled, nextRunAt: next, updatedAt: iso(now) },
-        };
+        ))[0];
+        if (row === undefined || row.project_id !== input.projectId) return Option.none();
+        yield* checkAuthorizedTask(row, input);
+        const existing = yield* decodeRow(row, yield* readWebhookOrigin);
+        const workspaceStrategy =
+          input.workspaceStrategy ??
+          (input.workspaceStrategyPatch === undefined
+            ? existing.workspaceStrategy
+            : yield* decodeWorkspaceStrategy({
+                ...existing.workspaceStrategy,
+                ...input.workspaceStrategyPatch,
+              }).pipe(
+                Effect.mapError((cause) =>
+                  taskError("Could not update schedule task.", { taskId: input.id, cause }),
+                ),
+              ));
+        const result = yield* upsertTask({
+          ...existing,
+          requireExisting: true,
+          title: input.title ?? existing.title,
+          prompt: input.prompt ?? existing.prompt,
+          enabled: input.enabled ?? existing.enabled,
+          schedule: input.schedule ?? existing.schedule,
+          projectId: input.nextProjectId ?? existing.projectId,
+          threadId: input.threadId === undefined ? existing.threadId : input.threadId,
+          workspaceStrategy,
+          modelSelection: input.modelSelection ?? existing.modelSelection,
+          runtimeMode: input.runtimeMode ?? existing.runtimeMode,
+          interactionMode: input.interactionMode ?? existing.interactionMode,
+        });
+        return Option.some(result);
       });
 
-    const deleteTask: ScheduledTaskService["Service"]["delete"] = (input) =>
-      deleteRow(input.id).pipe(
-        Effect.andThen(
-          Effect.all([
-            Ref.update(webhookRateWindows, (windows) => {
-              const next = new Map(windows);
-              next.delete(input.id);
-              return next;
-            }),
-            Ref.update(webhookPermits, (permits) => {
-              const next = new Map(permits);
-              next.delete(input.id);
-              return next;
-            }),
-          ]),
-        ),
-        Effect.andThen(notifyChanged),
-        Effect.as({ id: input.id }),
+    const update: ScheduledTaskService["Service"]["update"] = (input) =>
+      sql.withTransaction(updateTask(input)).pipe(
+        Effect.catchTags({
+          SqlError: (cause) =>
+            Effect.fail(taskError("Could not update schedule task.", { taskId: input.id, cause })),
+        }),
+        Effect.tap((result) => (Option.isSome(result) ? notifyChanged : Effect.void)),
       );
+
+    const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = (input) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const existing = yield* loadTask(input.id);
+            if (existing.enabled === input.enabled) return { task: existing };
+            const result = yield* updateTask({ ...input, projectId: existing.projectId });
+            if (Option.isNone(result))
+              return yield* taskError("Schedule task not found.", { taskId: input.id });
+            return result.value;
+          }),
+        )
+        .pipe(
+          Effect.catchTags({
+            SqlError: (cause) =>
+              Effect.fail(
+                taskError("Could not update schedule task.", { taskId: input.id, cause }),
+              ),
+          }),
+          Effect.tap(() => notifyChanged),
+        );
+
+    const deleteTask: ScheduledTaskService["Service"]["delete"] = (input) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const existing = (yield* getRows(input.id))[0];
+            if (
+              existing === undefined ||
+              (input.projectId !== undefined && existing.project_id !== input.projectId)
+            ) {
+              return Option.none<ScheduledTaskDeleteResult>();
+            }
+            yield* checkAuthorizedTask(existing, input);
+            yield* sql`DELETE FROM scheduled_tasks WHERE task_id = ${input.id}`;
+            yield* sql`DELETE FROM scheduled_task_webhook_deliveries WHERE task_id = ${input.id}`;
+            return Option.some({ id: input.id });
+          }),
+        )
+        .pipe(
+          Effect.catchTags({
+            SqlError: (cause) =>
+              Effect.fail(
+                taskError("Could not delete schedule task.", { taskId: input.id, cause }),
+              ),
+          }),
+          Effect.tap((result) =>
+            Option.isNone(result)
+              ? Effect.void
+              : Effect.all([
+                  Ref.update(webhookRateWindows, (windows) => {
+                    const next = new Map(windows);
+                    next.delete(input.id);
+                    return next;
+                  }),
+                  Ref.update(webhookPermits, (permits) => {
+                    const next = new Map(permits);
+                    next.delete(input.id);
+                    return next;
+                  }),
+                  notifyChanged,
+                ]),
+          ),
+        );
 
     const runNow: ScheduledTaskService["Service"]["runNow"] = (input: ScheduledTaskRunNowInput) =>
       Effect.gen(function* () {
         const task = yield* loadTask(input.id);
+        if (input.projectId !== undefined && task.projectId !== input.projectId) {
+          return yield* taskError("Schedule task not found.", { taskId: input.id });
+        }
         if (task.schedule.type === "webhook") {
           return yield* taskError("Webhook tasks run when their URL receives a request.", {
             taskId: input.id,
@@ -1590,6 +1751,7 @@ export const layer = Layer.effect(
       list,
       subscribeList,
       upsert,
+      update,
       setEnabled,
       delete: deleteTask,
       runNow,

@@ -519,6 +519,7 @@ const layerUnusedScheduledTaskStub = Layer.succeed(
     list: () => Effect.succeed({ tasks: [] }),
     subscribeList: () => Stream.succeed({ tasks: [] }),
     upsert: () => Effect.die("ScheduledTaskService.upsert is unused in this test"),
+    update: () => Effect.die("ScheduledTaskService.update is unused in this test"),
     setEnabled: () => Effect.die("ScheduledTaskService.setEnabled is unused in this test"),
     delete: () => Effect.die("ScheduledTaskService.delete is unused in this test"),
     runNow: () => Effect.die("ScheduledTaskService.runNow is unused in this test"),
@@ -674,12 +675,32 @@ describe("orchestrator MCP toolkit", () => {
                   ]);
                   return { task };
                 }),
+              update: (input) =>
+                Ref.modify(scheduledStore, (all) => {
+                  const existing = all.find(
+                    (task) => task.id === input.id && task.projectId === input.projectId,
+                  );
+                  if (existing === undefined) return [Option.none(), all];
+                  const task = scheduledTaskFromUpsert({
+                    ...existing,
+                    title: input.title ?? existing.title,
+                    prompt: input.prompt ?? existing.prompt,
+                    enabled: input.enabled ?? existing.enabled,
+                    schedule: input.schedule ?? existing.schedule,
+                    threadId: input.threadId === undefined ? existing.threadId : input.threadId,
+                    workspaceStrategy: input.workspaceStrategy ?? existing.workspaceStrategy,
+                  });
+                  return [
+                    Option.some({ task }),
+                    all.map((candidate) => (candidate.id === task.id ? task : candidate)),
+                  ];
+                }),
               setEnabled: () =>
                 Effect.die("ScheduledTaskService.setEnabled is unused in this test"),
               delete: (input) =>
                 Ref.update(scheduledStore, (all) =>
                   all.filter((candidate) => candidate.id !== input.id),
-                ).pipe(Effect.as({ id: input.id })),
+                ).pipe(Effect.as(Option.some({ id: input.id }))),
               runNow: () => Effect.die("ScheduledTaskService.runNow is unused in this test"),
               rotateWebhookToken: () => Effect.die("unused in this test"),
               listWebhookDeliveries: () => Effect.die("unused in this test"),

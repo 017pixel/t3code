@@ -20,6 +20,7 @@ import {
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -762,10 +763,12 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
                   scheduledTask("task-auto", "auto"),
                 ],
               }),
-            upsert: (input) =>
-              Effect.succeed({
-                task: { ...(scheduledTask(input.id ?? "task-auto", "auto") as object), ...input },
-              } as never),
+            update: (input) =>
+              Effect.succeed(
+                Option.some({
+                  task: { ...(scheduledTask(input.id, "auto") as object), ...input },
+                } as never),
+              ),
           }),
         ),
         Layer.provide(Layer.mock(ProjectService.ProjectService)({})),

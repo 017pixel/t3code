@@ -1728,56 +1728,78 @@ const make = Effect.gen(function* () {
               : "bindToCurrentThread binds to this thread, which belongs to a different project.",
           );
         }
-        const threadId =
-          input.bindToCurrentThread === undefined
-            ? existing.threadId
-            : input.bindToCurrentThread && parent !== undefined
-              ? parent.thread.id
-              : null;
-        // Rebinding changes where runs execute, so the workspace strategy must
-        // follow: unbinding a root-strategy task would otherwise run loose
-        // prompts in the shared project checkout.
-        const workspaceStrategy =
-          input.bindToCurrentThread === undefined
-            ? existing.workspaceStrategy
-            : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
-        const upsertInput: ScheduledTaskUpsertInput = {
-          id: existing.id,
-          title: input.title ?? existing.title,
-          prompt: input.prompt ?? existing.prompt,
-          enabled: input.enabled ?? existing.enabled,
-          schedule: input.schedule ?? existing.schedule,
-          projectId: existing.projectId,
-          threadId,
-          workspaceStrategy,
-          modelSelection: existing.modelSelection,
-          runtimeMode: existing.runtimeMode,
-          interactionMode: existing.interactionMode,
-          createdBy: existing.createdBy,
-          creationSource: existing.creationSource,
-        };
-        const { task } = yield* scheduledTasks
-          .upsert(upsertInput)
+        const updated = yield* scheduledTasks
+          .update({
+            id: existing.id,
+            projectId: existing.projectId,
+            // loadScheduledTask authorized these modes; a raise committed
+            // since must fail the edit rather than run the caller's patch
+            // above its limits.
+            expectedThreadId: existing.threadId,
+            expectedRuntimeMode: existing.runtimeMode,
+            expectedInteractionMode: existing.interactionMode,
+            ...(input.title === undefined ? {} : { title: input.title }),
+            ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+            ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+            ...(input.schedule === undefined ? {} : { schedule: input.schedule }),
+            // Rebinding changes where runs execute, so the workspace strategy
+            // must follow: unbinding a root-strategy task would otherwise run
+            // loose prompts in the shared project checkout.
+            ...(input.bindToCurrentThread === undefined
+              ? {}
+              : {
+                  threadId:
+                    input.bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
+                  workspaceStrategy: scheduledTaskWorkspaceStrategy(input.bindToCurrentThread),
+                }),
+          })
           .pipe(
-            Effect.mapError((error) =>
-              failure("orchestration_error", `Could not update scheduled task: ${error.message}`),
-            ),
+            Effect.provideService(DispatchModeLimit, limits),
+            Effect.catchTags({
+              ScheduledTaskError: (error) =>
+                Effect.fail(
+                  failure(
+                    "orchestration_error",
+                    `Could not update scheduled task: ${error.message}`,
+                  ),
+                ),
+            }),
           );
-        return yield* summarizeScheduledTask(scope, { parent, limits }, task);
+        if (Option.isNone(updated)) {
+          return yield* failure(
+            "task_not_found",
+            `Scheduled task ${input.scheduledTaskId} was not found.`,
+          );
+        }
+        return yield* summarizeScheduledTask(scope, { parent, limits }, updated.value.task);
       }),
     deleteScheduledTask: (scope, input) =>
       Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
-        yield* scheduledTasks
-          .delete({ id: existing.id })
+        const deleted = yield* scheduledTasks
+          .delete({
+            id: existing.id,
+            projectId: existing.projectId,
+            expectedThreadId: existing.threadId,
+            expectedRuntimeMode: existing.runtimeMode,
+            expectedInteractionMode: existing.interactionMode,
+          })
           .pipe(
-            Effect.mapError((error) =>
-              failure("orchestration_error", `Could not delete scheduled task: ${error.message}`),
-            ),
+            Effect.provideService(DispatchModeLimit, limits),
+            Effect.catchTags({
+              ScheduledTaskError: (error) =>
+                failure("orchestration_error", `Could not delete scheduled task: ${error.message}`),
+            }),
           );
-        return { scheduledTaskId: existing.id, deleted: true };
+        if (Option.isNone(deleted)) {
+          return yield* failure(
+            "task_not_found",
+            `Scheduled task ${input.scheduledTaskId} was not found.`,
+          );
+        }
+        return { scheduledTaskId: deleted.value.id, deleted: true };
       }),
     requestSecret: (scope, input) =>
       Effect.gen(function* () {

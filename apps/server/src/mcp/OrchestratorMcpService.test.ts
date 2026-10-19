@@ -17,6 +17,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
@@ -2102,8 +2103,10 @@ describe("OrchestratorMcpService provider resolution", () => {
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({
               list: () => Effect.succeed({ tasks }),
-              upsert: () =>
-                Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: tasks[0]! })),
+              update: () =>
+                Ref.update(upserted, (count) => count + 1).pipe(
+                  Effect.as(Option.some({ task: tasks[0]! })),
+                ),
             }),
           ),
         ),
@@ -2260,8 +2263,10 @@ describe("OrchestratorMcpService provider resolution", () => {
                   Layer.mock(SecretRequests.SecretRequests)({}),
                   Layer.mock(ScheduledTaskService.ScheduledTaskService)({
                     list: () => Effect.succeed({ tasks: [bound] }),
-                    upsert: () =>
-                      Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: bound })),
+                    update: () =>
+                      Ref.update(upserted, (count) => count + 1).pipe(
+                        Effect.as(Option.some({ task: bound })),
+                      ),
                   }),
                 ),
               ),

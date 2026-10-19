@@ -3,7 +3,7 @@ import * as NodeCrypto from "node:crypto";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
-import { ScheduledTaskUpsertInput, SecretRequestError } from "@t3tools/contracts";
+import { ScheduledTaskUpsertInput, SecretRef, SecretRequestError } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -11,6 +11,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Queue from "effect/Queue";
+import * as Option from "effect/Option";
 import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
@@ -65,12 +66,17 @@ const withService = <A, E>(
     readonly service: ScheduledTaskService.ScheduledTaskService["Service"];
     readonly launches: Queue.Queue<LaunchInput>;
     readonly secretsByRef: Map<string, string>;
+    readonly consumedRefs: string[];
   }) => Effect.Effect<A, E, never>,
-  options: { readonly gate?: Deferred.Deferred<void>; readonly relayHookBaseUrl?: string } = {},
+  options: {
+    readonly gate?: Deferred.Deferred<void>;
+    readonly relayHookBaseUrl?: string;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const launches = yield* Queue.unbounded<LaunchInput>();
     const secretsByRef = new Map<string, string>();
+    const consumedRefs: string[] = [];
     const layerDependencies = Layer.mergeAll(
       NodePlatformCrypto.layer,
       Scheduler.layer,
@@ -84,6 +90,7 @@ const withService = <A, E>(
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
       Layer.mock(SecretRequests.SecretRequests)({
         consume: ({ ref }) => {
+          consumedRefs.push(ref);
           const value = secretsByRef.get(ref);
           secretsByRef.delete(ref);
           return value === undefined
@@ -98,7 +105,7 @@ const withService = <A, E>(
     );
     return yield* Effect.gen(function* () {
       const service = yield* ScheduledTaskService.ScheduledTaskService;
-      return yield* body({ service, launches, secretsByRef });
+      return yield* body({ service, launches, secretsByRef, consumedRefs });
     }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory));
 
@@ -868,6 +875,66 @@ it.effect("counts each handled request by what happened to it", () =>
       assert.equal((yield* deliveriesCounted("not_found", "direct")) - before.notFound, 1);
       assert.equal((yield* deliveriesCounted("accepted", "relay")) - before.relayAccepted, 1);
       assert.equal((yield* deliveriesCounted("duplicate", "relay")) - before.duplicate, 1);
+    }),
+  ),
+);
+
+it.effect("webhook edits retain credentials and consume a replacement secret once", () =>
+  withService(({ service, launches, secretsByRef, consumedRefs }) =>
+    Effect.gen(function* () {
+      const signature = {
+        header: "x-hub-signature-256",
+        encoding: "hex",
+        prefix: "sha256=",
+      } as const;
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: {
+            type: "webhook",
+            signature: { ...signature, secret: "original-secret" },
+          },
+        }),
+      );
+      const scope = { id: task.id, projectId: task.projectId };
+      const edited = Option.getOrThrow(
+        yield* service.update({
+          ...scope,
+          title: "Renamed",
+          schedule: { type: "webhook", signature, maxDeliveryAgeMinutes: 30 },
+        }),
+      ).task;
+      assert.equal(edited.webhook?.path, task.webhook?.path);
+      assert.isTrue(edited.webhook?.hasSecret);
+      assert.equal(
+        (yield* service.triggerWebhook(
+          requestFor(edited, {
+            headers: { "x-hub-signature-256": githubSignature("original-secret") },
+          }),
+        ))._tag,
+        "accepted",
+      );
+      yield* Queue.take(launches);
+
+      const secretRef = SecretRef.make("secret-ref:00000000000000000000000000000003");
+      secretsByRef.set(secretRef, "replacement-secret");
+      const replaced = Option.getOrThrow(
+        yield* service.update({
+          ...scope,
+          schedule: { type: "webhook", signature: { ...signature, secretRef } },
+        }),
+      ).task;
+      assert.deepEqual(consumedRefs, [secretRef]);
+      assert.equal(replaced.webhook?.path, task.webhook?.path);
+      assert.isFalse(JSON.stringify(replaced).includes("replacement-secret"));
+      assert.equal(
+        (yield* service.triggerWebhook(
+          requestFor(replaced, {
+            headers: { "x-hub-signature-256": githubSignature("replacement-secret") },
+          }),
+        ))._tag,
+        "accepted",
+      );
+      yield* Queue.take(launches);
     }),
   ),
 );
