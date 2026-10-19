@@ -779,8 +779,15 @@ describe("CodexAdapterV2 process spawning", () => {
       yield* open({ T3CODE_CODEX_LAUNCH_ARGS: " --enable env-feature " });
 
       assert.deepEqual(spawnedArgs, [
-        ["app-server", "--strict-config", "-c", "model_reasoning_summary=detailed"],
-        ["app-server", "--enable", "env-feature"],
+        [
+          "app-server",
+          "--strict-config",
+          "-c",
+          "model_reasoning_summary=detailed",
+          "-c",
+          "thread_unload_delay_secs=0",
+        ],
+        ["app-server", "--enable", "env-feature", "-c", "thread_unload_delay_secs=0"],
       ]);
     }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );

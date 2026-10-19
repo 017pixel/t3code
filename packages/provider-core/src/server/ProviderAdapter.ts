@@ -382,6 +382,16 @@ export class ProviderAdapterProtocolError extends Schema.TaggedError<ProviderAda
   }
 }
 
+/** The adapter proves no native release began, including in earlier failed attempts. */
+export class ProviderAdapterThreadUnloadRefusedError extends Schema.TaggedError<ProviderAdapterThreadUnloadRefusedError>()(
+  "ProviderAdapterThreadUnloadRefusedError",
+  { driver: ProviderDriverKind, providerThreadId: ProviderThreadId },
+) {
+  override get message(): string {
+    return `${this.driver} native thread remains loaded because it has unfinished background work.`;
+  }
+}
+
 export const ProviderAdapterV2Error = Schema.Union([
   ProviderAdapterCapabilitiesError,
   ProviderAdapterOpenSessionError,
@@ -398,6 +408,7 @@ export const ProviderAdapterV2Error = Schema.Union([
   ProviderAdapterRuntimeRequestResponseError,
   ProviderAdapterEventStreamError,
   ProviderAdapterProtocolError,
+  ProviderAdapterThreadUnloadRefusedError,
 ]);
 export type ProviderAdapterV2Error = typeof ProviderAdapterV2Error.Type;
 
