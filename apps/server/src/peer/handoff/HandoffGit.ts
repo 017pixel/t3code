@@ -366,7 +366,7 @@ const make = Effect.gen(function* () {
         );
         // No-overlay checkout carries deletions; read-tree unstages edits without moving the branch.
         yield* git(input.worktreePath, ["checkout", "--no-overlay", input.snapshot, "--", "."]);
-        yield* git(input.worktreePath, ["read-tree", input.tip]);
+        yield* git(input.worktreePath, ["read-tree", "-m", input.tip]);
         return {
           branch,
           commit: Effect.sync(() => {
