@@ -141,7 +141,12 @@ export function collectThreadFilePaths(
   for (const item of items) {
     let cached = pathsByItem.get(item);
     if (cached === undefined || cached.cwd !== cwd) {
-      cached = { cwd, paths: turnItemPaths(item, cwd).filter(isAbsolutePath) };
+      cached = {
+        cwd,
+        paths: turnItemPaths(item, cwd)
+          .map((path) => (isAbsolutePath(path) ? path : resolveOperand(path, cwd)))
+          .filter((path) => path !== null),
+      };
       pathsByItem.set(item, cached);
     }
     for (const path of cached.paths) {

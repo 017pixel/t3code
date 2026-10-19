@@ -372,14 +372,14 @@ describe("thread-evidenced file candidates", () => {
       {
         ...itemBase(0),
         type: "file_change",
-        fileName: "/repos/app-a/.worktrees/feature-b/docs/guide.md",
-        changes: [{ operation: "update", path: "/repos/app-b/src/api/rules/categories.ts" }],
+        fileName: "./.worktrees/feature-b/docs/guide.md",
+        changes: [{ operation: "update", path: "../app-b/src/api/rules/categories.ts" }],
       },
       {
         ...itemBase(1),
         type: "dynamic_tool",
         toolName: "Read",
-        input: { file_path: "/notes/meeting/summary.md" },
+        input: { file_path: "../../notes/meeting/summary.md" },
         output: { path: "/not-evidence/tool-output.md" },
       },
       {
@@ -387,14 +387,13 @@ describe("thread-evidenced file candidates", () => {
         type: "dynamic_tool",
         toolName: "view_image",
         input: null,
-        viewedImagePath: "/tmp/images/shot.png",
+        viewedImagePath: "../../tmp/images/shot.png",
       },
       {
         ...itemBase(3),
         type: "file_search",
         results: [
-          { fileName: "/repos/app-b/src/api/rules/categories.ts" },
-          { fileName: "/repos/app-b/tests/rules.test.ts", preview: "/not-evidence/search.txt" },
+          { fileName: "../app-b/tests/rules.test.ts", preview: "/not-evidence/search.txt" },
         ],
       },
       {
@@ -464,10 +463,15 @@ describe("thread-evidenced file candidates", () => {
       { href: "docs/guide.md", paths: ["/other/mydocs/guide.md"], expected: null },
       { href: "DOCS/guide.md", paths: ["/other/docs/guide.md"], expected: null },
       { href: "docs/guide.md", paths: ["/repos/app-a/docs/guide.md"], expected: null },
+      {
+        href: "docs/guide.md",
+        paths: ["./docs/guide.md", "/other/docs/guide.md"],
+        expected: null,
+      },
       { href: "docs/guide.md", paths: ["/repos/app-a/packages/web/docs/notes.md"], expected: null },
       {
         href: "docs/guide.md",
-        paths: ["/repos/app-a/docs/notes.md", "/other/docs/notes.md"],
+        paths: ["./docs/notes.md", "/other/docs/notes.md"],
         expected: null,
       },
       {
@@ -491,14 +495,26 @@ describe("thread-evidenced file candidates", () => {
       },
     ];
     for (const { href, paths, expected } of cases) {
-      expect(
-        resolveThreadFilePathCandidate(href, cwd, createThreadFilePathIndex(paths)),
-        JSON.stringify({ href, paths }),
-      ).toBe(expected);
+      const evidence = collectThreadFilePaths(
+        [
+          {
+            ...itemBase(0),
+            type: "file_search",
+            results: paths.map((fileName) => ({ fileName })),
+          },
+        ],
+        cwd,
+      );
+      expect
+        .soft(
+          resolveThreadFilePathCandidate(href, cwd, createThreadFilePathIndex(evidence)),
+          JSON.stringify({ href, paths }),
+        )
+        .toBe(expected);
     }
   });
 
-  it("uses literal same-command cwd and quoted paths without inheriting or guessing shell state", () => {
+  it("uses literal paths and cwd without inheriting or guessing shell state", () => {
     const items = [
       'cd "../app b" && cat "docs/my guide.md"',
       "cat src/local.ts",
@@ -554,5 +570,24 @@ describe("thread-evidenced file candidates", () => {
     expect(
       resolveThreadFilePathCandidate("raw/recording.mp3", cwd, createThreadFilePathIndex(paths)),
     ).toBe("/repos/meeting/raw/recording.mp3");
+
+    const item = Object.freeze({
+      ...itemBase(items.length),
+      type: "dynamic_tool",
+      toolName: "Read",
+      input: { path: "docs/../docs/local.md" },
+      viewedImagePath: "/tmp/[shot] #1?.png",
+    } satisfies OrchestrationV2TurnItem);
+    for (const [root, relativePaths] of [
+      [cwd, ["/repos/app-a/docs/local.md"]],
+      ["/other/app", ["/other/app/docs/local.md"]],
+      [null, []],
+      ["relative/root", []],
+      [cwd, ["/repos/app-a/docs/local.md"]],
+    ] as const) {
+      expect
+        .soft(collectThreadFilePaths([item], root), String(root))
+        .toEqual(["/tmp/[shot] #1?.png", ...relativePaths]);
+    }
   });
 });
