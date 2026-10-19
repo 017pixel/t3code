@@ -1360,8 +1360,9 @@ describe("ProviderInstallLock", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  for (const change of ["contents", "mtime", "reappeared"] as const) {
-    it.effect(`abandons an age takeover after its predecessor changes (${change})`, () =>
+  it.effect.each(["contents", "mtime", "reappeared"] as const)(
+    "abandons an age takeover after its predecessor changes (%s)",
+    (change) =>
       Effect.gen(function* () {
         const { home, directory } = yield* withHome;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -1414,8 +1415,7 @@ describe("ProviderInstallLock", () => {
           assert.deepStrictEqual(yield* lock.tryRun("k", () => Effect.void), Option.none());
         }
       }).pipe(Effect.provide(NodeServices.layer)),
-    );
-  }
+  );
 
   it.effect("does not skip a resumed owner after another successor abandons its generation", () =>
     Effect.gen(function* () {
