@@ -58,17 +58,23 @@ describe("MCP server editor", () => {
       },
     };
     const draft = mcpServerDraftFrom("docs", server);
-    expect(mcpServerFromDraft(draft, new Set(), "docs")).toEqual({
+    const unchanged = mcpServerFromDraft(draft, new Set(), "docs");
+    expect(unchanged).toEqual({
       ok: true,
       name: "docs",
       transport: server.transport,
     });
+    if (!unchanged.ok) throw new Error("Expected an unchanged server");
+    expect(
+      mcpServerTransportForTarget(unchanged.transport, server.transport, server.transport),
+    ).toEqual(server.transport);
     const renamed = {
       ...draft,
       name: "docs-work",
       headers: draft.headers.map((header) => ({ ...header, name: "X-Api-Key" })),
     };
-    expect(mcpServerFromDraft(renamed, new Set(), "docs")).toEqual({
+    const moved = mcpServerFromDraft(renamed, new Set(), "docs");
+    expect(moved).toEqual({
       ok: true,
       name: "docs-work",
       transport: {
@@ -84,6 +90,10 @@ describe("MCP server editor", () => {
         ],
       },
     });
+    if (!moved.ok) throw new Error("Expected a valid secret rename");
+    expect(
+      mcpServerTransportForTarget(moved.transport, server.transport, server.transport, "docs"),
+    ).toEqual(moved.transport);
     expect(
       mcpServerFromDraft(
         {
@@ -113,6 +123,32 @@ describe("MCP server editor", () => {
     expect(result.ok && result.transport.type === "http" && result.transport.headers).toEqual([
       { name: "X-Api-Key", value: "replacement-token", sensitive: true },
     ]);
+    const cleared = mcpServerFromDraft(
+      {
+        ...draft,
+        headers: [
+          { id: "replacement", name: "Authorization", value: "", sensitive: true, stored: false },
+        ],
+      },
+      new Set(),
+      "docs",
+    );
+    if (!cleared.ok) throw new Error("Expected a valid empty replacement");
+    const emptyTransport = {
+      ...server.transport,
+      headers: [{ name: "Authorization", value: "", sensitive: true }],
+    };
+    expect(cleared.transport).toEqual(emptyTransport);
+    for (const renamedFrom of [undefined, "docs"]) {
+      expect(
+        mcpServerTransportForTarget(
+          cleared.transport,
+          server.transport,
+          server.transport,
+          renamedFrom,
+        ),
+      ).toEqual(emptyTransport);
+    }
   });
 });
 

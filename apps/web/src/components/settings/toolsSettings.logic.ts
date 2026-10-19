@@ -466,7 +466,8 @@ export function mcpServerTransportForTarget(
         !previous ||
         !destination ||
         previous.value !== variable.value ||
-        previous.sensitive !== variable.sensitive
+        previous.sensitive !== variable.sensitive ||
+        Boolean(previous.valueRedacted) !== Boolean(variable.valueRedacted)
       )
         return variable;
       const { valueRedacted: _redacted, storedAs, ...rest } = variable;

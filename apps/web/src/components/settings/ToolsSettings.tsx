@@ -369,11 +369,10 @@ function SkillsPanel() {
                   targets.some(
                     (candidate) =>
                       candidate.projectId !== null &&
-                      Object.hasOwn(
+                      Object.keys(
                         target?.settings.projectSettingsOverrides[candidate.projectId]
                           ?.disabledSkills ?? {},
-                        row.name,
-                      ),
+                      ).some((name) => name.toLowerCase() === row.name.toLowerCase()),
                   )
                 }
                 showProviders={skillReachesSomeProviders(row, enabledProviders.length)}
