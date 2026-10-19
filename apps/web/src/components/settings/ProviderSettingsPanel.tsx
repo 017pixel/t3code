@@ -50,6 +50,7 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { cn } from "../../lib/utils";
 import { resolveAppModelSelectionState } from "../../modelSelection";
+import { resolveProviderInstanceAccentColor } from "../../providerInstances";
 import {
   useEnvironments,
   usePrimaryEnvironmentId,
@@ -960,6 +961,10 @@ export function EnvironmentProviderSettings({
         readOnly={readOnly}
         canWriteSettings={canWriteSettings}
         liveProvider={serverProviders.find((candidate) => candidate.instanceId === row.instanceId)}
+        autoAccentColor={resolveProviderInstanceAccentColor(
+          { instanceId: row.instanceId, driver: row.driver, accentColor: undefined },
+          serverProviders,
+        )}
         isUpdateDispatching={updatingProviderInstanceIds.has(row.instanceId)}
         showProjectOverride={showProjectOverride}
         projectOverrideValue={
@@ -1246,6 +1251,7 @@ function ProviderInstanceRow({
   readOnly,
   canWriteSettings,
   liveProvider,
+  autoAccentColor,
   isUpdateDispatching,
   showProjectOverride,
   projectOverrideValue,
@@ -1266,6 +1272,7 @@ function ProviderInstanceRow({
   readonly readOnly: boolean;
   readonly canWriteSettings: boolean;
   readonly liveProvider: ServerProvider | undefined;
+  readonly autoAccentColor: string | undefined;
   readonly isUpdateDispatching: boolean;
   readonly showProjectOverride: boolean;
   readonly projectOverrideValue: boolean | undefined;
@@ -1324,6 +1331,7 @@ function ProviderInstanceRow({
       instance={instance}
       driverOption={driverOption}
       liveProvider={liveProvider}
+      autoAccentColor={autoAccentColor}
       mode={mode}
       selected={selected}
       onSelect={mode === "list" ? () => actions.selectInstance(instanceId) : undefined}

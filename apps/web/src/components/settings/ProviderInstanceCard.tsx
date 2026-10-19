@@ -593,6 +593,7 @@ interface ProviderInstanceCardProps {
   readonly isUpdating?: boolean | undefined;
   readonly onAcceptUrlAuth?: ((action: AcpRegistryUrlAuthAction) => void) | undefined;
   readonly environmentId?: EnvironmentId | undefined;
+  readonly autoAccentColor?: string | undefined;
   readonly projectOverride?: ProjectOverrideControl | undefined;
   readonly acpProjects?:
     | ReadonlyArray<{
@@ -641,6 +642,7 @@ export function ProviderInstanceCard({
   isUpdating = false,
   onAcceptUrlAuth,
   environmentId,
+  autoAccentColor,
   acpProjects = EMPTY_ACP_PROJECTS,
   projectOverride,
 }: ProviderInstanceCardProps) {
@@ -689,7 +691,8 @@ export function ProviderInstanceCard({
   const urlAuthAction = liveProvider?.auth.action;
   const displayName =
     instance.displayName?.trim() || driverOption?.label || String(instance.driver);
-  const accentColor = normalizeProviderAccentColor(instance.accentColor);
+  const explicitAccentColor = normalizeProviderAccentColor(instance.accentColor);
+  const accentColor = explicitAccentColor ?? autoAccentColor;
   const { copyToClipboard } = useCopyToClipboard<{ providerName: string }>({
     onCopy: ({ providerName }) => {
       toastManager.add({
@@ -1163,7 +1166,8 @@ export function ProviderInstanceCard({
               <ProviderAccentColorPicker
                 layout="inline"
                 displayName={displayName}
-                value={accentColor}
+                value={explicitAccentColor}
+                placeholderColor={autoAccentColor}
                 onCommit={updateAccentColor}
                 commitDelayMs={120}
               />

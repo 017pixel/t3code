@@ -13,11 +13,16 @@ import {
 } from "@t3tools/contracts";
 import {
   normalizeProviderAccentColor,
+  resolveProviderInstanceAccentColor,
   resolveProviderInstanceDisplayName,
   shouldShowInstanceBadge,
 } from "@t3tools/client-runtime/state/provider-instance-display";
 
-export { normalizeProviderAccentColor, shouldShowInstanceBadge };
+export {
+  normalizeProviderAccentColor,
+  resolveProviderInstanceAccentColor,
+  shouldShowInstanceBadge,
+};
 
 /**
  * Local-only placeholder used while a draft has no provider it can safely
@@ -87,7 +92,7 @@ export function deriveProviderInstanceEntries(
       instanceId,
       driverKind,
       displayName: resolveProviderInstanceDisplayName(snapshot),
-      accentColor: normalizeProviderAccentColor(snapshot.accentColor),
+      accentColor: resolveProviderInstanceAccentColor(snapshot, providers),
       ...(driverKind === "acpRegistry" && snapshot.iconUrl
         ? { acpRegistryIconUrl: snapshot.iconUrl }
         : {}),

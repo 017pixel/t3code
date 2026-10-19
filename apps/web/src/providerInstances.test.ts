@@ -271,6 +271,16 @@ describe("deriveProviderInstanceEntries", () => {
     expect(entry?.driverKind).toBe("codex");
     expect(entry?.isDefault).toBe(false);
   });
+
+  it("auto-colors a custom instance that shares its driver, but not the default", () => {
+    const [defaultEntry, customEntry] = deriveProviderInstanceEntries([
+      provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex" }),
+      provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex_personal" }),
+    ]);
+
+    expect(defaultEntry?.accentColor).toBeUndefined();
+    expect(customEntry?.accentColor).toMatch(/^#[0-9a-f]{6}$/);
+  });
 });
 
 describe("deriveProviderEntriesByEnvironment", () => {

@@ -144,6 +144,18 @@ describe("resolveThreadProviderInstance", () => {
       resolveThreadProviderInstance(serverConfigs.get(environmentId)?.providers, thread)?.showBadge,
     ).toBe(false);
   });
+
+  it("auto-colors a custom instance that shares its driver with the default", () => {
+    const providers = makeConfig([
+      { instanceId: "codex", driver: "codex" },
+      { instanceId: "codex_personal", driver: "codex" },
+    ]).providers;
+    const thread = makeThread(EnvironmentId.make("environment-a"), "codex_personal");
+
+    const resolved = resolveThreadProviderInstance(providers, thread);
+    expect(resolved?.accentColor).toMatch(/^#[0-9a-f]{6}$/);
+    expect(resolved?.showBadge).toBe(true);
+  });
 });
 
 describe("createThreadRowProviderInstanceResolver", () => {
