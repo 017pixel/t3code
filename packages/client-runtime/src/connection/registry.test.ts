@@ -2105,6 +2105,17 @@ describe("EnvironmentRegistry routes", () => {
             expectedEnvironmentId: RELAY_TARGET.environmentId,
           };
           yield* onboarding.registerPairing(input);
+          const connectProfiles = yield* Ref.get(harness.storedProfiles);
+          expect(
+            yield* onboarding
+              .registerPairing({
+                ...input,
+                pairingUrl: input.host,
+                pairingCode: "pairing-code",
+              })
+              .pipe(Effect.flip),
+          ).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });
+          expect(yield* Ref.get(harness.storedProfiles)).toEqual(connectProfiles);
           yield* onboarding.registerPairing({ ...input, pairingCode: "pairing-code" });
           const pairedProfiles = yield* Ref.get(harness.storedProfiles);
           const pairedCredentials = yield* Ref.get(harness.storedCredentials);

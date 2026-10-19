@@ -254,7 +254,7 @@ export const resolveRemoteAddressWithoutCredential = (input: {
 }): { readonly httpBaseUrl: string; readonly wsBaseUrl: string } | null => {
   const pairingUrl = input.pairingUrl?.trim() ?? "";
   const raw = (pairingUrl || input.host?.trim() || "").replace(/^\/+/, "");
-  if (raw === "" || (pairingUrl === "" && (input.pairingCode?.trim() ?? "") !== "")) return null;
+  if (raw === "" || (input.pairingCode?.trim() ?? "") !== "") return null;
   let url: URL;
   try {
     if (/^[a-zA-Z][a-zA-Z\d+-]*:\/\//.test(raw)) {
