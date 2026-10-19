@@ -931,6 +931,7 @@ export const layer: Layer.Layer<
           const terminalEvent = yield* Ref.make<ProviderTerminalEvent | null>(null);
           const latestTurnItemOrdinal = yield* Ref.make(input.providerTurnOrdinal * 100);
           const latestProviderThread = yield* Ref.make(input.providerThread);
+          const pendingBackgroundWork = new Map<ProviderThreadId, boolean>();
           const routeIdentity: ProviderEventRouteIdentity = {
             threadId: input.run.threadId,
             runId: input.run.id,
@@ -1193,9 +1194,16 @@ export const layer: Layer.Layer<
             if (backgroundItems.size > 0) {
               return false;
             }
+            // Live probes can run ahead of queued events. Consumed child snapshots
+            // retain native continuations between their terminal and next turn.
+            for (const [providerThreadId, pending] of pendingBackgroundWork) {
+              if (providerThreadId !== input.providerThread.id && pending) return false;
+            }
             if (yield* Ref.get(providerThreadOwnerLost)) {
               return true;
             }
+            const pendingRoot = pendingBackgroundWork.get(input.providerThread.id);
+            if (pendingRoot !== undefined) return !pendingRoot;
             // Claude background Bash has no turn-item projection. Use only the
             // thread-scoped probe: session-wide pending work (siblings, wake
             // buffers, session subagents) must not pin this root subscription.
@@ -1284,6 +1292,9 @@ export const layer: Layer.Layer<
                   reservedHeldTurnItemIds.add(event.turnItem.id);
                 }
                 if (event.type === "provider_thread.updated") {
+                  if (event.pendingBackgroundWork !== undefined) {
+                    pendingBackgroundWork.set(event.providerThread.id, event.pendingBackgroundWork);
+                  }
                   if (event.providerThread.id === input.providerThread.id && storedEventCount > 0) {
                     yield* Ref.set(latestProviderThread, event.providerThread);
                   }

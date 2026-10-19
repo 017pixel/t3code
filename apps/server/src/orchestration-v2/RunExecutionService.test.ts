@@ -12,9 +12,11 @@ import {
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2Subagent,
+  type OrchestrationV2StoredEvent,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -1688,6 +1690,97 @@ it.effect("ends a nested native subagent and its thread when the root run is int
     assert.deepInclude(ended, ["subagent.updated", nestedId, "interrupted"]);
     assert.deepInclude(ended, ["node.updated", grandchildRootId, "interrupted"]);
   }),
+);
+
+it.effect.each([false, true])(
+  "drains queued child output with an idle adapter and root ownership lost=%s",
+  (rootOwnershipLost) =>
+    Effect.gen(function* () {
+      const childEvents: Array<string> = [];
+      yield* runBackgroundItemScenario(
+        "queued-child-output",
+        (ids) => {
+          const childProviderThreadId = ProviderThreadId.make(
+            "provider-thread:queued-child-output:child",
+          );
+          const snapshot = (child: boolean, pendingBackgroundWork: boolean) => ({
+            type: "provider_thread.updated" as const,
+            driver,
+            providerThread: {
+              id: child ? childProviderThreadId : ids.providerThreadId,
+              driver,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              providerSessionId: null,
+              appThreadId: child ? ids.childThreadId : ids.threadId,
+              ownerNodeId: null,
+              nativeThreadRef: null,
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: 1,
+              lastRunOrdinal: 1,
+              handoffIds: [],
+              forkedFrom: null,
+              pendingBackgroundTasks: [],
+              createdAt: DateTime.makeUnsafe(0),
+              updatedAt: DateTime.makeUnsafe(0),
+            } satisfies OrchestrationV2ProviderThread,
+            pendingBackgroundWork,
+          });
+          const childTurn = (status: "running" | "completed") => ({
+            type: "provider_turn.updated" as const,
+            driver,
+            threadId: ids.childThreadId,
+            providerTurn: {
+              id: ProviderTurnId.make("provider-turn:queued-child-output:child"),
+              providerThreadId: childProviderThreadId,
+              runAttemptId: null,
+              ordinal: 2,
+              status,
+            } as OrchestrationV2ProviderTurn,
+          });
+          const message = (text: string) =>
+            ({
+              type: "message.updated",
+              driver,
+              message: { threadId: ids.childThreadId, runId: null, text },
+            }) as ProviderAdapter.ProviderAdapterV2Event;
+          return [
+            childThreadCreatedEvent(ids),
+            snapshot(false, true),
+            snapshot(true, true),
+            subagentEvent(ids, "running"),
+            rootTerminalEvent(ids, "completed"),
+            snapshot(false, true),
+            subagentEvent(ids, "completed"),
+            childTurn("running"),
+            message("GRANDCHILD_OK"),
+            childTurn("completed"),
+            snapshot(true, false),
+            snapshot(false, false),
+            message("after-drain"),
+          ];
+        },
+        {
+          keepEventStreamOpen: true,
+          hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+          onIngest: (input) =>
+            Effect.sync(() => {
+              const event = input.event;
+              if (event.type === "provider_turn.updated")
+                childEvents.push(event.providerTurn.status);
+              if (event.type === "message.updated") childEvents.push(event.message.text);
+              if (event.type !== "provider_thread.updated") return [];
+              if (rootOwnershipLost && input.writeIfProviderThreadOwner !== undefined) return [];
+              return [
+                {
+                  event: { type: "provider-thread.updated", payload: event.providerThread },
+                } as OrchestrationV2StoredEvent,
+              ];
+            }),
+        },
+      );
+      assert.deepEqual(childEvents, ["running", "GRANDCHILD_OK", "completed"]);
+    }),
 );
 
 it.effect("keeps ingesting a late background command item completion after root terminal", () =>
@@ -4377,6 +4470,10 @@ function runBackgroundItemScenario(
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
     >;
     readonly onSubscribe?: Effect.Effect<void>;
+    readonly onIngest?: ProviderEventIngestor.ProviderEventIngestorV2["Service"]["ingestNormalized"];
+    readonly hasPendingBackgroundWorkForThread?: (
+      thread: OrchestrationV2ProviderThread,
+    ) => Effect.Effect<boolean>;
     readonly onFinalized?: (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
     ) => Effect.Effect<void>;
@@ -4426,7 +4523,7 @@ function runBackgroundItemScenario(
                     `subagent:${event.subagent.status}`,
                   ]);
                 }
-                return [];
+                return yield* options?.onIngest?.(input) ?? Effect.succeed([]);
               }),
           }),
           ServerSettings.layerTest(),
@@ -4442,6 +4539,9 @@ function runBackgroundItemScenario(
         providerSessionId: ProviderSessionId.make(`session:${key}`),
         session: {
           events: Stream.empty,
+          ...(options?.hasPendingBackgroundWorkForThread === undefined
+            ? {}
+            : { hasPendingBackgroundWorkForThread: options.hasPendingBackgroundWorkForThread }),
           subscribeEvents: Effect.gen(function* () {
             yield* options?.onSubscribe ?? Effect.void;
             const events = Stream.fromIterable(makeEvents(ids));
@@ -4502,8 +4602,7 @@ function runBackgroundItemScenario(
       });
     }).pipe(Effect.provide(layerTest));
 
-    const closed = yield* Deferred.await(ingestionDone).pipe(Effect.timeoutOption("2 seconds"));
-    assert.isTrue(Option.isSome(closed), "event ingestion fiber did not finish");
+    yield* Deferred.await(ingestionDone);
     return yield* Ref.get(observed);
   });
 }
