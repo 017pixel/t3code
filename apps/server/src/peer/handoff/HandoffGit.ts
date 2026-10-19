@@ -33,7 +33,7 @@ export class HandoffTooLargeError extends Schema.TaggedError<HandoffTooLargeErro
   { bundleBytes: Schema.Number },
 ) {
   override get message(): string {
-    return `The unpushed work is ${Math.ceil(this.bundleBytes / 1024 / 1024)} MiB, over the ${MAX_HANDOFF_BUNDLE_BYTES / 1024 / 1024} MiB a handoff carries. Push the branch, then hand off again.`;
+    return `The Git package is ${Math.ceil(this.bundleBytes / 1024 / 1024)} MiB, over the ${MAX_HANDOFF_BUNDLE_BYTES / 1024 / 1024} MiB a handoff carries. Commit and push large files, or reduce uncommitted changes, then try again.`;
   }
 }
 
