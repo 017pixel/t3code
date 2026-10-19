@@ -11,6 +11,9 @@ import { OFFICE_PREVIEW_MAX_BYTES, type OfficeWorkerResult } from "./officePrevi
 type Workbook = Extract<OfficeWorkerResult, { type: "xlsx" }>;
 type Slide = Extract<OfficeWorkerResult, { type: "slide" }>;
 
+const OFFICE_PAGE_PADDING = 20;
+const OFFICE_PAGE_BACKGROUND = { light: "#f4f4f5", dark: "#141414" };
+
 async function readOfficeFile(src: string, signal: AbortSignal) {
   const response = await fetch(src, { signal });
   if (!response.ok) throw new Error("The file could not be loaded. Close it and try again.");
@@ -86,7 +89,7 @@ function WordFrame(props: {
   readonly name: string;
 }) {
   const { resolvedTheme } = useTheme();
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${resolvedTheme === "dark" ? "#141414" : "#f4f4f5"}}body{margin:0}.docx-wrapper{background:transparent;padding:20px;box-sizing:border-box}.docx-wrapper section.docx{max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
   return (
     <iframe title={props.name} srcDoc={srcDoc} sandbox="" className="min-h-0 flex-1 border-0" />
   );
@@ -97,6 +100,7 @@ function SlideCanvas(props: {
   readonly onError: (message: string) => void;
 }) {
   const { slide, onError } = props;
+  const { resolvedTheme } = useTheme();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     let cancelled = false;
@@ -138,12 +142,15 @@ function SlideCanvas(props: {
     };
   }, [slide, onError]);
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center bg-muted/30 p-4">
+    <div
+      className="min-h-0 flex-1 overflow-auto"
+      style={{ background: OFFICE_PAGE_BACKGROUND[resolvedTheme], padding: OFFICE_PAGE_PADDING }}
+    >
       <canvas
         ref={canvasRef}
         role="img"
         aria-label={props.slide.text || `Slide ${props.slide.index + 1}`}
-        className="max-h-full max-w-full object-contain shadow-sm"
+        className="block h-auto w-full shadow-sm"
       />
     </div>
   );
