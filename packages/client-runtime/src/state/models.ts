@@ -99,6 +99,7 @@ export interface EnvironmentThreadShell {
   readonly branch: string | null;
   readonly worktreePath: string | null;
   readonly lineage: OrchestrationV2ThreadShell["lineage"];
+  readonly handoff?: OrchestrationV2ThreadShell["handoff"] | null;
   readonly forkedFrom: OrchestrationV2ThreadShell["forkedFrom"];
   readonly activeProviderThreadId: OrchestrationV2ThreadShell["activeProviderThreadId"];
   readonly latestRun: ThreadRunSummary | null;
@@ -238,6 +239,7 @@ export function presentThreadShell(
     linkedPullRequest: thread.linkedPullRequest ?? null,
     branchPullRequest: thread.branchPullRequest ?? null,
     lineage: thread.lineage,
+    handoff: thread.handoff ?? null,
     forkedFrom: thread.forkedFrom,
     activeProviderThreadId: thread.activeProviderThreadId,
     latestRun,

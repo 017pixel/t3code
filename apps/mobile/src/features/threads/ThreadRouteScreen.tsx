@@ -1,3 +1,4 @@
+import { useThreadHandoffAction } from "./useThreadHandoffAction";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
@@ -693,7 +694,14 @@ function ThreadRouteContent(
       terminalId: targetTerminalId,
     });
   };
+  const handoff = useThreadHandoffAction(
+    selectedThread
+      ? { environmentId: selectedThread.environmentId, threadId: selectedThread.id }
+      : null,
+    (ref) => navigation.navigate("ThreadHandoff", ref),
+  );
   const threadGitControlProps = {
+    ...(handoff.available ? { onContinueOn: handoff.open } : {}),
     environmentId: environmentIdRaw ?? "",
     threadId: threadId ?? "",
     auxiliaryPaneControl:

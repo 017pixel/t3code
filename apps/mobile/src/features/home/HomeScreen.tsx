@@ -11,9 +11,13 @@ import {
   threadSearchMatchKey,
   type EnvironmentThreadSearchMatch,
 } from "@t3tools/client-runtime/state/thread-search";
-import { type EnvironmentId, type SidebarProjectGroupingMode } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  type SidebarProjectGroupingMode,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { use, useEffect, useRef, useState, type ComponentProps } from "react";
 import {
   Platform,
@@ -250,6 +254,10 @@ function renderHomeScrollView(props: ScrollViewProps) {
 }
 
 export function HomeScreen(props: HomeScreenProps) {
+  const navigation = useNavigation();
+  const handleContinueOn = (ref: ScopedThreadRef) => {
+    navigation.navigate("ThreadHandoff", ref);
+  };
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const workspace = useWorkspaceTabs();
   const [initialScrollOffset] = useState(() => workspace?.getScrollOffset("threads") ?? 0);
@@ -631,6 +639,7 @@ export function HomeScreen(props: HomeScreenProps) {
         selected={scopedThreadKey(thread.environmentId, thread.id) === selectedThreadKey}
         fullSwipeWidth={fullSwipeWidth}
         onNewThreadOnBranch={props.onNewThreadOnBranch}
+        onContinueOn={handleContinueOn}
         thread={thread}
         variant={item.item.variant}
         hasQueuedMessages={item.hasQueuedMessages}

@@ -1,3 +1,4 @@
+import { threadHandoffAction } from "../components/threadHandoffAction";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import {
@@ -128,7 +129,9 @@ export function useThreadActionMenu(input: {
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat);
+      const handoff = threadHandoffAction(threadRef);
       const items = buildThreadActionMenuItems({
+        canContinueOn: handoff.available,
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
         branch: thread.branch ?? null,
         projectFilter: null,
@@ -177,6 +180,9 @@ export function useThreadActionMenu(input: {
         }
       };
       switch (action) {
+        case "continue-on":
+          handoff.run();
+          return;
         case "project-settings": {
           const project = projects.find(
             (candidate) =>

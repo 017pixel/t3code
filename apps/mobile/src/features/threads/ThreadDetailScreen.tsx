@@ -1,3 +1,5 @@
+import { ThreadHandoffCard } from "./ThreadHandoffCard";
+import { threadHandoffIsReadOnly } from "@t3tools/client-runtime/state/threads";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import * as Dialog from "../../components/ui/Dialog";
@@ -612,7 +614,9 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     useState<RuntimeRequestId | null>(null);
   const activeUserInputRequestId = props.activePendingUserInput?.requestId ?? null;
   const composerSlotHidden =
-    activeUserInputRequestId !== null || props.creationState?.kind === "failed";
+    activeUserInputRequestId !== null ||
+    props.creationState?.kind === "failed" ||
+    threadHandoffIsReadOnly(props.selectedThread);
   const [usageLimitsPanel, setUsageLimitsPanel] = useState<{
     readonly key: string;
     readonly threadKey: string;
@@ -1284,6 +1288,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                   ) : null}
                 </View>
 
+                <ThreadHandoffCard thread={props.selectedThread} />
                 {/*
                  * Hidden (not unmounted) while a user-input request owns the composer slot, so
                  * composer drafts and editor state survive.

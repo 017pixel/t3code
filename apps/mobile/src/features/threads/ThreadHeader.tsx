@@ -25,6 +25,12 @@ export function ThreadHeader(
   const native = useThreadHeaderOptions(props);
   const androidHeaderActions = useMemo<ReadonlyArray<AppBarAction>>(() => {
     const actions: AppBarAction[] = [];
+    if (props.gitControls.onContinueOn)
+      actions.push({
+        accessibilityLabel: "Continue on…",
+        icon: "arrow.right",
+        onPress: props.gitControls.onContinueOn,
+      });
     if (props.onReturnToThread) {
       actions.push({
         accessibilityLabel: "Return to chat",
@@ -62,6 +68,7 @@ export function ThreadHeader(
     }
     return actions;
   }, [
+    props.gitControls.onContinueOn,
     props.inspectorMode,
     panes.auxiliaryPaneVisible,
     props.onOpenFilesInspector,

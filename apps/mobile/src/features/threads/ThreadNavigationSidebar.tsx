@@ -1,3 +1,4 @@
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
 import { resolveScratchProjectScopeKey } from "@t3tools/client-runtime/state/project-grouping";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -91,6 +92,7 @@ interface ThreadNavigationSidebarProps {
   readonly onOpenSettings: () => void;
   readonly onOpenEnvironmentSettings: () => void;
   readonly onNewThreadOnBranch: (thread: EnvironmentThreadShell) => void;
+  readonly onContinueOn: (ref: ScopedThreadRef) => void;
   readonly onNewThreadInProject: (project: EnvironmentProject) => void;
   readonly onSearchQueryChange: (query: string) => void;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
@@ -579,6 +581,7 @@ function ThreadNavigationSidebarPane(
         return (
           <ThreadListV2Row
             onNewThreadOnBranch={props.onNewThreadOnBranch}
+            onContinueOn={props.onContinueOn}
             thread={thread}
             variant={item.item.variant}
             hasQueuedMessages={item.hasQueuedMessages}

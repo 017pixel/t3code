@@ -2,7 +2,12 @@ import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
-import { EnvironmentId, ThreadId, type SidebarProjectGroupingMode } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ThreadId,
+  type SidebarProjectGroupingMode,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { useFocusEffect } from "@react-navigation/native";
 import {
@@ -416,6 +421,10 @@ function AdaptiveWorkspaceLayoutContent(
     });
   };
 
+  const handleContinueOn = (ref: ScopedThreadRef) => {
+    navigation.navigate("ThreadHandoff", ref);
+  };
+
   const handleOpenThreadPullRequests = useOpenThreadPullRequests();
 
   const handleNewThreadOnBranch = (thread: EnvironmentThreadShell) => {
@@ -683,6 +692,7 @@ function AdaptiveWorkspaceLayoutContent(
                           onOpenEnvironmentSettings={handleOpenEnvironmentSettings}
                           onNewThreadInProject={handleNewThreadInProject}
                           onNewThreadOnBranch={handleNewThreadOnBranch}
+                          onContinueOn={handleContinueOn}
                           onSelectThread={handleSelectThread}
                           onOpenThreadPullRequests={handleOpenThreadPullRequests}
                           onSearchQueryChange={setPrimarySidebarSearchQuery}

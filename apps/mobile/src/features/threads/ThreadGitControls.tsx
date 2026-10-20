@@ -72,6 +72,7 @@ function compactMenuStatus(gitStatus: VcsStatusResult | null): string {
 type HeaderItem = Record<string, unknown>;
 type HeaderItems = HeaderItem[];
 type ThreadGitHeaderActionItems = {
+  readonly handoff: HeaderItem | null;
   readonly terminal: HeaderItem;
   readonly files: HeaderItem;
   readonly git: HeaderItem;
@@ -96,6 +97,7 @@ export type ThreadGitMenuProps = {
 };
 
 type ThreadGitControlsProps = ThreadGitMenuProps & {
+  readonly onContinueOn?: () => void;
   readonly auxiliaryPaneControl?: {
     readonly accessibilityLabel: string;
     readonly onPress: () => void;
@@ -264,6 +266,17 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
   const model = useThreadGitControlModel(props);
 
   return {
+    handoff:
+      props.onContinueOn !== undefined
+        ? {
+            type: "button" as const,
+            identifier: "thread-continue-on",
+            accessibilityLabel: "Continue on…",
+            label: "Continue on…",
+            icon: { name: "arrow.right", type: "sfSymbol" as const },
+            onPress: props.onContinueOn,
+          }
+        : null,
     terminal: {
       accessibilityLabel: "Open terminal",
       disabled: !props.canOpenTerminal,
@@ -397,12 +410,22 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
 
 export function useThreadGitRightHeaderItems(props: ThreadGitControlsProps): HeaderItems {
   const actionItems = useThreadGitHeaderActionItems(props);
-  return [actionItems.git, actionItems.files, actionItems.terminal] as HeaderItems;
+  return [
+    ...(actionItems.handoff ? [actionItems.handoff] : []),
+    actionItems.git,
+    actionItems.files,
+    actionItems.terminal,
+  ] as HeaderItems;
 }
 
 export function useThreadGitCenterHeaderItems(props: ThreadGitControlsProps): HeaderItems {
   const actionItems = useThreadGitHeaderActionItems(props);
-  return [actionItems.files, actionItems.git, actionItems.terminal] as HeaderItems;
+  return [
+    ...(actionItems.handoff ? [actionItems.handoff] : []),
+    actionItems.files,
+    actionItems.git,
+    actionItems.terminal,
+  ] as HeaderItems;
 }
 
 export function ThreadGitControls(props: ThreadGitControlsProps) {
@@ -415,6 +438,13 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
 
   return (
     <Toolbar placement="right">
+      {props.onContinueOn !== undefined ? (
+        <Toolbar.Button
+          accessibilityLabel="Continue on…"
+          icon="arrow.right"
+          onPress={props.onContinueOn}
+        />
+      ) : null}
       {showActionControls && props.auxiliaryPaneControl ? (
         <Toolbar.Button
           accessibilityLabel={props.auxiliaryPaneControl.accessibilityLabel}

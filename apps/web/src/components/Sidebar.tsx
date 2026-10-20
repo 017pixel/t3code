@@ -1,3 +1,4 @@
+import { threadHandoffAction } from "./threadHandoffAction";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "./ThreadHoverCard";
@@ -4215,9 +4216,11 @@ export default function Sidebar() {
                 projectRef.projectId === thread.projectId,
             ),
           ) ?? null;
+        const handoff = threadHandoffAction(threadRef);
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
+              canContinueOn: handoff.available,
               canOperate: readEnvironmentScope(
                 threadRef.environmentId,
                 AuthOrchestrationOperateScope,
@@ -4259,6 +4262,9 @@ export default function Sidebar() {
           return;
         }
         switch (clicked.value) {
+          case "continue-on":
+            handoff.run();
+            return;
           case "filter-by-project":
             if (threadProjectGroup) {
               setProjectScopeKey(

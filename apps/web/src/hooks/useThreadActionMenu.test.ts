@@ -145,6 +145,7 @@ vi.mock("./useThreadActions", () => ({
 }));
 
 import { useThreadActionMenu } from "./useThreadActionMenu";
+import * as HandoffAction from "../components/threadHandoffAction";
 
 const target = {
   environmentId: EnvironmentId.make("secondary"),
@@ -217,5 +218,43 @@ describe("thread menu permissions", () => {
     createMenu().openMenu(position);
     await state.completed.promise;
     expect(state.effects).toEqual([effect]);
+  });
+});
+
+describe("thread handoff menu navigation", () => {
+  it("ignores delayed native menu choices from before draft navigation and accepts a fresh choice", async () => {
+    state.granted.add("secondary");
+    HandoffAction.threadHandoffRequest.setState({ request: null });
+    HandoffAction.configureThreadHandoffActions(() => true);
+    HandoffAction.updateThreadHandoffSelection("/secondary/thread");
+    const requested = deferred<void>();
+    const requests: Array<HandoffAction.ThreadHandoffRequest> = [];
+    const unsubscribe = HandoffAction.threadHandoffRequest.subscribe(({ request }) => {
+      if (request) {
+        requests.push(request);
+        requested.resolve();
+      }
+    });
+    try {
+      const oldChoice = deferred<ThreadActionMenuId | null>();
+      state.show.mockReturnValueOnce(oldChoice.promise);
+      createMenu().openMenu(position);
+      HandoffAction.updateThreadHandoffSelection("/secondary/draft");
+      HandoffAction.updateThreadHandoffSelection("/secondary/thread");
+      const freshChoice = deferred<ThreadActionMenuId | null>();
+      state.show.mockReturnValueOnce(freshChoice.promise);
+      createMenu().openMenu(position);
+      oldChoice.resolve("continue-on");
+      // Both menu continuations run in resolution order; the valid request is the milestone.
+      freshChoice.resolve("continue-on");
+      await requested.promise;
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.ref).toEqual(target);
+      expect(HandoffAction.isCurrentThreadHandoffRequest(requests[0]!)).toBe(true);
+    } finally {
+      unsubscribe();
+      HandoffAction.threadHandoffRequest.setState({ request: null });
+      HandoffAction.configureThreadHandoffActions(() => false);
+    }
   });
 });

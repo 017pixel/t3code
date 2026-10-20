@@ -289,13 +289,14 @@ export async function prepareTurnAttachments(input: {
   readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly supportsImageUploads?: boolean;
   readonly signal?: AbortSignal;
+  readonly isCurrent?: () => boolean;
   readonly onUploadProgress?: (attachmentId: string, progress: number) => void;
   readonly persistUploadedReferences?: (
     draftAttachments: ReadonlyArray<DraftComposerAttachment>,
   ) => Promise<"persisted" | "abandon">;
 }): Promise<PrepareTurnAttachmentsResult> {
   const { environmentId } = input;
-  if (input.signal?.aborted) return { status: "abandoned" };
+  if (input.signal?.aborted || input.isCurrent?.() === false) return { status: "abandoned" };
   const files = input.attachments.filter((attachment) => attachment.type === "file");
   const ready = (
     attachments: ReadonlyArray<UploadedMobileAttachment>,
@@ -313,15 +314,17 @@ export async function prepareTurnAttachments(input: {
       const imageAttachments = await toUploadChatImageAttachments(
         input.attachments.filter((attachment) => attachment.type === "image"),
       );
-      if (input.signal?.aborted) return { status: "abandoned" };
+      if (input.signal?.aborted || input.isCurrent?.() === false) return { status: "abandoned" };
       return ready(imageAttachments, [], input.attachments);
     } catch (error) {
-      if (input.signal?.aborted) return { status: "abandoned" };
+      if (input.signal?.aborted || input.isCurrent?.() === false) return { status: "abandoned" };
       throw error;
     }
   }
 
   const requireUploadAccess = () => {
+    if (input.isCurrent?.() === false)
+      throw new Error("This thread can no longer send attachments.");
     if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
       throw new Error("This connection cannot upload attachments.");
     }
@@ -401,7 +404,7 @@ export async function prepareTurnAttachments(input: {
           abort,
         }),
         onMinted: (attachmentId) => {
-          if (controller.signal.aborted) return "cancel";
+          if (controller.signal.aborted || input.isCurrent?.() === false) return "cancel";
           pendingAttachmentIds.push(attachmentId);
           createdAttachmentIds.push(attachmentId);
           return "continue";
@@ -416,6 +419,7 @@ export async function prepareTurnAttachments(input: {
     }
 
     if (controller.signal.aborted) throw new Error("Upload cancelled.");
+    requireUploadAccess();
 
     const draftAttachments = withUploadedMobileAttachmentReferences({
       environmentId,
@@ -434,7 +438,7 @@ export async function prepareTurnAttachments(input: {
     return ready(uploadedAttachments, pendingAttachmentIds, draftAttachments);
   } catch (error) {
     await releaseCreatedUploadsQuietly(environmentId, createdAttachmentIds);
-    if (controller.signal.aborted) return { status: "abandoned" };
+    if (controller.signal.aborted || input.isCurrent?.() === false) return { status: "abandoned" };
     throw error;
   } finally {
     input.signal?.removeEventListener("abort", abort);

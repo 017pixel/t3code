@@ -6,6 +6,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  type OrchestrationV2ThreadHandoff,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult, type Atom } from "effect/reactivity";
@@ -22,6 +23,7 @@ const state = vi.hoisted(() => ({
   interaction: vi.fn(),
   prepare: vi.fn(),
   checkout: vi.fn(),
+  publishThread: () => {},
   manager: null as unknown as ReturnType<
     typeof import("./thread-outbox-manager").createThreadOutboxManager
   >,
@@ -32,10 +34,11 @@ const state = vi.hoisted(() => ({
     runtimeMode: "full-access",
     interactionMode: "default",
     session: null,
+    handoff: null as OrchestrationV2ThreadHandoff | null,
   },
   config: {
     providers: [{ instanceId: "codex", driver: "codex" }],
-    environment: { capabilities: {} },
+    environment: { capabilities: { fileAttachments: { maxUploadBytes: 1024 } } },
   },
 }));
 vi.mock("react", () => ({
@@ -70,6 +73,9 @@ vi.mock("./server", async () => {
 });
 vi.mock("./threads", async () => {
   const { Atom } = await import("effect/reactivity");
+  const { appAtomRegistry } = await import("./atom-registry");
+  const threadShellsAtom = Atom.make([state.thread]);
+  state.publishThread = () => appAtomRegistry.set(threadShellsAtom, [state.thread]);
   return {
     threadEnvironment: {
       startTurn: state.start,
@@ -77,7 +83,7 @@ vi.mock("./threads", async () => {
       setRuntimeMode: state.runtime,
       setInteractionMode: state.interaction,
     },
-    environmentThreadShells: { threadShellsAtom: Atom.make([state.thread]) },
+    environmentThreadShells: { threadShellsAtom },
   };
 });
 vi.mock("./use-atom-command", () => ({ useAtomCommand: <A>(command: A) => command }));
@@ -161,18 +167,25 @@ const message = (overrides: Partial<QueuedThreadMessage> = {}): QueuedThreadMess
 const remaining = () =>
   Object.values(appAtomRegistry.get(state.manager.queuedMessagesByThreadKeyAtom)).flat();
 
+function setThreadHandoff(handoff: OrchestrationV2ThreadHandoff | null) {
+  state.thread = { ...state.thread, handoff };
+  state.publishThread();
+}
+
 function runDrain() {
   const settled = Promise.withResolvers<void>();
   const release = appAtomRegistry.subscribe(dispatchingQueuedMessageIdAtom, (id) => {
     if (id === null) settled.resolve();
   });
   useThreadOutboxDrain();
+  if (appAtomRegistry.get(dispatchingQueuedMessageIdAtom) === null) settled.resolve();
   return settled.promise.finally(release);
 }
 
 beforeEach(() => {
   state.grantedEnvironments = new Set(["primary"]);
   state.draftText = "Keep this draft separate";
+  setThreadHandoff(null);
   appAtomRegistry.set(state.manager.queuedMessagesByThreadKeyAtom, {});
   appAtomRegistry.set(dispatchingQueuedMessageIdAtom, null);
   for (const command of [
@@ -430,6 +443,106 @@ describe("queued task operation access", () => {
       expect(state.prepare).toHaveBeenCalledOnce();
       expect(state.start).not.toHaveBeenCalled();
       expect(remaining()).toEqual([queued]);
+    },
+  );
+});
+
+const movingTo = {
+  handoffId: "move-one",
+  environmentId: EnvironmentId.make("destination"),
+  projectId: ProjectId.make("destination-project"),
+  label: "Destination",
+};
+const attachedMessage = () =>
+  message({
+    attachments: [
+      {
+        id: "file",
+        type: "file",
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 42,
+        fileUri: "file:///documents/notes.txt",
+      },
+    ],
+  });
+
+describe("queued messages during a thread move", () => {
+  it.each([
+    { state: "normal", handoff: null, sendable: true },
+    {
+      state: "pending",
+      handoff: { ...movingTo, state: "pending", requestCommandId: CommandId.make("request") },
+      sendable: true,
+    },
+    { state: "departing", handoff: { ...movingTo, state: "departing" }, sendable: false },
+    {
+      state: "departed",
+      handoff: { ...movingTo, state: "departed", threadId: ThreadId.make("target") },
+      sendable: false,
+    },
+    {
+      state: "failed",
+      handoff: { ...movingTo, state: "failed", lastError: "Disconnected" },
+      sendable: true,
+    },
+  ] as const)(
+    "preserves queued text and files on $state until sending is allowed",
+    async ({ handoff, sendable }) => {
+      state.grantedEnvironments.add("secondary");
+      setThreadHandoff(handoff);
+      const queued = attachedMessage();
+      await state.manager.enqueue(queued);
+      await runDrain();
+      expect(state.prepare).toHaveBeenCalledTimes(sendable ? 1 : 0);
+      expect(state.start).toHaveBeenCalledTimes(sendable ? 1 : 0);
+      expect(remaining()).toEqual(sendable ? [] : [queued]);
+      expect(state.draftText).toBe("Keep this draft separate");
+      if (!sendable) {
+        setThreadHandoff({ ...movingTo, state: "failed", lastError: "Disconnected" });
+        await runDrain();
+        expect(state.start).toHaveBeenCalledOnce();
+        expect(state.start.mock.calls[0]?.[0].input.message.text).toBe(queued.text);
+        expect(remaining()).toEqual([]);
+      }
+    },
+  );
+
+  it.each(["settings", "upload"] as const)(
+    "parks the unchanged message when departure begins during %s",
+    async (stage) => {
+      state.grantedEnvironments.add("secondary");
+      const queued = { ...attachedMessage(), runtimeMode: "approval-required" as const };
+      await state.manager.enqueue(queued);
+      const entered = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      if (stage === "settings") {
+        state.runtime.mockImplementationOnce(async () => {
+          entered.resolve();
+          await resume.promise;
+          return AsyncResult.success(undefined);
+        });
+      } else {
+        state.prepare.mockImplementationOnce(async ({ attachments }) => {
+          entered.resolve();
+          await resume.promise;
+          return {
+            status: "ready",
+            attachments: [],
+            draftAttachments: attachments,
+            pendingAttachmentIds: [],
+          };
+        });
+      }
+      const drained = runDrain();
+      await entered.promise;
+      setThreadHandoff({ ...movingTo, state: "departing" });
+      resume.resolve();
+      await drained;
+      expect(state.start).not.toHaveBeenCalled();
+      expect(state.prepare).toHaveBeenCalledTimes(stage === "settings" ? 0 : 1);
+      expect(remaining()).toEqual([queued]);
+      expect(state.draftText).toBe("Keep this draft separate");
     },
   );
 });

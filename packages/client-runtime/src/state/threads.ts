@@ -944,3 +944,5 @@ export * from "./threadFeedback.ts";
 export * from "./threadDetail.ts";
 export * from "./threadShell.ts";
 export * from "./threadState.ts";
+
+export * from "./threadHandoff.ts";

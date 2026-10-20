@@ -1,3 +1,6 @@
+import { threadHandoffIsReadOnly } from "@t3tools/client-runtime/state/threads";
+import { readThreadShell } from "../state/entities";
+import { ThreadHandoffBanner } from "./ThreadHandoffBanner";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
@@ -3346,7 +3349,12 @@ export default function ChatView(props: ChatViewProps) {
     scheduleComposerFocus();
   };
   const insertArtifactTemplateStable = useStableCallback(insertArtifactTemplate);
+  const sourceIsReadOnly = () =>
+    isServerThread &&
+    activeThreadRef !== null &&
+    threadHandoffIsReadOnly(readThreadShell(activeThreadRef));
   const sendAppMessage = async (text: string) => {
+    if (sourceIsReadOnly()) throw new Error("This thread continues on another environment.");
     if (!isServerThread || activeThreadId === null) {
       throw new Error("Messages from apps need a started thread.");
     }
@@ -5082,6 +5090,7 @@ export default function ChatView(props: ChatViewProps) {
   })() as ComposerBannerStackItem | null;
 
   const sendStandaloneCommand = async (text: string, failureMessage: string) => {
+    if (sourceIsReadOnly()) return;
     if (!activeThread || !clientSettingsHydrated || sendInFlightRef.current) return;
     const context = composerRef.current?.getSendContext();
     if (!context?.providerAvailable) return;
@@ -5972,6 +5981,7 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
+    if (sourceIsReadOnly()) return;
     if (
       usageLimitsOffered &&
       usageLimitsKey !== null &&
@@ -6468,6 +6478,10 @@ export default function ChatView(props: ChatViewProps) {
         });
       }
       await awaitAttachmentUploads(composerAttachmentsSnapshot.map((attachment) => attachment.id));
+      if (sourceIsReadOnly()) {
+        sendInFlightRef.current = false;
+        return;
+      }
       const attachmentCapabilitiesAfterUpload = readLiveAttachmentCapabilities();
       if (attachmentCapabilitiesAfterUpload.fileBlockReason !== null) {
         sendInFlightRef.current = false;
@@ -6507,6 +6521,10 @@ export default function ChatView(props: ChatViewProps) {
       await dockStarted;
     }
 
+    if (sourceIsReadOnly()) {
+      sendInFlightRef.current = false;
+      return;
+    }
     const attachmentCapabilitiesBeforeDispatch = readLiveAttachmentCapabilities();
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -8109,6 +8127,9 @@ export default function ChatView(props: ChatViewProps) {
                   data-chat-composer-stack="true"
                   className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
+                  {activeThreadShell?.handoff ? (
+                    <ThreadHandoffBanner thread={activeThreadShell} />
+                  ) : null}
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full">
                       <div
@@ -8130,11 +8151,12 @@ export default function ChatView(props: ChatViewProps) {
                   <div
                     ref={draftHeroComposerAnchorRef}
                     className="relative z-10"
-                    style={
-                      forceExpandedMobileComposer
+                    style={{
+                      ...(forceExpandedMobileComposer
                         ? { viewTransitionName: MOBILE_COMPOSER_VIEW_TRANSITION_NAME }
-                        : undefined
-                    }
+                        : {}),
+                      ...(threadHandoffIsReadOnly(activeThreadShell) ? { display: "none" } : {}),
+                    }}
                   >
                     <ComposerSurface.Shell
                       contextStrip={showComposerContextStrip || showComposerModelStrip}

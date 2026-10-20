@@ -5,8 +5,10 @@ import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import {
   WS_METHODS,
+  linkOriginIsFenced,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
@@ -93,6 +95,7 @@ import {
 } from "../operations/commands.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 
 export type LoadEarlierThreadHistoryInput = {
@@ -138,6 +141,36 @@ export type {
   VisitThreadInput,
   WatchThreadPullRequestInput,
 } from "../operations/commands.ts";
+
+export function threadHandoffIsReadOnly(
+  thread: { readonly handoff?: OrchestrationV2ThreadShell["handoff"] } | null | undefined,
+): boolean {
+  return thread?.handoff?.state === "departing" || thread?.handoff?.state === "departed";
+}
+
+export function canStartThreadHandoff(input: {
+  readonly thread: OrchestrationV2ThreadShell | null;
+  readonly connected: boolean;
+  readonly supported: boolean;
+  readonly hasLocalWork: boolean;
+}): boolean {
+  const { thread } = input;
+  return (
+    input.connected &&
+    input.supported &&
+    !input.hasLocalWork &&
+    thread !== null &&
+    thread.archivedAt === null &&
+    thread.deletedAt === null &&
+    thread.lineage.relationshipToParent !== "subagent" &&
+    !(thread.linkOrigin !== undefined && linkOriginIsFenced(thread.linkOrigin)) &&
+    thread.activeRunId === null &&
+    thread.pendingRuntimeRequest === null &&
+    !["preparing", "queued", "starting", "running", "waiting"].includes(thread.status) &&
+    (thread.handoff == null || thread.handoff.state === "failed") &&
+    (thread.pendingBackgroundTasks?.length ?? 0) === 0
+  );
+}
 
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Crypto.Crypto | R, E>,
@@ -278,7 +311,22 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     startTurn: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:start-turn",
-      execute: (input: StartThreadTurnInput) => startThreadTurn(input),
+      execute: (input: StartThreadTurnInput, registry, environmentId) => {
+        const validate = Effect.suspend(() => {
+          const thread = registry
+            .get(snapshotAtom(environmentId))
+            ?.threads.find((thread) => thread.id === input.threadId);
+          return threadHandoffIsReadOnly(thread)
+            ? Effect.fail(
+                new EnvironmentRpcUnavailableError({
+                  environmentId,
+                  message: "This thread is continuing on another environment.",
+                }),
+              )
+            : Effect.void;
+        });
+        return validate.pipe(Effect.andThen(startThreadTurn(input, validate)));
+      },
       scheduler,
       concurrency,
     }),

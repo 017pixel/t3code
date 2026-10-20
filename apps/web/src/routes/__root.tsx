@@ -1,3 +1,4 @@
+import { ThreadHandoffDialogHost } from "../components/ThreadHandoffDialog";
 import { PermissionUpdateNotice } from "../components/PermissionUpdateNotice";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -186,6 +187,7 @@ function RootRouteView() {
           <FontAppearanceSync />
           <ProviderAuthCallbackCoordinator />
           <CustomSnoozeDialogHost />
+          <ThreadHandoffDialogHost />
           <CommandPalette>
             <AppSidebarLayout>
               <Outlet />
@@ -241,6 +243,7 @@ function RootRouteView() {
           <ReopenClosedViewShortcut />
           <ConfirmDialogHost />
           <CustomSnoozeDialogHost />
+          <ThreadHandoffDialogHost />
           <SlowRpcRequestToastCoordinator />
           <PermissionUpdateNotice />
           {primaryEnvironmentAuthenticated ? <LegacyThreadMigrationToast /> : null}

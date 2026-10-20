@@ -1,3 +1,4 @@
+import { threadHandoffIsReadOnly } from "@t3tools/client-runtime/state/threads";
 import * as Dialog from "../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -189,6 +190,7 @@ function settingsCommandId(message: QueuedThreadMessage, setting: string): Comma
 export async function prepareQueuedMessageAttachments(
   queuedMessage: QueuedThreadMessage,
   supportsImageUploads = false,
+  canSend = () => readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope),
 ): Promise<
   | {
       readonly status: "ready";
@@ -201,7 +203,7 @@ export async function prepareQueuedMessageAttachments(
   if (!(await confirmThreadOutboxMessageQueued(queuedMessage))) {
     return { status: "abandoned" };
   }
-  if (!readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope)) {
+  if (!canSend()) {
     return { status: "abandoned" };
   }
   const revision = threadOutboxRevision(queuedMessage.messageId);
@@ -214,8 +216,9 @@ export async function prepareQueuedMessageAttachments(
     environmentId: queuedMessage.environmentId,
     attachments: queuedMessage.attachments,
     supportsImageUploads,
+    isCurrent: canSend,
     persistUploadedReferences: async (draftAttachments) => {
-      if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
+      if (!canSend() || appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
         return "abandon";
       }
       const updatedMessage = { ...queuedMessage, attachments: draftAttachments };
@@ -735,7 +738,10 @@ export function useThreadOutboxDrain(): void {
   const sendQueuedMessage = useCallback(
     async (queuedMessage: QueuedThreadMessage, thread: EnvironmentThreadShell) => {
       const hasAccess = () =>
-        readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope);
+        readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope) &&
+        !threadHandoffIsReadOnly(
+          findThread(appAtomRegistry.get(environmentThreadShells.threadShellsAtom), queuedMessage),
+        );
       if (!hasAccess()) return true;
       const serverConfig = appAtomRegistry.get(
         serverEnvironment.configValueAtom(queuedMessage.environmentId),
@@ -794,7 +800,9 @@ export function useThreadOutboxDrain(): void {
         const preparedResult = await prepareQueuedMessageAttachments(
           queuedMessage,
           serverConfig.environment.capabilities.attachmentUploads === true,
+          hasAccess,
         );
+        if (!hasAccess()) return true;
         if (preparedResult.status === "abandoned") {
           return true;
         }
@@ -903,7 +911,10 @@ export function useThreadOutboxDrain(): void {
       projectCwd: string,
     ) => {
       const hasAccess = () =>
-        readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope);
+        readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope) &&
+        !threadHandoffIsReadOnly(
+          findThread(appAtomRegistry.get(environmentThreadShells.threadShellsAtom), queuedMessage),
+        );
       if (!hasAccess()) return true;
       const modelSelection = queuedMessage.modelSelection;
       if (modelSelection === undefined) {
@@ -937,7 +948,9 @@ export function useThreadOutboxDrain(): void {
         const preparedResult = await prepareQueuedMessageAttachments(
           queuedMessage,
           serverConfig.environment.capabilities.attachmentUploads === true,
+          hasAccess,
         );
+        if (!hasAccess()) return true;
         if (preparedResult.status === "abandoned") {
           return true;
         }
@@ -1151,6 +1164,7 @@ export function useThreadOutboxDrain(): void {
         continue;
       }
 
+      if (threadHandoffIsReadOnly(thread)) continue;
       const creation = nextQueuedMessage.creation;
       const environment = connectedEnvironments.find(
         (candidate) => candidate.environmentId === nextQueuedMessage.environmentId,

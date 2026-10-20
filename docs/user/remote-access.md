@@ -35,6 +35,14 @@ If an older saved link asks you to pair again, update both environments and repe
 the previous pairing unless it has full access. Unlinking forgets the credential here; revoke the
 client in the destination's **Settings → Connections** to end its session there.
 
+To continue a stopped thread on another linked environment, choose **Continue on…**
+from its actions and select a destination with the same repository. The conversation
+and Git working changes move to a fresh agent there; provider sessions and chat
+attachment files stay on the source. Finish queued work first. The source becomes
+read-only during the move. Retry an interrupted move, or choose **Continue here…**
+if you accept that the destination may already have a copy. Threads started by a
+restricted link cannot move.
+
 ## T3 Connect
 
 T3 Connect makes an environment available to your other devices without setting

@@ -1,3 +1,4 @@
+import { useThreadHandoffAction } from "./useThreadHandoffAction";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import {
@@ -18,7 +19,11 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
-import { AuthOrchestrationOperateScope, type EnvironmentMachineKind } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  type EnvironmentMachineKind,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
@@ -497,6 +502,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   ) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly onNewThreadOnBranch: (thread: EnvironmentThreadShell) => void;
+  readonly onContinueOn: (ref: ScopedThreadRef) => void;
   readonly onRenameThread: (thread: EnvironmentThreadShell) => void;
   readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
   readonly onSettleThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
@@ -592,6 +598,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
+  const handoff = useThreadHandoffAction(
+    { environmentId: thread.environmentId, threadId: thread.id },
+    props.onContinueOn,
+  );
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
@@ -728,13 +738,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const titleMenuItems = useMemo<MenuAction[]>(
     () => [
+      ...(handoff.available
+        ? [{ id: "continue-on", title: "Continue on…", image: "arrow.right" }]
+        : []),
       { id: "rename", title: "Rename", image: "square.and.pencil" },
       ...buildThreadTitleRegenerationMenuItems({
         supported: props.titleRegenerationSupported,
         isRegenerating: thread.titleRegeneration != null,
       }),
     ],
-    [props.titleRegenerationSupported, thread.titleRegeneration],
+    [handoff.available, props.titleRegenerationSupported, thread.titleRegeneration],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -805,6 +818,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "arrange") appAtomRegistry.set(threadArrangementOpenAtom, true);
       if (nativeEvent.event === "move-up") handleMoveUp();
       if (nativeEvent.event === "move-down") handleMoveDown();
+      if (nativeEvent.event === "continue-on") handoff.open();
       if (nativeEvent.event === "archive") handleArchive();
       if (nativeEvent.event === "rename") handleRename();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
@@ -832,6 +846,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     },
     [
       onNewThreadOnBranch,
+      handoff,
       thread,
       handleArchive,
       handleDelete,

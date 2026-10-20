@@ -1,10 +1,12 @@
 import {
+  CommandId,
   EnvironmentId,
   ProjectId,
   RunId,
   RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadHandoff,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -53,6 +55,47 @@ function makeHarness(environmentIds: ReadonlyArray<EnvironmentId> = [environment
 }
 
 describe("v2 thread shell lists", () => {
+  it("projects move updates and cancellation only onto the source environment's thread", () => {
+    const h = makeHarness([environmentId, remoteEnvironmentId]);
+    const source = h.threads.threadShellAtom({ environmentId, threadId: v2ThreadShell.id });
+    const other = h.threads.threadShellAtom({
+      environmentId: remoteEnvironmentId,
+      threadId: v2ThreadShell.id,
+    });
+    const base = {
+      handoffId: "move-one",
+      environmentId: remoteEnvironmentId,
+      projectId: otherProjectId,
+      label: "Other machine",
+    };
+    const updates: ReadonlyArray<OrchestrationV2ThreadHandoff | null> = [
+      { ...base, state: "pending", requestCommandId: CommandId.make("move-request") },
+      null,
+      { ...base, handoffId: "move-two", state: "departing" },
+      { ...base, handoffId: "move-two", state: "failed", lastError: "Push the branch first." },
+      { ...base, handoffId: "move-three", state: "departed", threadId: ThreadId.make("target") },
+    ];
+    h.registry.mount(source);
+    h.registry.mount(other);
+    const unchanged = h.registry.get(other);
+    try {
+      let snapshot = v2ShellSnapshot;
+      for (const handoff of updates) {
+        snapshot = applyShellStreamEvent(snapshot, {
+          kind: "thread.updated",
+          location: "active",
+          sequence: snapshot.snapshotSequence + 1,
+          thread: { ...v2ThreadShell, handoff },
+        });
+        h.registry.set(h.snapshotAtom(environmentId), snapshot);
+        expect(h.registry.get(source)).toMatchObject({ handoff });
+        expect(h.registry.get(other)).toBe(unchanged);
+      }
+    } finally {
+      h.registry.dispose();
+    }
+  });
+
   it("preserves ordered reference arrays when a middle thread changes", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const snapshot = {

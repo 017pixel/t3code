@@ -1,3 +1,4 @@
+import { ThreadHandoffSheet } from "./features/threads/ThreadHandoffSheet";
 import { ComponentCatalogScreen } from "./features/development/ComponentCatalogScreen";
 import { PullRequestGuideStopScreen } from "./features/pull-requests/guide/PullRequestGuideScreen";
 import { PullRequestInlineCommentScreen } from "./features/pull-requests/PullRequestInlineCommentScreen";
@@ -550,6 +551,7 @@ const WORKSPACE_OVERLAY_ROUTES = new Set([
   "NewTaskSheet",
   "SettingsLegal",
   "SettingsSheet",
+  "ThreadHandoff",
   "ThreadAgents",
   "ThreadPullRequests",
   "ThreadQueue",
@@ -848,6 +850,15 @@ const RootStackConfig = createWorkspaceStackNavigator({
     }),
     ThreadQueue: createNativeStackScreen({
       screen: ThreadQueueSheet,
+      options: {
+        ...FORM_SHEET_PRESENTATION_OPTIONS,
+        headerShown: false,
+        sheetAllowedDetents: [0.65, 0.95],
+        sheetGrabberVisible: true,
+      },
+    }),
+    ThreadHandoff: createNativeStackScreen({
+      screen: ThreadHandoffSheet,
       options: {
         ...FORM_SHEET_PRESENTATION_OPTIONS,
         headerShown: false,

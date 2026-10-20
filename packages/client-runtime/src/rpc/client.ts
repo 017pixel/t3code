@@ -189,7 +189,11 @@ const authorizeRequest = Effect.fn("EnvironmentRpc.authorize")(function* (
 
 export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
->(tag: TTag, input: EnvironmentRpcInput<TTag>) {
+>(
+  tag: TTag,
+  input: EnvironmentRpcInput<TTag>,
+  beforeDispatch: Effect.Effect<void, EnvironmentRpcUnavailableError> = Effect.void,
+) {
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
   yield* Effect.annotateCurrentSpan({
     "environment.id": supervisor.target.environmentId,
@@ -205,7 +209,12 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     environmentId: supervisor.target.environmentId,
     method: tag,
   });
-  return yield* method(input).pipe(Effect.ensuring(completeObservation));
+  // Observation can suspend while the connection grants change.
+  return yield* authorizeRequest(tag, input).pipe(
+    Effect.andThen(beforeDispatch),
+    Effect.andThen(() => method(input)),
+    Effect.ensuring(completeObservation),
+  );
 });
 
 export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(
@@ -433,7 +442,8 @@ export function subscribe<TTag extends EnvironmentSubscriptionRpcTag>(
 export const request = <TTag extends Exclude<EnvironmentUnaryRpcTag, ClientGuardedRpcTag>>(
   tag: TTag,
   input: EnvironmentRpcInput<TTag>,
-) => requestGuarded(tag, input);
+  beforeDispatch: Effect.Effect<void, EnvironmentRpcUnavailableError> = Effect.void,
+) => requestGuarded(tag, input, beforeDispatch);
 
 export const runStream = <
   TTag extends Exclude<EnvironmentStreamCommandRpcTag, ClientGuardedRpcTag>,

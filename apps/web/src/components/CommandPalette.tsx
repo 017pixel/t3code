@@ -1,5 +1,7 @@
 "use client";
 
+import { threadHandoffAction } from "./threadHandoffAction";
+
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
@@ -1743,6 +1745,18 @@ function OpenCommandPaletteDialog(props: {
   }
 
   if (activeThread !== null) {
+    const handoff = threadHandoffAction(
+      scopeThreadRef(activeThread.environmentId, activeThread.id),
+    );
+    if (handoff.available)
+      actionItems.push({
+        kind: "action",
+        value: "action:continue-on",
+        title: "Continue on…",
+        searchTerms: ["move", "handoff", "environment", "continue"],
+        icon: <RotateCcwIcon className={ITEM_ICON_CLASS} />,
+        run: async () => handoff.run(),
+      });
     const thread = activeThread;
     actionItems.push({
       kind: "action",

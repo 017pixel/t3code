@@ -1,3 +1,5 @@
+import { environmentThreadShells } from "./threads";
+import { threadHandoffIsReadOnly } from "@t3tools/client-runtime/state/threads";
 import * as Dialog from "../components/ui/Dialog";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { readEnvironmentScope } from "./session";
@@ -424,7 +426,18 @@ export function useThreadComposerState() {
     removeQueuedRunEditAttachment(selectedThreadKey, attachmentId);
   };
 
+  const sourceIsReadOnly = () =>
+    threadHandoffIsReadOnly(
+      appAtomRegistry
+        .get(environmentThreadShells.threadShellsAtom)
+        .find(
+          (thread) =>
+            thread.environmentId === selectedThreadShell?.environmentId &&
+            thread.id === selectedThreadShell?.id,
+        ),
+    );
   const saveQueuedRunEdit = async () => {
+    if (sourceIsReadOnly()) return;
     const thread = selectedThreadShell;
     if (!thread || savingQueuedEditRef.current) return;
     const threadKey = scopedThreadKey(thread.environmentId, thread.id);
@@ -455,8 +468,14 @@ export function useThreadComposerState() {
         environmentId: thread.environmentId,
         attachments: draft.attachments,
         supportsImageUploads: capabilities?.attachmentUploads === true,
+        isCurrent: () => !sourceIsReadOnly(),
       }),
     );
+    if (sourceIsReadOnly()) {
+      savingQueuedEditRef.current = false;
+      setIsSavingQueuedEdit(false);
+      return;
+    }
     if (AsyncResult.isFailure(prepared)) {
       savingQueuedEditRef.current = false;
       setIsSavingQueuedEdit(false);
@@ -505,6 +524,7 @@ export function useThreadComposerState() {
   };
 
   const onSendMessage = async (followUpOverride?: ActiveTurnComposerAction) => {
+    if (sourceIsReadOnly()) return null;
     if (
       selectedThreadShell &&
       selectedEnvironmentRuntime?.connectionState === "connected" &&
@@ -644,6 +664,7 @@ export function useThreadComposerState() {
 
     const metadata = makeQueuedMessageMetadata();
     const messageId = MessageId.make(metadata.messageId);
+    if (sourceIsReadOnly()) return null;
     clearThreadComposerError(threadKey);
     const enqueuePromise = enqueueThreadOutboxMessage({
       environmentId: selectedThreadShell.environmentId,

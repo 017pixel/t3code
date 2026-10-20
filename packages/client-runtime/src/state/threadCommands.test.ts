@@ -1,6 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  AuthOrchestrationOperateScope,
+  WS_METHODS,
+  type AuthSessionState,
   CommandId,
+  MessageId,
   RuntimeRequestId,
   EnvironmentId,
   ORCHESTRATION_V2_WS_METHODS,
@@ -9,7 +13,11 @@ import {
   ThreadId,
   type OrchestrationV2Command,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadHandoff,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
+import { vi } from "vite-plus/test";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -18,12 +26,23 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { Atom, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
+import * as ThreadCommands from "./threadCommands.ts";
+import { createThreadHandoffEnvironmentAtoms } from "./threadHandoff.ts";
+import * as HandoffAction from "../../../../apps/web/src/components/threadHandoffAction.ts";
+import { EnvironmentRpcRequestObserver, type EnvironmentRpcInput } from "../rpc/client.ts";
+
+vi.mock("./session.ts", () => ({
+  createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
+}));
+const sessions = Atom.family((_id: EnvironmentId) =>
+  Atom.make<AsyncResult.AsyncResult<AuthSessionState>>(AsyncResult.initial()),
+);
 
 const ENVIRONMENT_ID = EnvironmentId.make("remote");
 const THREAD_ID = ThreadId.make("thread");
@@ -80,7 +99,9 @@ const SNAPSHOT: OrchestrationV2ShellSnapshot = {
   ],
 };
 
-const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
+const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (
+  replyImmediately = false,
+) {
   const requests = yield* Queue.unbounded<{
     command: OrchestrationV2Command;
     reply: Deferred.Deferred<{ sequence: number }, Error>;
@@ -94,6 +115,7 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
             Effect.gen(function* () {
               const reply = yield* Deferred.make<{ sequence: number }, Error>();
               yield* Queue.offer(requests, { command, reply });
+              if (replyImmediately) yield* Deferred.succeed(reply, { sequence: 2 });
               return yield* Deferred.await(reply);
             }),
         },
@@ -395,5 +417,414 @@ describe("remote thread lifecycle commands", () => {
         expect(h.registry.get(h.visibleAtom)?.threads[0]?.pendingRuntimeRequest).toBeNull();
         expect(h.registry.get(h.snapshotAtom(ENVIRONMENT_ID))).toBe(stale);
       }),
+  );
+});
+
+const handoffTarget = {
+  handoffId: "move-one",
+  environmentId: EnvironmentId.make("destination"),
+  projectId: ProjectId.make("destination-project"),
+  label: "Destination",
+};
+const handoffStates: ReadonlyArray<{
+  label: string;
+  handoff: OrchestrationV2ThreadHandoff | null;
+  sendable: boolean;
+}> = [
+  { label: "no move", handoff: null, sendable: true },
+  {
+    label: "pending",
+    handoff: { ...handoffTarget, state: "pending", requestCommandId: CommandId.make("request") },
+    sendable: true,
+  },
+  { label: "departing", handoff: { ...handoffTarget, state: "departing" }, sendable: false },
+  {
+    label: "departed",
+    handoff: { ...handoffTarget, state: "departed", threadId: ThreadId.make("destination-thread") },
+    sendable: false,
+  },
+  {
+    label: "failed",
+    handoff: { ...handoffTarget, state: "failed", lastError: "Destination disconnected" },
+    sendable: true,
+  },
+];
+
+describe("thread move commands", () => {
+  it("offers Move only for a connected, supported, stopped source without local work", () => {
+    const source = SNAPSHOT.threads[0]!;
+    const context = { connected: true, supported: true, hasLocalWork: false };
+    const canStart = (thread: OrchestrationV2ThreadShell | null, overrides = {}) =>
+      ThreadCommands.canStartThreadHandoff({ ...context, ...overrides, thread });
+
+    expect(canStart(source)).toBe(true);
+    expect(canStart(null)).toBe(false);
+    expect(canStart(source, { connected: false })).toBe(false);
+    expect(canStart(source, { supported: false })).toBe(false);
+    expect(canStart(source, { hasLocalWork: true })).toBe(false);
+    expect(canStart({ ...source, archivedAt: NOW })).toBe(false);
+    for (const status of ["preparing", "queued", "starting", "running", "waiting"] as const) {
+      expect(canStart({ ...source, status, activeRunId: null }), status).toBe(false);
+    }
+    for (const creationSource of ["provider", "mcp"] as const) {
+      expect(
+        canStart({
+          ...source,
+          creationSource,
+          createdBy: "agent",
+          lineage: {
+            ...source.lineage,
+            parentThreadId: ThreadId.make("parent"),
+            relationshipToParent: "subagent",
+          },
+        }),
+        creationSource,
+      ).toBe(false);
+    }
+    for (const { label, handoff } of handoffStates) {
+      expect(canStart({ ...source, handoff }), label).toBe(
+        handoff === null || handoff.state === "failed",
+      );
+    }
+  });
+
+  it.effect.each(handoffStates)(
+    "rechecks the source before dispatching a turn ($label)",
+    ({ handoff, sendable }) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness(true);
+        h.registry.set(h.snapshotAtom(ENVIRONMENT_ID), {
+          ...SNAPSHOT,
+          threads: [{ ...SNAPSHOT.threads[0]!, handoff }],
+        });
+        const result = yield* Effect.promise(() =>
+          h.commands.startTurn.run(h.registry, {
+            environmentId: ENVIRONMENT_ID,
+            input: {
+              threadId: THREAD_ID,
+              commandId: CommandId.make("send"),
+              dispatchMode: "start",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              message: {
+                messageId: MessageId.make("message"),
+                role: "user",
+                text: "Keep working here",
+                attachments: [],
+              },
+            },
+          }),
+        );
+        expect(yield* Queue.size(h.requests)).toBe(sendable ? 1 : 0);
+        expect(result._tag).toBe(sendable ? "Success" : "Failure");
+        expect(h.registry.get(h.visibleAtom)?.threads[0]?.handoff).toEqual(handoff);
+      }),
+  );
+});
+
+const makeHandoffHarness = Effect.fn("TestThreadCommands.makeHandoffHarness")(function* () {
+  const gates = yield* Queue.unbounded<Deferred.Deferred<void>>();
+  const sent: Array<{ method: string; input: unknown }> = [];
+  const record = (method: string, input: unknown) =>
+    Effect.sync(() => {
+      sent.push({ method, input });
+    });
+  const supervisor = {
+    target: { environmentId: ENVIRONMENT_ID },
+    session: yield* SubscriptionRef.make(
+      Option.some({
+        client: {
+          [WS_METHODS.threadHandoffStart]: (
+            input: EnvironmentRpcInput<typeof WS_METHODS.threadHandoffStart>,
+          ) =>
+            record(WS_METHODS.threadHandoffStart, input).pipe(
+              Effect.as({ ...handoffTarget, state: "departing" as const }),
+            ),
+          [WS_METHODS.threadHandoffCancel]: (
+            input: EnvironmentRpcInput<typeof WS_METHODS.threadHandoffCancel>,
+          ) => record(WS_METHODS.threadHandoffCancel, input).pipe(Effect.as({})),
+        },
+      } as unknown as RpcSession),
+    ),
+  } as EnvironmentSupervisor.EnvironmentSupervisor["Service"];
+  const runtime = Atom.runtime(
+    Layer.mergeAll(
+      Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, {
+        run: (_environmentId, effect) =>
+          Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      } as EnvironmentRegistry.EnvironmentRegistry["Service"]),
+      Layer.succeed(EnvironmentRpcRequestObserver, {
+        observe: () =>
+          Effect.gen(function* () {
+            const release = yield* Deferred.make<void>();
+            yield* Queue.offer(gates, release);
+            yield* Deferred.await(release);
+            return Effect.void;
+          }),
+      }),
+    ),
+  );
+  const thread = Atom.make<OrchestrationV2ThreadShell | null>(SNAPSHOT.threads[0]!);
+  const localWork = Atom.make(false);
+  const commands = createThreadHandoffEnvironmentAtoms(runtime, {
+    threadAtom: () => thread,
+    connectedAtom: () => Atom.make(true),
+    supportedAtom: () => Atom.make(true),
+    hasLocalWorkAtom: () => localWork,
+  });
+  const registry = AtomRegistry.make();
+  yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
+  const session = sessions(ENVIRONMENT_ID);
+  registry.mount(session);
+  const grant: AuthSessionState = {
+    authenticated: true,
+    auth: {
+      policy: "remote-reachable",
+      bootstrapMethods: [],
+      sessionMethods: [],
+      sessionCookieName: "test",
+    },
+    scopes: [AuthOrchestrationOperateScope],
+    permissions: [AuthOrchestrationOperateScope],
+  };
+  registry.set(session, AsyncResult.success(grant));
+  return { registry, commands, thread, localWork, gates, sent, session, grant };
+});
+
+describe("handoff dispatch boundaries", () => {
+  it.effect("moves full-access linked threads but fences origins without recorded access", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHandoffHarness();
+      const ref = { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID };
+      const input = { threadId: THREAD_ID, environmentId: handoffTarget.environmentId };
+      const linkOrigin = { sessionId: "linked-session", label: "Linked source" };
+      yield* Queue.take(h.gates).pipe(
+        Effect.flatMap((gate) => Deferred.succeed(gate, undefined)),
+        Effect.forever,
+        Effect.forkChild,
+      );
+
+      h.registry.set(h.thread, {
+        ...SNAPSHOT.threads[0]!,
+        linkOrigin: { ...linkOrigin, access: "full-access" },
+      });
+      expect(h.registry.get(h.commands.availableAtom(ref))).toBe(true);
+      const accepted = yield* Effect.promise(() =>
+        h.commands.start.run(h.registry, { environmentId: ENVIRONMENT_ID, input }),
+      );
+      expect(accepted._tag).toBe("Success");
+      expect(h.sent).toEqual([{ method: WS_METHODS.threadHandoffStart, input }]);
+
+      h.registry.set(h.thread, { ...SNAPSHOT.threads[0]!, linkOrigin });
+      const available = h.registry.get(h.commands.availableAtom(ref));
+      const denied = yield* Effect.promise(() =>
+        h.commands.start.run(h.registry, { environmentId: ENVIRONMENT_ID, input }),
+      );
+      expect({ available, result: denied._tag, sent: h.sent }).toEqual({
+        available: false,
+        result: "Failure",
+        sent: [{ method: WS_METHODS.threadHandoffStart, input }],
+      });
+    }),
+  );
+
+  it.effect(
+    "revalidates local work and the source shell after preparation, then sends only current wire input",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHandoffHarness();
+        const ref = { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID };
+        const input = {
+          threadId: THREAD_ID,
+          environmentId: handoffTarget.environmentId,
+          projectId: handoffTarget.projectId,
+          isCurrent: () => true,
+        };
+        expect(h.registry.get(h.commands.availableAtom(ref))).toBe(true);
+        const queued = h.commands.start.run(h.registry, { environmentId: ENVIRONMENT_ID, input });
+        const queueGate = yield* Queue.take(h.gates);
+        h.registry.set(h.localWork, true);
+        expect(h.registry.get(h.commands.availableAtom(ref))).toBe(false);
+        yield* Deferred.succeed(queueGate, undefined);
+        expect((yield* Effect.promise(() => queued))._tag).toBe("Failure");
+        expect(h.sent).toEqual([]);
+
+        h.registry.set(h.localWork, false);
+        const running = h.commands.start.run(h.registry, { environmentId: ENVIRONMENT_ID, input });
+        const runGate = yield* Queue.take(h.gates);
+        h.registry.set(h.thread, { ...SNAPSHOT.threads[0]!, status: "running" });
+        yield* Deferred.succeed(runGate, undefined);
+        expect((yield* Effect.promise(() => running))._tag).toBe("Failure");
+        expect(h.sent).toEqual([]);
+
+        h.registry.set(h.thread, SNAPSHOT.threads[0]!);
+        const valid = h.commands.start.run(h.registry, { environmentId: ENVIRONMENT_ID, input });
+        yield* Deferred.succeed(yield* Queue.take(h.gates), undefined);
+        expect((yield* Effect.promise(() => valid))._tag).toBe("Success");
+        expect(h.sent).toEqual([
+          {
+            method: WS_METHODS.threadHandoffStart,
+            input: {
+              threadId: THREAD_ID,
+              environmentId: handoffTarget.environmentId,
+              projectId: handoffTarget.projectId,
+            },
+          },
+        ]);
+      }),
+  );
+
+  it.effect(
+    "does not let pending cancellation, retry or abandonment cross a replacement handoff",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHandoffHarness();
+        const pending = {
+          ...handoffTarget,
+          state: "pending" as const,
+          requestCommandId: CommandId.make("move-request"),
+        };
+        h.registry.set(h.thread, { ...SNAPSHOT.threads[0]!, handoff: pending });
+        const cancelled = h.commands.cancel.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID, handoffId: pending.handoffId, isCurrent: () => true },
+        });
+        const cancelGate = yield* Queue.take(h.gates);
+        const departing = {
+          ...handoffTarget,
+          handoffId: "replacement",
+          state: "departing" as const,
+        };
+        h.registry.set(h.thread, { ...SNAPSHOT.threads[0]!, handoff: departing });
+        yield* Deferred.succeed(cancelGate, undefined);
+        expect((yield* Effect.promise(() => cancelled))._tag).toBe("Failure");
+        expect(h.sent).toEqual([]);
+
+        const retry = h.commands.start.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: {
+            threadId: THREAD_ID,
+            environmentId: departing.environmentId,
+            handoffId: departing.handoffId,
+            isCurrent: () => true,
+          },
+        });
+        const retryGate = yield* Queue.take(h.gates);
+        const next = { ...departing, handoffId: "newest" };
+        h.registry.set(h.thread, { ...SNAPSHOT.threads[0]!, handoff: next });
+        yield* Deferred.succeed(retryGate, undefined);
+        expect((yield* Effect.promise(() => retry))._tag).toBe("Failure");
+        expect(h.sent).toEqual([]);
+
+        let current = true;
+        const abandonInput = {
+          threadId: THREAD_ID,
+          handoffId: next.handoffId,
+          abandon: true,
+          isCurrent: () => current,
+        };
+        const stale = h.commands.cancel.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: abandonInput,
+        });
+        const abandonGate = yield* Queue.take(h.gates);
+        current = false;
+        yield* Deferred.succeed(abandonGate, undefined);
+        expect((yield* Effect.promise(() => stale))._tag).toBe("Failure");
+        expect(h.sent).toEqual([]);
+
+        current = true;
+        const accepted = h.commands.cancel.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: abandonInput,
+        });
+        yield* Deferred.succeed(yield* Queue.take(h.gates), undefined);
+        expect((yield* Effect.promise(() => accepted))._tag).toBe("Success");
+        expect(h.sent).toEqual([
+          {
+            method: WS_METHODS.threadHandoffCancel,
+            input: { threadId: THREAD_ID, handoffId: next.handoffId, abandon: true },
+          },
+        ]);
+      }),
+  );
+
+  it.effect(
+    "rejects an old selection after source to draft to the same source, while a fresh selection can move",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHandoffHarness();
+        const ref = { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID };
+        HandoffAction.configureThreadHandoffActions((source) =>
+          h.registry.get(h.commands.availableAtom(source)),
+        );
+        HandoffAction.threadHandoffRequest.setState({ request: null });
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            HandoffAction.threadHandoffRequest.setState({ request: null });
+            HandoffAction.configureThreadHandoffActions(() => false);
+          }),
+        );
+        HandoffAction.updateThreadHandoffSelection("/remote/thread");
+        const oldMenu = HandoffAction.threadHandoffAction(ref);
+        oldMenu.run();
+        const oldRequest = HandoffAction.threadHandoffRequest.getState().request!;
+        const stale = h.commands.start.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: {
+            threadId: THREAD_ID,
+            environmentId: handoffTarget.environmentId,
+            isCurrent: () => HandoffAction.isCurrentThreadHandoffRequest(oldRequest),
+          },
+        });
+        const gate = yield* Queue.take(h.gates);
+        HandoffAction.updateThreadHandoffSelection("/remote/draft");
+        HandoffAction.updateThreadHandoffSelection("/remote/thread");
+        yield* Deferred.succeed(gate, undefined);
+        expect((yield* Effect.promise(() => stale))._tag).toBe("Failure");
+        expect(h.sent).toEqual([]);
+        HandoffAction.threadHandoffRequest.setState({ request: null });
+        oldMenu.run();
+        expect(HandoffAction.threadHandoffRequest.getState().request).toBeNull();
+
+        HandoffAction.threadHandoffAction(ref).run();
+        const fresh = HandoffAction.threadHandoffRequest.getState().request!;
+        expect(fresh.ref).toEqual(ref);
+        const accepted = h.commands.start.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: {
+            threadId: THREAD_ID,
+            environmentId: handoffTarget.environmentId,
+            isCurrent: () => HandoffAction.isCurrentThreadHandoffRequest(fresh),
+          },
+        });
+        yield* Deferred.succeed(yield* Queue.take(h.gates), undefined);
+        expect((yield* Effect.promise(() => accepted))._tag).toBe("Success");
+        expect(h.sent).toEqual([
+          {
+            method: WS_METHODS.threadHandoffStart,
+            input: { threadId: THREAD_ID, environmentId: handoffTarget.environmentId },
+          },
+        ]);
+      }),
+  );
+
+  it.effect("honors permission revocation while an authorized start awaits dispatch", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHandoffHarness();
+      const result = h.commands.start.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID, environmentId: handoffTarget.environmentId },
+      });
+      const gate = yield* Queue.take(h.gates);
+      h.registry.set(h.session, AsyncResult.success({ ...h.grant, scopes: [], permissions: [] }));
+      expect(h.registry.get(h.commands.start.permissionAtom(ENVIRONMENT_ID))).toBe(false);
+      yield* Deferred.succeed(gate, undefined);
+      const denied = yield* Effect.promise(() => result);
+      expect(h.sent).toEqual([]);
+      expect(denied._tag).toBe("Failure");
+      if (denied._tag === "Failure")
+        expect(Cause.squash(denied.cause)).toMatchObject({ _tag: "EnvironmentAuthorizationError" });
+    }),
   );
 });

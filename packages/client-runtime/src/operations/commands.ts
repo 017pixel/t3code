@@ -33,7 +33,11 @@ import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 
-import { getInitialServerConfig, request } from "../rpc/client.ts";
+import {
+  getInitialServerConfig,
+  request,
+  type EnvironmentRpcUnavailableError,
+} from "../rpc/client.ts";
 
 interface CommandMetadata {
   readonly commandId?: CommandId;
@@ -259,8 +263,10 @@ const allocateCommandId = Effect.fn("EnvironmentCommands.allocateCommandId")(fun
   return CommandId.make(yield* crypto.randomUUIDv4().pipe(Effect.orDie));
 });
 
-const dispatch = (command: OrchestrationV2Command) =>
-  request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command);
+const dispatch = (
+  command: OrchestrationV2Command,
+  beforeDispatch: Effect.Effect<void, EnvironmentRpcUnavailableError> = Effect.void,
+) => request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command, beforeDispatch);
 
 const getProjection = (threadId: ThreadId) =>
   request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, { threadId });
@@ -276,6 +282,7 @@ const persistAttachments = Effect.fn("EnvironmentCommands.persistAttachments")(f
   threadId: ThreadId,
   messageId: MessageId,
   attachments: ReadonlyArray<ChatAttachment | UploadChatAttachment>,
+  beforeDispatch: Effect.Effect<void, EnvironmentRpcUnavailableError> = Effect.void,
 ) {
   const stored = attachments.filter(
     (attachment): attachment is ChatAttachment => !("dataUrl" in attachment),
@@ -284,11 +291,15 @@ const persistAttachments = Effect.fn("EnvironmentCommands.persistAttachments")(f
     (attachment): attachment is UploadChatAttachment => "dataUrl" in attachment,
   );
   if (uploads.length === 0) return stored;
-  const result = yield* request(WS_METHODS.assetsPersistChatAttachments, {
-    threadId,
-    messageId,
-    attachments: uploads,
-  });
+  const result = yield* request(
+    WS_METHODS.assetsPersistChatAttachments,
+    {
+      threadId,
+      messageId,
+      attachments: uploads,
+    },
+    beforeDispatch,
+  );
   if (stored.length === 0) return result.attachments;
   const byUpload = new Map(
     uploads.map((attachment, index) => [attachment, result.attachments[index]]),
@@ -619,12 +630,16 @@ export const setThreadInteractionMode = Effect.fn("EnvironmentCommands.setThread
 
 export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(function* (
   input: StartThreadTurnInput,
+  beforeDispatch: Effect.Effect<void, EnvironmentRpcUnavailableError> = Effect.void,
 ) {
+  yield* beforeDispatch;
   const commandId = yield* allocateCommandId(input);
+  yield* beforeDispatch;
   const attachments = yield* persistAttachments(
     input.threadId,
     input.message.messageId,
     input.message.attachments,
+    beforeDispatch,
   );
   const context = remapComposerContextAttachments(
     input.message.context,
@@ -659,48 +674,55 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
                 ? {}
                 : { branch: bootstrap.branch }),
             };
-    return yield* request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
-      commandId,
-      creationSource: input.creationSource ?? "web",
-      threadId: input.threadId,
-      ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
-      projectId: thread.projectId,
-      title: input.titleSeed ?? thread.title,
-      generateTitle: input.titleSeed !== undefined,
-      modelSelection: input.modelSelection ?? thread.modelSelection,
-      runtimeMode: input.runtimeMode,
-      interactionMode: input.interactionMode,
-      workspaceStrategy,
-      initialMessage: {
-        messageId: input.message.messageId,
-        text: input.message.text,
-        ...(context ? { context } : {}),
-        attachments,
+    return yield* request(
+      ORCHESTRATION_V2_WS_METHODS.launchThread,
+      {
+        commandId,
+        creationSource: input.creationSource ?? "web",
+        threadId: input.threadId,
+        ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
+        projectId: thread.projectId,
+        title: input.titleSeed ?? thread.title,
+        generateTitle: input.titleSeed !== undefined,
+        modelSelection: input.modelSelection ?? thread.modelSelection,
+        runtimeMode: input.runtimeMode,
+        interactionMode: input.interactionMode,
+        workspaceStrategy,
+        initialMessage: {
+          messageId: input.message.messageId,
+          text: input.message.text,
+          ...(context ? { context } : {}),
+          attachments,
+        },
       },
-    });
+      beforeDispatch,
+    );
   }
 
   const requestedMode = input.dispatchMode ?? "auto";
   if (requestedMode === "start") {
-    return yield* dispatch({
-      type: "message.dispatch",
-      commandId,
-      createdBy: "user",
-      creationSource: input.creationSource ?? "web",
-      threadId: input.threadId,
-      messageId: input.message.messageId,
-      ...(input.manualContinuationOfRunId === undefined
-        ? {}
-        : { manualContinuationOfRunId: input.manualContinuationOfRunId }),
-      text: input.message.text,
-      ...(context ? { context } : {}),
-      attachments,
-      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-      ...(input.sourceProposedPlan === undefined
-        ? {}
-        : { sourcePlanRef: input.sourceProposedPlan }),
-      dispatchMode: { type: "start_immediately" },
-    });
+    return yield* dispatch(
+      {
+        type: "message.dispatch",
+        commandId,
+        createdBy: "user",
+        creationSource: input.creationSource ?? "web",
+        threadId: input.threadId,
+        messageId: input.message.messageId,
+        ...(input.manualContinuationOfRunId === undefined
+          ? {}
+          : { manualContinuationOfRunId: input.manualContinuationOfRunId }),
+        text: input.message.text,
+        ...(context ? { context } : {}),
+        attachments,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.sourceProposedPlan === undefined
+          ? {}
+          : { sourcePlanRef: input.sourceProposedPlan }),
+        dispatchMode: { type: "start_immediately" },
+      },
+      beforeDispatch,
+    );
   }
 
   const serverResolvesCommandContext = yield* supportsServerResolvedCommandContext();
@@ -746,24 +768,29 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
   const shouldSendTitleSeed =
     input.titleSeed !== undefined &&
     (serverResolvesCommandContext || projection?.messages.length === 0);
-  return yield* dispatch({
-    type: "message.dispatch",
-    commandId,
-    createdBy: "user",
-    creationSource: input.creationSource ?? "web",
-    threadId: input.threadId,
-    messageId: input.message.messageId,
-    text: input.message.text,
-    ...(context ? { context } : {}),
-    attachments,
-    ...(shouldSendTitleSeed ? { titleSeed: input.titleSeed } : {}),
-    ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-    ...(input.sourceProposedPlan === undefined ? {} : { sourcePlanRef: input.sourceProposedPlan }),
-    ...(serverResolvesCommandContext && requestedMode !== "queue"
-      ? { deliveryIntent: requestedMode }
-      : {}),
-    dispatchMode,
-  });
+  return yield* dispatch(
+    {
+      type: "message.dispatch",
+      commandId,
+      createdBy: "user",
+      creationSource: input.creationSource ?? "web",
+      threadId: input.threadId,
+      messageId: input.message.messageId,
+      text: input.message.text,
+      ...(context ? { context } : {}),
+      attachments,
+      ...(shouldSendTitleSeed ? { titleSeed: input.titleSeed } : {}),
+      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+      ...(input.sourceProposedPlan === undefined
+        ? {}
+        : { sourcePlanRef: input.sourceProposedPlan }),
+      ...(serverResolvesCommandContext && requestedMode !== "queue"
+        ? { deliveryIntent: requestedMode }
+        : {}),
+      dispatchMode,
+    },
+    beforeDispatch,
+  );
 });
 
 export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThreadTurn")(function* (
