@@ -11,6 +11,7 @@ import {
   type ProjectScriptMcpStopResult,
   type ProjectScript,
   type ThreadId,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import {
   projectScriptRuntimeEnv,
@@ -83,9 +84,14 @@ const make = Effect.gen(function* () {
   const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const settings = yield* Settings.ServerSettingsService;
   const runs = new Map<
-    TerminalManager.TerminalSessionHandle,
-    { readonly projectId: string; readonly scriptId: string }
+    string,
+    {
+      readonly handle: TerminalManager.TerminalSessionHandle;
+      readonly projectId: string;
+      readonly scriptId: string;
+    }
   >();
+  const runKey = (threadId: string, terminalId: string) => JSON.stringify([threadId, terminalId]);
 
   const load = Effect.fn("ProjectScriptMcpService.load")(function* (
     scope: Invocation,
@@ -116,18 +122,19 @@ const make = Effect.gen(function* () {
     return { context, target, project: project.value };
   });
 
-  // Orchestration takes parent locks before child locks; a lexical ID ordering alone can deadlock it.
-  const depth = Effect.fn("ProjectScriptMcpService.depth")(function* (threadId: ThreadId) {
-    let id = threadId;
-    for (let value = 0; value < 64; value++) {
-      const shell = yield* threads.getThreadShell(id).pipe(Effect.mapError(unavailable));
-      if (shell === null || shell.lineage.parentThreadId === null) return value;
-      id = shell.lineage.parentThreadId;
+  // Orchestration nests parent then child locks, so all script calls use that same order.
+  const depth = Effect.fn("ProjectScriptMcpService.depth")(function* (
+    shell: OrchestrationV2ThreadShell,
+  ) {
+    const ancestors = new Set([shell.id]);
+    let parentId = shell.lineage.parentThreadId;
+    while (parentId !== null) {
+      if (ancestors.has(parentId)) return yield* unavailable();
+      ancestors.add(parentId);
+      const parent = yield* threads.getThreadShell(parentId).pipe(Effect.mapError(unavailable));
+      parentId = parent?.lineage.parentThreadId ?? null;
     }
-    return yield* new ProjectScriptMcpFailure({
-      code: "operation_failed",
-      message: "The thread ancestry exceeds the script execution limit.",
-    });
+    return ancestors.size;
   });
 
   const mutate = <A, E, R>(
@@ -137,15 +144,12 @@ const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const initial = yield* load(scope, threadId);
-      const ids = [
-        ...new Set(
-          [initial.context.caller?.id, initial.target.id].filter(
-            (id): id is ThreadId => id !== undefined,
-          ),
-        ),
-      ];
-      const ordered = yield* Effect.forEach(ids, (id) =>
-        depth(id).pipe(Effect.map((depth) => ({ id, depth }))),
+      const shells =
+        initial.context.caller === undefined || initial.context.caller.id === initial.target.id
+          ? [initial.target]
+          : [initial.context.caller, initial.target];
+      const ordered = yield* Effect.forEach(shells, (shell) =>
+        depth(shell).pipe(Effect.map((depth) => ({ id: shell.id, depth }))),
       );
       ordered.sort((a, b) => a.depth - b.depth || (a.id < b.id ? -1 : a.id === b.id ? 0 : 1));
       const operation = Effect.gen(function* () {
@@ -197,110 +201,103 @@ const make = Effect.gen(function* () {
     });
 
   const run: ProjectScriptMcpService["Service"]["run"] = (scope, input) =>
-    mutate(scope, input.threadId, ({ target, project }) =>
-      Effect.suspend(() => {
-        let admittedHandle: TerminalManager.TerminalSessionHandle | undefined;
-        return Effect.gen(function* () {
-          const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
-          const script = resolveProjectScripts(current, project).find(
-            (script) => script.id === input.scriptId,
-          );
-          if (script === undefined)
-            return yield* new ProjectScriptMcpFailure({
-              code: "script_not_found",
-              message: "The saved script was not found.",
-            });
-          const data = projectScriptTerminalInput(script.command);
-          if (data.length > 65_535)
-            return yield* new ProjectScriptMcpFailure({
-              code: "script_command_too_large",
-              message: "The saved script exceeds the terminal input limit including its newline.",
-            });
-          const opened = yield* terminals
-            .openFreshWithHandle(
-              {
-                threadId: target.id,
-                terminalId: input.terminalId,
-                cwd: target.worktreePath ?? project.workspaceRoot,
-                worktreePath: target.worktreePath,
-                env: projectScriptRuntimeEnv({
-                  project: { cwd: project.workspaceRoot },
-                  worktreePath: target.worktreePath,
-                }),
-                providerInstanceId: target.modelSelection.instanceId,
-              },
-              (handle) => {
-                admittedHandle = handle;
-                runs.set(handle, { projectId: project.id, scriptId: script.id });
-              },
-              (handle) => {
-                runs.delete(handle);
-              },
-            )
-            .pipe(
-              Effect.mapError(
-                (error) =>
-                  new ProjectScriptMcpFailure({
-                    code:
-                      error._tag === "TerminalAlreadyExistsError"
-                        ? "terminal_already_exists"
-                        : "operation_failed",
-                    message:
-                      error._tag === "TerminalAlreadyExistsError"
-                        ? error.message
-                        : "The script terminal could not be opened.",
-                  }),
-              ),
-            );
-          const result = yield* Effect.result(
-            terminals.writeWithHandle({
+    mutate(scope, input.threadId, ({ target, project }) => {
+      let admittedHandle: TerminalManager.TerminalSessionHandle | undefined;
+      const key = runKey(target.id, input.terminalId);
+      return Effect.gen(function* () {
+        const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
+        const script = resolveProjectScripts(current, project).find(
+          (script) => script.id === input.scriptId,
+        );
+        if (script === undefined)
+          return yield* new ProjectScriptMcpFailure({
+            code: "script_not_found",
+            message: "The saved script was not found.",
+          });
+        const data = projectScriptTerminalInput(script.command);
+        if (data.length > 65_535)
+          return yield* new ProjectScriptMcpFailure({
+            code: "script_command_too_large",
+            message: "The saved script exceeds the terminal input limit including its newline.",
+          });
+        const opened = yield* terminals
+          .openFreshWithHandle(
+            {
               threadId: target.id,
               terminalId: input.terminalId,
-              handle: opened.handle,
-              data,
-            }),
+              cwd: target.worktreePath ?? project.workspaceRoot,
+              worktreePath: target.worktreePath,
+              env: projectScriptRuntimeEnv({
+                project: { cwd: project.workspaceRoot },
+                worktreePath: target.worktreePath,
+              }),
+              providerInstanceId: target.modelSelection.instanceId,
+            },
+            (handle) => {
+              admittedHandle = handle;
+              runs.set(key, { handle, projectId: project.id, scriptId: script.id });
+            },
+            (handle) => {
+              if (runs.get(key)?.handle === handle) runs.delete(key);
+            },
+          )
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new ProjectScriptMcpFailure({
+                  code:
+                    error._tag === "TerminalAlreadyExistsError"
+                      ? "terminal_already_exists"
+                      : "operation_failed",
+                  message:
+                    error._tag === "TerminalAlreadyExistsError"
+                      ? error.message
+                      : "The script terminal could not be opened.",
+                }),
+            ),
           );
-          const accepted = result._tag === "Success" && result.success;
-          return {
+        const accepted = yield* terminals
+          .writeWithHandle({
             threadId: target.id,
-            projectId: project.id,
-            scriptId: script.id,
             terminalId: input.terminalId,
-            outcome: accepted
-              ? ("input_accepted" as const)
-              : ("terminal_opened_input_failed" as const),
-            terminal: opened.snapshot,
-            inputAcceptance: accepted ? { accepted: true as const, characters: data.length } : null,
-            error: accepted
-              ? null
-              : "The terminal opened, but its input may have been partially written. Inspect it before retrying.",
-            previewUrl: script.previewUrl ?? null,
-            previewAutoOpened: false as const,
-          };
-        }).pipe(
-          Effect.onInterrupt(() =>
-            Effect.gen(function* () {
-              if (admittedHandle !== undefined)
-                yield* terminals.closeWithHandle(admittedHandle).pipe(Effect.ignore);
-            }),
-          ),
-        );
-      }),
-    );
+            handle: opened.handle,
+            data,
+          })
+          .pipe(Effect.orElseSucceed(() => false));
+        return {
+          threadId: target.id,
+          projectId: project.id,
+          scriptId: script.id,
+          terminalId: input.terminalId,
+          outcome: accepted
+            ? ("input_accepted" as const)
+            : ("terminal_opened_input_failed" as const),
+          terminal: opened.snapshot,
+          inputAcceptance: accepted ? { accepted: true as const, characters: data.length } : null,
+          error: accepted
+            ? null
+            : "The terminal opened, but its input may have been partially written. Inspect it before retrying.",
+          previewUrl: script.previewUrl ?? null,
+          previewAutoOpened: false as const,
+        };
+      }).pipe(
+        Effect.onInterrupt(() =>
+          admittedHandle === undefined
+            ? Effect.void
+            : terminals.closeWithHandle(admittedHandle).pipe(Effect.ignore),
+        ),
+      );
+    });
 
   const stop: ProjectScriptMcpService["Service"]["stop"] = (scope, input) =>
     mutate(scope, input.threadId, ({ target, project }) =>
       Effect.gen(function* () {
-        const handle = [...runs.entries()].find(
-          ([handle, ownership]) =>
-            handle.threadId === target.id &&
-            handle.terminalId === input.terminalId &&
-            ownership.projectId === project.id &&
-            ownership.scriptId === input.scriptId,
-        )?.[0];
+        const key = runKey(target.id, input.terminalId);
+        const run = runs.get(key);
         if (
-          handle === undefined ||
-          !(yield* terminals.closeWithHandle(handle).pipe(
+          run?.projectId !== project.id ||
+          run.scriptId !== input.scriptId ||
+          !(yield* terminals.closeWithHandle(run.handle).pipe(
             Effect.mapError(
               () =>
                 new ProjectScriptMcpFailure({
@@ -310,7 +307,6 @@ const make = Effect.gen(function* () {
             ),
           ))
         ) {
-          if (handle !== undefined) runs.delete(handle);
           return yield* new ProjectScriptMcpFailure({
             code: "script_run_not_found",
             message: "No matching live script run was found.",

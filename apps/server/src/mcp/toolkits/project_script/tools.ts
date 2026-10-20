@@ -1,4 +1,5 @@
 import {
+  OrchestratorMcpFailure,
   ProjectScriptMcpFailure,
   ProjectScriptMcpListInput,
   ProjectScriptMcpListResult,
@@ -9,7 +10,6 @@ import {
 } from "@t3tools/contracts";
 import { Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 
 import { McpInvocationContext } from "../../McpInvocationContext.ts";

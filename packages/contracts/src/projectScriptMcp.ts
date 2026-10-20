@@ -2,8 +2,7 @@ import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProjectScript, ProjectScriptIcon } from "./project.ts";
-import { TerminalId } from "./terminal.ts";
-import { TerminalSessionSnapshot } from "./terminal.ts";
+import { TerminalId, TerminalSessionSnapshot } from "./terminal.ts";
 
 export const PROJECT_SCRIPT_MCP_DEFAULT_LIST_LIMIT = 20;
 export const PROJECT_SCRIPT_MCP_MAX_LIST_LIMIT = 50;
@@ -89,15 +88,11 @@ export const ProjectScriptMcpStopResult = Schema.Struct({
 export type ProjectScriptMcpStopResult = typeof ProjectScriptMcpStopResult.Type;
 
 export const ProjectScriptMcpFailureCode = Schema.Literals([
-  "capability_denied",
-  "thread_not_found",
   "project_not_found",
   "execution_policy_denied",
   "script_not_found",
   "script_command_too_large",
   "script_run_not_found",
-  "terminal_not_found",
-  "terminal_not_running",
   "terminal_already_exists",
   "operation_failed",
 ]);
