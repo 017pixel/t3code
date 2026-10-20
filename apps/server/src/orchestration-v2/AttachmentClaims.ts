@@ -45,10 +45,20 @@ export const releaseClaimedAttachments = Effect.fn("AttachmentClaims.releaseClai
   function* (claimedPaths: ReadonlyArray<string>) {
     if (claimedPaths.length === 0) return;
     const fileSystem = yield* FileSystem.FileSystem;
-    yield* Effect.forEach(claimedPaths, (path) => fileSystem.remove(path).pipe(Effect.ignore), {
-      concurrency: 1,
-      discard: true,
-    }).pipe(Effect.uninterruptible);
+    yield* Effect.forEach(
+      claimedPaths,
+      (path) =>
+        fileSystem
+          .remove(path)
+          .pipe(
+            Effect.ignore,
+            Effect.andThen(fileSystem.remove(`${path}.txt`, { force: true }).pipe(Effect.ignore)),
+          ),
+      {
+        concurrency: 1,
+        discard: true,
+      },
+    ).pipe(Effect.uninterruptible);
   },
 );
 

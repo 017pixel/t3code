@@ -296,6 +296,46 @@ describe("AttachmentClaims", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("rolls back an extracted sidecar published while the claim is interrupted", () =>
+    Effect.gen(function* () {
+      const pending = yield* stagePendingUpload({
+        name: "interrupt.png",
+        bytes: new Uint8Array([7]),
+        mimeType: "image/png",
+      });
+      const started = yield* Deferred.make<string>();
+      const publish = yield* Deferred.make<void>();
+      const fileSystem = yield* FileSystem.FileSystem;
+      const claimFiber = yield* claimPendingAttachments({
+        threadId: "thread-extraction-interrupt",
+        attachments: [pending],
+      }).pipe(
+        Effect.provideService(
+          DocumentText.DocumentText,
+          DocumentText.DocumentText.of({
+            ensure: (path) =>
+              Deferred.succeed(started, path).pipe(
+                Effect.andThen(Deferred.await(publish)),
+                Effect.andThen(fileSystem.writeFileString(path + ".txt", "extracted")),
+                Effect.as(path + ".txt"),
+                Effect.orDie,
+                Effect.uninterruptible,
+              ),
+          }),
+        ),
+        Effect.forkChild,
+      );
+      const claimedPath = yield* Deferred.await(started);
+      claimFiber.interruptUnsafe();
+      yield* Deferred.succeed(publish, undefined);
+      expect(Exit.hasInterrupts(yield* Fiber.await(claimFiber))).toBe(true);
+      expect(NodeFS.existsSync(claimedPath)).toBe(false);
+      expect(NodeFS.existsSync(claimedPath + ".txt")).toBe(false);
+      const config = yield* ServerConfig.ServerConfig;
+      expect(NodeFS.readdirSync(config.attachmentsDir)).toHaveLength(1);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("releaseClaimedAttachments removes claimed copies best-effort", () =>
     Effect.gen(function* () {
       const pending = yield* stagePendingUpload({

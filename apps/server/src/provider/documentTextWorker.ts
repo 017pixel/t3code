@@ -7,6 +7,10 @@ import * as Yauzl from "yauzl";
 const MAX_INPUT = 16 * 1024 * 1024;
 const MAX_EXPANDED = 32 * 1024 * 1024;
 const MAX_OUTPUT = 1_000_000;
+const CELL_START = Symbol("cell-start");
+const CELL_END = Symbol("cell-end");
+type TextPart = string | typeof CELL_START | typeof CELL_END | { fallback: string };
+
 const TRUNCATED = "\n\n[Extracted text truncated at 1,000,000 characters.]";
 
 interface XmlNode {
@@ -51,74 +55,73 @@ function xml(source: string, odfSpaces = false): XmlNode {
 
 const children = (node: XmlNode) =>
   node.children.filter((child): child is XmlNode => typeof child !== "string");
-function all(node: XmlNode, name: string): XmlNode[] {
-  return children(node).flatMap((child) => (child.name === name ? [child] : all(child, name)));
-}
-function text(node: XmlNode): string {
-  if (["script", "style", "binary-data"].includes(node.name)) return "";
-  if (["tab", "cell"].includes(node.name)) return "\t";
-  if (["br", "line-break"].includes(node.name)) return "\n";
-  if (node.spaceCount !== undefined) return " ".repeat(node.spaceCount);
-  return node.children.map((child) => (typeof child === "string" ? child : text(child))).join("");
-}
-function paragraphs(node: XmlNode): string {
-  if (["script", "style", "binary-data"].includes(node.name)) return "";
-  return node.children
-    .map((child) => {
-      if (typeof child === "string") return child;
-      if (child.name === "tbl" || child.name === "table") return table(child);
-      if (child.name === "p" || child.name === "h") {
-        const style = all(child, "pStyle")[0]?.attrs.val ?? "";
-        const level =
-          child.name === "h"
-            ? Number(child.attrs["outline-level"]) || 1
-            : Number(style.match(/^Heading([1-6])$/i)?.[1]) || 0;
-        return `${"#".repeat(Math.min(6, level))}${level ? " " : ""}${text(child)}\n`;
-      }
-      if (/^h[1-6]$/.test(child.name))
-        return `${"#".repeat(Number(child.name[1]))} ${text(child)}\n`;
-      if (["li", "div", "section"].includes(child.name)) return `${paragraphs(child)}\n`;
-      return paragraphs(child) || text(child);
-    })
-    .join("");
-}
-function table(node: XmlNode, limit = MAX_OUTPUT + 1): string {
-  const rows = [...all(node, "tr"), ...all(node, "table-row")];
-  if (rows.length > 10_000) throw new Error("Row limit");
-  let result = "";
-  let rowCount = 0;
-  for (const row of rows) {
-    const cells = children(row).filter((cell) =>
-      ["tc", "table-cell", "covered-table-cell", "td", "th"].includes(cell.name),
-    );
-    const values: string[] = [];
-    let length = 0;
-    const budget = limit - result.length;
-    for (const cell of cells) {
-      const count = Math.min(512, Number(cell.attrs["number-columns-repeated"]) || 1);
-      if (values.length + count > 512) throw new Error("Column limit");
-      const value = paragraphs(cell).replaceAll(/\s+/g, " ").trim() || cell.attrs.value || "";
-      for (let column = 0; column < count; column++) {
-        if (values.length > 0) length++;
-        const part = value.slice(0, Math.max(0, budget - length));
-        values.push(part);
-        length += part.length;
-        if (length >= budget) break;
-      }
-      if (length >= budget) break;
-    }
-    const line = values.join("\t");
-    const repeat = Math.min(10_000, Number(row.attrs["number-rows-repeated"]) || 1);
-    if (!line.trim()) continue;
-    rowCount += repeat;
-    if (rowCount > 10_000) throw new Error("Repeated row limit");
-    const remaining = limit - result.length;
-    result += `${line}\n`
-      .repeat(Math.min(repeat, Math.ceil(remaining / (line.length + 1))))
-      .slice(0, remaining);
-    if (result.length >= limit) break;
+function* all(node: XmlNode, name: string | readonly string[]): Generator<XmlNode, void> {
+  for (const child of children(node)) {
+    if (typeof name === "string" ? child.name === name : name.includes(child.name)) yield child;
+    else yield* all(child, name);
   }
-  return result;
+}
+function* text(node: XmlNode): Generator<string, void> {
+  if (["script", "style", "binary-data"].includes(node.name)) return;
+  if (["tab", "cell"].includes(node.name)) yield "\t";
+  else if (["br", "line-break"].includes(node.name)) yield "\n";
+  else if (node.spaceCount !== undefined) yield " ".repeat(node.spaceCount);
+  else
+    for (const child of node.children) {
+      if (typeof child === "string") yield child;
+      else yield* text(child);
+    }
+}
+function* paragraphs(node: XmlNode): Generator<TextPart, void> {
+  if (["script", "style", "binary-data"].includes(node.name)) return;
+  for (const child of node.children) {
+    if (typeof child === "string") yield child;
+    else if (["tbl", "table"].includes(child.name)) yield* table(child);
+    else if (["p", "h"].includes(child.name) || /^h[1-6]$/.test(child.name)) {
+      const style = all(child, "pStyle").next().value?.attrs.val ?? "";
+      const level =
+        child.name === "h"
+          ? Number(child.attrs["outline-level"]) || 1
+          : /^h[1-6]$/.test(child.name)
+            ? Number(child.name[1])
+            : Number(style.match(/^Heading([1-6])$/i)?.[1]) || 0;
+      if (level) yield `${"#".repeat(Math.min(6, level))} `;
+      yield* text(child);
+      yield "\n";
+    } else {
+      yield* paragraphs(child);
+      if (["li", "div", "section"].includes(child.name)) yield "\n";
+    }
+  }
+}
+function* inCell(parts: Iterable<TextPart>): Generator<TextPart, void> {
+  yield CELL_START;
+  yield* parts;
+  yield CELL_END;
+}
+function* table(node: XmlNode): Generator<TextPart, void> {
+  let rowCount = 0;
+  for (const row of all(node, ["tr", "table-row"])) {
+    const repeat = Math.min(10_000, Number(row.attrs["number-rows-repeated"]) || 1);
+    rowCount += repeat;
+    if (rowCount > 10_000) throw new Error("Row limit");
+    for (let index = 0; index < repeat; index++) {
+      let column = 0;
+      for (const cell of children(row)) {
+        if (!["tc", "table-cell", "covered-table-cell", "td", "th"].includes(cell.name)) continue;
+        const count = Math.min(512, Number(cell.attrs["number-columns-repeated"]) || 1);
+        if (column + count > 512) throw new Error("Column limit");
+        for (let i = 0; i < count; i++) {
+          if (column++) yield "\t";
+          yield CELL_START;
+          yield* paragraphs(cell);
+          if (cell.attrs.value) yield { fallback: cell.attrs.value };
+          yield CELL_END;
+        }
+      }
+      yield "\n";
+    }
+  }
 }
 
 async function archive(path: string): Promise<Map<string, string>> {
@@ -186,7 +189,7 @@ async function archive(path: string): Promise<Map<string, string>> {
   return files;
 }
 
-function notebook(source: string): string {
+function* notebook(source: string): Generator<string, void> {
   const book: unknown = JSON.parse(source);
   if (
     !book ||
@@ -196,42 +199,43 @@ function notebook(source: string): string {
     book.cells.length > 10_000
   )
     throw new Error("Invalid notebook");
-  const lines = (value: unknown): string =>
-    typeof value === "string"
-      ? value
-      : Array.isArray(value)
-        ? value.filter((line) => typeof line === "string").join("")
-        : "";
-  return book.cells
-    .map((cell: unknown, index) => {
-      if (!cell || typeof cell !== "object") return "";
-      const source = "source" in cell ? lines(cell.source) : "";
-      const kind = "cell_type" in cell && cell.cell_type === "code" ? "code" : "markdown";
-      const outputs =
-        "outputs" in cell && Array.isArray(cell.outputs)
-          ? cell.outputs
-              .map((output: unknown) => {
-                if (!output || typeof output !== "object") return "";
-                if ("text" in output) return lines(output.text);
-                if ("data" in output && output.data && typeof output.data === "object") {
-                  if ("text/plain" in output.data) return lines(output.data["text/plain"]);
-                }
-                return "";
-              })
-              .join("\n")
-          : "";
-      return `## Cell ${index + 1} (${kind})\n${source}\n${outputs ? `Output:\n${outputs}` : ""}`;
-    })
-    .join("\n\n");
+  function* lines(value: unknown): Generator<string, void> {
+    if (typeof value === "string") yield value;
+    else if (Array.isArray(value))
+      for (const line of value) {
+        if (typeof line === "string") yield line;
+      }
+  }
+  for (const [index, cell] of book.cells.entries()) {
+    if (!cell || typeof cell !== "object") continue;
+    const kind = "cell_type" in cell && cell.cell_type === "code" ? "code" : "markdown";
+    yield `## Cell ${index + 1} (${kind})\n`;
+    if ("source" in cell) yield* lines(cell.source);
+    if ("outputs" in cell && Array.isArray(cell.outputs)) {
+      yield "\nOutput:\n";
+      for (const output of cell.outputs) {
+        if (!output || typeof output !== "object") continue;
+        if ("text" in output) yield* lines(output.text);
+        else if (
+          "data" in output &&
+          output.data &&
+          typeof output.data === "object" &&
+          "text/plain" in output.data
+        )
+          yield* lines(output.data["text/plain"]);
+        yield "\n";
+      }
+    }
+    yield "\n\n";
+  }
 }
 
-function rtf(source: string): string {
+function* rtf(source: string): Generator<string, void> {
   if (!source.startsWith("{\\rtf")) throw new Error("Invalid RTF document");
   let state = { skip: false, uc: 1, decoder: new TextDecoder("windows-1252") };
   const stack: Array<typeof state> = [];
   let fallback = 0;
-  let result = "";
-  for (let i = 0; i < source.length && result.length <= MAX_OUTPUT; i++) {
+  for (let i = 0; i < source.length; i++) {
     const char = source[i]!;
     if (char === "{") {
       stack.push({ ...state });
@@ -244,7 +248,7 @@ function rtf(source: string): string {
       if (hex) {
         if (fallback) fallback--;
         else if (!state.skip)
-          result += state.decoder.decode(Uint8Array.of(Number.parseInt(hex[1]!, 16)));
+          yield state.decoder.decode(Uint8Array.of(Number.parseInt(hex[1]!, 16)));
         i += 3;
       } else if (word) {
         i += word[0].length;
@@ -275,180 +279,196 @@ function rtf(source: string): string {
           i += value;
         } else if (control === "uc") state.uc = Math.max(0, Math.min(16, value));
         else if (control === "u" && !state.skip) {
-          result += String.fromCharCode(value < 0 ? value + 65536 : value);
+          yield String.fromCharCode(value < 0 ? value + 65536 : value);
           fallback = state.uc;
-        } else if (!state.skip && ["par", "line", "row"].includes(control)) result += "\n";
-        else if (!state.skip && ["tab", "cell"].includes(control)) result += "\t";
+        } else if (!state.skip && ["par", "line", "row"].includes(control)) yield "\n";
+        else if (!state.skip && ["tab", "cell"].includes(control)) yield "\t";
       } else {
         i++;
         if (rest[0] === "*") state.skip = true;
         else if (fallback) fallback--;
-        else if (!state.skip && ["\\", "{", "}"].includes(rest[0]!)) result += rest[0];
-        else if (!state.skip && rest[0] === "~") result += " ";
+        else if (!state.skip && ["\\", "{", "}"].includes(rest[0]!)) yield rest[0]!;
+        else if (!state.skip && rest[0] === "~") yield " ";
       }
     } else if (!state.skip && char !== "\n" && char !== "\r") {
       if (fallback) fallback--;
       else
-        result +=
-          char.charCodeAt(0) < 128 ? char : state.decoder.decode(Uint8Array.of(char.charCodeAt(0)));
+        yield char.charCodeAt(0) < 128
+          ? char
+          : state.decoder.decode(Uint8Array.of(char.charCodeAt(0)));
     }
   }
-  return result;
 }
 
-export async function extractDocumentText(path: string, extension: string): Promise<string> {
+async function* document(path: string, extension: string): AsyncGenerator<TextPart, void> {
   if ((await NodeFSP.stat(path)).size > MAX_INPUT) throw new Error("Input byte limit");
-  let result: string;
-  let outputTruncated = false;
-  if (extension === ".ipynb") result = notebook(await NodeFSP.readFile(path, "utf8"));
-  else if (extension === ".rtf") {
-    result = rtf((await NodeFSP.readFile(path)).toString("latin1"));
-    outputTruncated = result.length > MAX_OUTPUT;
-  } else {
+  if (extension === ".ipynb") yield* notebook(await NodeFSP.readFile(path, "utf8"));
+  else if (extension === ".rtf") yield* rtf((await NodeFSP.readFile(path)).toString("latin1"));
+  else {
     const files = await archive(path);
     const read = (name: string) => {
       const data = files.get(name);
       if (!data) throw new Error("Missing document part");
       return xml(data, [".odt", ".ods", ".odp"].includes(extension));
     };
-    if (extension === ".docx") result = paragraphs(read("word/document.xml"));
+    const relations = (name: string) =>
+      new Map(
+        [...all(read(name), "Relationship")]
+          .filter((rel) => rel.attrs.TargetMode !== "External")
+          .map((rel) => [rel.attrs.Id, rel.attrs.Target]),
+      );
+    if (extension === ".docx") yield* paragraphs(read("word/document.xml"));
     else if ([".odt", ".ods", ".odp"].includes(extension)) {
       const content = read("content.xml");
-      if (extension === ".ods") {
-        result = "";
-        for (const sheet of all(content, "table")) {
-          result += `${result ? "\n\n" : ""}## Sheet: ${sheet.attrs.name ?? "Untitled"}\n`.slice(
-            0,
-            MAX_OUTPUT + 1 - result.length,
-          );
-          if (result.length > MAX_OUTPUT) break;
-          result += table(sheet, MAX_OUTPUT + 1 - result.length);
-          if (result.length > MAX_OUTPUT) break;
+      if (extension === ".odt") yield* paragraphs(content);
+      else {
+        let index = 0;
+        for (const part of all(content, extension === ".ods" ? "table" : "page")) {
+          yield extension === ".ods"
+            ? `\n\n## Sheet: ${part.attrs.name ?? "Untitled"}\n`
+            : `\n\n## Slide ${++index}\n`;
+          if (extension === ".ods") yield* table(part);
+          else yield* paragraphs(part);
         }
-      } else {
-        result =
-          extension === ".odp"
-            ? all(content, "page")
-                .map((slide, i) => `## Slide ${i + 1}\n${paragraphs(slide)}`)
-                .join("\n\n")
-            : paragraphs(content);
       }
     } else if (extension === ".xlsx") {
       const workbook = read("xl/workbook.xml");
       const dateSystem = ["1", "true"].includes(
-        all(workbook, "workbookPr")[0]?.attrs.date1904 ?? "",
+        all(workbook, "workbookPr").next().value?.attrs.date1904 ?? "",
       )
         ? "1904"
         : "1900";
       const styles = files.has("xl/styles.xml") ? read("xl/styles.xml") : undefined;
       const customFormats = new Map(
         styles
-          ? all(styles, "numFmt").map((node) => [node.attrs.numFmtId, node.attrs.formatCode])
+          ? [...all(styles, "numFmt")].map((node) => [node.attrs.numFmtId, node.attrs.formatCode])
           : [],
       );
-      const cellFormats = styles ? all(styles, "cellXfs")[0] : undefined;
+      const cellFormats = styles ? all(styles, "cellXfs").next().value : undefined;
       const formats = cellFormats ? children(cellFormats) : [];
       const strings = files.has("xl/sharedStrings.xml")
-        ? all(read("xl/sharedStrings.xml"), "si").map(text)
+        ? [...all(read("xl/sharedStrings.xml"), "si")]
         : [];
-      const relations = new Map(
-        all(read("xl/_rels/workbook.xml.rels"), "Relationship")
-          .filter((rel) => rel.attrs.TargetMode !== "External")
-          .map((rel) => [rel.attrs.Id, rel.attrs.Target]),
-      );
-      result = "";
+      const rels = relations("xl/_rels/workbook.xml.rels");
       for (const sheet of all(workbook, "sheet")) {
-        if (result.length > MAX_OUTPUT) break;
-        const target = relations.get(sheet.attrs["r:id"] ?? sheet.attrs.id);
+        yield `\n## Sheet: ${sheet.attrs.name}\n`;
+        const target = rels.get(sheet.attrs["r:id"] ?? sheet.attrs.id);
         if (!target) throw new Error("Missing sheet relationship");
         const name = target.startsWith("/")
           ? target.slice(1)
           : NodePath.posix.normalize(`xl/${target}`);
-        const rows = all(read(name), "row");
-        if (rows.length > 10_000) throw new Error("Row limit");
-        result += `${result ? "\n" : ""}## Sheet: ${sheet.attrs.name}\n`.slice(
-          0,
-          MAX_OUTPUT + 1 - result.length,
-        );
-        for (const row of rows) {
-          if (result.length > MAX_OUTPUT) break;
-          const values: string[] = [];
-          let rowLength = 0;
+        let rowCount = 0;
+        for (const row of all(read(name), "row")) {
+          if (++rowCount > 10_000) throw new Error("Row limit");
+          const cells: Array<XmlNode | undefined> = [];
           for (const cell of children(row).filter((node) => node.name === "c")) {
             const letters = cell.attrs.r?.match(/^[A-Z]+/)?.[0];
             const column = letters
               ? [...letters].reduce((n, char) => n * 26 + char.charCodeAt(0) - 64, 0) - 1
-              : values.length;
+              : cells.length;
             if (column > 511) throw new Error("Column limit");
-            while (values.length <= column) values.push("");
-            const value = all(cell, "v")[0];
-            const raw = value ? text(value) : "";
-            const formatId = formats[Number(cell.attrs.s ?? 0)]?.attrs.numFmtId;
-            const format = formatId ? customFormats.get(formatId) : undefined;
-            const numeric = cell.attrs.t === undefined || cell.attrs.t === "n";
-            const formatted =
-              numeric && raw && formatId && formatId !== "0"
-                ? `${raw} [Excel numFmtId=${formatId}${format ? `; format=${format}` : ""}; date system ${dateSystem}]`
-                : raw;
-            rowLength -= values[column]!.length;
-            values[column] = (
-              cell.attrs.t === "s"
-                ? (strings[Number(raw)] ?? "")
-                : cell.attrs.t === "inlineStr"
-                  ? all(cell, "t").map(text).join("")
-                  : formatted || all(cell, "f").map(text).join("")
-            )
-              .slice(0, MAX_OUTPUT + 1 - result.length - rowLength)
-              .replaceAll(/[\t\r\n]+/g, " ");
-            rowLength += values[column]!.length;
-            if (result.length + rowLength > MAX_OUTPUT) break;
+            cells[column] = cell;
           }
-          result += `${values.join("\t")}\n`.slice(0, MAX_OUTPUT + 1 - result.length);
+          for (const [column, cell] of cells.entries()) {
+            if (column) yield "\t";
+            if (!cell) continue;
+            const value = all(cell, "v").next().value;
+            const raw = value?.children.find((child) => typeof child === "string") ?? "";
+            if (cell.attrs.t === "s") {
+              const shared = strings[Number(raw)];
+              if (shared) yield* inCell(text(shared));
+            } else if (cell.attrs.t === "inlineStr") yield* inCell(text(cell));
+            else {
+              if (value) yield* inCell(text(value));
+              else for (const formula of all(cell, "f")) yield* inCell(text(formula));
+              const formatId = formats[Number(cell.attrs.s ?? 0)]?.attrs.numFmtId;
+              const format = formatId ? customFormats.get(formatId) : undefined;
+              if (
+                (cell.attrs.t === undefined || cell.attrs.t === "n") &&
+                raw &&
+                formatId &&
+                formatId !== "0"
+              )
+                yield ` [Excel numFmtId=${formatId}${format ? `; format=${format}` : ""}; date system ${dateSystem}]`;
+            }
+          }
+          yield "\n";
         }
       }
-      outputTruncated = result.length > MAX_OUTPUT;
     } else if (extension === ".pptx") {
-      const relations = new Map(
-        all(read("ppt/_rels/presentation.xml.rels"), "Relationship")
-          .filter((rel) => rel.attrs.TargetMode !== "External")
-          .map((rel) => [rel.attrs.Id, rel.attrs.Target]),
-      );
-      result = all(read("ppt/presentation.xml"), "sldId")
-        .map((slide, i) => {
-          const target = relations.get(slide.attrs["r:id"] ?? slide.attrs.id);
-          if (!target) throw new Error("Missing slide relationship");
-          return `## Slide ${i + 1}\n${paragraphs(read(target.startsWith("/") ? target.slice(1) : NodePath.posix.normalize(`ppt/${target}`)))}`;
-        })
-        .join("\n\n");
+      const rels = relations("ppt/_rels/presentation.xml.rels");
+      let index = 0;
+      for (const slide of all(read("ppt/presentation.xml"), "sldId")) {
+        yield `\n\n## Slide ${++index}\n`;
+        const target = rels.get(slide.attrs["r:id"] ?? slide.attrs.id);
+        if (!target) throw new Error("Missing slide relationship");
+        yield* paragraphs(
+          read(
+            target.startsWith("/") ? target.slice(1) : NodePath.posix.normalize(`ppt/${target}`),
+          ),
+        );
+      }
     } else if (extension === ".epub") {
-      const rootfile = all(read("META-INF/container.xml"), "rootfile")[0]?.attrs["full-path"];
+      const rootfile = all(read("META-INF/container.xml"), "rootfile").next().value?.attrs[
+        "full-path"
+      ];
       if (!rootfile) throw new Error("Missing EPUB package");
       const packageXml = read(rootfile);
       const items = new Map(
-        all(packageXml, "item").map((item) => [item.attrs.id, item.attrs.href]),
+        [...all(packageXml, "item")].map((item) => [item.attrs.id, item.attrs.href]),
       );
-      result = all(packageXml, "itemref")
-        .map((item, i) => {
-          const href = items.get(item.attrs.idref);
-          if (!href) throw new Error("Missing chapter");
-          const name = NodePath.posix.normalize(
-            NodePath.posix.join(
-              NodePath.posix.dirname(rootfile),
-              decodeURIComponent(href.split("#")[0]!),
-            ),
-          );
-          return `## Chapter ${i + 1}\n${paragraphs(read(name))}`;
-        })
-        .join("\n\n");
+      let index = 0;
+      for (const item of all(packageXml, "itemref")) {
+        yield `\n\n## Chapter ${++index}\n`;
+        const href = items.get(item.attrs.idref);
+        if (!href) throw new Error("Missing chapter");
+        const name = NodePath.posix.normalize(
+          NodePath.posix.join(
+            NodePath.posix.dirname(rootfile),
+            decodeURIComponent(href.split("#")[0]!),
+          ),
+        );
+        yield* paragraphs(read(name));
+      }
     } else throw new Error("Unsupported document");
   }
-  outputTruncated ||= result.length > MAX_OUTPUT;
-  result = result
-    .replaceAll("\0", "")
-    .replaceAll(/\n(?:[ \t]*\n){2,}/g, "\n\n")
-    .trim();
+}
+
+export async function extractDocumentText(path: string, extension: string): Promise<string> {
+  let result = "";
+  let remaining = MAX_OUTPUT;
+  let cellDepth = 0;
+  let started = false;
+  let space = false;
+  // Charge raw text before normalization so repeated whitespace also exhausts the budget.
+  for await (const part of document(path, extension)) {
+    if (part === CELL_START) {
+      if (cellDepth++ === 0) {
+        started = false;
+        space = false;
+      }
+      continue;
+    }
+    if (part === CELL_END) {
+      cellDepth--;
+      continue;
+    }
+    if (typeof part !== "string" && started) continue;
+    const raw = typeof part === "string" ? part : part.fallback;
+    let value = raw.slice(0, remaining).replaceAll("\0", "");
+    remaining -= Math.min(raw.length, remaining);
+    if (cellDepth) {
+      value = value.replaceAll(/\s+/g, " ");
+      const trimmed = value.trim();
+      if (trimmed) {
+        result += (started && (space || value.startsWith(" ")) ? " " : "") + trimmed;
+        started = true;
+      }
+      space = value.endsWith(" ") || (!value && space);
+    } else result += value;
+    if (remaining === 0) break;
+  }
+  result = result.replaceAll(/\n(?:[ \t]*\n){2,}/g, "\n\n").trim();
   if (!result) throw new Error("No text extracted");
-  return outputTruncated || result.length > MAX_OUTPUT
-    ? result.slice(0, MAX_OUTPUT) + TRUNCATED
-    : result;
+  return result + (remaining === 0 ? TRUNCATED : "");
 }

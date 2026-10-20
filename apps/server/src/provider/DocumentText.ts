@@ -57,19 +57,18 @@ const make = Effect.gen(function* () {
           new Promise<string>((resolve, reject) => {
             NodeChildProcess.execFile(
               executable,
-              [
-                ...(isExecutable ? [] : ["--max-old-space-size=192", entry]),
-                "__document-text",
-                path,
-                `.${extension}`,
-              ],
+              [...(isExecutable ? [] : [entry]), "__document-text", path, `.${extension}`],
               {
                 signal,
                 timeout: 15_000,
                 maxBuffer: 4 * 1024 * 1024 + 1024,
                 encoding: "utf8",
                 windowsHide: true,
-                env: { ...environment, ELECTRON_RUN_AS_NODE: "1" },
+                env: {
+                  ...environment,
+                  ELECTRON_RUN_AS_NODE: "1",
+                  NODE_OPTIONS: `${environment.NODE_OPTIONS ?? ""} --max-old-space-size=192`,
+                },
               },
               (error, stdout) => (error ? reject(error) : resolve(stdout)),
             );

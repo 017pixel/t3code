@@ -3331,6 +3331,11 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 resolveAttachmentPath: host.resolveAttachmentPath,
                 resolveExtractedTextPath: host.resolveExtractedTextPath,
               })).trim();
+              if (state.activeTurn !== turn || turn.interrupted || turn.finalized) {
+                return yield* protocolError(
+                  `OpenCode turn ${steerInput.providerTurnId} is not active`,
+                );
+              }
               const files = OpenCodeRuntime.toOpenCodeFileParts({
                 attachments: steerInput.message.attachments,
                 resolveAttachmentPath: host.resolveAttachmentPath,

@@ -1,10 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import { vi } from "vite-plus/test";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerConfig from "../config.ts";
 import * as DocumentText from "./DocumentText.ts";
 import { extractDocumentText } from "./documentTextWorker.ts";
@@ -14,6 +17,8 @@ import * as PreviewManager from "../preview/Manager.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as NodeZlib from "node:zlib";
 import { appendUserInputAttachmentPaths } from "./userInputAttachments.ts";
+
+vi.mock("node:child_process", { spy: true });
 
 const layer = Layer.merge(
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-answer-paths-" }),
@@ -27,6 +32,57 @@ const attachment = {
   sizeBytes: 4,
 };
 describe("question answer paths", () => {
+  it.effect.each([false, true])("limits the child heap for standalone=%s", (standalone) =>
+    Effect.acquireUseRelease(
+      Effect.promise(async () => {
+        const { execFile } = await vi.importActual<typeof NodeChildProcess>("node:child_process");
+        const probe = vi.spyOn(NodeChildProcess, "execFile");
+        probe.mockImplementation(((
+          file: string,
+          _args: readonly string[],
+          options: NodeChildProcess.ExecFileOptionsWithStringEncoding,
+          callback: (
+            error: NodeChildProcess.ExecFileException | null,
+            stdout: string,
+            stderr: string,
+          ) => void,
+        ) =>
+          execFile(
+            file,
+            [
+              "-e",
+              'process.stdout.write(String(require("node:v8").getHeapStatistics().heap_size_limit))',
+            ],
+            options,
+            callback,
+          )) as typeof NodeChildProcess.execFile);
+        return probe;
+      }),
+      () =>
+        Effect.gen(function* () {
+          const config = yield* ServerConfig.ServerConfig;
+          const path = NodePath.join(config.attachmentsDir, "heap.rtf");
+          NodeFS.writeFileSync(path, String.raw`{\rtf1 hello}`);
+          const extracted = yield* Effect.gen(function* () {
+            return yield* (yield* DocumentText.DocumentText).ensure(path);
+          }).pipe(
+            Effect.provide(Layer.fresh(DocumentText.layer)),
+            Effect.provideService(HostProcess.IsExecutable, standalone),
+            Effect.provideService(HostProcess.Environment, {
+              ...process.env,
+              NODE_OPTIONS: "--max-old-space-size=1024",
+            }),
+          );
+          expect(extracted).toBe(path + ".txt");
+          const heapLimit = Number(NodeFS.readFileSync(path + ".txt", "utf8"));
+          expect(heapLimit).toBeGreaterThan(192 * 1024 * 1024);
+          // Newer V8 versions reserve up to 192 MiB for the young generation as well.
+          expect(heapLimit).toBeLessThanOrEqual(384 * 1024 * 1024);
+        }).pipe(Effect.provide(layer)),
+      (probe) => Effect.sync(() => probe.mockRestore()),
+    ),
+  );
+
   it.effect("extracts notebook cells and outputs once and keeps both readable paths", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
@@ -217,9 +273,9 @@ describe("question answer paths", () => {
           ext: "ods",
           parts: {
             "content.xml":
-              '<office:document><table:table table:name="Cargo"><table:table-row><table:table-cell><text:p>Violet</text:p></table:table-cell><table:table-cell office:value="19"/></table:table-row></table:table></office:document>',
+              '<office:document><table:table table:name="Cargo"><table:table-row><table:table-cell><text:p>Violet</text:p></table:table-cell><table:table-cell office:value="19"/><table:table-cell office:value="27"><text:p/></table:table-cell></table:table-row></table:table></office:document>',
           },
-          expected: ["## Sheet: Cargo", "Violet\t19"],
+          expected: ["## Sheet: Cargo", "Violet\t19\t27"],
         },
         {
           ext: "ods",
@@ -258,6 +314,74 @@ describe("question answer paths", () => {
             "[Extracted text truncated at 1,000,000 characters.]",
           ],
           absent: ["## Sheet: Unneeded"],
+        },
+        {
+          ext: "odt",
+          bounded: true,
+          parts: {
+            "content.xml": `<office:document><text:p>Before whitespace</text:p><table:table><table:table-row table:number-rows-repeated="10000"><table:table-cell table:number-columns-repeated="512"><text:p>${" ".repeat(10_000)}</text:p></table:table-cell></table:table-row></table:table><text:p>Unneeded</text:p></office:document>`,
+          },
+          expected: ["Before whitespace", "[Extracted text truncated at 1,000,000 characters.]"],
+          absent: ["Unneeded"],
+        },
+        ...["odt", "odp", "ods"].flatMap((ext) =>
+          [false, true].map((rows) => ({
+            ext,
+            bounded: true,
+            parts: {
+              "content.xml": `<office:document><draw:page>${Array.from(
+                { length: 256 },
+                () =>
+                  `<table:table><table:table-row${rows ? ' table:number-rows-repeated="10000"' : ""}><table:table-cell table:number-columns-repeated="512"><text:p>${"Budget ".repeat(rows ? 160 : 585)}</text:p></table:table-cell></table:table-row></table:table>`,
+              ).join(
+                "",
+              )}</draw:page><draw:page><text:p>Unneeded</text:p></draw:page></office:document>`,
+            },
+            expected: ["Budget ", "[Extracted text truncated at 1,000,000 characters.]"],
+            absent: ["Unneeded"],
+          })),
+        ),
+        {
+          ext: "docx",
+          bounded: true,
+          parts: {
+            "word/document.xml": `<w:document><w:p><w:t>${"A".repeat(1_000_100)}</w:t></w:p><w:p><w:t>Unneeded</w:t></w:p></w:document>`,
+          },
+          expected: ["A".repeat(32), "[Extracted text truncated at 1,000,000 characters.]"],
+          absent: ["Unneeded"],
+        },
+        {
+          ext: "pptx",
+          bounded: true,
+          parts: {
+            "ppt/presentation.xml":
+              '<p:presentation><p:sldId r:id="a"/><p:sldId r:id="missing"/></p:presentation>',
+            "ppt/_rels/presentation.xml.rels":
+              '<Relationships><Relationship Id="a" Target="slides/slide.xml"/></Relationships>',
+            "ppt/slides/slide.xml": `<p:sld><a:p><a:t>${"A".repeat(1_000_100)}</a:t></a:p></p:sld>`,
+          },
+          expected: [
+            "## Slide 1",
+            "A".repeat(32),
+            "[Extracted text truncated at 1,000,000 characters.]",
+          ],
+          absent: ["## Slide 2"],
+        },
+        {
+          ext: "epub",
+          bounded: true,
+          parts: {
+            "META-INF/container.xml": '<container><rootfile full-path="book.opf"/></container>',
+            "book.opf":
+              '<package><item id="a" href="a.xhtml"/><itemref idref="a"/><itemref idref="missing"/></package>',
+            "a.xhtml": `<html><body><p>${"A".repeat(1_000_100)}</p></body></html>`,
+          },
+          expected: [
+            "## Chapter 1",
+            "A".repeat(32),
+            "[Extracted text truncated at 1,000,000 characters.]",
+          ],
+          absent: ["## Chapter 2"],
         },
         {
           ext: "epub",
@@ -334,6 +458,9 @@ describe("question answer paths", () => {
           for (const absent of item.absent) expect(extracted).not.toContain(absent);
         if (("bounded" in item && item.bounded) || item.ext === "epub") {
           expect(extracted.length).toBeLessThan(1_000_100);
+          expect(extracted.match(/\[Extracted text truncated/g)?.length ?? 0).toBeLessThanOrEqual(
+            1,
+          );
           const documents = yield* DocumentText.DocumentText;
           expect(yield* documents.ensure(path)).toBe(path + ".txt");
           expect(NodeFS.readFileSync(path + ".txt", "utf8")).toBe(extracted);
