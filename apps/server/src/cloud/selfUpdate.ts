@@ -377,19 +377,18 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     commitDesktopUpdate: (requestId, onHandoffAccepted) =>
       desktopAppUpdate.commit(requestId, onHandoffAccepted),
     capability,
-    stage: (targetVersion) =>
-      Effect.gen(function* () {
-        if (capability !== "boot-service" || !isExactServiceVersion(targetVersion)) {
-          return yield* failWith("Only a managed service can stage an exact server version.");
-        }
-        if (yield* Ref.getAndSet(inFlight, true)) {
-          return yield* failWith("A server update is already in progress.");
-        }
-        const { orchestrationProtocol } = yield* stageRuntime(targetVersion).pipe(
-          Effect.ensuring(Ref.set(inFlight, false)),
-        );
-        return { orchestrationProtocol };
-      }),
+    stage: Effect.fn("cloud.server_self_update.stage")(function* (targetVersion: string) {
+      if (capability !== "boot-service" || !isExactServiceVersion(targetVersion)) {
+        return yield* failWith("Only a managed service can stage an exact server version.");
+      }
+      if (yield* Ref.getAndSet(inFlight, true)) {
+        return yield* failWith("A server update is already in progress.");
+      }
+      const { orchestrationProtocol } = yield* stageRuntime(targetVersion).pipe(
+        Effect.ensuring(Ref.set(inFlight, false)),
+      );
+      return { orchestrationProtocol };
+    }),
   });
 });
 

@@ -474,9 +474,11 @@ if (context.update?.status === "pending") {
       );
 
       const environment = yield* Effect.promise(() => readServiceEnvironment(root));
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)), {
-        environment,
-      });
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        { environment },
+      );
       yield* runUntil(
         launcher,
         statePath,

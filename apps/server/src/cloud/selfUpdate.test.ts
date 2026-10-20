@@ -625,20 +625,22 @@ it.layer(NodeServices.layer)("background server updates", (it) => {
   );
 
   it.effect.each(["download", "protocol"] as const)(
-    "drops the old staged release when its replacement fails %s",
+    "clears a superseded release and retries download failures but skips protocol mismatches: %s",
     (failure) =>
       Effect.gen(function* () {
-        const accepted = yield* Deferred.make<void>();
+        const accepted = yield* Deferred.make<string>();
         const release = { version: "1.1.0" };
+        let downloadFails = failure === "download";
         const options = {
           release,
           orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION,
           beforeDownload: Effect.sync(() => {
-            if (failure === "download" && release.version === "1.2.0") {
+            if (downloadFails && release.version === "1.2.0") {
               throw new Error("download failed");
             }
           }),
-          requestUpdate: () => Deferred.succeed(accepted, undefined).pipe(Effect.as("launcher-id")),
+          requestUpdate: ({ targetVersion }: { readonly targetVersion: string }) =>
+            Deferred.succeed(accepted, targetVersion).pipe(Effect.as("launcher-id")),
         };
         const harness = yield* makeHarness(options);
         const open = { value: false };
@@ -651,6 +653,24 @@ it.layer(NodeServices.layer)("background server updates", (it) => {
         open.value = true;
         yield* pass.pipe(Effect.raceFirst(Deferred.await(accepted)));
         expect(yield* Deferred.isDone(accepted)).toBe(false);
+
+        const downloads = harness.order.filter((step) => step === "download").length;
+        downloadFails = false;
+        options.orchestrationProtocol = ORCHESTRATION_PROTOCOL_VERSION;
+        yield* TestClock.adjust(Duration.hours(1));
+        if (failure === "protocol") {
+          yield* pass;
+          expect(yield* Deferred.isDone(accepted)).toBe(false);
+          expect(harness.order.filter((step) => step === "download")).toHaveLength(downloads);
+        } else {
+          const handoff = yield* Effect.forkChild(pass, { startImmediately: true });
+          expect(yield* Deferred.await(accepted)).toBe("1.2.0");
+          expect(harness.order.filter((step) => step === "download")).toHaveLength(downloads + 1);
+          while (handoff.pollUnsafe() === undefined) {
+            yield* TestClock.adjust(Duration.minutes(1));
+          }
+          yield* Fiber.join(handoff);
+        }
       }),
   );
 
