@@ -63,8 +63,10 @@ function text(node: XmlNode): string {
   return node.children.map((child) => (typeof child === "string" ? child : text(child))).join("");
 }
 function paragraphs(node: XmlNode): string {
-  return children(node)
+  if (["script", "style", "binary-data"].includes(node.name)) return "";
+  return node.children
     .map((child) => {
+      if (typeof child === "string") return child;
       if (child.name === "tbl" || child.name === "table") return table(child);
       if (child.name === "p" || child.name === "h") {
         const style = all(child, "pStyle")[0]?.attrs.val ?? "";
@@ -79,16 +81,16 @@ function paragraphs(node: XmlNode): string {
       if (["li", "div", "section"].includes(child.name)) return `${paragraphs(child)}\n`;
       return paragraphs(child) || text(child);
     })
-    .join("\n");
+    .join("");
 }
 function table(node: XmlNode): string {
-  const rows = all(node, node.name === "tbl" ? "tr" : "table-row");
+  const rows = [...all(node, "tr"), ...all(node, "table-row")];
   if (rows.length > 10_000) throw new Error("Row limit");
   let result = "";
   let rowCount = 0;
   for (const row of rows) {
     const cells = children(row).filter((cell) =>
-      ["tc", "table-cell", "covered-table-cell"].includes(cell.name),
+      ["tc", "table-cell", "covered-table-cell", "td", "th"].includes(cell.name),
     );
     const values: string[] = [];
     for (const cell of cells) {

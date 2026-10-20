@@ -201,7 +201,16 @@ export const storeAttachmentUpload = Effect.fn("AttachmentUpload.store")(functio
         detail: `Body was ${receivedBytes} bytes, expected ${claims.sizeBytes}.`,
       } satisfies StoreAttachmentUploadResult;
     }
-    yield* fileSystem.rename(partPath, finalPath);
+    // Publishing without replacement keeps an upload and its cached text immutable.
+    const published = yield* fileSystem.link(partPath, finalPath).pipe(
+      Effect.map(() => true),
+      Effect.catch((error) =>
+        error.reason._tag === "AlreadyExists" ? Effect.succeed(false) : Effect.fail(error),
+      ),
+    );
+    if (!published) {
+      return { ok: false, status: 409, detail: "Attachment already uploaded." };
+    }
     const documents = yield* DocumentText.DocumentText;
     yield* documents.ensure(finalPath);
     return { ok: true } satisfies StoreAttachmentUploadResult;

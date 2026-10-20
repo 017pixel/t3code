@@ -78,6 +78,15 @@ describe("AttachmentUpload", () => {
         expect(yield* storeAttachmentUpload(claims, bytes)).toEqual({ ok: true });
         const path = NodePath.join(config.attachmentsDir, `${issued.attachmentId}.ipynb`);
         expect(NodeFS.readFileSync(`${path}.txt`, "utf8")).toContain("Violet crates: 19");
+        const replacement = new TextEncoder().encode(
+          new TextDecoder().decode(bytes).replace("Violet crates: 19", "Violet crates: 28"),
+        );
+        expect(yield* storeAttachmentUpload(claims, replacement)).toMatchObject({
+          ok: false,
+          status: 409,
+        });
+        expect(NodeFS.readFileSync(path)).toEqual(Buffer.from(bytes));
+        expect(NodeFS.readFileSync(`${path}.txt`, "utf8")).toContain("Violet crates: 19");
         const claimed = yield* claimPendingAttachments({
           threadId: "document-thread",
           attachments: [

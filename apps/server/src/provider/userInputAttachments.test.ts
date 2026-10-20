@@ -186,9 +186,21 @@ describe("question answer paths", () => {
             "OEBPS/book.opf":
               '<package><manifest><item id="a" href="a.xhtml"/><item id="b" href="b.xhtml"/></manifest><spine><itemref idref="b"/><itemref idref="a"/></spine></package>',
             "OEBPS/a.xhtml": "<html><body><p>Last chapter</p></body></html>",
-            "OEBPS/b.xhtml": "<html><body><h1>First chapter</h1><p>Larkspur</p></body></html>",
+            "OEBPS/b.xhtml":
+              "<html><body><h1>First chapter</h1><p>Larkspur</p><div>Direct div<section>Direct section<li>Direct item <em>emphasis</em> trailing</li></section></div><table><thead><tr><th>Heading</th><th>Total</th></tr></thead><tbody><tr><td>Important value</td><td>731</td></tr></tbody></table></body></html>",
           },
-          expected: ["## Chapter 1", "# First chapter", "Larkspur", "## Chapter 2", "Last chapter"],
+          expected: [
+            "## Chapter 1",
+            "# First chapter",
+            "Larkspur",
+            "Direct div",
+            "Direct section",
+            "Direct item emphasis trailing",
+            "Heading\tTotal",
+            "Important value\t731",
+            "## Chapter 2",
+            "Last chapter",
+          ],
         },
       ];
       for (const item of cases) {
@@ -230,7 +242,7 @@ describe("question answer paths", () => {
         let previous = -1;
         for (const expected of item.expected) {
           const index = extracted.indexOf(expected);
-          expect(index).toBeGreaterThan(previous);
+          expect(index, `${item.ext}: ${expected} in ${extracted}`).toBeGreaterThan(previous);
           previous = index;
         }
         if (item.ext === "docx") {
