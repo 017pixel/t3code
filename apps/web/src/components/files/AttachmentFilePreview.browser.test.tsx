@@ -25,6 +25,8 @@ import BinaryViewer from "./BinaryViewer";
 import { decodeImagePreview } from "./decodeImagePreview";
 import type { BinaryWorkerResult } from "./binaryPreviewProtocol";
 
+// Real worker imports and WASM initialization can exceed waitFor's default second
+// when the full browser project runs concurrently on CI.
 describe("bounded binary previews", () => {
   it("preserves length-delimited local and global PAX attributes", async () => {
     const encode = (value: string) => new TextEncoder().encode(value);
@@ -127,7 +129,7 @@ describe("bounded binary previews", () => {
     try {
       await using screen = await render(<BinaryViewer src={src} name="paths.tar" kind="archive" />);
       const child = () => screen.container.querySelector<HTMLButtonElement>("tbody button");
-      await vi.waitFor(() => expect(child()?.textContent).toBe("a"));
+      await vi.waitFor(() => expect(child()?.textContent).toBe("a"), 10_000);
       await act(() => child()!.click());
       await act(() => child()!.click());
       await vi.waitFor(() => expect(child()?.textContent).toBe("hello.txt"));
@@ -176,20 +178,25 @@ describe("bounded binary previews", () => {
       try {
         await using screen = await render(<BinaryViewer src={src} name="pax.tar" kind="archive" />);
         if (size === "5") {
-          await vi.waitFor(() =>
-            expect(screen.container.querySelector("tbody button")?.textContent).toBe("hello.txt"),
+          await vi.waitFor(
+            () =>
+              expect(screen.container.querySelector("tbody button")?.textContent).toBe("hello.txt"),
+            10_000,
           );
           await act(() =>
             screen.container.querySelector<HTMLButtonElement>("tbody button")!.click(),
           );
-          await vi.waitFor(() =>
-            expect(screen.container.querySelector("pre")?.textContent).toBe("hello"),
+          await vi.waitFor(
+            () => expect(screen.container.querySelector("pre")?.textContent).toBe("hello"),
+            10_000,
           );
         } else {
-          await vi.waitFor(() =>
-            expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(
-              "too large or damaged",
-            ),
+          await vi.waitFor(
+            () =>
+              expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(
+                "too large or damaged",
+              ),
+            10_000,
           );
         }
       } finally {
@@ -214,13 +221,15 @@ describe("bounded binary previews", () => {
       await using screen = await render(
         <BinaryViewer src={src} name="orders.sqlite" kind="sqlite" />,
       );
-      await vi.waitFor(() =>
-        expect([...screen.container.querySelectorAll("th")].map((x) => x.textContent)).toEqual([
-          "price",
-          "quantity",
-          "total",
-          "doubled",
-        ]),
+      await vi.waitFor(
+        () =>
+          expect([...screen.container.querySelectorAll("th")].map((x) => x.textContent)).toEqual([
+            "price",
+            "quantity",
+            "total",
+            "doubled",
+          ]),
+        10_000,
       );
       expect([...screen.container.querySelectorAll("td")].map((x) => x.textContent)).toEqual([
         "7",
@@ -300,13 +309,14 @@ describe("bounded binary previews", () => {
     const src = URL.createObjectURL(new Blob([bytes]));
     try {
       await using screen = await render(<BinaryViewer src={src} name="names.zip" kind="archive" />);
-      await vi.waitFor(() =>
-        expect(screen.container.querySelectorAll("tbody button")).toHaveLength(2),
+      await vi.waitFor(
+        () => expect(screen.container.querySelectorAll("tbody button")).toHaveLength(2),
+        10_000,
       );
       const buttons = [...screen.container.querySelectorAll<HTMLButtonElement>("tbody button")];
       expect(buttons.map((button) => button.textContent)).toEqual(["foo.txt", "foo.txt"]);
       await act(() => buttons[1]!.click());
-      await vi.waitFor(() => expect(screen.container.textContent).toContain("root file"));
+      await vi.waitFor(() => expect(screen.container.textContent).toContain("root file"), 10_000);
     } finally {
       URL.revokeObjectURL(src);
     }
@@ -468,8 +478,9 @@ describe("large text preview recovery", () => {
       await using screen = await render(
         <LargeTextViewer src={src} name="latin.txt" delimiter={null} />,
       );
-      await vi.waitFor(() =>
-        expect(screen.container.querySelector('[role="alert"]')).not.toBeNull(),
+      await vi.waitFor(
+        () => expect(screen.container.querySelector('[role="alert"]')).not.toBeNull(),
+        10_000,
       );
     } finally {
       URL.revokeObjectURL(src);
@@ -498,7 +509,7 @@ describe("large text preview recovery", () => {
           <LargeTextViewer src={src} name="log.txt" delimiter={null} />
         </div>,
       );
-      await vi.waitFor(() => expect(screen.container.textContent).toContain("current-40"));
+      await vi.waitFor(() => expect(screen.container.textContent).toContain("current-40"), 10_000);
       expect(screen.container.textContent).not.toContain("old-");
     } finally {
       URL.revokeObjectURL(src);
@@ -591,11 +602,15 @@ describe("large text preview recovery", () => {
     await using screen = await render(
       <LargeTextViewer name="log.txt" text={"bad\0text"} delimiter={null} />,
     );
-    await vi.waitFor(() =>
-      expect(screen.container.textContent).toContain("This file contains binary data."),
+    await vi.waitFor(
+      () => expect(screen.container.textContent).toContain("This file contains binary data."),
+      10_000,
     );
     await screen.rerender(<LargeTextViewer name="log.txt" text="" delimiter={null} />);
-    await vi.waitFor(() => expect(screen.container.textContent).toContain("This file is empty."));
+    await vi.waitFor(
+      () => expect(screen.container.textContent).toContain("This file is empty."),
+      10_000,
+    );
     expect(screen.container.querySelector('[role="alert"]')).toBeNull();
   });
 
