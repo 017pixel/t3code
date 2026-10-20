@@ -262,7 +262,7 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
         TEXT_MIME_TYPES.has(mimeType) ||
         TEXT_FILE_EXTENSIONS.has(path.extname(attachment.name).toLowerCase()));
     const isPathOnly =
-      (attachment.type === "image" && input.promptCapabilities?.image !== true) ||
+      (attachment.type === "image" && (!image || input.promptCapabilities?.image !== true)) ||
       (attachment.type === "file" &&
         (isPastedText ||
           (audio
@@ -270,11 +270,6 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
             : pdf || textFile
               ? input.promptCapabilities?.embeddedContext !== true
               : true)));
-    if (!isPathOnly && attachment.type === "image" && !image) {
-      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
-        `Antigravity does not support '${attachment.name}' (${attachment.mimeType}). Attach a BMP, JPEG, PNG, WebP, PDF, audio, or text file.`,
-      );
-    }
     const attachmentPath = resolveAttachmentPath({
       attachmentsDir: input.attachmentsDir,
       attachment,

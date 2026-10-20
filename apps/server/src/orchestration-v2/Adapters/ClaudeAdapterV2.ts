@@ -1847,6 +1847,15 @@ const estimateClaudePdfPages = (bytes: Buffer): number | null => {
       while (i < bytes.length && bytes[i] !== 10 && bytes[i] !== 13) i++;
       continue;
     }
+    if (byte <= 32) {
+      i++;
+      continue;
+    }
+    if (previous === "/Type" && byte !== 47) return null;
+    if (previous === "/Kids") {
+      if (byte !== 91) return null;
+      previous = "";
+    }
     if (byte === 40) {
       let depth = 1;
       for (i++; i < bytes.length && depth > 0; i++) {
@@ -1894,6 +1903,15 @@ const estimateClaudePdfPages = (bytes: Buffer): number | null => {
     }
     if (previous === "/Count") {
       if (!/^[1-9]\d{0,8}$/.test(token)) return null;
+      let next = i;
+      while (next < bytes.length) {
+        if (bytes[next]! <= 32) next++;
+        else if (bytes[next] === 37) {
+          while (next < bytes.length && bytes[next] !== 10 && bytes[next] !== 13) next++;
+        } else break;
+      }
+      // A second scalar is an indirect reference, not a direct page count.
+      if (next < bytes.length && !delimiter(bytes[next]!)) return null;
       count = Math.max(count, Number(token));
     }
     previous = token;
@@ -1957,8 +1975,8 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
 
   // Reserve all text and actual image bytes before considering any document,
   // including images that follow it in attachment order.
-  const images = new Map<ChatAttachment, ClaudeUserContentBlock>();
-  let retainedBytes = Buffer.byteLength(
+  const images = new Map<number, ClaudeUserContentBlock>();
+  const textBytes = Buffer.byteLength(
     encodeClaudeJson(
       dispatch
         ? [
@@ -1970,7 +1988,9 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
         : [{ type: "text", text: textWithAttachmentPaths }],
     ),
   );
-  for (const attachment of input.attachments) {
+  input.pdfReservation.budget.remainingBytes -= textBytes;
+  input.pdfReservation.bytes += textBytes;
+  for (const [index, attachment] of input.attachments.entries()) {
     if (attachment.type !== "image") continue;
     if (!isSupportedClaudeImageMimeType(attachment.mimeType)) {
       return yield* new ProviderAdapter.ProviderAdapterProtocolError({
@@ -1999,6 +2019,10 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
           }),
       ),
     );
+    const retainedBytes = 4 * Math.ceil(bytes.length / 3) + 128;
+    if (retainedBytes > input.pdfReservation.budget.remainingBytes) continue;
+    input.pdfReservation.budget.remainingBytes -= retainedBytes;
+    input.pdfReservation.bytes += retainedBytes;
     const block: ClaudeUserContentBlock = {
       type: "image",
       source: {
@@ -2007,12 +2031,9 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
         data: Buffer.from(bytes).toString("base64"),
       },
     };
-    retainedBytes += 4 * Math.ceil(bytes.length / 3) + 128;
-    images.set(attachment, block);
+    images.set(index, block);
   }
-  input.pdfReservation.budget.remainingBytes -= retainedBytes;
-  input.pdfReservation.bytes += retainedBytes;
-  for (const attachment of input.attachments) {
+  for (const [index, attachment] of input.attachments.entries()) {
     if (attachment.type === "file") {
       if (
         input.pdfReservation.budget.remainingPages <= 0 ||
@@ -2066,7 +2087,8 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
       content.push(block);
       continue;
     }
-    content.push(images.get(attachment)!);
+    const image = images.get(index);
+    if (image !== undefined) content.push(image);
   }
 
   // Images go before the command block: a text block after them still

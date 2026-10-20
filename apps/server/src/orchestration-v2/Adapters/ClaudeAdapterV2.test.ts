@@ -1828,17 +1828,22 @@ describe("ClaudeAdapterV2 resume compaction", () => {
 
 describe("ClaudeAdapterV2 attachments", () => {
   it.effect.each([
-    ...["retained-images", "retained-text", "same-message-images", "retained-documents"].map(
-      (budget) => ({
-        name: budget,
-        prompt: "Read this PDF.",
-        expectedText: "Read this PDF.",
-        command: undefined,
-        ultrathink: false,
-        resumed: false,
-        budget,
-      }),
-    ),
+    ...[
+      "retained-images",
+      "retained-text",
+      "same-message-images",
+      "retained-documents",
+      "later-images",
+      "partial-images",
+    ].map((budget) => ({
+      name: budget,
+      prompt: "Read this PDF.",
+      expectedText: "Read this PDF.",
+      command: undefined,
+      ultrathink: false,
+      resumed: false,
+      budget,
+    })),
     {
       name: "ordinary text",
       prompt: "What’s in this image?",
@@ -1915,18 +1920,19 @@ describe("ClaudeAdapterV2 attachments", () => {
             queryRunner: {
               allocateSessionId: Effect.succeed("native-thread-claude-attachments"),
               open: () =>
-                Effect.suspend(() => {
+                Effect.gen(function* () {
                   if (failOpen) {
                     failOpen = false;
-                    return Effect.fail(
+                    return yield* Effect.fail(
                       new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
                         method: "open",
                         cause: "rejected open",
                       }),
                     );
                   }
-                  return Effect.succeed({
-                    messages: Stream.never,
+                  const messages = yield* Queue.unbounded<SDKMessage>();
+                  return {
+                    messages: Stream.fromQueue(messages),
                     offer: (message) =>
                       Effect.suspend(() => {
                         if (failOffer) {
@@ -1948,8 +1954,8 @@ describe("ClaudeAdapterV2 attachments", () => {
                     backgroundTasks: () => Effect.succeed(false),
                     stopTask: () => Effect.void,
                     interrupt: Effect.void,
-                    close: Effect.void,
-                  });
+                    close: Queue.shutdown(messages),
+                  };
                 }),
               forkSession: () => Effect.die("unused forkSession"),
               subagentLaunchToolUseId: () => Effect.succeed(null),
@@ -2021,6 +2027,71 @@ describe("ClaudeAdapterV2 attachments", () => {
             const imagePath = path.join(attachmentsDir, attachmentRelativePath(attachment)!);
             // The on-disk length deliberately disagrees with sizeBytes.
             yield* fileSystem.writeFile(imagePath, Buffer.alloc(4 * 1024 * 1024));
+            if (["later-images", "partial-images"].includes(budget)) {
+              const documentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
+              yield* fileSystem.writeFile(
+                documentPath,
+                Buffer.concat([
+                  pdfBytes.subarray(0, -5),
+                  Buffer.alloc(
+                    (budget === "later-images" ? 19 : 16) * 1024 * 1024 - pdfBytes.length,
+                    32,
+                  ),
+                  Buffer.from("%%EOF"),
+                ]),
+              );
+              yield* runtime.startTurn({
+                ...turnInput,
+                message: { ...turnInput.message, attachments: [document] },
+              });
+              assert.include(
+                JSON.stringify(offeredMessages[0]!.message.content),
+                '"type":"document"',
+              );
+              const message = { ...turnInput.message, attachments: [attachment, attachment] };
+              yield* runtime.interruptTurn({ providerThread, providerTurnId });
+              const laterAttemptId = RunAttemptId.make("attempt-claude-attachments-later");
+              yield* runtime.startTurn({
+                ...turnInput,
+                attemptId: laterAttemptId,
+                providerTurnOrdinal: 2,
+                nativeThreadHasTurns: true,
+                message,
+              });
+              const sent = offeredMessages.at(-1)!.message.content;
+              assert.isArray(sent);
+              assert.lengthOf(
+                typeof sent === "string" ? [] : sent.filter((block) => block.type === "image"),
+                budget === "partial-images" ? 1 : 0,
+              );
+              assert.include(JSON.stringify(sent), imagePath);
+              yield* runtime.steerTurn({
+                threadId,
+                runId: RunId.make("run-claude-attachments"),
+                providerThread,
+                providerTurnId: idAllocator.derive.providerTurn({
+                  driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                  nativeTurnId: `turn:${laterAttemptId}`,
+                }),
+                message,
+              });
+              const steered = offeredMessages.at(-1)!.message.content;
+              assert.isArray(steered);
+              assert.lengthOf(
+                typeof steered === "string"
+                  ? []
+                  : steered.filter((block) => block.type === "image"),
+                0,
+              );
+              assert.include(JSON.stringify(steered), imagePath);
+              assert.isBelow(
+                Buffer.byteLength(
+                  JSON.stringify(offeredMessages.map((message) => message.message)),
+                ),
+                32_000_000,
+              );
+              return;
+            }
             if (budget === "retained-documents") {
               yield* fileSystem.writeFile(
                 path.join(attachmentsDir, attachmentRelativePath(document)!),
@@ -2121,11 +2192,11 @@ describe("ClaudeAdapterV2 attachments", () => {
           const expectedContent = command
             ? [
                 requestBlock,
-                expectedImageBlock,
+                ...(!resumed ? [expectedImageBlock] : []),
                 ...(!resumed ? [expectedDocumentBlock] : []),
                 { type: "text" as const, text: command + attachmentNotes },
               ]
-            : [expectedImageBlock, ...(!resumed ? [expectedDocumentBlock] : []), requestBlock];
+            : [...(!resumed ? [expectedImageBlock, expectedDocumentBlock] : []), requestBlock];
           assert.deepEqual(offeredMessages[0]?.message.content, expectedContent);
 
           const providerTurnId = idAllocator.derive.providerTurn({
@@ -2162,6 +2233,10 @@ describe("ClaudeAdapterV2 attachments", () => {
             "escaped-name",
             "incremental",
             "compressed-bomb",
+            "indirect-count",
+            "indirect-type",
+            "indirect-kids",
+            "indirect-101-pages",
             "aggregate-pages",
             "retained-pages",
             "delivery-failure",
@@ -2189,6 +2264,22 @@ describe("ClaudeAdapterV2 attachments", () => {
                 );
                 attachments = [document, second];
               }
+            } else if (scenario.startsWith("indirect-")) {
+              const raw =
+                scenario === "indirect-count" || scenario === "indirect-101-pages"
+                  ? `%PDF-1.7\n1 0 obj ${scenario === "indirect-count" ? 1 : 101} endobj\n2 0 obj << /Type /Catalog /Pages 3 0 R >> endobj\n3 0 obj << /Type /Pages /Count 1 0 R /Kids [${Array.from({ length: scenario === "indirect-count" ? 1 : 101 }, (_, i) => `${i + 4} 0 R`).join(" ")}] >> endobj\n4 0 obj << /Type /Page /Parent 3 0 R >> endobj\n${scenario === "indirect-count" ? "" : Array.from({ length: 100 }, (_, i) => `${i + 5} 0 obj << /Type 105 0 R /Parent 3 0 R >> endobj`).join("\n")}\n105 0 obj /Page endobj\n%%EOF`
+                  : scenario === "indirect-type"
+                    ? pdfBytes
+                        .toString()
+                        .replace(
+                          "%%EOF",
+                          "4 0 obj << /Type 5 0 R >> endobj\n5 0 obj /Annot endobj\n%%EOF",
+                        )
+                    : pdfBytes
+                        .toString()
+                        .replace("/Kids [3 0 R]", "/Kids 4 0 R")
+                        .replace("%%EOF", "4 0 obj [3 0 R] endobj\n%%EOF");
+              yield* fileSystem.writeFileString(documentPath, raw);
             } else if (scenario === "bytes") {
               yield* fileSystem.truncate(documentPath, 20 * 1024 * 1024 + 1);
             } else if (scenario === "invalid") {

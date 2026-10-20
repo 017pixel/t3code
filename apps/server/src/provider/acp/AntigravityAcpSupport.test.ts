@@ -464,26 +464,27 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
     }),
   );
 
-  it.effect.each([
-    { ...imageAttachment, name: "animation.gif", mimeType: "image/gif" },
-  ] satisfies ReadonlyArray<ChatAttachment>)(
-    "rejects $name instead of silently dropping it from a valid prompt",
-    (attachment) =>
+  it.effect.each([undefined, {}, { image: false }, { image: true }])(
+    "keeps unsupported image formats path-only with capabilities %s",
+    (promptCapabilities) =>
       Effect.gen(function* () {
         const fixture = yield* makeAttachmentFixture();
-        yield* fixture.write(imageAttachment, new Uint8Array([1, 2, 3]));
-        const error = yield* buildAntigravityPrompt({
-          input: "Analyze every attachment.",
-          attachments: [imageAttachment, attachment],
+        const attachment = { ...imageAttachment, name: "animation.gif", mimeType: "image/gif" };
+        const upload = yield* fixture.write(attachment, "GIF89a");
+        const input = `Analyze the image at ${upload.filePath}`;
+        const prompt = yield* buildAntigravityPrompt({
+          input,
+          attachments: [attachment],
           attachmentsDir: fixture.attachmentsDir,
-          promptCapabilities: { image: true, audio: true, embeddedContext: true },
-        }).pipe(Effect.flip);
+          promptCapabilities,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fixture.fs,
+            stream: () => Effect.die("Unsupported images must not be read").pipe(Stream.fromEffect),
+          }),
+        );
 
-        expect(error).toMatchObject({
-          _tag: "AcpRequestError",
-          code: -32602,
-          errorMessage: expect.stringContaining(`does not support '${attachment.name}'`),
-        });
+        expect(prompt).toEqual([{ type: "text", text: input }]);
       }),
   );
 
