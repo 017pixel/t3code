@@ -4443,8 +4443,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   nativeMetadata: {
                     ...event.providerThread.nativeMetadata,
                     claudeAttachmentBudget: {
-                      bytesUsed: budget.committed.bytes + budget.pending.bytes,
-                      pagesUsed: budget.committed.pages + budget.pending.pages,
+                      bytesUsed: budget.committed.bytes,
+                      pagesUsed: budget.committed.pages,
                     },
                   },
                 },

@@ -3378,7 +3378,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
-  it.effect.each(["release-after", "cancel-after", "release-before"] as const)(
+  it.effect.each(["release-after", "cancel-after", "release-before", "resume-pending"] as const)(
     "keeps attachment reservations across compaction: %s boundary",
     (outcome) =>
       Effect.gen(function* () {
@@ -3495,23 +3495,42 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         for (const thread of updates) {
           yield* decodeProviderThreadJson(yield* encodeProviderThreadJson(thread));
         }
-        const persisted = updates.at(-1)!;
+        const persisted = yield* decodeProviderThreadJson(
+          yield* encodeProviderThreadJson(updates.at(-1)!),
+        );
         const usage = persisted.nativeMetadata?.claudeAttachmentBudget;
-        assert.equal(usage?.pagesUsed, outcome === "cancel-after" ? 0 : 60);
-        if (outcome === "cancel-after") assert.equal(usage?.bytesUsed, 0);
+        const undelivered = outcome === "cancel-after" || outcome === "resume-pending";
+        assert.equal(usage?.pagesUsed, undelivered ? 0 : 60);
+        if (undelivered) assert.equal(usage?.bytesUsed, 0);
         else assert.isAbove(usage?.bytesUsed ?? 0, 25 * 1024 * 1024);
-        yield* harness.runtime.startTurn(
+        const next = outcome === "resume-pending" ? yield* makeWakeHarness : harness;
+        const providerThread =
+          outcome === "resume-pending"
+            ? yield* next.runtime.resumeThread({ providerThread: persisted })
+            : persisted;
+        if (outcome === "resume-pending") {
+          assert.lengthOf(harness.offeredMessages, 1);
+          yield* fileSystem.copyFile(
+            path.join(harness.attachmentsDir, attachmentRelativePath(document)!),
+            path.join(next.attachmentsDir, attachmentRelativePath(document)!),
+          );
+        }
+        yield* next.runtime.startTurn(
           makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: persisted,
+            threadId: next.threadId,
+            providerThread,
             now: yield* DateTime.now,
             attemptId: RunAttemptId.make("after-compacting-reservation"),
             text: "Read this PDF again.",
             attachments: [document],
             providerTurnOrdinal: 2,
+            nativeThreadHasTurns: true,
           }),
         );
-        const delivered = harness.offeredMessages.slice(1);
+        if (outcome === "resume-pending") {
+          assert.equal(next.getOpenedOptions()?.resume, WAKE_NATIVE_SESSION);
+        }
+        const delivered = next.offeredMessages.slice(outcome === "resume-pending" ? 0 : 1);
         const documents = delivered.flatMap((message) =>
           Array.isArray(message.message.content)
             ? message.message.content.filter((block) => block.type === "document")
