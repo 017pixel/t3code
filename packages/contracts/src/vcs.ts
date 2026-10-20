@@ -92,7 +92,9 @@ export interface VcsProcessExitFailure {
 // leave the process boundary. Other CLIs stay excerpt-free.
 const GLAB_STDERR_EXCERPT_MAX_CHARS = 200;
 
+// eslint-disable-next-line no-control-regex -- ANSI sequences start with ESC.
 const GLAB_STDERR_ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+// eslint-disable-next-line no-control-regex -- stripping C0 controls is the point.
 const GLAB_STDERR_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const GLAB_STDERR_USERINFO_PATTERN = /(https?:\/\/)[^\s/@]+:[^\s@]+@/gi;
 const GLAB_STDERR_QUERY_SECRET_PATTERN =
