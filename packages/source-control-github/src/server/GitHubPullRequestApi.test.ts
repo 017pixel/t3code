@@ -31,6 +31,7 @@ const coreResponse = (pullRequest: Readonly<Record<string, unknown>> = {}) => ({
       mergeCommitAllowed: true,
       squashMergeAllowed: false,
       rebaseMergeAllowed: true,
+      autoMergeAllowed: true,
       viewerPermission: "WRITE",
       pullRequest: {
         number: 7,
@@ -39,6 +40,7 @@ const coreResponse = (pullRequest: Readonly<Record<string, unknown>> = {}) => ({
         body: "",
         isDraft: false,
         mergeable: "MERGEABLE",
+        mergeStateStatus: "BLOCKED",
         reviewDecision: null,
         additions: 0,
         deletions: 0,
@@ -1116,6 +1118,46 @@ layer("GitHubPullRequestApi.layer", (it) => {
         host: "ghe.example.com",
         path: "repos/acme/web/stacks?pull_request=7",
       });
+    }),
+  );
+
+  it.effect("revalidates a polled stack, per credential, so an unchanged one costs no quota", () =>
+    Effect.gen(function* () {
+      const listing = encodeJson([
+        {
+          number: 4,
+          url: "https://api.github.com/repos/acme/poll/stacks/4",
+          base: { ref: "main" },
+          pull_requests: [
+            { number: 9, head: { ref: "feat/nine" }, state: "open", merged_at: null },
+          ],
+        },
+      ]);
+      const read = Effect.flatMap(GitHubPullRequestApi.GitHubPullRequestApi, (cli) =>
+        cli.getPullRequestStack({
+          cwd: "/w",
+          repository: "acme/poll",
+          host: "github.com",
+          number: 9,
+        }),
+      );
+      mockedExecute.mockReturnValueOnce(
+        Effect.succeed(output(listing, false, false, { etag: 'W/"v1"' })),
+      );
+      const first = yield* read;
+      mockedExecute.mockReturnValueOnce(Effect.succeed(output("", false, false, {}, 304)));
+      const second = yield* read;
+      mockedCredential.mockImplementationOnce(() =>
+        Effect.succeed({ token: Redacted.make("other"), fingerprint: "github.com:other" }),
+      );
+      mockedExecute.mockReturnValueOnce(Effect.succeed(output(listing)));
+      yield* read;
+
+      assert.deepStrictEqual(second, first);
+      expect(callAt(0)).not.toHaveProperty("ifNoneMatch");
+      expect(callAt(1)).toMatchObject({ ifNoneMatch: 'W/"v1"' });
+      // Another account never revalidates the first account's answer.
+      expect(callAt(2)).not.toHaveProperty("ifNoneMatch");
     }),
   );
 
@@ -2461,6 +2503,44 @@ layer("GitHubPullRequestApi.layer", (it) => {
       expect(detail.viewerPermissions.actions).toContain("delete-branch");
       expect(queryAt(0)).toContain("headRepository{nameWithOwner viewerPermission}");
     }),
+  );
+
+  it.effect.each([
+    { mergeStateStatus: "BLOCKED", autoMergeAllowed: true, offered: true },
+    { mergeStateStatus: "UNKNOWN", autoMergeAllowed: true, offered: true },
+    { mergeStateStatus: "CLEAN", autoMergeAllowed: true, offered: false },
+    { mergeStateStatus: "UNSTABLE", autoMergeAllowed: true, offered: false },
+    { mergeStateStatus: "HAS_HOOKS", autoMergeAllowed: true, offered: false },
+    { mergeStateStatus: "BLOCKED", autoMergeAllowed: false, offered: false },
+  ])(
+    "gates auto-merge detail and fresh access for $mergeStateStatus (repository allows: $autoMergeAllowed)",
+    ({ mergeStateStatus, autoMergeAllowed, offered }) =>
+      Effect.gen(function* () {
+        const answer = coreResponse({ mergeStateStatus });
+        answer.data.repository.autoMergeAllowed = autoMergeAllowed;
+        mockedExecute.mockReturnValue(Effect.succeed(output(encodeJson(answer))));
+        const provider = yield* GitHubPullRequestProvider.make;
+        const reference = {
+          cwd: "/w",
+          repository: "acme/web",
+          host: "github.com",
+          number: 7,
+        };
+        const detail = yield* provider.getChangeRequest(reference);
+        expect(detail.viewerPermissions.actions.includes("enable-auto-merge")).toBe(offered);
+        expect(detail.viewerPermissions.actions).toEqual(
+          expect.arrayContaining(["merge", "disable-auto-merge"]),
+        );
+
+        const permissions = yield* provider.getViewerPermissions({
+          ...reference,
+          includeUpdateBranch: false,
+        });
+        expect(permissions.actions.includes("enable-auto-merge")).toBe(autoMergeAllowed);
+        expect(permissions.actions).toEqual(
+          expect.arrayContaining(["merge", "disable-auto-merge"]),
+        );
+      }),
   );
 
   const branchToDelete = (pullRequest: Readonly<Record<string, unknown>> = {}) => ({
@@ -4456,6 +4536,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                     mergeCommitAllowed: true,
                     squashMergeAllowed: false,
                     rebaseMergeAllowed: true,
+                    autoMergeAllowed: true,
                     viewerPermission: "READ",
                     pullRequest: {
                       viewerCanUpdate: true,
@@ -4482,6 +4563,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
         expect(queryAt(0)).toContain("mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed");
         expect(access).toEqual({
           mergeCapabilities: { merge: true, squash: false, rebase: true },
+          autoMergeAllowed: true,
           canWrite: false,
           canDeleteBranch: false,
           canTriage: false,
@@ -4502,6 +4584,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                   mergeCommitAllowed: true,
                   squashMergeAllowed: false,
                   rebaseMergeAllowed: true,
+                  autoMergeAllowed: true,
                   viewerPermission: "READ",
                   pullRequest: {
                     viewerCanUpdate: true,
@@ -4550,6 +4633,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                     mergeCommitAllowed: true,
                     squashMergeAllowed: false,
                     rebaseMergeAllowed: true,
+                    autoMergeAllowed: true,
                     viewerPermission: "READ",
                     pullRequest: {
                       viewerCanUpdate: true,
@@ -4574,6 +4658,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                     mergeCommitAllowed: true,
                     squashMergeAllowed: false,
                     rebaseMergeAllowed: true,
+                    autoMergeAllowed: true,
                     viewerPermission: "READ",
                     pullRequest: {
                       viewerCanUpdate: true,
@@ -4605,6 +4690,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
       assert.strictEqual(mockedExecute.mock.calls.length, 2);
       expect(access).toEqual({
         mergeCapabilities: { merge: true, squash: false, rebase: true },
+        autoMergeAllowed: true,
         canWrite: false,
         canDeleteBranch: false,
         canTriage: false,
