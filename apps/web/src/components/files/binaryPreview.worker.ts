@@ -52,7 +52,8 @@ function tarEntries(bytes: Uint8Array<ArrayBuffer>) {
     return Number.parseInt(value || "0", 8);
   };
   let longPath: string | null = null;
-  let paxSize: number | null = null;
+  const globalPax: Record<string, string> = {};
+  let localPax: Record<string, string> = {};
   let offset = 0;
   while (offset + 512 <= bytes.length) {
     if (bytes.subarray(offset, offset + 512).every((byte) => byte === 0)) break;
@@ -64,40 +65,64 @@ function tarEntries(bytes: Uint8Array<ArrayBuffer>) {
     if (checksum !== number(offset + 148, 8)) throw new Error("The TAR header is damaged.");
     const type = text(offset + 156, 1);
     const metadata = type === "L" || type === "x" || type === "g";
-    const size = !metadata && paxSize !== null ? paxSize : number(offset + 124, 12);
+    const attributes: Record<string, string> = metadata ? {} : { ...globalPax, ...localPax };
+    const size = attributes.size ? Number(attributes.size) : number(offset + 124, 12);
+    if (attributes.size && !/^\d+$/.test(attributes.size))
+      throw new Error("An archive entry is too large or damaged.");
     const prefix =
       text(offset + 257, 6) === "ustar" && text(offset + 263, 2) === "00"
         ? text(offset + 345, 155)
         : "";
-    const path = longPath ?? [prefix, text(offset, 100)].filter(Boolean).join("/");
+    const path =
+      attributes.path || longPath || [prefix, text(offset, 100)].filter(Boolean).join("/");
     if (!metadata) {
       longPath = null;
-      paxSize = null;
+      localPax = {};
     }
-    if (path.length > 1024 || size > BINARY_PREVIEW_MAX_BYTES || offset + 512 + size > bytes.length)
+    if (
+      path.length > 1024 ||
+      !Number.isSafeInteger(size) ||
+      size < 0 ||
+      size > BINARY_PREVIEW_MAX_BYTES ||
+      offset + 512 + size > bytes.length
+    )
       throw new Error("An archive entry is too large or damaged.");
     const content = bytes.subarray(offset + 512, offset + 512 + size);
     if (type === "L") longPath = new TextDecoder().decode(content).replace(/\0.*$/s, "");
     else if (type === "x" || type === "g") {
       if (size > 65536) throw new Error("Archive metadata is too large.");
-      for (const line of new TextDecoder().decode(content).split("\n")) {
-        const match = /^\d+ (path|size)=(.*)$/.exec(line);
-        if (!match || type !== "x") continue;
-        if (match[1] === "path") longPath = match[2]!;
-        else {
-          const value = match[2]!;
-          const size = Number(value);
-          if (
-            !/^\d+$/.test(value) ||
-            !Number.isSafeInteger(size) ||
-            size > BINARY_PREVIEW_MAX_BYTES
-          )
-            throw new Error("An archive entry is too large or damaged.");
-          paxSize = size;
+      for (let cursor = 0; cursor < content.length;) {
+        const separator = content.indexOf(32, cursor);
+        if (separator < cursor || separator - cursor > 10)
+          throw new Error("The TAR metadata is damaged.");
+        const lengthText = new TextDecoder().decode(content.subarray(cursor, separator));
+        const length = Number(lengthText);
+        const end = cursor + length;
+        if (
+          !/^[1-9]\d*$/.test(lengthText) ||
+          !Number.isSafeInteger(length) ||
+          end > content.length ||
+          end <= separator + 1 ||
+          content[end - 1] !== 10
+        )
+          throw new Error("The TAR metadata is damaged.");
+        const record = new TextDecoder().decode(content.subarray(separator + 1, end - 1));
+        const equals = record.indexOf("=");
+        if (equals < 1) throw new Error("The TAR metadata is damaged.");
+        const key = record.slice(0, equals);
+        const value = record.slice(equals + 1);
+        if (["path", "size", "mtime"].includes(key)) {
+          if (type === "x") localPax[key] = value;
+          else if (value) globalPax[key] = value;
+          else delete globalPax[key];
         }
+        cursor = end;
       }
     } else if (type === "" || type === "0" || type === "5") {
-      const modified = number(offset + 136, 12) * 1000;
+      if (attributes.mtime && !/^[+-]?\d+(?:\.\d+)?$/.test(attributes.mtime))
+        throw new Error("The TAR metadata is damaged.");
+      const modified =
+        (attributes.mtime ? Number(attributes.mtime) : number(offset + 136, 12)) * 1000;
       const date = new Date(modified);
       entries.push({
         path,
@@ -167,7 +192,7 @@ async function handle(input: BinaryWorkerRequest) {
     tables =
       database
         .exec(
-          "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql NOT LIKE 'CREATE VIRTUAL TABLE%' ORDER BY name LIMIT 101",
+          "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name, 1, 7) != 'sqlite_' AND sql NOT LIKE 'CREATE VIRTUAL TABLE%' ORDER BY name LIMIT 101",
         )[0]
         ?.values.map((row) => String(row[0])) ?? [];
     if (tables.length > 100) throw new Error("Database previews are limited to 100 tables.");
