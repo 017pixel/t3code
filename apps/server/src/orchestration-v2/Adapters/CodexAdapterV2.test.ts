@@ -8321,7 +8321,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             prompt: "Continue",
           })
             .slice(5)
-            .map((entry) => (entry.label === "turn/start" ? withReplayRequestId(entry, 4) : entry)),
+            .map((entry) =>
+              "label" in entry && entry.label === "turn/start"
+                ? withReplayRequestId(entry, 4)
+                : entry,
+            ),
           {
             type: "expect_outbound",
             frame: { id: 5, method: "thread/unsubscribe", params: { threadId: peer } },
