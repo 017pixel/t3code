@@ -184,13 +184,20 @@ export class TerminalManager extends Context.Service<
       TerminalError | TerminalAlreadyExistsError
     >;
 
-    readonly writeWithHandle: (
+    // Wrappers run under the lifecycle lock; never reenter Manager or take a workspace lease.
+    readonly writeWithHandle: <E = never, R = never>(
       input: TerminalWriteInput & { readonly handle: TerminalSessionHandle },
-    ) => Effect.Effect<boolean, TerminalError>;
+      withOperation?: (
+        operation: Effect.Effect<boolean, TerminalError>,
+      ) => Effect.Effect<boolean, TerminalError | E, R>,
+    ) => Effect.Effect<boolean, TerminalError | E, R>;
 
-    readonly closeWithHandle: (
+    readonly closeWithHandle: <E = never, R = never>(
       handle: TerminalSessionHandle,
-    ) => Effect.Effect<boolean, TerminalError>;
+      withOperation?: (
+        operation: Effect.Effect<boolean, TerminalError>,
+      ) => Effect.Effect<boolean, TerminalError | E, R>,
+    ) => Effect.Effect<boolean, TerminalError | E, R>;
 
     readonly attachStream: (
       input: TerminalAttachInput,
@@ -3338,25 +3345,31 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
-  const writeWithHandle: TerminalManager["Service"]["writeWithHandle"] = (input) =>
+  const writeWithHandle: TerminalManager["Service"]["writeWithHandle"] = (input, withOperation) =>
     withThreadLock(
       input.threadId,
-      Effect.gen(function* () {
-        const session = yield* getSession(input.threadId, input.terminalId);
-        if (Option.isNone(session) || !isRunningHandle(session.value, input.handle)) return false;
-        yield* write(input);
-        return true;
+      Effect.suspend(() => {
+        const operation = Effect.gen(function* () {
+          const session = yield* getSession(input.threadId, input.terminalId);
+          if (Option.isNone(session) || !isRunningHandle(session.value, input.handle)) return false;
+          yield* write(input);
+          return true;
+        });
+        return withOperation === undefined ? operation : withOperation(operation);
       }),
     );
 
-  const closeWithHandle: TerminalManager["Service"]["closeWithHandle"] = (handle) =>
+  const closeWithHandle: TerminalManager["Service"]["closeWithHandle"] = (handle, withOperation) =>
     withThreadLock(
       handle.threadId,
-      Effect.gen(function* () {
-        const session = yield* getSession(handle.threadId, handle.terminalId);
-        if (Option.isNone(session) || !isRunningHandle(session.value, handle)) return false;
-        yield* closeSession(handle.threadId, handle.terminalId, false);
-        return true;
+      Effect.suspend(() => {
+        const operation = Effect.gen(function* () {
+          const session = yield* getSession(handle.threadId, handle.terminalId);
+          if (Option.isNone(session) || !isRunningHandle(session.value, handle)) return false;
+          yield* closeSession(handle.threadId, handle.terminalId, false);
+          return true;
+        });
+        return withOperation === undefined ? operation : withOperation(operation);
       }),
     );
 
