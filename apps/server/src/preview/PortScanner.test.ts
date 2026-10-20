@@ -546,6 +546,10 @@ effectIt.effect.each(["linux", "darwin"] as const)(
                 lsofCalls += 1;
                 return Effect.succeed(processOutput(lsofStdout));
               }
+              // A direct child of this process, so stop refuses it without signaling anything.
+              if (input.args[0] === "-A") {
+                return Effect.succeed(processOutput(`4242 ${process.pid} 4242\n`));
+              }
               environmentReads += 1;
               return Effect.succeed(
                 processOutput(
@@ -584,6 +588,11 @@ effectIt.effect.each(["linux", "darwin"] as const)(
 
       expect(yield* scanner.scan()).toHaveLength(1);
       expect(environmentReads).toBe(platform === "linux" ? 2 : 1);
+
+      // Stop reads its target's environment again rather than trust the cache, and still finds it.
+      const stop = yield* Effect.flip(scanner.stopServer({ pid: 4242, port: agentPort }));
+      expect(stop.reason).toBe("shared-group");
+      expect(environmentReads).toBe(platform === "linux" ? 3 : 2);
 
       lsofStdout = otherListener;
       expect(yield* scanner.scan()).toEqual([]);

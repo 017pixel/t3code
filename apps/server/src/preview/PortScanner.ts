@@ -1114,6 +1114,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       next.delete(input.pid);
       return next;
     });
+    agentScanPending = true;
     const listed = (yield* scanOnce()).some(
       (server) => server.pid === input.pid && server.port === input.port && isOwned(server),
     );
