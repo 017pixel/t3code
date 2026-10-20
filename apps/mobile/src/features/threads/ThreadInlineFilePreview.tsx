@@ -16,7 +16,7 @@ import {
   activateAudioSession,
   isAudioSessionOwner,
   releaseAudioSession,
-} from "../voice-input/audioSession";
+} from "../../lib/audioSession";
 import { usePlaybackAudioPlayer } from "../voice-input/usePlaybackAudioPlayer";
 
 type PreviewProps = {

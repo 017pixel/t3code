@@ -7,11 +7,7 @@ import { ThreadInlineFilePreview } from "../features/threads/ThreadInlineFilePre
 import { AudioFilePreview } from "../features/files/AudioFilePreview";
 import { MediaVideoPlayer } from "../components/MediaVideoPlayer";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import {
-  acquireAudioSession,
-  activateAudioSession,
-  releaseAudioSession,
-} from "../features/voice-input/audioSession";
+import { acquireAudioSession, activateAudioSession, releaseAudioSession } from "./audioSession";
 
 const audio = vi.hoisted(() => ({
   status: {

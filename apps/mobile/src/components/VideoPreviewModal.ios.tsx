@@ -16,7 +16,7 @@ import {
   activateAudioSession,
   isAudioSessionOwner,
   releaseAudioSession,
-} from "../features/voice-input/audioSession";
+} from "../lib/audioSession";
 
 export type { VideoPreviewSource } from "../lib/videoPreviewSource";
 

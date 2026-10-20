@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AppState, View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
 import { useFullscreenVideoOpen, useMediaAudioSessionHold } from "../../lib/videoAudioSession";
-import { createAudioPlaybackSession } from "../voice-input/audioSession";
+import { createAudioPlaybackSession } from "../../lib/audioSession";
 import { usePlaybackAudioPlayer } from "../voice-input/usePlaybackAudioPlayer";
 
 function timestamp(seconds: number) {

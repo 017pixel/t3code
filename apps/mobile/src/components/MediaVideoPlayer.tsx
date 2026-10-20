@@ -12,7 +12,7 @@ import { useMediaActions } from "../state/mediaActions";
 import { type MediaActionsSource } from "../lib/mediaActionsSource";
 import { useFullscreenVideoOpen, useMediaAudioSessionHold } from "../lib/videoAudioSession";
 import { MediaActionsMenu } from "./MediaActionsMenu";
-import { createAudioPlaybackSession } from "../features/voice-input/audioSession";
+import { createAudioPlaybackSession } from "../lib/audioSession";
 
 function LoadedMediaVideo(props: {
   readonly uri: string;

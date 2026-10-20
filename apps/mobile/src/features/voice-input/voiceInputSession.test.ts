@@ -7,7 +7,7 @@ import {
   activateAudioSession,
   isAudioSessionOwner,
   releaseAudioSession,
-} from "./audioSession";
+} from "../../lib/audioSession";
 
 const audio = vi.hoisted(() => ({
   setMode: vi.fn(async (_mode: unknown) => {}),
