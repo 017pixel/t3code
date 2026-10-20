@@ -1835,6 +1835,7 @@ describe("ClaudeAdapterV2 attachments", () => {
       expectedText: "Ultrathink:\nWhat’s in this image?",
       command: undefined,
       ultrathink: true,
+      resumed: false,
     },
     {
       name: "mid-sentence skill",
@@ -1842,6 +1843,7 @@ describe("ClaudeAdapterV2 attachments", () => {
       expectedText: "Ultrathink:\nplease /implement fixes\n\nThen report the result",
       command: "/implement fixes\n\nThen report the result",
       ultrathink: true,
+      resumed: false,
     },
     {
       name: "prompt-leading skill",
@@ -1849,10 +1851,19 @@ describe("ClaudeAdapterV2 attachments", () => {
       expectedText: "/implement fixes",
       command: undefined,
       ultrathink: false,
+      resumed: false,
+    },
+    {
+      name: "resumed history with an unknown PDF budget",
+      prompt: "Inspect this file",
+      expectedText: "Ultrathink:\nInspect this file",
+      command: undefined,
+      ultrathink: true,
+      resumed: true,
     },
   ])(
     "preserves $name with native PDFs, images, and paths on sends and steering",
-    ({ prompt, expectedText, command, ultrathink }) =>
+    ({ prompt, expectedText, command, ultrathink, resumed }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
@@ -1952,8 +1963,8 @@ describe("ClaudeAdapterV2 attachments", () => {
           const attemptId = RunAttemptId.make("attempt-claude-attachments");
           const now = yield* DateTime.now;
 
-          yield* runtime.startTurn(
-            makeClaudeTestTurnInput({
+          yield* runtime.startTurn({
+            ...makeClaudeTestTurnInput({
               threadId,
               providerThread,
               now,
@@ -1962,7 +1973,8 @@ describe("ClaudeAdapterV2 attachments", () => {
               text: prompt,
               attachments: [attachment, document],
             }),
-          );
+            nativeThreadHasTurns: resumed,
+          });
 
           const expectedImageBlock = {
             type: "image",
@@ -1991,10 +2003,10 @@ describe("ClaudeAdapterV2 attachments", () => {
             ? [
                 requestBlock,
                 expectedImageBlock,
-                expectedDocumentBlock,
+                ...(!resumed ? [expectedDocumentBlock] : []),
                 { type: "text" as const, text: command + attachmentNotes },
               ]
-            : [expectedImageBlock, expectedDocumentBlock, requestBlock];
+            : [expectedImageBlock, ...(!resumed ? [expectedDocumentBlock] : []), requestBlock];
           assert.deepEqual(offeredMessages[0]?.message.content, expectedContent);
 
           const providerTurnId = idAllocator.derive.providerTurn({
@@ -2024,11 +2036,12 @@ describe("ClaudeAdapterV2 attachments", () => {
             "invalid",
             "invalid-page-tree",
             "aggregate-pages",
+            "retained-pages",
             "pasted-text",
             "text-only",
           ]) {
             let attachments: ReadonlyArray<ChatAttachment> = [document];
-            if (scenario === "pages" || scenario === "aggregate-pages") {
+            if (["pages", "aggregate-pages", "retained-pages"].includes(scenario)) {
               const large = yield* Effect.promise(() => PDFDocument.create());
               for (let i = 0; i < (scenario === "pages" ? 101 : 60); i++) large.addPage();
               yield* fileSystem.writeFile(documentPath, yield* Effect.promise(() => large.save()));
@@ -2078,7 +2091,11 @@ describe("ClaudeAdapterV2 attachments", () => {
             const sent = offeredMessages.at(-1)!.message.content;
             const documents =
               typeof sent === "string" ? [] : sent.filter((block) => block.type === "document");
-            assert.lengthOf(documents, scenario === "aggregate-pages" ? 1 : 0, scenario);
+            assert.lengthOf(
+              documents,
+              scenario === "aggregate-pages" && !resumed ? 1 : 0,
+              scenario,
+            );
             if (scenario === "text-only")
               assert.equal(sent, ultrathink ? "Ultrathink:\nContinue." : "Continue.");
             else assert.include(JSON.stringify(sent), documentPath);

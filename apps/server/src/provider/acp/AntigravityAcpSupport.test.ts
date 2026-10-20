@@ -363,8 +363,8 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
     }),
   );
 
-  it.effect.each([undefined, {}, { audio: false, embeddedContext: false }])(
-    "keeps files path-only when native prompt capabilities are absent: %s",
+  it.effect.each([undefined, {}, { image: false, audio: false, embeddedContext: false }])(
+    "keeps attachments path-only when native prompt capabilities are absent: %s",
     (promptCapabilities) =>
       Effect.gen(function* () {
         const fixture = yield* makeAttachmentFixture();
@@ -374,13 +374,14 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
           name: "audio.wav",
           mimeType: "audio/wav",
         };
+        const image = yield* fixture.write(imageAttachment, "pixels");
         const pdf = yield* fixture.write(pdfAttachment, "%PDF-1.7");
         const text = yield* fixture.write(textAttachment, "hello");
         const sound = yield* fixture.write(audio, "RIFF");
-        const input = `Read ${pdf.filePath}, ${text.filePath}, and ${sound.filePath}`;
+        const input = `Read ${image.filePath}, ${pdf.filePath}, ${text.filePath}, and ${sound.filePath}`;
         const prompt = yield* buildAntigravityPrompt({
           input,
-          attachments: [pdfAttachment, textAttachment, audio],
+          attachments: [imageAttachment, pdfAttachment, textAttachment, audio],
           attachmentsDir: fixture.attachmentsDir,
           promptCapabilities,
         }).pipe(

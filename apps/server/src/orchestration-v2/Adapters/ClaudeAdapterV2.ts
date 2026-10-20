@@ -1,5 +1,4 @@
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
-import { PDFDocument } from "pdf-lib";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 import {
   dynamicToolTitle,
@@ -814,9 +813,13 @@ const claudeConfigDirOf = (
 
 // The SDK reads CLAUDE_CONFIG_DIR from process.env. Isolate custom homes in a
 // worker so concurrent providers keep the server's environment.
-const forkClaudeSessionInWorker = Effect.fn("forkClaudeSessionInWorker")(function* (
-  input: ClaudeAgentSdkSessionForkInput,
-) {
+const runClaudeWorker = Effect.fn("runClaudeWorker")(function* (input: {
+  readonly method: "forkSession" | "pdfPageCount";
+  readonly sessionId: string;
+  readonly options?: ForkSessionOptions;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly bytes?: Uint8Array;
+}) {
   const path = yield* Path.Path;
   const fromSource = import.meta.url.endsWith(".ts");
   // A single executable hosts the worker itself; it has no sibling script.
@@ -838,20 +841,37 @@ const forkClaudeSessionInWorker = Effect.fn("forkClaudeSessionInWorker")(functio
       executablePath,
       [
         ...workerArguments,
-        "forkSession",
+        input.method,
         input.sessionId,
-        encodeClaudeHistoryOptions(input.options),
+        encodeClaudeHistoryOptions(input.options ?? {}),
       ],
-      { env: { ...input.environment, ELECTRON_RUN_AS_NODE: "1" } },
+      {
+        env: {
+          ...input.environment,
+          ELECTRON_RUN_AS_NODE: "1",
+          ...(input.method === "pdfPageCount"
+            ? { NODE_OPTIONS: `${input.environment.NODE_OPTIONS ?? ""} --max-old-space-size=192` }
+            : {}),
+        },
+        ...(input.bytes === undefined ? {} : { stdin: Stream.make(input.bytes) }),
+      },
     ),
-  ).pipe(Effect.timeout("30 seconds"));
+  ).pipe(Effect.timeout(input.method === "pdfPageCount" ? "10 seconds" : "30 seconds"));
   if (result.code !== 0) {
     return yield* new ClaudeAgentSdkQueryRunnerError({
-      method: "forkSession",
+      method: input.method,
       cause: result.stderr.trim() || `Claude history worker exited with code ${result.code}.`,
     });
   }
-  return yield* decodeClaudeHistoryFork(result.stdout);
+  return result.stdout;
+});
+
+const forkClaudeSessionInWorker = Effect.fn("forkClaudeSessionInWorker")(function* (
+  input: ClaudeAgentSdkSessionForkInput,
+) {
+  return yield* runClaudeWorker({ ...input, method: "forkSession" }).pipe(
+    Effect.flatMap(decodeClaudeHistoryFork),
+  );
 });
 
 export const layerQueryRunner: Layer.Layer<
@@ -1826,6 +1846,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
   readonly uuid?: SDKUserMessage["uuid"];
   readonly attachmentsDir: string;
   readonly fileSystem: FileSystem.FileSystem;
+  readonly pdfBudget: { remainingPages: number; remainingBytes: number };
   readonly skills?: ReadonlyMap<string, ClaudeSkillTarget>;
 }) {
   if (input.attachments.length === 0) {
@@ -1854,7 +1875,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
   // expose document/context-window capabilities, so use the 100-page limit
   // that also applies to models with less than a 1M-token context window.
   let nativeBytes = Buffer.byteLength(textWithAttachmentPaths);
-  let pdfPages = 0;
+
   const nativeByteBudget = Math.min(PROVIDER_SEND_TURN_MAX_FILE_BYTES, 20 * 1024 * 1024);
   for (const attachment of input.attachments) {
     if (attachment.type === "image") nativeBytes += attachment.sizeBytes;
@@ -1866,6 +1887,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
   for (const attachment of input.attachments) {
     if (attachment.type === "file") {
       if (
+        input.pdfBudget.remainingPages <= 0 ||
         attachment.mimeType.toLowerCase().split(";", 1)[0]?.trim() !== "application/pdf" ||
         ("source" in attachment && attachment.source?._tag === "pasted-text")
       )
@@ -1875,7 +1897,10 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
         attachment,
       });
       if (attachmentPath === null) continue;
-      const remainingBytes = nativeByteBudget - nativeBytes;
+      const remainingBytes = Math.min(
+        nativeByteBudget - nativeBytes,
+        input.pdfBudget.remainingBytes,
+      );
       const info = yield* input.fileSystem
         .stat(attachmentPath)
         .pipe(Effect.orElseSucceed(() => null));
@@ -1889,13 +1914,20 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
           Effect.orElseSucceed(() => null),
         );
       if (bytes === null || bytes.length > remainingBytes) continue;
-      const pageCount = yield* Effect.tryPromise(async () => {
-        const document = await PDFDocument.load(bytes);
-        return document.getPageCount();
-      }).pipe(Effect.orElseSucceed(() => null));
-      if (pageCount === null || pageCount === 0 || pdfPages + pageCount > 100) continue;
+      const pageCount = yield* runClaudeWorker({
+        method: "pdfPageCount",
+        sessionId: "pdf",
+        environment: yield* HostProcess.Environment,
+        bytes,
+      }).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Int))),
+        Effect.orElseSucceed(() => null),
+      );
+      if (pageCount === null || pageCount <= 0 || pageCount > input.pdfBudget.remainingPages)
+        continue;
       nativeBytes += bytes.length;
-      pdfPages += pageCount;
+      input.pdfBudget.remainingPages -= pageCount;
+      input.pdfBudget.remainingBytes -= bytes.length;
       content.push({
         type: "document",
         source: { type: "base64", media_type: "application/pdf", data: bytes.toString("base64") },
@@ -3858,6 +3890,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   adapterOptions: ClaudeAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const { attachmentsDir, fileSystem, path, crypto, idAllocator, queryRunner } = adapterOptions;
   const subagentModelCatalog = scopeClaudeModelCatalog(
     BUNDLED_CLAUDE_MODEL_CATALOG,
@@ -4020,6 +4053,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
         });
         const openedNativeThreads = yield* Ref.make(new Set<string>());
+        // Resumed history is owned by the SDK. Only spend a known retained PDF budget.
+        const pdfBudgets = new Map<string, { remainingPages: number; remainingBytes: number }>();
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         // Claude 5 task tools edit one list per native session, across turns.
         const taskListsByNativeThread = yield* Ref.make(
@@ -9372,6 +9407,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             if (!goalsByNativeThread.has(nativeThreadId)) {
               goalsByNativeThread.set(nativeThreadId, turnInput.providerThread.goal ?? null);
             }
+            if (!pdfBudgets.has(nativeThreadId)) {
+              const resumed =
+                (turnInput.nativeThreadHasTurns ?? turnInput.providerTurnOrdinal > 1) ||
+                (yield* getNativeConversationHeadId(turnInput.providerThread)) !== undefined ||
+                (yield* Ref.get(openedNativeThreads)).has(nativeThreadId);
+              pdfBudgets.set(nativeThreadId, {
+                remainingPages: resumed ? 0 : 100,
+                remainingBytes: resumed ? 0 : 20 * 1024 * 1024,
+              });
+            }
             const userMessage =
               promptUuid === null
                 ? null
@@ -9383,9 +9428,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     attachments: turnInput.message.attachments,
                     attachmentsDir,
                     fileSystem,
+                    pdfBudget: pdfBudgets.get(nativeThreadId)!,
                     skills: yield* userInvocableSkills(turnInput.runtimePolicy.cwd),
                     uuid: promptUuid,
-                  });
+                  }).pipe(
+                    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                    Effect.provideService(Path.Path, path),
+                  );
             const querySession = yield* openQuery(turnInput, nativeThreadId);
             const context: ActiveClaudeTurnContext = {
               input: turnInput,
@@ -9814,8 +9863,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               priority: "now",
               attachmentsDir,
               fileSystem,
+              pdfBudget: pdfBudgets.get(existing.nativeThreadId) ?? {
+                remainingPages: 0,
+                remainingBytes: 0,
+              },
               skills: yield* userInvocableSkills(currentTurn.input.runtimePolicy.cwd),
-            });
+            }).pipe(
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              Effect.provideService(Path.Path, path),
+            );
             yield* backgroundForegroundSubagents(existing);
             // The turn can end while the moves are answered. A steer offered
             // then would start a new turn the orchestrator never asked for, so
@@ -10361,6 +10417,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
 });
 
 export type ClaudeAdapterV2DriverEnv =
+  | ChildProcessSpawner.ChildProcessSpawner
   | ClaudeAgentSdkQueryRunner
   | Crypto.Crypto
   | FileSystem.FileSystem
@@ -10454,6 +10511,7 @@ const makeDefaultClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2.layer")(function* 
 const layer: Layer.Layer<
   ProviderAdapter.ProviderAdapterV2,
   never,
+  | ChildProcessSpawner.ChildProcessSpawner
   | ClaudeAgentSdkQueryRunner
   | Crypto.Crypto
   | FileSystem.FileSystem
