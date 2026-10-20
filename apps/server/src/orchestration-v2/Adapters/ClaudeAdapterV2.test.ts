@@ -1887,6 +1887,8 @@ describe("ClaudeAdapterV2 attachments", () => {
             prefix: "t3-claude-v2-attachments-",
           });
           const offeredMessages: Array<SDKUserMessage> = [];
+          let failOpen = false;
+          let failOffer = false;
           const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
             instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
             settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: claudeHome },
@@ -1899,19 +1901,41 @@ describe("ClaudeAdapterV2 attachments", () => {
             queryRunner: {
               allocateSessionId: Effect.succeed("native-thread-claude-attachments"),
               open: () =>
-                Effect.succeed({
-                  messages: Stream.never,
-                  offer: (message) =>
-                    Effect.sync(() => {
-                      offeredMessages.push(message);
-                    }),
-                  setModel: () => Effect.void,
-                  applyFlagSettings: () => Effect.void,
-                  setPermissionMode: () => Effect.void,
-                  backgroundTasks: () => Effect.succeed(false),
-                  stopTask: () => Effect.void,
-                  interrupt: Effect.void,
-                  close: Effect.void,
+                Effect.suspend(() => {
+                  if (failOpen) {
+                    failOpen = false;
+                    return Effect.fail(
+                      new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                        method: "open",
+                        cause: "rejected open",
+                      }),
+                    );
+                  }
+                  return Effect.succeed({
+                    messages: Stream.never,
+                    offer: (message) =>
+                      Effect.suspend(() => {
+                        if (failOffer) {
+                          failOffer = false;
+                          return Effect.fail(
+                            new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                              method: "offer",
+                              cause: "rejected offer",
+                            }),
+                          );
+                        }
+                        return Effect.sync(() => {
+                          offeredMessages.push(message);
+                        });
+                      }),
+                    setModel: () => Effect.void,
+                    applyFlagSettings: () => Effect.void,
+                    setPermissionMode: () => Effect.void,
+                    backgroundTasks: () => Effect.succeed(false),
+                    stopTask: () => Effect.void,
+                    interrupt: Effect.void,
+                    close: Effect.void,
+                  });
                 }),
               forkSession: () => Effect.die("unused forkSession"),
               subagentLaunchToolUseId: () => Effect.succeed(null),
@@ -1963,7 +1987,7 @@ describe("ClaudeAdapterV2 attachments", () => {
           const attemptId = RunAttemptId.make("attempt-claude-attachments");
           const now = yield* DateTime.now;
 
-          yield* runtime.startTurn({
+          const turnInput = {
             ...makeClaudeTestTurnInput({
               threadId,
               providerThread,
@@ -1974,7 +1998,23 @@ describe("ClaudeAdapterV2 attachments", () => {
               attachments: [attachment, document],
             }),
             nativeThreadHasTurns: resumed,
-          });
+          };
+          if (!resumed) {
+            const undelivered = yield* Effect.promise(() => PDFDocument.create());
+            for (let i = 0; i < 60; i++) undelivered.addPage();
+            yield* fileSystem.writeFile(
+              path.join(attachmentsDir, attachmentRelativePath(document)!),
+              yield* Effect.promise(() => undelivered.save()),
+            );
+            failOpen = true;
+            assert.isTrue(Exit.isFailure(yield* runtime.startTurn(turnInput).pipe(Effect.exit)));
+            assert.lengthOf(offeredMessages, 0);
+            yield* fileSystem.writeFile(
+              path.join(attachmentsDir, attachmentRelativePath(document)!),
+              pdfBytes,
+            );
+          }
+          yield* runtime.startTurn(turnInput);
 
           const expectedImageBlock = {
             type: "image",
@@ -2037,13 +2077,21 @@ describe("ClaudeAdapterV2 attachments", () => {
             "invalid-page-tree",
             "aggregate-pages",
             "retained-pages",
+            "delivery-failure",
             "pasted-text",
             "text-only",
           ]) {
             let attachments: ReadonlyArray<ChatAttachment> = [document];
-            if (["pages", "aggregate-pages", "retained-pages"].includes(scenario)) {
+            if (
+              ["pages", "aggregate-pages", "retained-pages", "delivery-failure"].includes(scenario)
+            ) {
               const large = yield* Effect.promise(() => PDFDocument.create());
-              for (let i = 0; i < (scenario === "pages" ? 101 : 60); i++) large.addPage();
+              for (
+                let i = 0;
+                i < (scenario === "pages" ? 101 : scenario === "delivery-failure" ? 30 : 60);
+                i++
+              )
+                large.addPage();
               yield* fileSystem.writeFile(documentPath, yield* Effect.promise(() => large.save()));
               if (scenario === "aggregate-pages") {
                 const second = {
@@ -2075,7 +2123,7 @@ describe("ClaudeAdapterV2 attachments", () => {
               attachments = [];
               yield* fileSystem.remove(documentPath);
             }
-            yield* runtime.steerTurn({
+            const steering = {
               threadId,
               runId: RunId.make("run-claude-attachments"),
               providerThread,
@@ -2087,13 +2135,19 @@ describe("ClaudeAdapterV2 attachments", () => {
                 text: "Continue.",
                 attachments,
               },
-            });
+            } satisfies ProviderAdapter.ProviderAdapterV2SteerInput;
+            if (scenario === "delivery-failure") {
+              failOffer = true;
+              assert.isTrue(Exit.isFailure(yield* runtime.steerTurn(steering).pipe(Effect.exit)));
+            }
+            yield* runtime.steerTurn(steering);
+
             const sent = offeredMessages.at(-1)!.message.content;
             const documents =
               typeof sent === "string" ? [] : sent.filter((block) => block.type === "document");
             assert.lengthOf(
               documents,
-              scenario === "aggregate-pages" && !resumed ? 1 : 0,
+              ["aggregate-pages", "delivery-failure"].includes(scenario) && !resumed ? 1 : 0,
               scenario,
             );
             if (scenario === "text-only")

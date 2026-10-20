@@ -1839,6 +1839,17 @@ export function makeClaudeUserMessage(input: {
   };
 }
 
+const reserveClaudePdfBudget = (budget: { remainingPages: number; remainingBytes: number }) =>
+  Effect.acquireRelease(
+    Effect.sync(() => ({ budget, pages: 0, bytes: 0, delivered: false })),
+    (reservation) =>
+      Effect.sync(() => {
+        if (reservation.delivered) return;
+        budget.remainingPages += reservation.pages;
+        budget.remainingBytes += reservation.bytes;
+      }),
+  );
+
 const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input: {
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
@@ -1846,7 +1857,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
   readonly uuid?: SDKUserMessage["uuid"];
   readonly attachmentsDir: string;
   readonly fileSystem: FileSystem.FileSystem;
-  readonly pdfBudget: { remainingPages: number; remainingBytes: number };
+  readonly pdfReservation: Effect.Success<ReturnType<typeof reserveClaudePdfBudget>>;
   readonly skills?: ReadonlyMap<string, ClaudeSkillTarget>;
 }) {
   if (input.attachments.length === 0) {
@@ -1887,7 +1898,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
   for (const attachment of input.attachments) {
     if (attachment.type === "file") {
       if (
-        input.pdfBudget.remainingPages <= 0 ||
+        input.pdfReservation.budget.remainingPages <= 0 ||
         attachment.mimeType.toLowerCase().split(";", 1)[0]?.trim() !== "application/pdf" ||
         ("source" in attachment && attachment.source?._tag === "pasted-text")
       )
@@ -1899,7 +1910,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
       if (attachmentPath === null) continue;
       const remainingBytes = Math.min(
         nativeByteBudget - nativeBytes,
-        input.pdfBudget.remainingBytes,
+        input.pdfReservation.budget.remainingBytes,
       );
       const info = yield* input.fileSystem
         .stat(attachmentPath)
@@ -1923,11 +1934,18 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
         Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Int))),
         Effect.orElseSucceed(() => null),
       );
-      if (pageCount === null || pageCount <= 0 || pageCount > input.pdfBudget.remainingPages)
+      if (
+        pageCount === null ||
+        pageCount <= 0 ||
+        pageCount > input.pdfReservation.budget.remainingPages ||
+        bytes.length > input.pdfReservation.budget.remainingBytes
+      )
         continue;
       nativeBytes += bytes.length;
-      input.pdfBudget.remainingPages -= pageCount;
-      input.pdfBudget.remainingBytes -= bytes.length;
+      input.pdfReservation.budget.remainingPages -= pageCount;
+      input.pdfReservation.budget.remainingBytes -= bytes.length;
+      input.pdfReservation.pages += pageCount;
+      input.pdfReservation.bytes += bytes.length;
       content.push({
         type: "document",
         source: { type: "base64", media_type: "application/pdf", data: bytes.toString("base64") },
@@ -9417,6 +9435,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 remainingBytes: resumed ? 0 : 20 * 1024 * 1024,
               });
             }
+            const pdfReservation = yield* reserveClaudePdfBudget(pdfBudgets.get(nativeThreadId)!);
             const userMessage =
               promptUuid === null
                 ? null
@@ -9428,7 +9447,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     attachments: turnInput.message.attachments,
                     attachmentsDir,
                     fileSystem,
-                    pdfBudget: pdfBudgets.get(nativeThreadId)!,
+                    pdfReservation,
                     skills: yield* userInvocableSkills(turnInput.runtimePolicy.cwd),
                     uuid: promptUuid,
                   }).pipe(
@@ -9543,7 +9562,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             if (userMessage !== null) {
               yield* attachTurn;
               yield* startUserTurnForWakeReports(nativeThreadId);
-              yield* querySession.query.offer(userMessage);
+              yield* Effect.uninterruptibleMask((restore) =>
+                restore(querySession.query.offer(userMessage)).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      pdfReservation.delivered = true;
+                    }),
+                  ),
+                ),
+              );
               return;
             }
             // Transcript reads suspend replay. Hold live SDK frames until the whole
@@ -9675,6 +9702,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           },
           (effect, turnInput) =>
             effect.pipe(
+              Effect.scoped,
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterTurnStartError({
@@ -9854,6 +9882,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 detail: `Claude provider turn ${turnInput.providerTurnId} is not the active turn.`,
               });
             }
+            const pdfReservation = yield* reserveClaudePdfBudget(
+              pdfBudgets.get(existing.nativeThreadId) ?? { remainingPages: 0, remainingBytes: 0 },
+            );
             const userMessage = yield* makeClaudeUserMessageWithAttachments({
               text: applyClaudePromptEffortPrefix(
                 turnInput.message.text,
@@ -9863,10 +9894,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               priority: "now",
               attachmentsDir,
               fileSystem,
-              pdfBudget: pdfBudgets.get(existing.nativeThreadId) ?? {
-                remainingPages: 0,
-                remainingBytes: 0,
-              },
+              pdfReservation,
               skills: yield* userInvocableSkills(currentTurn.input.runtimePolicy.cwd),
             }).pipe(
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -9890,10 +9918,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               next.add(turnInput.providerTurnId);
               return next;
             });
-            yield* existing.query.offer(userMessage);
+            yield* Effect.uninterruptibleMask((restore) =>
+              restore(existing.query.offer(userMessage)).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    pdfReservation.delivered = true;
+                  }),
+                ),
+              ),
+            );
           },
           (effect, turnInput) =>
             effect.pipe(
+              Effect.scoped,
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterSteerRunError({
