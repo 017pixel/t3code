@@ -127,6 +127,7 @@ describe("createEnvironmentThreadDetailAtoms", () => {
       () => shellAtom,
     );
     const registry = AtomRegistry.make();
+    const unmount = registry.mount(details.behindShellAtom(ref));
 
     // The old copy stays visible; it is only marked.
     expect(registry.get(details.threadAtom(ref))?.projection).toBe(v2Projection);
@@ -136,11 +137,30 @@ describe("createEnvironmentThreadDetailAtoms", () => {
     registry.set(sourceAtom, state(caughtUp, "cached"));
     expect(registry.get(details.behindShellAtom(ref))).toBe(false);
 
-    // A live thread is current even when the shell moves first.
-    registry.set(shellAtom, { updatedAt: "2026-06-20T00:06:00.000Z" });
+    // Once current, a live thread is not marked when the shell moves first.
     registry.set(sourceAtom, state(caughtUp, "live"));
+    registry.set(shellAtom, { updatedAt: "2026-06-20T00:06:00.000Z" });
     expect(registry.get(details.behindShellAtom(ref))).toBe(false);
 
+    unmount();
+    registry.dispose();
+  });
+
+  it("marks a warm resume that is live but behind the shell", () => {
+    const sourceAtom = Atom.make(
+      AsyncResult.success(
+        threadState({ data: Option.some(v2Projection), status: "live", error: Option.none() }),
+      ),
+    );
+    const shellAtom = Atom.make<{ readonly updatedAt: string } | null>({
+      updatedAt: "2026-06-20T00:05:00.000Z",
+    });
+    const details = createEnvironmentThreadDetailAtoms(
+      () => sourceAtom,
+      () => shellAtom,
+    );
+    const registry = AtomRegistry.make();
+    expect(registry.get(details.behindShellAtom(ref))).toBe(true);
     registry.dispose();
   });
 });

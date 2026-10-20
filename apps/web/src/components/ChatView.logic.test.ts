@@ -63,8 +63,8 @@ import {
   resolveWorktreeSetupProgress,
   isPaintOnlyThreadTimeline,
   peekHeldThreadTimeline,
-  isRememberedThreadTimelineBehind,
   peekRememberedThreadTimeline,
+  peekRememberedThreadTimelineUpdatedAt,
   rememberReadyThreadTimeline,
   resetHeldThreadTimeline,
   resolveThreadSwitchTimeline,
@@ -1144,18 +1144,10 @@ describe("resolveThreadSwitchTimeline", () => {
     ).toEqual({ entries: ["fresh-b"], displayThreadKey: "env-1:thread-b" });
   });
 
-  it("marks a remembered timeline the thread has moved past", () => {
-    rememberReadyThreadTimeline({
-      threadKey: "env-1:thread-b",
-      entries: ["old-b"],
-      updatedAt: Date.parse("2026-06-20T00:00:00.000Z"),
-    });
-    expect(isRememberedThreadTimelineBehind("env-1:thread-b", "2026-06-20T00:05:00.000Z")).toBe(
-      true,
-    );
-    expect(isRememberedThreadTimelineBehind("env-1:thread-b", "2026-06-20T00:00:00.000Z")).toBe(
-      false,
-    );
+  it("remembers which projection a timeline came from", () => {
+    const updatedAt = Date.parse("2026-06-20T00:00:00.000Z");
+    rememberReadyThreadTimeline({ threadKey: "env-1:thread-b", entries: ["old-b"], updatedAt });
+    expect(peekRememberedThreadTimelineUpdatedAt("env-1:thread-b")).toBe(updatedAt);
   });
 
   it("does not keep a remembered snapshot on a resolved empty thread", () => {

@@ -205,20 +205,28 @@ export function createEnvironmentThreadDetailAtoms<E>(
   });
 
   // A saved copy can be many turns old when the thread moved on while it was
-  // closed. Clients still show it, but marked as out of date until the stream
-  // catches up. A live thread is current even when the shell arrives first.
-  const behindShellAtomFamily = Atom.family((key: string) => {
+  // closed. Clients still show it, but marked as out of date until it catches
+  // up. A streaming thread can trail the shell by an event, so once it has been
+  // current in this mount it stays unmarked while live. A warm resume is live
+  // from the start, so it stays marked until it first catches up.
+  const shellSyncAtomFamily = Atom.family((key: string) => {
     const ref = parseThreadKey(key);
-    return Atom.make((get) => {
-      if (threadShellAtom === undefined) return false;
+    return Atom.make((get): "none" | "behind" | "current" => {
       const state = get(threadStateValueAtomFamily(key));
-      return (
-        state.status !== "live" &&
-        Option.isSome(state.data) &&
-        isBehindShell(state.data.value, get(threadShellAtom(ref)))
-      );
-    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-behind-shell:${key}`));
+      if (threadShellAtom === undefined || Option.isNone(state.data)) return "none";
+      if (!isBehindShell(state.data.value, get(threadShellAtom(ref)))) return "current";
+      return state.status === "live" &&
+        Option.contains(get.self<"none" | "behind" | "current">(), "current")
+        ? "current"
+        : "behind";
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-shell-sync:${key}`));
   });
+  const behindShellAtomFamily = Atom.family((key: string) =>
+    Atom.make((get) => get(shellSyncAtomFamily(key)) === "behind").pipe(
+      Atom.setIdleTTL(0),
+      Atom.withLabel(`environment-thread-behind-shell:${key}`),
+    ),
+  );
 
   const statusAtomFamily = Atom.family((key: string) =>
     Atom.make((get) => get(threadStateValueAtomFamily(key)).status).pipe(

@@ -15,8 +15,8 @@ import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
 import {
   isPaintOnlyThreadTimeline,
   peekHeldThreadTimeline,
-  isRememberedThreadTimelineBehind,
   peekRememberedThreadTimeline,
+  peekRememberedThreadTimelineUpdatedAt,
   rememberReadyThreadTimeline,
   resolveExplicitDiffOpenOnActivate,
   resolveThreadSwitchTimeline,
@@ -393,6 +393,7 @@ import {
   useThreadProjection,
   useThreadStatus,
   useThreadBehindShell,
+  useThreadShellNewerThan,
   useThreadHistory,
   useQuietThreadShell,
   useThreadShell,
@@ -2892,6 +2893,10 @@ export default function ChatView(props: ChatViewProps) {
   const timelineMessages = timelineEntries.flatMap((entry) =>
     entry.kind === "message" ? [entry.message] : [],
   );
+  const rememberedTimelineBehind = useThreadShellNewerThan(
+    routeThreadDetailRef,
+    peekRememberedThreadTimelineUpdatedAt(activeThreadKey),
+  );
   const displayedTimeline = resolveThreadSwitchTimeline({
     loading: timelineEntries.length === 0 && threadSyncPhase !== null,
     activeThreadKey,
@@ -2904,8 +2909,7 @@ export default function ChatView(props: ChatViewProps) {
     threadSyncPhase !== null &&
     (timelineEntries.length > 0
       ? threadBehindShell
-      : displayedTimeline.entries.length > 0 &&
-        isRememberedThreadTimelineBehind(activeThreadKey, serverThread?.updatedAt));
+      : displayedTimeline.entries.length > 0 && rememberedTimelineBehind);
   const displayedTimelineKey = displayedTimeline.displayThreadKey ?? routeThreadKey;
   const paintOnlyDisplayedTimeline = isPaintOnlyThreadTimeline(
     displayedTimeline.displayThreadKey,

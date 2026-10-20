@@ -133,6 +133,14 @@ export function useThreadShell(ref: ScopedThreadRef | null): EnvironmentThreadSh
   );
 }
 
+/** Whether the thread had activity after `epochMs`. Re-renders only when that answer changes. */
+export function useThreadShellNewerThan(ref: ScopedThreadRef | null, epochMs: number | null) {
+  return useAtomValue(
+    ref === null ? EMPTY_THREAD_SHELL_ATOM : environmentThreadShells.threadShellAtom(ref),
+    (shell) => epochMs !== null && shell !== null && Date.parse(shell.updatedAt) > epochMs,
+  );
+}
+
 /** The shell without its streaming timestamps; see quietThreadShellAtom. */
 export function useQuietThreadShell(ref: ScopedThreadRef | null): EnvironmentThreadShell | null {
   return useAtomValue(

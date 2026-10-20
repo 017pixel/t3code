@@ -371,16 +371,8 @@ export function peekRememberedThreadTimeline<T extends readonly unknown[]>(
   return (rememberedThreadTimelines.get(threadKey)?.entries as T | undefined) ?? null;
 }
 
-/** True when the thread had activity after its remembered timeline was painted. */
-export function isRememberedThreadTimelineBehind(
-  threadKey: string | null,
-  shellUpdatedAt: string | null | undefined,
-): boolean {
-  if (threadKey === null || shellUpdatedAt == null) {
-    return false;
-  }
-  const updatedAt = rememberedThreadTimelines.get(threadKey)?.updatedAt;
-  return updatedAt !== undefined && updatedAt < Date.parse(shellUpdatedAt);
+export function peekRememberedThreadTimelineUpdatedAt(threadKey: string | null): number | null {
+  return threadKey === null ? null : (rememberedThreadTimelines.get(threadKey)?.updatedAt ?? null);
 }
 
 export function peekHeldThreadTimeline<
