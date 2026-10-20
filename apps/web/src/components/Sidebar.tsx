@@ -1986,6 +1986,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isActive: props.isActive,
   });
 
+  const rowLabel = isAgentOpenedThread(thread.source)
+    ? `${accessibility.label}, Opened by an agent`
+    : accessibility.label;
+
   const title =
     isRenaming && canOperateThread ? (
       <input
@@ -2140,7 +2144,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 ref={rowRef}
                 role="button"
                 tabIndex={0}
-                aria-label={accessibility.label}
+                aria-label={rowLabel}
                 aria-current={accessibility.current}
                 data-testid="sidebar-row-slim"
                 aria-busy={isRegeneratingTitle || undefined}
@@ -2300,7 +2304,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ref={rowRef}
               role="button"
               tabIndex={0}
-              aria-label={accessibility.label}
+              aria-label={rowLabel}
               aria-current={accessibility.current}
               data-testid="sidebar-row-card"
               aria-busy={isRegeneratingTitle || undefined}
