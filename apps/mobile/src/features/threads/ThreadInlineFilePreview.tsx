@@ -59,19 +59,26 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
   const active = useRef(true);
   const opening = useRef(false);
   const playRequested = useRef(false);
+  const [playbackRequested, setPlaybackRequested] = useState(false);
+  const requestPlayback = useCallback((requested: boolean) => {
+    playRequested.current = requested;
+    setPlaybackRequested(requested);
+    if (!requested) setLoading(false);
+  }, []);
   useMediaAudioSessionHold(status.playing);
   const fullscreenVideoOpen = useFullscreenVideoOpen();
   useEffect(() => {
-    if (fullscreenVideoOpen) {
-      playRequested.current = false;
-      player.pause();
+    if (fullscreenVideoOpen || status.didJustFinish || status.error) {
+      // oxlint-disable-next-line react/set-state-in-effect -- Native completion and fullscreen takeover invalidate the pending playback request.
+      requestPlayback(false);
     }
-  }, [fullscreenVideoOpen, player]);
+    if (fullscreenVideoOpen) player.pause();
+  }, [fullscreenVideoOpen, status.didJustFinish, status.error, player, requestPlayback]);
   useEffect(() => {
     active.current = true;
     const subscription = AppState.addEventListener("change", (state) => {
       if (state !== "active") {
-        playRequested.current = false;
+        requestPlayback(false);
         player.pause();
       }
     });
@@ -80,23 +87,26 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
       playRequested.current = false;
       subscription.remove();
     };
-  }, [player]);
+  }, [player, requestPlayback]);
   const toggle = () => {
-    if (opening.current) return;
-    if (status.playing) {
-      playRequested.current = false;
+    if (status.playing || playRequested.current) {
+      requestPlayback(false);
       return player.pause();
     }
-    playRequested.current = true;
+    if (opening.current) return;
+    requestPlayback(true);
     opening.current = true;
     setLoading(true);
     setError(false);
     void Promise.resolve()
       .then(async () => {
+        if (!playRequested.current) return;
         if (!status.isLoaded || status.error) {
           const uri = await props.resolveUri();
-          if (!active.current || AppState.currentState !== "active") return;
+          if (!active.current || !playRequested.current || AppState.currentState !== "active")
+            return;
           if (!uri) {
+            requestPlayback(false);
             setError(true);
             return;
           }
@@ -108,7 +118,10 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
           player.play();
       })
       .catch(() => {
-        if (active.current) setError(true);
+        if (active.current && playRequested.current) {
+          requestPlayback(false);
+          setError(true);
+        }
       })
       .finally(() => {
         opening.current = false;
@@ -117,12 +130,14 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
   };
   const progress =
     status.duration > 0 ? Math.min(1, Math.max(0, status.currentTime / status.duration)) : 0;
+  const playing = playbackRequested || status.playing;
+  const busy = loading || (playbackRequested && status.isBuffering);
   return (
     <>
       <FileCardHeader
         {...props}
         onOpen={() => {
-          playRequested.current = false;
+          requestPlayback(false);
           player.pause();
           props.onOpen();
         }}
@@ -131,15 +146,14 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={
-            status.playing ? "Pause audio" : error || status.error ? "Retry audio" : "Play audio"
+            playing ? "Pause audio" : error || status.error ? "Retry audio" : "Play audio"
           }
-          accessibilityState={{ busy: loading || status.isBuffering, disabled: loading }}
-          disabled={loading}
+          accessibilityState={{ busy }}
           onPress={toggle}
           className="h-11 w-11 items-center justify-center rounded-lg bg-subtle"
         >
           <SymbolView
-            name={status.playing ? "pause" : "play"}
+            name={playing ? "pause" : "play"}
             size={18}
             tintColorClassName="accent-foreground"
           />
@@ -155,7 +169,7 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
           <Text className="text-xs text-foreground-muted" numberOfLines={1}>
             {error || status.error
               ? "Unavailable · tap play to retry"
-              : loading || status.isBuffering
+              : busy
                 ? "Loading…"
                 : `${timestamp(status.currentTime)} / ${status.isLoaded ? timestamp(status.duration) : "--:--"}`}
           </Text>

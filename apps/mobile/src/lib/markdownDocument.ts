@@ -248,12 +248,15 @@ export function markdownWithFileEmbeds(
   const topLevelBlocks = new Set<MarkdownNode>(root.children);
   const definitions = new Map<string, string>();
   const collect = (node: MarkdownNode) => {
-    if (node.type === "definition") definitions.set(node.identifier.toUpperCase(), node.url);
+    if (node.type === "definition") {
+      const identifier = node.identifier.toUpperCase();
+      if (!definitions.has(identifier)) definitions.set(identifier, node.url);
+    }
     if ("children" in node) node.children.forEach(collect);
   };
   collect(root);
   const edits: Array<{ start: number; end: number; content: string }> = [];
-  const visit = (node: MarkdownNode, standalone = false) => {
+  const visit = (node: MarkdownNode, standalone = false, insideLink = false) => {
     if (node.type === "image" || node.type === "imageReference") {
       const href =
         node.type === "image" ? node.url : definitions.get(node.identifier.toUpperCase());
@@ -263,7 +266,7 @@ export function markdownWithFileEmbeds(
       if (href !== undefined && name !== null && start !== undefined && end !== undefined) {
         const text = name.replace(/[\\[\]`*_~|&<>]/g, "\\$&");
         const url = href.replace(/[\\&]/g, "\\$&").replace(/</g, "%3C").replace(/>/g, "%3E");
-        edits.push({ start, end, content: `[${text}](<${url}>)` });
+        edits.push({ start, end, content: insideLink ? text : `[${text}](<${url}>)` });
         fileHrefs.add(href);
       }
     }
@@ -272,6 +275,7 @@ export function markdownWithFileEmbeds(
         visit(
           child,
           node.type === "paragraph" && node.children.length === 1 && topLevelBlocks.has(node),
+          insideLink || node.type === "link" || node.type === "linkReference",
         ),
       );
   };

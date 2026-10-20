@@ -10,6 +10,7 @@ import { markdownImageSources } from "./markdownImageSources";
 import { markdownFileEmbedLabel, resolveMarkdownMediaPreview } from "./markdownMedia";
 import { resolveMarkdownLinkPresentation } from "./markdownLinks";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { parseMarkdown } from "react-native-enriched-markdown/src/web/parseMarkdown";
 
 describe("HTML in native Markdown", () => {
   it("leaves code inside an HTML details block literal", () => {
@@ -96,6 +97,62 @@ describe("file embeds in native thread and file Markdown", () => {
     visit(parseMarkdownDocument(markdown));
     return result;
   };
+
+  it.each([
+    [
+      "[![sheet](./report.csv)](https://example.com/download)",
+      "report.csv",
+      "https://example.com/download",
+    ],
+    ["[![report](./report.pdf)](./report.pdf)", "report.pdf", "./report.pdf"],
+    [
+      "[![sheet][f]][download]\n\n[f]: ./report.csv\n[download]: https://example.com/download",
+      "report.csv",
+      "https://example.com/download",
+    ],
+  ])("keeps the enclosing link for %s", async (source, filename, target) => {
+    const converted = markdownWithFileEmbeds(source, (href, standalone) =>
+      markdownFileEmbedLabel(href, input, standalone),
+    );
+    expect((await parseMarkdown(converted.markdown)).children).toMatchObject([
+      {
+        type: "Paragraph",
+        children: [
+          {
+            type: "Link",
+            attributes: { url: target },
+            children: [{ type: "Text", content: filename }],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it.each(["f", "F", "File Label", "file   label"])(
+    "uses the first reference definition for %s",
+    async (identifier) => {
+      const source = `![sheet][${identifier}]\n\n[${identifier.toLowerCase()}]: ./report.csv\n[${identifier.toUpperCase()}]: ./report.xlsx`;
+      const converted = markdownWithFileEmbeds(source, (href, standalone) =>
+        markdownFileEmbedLabel(href, input, standalone),
+      );
+      expect(converted.fileHrefs).toEqual(new Set(["./report.csv"]));
+      expect((await parseMarkdown(converted.markdown)).children).toMatchObject([
+        {
+          type: "Paragraph",
+          children: [
+            {
+              type: "Link",
+              attributes: { url: "./report.csv" },
+              children: [{ type: "Text", content: "report.csv" }],
+            },
+          ],
+        },
+      ]);
+      expect((await parseMarkdown(source)).children).toMatchObject([
+        { type: "Paragraph", children: [{ type: "Image", attributes: { url: "./report.csv" } }] },
+      ]);
+    },
+  );
 
   it.each([
     "report.csv",

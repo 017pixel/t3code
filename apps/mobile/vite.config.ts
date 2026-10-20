@@ -2,6 +2,7 @@ import { defineConfig } from "vite-plus";
 import "vite-plus/test/config";
 
 const reactTests = [
+  "src/lib/filePreview.test.ts",
   "src/components/ui/Dialog.android.test.tsx",
   "src/features/home/home-route-visibility.test.tsx",
   "src/features/settings/SettingsServerControlsRouteScreen.test.tsx",
