@@ -10568,6 +10568,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 return updated;
               });
               const now = yield* DateTime.now;
+              // Native forks retain document/image history. Inherit full current
+              // usage even at an earlier fork point; this is conservative.
+              const claudeAttachmentBudget =
+                forkInput.sourceProviderThread.nativeMetadata?.claudeAttachmentBudget;
               return makeProviderThread({
                 idAllocator,
                 providerInstanceId: adapterOptions.instanceId,
@@ -10581,9 +10585,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     ? {}
                     : { providerTurnId: forkInput.providerTurnId }),
                 },
-                ...(forked.headMessageId === undefined
+                ...(forked.headMessageId === undefined && claudeAttachmentBudget === undefined
                   ? {}
-                  : { nativeMetadata: { forkHeadMessageId: forked.headMessageId } }),
+                  : {
+                      nativeMetadata: {
+                        ...(forked.headMessageId === undefined
+                          ? {}
+                          : { forkHeadMessageId: forked.headMessageId }),
+                        ...(claudeAttachmentBudget === undefined ? {} : { claudeAttachmentBudget }),
+                      },
+                    }),
                 now,
               });
             },

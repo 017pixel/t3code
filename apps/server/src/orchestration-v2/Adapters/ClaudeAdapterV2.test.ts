@@ -3378,7 +3378,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
-  it.effect.each(["resume", "legacy", "compacted", "failed", "stopped"] as const)(
+  const attachmentBudgetOutcomes = [
+    "resume",
+    "legacy",
+    "compacted",
+    "failed",
+    "stopped",
+    "fork-bytes",
+    "fork-pages",
+  ] as const;
+  it.effect.each(attachmentBudgetOutcomes)(
     "restores retained attachment counters after %s",
     (outcome) =>
       Effect.gen(function* () {
@@ -3487,8 +3496,29 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             );
           }),
         );
+        const fork = outcome === "fork-bytes" || outcome === "fork-pages";
+        const inherited = fork
+          ? yield* Effect.scoped(
+              Effect.gen(function* () {
+                const harness = yield* makeWakeHarnessWithOptions({
+                  forkSession: () =>
+                    Effect.succeed({
+                      sessionId: "forked-native-session",
+                      ...(outcome === "fork-bytes"
+                        ? { headMessageId: "forked-assistant-head" }
+                        : {}),
+                    }),
+                });
+                const forked = yield* harness.runtime.forkThread({
+                  sourceProviderThread: persisted,
+                  targetThreadId: harness.threadId,
+                });
+                return yield* decodeProviderThreadJson(yield* encodeProviderThreadJson(forked));
+              }),
+            )
+          : persisted;
         const resumed = yield* makeWakeHarness;
-        const providerThread = yield* resumed.runtime.resumeThread({ providerThread: persisted });
+        const providerThread = yield* resumed.runtime.resumeThread({ providerThread: inherited });
         yield* fileSystem.writeFileString(
           path.join(resumed.attachmentsDir, attachmentRelativePath(document)!),
           "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R >> endobj\n%%EOF",
@@ -3504,11 +3534,19 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             now: yield* DateTime.now,
             attemptId: RunAttemptId.make("resume-attachment-budget"),
             text: "Read the PDF and both images.",
-            attachments: [document, image, image],
+            attachments:
+              outcome === "fork-bytes"
+                ? [image, image]
+                : outcome === "fork-pages"
+                  ? [document]
+                  : [document, image, image],
           }),
           nativeThreadHasTurns: true,
         });
-        assert.equal(resumed.getOpenedOptions()?.resume, WAKE_NATIVE_SESSION);
+        assert.equal(
+          resumed.getOpenedOptions()?.resume,
+          fork ? "forked-native-session" : WAKE_NATIVE_SESSION,
+        );
         const content = resumed.offeredMessages[0]?.message.content;
         assert.isArray(content);
         if (!Array.isArray(content)) return;
@@ -3516,6 +3554,22 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(content.filter((block) => block.type === "document").length, native ? 1 : 0);
         assert.equal(content.filter((block) => block.type === "image").length, native ? 2 : 0);
         assert.isBelow(Buffer.byteLength(encodeJsonString(content)), 32_000_000);
+        if (fork) {
+          assert.deepEqual(
+            inherited.nativeMetadata?.claudeAttachmentBudget,
+            persisted.nativeMetadata?.claudeAttachmentBudget,
+          );
+          assert.equal(
+            inherited.nativeMetadata?.forkHeadMessageId,
+            outcome === "fork-bytes" ? "forked-assistant-head" : undefined,
+          );
+          assert.isBelow(
+            (persisted.nativeMetadata?.claudeAttachmentBudget?.bytesUsed ?? 0) +
+              Buffer.byteLength(encodeJsonString(content)),
+            32_000_000,
+          );
+          assert.include(encodeJsonString(content), "budget.");
+        }
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
