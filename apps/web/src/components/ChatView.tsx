@@ -2905,7 +2905,7 @@ export default function ChatView(props: ChatViewProps) {
     rememberedForActive: peekRememberedThreadTimeline<typeof timelineEntries>(activeThreadKey),
   });
   // Old messages stay visible while the thread catches up, but faded so they
-  // do not read as the latest.
+  // do not read as the latest. The composer shows sync progress alongside.
   // Remembered entries are only painted while the detail loads.
   const timelineBehind =
     timelineEntries.length > 0
@@ -8513,7 +8513,9 @@ export default function ChatView(props: ChatViewProps) {
                               showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                               activeProposedPlan={activeProposedPlan}
                               threadSyncPhase={
-                                activeEnvironmentUnavailable ? null : threadSyncPhase
+                                activeEnvironmentUnavailable
+                                  ? null
+                                  : (threadSyncPhase ?? (timelineBehind ? "syncing" : null))
                               }
                               runtimeMode={runtimeMode}
                               interactionMode={interactionMode}

@@ -504,6 +504,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const composerKeyboardOffset = Platform.OS === "android" ? composerBottomInset : 0;
   const contentPresentationKind = props.contentPresentation.kind;
   const realThreadSyncLabel = (() => {
+    // A warm resume stays live while it catches up; its faded feed still syncs.
+    if (props.threadBehind === true) return "Syncing messages...";
     switch (props.threadSyncStatus) {
       case "empty":
       case "cached":
