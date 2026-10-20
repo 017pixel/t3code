@@ -15,6 +15,30 @@ const escape = (value: string) =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 
+const namespacePrefixes: Record<string, string> = {
+  "urn:oasis:names:tc:opendocument:xmlns:office:1.0": "office",
+  "urn:oasis:names:tc:opendocument:xmlns:table:1.0": "table",
+  "urn:oasis:names:tc:opendocument:xmlns:text:1.0": "text",
+  "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0": "draw",
+  "http://www.w3.org/1999/xlink": "xlink",
+  "http://www.w3.org/1999/xhtml": "",
+  "http://www.idpf.org/2007/opf": "",
+  "urn:oasis:names:tc:opendocument:xmlns:container": "",
+};
+function decodeEntities(value: string): string {
+  return value.replaceAll(/&(#x[\da-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g, (entity, name: string) => {
+    if (name.startsWith("#")) {
+      const code = name[1] === "x" ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
+      return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+        ? String.fromCodePoint(code)
+        : "";
+    }
+    return (
+      ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" } as Record<string, string>)[name] ??
+      entity
+    );
+  });
+}
 function parseXml(source: string): XmlNode {
   // EPUB XHTML commonly declares an external DTD. Discard it without resolving it.
   source = source.replaceAll(/<!DOCTYPE\s+[^<>[\]]*>/gi, "");
@@ -34,21 +58,57 @@ function parseXml(source: string): XmlNode {
   });
   const ordered = parser.parse(source) as OrderedXml[];
   let count = 0;
-  function convert(items: OrderedXml[], depth: number): XmlNode[] {
+  function convert(
+    items: OrderedXml[],
+    depth: number,
+    inherited: Record<string, string>,
+  ): XmlNode[] {
     if (depth > 100) throw new Error("This document is nested too deeply to preview.");
     return items.map((item) => {
       if (++count > 100_000) throw new Error("This document has too much content to preview.");
       const name = Object.keys(item).find((key) => key !== ":@") ?? "#text";
       const value = item[name];
+      const attrs = Object.fromEntries(
+        Object.entries((item[":@"] ?? {}) as Record<string, string>).map(([key, value]) => [
+          key,
+          decodeEntities(value),
+        ]),
+      );
+      const namespaces = Object.create(inherited) as Record<string, string>;
+      for (const [key, value] of Object.entries(attrs)) {
+        if (key === "xmlns") namespaces[""] = value;
+        else if (key.startsWith("xmlns:")) namespaces[key.slice(6)] = value;
+      }
+      const expanded = (name: string, attribute = false) => {
+        if (name.startsWith("#")) return name;
+        const colon = name.indexOf(":");
+        if (colon < 0 && attribute) return name;
+        const uri = namespaces[colon < 0 ? "" : name.slice(0, colon)];
+        if (!uri) return name;
+        const prefix = Object.hasOwn(namespacePrefixes, uri) ? namespacePrefixes[uri] : undefined;
+        const local = name.slice(colon + 1);
+        return prefix === undefined
+          ? "{" + uri + "}" + local
+          : prefix
+            ? prefix + ":" + local
+            : local;
+      };
       return {
-        name,
-        attrs: (item[":@"] ?? {}) as Record<string, string>,
-        children: Array.isArray(value) ? convert(value, depth + 1) : [],
+        name: expanded(name),
+        attrs: Object.fromEntries(
+          Object.entries(attrs).map(([key, value]) => [expanded(key, true), value]),
+        ),
+        children: Array.isArray(value) ? convert(value, depth + 1, namespaces) : [],
         text: typeof value === "string" ? value : "",
       };
     });
   }
-  return { name: "root", attrs: {}, children: convert(ordered, 0), text: "" };
+  return {
+    name: "root",
+    attrs: {},
+    children: convert(ordered, 0, Object.create(null) as Record<string, string>),
+    text: "",
+  };
 }
 function find(node: XmlNode, name: string): XmlNode[] {
   return node.children.flatMap((child) =>
@@ -58,21 +118,10 @@ function find(node: XmlNode, name: string): XmlNode[] {
   );
 }
 function text(node: XmlNode): string {
-  return node.name === "#text"
-    ? node.text.replaceAll(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (entity, value: string) => {
-        if (value.startsWith("#")) {
-          const code =
-            value[1] === "x"
-              ? Number.parseInt(value.slice(2), 16)
-              : Number.parseInt(value.slice(1), 10);
-          return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "";
-        }
-        return (
-          ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" } as Record<string, string>)[value] ??
-          entity
-        );
-      })
-    : node.children.map(text).join("");
+  if (node.name === "text:s") return " ".repeat(repeat(node.attrs["text:c"], 100));
+  if (node.name === "text:tab") return "\t";
+  if (node.name === "text:line-break") return "\n";
+  return node.name === "#text" ? decodeEntities(node.text) : node.children.map(text).join("");
 }
 function archivePath(base: string, href: string): string | null {
   if (/^(?:[a-z][a-z\d+.-]*:|\/|\\)/i.test(href)) return null;
@@ -100,13 +149,17 @@ async function imageData(archive: JSZip, path: string | null): Promise<string> {
   if (!mime || !entry) return "";
   const bytes = await entry.async("uint8array");
   if (bytes.length > 4 * 1024 * 1024) return "";
+  reserveMarkup(4 * Math.ceil(bytes.length / 3) + 100);
   return `data:image/${mime};base64,${await entry.async("base64")}`;
 }
 let markupBytes = 0;
-function boundedMarkup(value: string): string {
-  markupBytes += value.length;
+function reserveMarkup(size: number) {
+  markupBytes += size;
   if (markupBytes > 16 * 1024 * 1024)
     throw new Error("The rendered document is too large to preview.");
+}
+function boundedMarkup(value: string): string {
+  reserveMarkup(value.length);
   return value;
 }
 const HTML_TAGS = new Set([
@@ -155,7 +208,7 @@ async function epubHtml(node: XmlNode, archive: JSZip, base: string): Promise<st
     return "";
   if (tag === "img") {
     const src = await imageData(archive, archivePath(base, node.attrs.src ?? ""));
-    return src ? boundedMarkup(`<img src="${src}" alt="${escape(node.attrs.alt ?? "")}">`) : "";
+    return src ? `<img src="${src}" alt="${boundedMarkup(escape(node.attrs.alt ?? ""))}">` : "";
   }
   let children = "";
   for (const child of node.children) children += await epubHtml(child, archive, base);
@@ -163,7 +216,7 @@ async function epubHtml(node: XmlNode, archive: JSZip, base: string): Promise<st
 }
 async function odfHtml(node: XmlNode, archive: JSZip): Promise<string> {
   if (node.name === "#text") return boundedMarkup(escape(text(node)));
-  if (node.name === "text:s") return " ".repeat(Math.min(100, Number(node.attrs["text:c"]) || 1));
+  if (node.name === "text:s") return " ".repeat(repeat(node.attrs["text:c"], 100));
   if (node.name === "text:tab") return "&#9;";
   if (node.name === "text:line-break") return "<br>";
   if (node.name === "draw:image") {
@@ -171,7 +224,7 @@ async function odfHtml(node: XmlNode, archive: JSZip): Promise<string> {
       archive,
       archivePath("content.xml", node.attrs["xlink:href"] ?? ""),
     );
-    return src ? boundedMarkup(`<img src="${src}" alt="">`) : "";
+    return src ? `<img src="${src}" alt="">` : "";
   }
   if (
     [
@@ -271,16 +324,14 @@ export async function openDocument(
   const pages = kind === "odp" ? find(root, "draw:page") : find(root, "office:text");
   if (!pages.length || pages.length > 500)
     throw new Error("This document has no pages or too many pages to preview.");
-  return {
-    type: "document",
-    navigation: kind === "odp" ? "slide" : "page",
-    pages: await Promise.all(
-      pages.map(async (page, index) => ({
-        title: page.attrs["draw:name"] || `Page ${index + 1}`,
-        html: await odfHtml(page, archive),
-      })),
-    ),
-  };
+  const rendered = [];
+  for (const [index, page] of pages.entries()) {
+    rendered.push({
+      title: page.attrs["draw:name"] || `Page ${index + 1}`,
+      html: await odfHtml(page, archive),
+    });
+  }
+  return { type: "document", navigation: kind === "odp" ? "slide" : "page", pages: rendered };
 }
 export async function openEpub(archive: JSZip): Promise<OfficeWorkerResult> {
   markupBytes = 0;
@@ -352,8 +403,8 @@ export function openNotebook(bytes: ArrayBuffer): OfficeWorkerResult {
                 return { kind: "image" as const, text: `data:${mime};base64,${base64}` };
             }
           }
-          if (data["text/html"])
-            return { kind: "html" as const, text: notebookText(data["text/html"]) };
+          const html = notebookText(data["text/html"]);
+          if (html.trim()) return { kind: "html" as const, text: html };
           return {
             kind: "text" as const,
             text: notebookText(output.text ?? data["text/plain"] ?? output.traceback),
@@ -368,14 +419,33 @@ export function openNotebook(bytes: ArrayBuffer): OfficeWorkerResult {
 export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
   if (bytes.byteLength > 8 * 1024 * 1024)
     throw new Error("Rich text preview limited to files under 8 MB.");
-  const source = new TextDecoder("windows-1252").decode(bytes);
+  // Keep byte offsets intact for binary destinations and multibyte code pages.
+  const input = new Uint8Array(bytes);
+  let source = "";
+  for (let offset = 0; offset < input.length; offset += 8192)
+    source += String.fromCharCode(...input.subarray(offset, offset + 8192));
   if (!source.startsWith("{\\rtf")) throw new Error("This is not a valid rich text document.");
-  let state = { skip: false, bold: false, italic: false, underline: false, uc: 1 };
+  let state = {
+    skip: false,
+    bold: false,
+    italic: false,
+    underline: false,
+    uc: 1,
+    decoder: new TextDecoder("windows-1252"),
+  };
   const stack: (typeof state)[] = [];
   let html = "";
   let run = "";
   let fallback = 0;
+  const encoded = new Uint8Array(bytes.byteLength);
+  let encodedLength = 0;
   const flush = () => {
+    if (encodedLength) {
+      run += escape(state.decoder.decode(encoded.subarray(0, encodedLength)));
+      encodedLength = 0;
+    }
+    if (html.length + run.length > 8 * 1024 * 1024)
+      throw new Error("This rich text document has too much content to preview.");
     if (!run) return;
     let span = run;
     if (state.bold) span = `<strong>${span}</strong>`;
@@ -394,9 +464,15 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
     if (html.length + run.length > 8 * 1024 * 1024)
       throw new Error("This rich text document has too much content to preview.");
   };
+  const emitByte = (value: number) => {
+    if (state.skip) return;
+    if (fallback > 0) fallback--;
+    else encoded[encodedLength++] = value;
+  };
   for (let i = 0; i < source.length;) {
     const char = source[i++];
     if (char === "{") {
+      flush();
       if (stack.length > 100) throw new Error("This rich text document is nested too deeply.");
       stack.push({ ...state });
     } else if (char === "}") {
@@ -405,8 +481,15 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
       if (!parent) throw new Error("This rich text document is damaged.");
       state = parent;
     } else if (char === "\\") {
-      flush();
       const next = source[i];
+      if (next === "'") {
+        const hex = source.slice(i + 1, i + 3);
+        if (!/^[\da-f]{2}$/i.test(hex)) throw new Error("Invalid rich text byte escape.");
+        i += 3;
+        emitByte(Number.parseInt(hex, 16));
+        continue;
+      }
+      flush();
       if (next === "\\" || next === "{" || next === "}") {
         i++;
         emit(next);
@@ -415,12 +498,6 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
       if (next === "*") {
         state.skip = true;
         i++;
-        continue;
-      }
-      if (next === "'") {
-        const hex = source.slice(i + 1, i + 3);
-        i += 3;
-        emit(new TextDecoder("windows-1252").decode(new Uint8Array([Number.parseInt(hex, 16)])));
         continue;
       }
       const match = /^([a-z]+)(-?\d+)? ?/i.exec(source.slice(i));
@@ -459,6 +536,23 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
         if (!Number.isSafeInteger(arg) || arg < 0 || arg > source.length - i)
           throw new Error("Invalid rich text binary data.");
         i += arg;
+      } else if (word === "ansicpg") {
+        const label =
+          (
+            {
+              65001: "utf-8",
+              932: "shift_jis",
+              936: "gbk",
+              949: "euc-kr",
+              950: "big5",
+              874: "windows-874",
+            } as Record<number, string>
+          )[arg] ?? `windows-${arg}`;
+        try {
+          state.decoder = new TextDecoder(label);
+        } catch {
+          throw new Error("This rich text code page is not supported.");
+        }
       } else if (word === "b") state.bold = arg !== 0;
       else if (word === "i") state.italic = arg !== 0;
       else if (word === "ul") state.underline = arg !== 0;
@@ -471,7 +565,7 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
         fallback = state.uc;
       } else if (!state.skip && (word === "par" || word === "line")) html += "<br>";
       else if (word === "tab") emit("\t");
-    } else if (char !== "\r" && char !== "\n" && char) emit(char);
+    } else if (char !== "\r" && char !== "\n" && char) emitByte(char.charCodeAt(0));
   }
   if (stack.length) throw new Error("This rich text document is damaged.");
   flush();
