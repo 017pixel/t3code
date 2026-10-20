@@ -526,13 +526,22 @@ it.layer(
       const releaseOutput = yield* Deferred.make<void>();
       const exited = yield* Deferred.make<void>();
       const invalidated: TerminalManager.TerminalSessionHandle[] = [];
+      const observed: TerminalAttachStreamEvent[] = [];
       const unsubscribe = yield* manager.subscribe((event) =>
         event.type === "started" && event.terminalId === "blocker"
           ? Deferred.succeed(outputEntered, undefined).pipe(
               Effect.andThen(Deferred.await(releaseOutput)),
             )
           : event.type === "exited"
-            ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+            ? Effect.gen(function* () {
+                const stop = yield* manager.observeStream(openInput(), (event) =>
+                  Effect.sync(() => {
+                    observed.push(event);
+                  }),
+                );
+                stop();
+                yield* Deferred.succeed(exited, undefined);
+              })
             : Effect.void,
       );
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
@@ -561,13 +570,6 @@ it.layer(
       ).toEqual(["started", "cleared", "exited"]);
       expect(invalidated).toEqual([handle]);
       expect(yield* manager.closeWithHandle(handle)).toBe(false);
-      const observed: TerminalAttachStreamEvent[] = [];
-      const stop = yield* manager.observeStream(openInput(), (event) =>
-        Effect.sync(() => {
-          observed.push(event);
-        }),
-      );
-      yield* Effect.addFinalizer(() => Effect.sync(stop));
       expect(observed[0]).toMatchObject({
         type: "snapshot",
         snapshot: { status: "exited", exitCode: 7, history: "" },
@@ -597,8 +599,8 @@ it.layer(
         .pipe(Effect.forkScoped);
       yield* Deferred.await(started);
       opening.interruptUnsafe();
-      yield* Deferred.succeed(release, undefined);
       expect(Exit.isFailure(yield* Fiber.await(opening))).toBe(true);
+      yield* Deferred.succeed(release, undefined);
       expect(yield* Effect.flip(manager.write({ ...openInput(), data: "bad" }))).toMatchObject({
         _tag: "TerminalSessionLookupError",
       });
