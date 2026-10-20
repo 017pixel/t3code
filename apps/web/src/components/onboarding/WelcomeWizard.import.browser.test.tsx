@@ -164,13 +164,16 @@ function setGrant(environmentId: EnvironmentId, allowed: boolean) {
   );
 }
 
+// Default selection only picks recently active projects, so pin "now".
+const NOW = Date.parse("2026-01-01T00:00:00.000Z");
+
 function candidate(path: string): AgentSessionProjectCandidate {
   return {
     path,
     title: path.split("/").at(-1)!,
     sources: ["codex"],
     threadCount: 10,
-    lastActiveAt: new Date(Date.now() - 60_000).toISOString(),
+    lastActiveAt: new Date(NOW - 60_000).toISOString(),
     alreadyImported: false,
   };
 }
@@ -228,6 +231,7 @@ async function mountImport(remote = false) {
 
 // The mocked modules read `state`, so every test starts by replacing all of it.
 function setup() {
+  vi.spyOn(Date, "now").mockReturnValue(NOW);
   state.sessions.clear();
   for (const id of [primaryId, remoteId]) {
     state.sessions.set(
