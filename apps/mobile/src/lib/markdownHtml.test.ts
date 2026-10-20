@@ -208,7 +208,7 @@ describe("file embeds in native thread and file Markdown", () => {
     );
     expect(assets(converted.markdown)).toMatchObject([
       { type: "link", url: href, children: [{ value: "report#one%20.csv" }] },
-      { type: "link", url: "./main.tf#L42C3", children: [{ value: "main.tf:42:3" }] },
+      { type: "link", url: "./main.tf#L42C3", children: [{ value: "main.tf · L42:C3" }] },
     ]);
     expect(converted.markdown).toContain("`![sheet](./literal.csv)`");
     expect(converted.markdown).toContain("```md\n![sheet](./fenced.csv)\n```");
