@@ -40,8 +40,11 @@ final class T3NativeVideoPresentation: NSObject, AVPlayerViewControllerDelegate,
     metadata.value = title as NSString
     item.externalMetadata = [metadata]
     controller.player = AVPlayer(playerItem: item)
-    playbackObservation = controller.player?.observe(\.rate, options: [.new]) { player, _ in
-      onPlaybackChange(player.rate != 0)
+    playbackObservation = controller.player?.observe(\.timeControlStatus, options: [.new]) { player, _ in
+      // Waiting keeps the playback request alive through buffering and seeks.
+      if player.timeControlStatus != .waitingToPlayAtSpecifiedRate {
+        onPlaybackChange(player.timeControlStatus == .playing)
+      }
     }
     controller.delegate = self
     controller.overrideUserInterfaceStyle = .dark

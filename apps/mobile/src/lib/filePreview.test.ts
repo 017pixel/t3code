@@ -33,6 +33,7 @@ const audio = vi.hoisted(() => ({
   played: vi.fn(),
   video: {
     playing: false,
+    playbackRequested: false,
     status: "readyToPlay",
     play: vi.fn(),
     pause: vi.fn(),
@@ -40,6 +41,9 @@ const audio = vi.hoisted(() => ({
     addListener: vi.fn(),
   },
   videoListeners: new Set<(event: { isPlaying: boolean }) => void>(),
+  videoStatusListeners: new Set<(event: { status: string }) => void>(),
+  videoEndListeners: new Set<() => void>(),
+  videoRequestListeners: new Set<(event: { isPlaybackRequested: boolean }) => void>(),
 }));
 vi.mock("expo-audio", () => ({
   useAudioPlayer: () => audio.player,
@@ -119,19 +123,46 @@ describe("ThreadInlineFilePreview playback", () => {
       if (audio.enabled) audio.played();
     });
     audio.video.addListener.mockImplementation(
-      (_event: string, listener: (event: { isPlaying: boolean }) => void) => {
+      (event: string, listener: (event: { isPlaying: boolean }) => void) => {
+        if (event === "playbackRequestedChange") {
+          const requestListener = listener as unknown as (event: {
+            isPlaybackRequested: boolean;
+          }) => void;
+          audio.videoRequestListeners.add(requestListener);
+          return { remove: () => audio.videoRequestListeners.delete(requestListener) };
+        }
+        if (event === "statusChange") {
+          const statusListener = listener as unknown as (event: { status: string }) => void;
+          audio.videoStatusListeners.add(statusListener);
+          return { remove: () => audio.videoStatusListeners.delete(statusListener) };
+        }
+        if (event === "playToEnd") {
+          const endListener = listener as unknown as () => void;
+          audio.videoEndListeners.add(endListener);
+          return { remove: () => audio.videoEndListeners.delete(endListener) };
+        }
         audio.videoListeners.add(listener);
         return { remove: () => audio.videoListeners.delete(listener) };
       },
     );
     audio.video.play.mockImplementation(() => {
       audio.video.playing = true;
-      for (const listener of audio.videoListeners) listener({ isPlaying: true });
+      audio.video.playbackRequested = true;
+      for (const listener of audio.videoRequestListeners) listener({ isPlaybackRequested: true });
+      for (const listener of audio.videoListeners) listener({ isPlaying: audio.video.playing });
     });
     audio.video.pause.mockImplementation(() => {
-      if (!audio.video.playing) return;
+      const wasRequested = audio.video.playbackRequested;
+      const wasPlaying = audio.video.playing;
+      audio.video.playbackRequested = false;
       audio.video.playing = false;
-      for (const listener of audio.videoListeners) listener({ isPlaying: false });
+      if (wasRequested) {
+        for (const listener of audio.videoRequestListeners)
+          listener({ isPlaybackRequested: false });
+      }
+      if (wasPlaying) {
+        for (const listener of audio.videoListeners) listener({ isPlaying: false });
+      }
     });
   });
   afterEach(async () => {
@@ -141,6 +172,7 @@ describe("ThreadInlineFilePreview playback", () => {
     audio.refresh.mockReset();
     audio.setAudioMode.mockReset();
     audio.setActive.mockReset();
+    audio.video.status = "readyToPlay";
     audio.status = {
       playing: false,
       isLoaded: false,
@@ -224,6 +256,170 @@ describe("ThreadInlineFilePreview playback", () => {
       await act(async () => seek.resolve());
       expect(audio.played).not.toHaveBeenCalled();
       if (recording) await releaseAudioSession(recording);
+    },
+  );
+
+  it.each(["buffering", "seek"])(
+    "keeps file viewer ownership through %s and native resume",
+    async (transition) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      audio.status = { ...audio.status, isLoaded: true };
+      const container = document.createElement("div");
+      root = createRoot(container);
+      const render = () =>
+        root!.render(
+          createElement(AudioFilePreview, {
+            uri: "https://example.com/sound.mp3",
+            onRetry() {},
+          }),
+        );
+      await act(async () => render());
+      await act(async () =>
+        [...container.querySelectorAll("button")]
+          .find((button) => button.textContent === "Play")!
+          .click(),
+      );
+      audio.status = { ...audio.status, playing: true };
+      await act(async () => render());
+      audio.player.pause.mockClear();
+      if (transition === "seek") {
+        await act(async () =>
+          [...container.querySelectorAll("button")]
+            .find((button) => button.textContent === "+15s")!
+            .click(),
+        );
+        expect(audio.player.seekTo).toHaveBeenCalledWith(10);
+      }
+      audio.status = { ...audio.status, playing: false, isBuffering: transition === "buffering" };
+      await act(async () => render());
+      expect(audio.player.pause).not.toHaveBeenCalled();
+      audio.status = { ...audio.status, playing: true, isBuffering: false };
+      await act(async () => render());
+      expect(audio.played).toHaveBeenCalledOnce();
+      const recording = acquireAudioSession("recording");
+      expect(audio.player.pause).toHaveBeenCalledOnce();
+      await releaseAudioSession(recording);
+    },
+  );
+
+  it.each(["pause", "end", "error"])("releases file viewer ownership on %s", async (action) => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    audio.status = { ...audio.status, isLoaded: true };
+    const container = document.createElement("div");
+    root = createRoot(container);
+    const render = () =>
+      root!.render(
+        createElement(AudioFilePreview, {
+          uri: "https://example.com/sound.mp3",
+          onRetry() {},
+        }),
+      );
+    await act(async () => render());
+    await act(async () =>
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === "Play")!
+        .click(),
+    );
+    audio.status = { ...audio.status, playing: true };
+    await act(async () => render());
+    if (action === "pause") {
+      await act(async () =>
+        [...container.querySelectorAll("button")]
+          .find((button) => button.textContent === "Pause")!
+          .click(),
+      );
+    } else {
+      audio.status = { ...audio.status, playing: false, didJustFinish: action === "end" };
+      if (action === "error") Object.assign(audio.status, { error: "Playback failed" });
+      await act(async () => render());
+    }
+    expect(audio.player.pause).toHaveBeenCalled();
+    audio.player.pause.mockClear();
+    const recording = acquireAudioSession("recording");
+    expect(audio.player.pause).not.toHaveBeenCalled();
+    expect(audio.setActive).not.toHaveBeenCalledWith(false);
+    await releaseAudioSession(recording);
+  });
+
+  it.each(["buffering", "seek"])(
+    "keeps video ownership through %s and resume, including recording takeover during the next wait",
+    async (transition) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      root = createRoot(document.createElement("div"));
+      await act(async () =>
+        root!.render(
+          createElement(MediaVideoPlayer, {
+            uri: "https://example.com/clip.mp4",
+            name: "clip.mp4",
+            thumbnailKey: "clip",
+            expanded: true,
+            autoPlay: true,
+          }),
+        ),
+      );
+      audio.video.pause.mockClear();
+      // iOS can keep readyToPlay during a seek's evaluatingBufferingRate wait.
+      if (transition === "buffering") {
+        audio.video.status = "loading";
+        for (const listener of audio.videoStatusListeners) listener({ status: "loading" });
+      }
+      audio.video.playing = false;
+      for (const listener of audio.videoListeners) listener({ isPlaying: false });
+      expect(audio.video.pause).not.toHaveBeenCalled();
+      // Buffer readiness can precede the native playing=true event.
+      audio.video.status = "readyToPlay";
+      for (const listener of audio.videoStatusListeners) listener({ status: "readyToPlay" });
+      expect(audio.video.pause).not.toHaveBeenCalled();
+      audio.video.playing = true;
+      for (const listener of audio.videoListeners) listener({ isPlaying: true });
+      expect(audio.video.play).toHaveBeenCalledOnce();
+      audio.video.playing = false;
+      for (const listener of audio.videoListeners) listener({ isPlaying: false });
+      const recording = acquireAudioSession("recording");
+      expect(audio.video.pause).toHaveBeenCalledOnce();
+      audio.video.play();
+      expect(audio.video.playing).toBe(false);
+      await releaseAudioSession(recording);
+      audio.video.play();
+      expect(audio.video.playing).toBe(true);
+    },
+  );
+
+  it.each(["pause", "pause while buffering", "end", "error"])(
+    "releases video ownership on %s",
+    async (action) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      root = createRoot(document.createElement("div"));
+      await act(async () =>
+        root!.render(
+          createElement(MediaVideoPlayer, {
+            uri: "https://example.com/clip.mp4",
+            name: "clip.mp4",
+            thumbnailKey: "clip",
+            expanded: true,
+            autoPlay: true,
+          }),
+        ),
+      );
+      await act(async () => {
+        if (action.startsWith("pause")) {
+          if (action === "pause while buffering") {
+            audio.video.status = "loading";
+            audio.video.playing = false;
+            for (const listener of audio.videoListeners) listener({ isPlaying: false });
+          }
+          audio.video.pause();
+        } else if (action === "end") {
+          for (const listener of audio.videoEndListeners) listener();
+        } else {
+          audio.video.status = "error";
+          for (const listener of audio.videoStatusListeners) listener({ status: "error" });
+        }
+      });
+      audio.video.pause.mockClear();
+      const recording = acquireAudioSession("recording");
+      expect(audio.video.pause).not.toHaveBeenCalled();
+      await releaseAudioSession(recording);
     },
   );
 

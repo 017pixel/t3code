@@ -91,7 +91,6 @@ export function createAudioPlaybackSession(
   nativePlayback = false,
 ) {
   let token: AudioSessionToken | null = null;
-  let started = false;
   const stopPlayer = () => {
     // useAudioPlayer/useVideoPlayer may have disposed the native ref during unmount.
     try {
@@ -101,7 +100,6 @@ export function createAudioPlaybackSession(
   const pause = () => {
     const previous = token;
     token = null;
-    started = false;
     stopPlayer();
     if (previous) void releaseAudioSession(previous).catch(() => {});
   };
@@ -126,21 +124,16 @@ export function createAudioPlaybackSession(
         await prepare?.();
         if (!(await activateAudioSession(current, nativePlayback))) return;
         if (token !== current || !isAudioSessionOwner(current)) return;
-        started = true;
         player.play();
       } catch (error) {
         if (token === current) pause();
         throw error;
       }
     },
-    // Native video controls can start and stop playback without a JS play() call.
+    // A stopped clock is also reported during buffering and seeks. Native
+    // pause intent must call pause() separately from playingChange.
     playingChanged(playing: boolean) {
-      if (playing) {
-        if (token === null && acquire() === null) return;
-        started = true;
-      } else if (started) {
-        pause();
-      }
+      if (playing && token === null) acquire();
     },
   };
 }

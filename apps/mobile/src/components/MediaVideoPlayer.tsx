@@ -38,8 +38,21 @@ function LoadedMediaVideo(props: {
       if (isPlaying && !active.current && !fullscreen.current) playback.pause();
       else playback.playingChanged(isPlaying);
     });
+    const requested = player.addListener("playbackRequestedChange", ({ isPlaybackRequested }) => {
+      if (!isPlaybackRequested) {
+        if (playback.requested) playback.pause();
+      } else if (!active.current && !fullscreen.current) playback.pause();
+      else playback.playingChanged(true);
+    });
+    const ended = player.addListener("playToEnd", () => playback.pause());
+    const failed = player.addListener("statusChange", ({ status }) => {
+      if (status === "error") playback.pause();
+    });
     return () => {
       subscription.remove();
+      requested.remove();
+      ended.remove();
+      failed.remove();
       playback.pause();
     };
   }, [player, playback]);
