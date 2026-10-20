@@ -1487,7 +1487,8 @@ function redactCodexProtocolValue(
   depth = 0,
   budget = { remainingFields: 1_024 },
 ): unknown {
-  if (budget.remainingFields-- <= 0 || depth > 16) return "[TRUNCATED]";
+  if (depth > 16) return "[TRUNCATED]";
+  budget.remainingFields--;
   if (Array.isArray(value)) {
     const redacted: Array<unknown> = [];
     for (const nested of value) {
@@ -1529,7 +1530,6 @@ function redactCodexProtocolValue(
   const entries: Array<[string, unknown]> = [];
   for (const key in value) {
     if (!Object.hasOwn(value, key)) continue;
-    if (budget.remainingFields <= 0) break;
     entries.push([
       key,
       redactCodexProtocolValue(
@@ -3190,7 +3190,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           });
 
         const resolveCodexAttachment = Effect.fn("CodexAdapterV2.resolveCodexAttachment")(
-          function* (attachment: ChatAttachment) {
+          function* (attachment: ChatAttachment, budget: { remainingBytes: number }) {
             const attachmentPath = resolveAttachmentPath({
               attachmentsDir: serverConfig.attachmentsDir,
               attachment,
@@ -3198,20 +3198,35 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (attachmentPath === null) {
               return yield* toProtocolError(`Invalid attachment id '${attachment.id}'`);
             }
-            const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: CODEX_PROVIDER,
-                    detail: `Failed to read attachment '${attachment.id}'.`,
-                    reason: "attachment_unreadable",
-                    payload: cause,
-                  }),
-              ),
+            const prefix = `data:${attachment.mimeType};base64,`;
+            const maxBytes = Math.max(
+              0,
+              Math.floor((budget.remainingBytes - prefix.length) / 4) * 3,
             );
+            const stat = yield* fileSystem
+              .stat(attachmentPath)
+              .pipe(Effect.orElseSucceed(() => undefined));
+            if (stat === undefined || stat.type !== "File" || stat.size > BigInt(maxBytes)) return;
+            const bytes = yield* fileSystem
+              .stream(attachmentPath, { bytesToRead: maxBytes + 1 })
+              .pipe(
+                Stream.runCollect,
+                Effect.map((chunks) => Buffer.concat(chunks)),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CODEX_PROVIDER,
+                      detail: `Failed to read attachment '${attachment.id}'.`,
+                      reason: "attachment_unreadable",
+                      payload: cause,
+                    }),
+                ),
+              );
+            if (bytes.length === 0 || bytes.length > maxBytes) return;
+            budget.remainingBytes -= prefix.length + 4 * Math.ceil(bytes.length / 3);
             return {
               type: "image" as const,
-              url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+              url: `${prefix}${bytes.toString("base64")}`,
             } satisfies CodexSchema.V2TurnStartParams__UserInput;
           },
         );
@@ -3257,12 +3272,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               text,
             });
           }
+          // Leave room for text and JSON framing below Codex's 128 MiB frame limit.
+          const mediaBudget = { remainingBytes: 120 * 1024 * 1024 };
           const attachmentItems = yield* Effect.forEach(
             turnInput.message.attachments.filter(isProviderNativeImageAttachment),
-            resolveCodexAttachment,
+            (attachment) => resolveCodexAttachment(attachment, mediaBudget),
             { concurrency: 1 },
           );
-          inputItems.push(...attachmentItems);
+          inputItems.push(...attachmentItems.filter((item) => item !== undefined));
           // Match Codex 0.163's local-media formats and 50 MiB decoded-byte limit.
           const audioMimes: Record<string, string> = {
             wav: "audio/wav",
@@ -3287,18 +3304,27 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   attachment,
                 });
                 if (path === null) return;
+                const mime = audioMimes[attachment.name.split(".").at(-1)!.toLowerCase()];
+                const prefix = `data:${mime};base64,`;
+                const maxBytes = Math.max(
+                  0,
+                  Math.min(
+                    remainingBytes,
+                    Math.floor((mediaBudget.remainingBytes - prefix.length) / 4) * 3,
+                  ),
+                );
                 const stat = yield* fileSystem.stat(path);
-                if (stat.type !== "File" || stat.size > BigInt(remainingBytes)) return;
+                if (stat.type !== "File" || stat.size > BigInt(maxBytes)) return;
                 const chunks = yield* fileSystem
-                  .stream(path, { bytesToRead: remainingBytes + 1 })
+                  .stream(path, { bytesToRead: maxBytes + 1 })
                   .pipe(Stream.runCollect);
                 const bytes = Buffer.concat(chunks);
-                if (bytes.length === 0 || bytes.length > remainingBytes) return;
+                if (bytes.length === 0 || bytes.length > maxBytes) return;
                 remainingBytes -= bytes.length;
-                const mime = audioMimes[attachment.name.split(".").at(-1)!.toLowerCase()];
+                mediaBudget.remainingBytes -= prefix.length + 4 * Math.ceil(bytes.length / 3);
                 return {
                   type: "audio" as const,
-                  url: `data:${mime};base64,${bytes.toString("base64")}`,
+                  url: `${prefix}${bytes.toString("base64")}`,
                 };
               }).pipe(Effect.orElseSucceed(() => undefined));
               if (audio !== undefined) inputItems.push(audio);

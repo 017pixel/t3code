@@ -11,6 +11,7 @@ import {
   CheckpointId,
   ChatAttachmentId,
   ChatFileAttachment,
+  ChatImageAttachment,
   CodexSettings,
   EnvironmentId,
   MessageId,
@@ -38,7 +39,7 @@ import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexError from "effect-codex-app-server/errors";
 import * as CodexReplay from "effect-codex-app-server/replay";
-import type * as CodexSchema from "effect-codex-app-server/schema";
+import * as CodexSchema from "effect-codex-app-server/schema";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
@@ -74,6 +75,7 @@ import { makeReplayServerConfig, withCodexReplayChildMetadata } from "./CodexAda
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
 
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const isTurnCompletedNotification = Schema.is(CodexSchema.V2TurnCompletedNotification);
 const replayTranscriptJson = Schema.fromJsonString(CodexReplay.CodexAppServerReplayTranscript);
 const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
 const decodeReplayTranscriptJson = Schema.decodeUnknownEffect(replayTranscriptJson);
@@ -1290,6 +1292,63 @@ describe("CodexAdapterV2 native protocol logging", () => {
     }),
   );
 
+  it.effect.each(["completed", "failed"] as const)(
+    "retains %s metadata after large item arrays",
+    (status) =>
+      Effect.gen(function* () {
+        const writes: Array<unknown> = [];
+        const protocolLogger = CodexAdapterV2.makeCodexAppServerProtocolLogger({
+          nativeEventLogger: {
+            filePath: "/tmp/events.log",
+            write: (event) =>
+              Effect.sync(() => {
+                writes.push(event);
+              }),
+            close: () => Effect.void,
+          },
+          threadId: ThreadId.make("thread-1"),
+          providerSessionId: ProviderSessionId.make("provider-session-1"),
+        })!;
+        const params = {
+          threadId: "native-thread",
+          turn: {
+            id: "native-turn",
+            items: Array.from({ length: 200 }, (_, index) => ({
+              type: "agentMessage" as const,
+              id: `item-${index}`,
+              text: "answer",
+              phase: "final_answer" as const,
+              delivery: null,
+              questions: null,
+            })),
+            status,
+            error:
+              status === "failed"
+                ? { message: "provider failed", codexErrorInfo: "internalServerError" as const }
+                : null,
+          },
+        };
+        assert.isTrue(isTurnCompletedNotification(params));
+        yield* protocolLogger({
+          direction: "incoming",
+          stage: "decoded",
+          payload: { method: "turn/completed", params },
+        });
+        assert.lengthOf(writes, 1);
+        assert.nestedPropertyVal(writes[0], "event.payload.params.turn.id", "native-turn");
+        assert.nestedPropertyVal(writes[0], "event.payload.params.threadId", "native-thread");
+        assert.nestedPropertyVal(writes[0], "event.payload.params.turn.status", status);
+        if (status === "failed")
+          assert.nestedPropertyVal(
+            writes[0],
+            "event.payload.params.turn.error.message",
+            "provider failed",
+          );
+        else assert.nestedPropertyVal(writes[0], "event.payload.params.turn.error", null);
+        assert.isBelow(encodeUnknownJson(writes).length, 64 * 1_024);
+      }),
+  );
+
   it.effect("retains redacted failures when large payloads are summarized", () =>
     Effect.gen(function* () {
       const writes: Array<unknown> = [];
@@ -2205,6 +2264,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     "old-server",
     "rejected",
     "steer",
+    "mixed-media",
   ])("delivers audio attachments with %s input", (scenario) =>
     Effect.gen(function* () {
       const nativeThreadId = `audio-${scenario}`;
@@ -2247,7 +2307,46 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       yield* fileSystem.writeFile(storedPath, bytes);
       if (scenario === "stale-size") yield* fileSystem.truncate(storedPath, 50 * 1024 * 1024 + 1);
       if (scenario === "empty") yield* fileSystem.truncate(storedPath, 0);
-      const text = `${prompt}\n\n[Attached file "${attachment.name}" is saved at: ${storedPath}]`;
+      const attachments: Array<ChatFileAttachment | ChatImageAttachment> = [attachment];
+      const imageInput: Array<{ type: "image"; url: string }> = [];
+      const paths = [`[Attached file "${attachment.name}" is saved at: ${storedPath}]`];
+      if (scenario === "mixed-media") {
+        const imageBytes = Buffer.alloc(10 * 1024 * 1024);
+        const image = ChatImageAttachment.make({
+          type: "image",
+          id: ChatAttachmentId.make("image-12345678-1234-1234-1234-123456789abc-png"),
+          name: "image.png",
+          mimeType: "image/png",
+          sizeBytes: imageBytes.length,
+        });
+        const largeAudio = {
+          ...attachment,
+          id: ChatAttachmentId.make("large-audio-wav"),
+          sizeBytes: 50 * 1024 * 1024,
+        };
+        const largePath = resolveAttachmentPath({
+          attachmentsDir: serverConfig.attachmentsDir,
+          attachment: largeAudio,
+        })!;
+        const imagePath = resolveAttachmentPath({
+          attachmentsDir: serverConfig.attachmentsDir,
+          attachment: image,
+        })!;
+        yield* fileSystem.writeFile(imagePath, imageBytes);
+        yield* fileSystem.writeFile(largePath, new Uint8Array());
+        yield* fileSystem.truncate(largePath, largeAudio.sizeBytes);
+        attachments.unshift(largeAudio);
+        paths.unshift(`[Attached file "${largeAudio.name}" is saved at: ${largePath}]`);
+        for (let index = 0; index < 8; index++) {
+          attachments.push(image);
+          paths.push(`[Attached image "${image.name}" is saved at: ${imagePath}]`);
+          imageInput.push({
+            type: "image",
+            url: `data:image/png;base64,${imageBytes.toString("base64")}`,
+          });
+        }
+      }
+      const text = `${prompt}\n\n${paths.join("\n\n")}`;
       const queryModel = !["unsupported", "video", "oversized"].includes(scenario);
       const nativeAudio = ![
         "unsupported",
@@ -2260,6 +2359,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ].includes(scenario);
       const audioInput = [
         { type: "text", text },
+        ...imageInput,
         ...(nativeAudio
           ? [{ type: "audio", url: `data:${mime};base64,${bytes.toString("base64")}` }]
           : []),
@@ -2394,12 +2494,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           runId: turn.runId,
           providerThread: harness.providerThread,
           providerTurnId,
-          message: { ...turn.message, attachments: [attachment] },
+          message: { ...turn.message, attachments },
         });
       } else {
         yield* harness.runtime.startTurn({
           ...turn,
-          message: { ...turn.message, attachments: [attachment] },
+          message: { ...turn.message, attachments },
         });
       }
       assert.equal(
@@ -2407,6 +2507,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         queryModel ? 1 : 0,
       );
       assert.notInclude(JSON.stringify(harness.events), bytes.toString("base64"));
+      if (scenario === "mixed-media") {
+        const sent = requests.find((request) => request.method === "turn/start")!;
+        assert.isBelow(Buffer.byteLength(JSON.stringify(sent)), 128 * 1024 * 1024);
+      }
     }).pipe(
       Effect.scoped,
       Effect.provide(
