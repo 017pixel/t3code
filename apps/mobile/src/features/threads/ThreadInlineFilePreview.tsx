@@ -1,11 +1,6 @@
 import { useIsFocused } from "@react-navigation/native";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
-import {
-  setAudioModeAsync,
-  setIsAudioActiveAsync,
-  useAudioPlayer,
-  useAudioPlayerStatus,
-} from "expo-audio";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { AppState, Pressable, View } from "react-native";
 import type { FilePreviewSource } from "../../components/FilePreviewModal";
@@ -16,6 +11,12 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { useFullscreenVideoOpen, useMediaAudioSessionHold } from "../../lib/videoAudioSession";
 import { useRefreshAssetUrl } from "../../state/assets";
 import { ThreadMediaVisibleContext } from "./ThreadMarkdownVideo";
+import {
+  acquireAudioSession,
+  activateAudioSession,
+  isAudioSessionOwner,
+  releaseAudioSession,
+} from "../voice-input/audioSession";
 
 type PreviewProps = {
   readonly source: FilePreviewSource;
@@ -64,6 +65,7 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
   const active = useRef(true);
   const requestGeneration = useRef(0);
   const playRequested = useRef(false);
+  const audioToken = useRef<ReturnType<typeof acquireAudioSession> | null>(null);
   const [playbackRequested, setPlaybackRequested] = useState(false);
   const requestPlayback = useCallback((requested: boolean) => {
     playRequested.current = requested;
@@ -71,6 +73,10 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
     if (!requested) {
       requestGeneration.current += 1;
       setLoading(false);
+      if (audioToken.current) {
+        void releaseAudioSession(audioToken.current).catch(() => {});
+        audioToken.current = null;
+      }
     }
   }, []);
   useMediaAudioSessionHold(status.playing);
@@ -94,6 +100,10 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
       active.current = false;
       playRequested.current = false;
       requestGeneration.current += 1;
+      if (audioToken.current) {
+        void releaseAudioSession(audioToken.current).catch(() => {});
+        audioToken.current = null;
+      }
       subscription.remove();
     };
   }, [player, requestPlayback]);
@@ -102,10 +112,19 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
       requestPlayback(false);
       return player.pause();
     }
+    const token = acquireAudioSession("playback", () => {
+      requestPlayback(false);
+      player.pause();
+    });
+    if (!isAudioSessionOwner(token)) return;
+    audioToken.current = token;
     requestPlayback(true);
     const generation = ++requestGeneration.current;
     const isCurrentRequest = () =>
-      active.current && playRequested.current && requestGeneration.current === generation;
+      active.current &&
+      playRequested.current &&
+      requestGeneration.current === generation &&
+      isAudioSessionOwner(token);
     setLoading(true);
     setError(false);
     void Promise.resolve()
@@ -124,14 +143,7 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
           await player.seekTo(0);
         }
         if (!isCurrentRequest() || AppState.currentState !== "active") return;
-        await setAudioModeAsync({
-          allowsRecording: false,
-          playsInSilentMode: true,
-          interruptionMode: "doNotMix",
-          shouldPlayInBackground: false,
-        });
-        if (!isCurrentRequest() || AppState.currentState !== "active") return;
-        await setIsAudioActiveAsync(true);
+        await activateAudioSession(token);
         if (isCurrentRequest() && AppState.currentState === "active") player.play();
       })
       .catch(() => {

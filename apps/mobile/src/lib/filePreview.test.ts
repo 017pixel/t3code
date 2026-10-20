@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { inlineFilePreviewKind, isPdfFile } from "./filePreview";
 import { ThreadInlineFilePreview } from "../features/threads/ThreadInlineFilePreview";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
+import {
+  acquireAudioSession,
+  activateAudioSession,
+  releaseAudioSession,
+} from "../features/voice-input/audioSession";
 
 const audio = vi.hoisted(() => ({
   status: {
@@ -61,10 +65,11 @@ vi.mock("../features/threads/ThreadMarkdownVideo", async () => {
 
 describe("ThreadInlineFilePreview playback", () => {
   let root: ReturnType<typeof createRoot> | undefined;
-  afterEach(() => {
-    act(() => root?.unmount());
+  afterEach(async () => {
+    await act(async () => root?.unmount());
     root = undefined;
     vi.clearAllMocks();
+    audio.refresh.mockReset();
     audio.setAudioMode.mockReset();
     audio.setActive.mockReset();
     audio.status = {
@@ -82,9 +87,10 @@ describe("ThreadInlineFilePreview playback", () => {
     "reactivates audio after voice release and honors %s during activation",
     async (intent) => {
       (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-      // Voice release clears recording mode and deactivates Expo's global audio gate.
-      await setAudioModeAsync({ allowsRecording: false });
-      await setIsAudioActiveAsync(false);
+      const recording = acquireAudioSession("recording");
+      await activateAudioSession(recording);
+      await releaseAudioSession(recording);
+      vi.clearAllMocks();
       let activate: () => void = () => {};
       if (intent === "mode failure") {
         audio.setAudioMode.mockRejectedValueOnce(new Error("Playback mode unavailable"));
@@ -118,12 +124,12 @@ describe("ThreadInlineFilePreview playback", () => {
       if (intent.endsWith("failure")) {
         expect(container.textContent).toContain("Unavailable · tap play to retry");
         expect(button.getAttribute("aria-label")).toBe("Retry audio");
-        expect(audio.setActive).toHaveBeenCalledTimes(intent === "mode failure" ? 1 : 2);
+        expect(audio.setActive).toHaveBeenLastCalledWith(false);
         return;
       }
       expect(audio.setActive).toHaveBeenLastCalledWith(true);
-      expect(audio.setAudioMode.mock.invocationCallOrder[1]).toBeLessThan(
-        audio.setActive.mock.invocationCallOrder[1]!,
+      expect(audio.setAudioMode.mock.invocationCallOrder[0]).toBeLessThan(
+        audio.setActive.mock.invocationCallOrder[0]!,
       );
       if (intent === "cancel") await act(async () => button.click());
       else if (intent === "unmount") {
@@ -136,8 +142,88 @@ describe("ThreadInlineFilePreview playback", () => {
         expect(button.getAttribute("aria-label")).toBe("Pause audio");
       } else {
         expect(audio.player.play).not.toHaveBeenCalled();
+        expect(audio.setActive).toHaveBeenLastCalledWith(false);
         if (intent === "cancel") expect(button.getAttribute("aria-label")).toBe("Play audio");
       }
+    },
+  );
+
+  it.each(["playing", "URL pending", "mode pending", "activation pending"])(
+    "yields to recording while %s and plays again after recording stops",
+    async (phase) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      const url = Promise.withResolvers<string>();
+      const native = Promise.withResolvers<void>();
+      audio.refresh.mockReturnValueOnce(url.promise);
+      audio.status = { ...audio.status, isLoaded: phase !== "URL pending" };
+      if (phase === "mode pending") audio.setAudioMode.mockReturnValueOnce(native.promise);
+      if (phase === "activation pending") audio.setActive.mockReturnValueOnce(native.promise);
+      const container = document.createElement("div");
+      root = createRoot(container);
+      act(() =>
+        root!.render(
+          createElement(ThreadInlineFilePreview, {
+            source: {
+              kind: "document",
+              name: "sound.mp3",
+              environmentId: EnvironmentId.make("environment-1"),
+              resource: {
+                _tag: "workspace-file",
+                threadId: ThreadId.make("thread-1"),
+                path: "/repo/sound.mp3",
+              },
+            },
+            onOpen() {},
+          }),
+        ),
+      );
+      const button = container.querySelector<HTMLButtonElement>('button[aria-label="Play audio"]')!;
+      await act(async () => button.click());
+      expect(audio.player.play).toHaveBeenCalledTimes(phase === "playing" ? 1 : 0);
+      expect(audio.refresh).toHaveBeenCalledTimes(phase === "URL pending" ? 1 : 0);
+      let recording!: ReturnType<typeof acquireAudioSession>;
+      await act(async () => {
+        recording = acquireAudioSession("recording");
+      });
+      expect(audio.player.pause).toHaveBeenCalledOnce();
+      expect(button.getAttribute("aria-label")).toBe("Play audio");
+      native.resolve();
+      await activateAudioSession(recording);
+      expect(audio.setAudioMode).toHaveBeenLastCalledWith({
+        allowsRecording: true,
+        interruptionMode: "doNotMix",
+        playsInSilentMode: true,
+        shouldPlayInBackground: false,
+      });
+      const modeCalls = audio.setAudioMode.mock.calls.length;
+      const activationCalls = audio.setActive.mock.calls.length;
+      await act(async () => url.resolve("https://example.com/sound.mp3"));
+      await act(async () => button.click());
+      expect(audio.setAudioMode).toHaveBeenCalledTimes(modeCalls);
+      expect(audio.setActive).toHaveBeenCalledTimes(activationCalls);
+      expect(audio.setActive).not.toHaveBeenCalledWith(false);
+      expect(audio.player.play).toHaveBeenCalledTimes(phase === "playing" ? 1 : 0);
+      await releaseAudioSession(recording);
+      audio.status = { ...audio.status, isLoaded: true };
+      // Refresh the native status before the next tap.
+      await act(async () =>
+        root!.render(
+          createElement(ThreadInlineFilePreview, {
+            source: { kind: "document", name: "sound.mp3", uri: "https://example.com/sound.mp3" },
+            onOpen() {},
+          }),
+        ),
+      );
+      const replay = container.querySelector<HTMLButtonElement>('button[aria-label="Play audio"]')!;
+      await act(async () => replay.click());
+      expect(audio.player.play).toHaveBeenCalledTimes(phase === "playing" ? 2 : 1);
+      expect(audio.setAudioMode).toHaveBeenLastCalledWith({
+        allowsRecording: false,
+        interruptionMode: "doNotMix",
+        playsInSilentMode: true,
+        shouldPlayInBackground: false,
+      });
+      expect(audio.setActive).toHaveBeenLastCalledWith(true);
     },
   );
 
