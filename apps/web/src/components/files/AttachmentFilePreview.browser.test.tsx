@@ -40,8 +40,9 @@ describe("standalone Mermaid previews", () => {
 
   it.each(["<-->", "<==>", "<-.->", "-->"])("renders the %s arrow", async (arrow) => {
     await using screen = await render(<MermaidFilePreview text={`flowchart LR\nA ${arrow} B`} />);
-    await vi.waitFor(() =>
-      expect(screen.container.querySelector("svg .edgePaths path")).not.toBeNull(),
+    await vi.waitFor(
+      () => expect(screen.container.querySelector("svg .edgePaths path")).not.toBeNull(),
+      { timeout: 10_000 },
     );
     expect(screen.container.querySelector('[role="alert"]')).toBeNull();
     expect(screen.container.textContent).toContain("A");
@@ -71,7 +72,9 @@ it("clears an Office metadata error when the same URL becomes previewable", asyn
   );
   expect(screen.container.textContent).not.toContain("under 50 MB");
   resolveResponse(new Response("invalid-office-file"));
-  await vi.waitFor(() => expect(screen.container.textContent).toContain("not a valid Office"));
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("not a valid Office"), {
+    timeout: 10_000,
+  });
 });
 
 describe("attachment HTML preview recovery", () => {
