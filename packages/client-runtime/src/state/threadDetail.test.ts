@@ -30,7 +30,7 @@ const ref: ScopedThreadRef = {
 
 function threadState(
   partial: Pick<EnvironmentThreadState, "data" | "status" | "error"> &
-    Partial<Pick<EnvironmentThreadState, "history">>,
+    Partial<Pick<EnvironmentThreadState, "history" | "resuming">>,
 ): EnvironmentThreadState {
   return { ...partial, history: partial.history ?? EMPTY_THREAD_HISTORY_META };
 }
@@ -137,7 +137,7 @@ describe("createEnvironmentThreadDetailAtoms", () => {
     registry.set(sourceAtom, state(caughtUp, "cached"));
     expect(registry.get(details.behindShellAtom(ref))).toBe(false);
 
-    // Once current, a live thread is not marked when the shell moves first.
+    // A live thread is not marked when the shell moves first.
     registry.set(sourceAtom, state(caughtUp, "live"));
     registry.set(shellAtom, { updatedAt: "2026-06-20T00:06:00.000Z" });
     expect(registry.get(details.behindShellAtom(ref))).toBe(false);
@@ -146,11 +146,18 @@ describe("createEnvironmentThreadDetailAtoms", () => {
     registry.dispose();
   });
 
-  it("marks a warm resume that is live but behind the shell", () => {
-    const sourceAtom = Atom.make<AsyncResult.AsyncResult<EnvironmentThreadState, never>>(
+  it("marks a warm resume that is live but behind until the server confirms it", () => {
+    const resumed = (resuming: boolean) =>
       AsyncResult.success(
-        threadState({ data: Option.some(v2Projection), status: "live", error: Option.none() }),
-      ),
+        threadState({
+          data: Option.some(v2Projection),
+          status: "live",
+          error: Option.none(),
+          resuming,
+        }),
+      );
+    const sourceAtom = Atom.make<AsyncResult.AsyncResult<EnvironmentThreadState, never>>(
+      resumed(true),
     );
     const shellAtom = Atom.make<{ readonly updatedAt: string } | null>(null);
     const details = createEnvironmentThreadDetailAtoms(
@@ -158,23 +165,13 @@ describe("createEnvironmentThreadDetailAtoms", () => {
       () => shellAtom,
     );
     const registry = AtomRegistry.make();
-    const unmount = registry.mount(details.behindShellAtom(ref));
-    // Without a shell yet, nothing is known; a later newer shell still marks it.
     expect(registry.get(details.behindShellAtom(ref))).toBe(false);
     registry.set(shellAtom, { updatedAt: "2026-06-20T00:05:00.000Z" });
     expect(registry.get(details.behindShellAtom(ref))).toBe(true);
 
-    // Once it has synchronized, live is trusted even if a skipped event left
-    // updatedAt short of the shell.
-    const synced = (status: "synchronizing" | "live") =>
-      AsyncResult.success(
-        threadState({ data: Option.some(v2Projection), status, error: Option.none() }),
-      );
-    registry.set(sourceAtom, synced("synchronizing"));
-    expect(registry.get(details.behindShellAtom(ref))).toBe(true);
-    registry.set(sourceAtom, synced("live"));
+    // Confirmed caught up, even if a skipped event left updatedAt short.
+    registry.set(sourceAtom, resumed(false));
     expect(registry.get(details.behindShellAtom(ref))).toBe(false);
-    unmount();
     registry.dispose();
   });
 });

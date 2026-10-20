@@ -150,12 +150,14 @@ function matchesThreadSnapshot(
 }
 
 function cachedThreadState(value: EnvironmentThreadState): EnvironmentThreadState {
+  const status =
+    value.status === "deleted" || (value.status === "live" && Option.isSome(value.data))
+      ? value.status
+      : statusWithoutLiveData(value.data);
   return {
     ...value,
-    status:
-      value.status === "deleted" || (value.status === "live" && Option.isSome(value.data))
-        ? value.status
-        : statusWithoutLiveData(value.data),
+    status,
+    resuming: status === "live",
     error: Option.none(),
     history: { ...value.history, loading: false, error: null },
   };
@@ -554,7 +556,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       yield* Ref.set(awaitingCompletion, false);
       yield* SubscriptionRef.update(state, (current) =>
         Option.isSome(current.data) && current.status !== "deleted" && Option.isNone(current.error)
-          ? { ...current, status: "live" as const, error: Option.none() }
+          ? { ...current, status: "live" as const, error: Option.none(), resuming: false }
           : current,
       );
       return;
@@ -848,6 +850,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
             ...value,
             status: value.status === "deleted" ? value.status : ("live" as const),
             error: Option.none(),
+            resuming: false,
           }));
         }
 

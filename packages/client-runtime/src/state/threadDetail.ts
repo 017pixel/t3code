@@ -204,30 +204,20 @@ export function createEnvironmentThreadDetailAtoms<E>(
 
   // A saved copy can be many turns old when the thread moved on while it was
   // closed. Clients still show it, but marked as out of date until it catches
-  // up. Live is trusted once the thread has synchronized or been current in
-  // this mount: a streaming thread can trail the shell by an event, and a
-  // replayed event the client skips never advances updatedAt. A warm resume is
-  // live from its first value, so it stays marked until it catches up.
-  const shellSyncAtomFamily = Atom.family((key: string) => {
+  // up. A live thread is current even when the shell arrives an event first,
+  // unless it is a warm resume the server has not confirmed yet.
+  const behindShellAtomFamily = Atom.family((key: string) => {
     const ref = parseThreadKey(key);
-    return Atom.make((get): { readonly behind: boolean; readonly liveTrusted: boolean } => {
-      const liveTrusted =
-        Option.getOrUndefined(get.self<{ readonly liveTrusted: boolean }>())?.liveTrusted ?? false;
+    return Atom.make((get) => {
+      if (threadShellAtom === undefined) return false;
       const state = get(threadStateValueAtomFamily(key));
-      const shell = threadShellAtom === undefined ? null : get(threadShellAtom(ref));
-      if (Option.isNone(state.data) || shell === null) return { behind: false, liveTrusted };
-      const behind = isBehindShell(state.data.value, shell);
-      if (state.status !== "live") return { behind, liveTrusted: true };
-      const trusted = liveTrusted || !behind;
-      return { behind: behind && !trusted, liveTrusted: trusted };
-    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-shell-sync:${key}`));
+      if (Option.isNone(state.data) || (state.status === "live" && state.resuming !== true)) {
+        return false;
+      }
+      const shell = get(threadShellAtom(ref));
+      return shell !== null && isBehindShell(state.data.value, shell);
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-behind-shell:${key}`));
   });
-  const behindShellAtomFamily = Atom.family((key: string) =>
-    Atom.make((get) => get(shellSyncAtomFamily(key)).behind).pipe(
-      Atom.setIdleTTL(0),
-      Atom.withLabel(`environment-thread-behind-shell:${key}`),
-    ),
-  );
 
   const statusAtomFamily = Atom.family((key: string) =>
     Atom.make((get) => get(threadStateValueAtomFamily(key)).status).pipe(
