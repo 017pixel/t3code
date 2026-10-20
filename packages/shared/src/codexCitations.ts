@@ -117,14 +117,14 @@ const CITATION_SYNTAX: Extension = {
   text: { [START.charCodeAt(0)]: { tokenize: tokenizeCitation } },
 };
 
-function codexCitationText(citation: CodexCitation): string {
+export function codexCitationText(citation: CodexCitation): string {
   const sources = citation.sources.map(({ id, number }) => `Source ${number}: ${id}`);
   if (citation.locator !== undefined) sources.push(citation.locator);
   return `[${sources.join("; ")}]`;
 }
 
 /** Keeps the opaque source IDs readable without inventing link destinations. */
-function codexCitationMarkdown(citation: CodexCitation): string {
+export function codexCitationMarkdown(citation: CodexCitation): string {
   return codexCitationText(citation).replace(/[\\\]*_`<&]/g, "\\$&");
 }
 
@@ -303,4 +303,48 @@ export function renderCodexCitationsAsMarkdown(
     cursor = replacement.end;
   }
   return rendered + markdown.slice(cursor);
+}
+
+export function codexCitationFromHastProperties(
+  properties: Readonly<Record<string, unknown>> | null | undefined,
+): CodexCitation | null {
+  const serialized = properties?.dataCodexCitation;
+  if (typeof serialized !== "string") return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || !("raw" in value)) return null;
+  if (typeof value.raw !== "string" || !("sources" in value) || !Array.isArray(value.sources)) {
+    return null;
+  }
+  const parsed = parseCitation(value.raw);
+  if (!parsed || parsed.ids.length !== value.sources.length) return null;
+  const locator = "locator" in value ? value.locator : undefined;
+  if (locator !== parsed.locator) return null;
+  const sources: { readonly id: string; readonly number: number }[] = [];
+  const rawSources: readonly unknown[] = value.sources;
+  for (const [index, source] of rawSources.entries()) {
+    if (
+      typeof source !== "object" ||
+      source === null ||
+      !("id" in source) ||
+      typeof source.id !== "string" ||
+      source.id !== parsed.ids[index] ||
+      !("number" in source) ||
+      typeof source.number !== "number" ||
+      !Number.isSafeInteger(source.number) ||
+      source.number <= 0
+    ) {
+      return null;
+    }
+    sources.push({ id: source.id, number: source.number });
+  }
+  return {
+    raw: value.raw,
+    sources,
+    ...(parsed.locator === undefined ? {} : { locator: parsed.locator }),
+  };
 }

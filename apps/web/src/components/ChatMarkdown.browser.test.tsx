@@ -10,7 +10,6 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { filesystemEnvironment } from "../state/filesystem";
 import { useRightPanelStore } from "../rightPanelStore";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
-import { serializeTableElementToCsv } from "../markdown-clipboard";
 import { MarkdownFindContext } from "./chat/markdownFindContext";
 import { collectThreadFindRanges, useThreadFindHighlights } from "./chat/threadFindHighlights";
 import { setMarkdownTaskChecked } from "./files/filePreviewMode";
