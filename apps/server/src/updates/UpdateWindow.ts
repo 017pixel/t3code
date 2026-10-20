@@ -12,12 +12,15 @@ import * as RestartWork from "./RestartWork.ts";
 
 /** How long every client must be untouched before an update may run. */
 const QUIET_PERIOD = Duration.minutes(2);
+/** A restart disconnects every client, so it waits longer than an install. */
+const RESTART_QUIET_PERIOD = Duration.minutes(5);
 
 /**
  * Decides when a background update may replace something without anyone
- * noticing: no client was used for 2 minutes, no run is active, and no
- * provider installer is running on this host. A server restart also waits for
- * restart-sensitive work and busy terminals, which an install does not touch.
+ * noticing: no client was used for 2 minutes (5 before a restart), no run is
+ * active, and no provider installer is running on this host. A server restart
+ * also waits for restart-sensitive work and busy terminals, which an install
+ * does not touch.
  */
 export class UpdateWindow extends Context.Service<
   UpdateWindow,
@@ -49,7 +52,8 @@ const make = Effect.gen(function* () {
 
   const isOpen: UpdateWindow["Service"]["isOpen"] = Effect.fn("updates.UpdateWindow.isOpen")(
     function* (options) {
-      if (Duration.isLessThan(yield* backgroundPolicy.sinceLastClientInteraction, QUIET_PERIOD)) {
+      const quietPeriod = options?.restartsServer ? RESTART_QUIET_PERIOD : QUIET_PERIOD;
+      if (Duration.isLessThan(yield* backgroundPolicy.sinceLastClientInteraction, quietPeriod)) {
         return false;
       }
       // Includes native background work that outlives its parent run.

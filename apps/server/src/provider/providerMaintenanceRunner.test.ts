@@ -1874,7 +1874,7 @@ describe("UpdateWindow", () => {
   it.effect("keeps a server restart out while work or a terminal command would be lost", () =>
     Effect.gen(function* () {
       const state = {
-        quietFor: Duration.minutes(15),
+        quietFor: Duration.minutes(5),
         active: [] as ReadonlyArray<ThreadId> | "unreadable",
         installing: false,
         restartWork: 1,
@@ -1896,6 +1896,11 @@ describe("UpdateWindow", () => {
       assert.isFalse(yield* window.isOpen({ ...restart, ignoreInstallLocks: true }));
 
       state.busyTerminals = false;
+      // A restart disconnects every client, so it needs a longer quiet period.
+      state.quietFor = Duration.minutes(4);
+      assert.isTrue(yield* window.isOpen());
+      assert.isFalse(yield* window.isOpen(restart));
+      state.quietFor = Duration.minutes(5);
       assert.deepStrictEqual(
         yield* window.runIfOpen(Effect.succeed("ran"), restart),
         Option.some("ran"),

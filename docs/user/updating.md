@@ -124,8 +124,9 @@ development never updates provider CLIs.
 
 The same setting updates a [background service](./background-service.md) to
 the newest release on its channel. T3 Code downloads the release right away
-and restarts the service once the same conditions hold, and also no project
-clone or workspace setup is running and no terminal is running a command. A
+and restarts the service once no client has been used for 5 minutes, no thread
+is running or waiting for you, no project clone or workspace setup is running,
+and no terminal is running a command. A
 stable service never installs a prerelease, a release that changes the client
 protocol waits for a manual update, and a release the service rolled back is
 not tried again. A server that crashes is restarted
