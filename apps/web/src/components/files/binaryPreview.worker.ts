@@ -63,7 +63,10 @@ function tarEntries(bytes: Uint8Array<ArrayBuffer>) {
     if (checksum !== number(offset + 148, 8)) throw new Error("The TAR header is damaged.");
     const size = number(offset + 124, 12);
     const type = text(offset + 156, 1);
-    const prefix = text(offset + 345, 155);
+    const prefix =
+      text(offset + 257, 6) === "ustar" && text(offset + 263, 2) === "00"
+        ? text(offset + 345, 155)
+        : "";
     const path = longPath ?? [prefix, text(offset, 100)].filter(Boolean).join("/");
     longPath = null;
     if (path.length > 1024 || size > BINARY_PREVIEW_MAX_BYTES || offset + 512 + size > bytes.length)
@@ -164,9 +167,10 @@ async function handle(input: BinaryWorkerRequest) {
     let entries: ArchiveEntry[];
     if (
       /\.(zip|jar)$/i.test(input.name) ||
-      new DataView(input.bytes).getUint32(0, true) === 0x04034b50
+      (input.bytes.byteLength >= 4 &&
+        [0x04034b50, 0x06054b50].includes(new DataView(input.bytes).getUint32(0, true)))
     ) {
-      const archive = await boundedZip(input.bytes, ARCHIVE_ENTRY_MAX_BYTES);
+      const archive = await boundedZip(input.bytes, BINARY_PREVIEW_MAX_BYTES);
       entries = [...archive].map(([path, file]) => {
         files.set(path, file.bytes);
         return {

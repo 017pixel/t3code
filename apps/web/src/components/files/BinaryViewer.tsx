@@ -171,9 +171,10 @@ export default function BinaryViewer(props: {
     const slash = rest.indexOf("/");
     const path = slash < 0 ? item.path.replace(/\/$/, "") : `${folder}${rest.slice(0, slash)}`;
     const directory = slash >= 0 || item.directory;
-    const previous = children.get(path);
+    const key = `${path}${directory ? "/" : ""}`;
+    const previous = children.get(key);
     if (previous) previous.size += item.size;
-    else children.set(path, { path, directory, size: item.size, modified: item.modified });
+    else children.set(key, { path, directory, size: item.size, modified: item.modified });
   }
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -274,7 +275,10 @@ export default function BinaryViewer(props: {
                     Number(b.directory) - Number(a.directory) || a.path.localeCompare(b.path),
                 )
                 .map((item) => (
-                  <tr key={item.path} className="hover:bg-muted/40">
+                  <tr
+                    key={`${item.path}${item.directory ? "/" : ""}`}
+                    className="hover:bg-muted/40"
+                  >
                     <td className="max-w-0 border-b border-border/60">
                       <button
                         type="button"

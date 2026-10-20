@@ -1,5 +1,6 @@
 import DocumentPages, { sanitizeDocumentHtml } from "./DocumentPages";
 import { act, render, stubGlobal, type Screen } from "../../../test/render";
+import "~/index.css";
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -16,6 +17,181 @@ vi.mock(import("./ReadOnlySourcePreview"), () => ({
 }));
 
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
+import LargeTextViewer from "./LargeTextViewer";
+import VirtualTablePreview from "./VirtualTablePreview";
+import JSZip from "jszip";
+import { boundedZip } from "./boundedZip";
+import BinaryViewer from "./BinaryViewer";
+import { decodeImagePreview } from "./decodeImagePreview";
+
+describe("bounded binary previews", () => {
+  it("reauthorizes a failed image when retry is clicked", async () => {
+    const image =
+      'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>';
+    refresh
+      .mockReset()
+      .mockResolvedValueOnce("data:image/png;base64,broken")
+      .mockResolvedValue(image);
+    await using screen = await render(
+      <AttachmentFilePreview
+        name="photo.png"
+        mimeType="image/png"
+        sizeBytes={100}
+        asset={{ environmentId: EnvironmentId.make("test-environment"), attachmentId: "image" }}
+      />,
+    );
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(
+        "Unable to load image.",
+      ),
+    );
+    await act(() =>
+      screen.container.querySelector<HTMLButtonElement>('[role="alert"] button')!.click(),
+    );
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector("img")?.getAttribute("src")).toBe(image),
+    );
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads a small ZIP64 archive and rejects understated directory counts", async () => {
+    const zip = new JSZip().file("readme.txt", "hello");
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const end = bytes.length - 22;
+    const legacy = new DataView(bytes.buffer);
+    const extended = new Uint8Array(bytes.length + 76);
+    extended.set(bytes.subarray(0, end));
+    extended.set(bytes.subarray(end), end + 76);
+    const view = new DataView(extended.buffer);
+    view.setUint32(end, 0x06064b50, true);
+    view.setBigUint64(end + 4, 44n, true);
+    view.setBigUint64(end + 24, 1n, true);
+    view.setBigUint64(end + 32, 1n, true);
+    view.setBigUint64(end + 40, BigInt(legacy.getUint32(end + 12, true)), true);
+    view.setBigUint64(end + 48, BigInt(legacy.getUint32(end + 16, true)), true);
+    view.setUint32(end + 56, 0x07064b50, true);
+    view.setBigUint64(end + 64, BigInt(end), true);
+    view.setUint32(end + 72, 1, true);
+    view.setUint16(end + 76 + 10, 0xffff, true);
+    expect(
+      new TextDecoder().decode((await boundedZip(extended.buffer)).get("readme.txt")?.bytes),
+    ).toBe("hello");
+
+    const many = new JSZip();
+    for (let i = 0; i < 2049; i++) many.file(`file-${i}`, "");
+    const crowded = await many.generateAsync({ type: "arraybuffer" });
+    new DataView(crowded).setUint16(crowded.byteLength - 12, 1, true);
+    await expect(boundedZip(crowded)).rejects.toThrow("more than 2,048 entries");
+  });
+
+  it("keeps a file and directory with the same basename accessible", async () => {
+    const bytes = await new JSZip()
+      .file("foo.txt", "root file")
+      .file("foo.txt/bar.txt", "child")
+      .generateAsync({ type: "arraybuffer" });
+    const src = URL.createObjectURL(new Blob([bytes]));
+    try {
+      await using screen = await render(<BinaryViewer src={src} name="names.zip" kind="archive" />);
+      await vi.waitFor(() =>
+        expect(screen.container.querySelectorAll("tbody button")).toHaveLength(2),
+      );
+      const buttons = [...screen.container.querySelectorAll<HTMLButtonElement>("tbody button")];
+      expect(buttons.map((button) => button.textContent)).toEqual(["foo.txt", "foo.txt"]);
+      await act(() => buttons[1]!.click());
+      await vi.waitFor(() => expect(screen.container.textContent).toContain("root file"));
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  });
+
+  it("keeps WhiteIsZero TIFF brightness and rejects oversized metadata before decoding", async () => {
+    const tags = [
+      [256, 2],
+      [257, 1],
+      [258, 8],
+      [259, 1],
+      [262, 0],
+      [273, 134],
+      [277, 1],
+      [278, 1],
+      [279, 2],
+      [284, 1],
+    ];
+    const bytes = new ArrayBuffer(136);
+    const view = new DataView(bytes);
+    view.setUint16(0, 0x4949);
+    view.setUint16(2, 42, true);
+    view.setUint32(4, 8, true);
+    view.setUint16(8, tags.length, true);
+    tags.forEach(([tag, value], index) => {
+      const offset = 10 + index * 12;
+      view.setUint16(offset, tag!, true);
+      view.setUint16(offset + 2, 4, true);
+      view.setUint32(offset + 4, 1, true);
+      view.setUint32(offset + 8, value!, true);
+    });
+    view.setUint8(135, 255);
+    const src = URL.createObjectURL(new Blob([bytes]));
+    try {
+      const blob = await decodeImagePreview(src, false, new AbortController().signal);
+      const bitmap = await createImageBitmap(blob);
+      const canvas = new OffscreenCanvas(2, 1);
+      const context = canvas.getContext("2d")!;
+      context.drawImage(bitmap, 0, 0);
+      expect([...context.getImageData(0, 0, 2, 1).data]).toEqual([
+        255, 255, 255, 255, 0, 0, 0, 255,
+      ]);
+      bitmap.close();
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+    view.setUint32(14, 1_000_000, true);
+    const invalid = URL.createObjectURL(new Blob([bytes]));
+    try {
+      await expect(
+        decodeImagePreview(invalid, false, new AbortController().signal),
+      ).rejects.toThrow("metadata");
+    } finally {
+      URL.revokeObjectURL(invalid);
+    }
+  });
+});
+
+describe("large text preview recovery", () => {
+  it("recovers from a failed worker load when its source changes", async () => {
+    await using screen = await render(
+      <LargeTextViewer name="log.txt" text={"bad\0text"} delimiter={null} />,
+    );
+    await vi.waitFor(() =>
+      expect(screen.container.textContent).toContain("This file contains binary data."),
+    );
+    await screen.rerender(<LargeTextViewer name="log.txt" text="" delimiter={null} />);
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("This file is empty."));
+    expect(screen.container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("reloads a partial page when the indexed row count grows", async () => {
+    const load = vi.fn();
+    const rows = [["first"]];
+    const view = (count: number) => (
+      <div style={{ display: "flex", height: 400, width: 600 }}>
+        <VirtualTablePreview
+          name="log.txt"
+          count={count}
+          columns={1}
+          source
+          getRows={() => rows}
+          loadPage={load}
+        />
+      </div>
+    );
+    await using screen = await render(view(1));
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("first"));
+    expect(load).not.toHaveBeenCalled();
+    await screen.rerender(view(2));
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith(0));
+  });
+});
 
 describe("attachment HTML preview recovery", () => {
   const originalUrl = "data:text/html,original";

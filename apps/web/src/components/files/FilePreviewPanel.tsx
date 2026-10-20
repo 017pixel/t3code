@@ -1575,11 +1575,20 @@ function WorkspaceLargeTextPreview(props: {
   delimiter: "," | "\t" | null;
   workspaceMutationId: string | null;
 }) {
-  const assetUrl = useAssetUrlState(props.environmentId, {
+  const resource = {
     _tag: "media-file",
     threadId: props.threadRef.threadId,
     path: props.absolutePath,
     disposition: "attachment",
+  } as const;
+  const assetUrl = useAssetUrlState(props.environmentId, resource);
+  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, resource);
+  useWorkspaceMutationRefresh({
+    mutationId: props.workspaceMutationId,
+    resourceKey: JSON.stringify([props.environmentId, resource]),
+    refresh: () => {
+      void refreshAssetUrl().catch(() => undefined);
+    },
   });
   if (assetUrl._tag !== "Success")
     return (
