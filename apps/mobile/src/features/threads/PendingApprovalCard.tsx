@@ -4,6 +4,7 @@ import type {
   ProviderApprovalOption,
   RuntimeRequestId,
 } from "@t3tools/contracts";
+import { fullAccessOverrideLabel } from "@t3tools/client-runtime/state/thread-requests";
 import { View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -42,6 +43,18 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
       {props.approval.detail ? (
         <Text className="font-sans text-sm leading-normal text-foreground-secondary">
           {props.approval.detail}
+        </Text>
+      ) : null}
+      {props.approval.fullAccessOverride || props.approval.reason ? (
+        <Text className="font-sans text-xs leading-normal text-warning-foreground">
+          {[
+            props.approval.fullAccessOverride
+              ? fullAccessOverrideLabel(props.approval.fullAccessOverride)
+              : undefined,
+            props.approval.reason,
+          ]
+            .filter(Boolean)
+            .join(": ")}
         </Text>
       ) : null}
       {!canRespond ? (

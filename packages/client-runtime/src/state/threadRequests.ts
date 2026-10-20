@@ -2,6 +2,7 @@ import type {
   OrchestrationV2ThreadProjection,
   OrchestrationV2RuntimeRequest,
   OrchestrationV2UserInputQuestion,
+  ProviderApprovalFullAccessOverride,
   ProviderApprovalOption,
   ProviderRequestKind,
   RuntimeRequestId,
@@ -13,9 +14,15 @@ export interface ThreadPendingApproval {
   readonly requestKind: ProviderRequestKind;
   readonly createdAt: string;
   readonly detail?: string;
+  readonly reason?: string;
+  readonly fullAccessOverride?: ProviderApprovalFullAccessOverride;
   readonly appName?: string;
   readonly options?: ReadonlyArray<ProviderApprovalOption>;
   readonly responseCapability: "live" | "not_resumable";
+}
+
+export function fullAccessOverrideLabel(override: ProviderApprovalFullAccessOverride): string {
+  return override === "ask_rule" ? "Your ask rule" : "Required even in full access";
 }
 
 export interface ThreadUserInputQuestion extends Omit<
@@ -99,6 +106,10 @@ export function derivePendingThreadRequests(
       requestKind: request.kind,
       createdAt: DateTime.formatIso(request.createdAt),
       ...(item?.type === "approval_request" && item.prompt ? { detail: item.prompt } : {}),
+      ...(item?.type === "approval_request" && item.reason ? { reason: item.reason } : {}),
+      ...(item?.type === "approval_request" && item.fullAccessOverride
+        ? { fullAccessOverride: item.fullAccessOverride }
+        : {}),
       ...(item?.type === "approval_request" && item.appName ? { appName: item.appName } : {}),
       ...(item?.type === "approval_request" && item.options !== undefined
         ? { options: item.options }
