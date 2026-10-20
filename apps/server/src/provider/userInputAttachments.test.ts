@@ -79,6 +79,22 @@ describe("question answer paths", () => {
   );
 
   it.effect.each([
+    [
+      "text symbols",
+      String.raw`{\rtf1\ansi Pages 1\endash 5\emdash\lquote left\rquote\ldblquote right\rdblquote\bullet\b End\b0\unknown{\*\secret\bullet hidden}}`,
+      "Pages 1–5—‘left’“right”•End",
+    ],
+    [
+      "space and hyphen symbols",
+      String.raw`{\rtf1\ansi A\enspace B\emspace C\qmspace D\~E\_F\-G}`,
+      "A\u2002B\u2003C\u2005D\u00a0E\u2011FG",
+    ],
+    [
+      "text symbol fallback",
+      String.raw`{\rtf1\ansi\uc10\u945\endash\emdash\enspace\emspace\qmspace\lquote\rquote\ldblquote\rdblquote\bullet Z}`,
+      "αZ",
+    ],
+    ["hyphen symbol fallback", String.raw`{\rtf1\ansi\uc3\u945\~\_\-Z}`, "αZ"],
     ["control word", String.raw`{\rtf1\ansi A\u9\tab X}`, "A\tX"],
     ["group close", String.raw`{\rtf1\ansi{\u945}Z}`, "αZ"],
     ["group open", String.raw`{\rtf1\ansi\u945{Z}}`, "αZ"],
@@ -90,7 +106,7 @@ describe("question answer paths", () => {
     ["large fallback", String.raw`{\rtf1\ansi\uc20\u945????????????????????Z}`, "αZ"],
     ["no fallback", String.raw`{\rtf1\ansi\uc0\u945Z}`, "αZ"],
     ["scoped count", String.raw`{\rtf1\ansi{\uc2\u945??}\u946?Z}`, "αβZ"],
-  ] as const)("skips RTF Unicode fallback units: %s", ([name, source, expected]) =>
+  ] as const)("extracts RTF symbols and Unicode fallbacks: %s", ([name, source, expected]) =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const path = NodePath.join(config.attachmentsDir, `${name}.rtf`);

@@ -279,6 +279,21 @@ function* rtf(source: string): Generator<string, void> {
   if (!source.startsWith("{\\rtf")) throw new Error("Invalid RTF document");
   let state = { skip: false, uc: 1, decoder: new TextDecoder("windows-1252") };
   const stack: Array<typeof state> = [];
+  const symbols = new Map([
+    ["endash", "–"],
+    ["emdash", "—"],
+    ["enspace", "\u2002"],
+    ["emspace", "\u2003"],
+    ["qmspace", "\u2005"],
+    ["lquote", "‘"],
+    ["rquote", "’"],
+    ["ldblquote", "“"],
+    ["rdblquote", "”"],
+    ["bullet", "•"],
+    ["~", "\u00a0"],
+    ["_", "\u2011"],
+    ["-", ""],
+  ]);
   let fallback = 0;
   for (let i = 0; i < source.length; i++) {
     const char = source[i]!;
@@ -337,12 +352,13 @@ function* rtf(source: string): Generator<string, void> {
           fallback = state.uc;
         } else if (!state.skip && ["par", "line", "row"].includes(control)) yield "\n";
         else if (!state.skip && ["tab", "cell"].includes(control)) yield "\t";
+        else if (!state.skip && symbols.has(control)) yield symbols.get(control)!;
       } else {
         i++;
         if (fallback) fallback--;
         else if (rest[0] === "*") state.skip = true;
         else if (!state.skip && ["\\", "{", "}"].includes(rest[0]!)) yield rest[0]!;
-        else if (!state.skip && rest[0] === "~") yield " ";
+        else if (!state.skip && symbols.has(rest[0]!)) yield symbols.get(rest[0]!)!;
       }
     } else if (!state.skip && char !== "\n" && char !== "\r") {
       if (fallback) fallback--;
