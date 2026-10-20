@@ -38,6 +38,7 @@ import * as ScriptHandlers from "../project_script/handlers.ts";
 import { ProjectScriptToolkit } from "../project_script/tools.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as TerminalManager from "../../../terminal/Manager.ts";
+import { withWorkspaceLease } from "../../../workspace/workspaceLease.ts";
 import * as ProcessRunner from "../../../processRunner.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
@@ -557,6 +558,7 @@ const savedScriptFixture = Effect.gen(function* () {
     } satisfies ProjectRecord,
     partialWrite: false,
     beforeLock: (_id: ThreadId): Effect.Effect<void> => Effect.void,
+    beforeOpen: Effect.void,
   };
   const spawns: PtyAdapter.PtySpawnInput[] = [];
   const processes: Array<{ writes: string[]; killed: boolean; exit: () => void }> = [];
@@ -564,7 +566,8 @@ const savedScriptFixture = Effect.gen(function* () {
     logsDir: `${root}/logs`,
     processKillGraceMs: 1,
     shellResolver: () => "/bin/sh",
-    resolveProviderInstanceEnvironment: (id, env) => Effect.succeed({ ...env, TEST_PROVIDER: id }),
+    resolveProviderInstanceEnvironment: (id, env) =>
+      state.beforeOpen.pipe(Effect.as({ ...env, TEST_PROVIDER: id })),
     ptyAdapter: {
       spawn: (input) =>
         Effect.sync(() => {
@@ -862,6 +865,50 @@ it.layer(
         state.target = target;
       }
       expect(processes).toEqual([]);
+      for (const changed of ["caller", "target"] as const) {
+        const opening = yield* Deferred.make<void>();
+        state.beforeOpen = Deferred.succeed(opening, undefined).pipe(Effect.asVoid);
+        const run = {
+          threadId: target.id,
+          scriptId: script.id,
+          terminalId: `lease-${changed}`,
+        };
+        const running = yield* withWorkspaceLease(
+          target.worktreePath!,
+          Effect.gen(function* () {
+            const running = yield* handle("t3_project_script_run", run).pipe(Effect.forkScoped);
+            yield* Deferred.await(opening);
+            expect(processes).toHaveLength(changed === "caller" ? 0 : 1);
+            // Checkpoint rollback takes the executor lock while still holding this lease.
+            yield* executor
+              .withLock(
+                target.id,
+                Effect.sync(() => {
+                  state[changed] = { ...state[changed], interactionMode: "plan" };
+                }),
+              )
+              .pipe(
+                Effect.timeoutOrElse({
+                  duration: "2 seconds",
+                  orElse: () =>
+                    Effect.die(
+                      "Script startup held the executor lock while waiting for the workspace lease",
+                    ),
+                }),
+              );
+            return running;
+          }),
+        );
+        expect(yield* Fiber.join(running)).toMatchObject({
+          code: changed === "caller" ? "capability_denied" : "execution_policy_denied",
+        });
+        expect(processes.at(-1)).toMatchObject({ writes: [], killed: true });
+        state.caller = caller;
+        state.target = target;
+        expect(yield* handle("t3_project_script_stop", run)).toMatchObject({
+          code: "script_run_not_found",
+        });
+      }
     }),
   );
 
