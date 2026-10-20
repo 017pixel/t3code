@@ -15,7 +15,11 @@ function timestamp(seconds: number) {
 export function AudioFilePreview(props: { uri: string; onRetry: () => void }) {
   const player = usePlaybackAudioPlayer(props.uri);
   const status = useAudioPlayerStatus(player);
-  const playback = useMemo(() => createAudioPlaybackSession(player), [player]);
+  const [playbackRequested, setPlaybackRequested] = useState(false);
+  const playback = useMemo(
+    () => createAudioPlaybackSession(player, false, setPlaybackRequested),
+    [player],
+  );
   const [seekError, setSeekError] = useState(false);
   // Video teardown deactivates the shared iOS session, which would stop this player.
   useMediaAudioSessionHold(status.playing);
@@ -51,9 +55,11 @@ export function AudioFilePreview(props: { uri: string; onRetry: () => void }) {
           onPress={() => seek(Math.max(0, status.currentTime - 15))}
         />
         <Button
-          label={!status.isLoaded ? "Loading…" : status.playing ? "Pause" : "Play"}
+          label={
+            playbackRequested || status.playing ? "Pause" : !status.isLoaded ? "Loading…" : "Play"
+          }
           tone="secondary"
-          disabled={!status.isLoaded}
+          disabled={!status.isLoaded && !playbackRequested}
           onPress={() => {
             if (status.playing || playback.requested) playback.pause();
             else {

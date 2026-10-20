@@ -89,6 +89,7 @@ export function releaseAudioSession(token: AudioSessionToken): Promise<void> {
 export function createAudioPlaybackSession(
   player: { play(): void; pause(): void },
   nativePlayback = false,
+  onRequestedChange?: (requested: boolean) => void,
 ) {
   let token: AudioSessionToken | null = null;
   const stopPlayer = () => {
@@ -100,6 +101,7 @@ export function createAudioPlaybackSession(
   const pause = () => {
     const previous = token;
     token = null;
+    onRequestedChange?.(false);
     stopPlayer();
     if (previous) void releaseAudioSession(previous).catch(() => {});
   };
@@ -110,6 +112,7 @@ export function createAudioPlaybackSession(
       return null;
     }
     token = next;
+    onRequestedChange?.(true);
     return next;
   };
   return {

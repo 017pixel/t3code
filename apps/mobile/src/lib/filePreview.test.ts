@@ -61,10 +61,16 @@ vi.mock("react-native", () => ({
     onPress: () => void;
     disabled?: boolean;
     accessibilityLabel?: string;
+    accessibilityState?: { busy: boolean };
   }) =>
     createElement(
       "button",
-      { onClick: props.onPress, disabled: props.disabled, "aria-label": props.accessibilityLabel },
+      {
+        onClick: props.onPress,
+        disabled: props.disabled,
+        "aria-label": props.accessibilityLabel,
+        "aria-busy": props.accessibilityState?.busy,
+      },
       props.children,
     ),
 }));
@@ -215,7 +221,10 @@ describe("ThreadInlineFilePreview playback", () => {
     await act(async () => play.click());
     expect(audio.played).toHaveBeenCalledTimes(2);
     audio.player.pause.mockClear();
-    const recording = acquireAudioSession("recording");
+    let recording!: ReturnType<typeof acquireAudioSession>;
+    await act(async () => {
+      recording = acquireAudioSession("recording");
+    });
     expect(audio.player.pause).toHaveBeenCalledOnce();
     await activateAudioSession(recording);
     await act(async () => play.click());
@@ -244,11 +253,15 @@ describe("ThreadInlineFilePreview playback", () => {
         (button) => button.textContent === "Play",
       )!;
       await act(async () => play.click());
+      expect(play.textContent).toBe("Pause");
       let recording: ReturnType<typeof acquireAudioSession> | undefined;
       if (action === "pause") await act(async () => play.click());
       else if (action === "recording") {
-        recording = acquireAudioSession("recording");
-        await activateAudioSession(recording);
+        await act(async () => {
+          recording = acquireAudioSession("recording");
+        });
+        expect(play.textContent).toBe("Play");
+        await activateAudioSession(recording!);
       } else {
         await act(async () => root!.unmount());
         root = undefined;
@@ -293,53 +306,76 @@ describe("ThreadInlineFilePreview playback", () => {
       audio.status = { ...audio.status, playing: false, isBuffering: transition === "buffering" };
       await act(async () => render());
       expect(audio.player.pause).not.toHaveBeenCalled();
+      expect(
+        [...container.querySelectorAll("button")].map((button) => button.textContent),
+      ).toContain("Pause");
       audio.status = { ...audio.status, playing: true, isBuffering: false };
       await act(async () => render());
       expect(audio.played).toHaveBeenCalledOnce();
-      const recording = acquireAudioSession("recording");
+      let recording!: ReturnType<typeof acquireAudioSession>;
+      await act(async () => {
+        recording = acquireAudioSession("recording");
+      });
       expect(audio.player.pause).toHaveBeenCalledOnce();
       await releaseAudioSession(recording);
     },
   );
 
-  it.each(["pause", "end", "error"])("releases file viewer ownership on %s", async (action) => {
-    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-    audio.status = { ...audio.status, isLoaded: true };
-    const container = document.createElement("div");
-    root = createRoot(container);
-    const render = () =>
-      root!.render(
-        createElement(AudioFilePreview, {
-          uri: "https://example.com/sound.mp3",
-          onRetry() {},
-        }),
-      );
-    await act(async () => render());
-    await act(async () =>
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent === "Play")!
-        .click(),
-    );
-    audio.status = { ...audio.status, playing: true };
-    await act(async () => render());
-    if (action === "pause") {
+  it.each(["pause", "pause while buffering", "pause while loading", "end", "error"])(
+    "releases file viewer ownership on %s",
+    async (action) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      audio.status = { ...audio.status, isLoaded: true };
+      const container = document.createElement("div");
+      root = createRoot(container);
+      const render = () =>
+        root!.render(
+          createElement(AudioFilePreview, {
+            uri: "https://example.com/sound.mp3",
+            onRetry() {},
+          }),
+        );
+      await act(async () => render());
       await act(async () =>
         [...container.querySelectorAll("button")]
-          .find((button) => button.textContent === "Pause")!
+          .find((button) => button.textContent === "Play")!
           .click(),
       );
-    } else {
-      audio.status = { ...audio.status, playing: false, didJustFinish: action === "end" };
-      if (action === "error") Object.assign(audio.status, { error: "Playback failed" });
+      audio.status = { ...audio.status, playing: true };
       await act(async () => render());
-    }
-    expect(audio.player.pause).toHaveBeenCalled();
-    audio.player.pause.mockClear();
-    const recording = acquireAudioSession("recording");
-    expect(audio.player.pause).not.toHaveBeenCalled();
-    expect(audio.setActive).not.toHaveBeenCalledWith(false);
-    await releaseAudioSession(recording);
-  });
+      if (action.startsWith("pause")) {
+        if (action !== "pause") {
+          audio.status = {
+            ...audio.status,
+            playing: false,
+            isBuffering: true,
+            isLoaded: action !== "pause while loading",
+          };
+          await act(async () => render());
+        }
+        await act(async () =>
+          [...container.querySelectorAll("button")]
+            .find((button) => button.textContent === "Pause")!
+            .click(),
+        );
+      } else {
+        audio.status = { ...audio.status, playing: false, didJustFinish: action === "end" };
+        if (action === "error") Object.assign(audio.status, { error: "Playback failed" });
+        await act(async () => render());
+      }
+      expect(audio.player.pause).toHaveBeenCalled();
+      audio.status = { ...audio.status, playing: false, isBuffering: false, isLoaded: true };
+      await act(async () => render());
+      expect(
+        [...container.querySelectorAll("button")].map((button) => button.textContent),
+      ).toContain("Play");
+      audio.player.pause.mockClear();
+      const recording = acquireAudioSession("recording");
+      expect(audio.player.pause).not.toHaveBeenCalled();
+      expect(audio.setActive).not.toHaveBeenCalledWith(false);
+      await releaseAudioSession(recording);
+    },
+  );
 
   it.each(["buffering", "seek"])(
     "keeps video ownership through %s and resume, including recording takeover during the next wait",
@@ -706,9 +742,11 @@ describe("ThreadInlineFilePreview playback", () => {
       expect(audio.player.play).toHaveBeenCalledTimes(isLoaded ? 1 : 0);
       expect(button.disabled).toBe(false);
       expect(button.getAttribute("aria-label")).toBe("Pause audio");
+      expect(button.getAttribute("aria-busy")).toBe("true");
       await act(async () => button.click());
       expect(audio.player.pause).toHaveBeenCalled();
       expect(button.getAttribute("aria-label")).toBe("Play audio");
+      expect(button.getAttribute("aria-busy")).toBe("false");
       if (!isLoaded) await act(async () => resolve("https://example.com/sound.mp3"));
       expect(audio.player.play).toHaveBeenCalledTimes(isLoaded ? 1 : 0);
       if (!isLoaded) {
