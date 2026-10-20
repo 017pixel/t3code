@@ -15,7 +15,7 @@ import {
 } from "@t3tools/shared/composerContextClipboard";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, Profiler, useState, type ComponentProps, type ReactElement } from "react";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, onTestFinished, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
@@ -23,7 +23,7 @@ import "~/index.css";
 import { serverEnvironment } from "../../state/server";
 import { PullRequestLinkPreview } from "../pullRequest/PullRequestLinkPreview";
 import { Tooltip, TooltipPopup, TooltipScrollDismissArea, TooltipTrigger } from "../ui/tooltip";
-import { act, render } from "../../../test/render";
+import { act, render, stubGlobal } from "../../../test/render";
 import { MessagesTimeline, remarkThoughtPreview } from "./MessagesTimeline";
 import { parseMarkdownWithMath } from "@t3tools/shared/markdownMath";
 import { readTimelinePosition } from "./timelineScrollAnchoring";
@@ -42,6 +42,18 @@ vi.mock(import("~/state/query"), async (original) => ({
     refresh: () => {},
   })) as never,
 }));
+
+const audioAsset = vi.hoisted(() => ({ url: "" }));
+vi.mock(import("~/assets/assetUrls"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    useAssetUrlState: ((...args: Parameters<typeof actual.useAssetUrlState>) =>
+      audioAsset.url
+        ? { _tag: "Success", url: audioAsset.url }
+        : actual.useAssetUrlState(...args)) as typeof actual.useAssetUrlState,
+  };
+});
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const CREATED_AT = "2026-03-17T19:12:28.000Z";
@@ -883,6 +895,93 @@ describe("MessagesTimeline messages", () => {
 });
 
 describe("MessagesTimeline attachments", () => {
+  it("keeps playing audio mounted across virtualization until every player stops", async () => {
+    const NativeObserver = IntersectionObserver;
+    using _observer = stubGlobal(
+      "IntersectionObserver",
+      class extends NativeObserver {
+        constructor(
+          private readonly notify: IntersectionObserverCallback,
+          options?: IntersectionObserverInit,
+        ) {
+          super(notify, options);
+        }
+        override observe(target: Element) {
+          this.notify([{ target, isIntersecting: true } as IntersectionObserverEntry], this);
+        }
+      },
+    );
+    const src =
+      "data:audio/wav;base64,UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA";
+    audioAsset.url = src;
+    onTestFinished(() => {
+      audioAsset.url = "";
+    });
+    const props = baseProps();
+    await using screen = await renderTimeline(
+      [
+        message(
+          "Two recordings.",
+          {
+            attachments: ["one", "two"].map((name) => ({
+              type: "file",
+              id: `attachment-${name}`,
+              name: `${name}.wav`,
+              mimeType: "audio/wav",
+              sizeBytes: 45,
+              previewUrl: src,
+            })),
+          },
+          "audio",
+        ),
+        ...Array.from({ length: 40 }, (_, index) =>
+          message("Conversation history. ".repeat(40), { role: "user" }, `history-${index}`),
+        ),
+      ],
+      props,
+    );
+    screen.container.style.height = "600px";
+    screen.container.scrollIntoView({ block: "start" });
+    await vi.waitFor(
+      async () => {
+        await act(() => {
+          void props.listRef.current?.scrollToIndex({ index: 0, animated: false });
+        });
+        expect(screen.container.querySelectorAll("audio")).toHaveLength(2);
+      },
+      { timeout: 5000 },
+    );
+    const [one, two] = [...screen.container.querySelectorAll("audio")];
+    await act(async () => {
+      vi.spyOn(one!, "paused", "get").mockReturnValue(false);
+      vi.spyOn(two!, "paused", "get").mockReturnValue(false);
+      one!.dispatchEvent(new Event("play"));
+      two!.dispatchEvent(new Event("play"));
+    });
+    await vi.waitFor(async () => {
+      await act(() => {
+        void props.listRef.current!.scrollToEnd({ animated: false });
+      });
+      const scroll = props.listRef.current!.getScrollableNode()!;
+      expect(scroll.scrollTop).toBeGreaterThan(5000);
+    });
+    expect(one!.isConnected).toBe(true);
+    expect(two!.isConnected).toBe(true);
+    await act(async () => {
+      vi.spyOn(one!, "paused", "get").mockReturnValue(true);
+      one!.dispatchEvent(new Event("pause"));
+    });
+    expect(two!.isConnected).toBe(true);
+    await act(async () => {
+      vi.spyOn(two!, "paused", "get").mockReturnValue(true);
+      two!.dispatchEvent(new Event("pause"));
+    });
+    await act(() => {
+      void props.listRef.current!.scrollToIndex({ index: 20, animated: false });
+    });
+    await vi.waitFor(() => expect(one!.isConnected).toBe(false));
+  });
+
   const withAttachment = (attachment: Record<string, unknown>) =>
     message("Read the report.", {
       attachments: [
