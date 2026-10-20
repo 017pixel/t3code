@@ -270,6 +270,8 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
   const maxFirst = Math.max(0, props.count - headerRows - Math.floor(position.height / 29));
   const scale = Math.max(1, scrollHeight - position.height) / Math.max(1, maxFirst * 29);
   const first = Math.min(maxFirst, Math.floor(position.top / scale / 29)) + headerRows;
+  // The final mounted rows keep their measured height and scroll natively.
+  const nativeTail = first - headerRows === maxFirst;
   useLayoutEffect(() => {
     const node = ref.current;
     if (props.revealLine == null) {
@@ -296,7 +298,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
       event.deltaY * (event.deltaMode === 1 ? 29 : event.deltaMode === 2 ? node.clientHeight : 1);
     if (!delta) return;
     event.preventDefault();
-    node.scrollTop += delta * (maxFirst === 0 ? 1 : (scale * 29) / rowHeight());
+    node.scrollTop += delta * (nativeTail ? 1 : (scale * 29) / rowHeight());
   });
   useEffect(() => {
     const node = ref.current;
@@ -357,7 +359,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
       pendingReveal.current = null;
       return;
     }
-    node.scrollTop += delta * (maxFirst === 0 ? 1 : (scale * 29) / Math.max(29, bounds.height));
+    node.scrollTop += delta * (nativeTail ? 1 : (scale * 29) / Math.max(29, bounds.height));
     setTop(node.scrollTop);
   });
   return (
@@ -379,7 +381,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
                   : null;
         if (delta !== null) {
           event.preventDefault();
-          node.scrollTop += delta * (maxFirst === 0 ? 1 : (scale * 29) / rowHeight());
+          node.scrollTop += delta * (nativeTail ? 1 : (scale * 29) / rowHeight());
         } else if (event.key === "Home" || event.key === "End") {
           event.preventDefault();
           node.scrollTop = event.key === "Home" ? 0 : node.scrollHeight;
@@ -395,12 +397,10 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
             top:
               maxFirst === 0
                 ? 0
-                : position.top +
-                  (scrollHeight > position.height &&
-                  position.top > 0 &&
-                  position.top >= scrollHeight - position.height - 1
-                    ? position.height - layout.height
-                    : atStart
+                : nativeTail
+                  ? maxFirst * scale * 29 - layout.offset
+                  : position.top +
+                    (atStart
                       ? 0
                       : -layout.offset - ((position.top / scale / 29) % 1) * layout.rowHeight),
           }}
