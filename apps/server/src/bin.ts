@@ -14,6 +14,9 @@ if (
   })
 ) {
   const command = process.argv[2];
+  // Guard sockets before either dispatch path can load outbound-capable modules.
+  const { ignoreMacosTypeOfServiceEinval } = await import("./outboundHttp.ts");
+  ignoreMacosTypeOfServiceEinval();
   if (command === "__document-text") {
     const { extractDocumentText } = await import("./provider/documentTextWorker.ts");
     process.stdout.write(await extractDocumentText(process.argv[3]!, process.argv[4]!));
