@@ -1,39 +1,80 @@
+// Exercise the raw Node HTTP boundary before Effect attaches serving handlers.
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import {
-  guardHttpResponseWriteErrors,
-  holdRequestsUntilServing,
-} from "./httpResponseErrorGuard.ts";
+import * as HttpResponseErrorGuard from "./httpResponseErrorGuard.ts";
+
+const { guardHttpResponseWriteErrors } = HttpResponseErrorGuard;
 
 const servers: NodeHttp.Server[] = [];
+const requests: NodeHttp.ClientRequest[] = [];
+const sockets: NodeNet.Socket[] = [];
 
 function listen(server: NodeHttp.Server): Promise<number> {
   servers.push(server);
-  return new Promise((resolve) => {
+  server.on("connection", (socket) => sockets.push(socket));
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       resolve((server.address() as NodeNet.AddressInfo).port);
     });
   });
 }
 
-function fetchStatus(port: number, path: string): Promise<number> {
+function fetchResponse(
+  port: number,
+  path: string,
+  upgrade = false,
+): Promise<NodeHttp.IncomingMessage> {
   return new Promise((resolve, reject) => {
-    const request = NodeHttp.get({ host: "127.0.0.1", port, path }, (response) => {
-      response.resume();
-      resolve(response.statusCode ?? 0);
-    });
+    const request = NodeHttp.get(
+      {
+        host: "127.0.0.1",
+        port,
+        path,
+        agent: false,
+        headers: upgrade
+          ? {
+              connection: "Upgrade",
+              upgrade: "websocket",
+              "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+              "sec-websocket-version": "13",
+            }
+          : {},
+      },
+      (response) => {
+        response.on("error", reject);
+        response.on("end", () => resolve(response));
+        response.resume();
+      },
+    );
+    requests.push(request);
     request.on("error", reject);
-    request.setTimeout(5_000, () => reject(new Error("request timed out")));
+    request.on("upgrade", (response, socket) => {
+      socket.destroy();
+      resolve(response);
+    });
   });
 }
 
-afterEach(() => {
-  for (const server of servers.splice(0)) {
-    server.close();
+function fetchStatus(port: number, path: string): Promise<number> {
+  return fetchResponse(port, path).then((response) => response.statusCode ?? 0);
+}
+
+afterEach(async () => {
+  for (const request of requests.splice(0)) {
+    request.destroy();
   }
+  for (const socket of sockets.splice(0)) {
+    socket.destroy();
+  }
+  await Promise.all(
+    servers
+      .splice(0)
+      .map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
+  );
 });
 
 describe("guardHttpResponseWriteErrors", () => {
@@ -68,6 +109,7 @@ describe("guardHttpResponseWriteErrors", () => {
         ].join("\r\n"),
       );
     });
+    sockets.push(client);
     client.on("error", () => {});
 
     await failureObserved.promise;
@@ -105,84 +147,41 @@ describe("guardHttpResponseWriteErrors", () => {
   });
 });
 
-it("serves HTTP and websocket requests received before handlers attach", async () => {
-  const server = holdRequestsUntilServing(guardHttpResponseWriteErrors(NodeHttp.createServer()));
-  const port = await listen(server);
-  const parsed = Promise.withResolvers<void>();
-  let received = 0;
-  server.on("connection", (socket) =>
-    socket.once("data", () => {
-      if (++received === 2) parsed.resolve();
-    }),
-  );
-  const response = fetchStatus(port, "/early");
-  const client = NodeNet.connect(port, "127.0.0.1");
-  const upgrade = new Promise<string>((resolve, reject) => {
-    client.once("connect", () =>
-      client.write(
-        "GET /ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
-      ),
+describe("rejectRequestsUntilServing", () => {
+  it("rejects early HTTP and upgrades, then hands each off to its serving handler", async () => {
+    const writeErrors: unknown[] = [];
+    const server = HttpResponseErrorGuard.rejectRequestsUntilServing(
+      guardHttpResponseWriteErrors(NodeHttp.createServer(), (error) => writeErrors.push(error)),
     );
-    client.once("data", (data) => resolve(data.toString().split("\r\n")[0]!));
-    client.once("error", reject);
-  });
-  try {
-    await parsed.promise;
-    server.on("request", (_, outgoing) => {
-      outgoing.writeHead(204);
-      outgoing.end();
+    const port = await listen(server);
+
+    const earlyHttp = await fetchResponse(port, "/");
+    expect(earlyHttp.statusCode).toBe(503);
+    expect(earlyHttp.headers["retry-after"]).toBe("1");
+
+    const earlyUpgrade = await fetchResponse(port, "/rpc", true);
+    expect(earlyUpgrade.statusCode).toBe(503);
+    expect(earlyUpgrade.headers["retry-after"]).toBe("1");
+
+    server.on("request", (_request, response) => response.writeHead(204).end());
+
+    const servingHttp = await fetchResponse(port, "/");
+    expect(servingHttp.statusCode).toBe(204);
+    expect(servingHttp.headers["retry-after"]).toBeUndefined();
+
+    const pendingUpgrade = await fetchResponse(port, "/rpc", true);
+    expect(pendingUpgrade.statusCode).toBe(503);
+    expect(pendingUpgrade.headers["retry-after"]).toBe("1");
+
+    server.on("upgrade", (_request, socket) => {
+      socket.end(
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+      );
     });
-    server.on("upgrade", (_, socket) => socket.end("HTTP/1.1 101 Switching Protocols\r\n\r\n"));
-    await expect(response).resolves.toBe(204);
-    await expect(upgrade).resolves.toBe("HTTP/1.1 101 Switching Protocols");
-  } finally {
-    client.destroy();
-    server.closeAllConnections();
-  }
-});
 
-it("bounds pending HTTP and upgrade admission and serves requests after attachment", async () => {
-  const server = holdRequestsUntilServing(guardHttpResponseWriteErrors(NodeHttp.createServer()));
-  const sockets: NodeNet.Socket[] = [];
-  const handled: string[] = [];
-  const send = (kind: "request" | "upgrade", url: string) => {
-    const socket = new NodeNet.Socket();
-    sockets.push(socket);
-    const request = new NodeHttp.IncomingMessage(socket);
-    request.url = url;
-    const response = new NodeHttp.ServerResponse(request);
-    response.assignSocket(socket);
-    if (kind === "request") server.emit(kind, request, response);
-    else server.emit(kind, request, socket, Buffer.alloc(0));
-    return { socket, response };
-  };
-
-  try {
-    // Both event types share the startup budget; two independent limits would
-    // retain twice as many requests.
-    const admitted = Array.from({ length: 256 }, (_, i) => `/early/${i}`);
-    admitted.forEach((url, i) => send(i % 2 === 0 ? "request" : "upgrade", url));
-    const excessHttp = send("request", "/excess-http");
-    const excessUpgrade = send("upgrade", "/excess-upgrade");
-    expect.soft(excessHttp.socket.destroyed || excessHttp.response.writableEnded).toBe(true);
-    expect.soft(excessUpgrade.socket.destroyed || excessUpgrade.socket.writableEnded).toBe(true);
-
-    server.on("request", (request, response) => {
-      handled.push(request.url!);
-      response.end();
-    });
-    server.on("upgrade", (request, socket) => {
-      handled.push(request.url!);
-      socket.destroy();
-    });
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
-    expect.soft(handled.toSorted()).toEqual(admitted.toSorted());
-
-    handled.length = 0;
-    send("request", "/after-http");
-    send("upgrade", "/after-upgrade");
-    expect(handled).toEqual(["/after-http", "/after-upgrade"]);
-  } finally {
-    for (const socket of sockets) socket.destroy();
-  }
+    const servingUpgrade = await fetchResponse(port, "/rpc", true);
+    expect(servingUpgrade.statusCode).toBe(101);
+    expect(servingUpgrade.headers["retry-after"]).toBeUndefined();
+    expect(writeErrors).toEqual([]);
+  }, 5_000);
 });
