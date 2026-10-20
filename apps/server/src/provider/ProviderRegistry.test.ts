@@ -2096,11 +2096,18 @@ it.layer(
             ProviderDriverKind.make("other"),
           ),
         ];
+        const lockHome = yield* FileSystem.FileSystem.use((fileSystem) =>
+          fileSystem.makeTempDirectoryScoped({ prefix: "t3-registry-install-lock-" }),
+        ).pipe(Effect.provide(NodeServices.layer));
         const scope = yield* Scope.make();
         yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
         const runtimeServices = yield* Layer.build(
           ProviderMaintenanceRunner.layer.pipe(
-            Layer.provideMerge(ProviderInstallLock.layer),
+            Layer.provideMerge(
+              ProviderInstallLock.layer.pipe(
+                Layer.provide(Layer.succeed(HostProcess.Environment, { XDG_CACHE_HOME: lockHome })),
+              ),
+            ),
             Layer.provideMerge(ProviderRegistry.layer),
             Layer.provideMerge(
               Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
@@ -2133,26 +2140,23 @@ it.layer(
             ),
             Layer.provideMerge(Layer.succeed(HostProcess.Platform, "linux")),
             Layer.provideMerge(
-              Layer.succeed(
-                ProviderMaintenanceRunner.ProviderInstaller,
-                ProviderMaintenanceRunner.ProviderInstaller.of({
-                  run: (input) =>
-                    Effect.sync(() => {
-                      assert.strictEqual(input.command, "/personal/agent");
-                      assert.deepStrictEqual(input.args, ["update"]);
-                      assert.strictEqual(input.env?.PROVIDER_HOME, "/personal");
-                      events.push("update");
-                      return {
-                        stdout: "updated",
-                        stderr: "",
-                        exitCode: 0,
-                        timedOut: false,
-                        stdoutTruncated: false,
-                        stderrTruncated: false,
-                      };
-                    }),
-                }),
-              ),
+              Layer.succeed(ProviderMaintenanceRunner.ProviderInstaller, {
+                run: (input) =>
+                  Effect.sync(() => {
+                    assert.strictEqual(input.command, "/personal/agent");
+                    assert.deepStrictEqual(input.args, ["update"]);
+                    assert.strictEqual(input.env?.PROVIDER_HOME, "/personal");
+                    events.push("update");
+                    return {
+                      stdout: "updated",
+                      stderr: "",
+                      exitCode: 0,
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    };
+                  }),
+              }),
             ),
             Layer.provideMerge(
               ServerConfig.layerTest(process.cwd(), {

@@ -44,50 +44,49 @@ export const layer = Layer.effectDiscard(
     );
 
     /** Chooses what to install for one instance and spends its retry budget, or returns undefined. */
-    const pick = (instanceId: ProviderInstanceId) =>
-      Effect.gen(function* () {
-        if (!(yield* enabled)) return undefined;
-        const current = (yield* providers.getProviders).find(
-          (candidate) => candidate.instanceId === instanceId,
-        );
-        const updateStatus = current?.updateState?.status;
-        if (
-          !current?.enabled ||
-          !current.installed ||
-          updateStatus === "queued" ||
-          updateStatus === "running"
-        ) {
-          return undefined;
-        }
-        // A headless service has no client refreshing advisories, so look up the newest release here.
-        const capabilities = yield* providers.getProviderMaintenanceCapabilitiesForInstance(
-          instanceId,
-          current.driver,
-        );
-        const advisory = (yield* enrichProviderSnapshotWithVersionAdvisory(current, capabilities, {
-          enableProviderUpdateChecks: true,
-        }).pipe(
-          Effect.provideService(HttpClient.HttpClient, httpClient),
-          Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
-        )).versionAdvisory;
-        const targetVersion = advisory?.latestVersion;
-        if (advisory?.status !== "behind_latest" || !advisory.canUpdate || !targetVersion) {
-          return undefined;
-        }
-        const nowMs = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
-        for (const [key, attemptedAt] of attempts) {
-          if (nowMs - attemptedAt >= Duration.toMillis(RETRY_AFTER)) attempts.delete(key);
-        }
-        const attemptKey = `${instanceId}@${targetVersion}`;
-        if (attempts.has(attemptKey)) return undefined;
-        attempts.set(attemptKey, nowMs);
-        yield* Effect.logInfo("Updating provider in the background", {
-          instanceId,
-          fromVersion: current.version,
-          targetVersion,
-        });
-        return { provider: current.driver, targetVersion, attemptKey };
+    const pick = Effect.fn("ProviderAutoUpdater.pick")(function* (instanceId: ProviderInstanceId) {
+      if (!(yield* enabled)) return undefined;
+      const current = (yield* providers.getProviders).find(
+        (candidate) => candidate.instanceId === instanceId,
+      );
+      const updateStatus = current?.updateState?.status;
+      if (
+        !current?.enabled ||
+        !current.installed ||
+        updateStatus === "queued" ||
+        updateStatus === "running"
+      ) {
+        return undefined;
+      }
+      // A headless service has no client refreshing advisories, so look up the newest release here.
+      const capabilities = yield* providers.getProviderMaintenanceCapabilitiesForInstance(
+        instanceId,
+        current.driver,
+      );
+      const advisory = (yield* enrichProviderSnapshotWithVersionAdvisory(current, capabilities, {
+        enableProviderUpdateChecks: true,
+      }).pipe(
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+        Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
+      )).versionAdvisory;
+      const targetVersion = advisory?.latestVersion;
+      if (advisory?.status !== "behind_latest" || !advisory.canUpdate || !targetVersion) {
+        return undefined;
+      }
+      const nowMs = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+      for (const [key, attemptedAt] of attempts) {
+        if (nowMs - attemptedAt >= Duration.toMillis(RETRY_AFTER)) attempts.delete(key);
+      }
+      const attemptKey = `${instanceId}@${targetVersion}`;
+      if (attempts.has(attemptKey)) return undefined;
+      attempts.set(attemptKey, nowMs);
+      yield* Effect.logInfo("Updating provider in the background", {
+        instanceId,
+        fromVersion: current.version,
+        targetVersion,
       });
+      return { provider: current.driver, targetVersion, attemptKey };
+    });
 
     const pass = Effect.gen(function* () {
       if (!(yield* enabled)) return;

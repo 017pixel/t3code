@@ -1068,6 +1068,21 @@ describe("providerMaintenanceRunner", () => {
             background: true,
           });
         }
+        // OpenCode reports its helper as `version` and the CLI as `installedVersion`.
+        const { registry } = yield* makeVersionedRegistry(() => "1.0.0");
+        const helperBehind = Effect.succeed([
+          { ...baseProvider, version: "1.0.0", installedVersion: "9.9.9" },
+        ]);
+        const runner = yield* makeTestRunner({
+          ...registry,
+          getProviders: helperBehind,
+          refreshInstance: () => helperBehind,
+        });
+        yield* runner.updateProvider({
+          provider: CODEX_DRIVER,
+          targetVersion: "9.9.9",
+          background: true,
+        });
         assert.deepStrictEqual(calls, []);
       }).pipe(
         Effect.provide(
