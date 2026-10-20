@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- the stop test drives real server processes.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeNet from "node:net";
 
@@ -574,13 +575,13 @@ effectIt.effect.each(["linux", "darwin"] as const)(
       expect(yield* scanner.scan()).toEqual([]);
       expect(lsofCalls).toBe(0);
 
-      const release = scanner.trackAgent();
+      // The agent exits before any client looks; its server is still found.
+      scanner.trackAgent()();
       expect(yield* scanner.scan()).toMatchObject([
         { port: agentPort, pid: 4242, terminal: null, agent: { threadId: "thread-agent" } },
       ]);
       expect(requests).toEqual([`http://localhost:${agentPort}/`]);
 
-      release();
       expect(yield* scanner.scan()).toHaveLength(1);
       expect(environmentReads).toBe(platform === "linux" ? 2 : 1);
 
@@ -592,6 +593,48 @@ effectIt.effect.each(["linux", "darwin"] as const)(
     }).pipe(Effect.provide(layer));
   },
 );
+
+effectIt.effect("forgets agent pids while no client scans, since they can be reused", () => {
+  const port = 43_126;
+  let environ = `${PortScanner.AGENT_THREAD_ENV}=thread-agent\0`;
+  const missing = FileSystem.makeNoop({});
+  const layer = PortScanner.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        FileSystem.layerNoop({
+          readFileString: (path) =>
+            path === "/proc/4242/environ" ? Effect.succeed(environ) : missing.readFileString(path),
+        }),
+        Layer.succeed(ProcessRunner.ProcessRunner, {
+          run: () => Effect.succeed(processOutput(`p4242\ncnode\nn127.0.0.1:${port}\n`)),
+        }),
+        Layer.succeed(HostProcess.Platform, "linux"),
+        FetchHttpClient.layer.pipe(
+          Layer.provide(
+            Layer.succeed(FetchHttpClient.Fetch, () =>
+              Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } })),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    scanner.trackAgent()();
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* scanner.retain;
+        expect(yield* scanner.scan()).toMatchObject([
+          { pid: 4242, agent: { threadId: "thread-agent" } },
+        ]);
+      }),
+    );
+    // While nobody scanned, the server exited and an unrelated listener got its pid.
+    environ = "PATH=/usr/bin\0";
+    expect(yield* scanner.scan()).toEqual([]);
+  }).pipe(Effect.provide(layer));
+});
 
 effectIt.effect("stops only a job's own process group", () =>
   Effect.sync(() => {

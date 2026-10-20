@@ -37,8 +37,9 @@ export function ThreadServersPanel(props: {
   const canStop = useAtomValue(
     previewEnvironment.stopLocalServer.permissionAtom(props.environmentId),
   );
-  const isWindows =
-    useEnvironment(props.environmentId)?.serverConfig?.environment.platform.os === "windows";
+  const supportsStop =
+    useEnvironment(props.environmentId)?.serverConfig?.environment.capabilities.localServerStop ===
+    true;
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const stopServer = useAtomCommand(previewEnvironment.stopLocalServer, {
     label: "thread server stop",
@@ -97,7 +98,7 @@ export function ThreadServersPanel(props: {
                   .join(" · ")}
               </span>
             </ThreadDetailsControl>
-            {canStop && !isWindows && server.pid !== null ? (
+            {canStop && supportsStop && server.pid !== null ? (
               <Tooltip>
                 <TooltipTrigger
                   render={

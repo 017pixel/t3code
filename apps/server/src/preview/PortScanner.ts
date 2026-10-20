@@ -515,9 +515,13 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   >(new Map());
   const socketOwnerMissesRef = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
   // Each current listener pid's agent thread, or null without one. A process keeps its launch
-  // environment, so a pid is read once while it listens.
+  // environment, so a pid is read once while it listens. Cleared while no client retains the
+  // scanner, since unscanned pids can be reused.
   const agentThreadsRef = yield* Ref.make<ReadonlyMap<number, ThreadId | null>>(new Map());
   let runningAgents = 0;
+  // An agent that exited, or a cache cleared with a marked listener, owes one listener read: the
+  // servers it left may still run.
+  let agentScanPending = false;
 
   const readAgentThreads = Effect.fn("PortDiscovery.readAgentThreads")(function* (
     pids: ReadonlyArray<number>,
@@ -880,7 +884,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     const agentsPossible =
       hostPlatform !== "win32" &&
       (runningAgents > 0 ||
+        agentScanPending ||
         [...(yield* Ref.get(agentThreadsRef)).values()].some((threadId) => threadId !== null));
+    if (agentsPossible) agentScanPending = false;
     if (terminalOwners.size === 0 && configuredUrls.length === 0 && !agentsPossible) {
       return { discovered: [], configured: new Map() } satisfies WebProbeSnapshot;
     }
@@ -1009,11 +1015,19 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     }
   });
 
-  const retain: PortDiscovery["Service"]["retain"] = Effect.acquireRelease(acquireRetention(), () =>
-    Ref.update(stateRef, (state) => ({
-      ...state,
-      retainCount: Math.max(0, state.retainCount - 1),
-    })),
+  const releaseRetention = Effect.gen(function* () {
+    const idle = yield* Ref.modify(stateRef, (state) => {
+      const retainCount = Math.max(0, state.retainCount - 1);
+      return [retainCount === 0, { ...state, retainCount }];
+    });
+    if (!idle) return;
+    const threads = yield* Ref.getAndSet(agentThreadsRef, new Map());
+    if ([...threads.values()].some((threadId) => threadId !== null)) agentScanPending = true;
+  });
+
+  const retain: PortDiscovery["Service"]["retain"] = Effect.acquireRelease(
+    acquireRetention(),
+    () => releaseRetention,
   );
 
   const subscribe: PortDiscovery["Service"]["subscribe"] = Effect.fn("PortDiscovery.subscribe")(
@@ -1074,6 +1088,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       if (released) return;
       released = true;
       runningAgents -= 1;
+      agentScanPending = true;
     };
   };
 
@@ -1092,7 +1107,13 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     if (hostPlatform === "win32") {
       return yield* new PreviewStopLocalServerError({ reason: "unsupported" });
     }
-    // The pid comes from a client, so only a server this scan attributes to a thread is signaled.
+    // The pid comes from a client, so only a server this scan attributes to a thread is signaled,
+    // from its environment as read now.
+    yield* Ref.update(agentThreadsRef, (threads) => {
+      const next = new Map(threads);
+      next.delete(input.pid);
+      return next;
+    });
     const listed = (yield* scanOnce()).some(
       (server) => server.pid === input.pid && server.port === input.port && isOwned(server),
     );
