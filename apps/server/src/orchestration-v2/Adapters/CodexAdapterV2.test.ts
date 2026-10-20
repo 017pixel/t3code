@@ -8281,6 +8281,182 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("does not fence peers after interrupting the first start of a resumed root", () =>
+    Effect.gen(function* () {
+      const root = "resumed-interrupted-root";
+      const peer = "resumed-interrupted-peer";
+      const awaitingReply = yield* Deferred.make<void>();
+      const releaseReply = yield* Deferred.make<void>();
+      const processed = yield* Deferred.make<void>();
+      const rootRead = yield* Deferred.make<void>();
+      const clientReady = yield* Deferred.make<CodexClient.CodexAppServerClient["Service"]>();
+      const rootReads: Array<unknown> = [];
+      const transcript = makeCodexReplayTranscript({
+        scenario: "resumed-root-interrupted-start",
+        entries: [
+          ...codexReplayPreamble({
+            nativeThreadId: peer,
+            nativeTurnId: "unused",
+            prompt: "unused",
+          }).slice(0, 5),
+          {
+            type: "expect_outbound",
+            frame: {
+              id: 3,
+              method: "thread/resume",
+              params: {
+                threadId: root,
+                excludeTurns: true,
+                config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            frame: { id: 3, result: { thread: { id: root, updatedAt: 1782622450 } } },
+          },
+          ...codexReplayPreamble({
+            nativeThreadId: root,
+            nativeTurnId: "interrupted-root-turn",
+            prompt: "Continue",
+          })
+            .slice(5)
+            .map((entry) => (entry.label === "turn/start" ? withReplayRequestId(entry, 4) : entry)),
+          {
+            type: "expect_outbound",
+            frame: { id: 5, method: "thread/unsubscribe", params: { threadId: peer } },
+          },
+          { type: "emit_inbound", frame: { id: 5, result: { status: "unsubscribed" } } },
+          { type: "emit_inbound", frame: { method: "thread/closed", params: { threadId: peer } } },
+        ],
+      });
+      const driver = yield* CodexReplay.makeReplayDriver(transcript, {
+        beforeEmitInbound: (entry) =>
+          entry.label === "turn/start"
+            ? Deferred.succeed(awaitingReply, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseReply)),
+              )
+            : Effect.void,
+      });
+      const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
+        instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CODEX_SETTINGS,
+        environment: {},
+        clientFactory: {
+          open: (input) =>
+            Effect.gen(function* () {
+              const context = yield* Layer.build(CodexReplay.layerReplayWithDriver(driver));
+              const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+                Effect.provide(context),
+              );
+              yield* Deferred.succeed(clientReady, client);
+              return {
+                ...client,
+                raw: {
+                  ...client.raw,
+                  request: (method, params) =>
+                    method === "thread/read"
+                      ? Effect.sync(() => {
+                          rootReads.push(params);
+                          return {
+                            thread: { id: root, parentThreadId: null, source: "vscode" },
+                          };
+                        }).pipe(Effect.tap(() => Deferred.succeed(rootRead, undefined)))
+                      : client.raw.request(method, params),
+                },
+              } satisfies CodexClient.CodexAppServerClient["Service"];
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterOpenSessionError({
+                    driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                    providerSessionId: input.providerSessionId,
+                    cause,
+                  }),
+              ),
+            ),
+        },
+        crypto: yield* Crypto.Crypto,
+        fileSystem: yield* FileSystem.FileSystem,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+        serverConfig: yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
+      });
+      const runtime = yield* adapter.openSession({
+        threadId: ThreadId.make(root),
+        providerSessionId: ProviderSessionId.make("resumed-interrupted-session"),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      const client = yield* Deferred.await(clientReady);
+      // The client dispatches handlers in registration order, after the adapter.
+      yield* client.handleServerNotification("turn/started", () =>
+        Deferred.succeed(processed, undefined).pipe(Effect.asVoid),
+      );
+      const peerThread = yield* runtime.ensureThread({
+        threadId: ThreadId.make(peer),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      const rootThread = yield* runtime.resumeThread({
+        providerThread: {
+          ...peerThread,
+          id: ProviderThreadId.make("saved-root-provider-thread"),
+          appThreadId: ThreadId.make(root),
+          nativeThreadRef: {
+            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+            nativeId: root,
+            strength: "strong",
+          },
+        },
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      assert.equal(rootThread.nativeThreadRef?.nativeId, root);
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      const start = yield* runtime
+        .startTurn(
+          makeCodexTestTurnInput({
+            threadId: ThreadId.make(root),
+            providerThread: rootThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("resumed-interrupted-attempt"),
+            text: "Continue",
+          }),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(awaitingReply);
+      assert.isNull((yield* Ref.get(driver.state)).failure);
+      yield* Fiber.interrupt(start);
+      assert.equal((yield* Fiber.await(start))._tag, "Failure");
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      yield* Deferred.succeed(releaseReply, undefined);
+      yield* Deferred.await(processed);
+      // A root recognized before probing needs no read; a fenced peer must also
+      // recover when the metadata response proves this is a parentless root.
+      if (yield* runtime.hasPendingBackgroundWorkForThread!(peerThread))
+        yield* Deferred.await(rootRead);
+      const pending = yield* runtime.hasPendingBackgroundWorkForThread!(peerThread);
+      const unloaded = yield* runtime.unloadThread!({ providerThread: peerThread }).pipe(
+        Effect.result,
+      );
+      for (const params of rootReads)
+        assert.deepEqual(params, { threadId: root, includeTurns: false });
+      assert.isFalse(
+        pending,
+        `resumed root fenced its peer after ${rootReads.length} successful root reads`,
+      );
+      assert.equal(unloaded._tag, "Success");
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isNull((yield* Ref.get(driver.state)).failure);
+      assert.equal((yield* Ref.get(driver.state)).cursor, transcript.entries.length);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect("recovers out-of-order native ancestry and releases only the completed subtree", () =>
     Effect.gen(function* () {
       const root = "owned-root",
