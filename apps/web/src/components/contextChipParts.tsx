@@ -170,6 +170,7 @@ export function ImageChipButton({
   size,
   suffix,
   disabled,
+  onPreviewError,
   style,
   ...props
 }: Omit<ComponentProps<typeof ContextChip>, "kind" | "render"> & {
@@ -178,6 +179,7 @@ export function ImageChipButton({
   size: string;
   suffix?: string | null | undefined;
   disabled?: boolean | undefined;
+  onPreviewError?: (() => void) | undefined;
 }) {
   const [sample, setSample] = useState<{ url: string; color: string | undefined }>();
   const [corsFailedUrl, setCorsFailedUrl] = useState<string>();
@@ -197,7 +199,10 @@ export function ImageChipButton({
           src={previewUrl}
           alt=""
           className="size-[1.17em] shrink-0 rounded-sm object-cover"
-          onError={() => setCorsFailedUrl(previewUrl)}
+          onError={() => {
+            if (corsFailedUrl === previewUrl) onPreviewError?.();
+            else setCorsFailedUrl(previewUrl);
+          }}
           onLoad={(event) =>
             setSample({ url: previewUrl, color: averageImageColor(event.currentTarget) })
           }
@@ -278,6 +283,7 @@ export function FileChip(props: {
 function SvgFileChip(props: ComponentProps<typeof FileChip>) {
   const preview = props.svgPreview;
   const [local, setLocal] = useState<{ file: Blob; url: string }>();
+  const [failedPreviewUrl, setFailedPreviewUrl] = useState<string>();
   const asset = useAssetUrlState(
     preview?.file ? null : (preview?.environmentId ?? null),
     preview?.attachmentId
@@ -305,6 +311,9 @@ function SvgFileChip(props: ComponentProps<typeof FileChip>) {
     : asset._tag === "Success"
       ? asset.url
       : undefined;
+  if (url !== undefined && failedPreviewUrl === url) {
+    return <FileChip {...props} svgPreview={undefined} />;
+  }
   return (
     <Tooltip>
       <TooltipTrigger
@@ -316,6 +325,7 @@ function SvgFileChip(props: ComponentProps<typeof FileChip>) {
             suffix={props.suffix}
             disabled={props.disabled}
             onClick={props.onOpen}
+            onPreviewError={() => setFailedPreviewUrl(url)}
             data-markdown-copy={props.copyMarkdown}
             aria-label={props.accessibleLabel}
             {...(props.error ? { state: "invalid" as const } : {})}
