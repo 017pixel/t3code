@@ -1038,6 +1038,7 @@ export default function FilePreviewPanel({
     relativePath,
     attachment === undefined && relativePath !== null,
   );
+  const [fileRefreshRevision, setFileRefreshRevision] = useState(0);
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // A chat link cannot tell a folder from a file, so a folder arrives here as
   // a file surface and the read fails. Keep the breadcrumbs, drop the preview
@@ -1408,7 +1409,7 @@ export default function FilePreviewPanel({
             !isMermaid &&
             !isHtml ? (
             <WorkspaceLargeTextPreview
-              key={`${absolutePath}:${renderTable}`}
+              key={`${absolutePath}:${renderTable}:${fileRefreshRevision}`}
               environmentId={environmentId}
               threadRef={threadRef}
               absolutePath={absolutePath}
@@ -1538,7 +1539,12 @@ export default function FilePreviewPanel({
               onOpenFile={onOpenFile}
               workspaceMutationId={workspaceMutationId}
               {...(previewPath && !isMedia && !isPdf && !isDocument
-                ? { onRefreshSelectedFile: file.refresh }
+                ? {
+                    onRefreshSelectedFile: () => {
+                      file.refresh();
+                      setFileRefreshRevision((value) => value + 1);
+                    },
+                  }
                 : {})}
             />
           </aside>

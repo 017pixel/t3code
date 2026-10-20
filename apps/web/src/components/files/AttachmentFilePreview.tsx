@@ -158,7 +158,9 @@ export function AttachmentFilePreview(props: {
   }, [props.file, refresh, revision]);
   const url = props.file ? localUrl : remoteUrl;
   const streamsText =
-    kind === "text" && (props.sizeBytes === 0 || props.sizeBytes > FILE_TEXT_PREVIEW_MAX_BYTES);
+    kind === "text" &&
+    (props.sizeBytes > FILE_TEXT_PREVIEW_MAX_BYTES ||
+      (props.sizeBytes === 0 && (!resource || resource._tag === "attachment")));
   const needsText =
     kind === "text" || kind === "markdown" || kind === "mermaid" || (kind === "html" && !rendered);
   useEffect(() => {
