@@ -1019,6 +1019,10 @@ export class PreviewAutomationInvalidSelectorError extends Schema.TaggedError<Pr
   override get message(): string {
     if (this.staleRef)
       return "This element ref is stale. Navigation, dialogs, and new snapshots replace refs; take a fresh snapshot and use its refs.";
+    // The locator can quote page text, so name the accepted form instead of echoing it.
+    if (this.selectorKind === "locator") {
+      return "`locator` accepts `aria-ref=<ref>` or a Playwright role/text selector. Pass CSS (including `:has()`) in `selector`.";
+    }
     if (this.selectorKind !== undefined && this.selectorLength !== undefined) {
       return `Preview automation ${this.operation} received an invalid ${this.selectorKind} (${this.selectorLength} characters).`;
     }

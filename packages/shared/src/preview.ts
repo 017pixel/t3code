@@ -55,6 +55,27 @@ export function isLoopbackHost(host: string): boolean {
   return false;
 }
 
+// The raw URL stays out of the message. It can hold credentials, and a failed
+// parse reports the https: prefix added to a non-web scheme such as about:.
+const previewUrlRule =
+  "Only absolute http(s) URLs or schemeless hosts are allowed. Omit `url` to open a blank tab.";
+
+function invalidPreviewUrlMessage(input: {
+  readonly reason: "empty" | "parse" | "unsupported-protocol";
+  readonly protocol?: string | undefined;
+}): string {
+  switch (input.reason) {
+    case "empty":
+      return `The preview URL is empty. ${previewUrlRule}`;
+    case "unsupported-protocol":
+      return input.protocol === undefined
+        ? `This preview URL scheme is not allowed. ${previewUrlRule}`
+        : `The preview URL scheme \`${input.protocol}\` is not allowed. Only http: and https: are allowed, or a schemeless host. Omit \`url\` to open a blank tab.`;
+    case "parse":
+      return previewUrlRule;
+  }
+}
+
 export class PreviewUrlNormalizationError extends Schema.TaggedError<PreviewUrlNormalizationError>()(
   "PreviewUrlNormalizationError",
   {
@@ -65,8 +86,7 @@ export class PreviewUrlNormalizationError extends Schema.TaggedError<PreviewUrlN
   },
 ) {
   override get message(): string {
-    const protocol = this.protocol === undefined ? "" : `: ${this.protocol}`;
-    return `Invalid preview URL (${this.reason}${protocol}; input length ${this.inputLength}).`;
+    return invalidPreviewUrlMessage(this);
   }
 }
 

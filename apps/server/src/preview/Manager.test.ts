@@ -217,6 +217,9 @@ it.layer(layer)("PreviewManager", (it) => {
       expect(error._tag).toBe("PreviewInvalidUrlError");
       expect(error).toMatchObject({ inputLength: 3, reason: "empty" });
       expect(error).not.toHaveProperty("rawUrl");
+      expect(error.message).toBe(
+        "The preview URL is empty. Only absolute http(s) URLs or schemeless hosts are allowed. Omit `url` to open a blank tab.",
+      );
       expect(error.cause).toBeInstanceOf(PreviewUrlNormalizationError);
       expect((error.cause as PreviewUrlNormalizationError).reason).toBe("empty");
     }),
@@ -238,6 +241,9 @@ it.layer(layer)("PreviewManager", (it) => {
       expect(error.cause).toBeInstanceOf(PreviewUrlNormalizationError);
       const normalizationError = error.cause as PreviewUrlNormalizationError;
       expect(normalizationError.cause).toBeInstanceOf(Error);
+      expect(error.message).toBe(
+        "Only absolute http(s) URLs or schemeless hosts are allowed. Omit `url` to open a blank tab.",
+      );
       expect(error.message).not.toContain((normalizationError.cause as Error).message);
       expect(error.message).not.toMatch(/user|password|access_token|secret|fragment/);
     }),

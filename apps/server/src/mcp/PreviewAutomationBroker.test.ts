@@ -416,7 +416,7 @@ it.effect("preserves bounded request and remote selector diagnostics", () => {
         remoteDetailKind: "object",
       });
       expect(error.message).toBe(
-        `Preview automation click received an invalid locator (${locator.length} characters).`,
+        "`locator` accepts `aria-ref=<ref>` or a Playwright role/text selector. Pass CSS (including `:has()`) in `selector`.",
       );
       expect(error.message).not.toContain("secret");
       expect(error.cause).toBe(remoteError);

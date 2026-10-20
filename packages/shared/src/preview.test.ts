@@ -198,6 +198,9 @@ describe("normalizePreviewUrl", () => {
       expect(error).toMatchObject({ inputLength: 3, reason: "empty" });
       expect(error).not.toHaveProperty("rawUrl");
       expect("cause" in (error as object)).toBe(false);
+      expect((error as PreviewUrlNormalizationError).message).toBe(
+        "The preview URL is empty. Only absolute http(s) URLs or schemeless hosts are allowed. Omit `url` to open a blank tab.",
+      );
     }
   });
 
@@ -212,6 +215,27 @@ describe("normalizePreviewUrl", () => {
         reason: "unsupported-protocol",
         protocol: "ftp:",
       });
+      expect((error as PreviewUrlNormalizationError).message).toBe(
+        "The preview URL scheme `ftp:` is not allowed. Only http: and https: are allowed, or a schemeless host. Omit `url` to open a blank tab.",
+      );
+    }
+  });
+
+  it("tells preview_open that about:blank is not an allowed URL", () => {
+    try {
+      normalizePreviewUrl("about:blank");
+      expect.unreachable("expected URL normalization to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PreviewUrlNormalizationError);
+      expect(error).toMatchObject({
+        inputLength: "about:blank".length,
+        reason: "parse",
+        protocol: "https:",
+      });
+      expect((error as PreviewUrlNormalizationError).message).toBe(
+        "Only absolute http(s) URLs or schemeless hosts are allowed. Omit `url` to open a blank tab.",
+      );
+      expect((error as PreviewUrlNormalizationError).message).not.toContain("https:");
     }
   });
 
@@ -229,6 +253,9 @@ describe("normalizePreviewUrl", () => {
       });
       expect(error).not.toHaveProperty("rawUrl");
       expect((error as PreviewUrlNormalizationError).cause).toBeInstanceOf(Error);
+      expect((error as PreviewUrlNormalizationError).message).toBe(
+        "Only absolute http(s) URLs or schemeless hosts are allowed. Omit `url` to open a blank tab.",
+      );
       expect((error as PreviewUrlNormalizationError).message).not.toContain(
         ((error as PreviewUrlNormalizationError).cause as Error).message,
       );
