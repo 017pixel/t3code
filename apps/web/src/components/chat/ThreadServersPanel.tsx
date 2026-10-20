@@ -91,9 +91,9 @@ export function ThreadServersPanel(props: {
               onClick={() => void open(server)}
             >
               <GlobeIcon className={THREAD_DETAILS_PANEL_ICON_CLASS} />
-              <span className="min-w-0 flex-1 truncate">localhost:{server.port}</span>
-              <span className="shrink-0 text-2xs text-muted-foreground">
-                {[server.processName, server.terminal === null ? "Agent" : "Terminal"]
+              <span className="shrink-0">localhost:{server.port}</span>
+              <span className="ms-auto min-w-0 truncate text-2xs text-muted-foreground">
+                {[server.terminal === null ? "Agent" : "Terminal", server.processName]
                   .filter(Boolean)
                   .join(" · ")}
               </span>
