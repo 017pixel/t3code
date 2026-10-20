@@ -46,6 +46,20 @@ describe("large text preview recovery", () => {
       expect(offset).toBeGreaterThan(50);
       expect(offset).toBeLessThan(300);
     });
+    await act(() =>
+      viewport().dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })),
+    );
+    await vi.waitFor(() =>
+      expect(
+        Math.abs(row().getBoundingClientRect().bottom - viewport().getBoundingClientRect().bottom),
+      ).toBeLessThan(2),
+    );
+    await act(() =>
+      viewport().dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })),
+    );
+    await vi.waitFor(() =>
+      expect(row().getBoundingClientRect().top).toBe(viewport().getBoundingClientRect().top),
+    );
   });
 
   it("rejects malformed UTF-8 bytes through the real text worker", async () => {
