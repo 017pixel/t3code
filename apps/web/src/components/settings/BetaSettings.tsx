@@ -1,4 +1,5 @@
 import { Switch } from "../ui/switch";
+import { ScopedSwitch } from "./ScopedSwitch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import {
@@ -41,6 +42,22 @@ export function BetaSettingsPanel() {
                 updateSettings({ sidebarWorkingShelfEnabled: Boolean(checked) })
               }
               aria-label="Working section"
+            />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          settingKeys={["compactIdleThreads"]}
+          {...searchableSetting("compact-idle-threads")}
+          description="Compact long idle Claude threads just before their prompt cache expires, so coming back costs less."
+          control={
+            <ScopedSwitch
+              settingKeys={["compactIdleThreads"]}
+              checked={settings.compactIdleThreads}
+              onCheckedChange={(checked) =>
+                updateSettings({ compactIdleThreads: Boolean(checked) })
+              }
+              aria-label="Compact idle Claude threads"
             />
           }
         />

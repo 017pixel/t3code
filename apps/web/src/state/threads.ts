@@ -1,9 +1,11 @@
+import { useAtomValue } from "@effect/atom-react";
 import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
 import { arrayElementsEqual } from "@t3tools/client-runtime/state/entities";
 import {
   createEnvironmentThreadDetailAtoms,
   createEnvironmentThreadShellAtoms,
   createEnvironmentThreadStateAtoms,
+  EMPTY_ENVIRONMENT_THREAD_STATE,
   type EnvironmentThreadState,
   createThreadEnvironmentAtoms,
 } from "@t3tools/client-runtime/state/threads";
@@ -27,6 +29,26 @@ export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   snapshotAtom: threadEnvironment.snapshotAtom,
 });
+
+const EMPTY_THREAD_STATE_ATOM = Atom.make(AsyncResult.success(EMPTY_ENVIRONMENT_THREAD_STATE)).pipe(
+  Atom.withLabel("web-environment-thread:empty"),
+);
+
+export function useEnvironmentThread(
+  environmentId: EnvironmentId | null,
+  threadId: ThreadId | null,
+): EnvironmentThreadState {
+  const result = useAtomValue(
+    environmentId !== null && threadId !== null
+      ? environmentThreads.stateAtom(environmentId, threadId)
+      : EMPTY_THREAD_STATE_ATOM,
+  );
+  const state = Option.getOrElse(
+    AsyncResult.value(result),
+    () => EMPTY_ENVIRONMENT_THREAD_STATE,
+  ) as EnvironmentThreadState;
+  return state;
+}
 
 const isRunning = (status: string) =>
   status === "preparing" || status === "queued" || status === "starting" || status === "running";
