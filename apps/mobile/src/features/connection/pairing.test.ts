@@ -20,6 +20,32 @@ describe("buildPairingUrl", () => {
       "https://192.168.1.100:3773/#token=pairing-token",
     );
   });
+
+  it("prefers a code embedded in the address over the Code field", () => {
+    expect(buildPairingUrl("http://192.168.1.100:3773/#token=new-token", "old-token")).toBe(
+      "http://192.168.1.100:3773/#token=new-token",
+    );
+    expect(buildPairingUrl("remote.example.com/pair?token=new-token", "old-token")).toBe(
+      "https://remote.example.com/pair?token=new-token",
+    );
+    expect(
+      buildPairingUrl(
+        "https://app.t3.codes/pair?host=https%3A%2F%2Fdesktop.tailnet.ts.net%2F#token=new-token",
+        "old-token",
+      ),
+    ).toBe(
+      "https://app.t3.codes/pair?host=https%3A%2F%2Fdesktop.tailnet.ts.net%2F#token=new-token",
+    );
+  });
+
+  it("ignores a blank token in the address", () => {
+    expect(buildPairingUrl("http://192.168.1.100:3773/#token=%20", "pairing-token")).toBe(
+      "http://192.168.1.100:3773/#token=pairing-token",
+    );
+    expect(
+      buildPairingUrl("http://192.168.1.100:3773/?token=new-token#token=%20", "old-token"),
+    ).toBe("http://192.168.1.100:3773/?token=new-token#token=%20");
+  });
 });
 
 describe("extractPairingUrlFromQrPayload", () => {
