@@ -24,13 +24,107 @@ function xmlParser() {
   return parser;
 }
 
+// Section properties terminate the section they describe, so the kept prefix
+// may depend on a paragraph or body section beyond the retained input window.
+function wordSections() {
+  const parser = xmlParser();
+  const names: string[] = [];
+  const namespaceScopes: Record<string, string>[] = [];
+  const sections: { end: number; xml: string; body: boolean }[] = [];
+  let window = "";
+  let offset = 0;
+  let capture: {
+    start: number;
+    insert: number;
+    namespaces: string;
+    body: boolean;
+    depth: number;
+  } | null = null;
+  let bytes = 0;
+  let tags = 0;
+  let nextParagraph = false;
+  let paragraphSection = false;
+  const escape = (value: string) =>
+    value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+  parser.on("opentag", (tag) => {
+    names.push(tag.local);
+    namespaceScopes.push(tag.ns);
+    if (names.length > 64) throw new Error("This Word document has excessive XML nesting.");
+    const body = names.length === 3 && names[1] === "body";
+    if (
+      tag.local === "sectPr" &&
+      tag.uri === "http://schemas.openxmlformats.org/wordprocessingml/2006/main" &&
+      (body || (names.length === 5 && names[2] === "p" && names[3] === "pPr" && !nextParagraph))
+    ) {
+      let namespaces = "";
+      const scope = Object.assign({}, ...namespaceScopes) as Record<string, string>;
+      for (const prefix in scope) {
+        const name = prefix ? `xmlns:${prefix}` : "xmlns";
+        if (prefix !== "xml" && !tag.attributes[name])
+          namespaces += ` ${name}="${escape(scope[prefix]!)}"`;
+      }
+      const start = window.lastIndexOf("<", parser.position - offset - 1);
+      if (start < 0) throw new Error("This Word document has too much section markup.");
+      capture = {
+        start: start + offset,
+        insert: parser.position - (tag.isSelfClosing ? 2 : 1),
+        namespaces,
+        body,
+        depth: names.length,
+      };
+    }
+    if (capture && ++tags > 2_000)
+      throw new Error("Preview limited: this Word document has too much section markup.");
+  });
+  parser.on("closetag", (tag) => {
+    if (capture && tag.local === "sectPr" && names.length === capture.depth) {
+      const xml =
+        window.slice(capture.start - offset, capture.insert - offset) +
+        capture.namespaces +
+        window.slice(capture.insert - offset, parser.position - offset);
+      bytes += xml.length;
+      if (bytes > 128 * 1024)
+        throw new Error("Preview limited: this Word document has too much section markup.");
+      sections.push({ end: parser.position, xml, body: capture.body });
+      paragraphSection = !capture.body;
+      if (!capture.body && parser.position > 4 * 1024 * 1024) nextParagraph = true;
+      capture = null;
+    }
+    if (names.length === 3 && tag.local === "p" && paragraphSection) {
+      sections[sections.length - 1]!.end = parser.position;
+      paragraphSection = false;
+    }
+    names.pop();
+    namespaceScopes.pop();
+  });
+  return {
+    write(chunk: string) {
+      window += chunk;
+      parser.write(chunk);
+      if (capture && parser.position - capture.start > 128 * 1024)
+        throw new Error("Preview limited: this Word document has too much section markup.");
+      const keep = capture?.start ?? Math.max(offset, parser.position - 128 * 1024);
+      window = window.slice(keep - offset);
+      offset = keep;
+    },
+    finish() {
+      parser.close();
+      return sections;
+    },
+  };
+}
+
 // Keep whole body elements so every prefix and render batch is valid Word XML.
 // Individual tables/paragraphs are bounded too: one giant element must not
 // bypass the budget between yields on the main thread.
-function wordDocuments(xml: string, incomplete: boolean) {
+function wordDocuments(
+  xml: string,
+  incomplete: boolean,
+  sections: ReturnType<ReturnType<typeof wordSections>["finish"]>,
+) {
   const parser = xmlParser();
   const names: string[] = [];
-  const documents: string[] = [];
+  const batches: { content: string; end: number }[] = [];
   let prefix = "";
   let suffix = "";
   let boundary = 0;
@@ -57,13 +151,13 @@ function wordDocuments(xml: string, incomplete: boolean) {
     }
     if (names.length > 64) throw limit;
   });
-  parser.on("closetag", () => {
-    if (prefix && names.length === 3) {
+  parser.on("closetag", (tag) => {
+    if (prefix && names.length === 3 && tag.local !== "sectPr") {
       if (parser.position - prefix.length > 3 * 1024 * 1024) throw limit;
       boundary = parser.position;
       elementTags = 0;
       if (batchTags >= 500) {
-        documents.push(prefix + xml.slice(batchStart, boundary) + suffix);
+        batches.push({ content: xml.slice(batchStart, boundary), end: boundary });
         batchStart = boundary;
         batchTags = 0;
       }
@@ -81,8 +175,23 @@ function wordDocuments(xml: string, incomplete: boolean) {
     truncated = true;
   }
   if (!prefix) throw new Error("This Word document has no readable body.");
-  if (boundary > batchStart || documents.length === 0)
-    documents.push(prefix + xml.slice(batchStart, boundary) + suffix);
+  if (boundary > batchStart || batches.length === 0)
+    batches.push({ content: xml.slice(batchStart, boundary), end: boundary });
+  const documents: string[] = [];
+  let length = 0;
+  let markup = 0;
+  for (const batch of batches) {
+    const section = sections.find((section) => section.body || section.end >= batch.end);
+    const document = prefix + batch.content + (section?.xml ?? "") + suffix;
+    length += document.length;
+    markup += document.match(/<(?![!?/])/g)?.length ?? 0;
+    if (length > 3 * 1024 * 1024 || markup > 100_000) {
+      truncated = true;
+      break;
+    }
+    documents.push(document);
+  }
+  if (documents.length === 0) throw new Error("This Word document has too much section markup.");
   return { documents, truncated };
 }
 
@@ -239,6 +348,8 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
     const document = input.kind === "docx" && entry.name === "word/document.xml";
     const media = input.kind === "docx" && entry.name.startsWith("word/media/");
     const chunks: Uint8Array[] = [];
+    const sections = document ? wordSections() : null;
+    const decoder = new TextDecoder();
     let length = 0;
     await new Promise<void>((resolve, reject) => {
       // JSZip exposes this streaming API at runtime but omits it from its types.
@@ -251,12 +362,22 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
         .on("data", (chunk: Uint8Array) => {
           total += chunk.length;
           length += chunk.length;
-          if (document && length > 4 * 1024 * 1024) {
-            chunks.push(chunk.subarray(0, chunk.length - (length - 4 * 1024 * 1024)));
-            length = 4 * 1024 * 1024;
-            wordInputTruncated = true;
+          if (total > OFFICE_PREVIEW_MAX_BYTES) {
             stream.pause();
-            resolve();
+            reject(new Error("The expanded document is too large to preview safely."));
+            return;
+          }
+          try {
+            sections?.write(decoder.decode(chunk, { stream: true }));
+          } catch (cause) {
+            stream.pause();
+            reject(cause);
+            return;
+          }
+          if (document && length > 4 * 1024 * 1024) {
+            const kept = Math.max(0, chunk.length - (length - 4 * 1024 * 1024));
+            if (kept) chunks.push(chunk.subarray(0, kept));
+            wordInputTruncated = true;
             return;
           }
           // Media is bounded independently. Even renamed auxiliary XML must
@@ -285,14 +406,19 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
         .on("end", resolve)
         .resume();
     });
-    const content = new Uint8Array(length);
+    const content = new Uint8Array(document ? Math.min(length, 4 * 1024 * 1024) : length);
     let offset = 0;
     for (const chunk of chunks) {
       content.set(chunk, offset);
       offset += chunk.length;
     }
     if (document) {
-      word = wordDocuments(new TextDecoder().decode(content), wordInputTruncated);
+      sections!.write(decoder.decode());
+      word = wordDocuments(
+        new TextDecoder().decode(content),
+        wordInputTruncated,
+        sections!.finish(),
+      );
       archive.file(entry.name, word.documents[0]!);
     } else {
       archive.file(entry.name, content);

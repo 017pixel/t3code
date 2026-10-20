@@ -110,7 +110,7 @@ function WordFrame(props: {
   readonly name: string;
 }) {
   const { resolvedTheme } = useTheme();
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{width:612pt;max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {props.content.truncated ? (

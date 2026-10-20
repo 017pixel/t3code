@@ -19,71 +19,95 @@ import { OfficeFilePreview } from "./OfficeFilePreview";
 import { MermaidFilePreview } from "./MermaidFilePreview";
 import type { OfficeWorkerResult } from "./officePreviewProtocol";
 
-it.each(["paragraphs", "runs", "tables", "auxiliary XML", "XML bytes", "renamed XML"])(
-  "bounds excessive Word %s before rendering DOM",
-  async (scenario) => {
-    const { default: JSZip } = await import("jszip");
-    const archive = new JSZip();
-    const body =
-      scenario === "paragraphs"
-        ? "<w:p><w:r><w:t>x</w:t></w:r></w:p>".repeat(200_000)
-        : scenario === "runs"
-          ? `<w:p>${"<w:r><w:t>x</w:t></w:r>".repeat(50_001)}</w:p>`
-          : scenario === "tables"
-            ? "<w:tbl/>".repeat(50_001)
-            : scenario === "XML bytes"
-              ? `<w:p><w:r><w:t>${"x".repeat(2 * 1024 * 1024)}</w:t></w:r></w:p>`
-              : "<w:p/>";
+it.each([
+  "paragraphs",
+  "runs",
+  "tables",
+  "auxiliary XML",
+  "XML bytes",
+  "renamed XML",
+  "section after prefix",
+  "oversized section",
+])("bounds excessive Word %s before rendering DOM", async (scenario) => {
+  const { default: JSZip } = await import("jszip");
+  const archive = new JSZip();
+  const body = ["paragraphs", "section after prefix", "oversized section"].includes(scenario)
+    ? "<w:p><w:r><w:t>x</w:t></w:r></w:p>".repeat(200_000)
+    : scenario === "runs"
+      ? `<w:p>${"<w:r><w:t>x</w:t></w:r>".repeat(50_001)}</w:p>`
+      : scenario === "tables"
+        ? "<w:tbl/>".repeat(50_001)
+        : scenario === "XML bytes"
+          ? `<w:p><w:r><w:t>${"x".repeat(2 * 1024 * 1024)}</w:t></w:r></w:p>`
+          : "<w:p/>";
+  const section =
+    '<w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1440" w:left="1440" w:bottom="1440" w:right="1440"/></w:sectPr>';
+  archive.file(
+    "word/document.xml",
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}${scenario === "section after prefix" ? '<w:p xmlns:s="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><s:sectPr><s:pgSz s:w="11906" s:h="16838"/></s:sectPr></w:pPr></w:p>' : ""}${scenario === "oversized section" ? `<w:sectPr>${"<w:cols/>".repeat(2_001)}</w:sectPr>` : section}</w:body></w:document>`,
+  );
+  if (scenario === "auxiliary XML" || scenario === "renamed XML")
     archive.file(
-      "word/document.xml",
-      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
+      scenario === "renamed XML" ? "word/footnotes.dat" : "word/footnotes.xml",
+      `<w:footnotes>${"<w:p/>".repeat(50_001)}</w:footnotes>`,
     );
-    if (scenario === "auxiliary XML" || scenario === "renamed XML")
-      archive.file(
-        scenario === "renamed XML" ? "word/footnotes.dat" : "word/footnotes.xml",
-        `<w:footnotes>${"<w:p/>".repeat(50_001)}</w:footnotes>`,
-      );
-    const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
-    const src = URL.createObjectURL(file);
+  const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+  const src = URL.createObjectURL(file);
+  try {
+    const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+      type: "module",
+    });
     try {
-      const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
-        type: "module",
+      const result = await new Promise<OfficeWorkerResult>((resolve) => {
+        worker.addEventListener(
+          "message",
+          (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+          { once: true },
+        );
+        void file
+          .arrayBuffer()
+          .then((bytes) => worker.postMessage({ type: "open", kind: "docx", bytes }, [bytes]));
       });
-      try {
-        const result = await new Promise<OfficeWorkerResult>((resolve) => {
-          worker.addEventListener(
-            "message",
-            (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
-            { once: true },
-          );
-          void file
-            .arrayBuffer()
-            .then((bytes) => worker.postMessage({ type: "open", kind: "docx", bytes }, [bytes]));
+      if (
+        scenario === "auxiliary XML" ||
+        scenario === "renamed XML" ||
+        scenario === "oversized section"
+      ) {
+        expect(result).toMatchObject({
+          type: "error",
+          message: expect.stringContaining("Preview limited"),
         });
-        if (scenario === "auxiliary XML" || scenario === "renamed XML") {
-          expect(result).toMatchObject({
-            type: "error",
-            message: expect.stringContaining("Preview limited"),
-          });
-        } else {
-          expect(result.type).toBe("docx");
-          if (result.type !== "docx") throw new Error("Expected a Word prefix");
-          expect(result.truncated).toBe(true);
-          for (const xml of result.documents) {
-            const document = new DOMParser().parseFromString(xml, "application/xml");
-            expect(document.querySelector("parsererror")).toBeNull();
-            expect(document.getElementsByTagNameNS("*", "body")).toHaveLength(1);
-          }
-          expect(result.documents.join("").length).toBeLessThan(body.length);
+      } else {
+        expect(result.type).toBe("docx");
+        if (result.type !== "docx") throw new Error("Expected a Word prefix");
+        expect(result.truncated).toBe(true);
+        for (const xml of result.documents) {
+          const document = new DOMParser().parseFromString(xml, "application/xml");
+          expect(document.querySelector("parsererror")).toBeNull();
+          const bodies = document.getElementsByTagNameNS("*", "body");
+          expect(bodies).toHaveLength(1);
+          const section = bodies[0]!.lastElementChild!;
+          expect(section.localName).toBe("sectPr");
+          const size = section.getElementsByTagNameNS("*", "pgSz")[0]!;
+          expect(size.getAttributeNS(section.namespaceURI, "w")).toBe(
+            scenario === "section after prefix" ? "11906" : "16838",
+          );
+          expect(size.getAttributeNS(section.namespaceURI, "orient")).toBe(
+            scenario === "section after prefix" ? null : "landscape",
+          );
         }
-      } finally {
-        worker.terminate();
+        const markup = result.documents.join("");
+        expect(markup.length).toBeLessThan(body.length);
+        expect(markup.length).toBeLessThanOrEqual(3 * 1024 * 1024);
+        expect(markup.match(/<(?![!?/])/g)!.length).toBeLessThanOrEqual(100_000);
       }
     } finally {
-      URL.revokeObjectURL(src);
+      worker.terminate();
     }
-  },
-);
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+});
 
 it.each(["XFD200", "XFD1048576", "AX500", "AZ9999999"])(
   "bounds spreadsheet cells at %s before padding",
