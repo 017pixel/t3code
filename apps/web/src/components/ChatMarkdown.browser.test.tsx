@@ -113,6 +113,14 @@ function fileOptions(container: HTMLElement) {
     .filter((label) => label?.startsWith("File options for "));
 }
 
+it("shows unavailable audio when a workspace embed has no thread", async () => {
+  setup();
+  await using screen = await renderText("![recording](clip.wav)");
+  expect(screen.container.textContent).toContain("Audio unavailable");
+  expect(screen.container.textContent).not.toContain("Loading audio");
+  expect(screen.container.querySelector("audio")).toBeNull();
+});
+
 describe("ChatMarkdown theme drafts", () => {
   it.each(["dark", "light"] as const)(
     "previews opposite syntax colors and restores saved %s colors on cancel",
