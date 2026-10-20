@@ -348,18 +348,25 @@ export default function OfficeViewer(props: {
               </Select>
             </div>
           ) : previewDocument?.navigation === "chapter" ? (
-            <select
-              aria-label="Chapter"
-              value={page}
-              onChange={(event) => selectPage(Number(event.target.value))}
-              className="min-w-0 flex-1 rounded border border-input bg-background px-2 py-1 text-foreground"
-            >
-              {previewDocument.pages.map((item, index) => (
-                <option key={index} value={index}>
-                  {item.title}
-                </option>
-              ))}
-            </select>
+            <div className="min-w-0 flex-1">
+              <Select
+                value={page}
+                onValueChange={(value) => {
+                  if (value !== null) selectPage(value);
+                }}
+              >
+                <SelectTrigger aria-label="Chapter" size="xs">
+                  <SelectValue>{documentPage?.title}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {previewDocument.pages.map((item, index) => (
+                    <SelectItem key={index} value={index}>
+                      {item.title}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
           ) : (
             <span className="flex-1 text-center tabular-nums" aria-live="polite">
               {navigation === "slide" ? "Slide" : "Page"} {page + 1} of {count}

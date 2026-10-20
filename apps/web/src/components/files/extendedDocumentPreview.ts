@@ -1,4 +1,5 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
+import { decodeHTMLStrict as decodeEntities } from "entities";
 import type JSZip from "jszip";
 
 import { type OfficeWorkerResult, type NotebookCell } from "./officePreviewProtocol";
@@ -25,20 +26,6 @@ const namespacePrefixes: Record<string, string> = {
   "http://www.idpf.org/2007/opf": "",
   "urn:oasis:names:tc:opendocument:xmlns:container": "",
 };
-function decodeEntities(value: string): string {
-  return value.replaceAll(/&(#x[\da-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g, (entity, name: string) => {
-    if (name.startsWith("#")) {
-      const code = name[1] === "x" ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
-      return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
-        ? String.fromCodePoint(code)
-        : "";
-    }
-    return (
-      ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" } as Record<string, string>)[name] ??
-      entity
-    );
-  });
-}
 function parseXml(source: string): XmlNode {
   // EPUB XHTML commonly declares an external DTD. Discard it without resolving it.
   source = source.replaceAll(/<!DOCTYPE\s+[^<>[\]]*>/gi, "");

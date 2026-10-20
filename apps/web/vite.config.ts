@@ -101,6 +101,7 @@ const browserTestProject = {
       "@betteroffice/pptx",
       "docx-preview",
       "fast-xml-parser",
+      "entities",
       "dompurify",
       "heic-to/next",
       "jszip",

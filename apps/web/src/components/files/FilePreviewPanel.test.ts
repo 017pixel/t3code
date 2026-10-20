@@ -411,13 +411,15 @@ describe("document preview contents", () => {
       )
       .file(
         "Book/two&&&.xhtml",
-        '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><head><title>Second</title></head><body><h1>Second chapter</h1></body></html>',
+        '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><head><title>Second</title></head><body><h1>Second chapter</h1><p>A&nbsp;B &copy; &mdash; &NotEqualTilde; &amp;lt;</p><img src="cover.png" alt="&copy; &NotEqualTilde;"/></body></html>',
       )
       .file("Book/cover.png", new Uint8Array([137, 80, 78, 71]));
     const result = await openEpub(archive);
     expect(result.type).toBe("document");
     if (result.type !== "document") throw new Error("Expected document");
     expect(result.pages.map((page) => page.title)).toEqual(["Second", "First"]);
+    expect(result.pages[0]!.html).toContain("A\u00a0B © — ≂̸ &amp;lt;");
+    expect(result.pages[0]!.html).toContain('alt="© ≂̸"');
     expect(result.pages[1]!.html).toContain('src="data:image/png;base64,');
     expect(result.pages[1]!.html).not.toMatch(/https:|script|alert/);
   });
