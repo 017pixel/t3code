@@ -24,6 +24,133 @@ import BinaryViewer from "./BinaryViewer";
 import { decodeImagePreview } from "./decodeImagePreview";
 
 describe("bounded binary previews", () => {
+  it("can leave an archive folder with a repeated separator", async () => {
+    const bytes = new Uint8Array(2048);
+    const write = (offset: number, value: string) =>
+      bytes.set(new TextEncoder().encode(value), offset);
+    write(0, "a//hello.txt");
+    write(124, "00000000014\0");
+    bytes.fill(32, 148, 156);
+    write(156, "0");
+    write(
+      148,
+      bytes
+        .subarray(0, 512)
+        .reduce((sum, byte) => sum + byte, 0)
+        .toString(8)
+        .padStart(6, "0") + "\0 ",
+    );
+    write(512, "nested hello");
+    const src = URL.createObjectURL(new Blob([bytes]));
+    try {
+      await using screen = await render(<BinaryViewer src={src} name="paths.tar" kind="archive" />);
+      const child = () => screen.container.querySelector<HTMLButtonElement>("tbody button");
+      await vi.waitFor(() => expect(child()?.textContent).toBe("a"));
+      await act(() => child()!.click());
+      await act(() => child()!.click());
+      await vi.waitFor(() => expect(child()?.textContent).toBe("hello.txt"));
+      const parent = () =>
+        screen.container.querySelector<HTMLButtonElement>('[aria-label="Parent folder"]')!;
+      await act(() => parent().click());
+      await act(() => parent().click());
+      expect(parent().disabled).toBe(true);
+      expect(child()?.textContent).toBe("a");
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  });
+
+  it("uses a PAX size override for the following TAR payload and bounds it", async () => {
+    const archive = (size: string) => {
+      const header = (name: string, size: number, type: string) => {
+        const bytes = new Uint8Array(512);
+        const write = (offset: number, value: string) =>
+          bytes.set(new TextEncoder().encode(value), offset);
+        write(0, name);
+        write(124, size.toString(8).padStart(11, "0") + "\0");
+        bytes.fill(32, 148, 156);
+        write(156, type);
+        write(
+          148,
+          bytes
+            .reduce((sum, byte) => sum + byte, 0)
+            .toString(8)
+            .padStart(6, "0") + "\0 ",
+        );
+        return bytes;
+      };
+      const payload = ` size=${size}\n`;
+      let record = `${payload.length + 1}${payload}`;
+      while (record.length !== Number.parseInt(record, 10)) record = `${record.length}${payload}`;
+      const bytes = new Uint8Array(3072);
+      bytes.set(header("PaxHeader", record.length, "x"));
+      bytes.set(new TextEncoder().encode(record), 512);
+      bytes.set(header("hello.txt", 0, "0"), 1024);
+      bytes.set(new TextEncoder().encode("hello"), 1536);
+      return bytes;
+    };
+    for (const size of ["5", "999999999999999999999"]) {
+      const src = URL.createObjectURL(new Blob([archive(size)]));
+      try {
+        await using screen = await render(<BinaryViewer src={src} name="pax.tar" kind="archive" />);
+        if (size === "5") {
+          await vi.waitFor(() =>
+            expect(screen.container.querySelector("tbody button")?.textContent).toBe("hello.txt"),
+          );
+          await act(() =>
+            screen.container.querySelector<HTMLButtonElement>("tbody button")!.click(),
+          );
+          await vi.waitFor(() =>
+            expect(screen.container.querySelector("pre")?.textContent).toBe("hello"),
+          );
+        } else {
+          await vi.waitFor(() =>
+            expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(
+              "too large or damaged",
+            ),
+          );
+        }
+      } finally {
+        URL.revokeObjectURL(src);
+      }
+    }
+  });
+
+  it("shows stored and virtual generated SQLite columns", async () => {
+    const [{ default: initSqlJs }, { default: wasmUrl }] = await Promise.all([
+      import("sql.js"),
+      import("sql.js/dist/sql-wasm.wasm?url"),
+    ]);
+    const SQL = await initSqlJs({ locateFile: () => wasmUrl });
+    const database = new SQL.Database();
+    database.run(
+      "CREATE TABLE orders (price INTEGER, quantity INTEGER, total INTEGER GENERATED ALWAYS AS (price * quantity) STORED, doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL); INSERT INTO orders(price, quantity) VALUES (7, 3)",
+    );
+    const src = URL.createObjectURL(new Blob([new Uint8Array(database.export())]));
+    database.close();
+    try {
+      await using screen = await render(
+        <BinaryViewer src={src} name="orders.sqlite" kind="sqlite" />,
+      );
+      await vi.waitFor(() =>
+        expect([...screen.container.querySelectorAll("th")].map((x) => x.textContent)).toEqual([
+          "price",
+          "quantity",
+          "total",
+          "doubled",
+        ]),
+      );
+      expect([...screen.container.querySelectorAll("td")].map((x) => x.textContent)).toEqual([
+        "7",
+        "3",
+        "21",
+        "14",
+      ]);
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  });
+
   it("reauthorizes a failed image when retry is clicked", async () => {
     const image =
       'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>';

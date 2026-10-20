@@ -187,7 +187,7 @@ export default function BinaryViewer(props: {
               setError(null);
               setEntry(null);
               if (selectedPath) setSelectedPath(null);
-              else setFolder(folder.replace(/[^/]+\/$/, ""));
+              else setFolder(folder.replace(/(?:[^/]+)?\/$/, ""));
             }}
           >
             <ChevronLeftIcon className="size-3.5" />

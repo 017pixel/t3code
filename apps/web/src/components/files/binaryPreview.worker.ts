@@ -52,6 +52,7 @@ function tarEntries(bytes: Uint8Array<ArrayBuffer>) {
     return Number.parseInt(value || "0", 8);
   };
   let longPath: string | null = null;
+  let paxSize: number | null = null;
   let offset = 0;
   while (offset + 512 <= bytes.length) {
     if (bytes.subarray(offset, offset + 512).every((byte) => byte === 0)) break;
@@ -61,14 +62,18 @@ function tarEntries(bytes: Uint8Array<ArrayBuffer>) {
     for (let index = 0; index < 512; index++)
       checksum += index >= 148 && index < 156 ? 32 : bytes[offset + index]!;
     if (checksum !== number(offset + 148, 8)) throw new Error("The TAR header is damaged.");
-    const size = number(offset + 124, 12);
     const type = text(offset + 156, 1);
+    const metadata = type === "L" || type === "x" || type === "g";
+    const size = !metadata && paxSize !== null ? paxSize : number(offset + 124, 12);
     const prefix =
       text(offset + 257, 6) === "ustar" && text(offset + 263, 2) === "00"
         ? text(offset + 345, 155)
         : "";
     const path = longPath ?? [prefix, text(offset, 100)].filter(Boolean).join("/");
-    longPath = null;
+    if (!metadata) {
+      longPath = null;
+      paxSize = null;
+    }
     if (path.length > 1024 || size > BINARY_PREVIEW_MAX_BYTES || offset + 512 + size > bytes.length)
       throw new Error("An archive entry is too large or damaged.");
     const content = bytes.subarray(offset + 512, offset + 512 + size);
@@ -76,8 +81,20 @@ function tarEntries(bytes: Uint8Array<ArrayBuffer>) {
     else if (type === "x" || type === "g") {
       if (size > 65536) throw new Error("Archive metadata is too large.");
       for (const line of new TextDecoder().decode(content).split("\n")) {
-        const match = /^\d+ path=(.*)$/.exec(line);
-        if (match && type === "x") longPath = match[1]!;
+        const match = /^\d+ (path|size)=(.*)$/.exec(line);
+        if (!match || type !== "x") continue;
+        if (match[1] === "path") longPath = match[2]!;
+        else {
+          const value = match[2]!;
+          const size = Number(value);
+          if (
+            !/^\d+$/.test(value) ||
+            !Number.isSafeInteger(size) ||
+            size > BINARY_PREVIEW_MAX_BYTES
+          )
+            throw new Error("An archive entry is too large or damaged.");
+          paxSize = size;
+        }
       }
     } else if (type === "" || type === "0" || type === "5") {
       const modified = number(offset + 136, 12) * 1000;
@@ -115,8 +132,9 @@ async function handle(input: BinaryWorkerRequest) {
       throw new Error("This table is unavailable.");
     const columns =
       database
-        .exec(`PRAGMA table_info(${quote(input.table)})`)[0]
-        ?.values.map((row) => String(row[1]))
+        .exec(`PRAGMA table_xinfo(${quote(input.table)})`)[0]
+        ?.values.filter((row) => row[6] !== 1)
+        .map((row) => String(row[1]))
         .slice(0, 50) ?? [];
     const fields = columns.map((name) => {
       const field = quote(name);
