@@ -523,12 +523,16 @@ it.layer(
     Effect.gen(function* () {
       const { manager, ptyAdapter, getEvents } = yield* createManager();
       const outputEntered = yield* Deferred.make<void>();
+      const outputReceived = yield* Deferred.make<string>();
       const releaseOutput = yield* Deferred.make<void>();
       const exited = yield* Deferred.make<void>();
       const invalidated: TerminalManager.TerminalSessionHandle[] = [];
       const observed: TerminalAttachStreamEvent[] = [];
-      const unsubscribe = yield* manager.subscribe((event) =>
-        event.type === "started" && event.terminalId === "blocker"
+      const unsubscribe = yield* manager.subscribe((event) => {
+        if (event.type === "output") {
+          return Deferred.succeed(outputReceived, event.data).pipe(Effect.asVoid);
+        }
+        return event.type === "started" && event.terminalId === "blocker"
           ? Deferred.succeed(outputEntered, undefined).pipe(
               Effect.andThen(Deferred.await(releaseOutput)),
             )
@@ -544,8 +548,8 @@ it.layer(
                 stop();
                 yield* Deferred.succeed(exited, undefined);
               })
-            : Effect.void,
-      );
+            : Effect.void;
+      });
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
       const { handle } = yield* manager.openFreshWithHandle(
         openInput(),
@@ -555,7 +559,10 @@ it.layer(
       const blocker = yield* manager
         .open(openInput({ terminalId: "blocker" }))
         .pipe(Effect.forkScoped);
+      yield* Effect.addFinalizer(() => Deferred.succeed(releaseOutput, undefined));
       yield* Deferred.await(outputEntered);
+      ptyAdapter.processes[0]!.emitData("live output\n");
+      expect(yield* Deferred.await(outputReceived)).toBe("live output\n");
       // Another terminal startup holds the thread lock. Queue clear before the exit drain.
       const clearing = yield* manager
         .clear(openInput())
@@ -569,7 +576,7 @@ it.layer(
         (yield* getEvents)
           .filter((event) => event.terminalId === DEFAULT_TERMINAL_ID)
           .map((event) => event.type),
-      ).toEqual(["started", "cleared", "exited"]);
+      ).toEqual(["started", "output", "cleared", "exited"]);
       expect(invalidated).toEqual([handle]);
       expect(yield* manager.closeWithHandle(handle)).toBe(false);
       expect(observed[0]).toMatchObject({
