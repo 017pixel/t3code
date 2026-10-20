@@ -100,6 +100,7 @@ const browserTestProject = {
       "vite-plus/test/browser",
       "@betteroffice/pptx",
       "docx-preview",
+      "fast-xml-parser",
       "dompurify",
       "heic-to/next",
       "jszip",

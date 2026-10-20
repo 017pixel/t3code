@@ -29,6 +29,8 @@ export default function LargeTextViewer(props: {
   readonly name: string;
   readonly src?: string;
   readonly text?: string;
+  readonly sizeBytes?: number;
+  readonly onRetry?: () => void;
   readonly copyContents?: RefObject<(() => Promise<string>) | null>;
   readonly delimiter: "," | "\t" | null;
   readonly revealLine?: number | null;
@@ -128,6 +130,7 @@ export default function LargeTextViewer(props: {
           type: "open",
           src: props.src,
           text: props.text,
+          sizeBytes: props.sizeBytes,
           delimiter: props.delimiter,
         },
         [],
@@ -139,7 +142,9 @@ export default function LargeTextViewer(props: {
     };
     // Only this bounded prefix is parsed on the main thread. Indexing the full
     // file and fetching later pages remain in the worker.
-    if (props.text !== undefined) {
+    if (props.sizeBytes === 0) {
+      startWorker();
+    } else if (props.text !== undefined) {
       paintFirstScreen(
         props.text.slice(0, FIRST_SCREEN_BYTES),
         props.text.length <= FIRST_SCREEN_BYTES,
@@ -176,7 +181,7 @@ export default function LargeTextViewer(props: {
       worker.current = null;
       pending.current.clear();
     };
-  }, [props.src, props.text, props.delimiter]);
+  }, [props.src, props.text, props.delimiter, props.sizeBytes]);
   useImperativeHandle(
     props.copyContents,
     () => () =>
@@ -191,7 +196,10 @@ export default function LargeTextViewer(props: {
       }),
     [],
   );
-  if (error) return <FileSurfaceFailure message={error} />;
+  if (error)
+    return (
+      <FileSurfaceFailure message={error} {...(props.onRetry ? { onRetry: props.onRetry } : {})} />
+    );
   if (!meta || (meta.count > 0 && !pages.has(0))) return <FileSurfaceLoading />;
   const header = props.delimiter ? pages.get(0)?.[0] : undefined;
   return (

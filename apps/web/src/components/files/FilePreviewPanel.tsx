@@ -1,3 +1,5 @@
+import { DownloadIcon, CopyIcon, CheckIcon } from "lucide-react";
+import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { Spinner } from "~/components/ui/spinner";
 import {
   AuthPreviewOperateScope,
@@ -1562,6 +1564,17 @@ function WorkspaceLargeTextPreview(props: {
     path: props.absolutePath,
     disposition: "attachment",
   } as const;
+  const copyContents = useRef<(() => Promise<string>) | null>(null);
+  const { copyToClipboard, isCopied } = useCopyToClipboard({ target: props.name });
+  const [saving, setSaving] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const showError = (cause: unknown) => {
+    toastManager.add({
+      type: "error",
+      title: "Could not read file",
+      description: cause instanceof Error ? cause.message : "Try again.",
+    });
+  };
   const assetUrl = useAssetUrlState(props.environmentId, resource);
   const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, resource);
   useWorkspaceMutationRefresh({
@@ -1579,14 +1592,61 @@ function WorkspaceLargeTextPreview(props: {
     );
   const src = `${assetUrl.url}${assetUrl.url.includes("?") ? "&" : "?"}revision=${encodeURIComponent(props.workspaceMutationId ?? "")}`;
   return (
-    <Suspense fallback={<div className="p-6 text-xs text-muted-foreground">Loading…</div>}>
-      <LargeTextViewer
-        name={props.name}
-        src={src}
-        delimiter={props.delimiter}
-        revealLine={props.revealLine}
-        revealRequestId={props.revealRequestId}
-      />
-    </Suspense>
+    <>
+      <div className={FILE_SURFACE_SUBHEADER_CLASS}>
+        <span className="min-w-0 flex-1 text-xs text-muted-foreground">Full file</span>
+        <FileSurfaceAction
+          label={isCopied ? "Copied" : "Copy contents"}
+          onPress={() => {
+            const copy = copyContents.current;
+            if (!copy) return;
+            void copy()
+              .then((text) => copyToClipboard(text, undefined))
+              .catch(showError);
+          }}
+        >
+          {isCopied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+        </FileSurfaceAction>
+        <FileSurfaceAction
+          label={saving ? "Preparing file…" : "Save file"}
+          disabled={saving}
+          onPress={() => {
+            setSaving(true);
+            void (async () => {
+              const url = await refreshAssetUrl();
+              if (!url) throw new Error("Reconnect to the environment and try again.");
+              const response = await fetch(url);
+              if (!response.ok) throw new Error("The file could not be loaded. Try again.");
+              const downloadUrl = URL.createObjectURL(await response.blob());
+              setTimeout(() => URL.revokeObjectURL(downloadUrl), 30_000);
+              const anchor = document.createElement("a");
+              anchor.href = downloadUrl;
+              anchor.download = props.name.split(/[\\/]/).at(-1) || props.name;
+              anchor.click();
+            })()
+              .catch(showError)
+              .finally(() => setSaving(false));
+          }}
+        >
+          <DownloadIcon className="size-3.5" />
+        </FileSurfaceAction>
+      </div>
+      <Suspense fallback={<div className="p-6 text-xs text-muted-foreground">Loading…</div>}>
+        <LargeTextViewer
+          key={`${src}:${revision}`}
+          name={props.name}
+          copyContents={copyContents}
+          onRetry={() => {
+            void refreshAssetUrl()
+              .then(() => setRevision((value) => value + 1))
+              .catch(showError);
+          }}
+          src={src}
+          delimiter={props.delimiter}
+          revealLine={props.revealLine}
+          revealRequestId={props.revealRequestId}
+        />
+      </Suspense>
+    </>
   );
 }
