@@ -56,6 +56,7 @@ const EMPTY_THREAD_PROJECTION_ATOM = Atom.make<EnvironmentThread | null>(null).p
 const EMPTY_THREAD_STATUS_ATOM = Atom.make<EnvironmentThreadStatus>("empty").pipe(
   Atom.withLabel("web-thread-status:empty"),
 );
+const NOT_BEHIND_ATOM = Atom.make(false).pipe(Atom.withLabel("web-thread-behind-shell:empty"));
 const EMPTY_VISIBLE_TURN_ITEMS_ATOM = Atom.make(EMPTY_VISIBLE_TURN_ITEMS).pipe(
   Atom.withLabel("web-thread-visible-turn-items:empty"),
 );
@@ -154,6 +155,12 @@ export function useThreadProjection(ref: ScopedThreadRef | null): EnvironmentThr
 export function useThreadStatus(ref: ScopedThreadRef | null): EnvironmentThreadStatus {
   return useAtomValue(
     ref === null ? EMPTY_THREAD_STATUS_ATOM : environmentThreadDetails.statusAtom(ref),
+  );
+}
+
+export function useThreadBehindShell(ref: ScopedThreadRef | null): boolean {
+  return useAtomValue(
+    ref === null ? NOT_BEHIND_ATOM : environmentThreadDetails.behindShellAtom(ref),
   );
 }
 

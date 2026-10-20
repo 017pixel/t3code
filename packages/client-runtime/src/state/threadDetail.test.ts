@@ -111,7 +111,7 @@ describe("createEnvironmentThreadDetailAtoms", () => {
     registry.dispose();
   });
 
-  it("holds back a saved copy the shell shows is behind until the thread catches up", () => {
+  it("marks a saved copy the shell shows is behind until the thread catches up", () => {
     const state = (projection: OrchestrationV2ThreadProjection, status: "cached" | "live") =>
       AsyncResult.success(
         threadState({ data: Option.some(projection), status, error: Option.none() }),
@@ -127,25 +127,20 @@ describe("createEnvironmentThreadDetailAtoms", () => {
       () => shellAtom,
     );
     const registry = AtomRegistry.make();
-    const unmount = registry.mount(details.threadAtom(ref));
 
-    expect(registry.get(details.threadAtom(ref))).toBeNull();
-    expect(registry.get(details.statusAtom(ref))).toBe("cached");
-
-    // A warm resume keeps its old "live" status but is just as far behind.
-    registry.set(sourceAtom, state(v2Projection, "live"));
-    expect(registry.get(details.threadAtom(ref))).toBeNull();
-    expect(registry.get(details.statusAtom(ref))).toBe("synchronizing");
+    // The old copy stays visible; it is only marked.
+    expect(registry.get(details.threadAtom(ref))?.projection).toBe(v2Projection);
+    expect(registry.get(details.behindShellAtom(ref))).toBe(true);
 
     const caughtUp = { ...v2Projection, updatedAt: DateTime.makeUnsafe("2026-06-20T00:05:00Z") };
     registry.set(sourceAtom, state(caughtUp, "cached"));
-    expect(registry.get(details.threadAtom(ref))?.projection).toBe(caughtUp);
+    expect(registry.get(details.behindShellAtom(ref))).toBe(false);
 
-    // Once messages are on screen, a shell that moves first does not blank them.
+    // A live thread is current even when the shell moves first.
     registry.set(shellAtom, { updatedAt: "2026-06-20T00:06:00.000Z" });
-    expect(registry.get(details.threadAtom(ref))?.projection).toBe(caughtUp);
+    registry.set(sourceAtom, state(caughtUp, "live"));
+    expect(registry.get(details.behindShellAtom(ref))).toBe(false);
 
-    unmount();
     registry.dispose();
   });
 });

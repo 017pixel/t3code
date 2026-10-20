@@ -362,26 +362,25 @@ export function rememberReadyThreadTimeline<T extends readonly unknown[]>(
   rememberThreadTimelineEntries(held);
 }
 
-/** Skips entries older than `shellUpdatedAt`: the thread moved on since they were painted. */
 export function peekRememberedThreadTimeline<T extends readonly unknown[]>(
   threadKey: string | null,
-  shellUpdatedAt?: string | null,
 ): T | null {
   if (threadKey === null) {
     return null;
   }
-  const remembered = rememberedThreadTimelines.get(threadKey);
-  if (remembered === undefined) {
-    return null;
+  return (rememberedThreadTimelines.get(threadKey)?.entries as T | undefined) ?? null;
+}
+
+/** True when the thread had activity after its remembered timeline was painted. */
+export function isRememberedThreadTimelineBehind(
+  threadKey: string | null,
+  shellUpdatedAt: string | null | undefined,
+): boolean {
+  if (threadKey === null || shellUpdatedAt == null) {
+    return false;
   }
-  if (
-    shellUpdatedAt != null &&
-    remembered.updatedAt !== undefined &&
-    remembered.updatedAt < Date.parse(shellUpdatedAt)
-  ) {
-    return null;
-  }
-  return remembered.entries as T;
+  const updatedAt = rememberedThreadTimelines.get(threadKey)?.updatedAt;
+  return updatedAt !== undefined && updatedAt < Date.parse(shellUpdatedAt);
 }
 
 export function peekHeldThreadTimeline<
@@ -433,9 +432,7 @@ export function resolveThreadSwitchTimeline<T extends readonly unknown[]>(input:
   }
 
   const rememberedForActive =
-    input.rememberedForActive !== undefined
-      ? input.rememberedForActive
-      : peekRememberedThreadTimeline<T>(input.activeThreadKey);
+    input.rememberedForActive ?? peekRememberedThreadTimeline<T>(input.activeThreadKey);
   if (input.loading && rememberedForActive !== null && rememberedForActive.length > 0) {
     return { entries: rememberedForActive, displayThreadKey: input.activeThreadKey };
   }

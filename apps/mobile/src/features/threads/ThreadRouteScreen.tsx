@@ -51,7 +51,7 @@ import {
 import { useKnownTerminalSessions } from "../../state/use-terminal-session";
 import { uuidv4 } from "../../lib/uuid";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
-import { useSelectedThreadDetailState } from "../../state/use-thread-detail";
+import { useSelectedThreadDetailState, useThreadBehindShell } from "../../state/use-thread-detail";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { GitActionProgressOverlay } from "./GitActionProgressOverlay";
 import {
@@ -284,6 +284,10 @@ function ThreadRouteContent(
     AuthTerminalOperateScope,
   );
   const selectedThreadDetailState = props.selectedThreadDetailState;
+  const threadBehind = useThreadBehindShell({
+    environmentId: selectedThreadDetailRef?.environmentId ?? null,
+    threadId: selectedThreadDetailRef?.threadId ?? null,
+  });
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const { selectedThreadCwd } = useSelectedThreadWorktree();
   const composer = useThreadComposerState();
@@ -939,6 +943,7 @@ function ThreadRouteContent(
           respondingUserInputId={requests.respondingUserInputId}
           connectionStateLabel={routeConnectionState}
           threadSyncStatus={selectedThreadDetailState.status}
+          threadBehind={threadBehind}
           historyControls={historyControls}
           activeThreadBusy={composer.activeThreadBusy}
           canStopThread={awaitingBootstrapTurn || composer.interruptibleRunId !== null}

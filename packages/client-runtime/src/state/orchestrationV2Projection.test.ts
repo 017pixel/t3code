@@ -488,8 +488,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
           later.id,
         ]);
       } else {
-        expect(next).toEqual({ ...projection, updatedAt: itemEvent(late).occurredAt });
-        expect(next?.turnItems).toBe(projection.turnItems);
+        expect(next).toBe(projection);
       }
     });
   });

@@ -196,6 +196,7 @@ export interface ThreadDetailScreenProps {
   readonly respondingUserInputId: RuntimeRequestId | null;
   readonly connectionStateLabel: EnvironmentConnectionPhase;
   readonly threadSyncStatus?: EnvironmentThreadStatus;
+  readonly threadBehind?: boolean;
   readonly historyControls?: ThreadFeedHistoryControls;
   readonly activeThreadBusy: boolean;
   readonly canStopThread: boolean;
@@ -1135,6 +1136,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
               // Cancel on the edit banner would discard it.
               onEditPendingMessage={isProviderSubagent ? null : handleEditPendingMessage}
               contentPresentation={props.contentPresentation}
+              behind={props.threadBehind === true}
               agentLabel={agentLabel}
               threadTitle={props.selectedThread.title}
               latestRun={props.activityRun}

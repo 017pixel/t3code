@@ -14,7 +14,6 @@ import {
   type ThreadCheckpointSummary,
 } from "./threadCheckpoints.ts";
 import type { EnvironmentThread, EnvironmentThreadShell } from "./models.ts";
-import { EMPTY_THREAD_HISTORY_META } from "./threadHistoryMerge.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import {
   createQuestionHistoryProjector,
@@ -50,32 +49,12 @@ export function createEnvironmentThreadDetailAtoms<E>(
 ) {
   const threadStateValueAtomFamily = Atom.family((key: string) => {
     const ref = parseThreadKey(key);
-    return Atom.make((get) => {
-      const state = Option.getOrElse(
+    return Atom.make((get) =>
+      Option.getOrElse(
         AsyncResult.value(get(threadStateAtom(ref.environmentId, ref.threadId))),
         () => EMPTY_ENVIRONMENT_THREAD_STATE,
-      );
-      // A saved copy can be many turns old when the thread moved on while it
-      // was closed. Until the stream catches up, show it as loading rather
-      // than presenting old messages as the latest ones. Only an opening
-      // thread is held back: once messages are on screen, a reconnect that
-      // briefly trails the shell keeps them instead of blanking the view.
-      if (
-        threadShellAtom !== undefined &&
-        Option.isSome(state.data) &&
-        !Option.exists(get.self<EnvironmentThreadState>(), (shown) => Option.isSome(shown.data)) &&
-        isBehindShell(state.data.value, get(threadShellAtom(ref)))
-      ) {
-        // A warm resume keeps "live" from before it closed; it is catching up too.
-        return {
-          ...state,
-          data: Option.none(),
-          status: state.status === "live" ? "synchronizing" : state.status,
-          history: EMPTY_THREAD_HISTORY_META,
-        };
-      }
-      return state;
-    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-state-value:${key}`));
+      ),
+    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-state-value:${key}`));
   });
 
   const threadAtomFamily = Atom.family((key: string) => {
@@ -225,6 +204,22 @@ export function createEnvironmentThreadDetailAtoms<E>(
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-pending-requests:${key}`));
   });
 
+  // A saved copy can be many turns old when the thread moved on while it was
+  // closed. Clients still show it, but marked as out of date until the stream
+  // catches up. A live thread is current even when the shell arrives first.
+  const behindShellAtomFamily = Atom.family((key: string) => {
+    const ref = parseThreadKey(key);
+    return Atom.make((get) => {
+      if (threadShellAtom === undefined) return false;
+      const state = get(threadStateValueAtomFamily(key));
+      return (
+        state.status !== "live" &&
+        Option.isSome(state.data) &&
+        isBehindShell(state.data.value, get(threadShellAtom(ref)))
+      );
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-behind-shell:${key}`));
+  });
+
   const statusAtomFamily = Atom.family((key: string) =>
     Atom.make((get) => get(threadStateValueAtomFamily(key)).status).pipe(
       Atom.setIdleTTL(0),
@@ -256,6 +251,7 @@ export function createEnvironmentThreadDetailAtoms<E>(
     threadAtom: (ref: ScopedThreadRef) => threadAtomFamily(threadKey(ref)),
     visibleTurnItemsAtom: (ref: ScopedThreadRef) => visibleTurnItemsAtomFamily(threadKey(ref)),
     statusAtom: (ref: ScopedThreadRef) => statusAtomFamily(threadKey(ref)),
+    behindShellAtom: (ref: ScopedThreadRef) => behindShellAtomFamily(threadKey(ref)),
     errorAtom: (ref: ScopedThreadRef) => errorAtomFamily(threadKey(ref)),
     historyAtom: (ref: ScopedThreadRef) => historyAtomFamily(threadKey(ref)),
   };

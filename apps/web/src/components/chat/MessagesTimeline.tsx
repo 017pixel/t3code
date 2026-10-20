@@ -524,6 +524,8 @@ interface MessagesTimelineProps {
   hideEmptyPlaceholder?: boolean;
   /** Composer space to center the empty state against; held steady through collapse. */
   emptyPlaceholderInset: number;
+  /** Fades the rows: they are an older copy that the thread is still catching up from. */
+  behind?: boolean;
   topFadeEnabled?: boolean;
   historyControls?: MessagesTimelineHistoryControls | undefined;
   loadEarlier?: CitationHistoryPage | null;
@@ -618,6 +620,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   cancelPositionRestoreRef,
   hideEmptyPlaceholder = false,
   emptyPlaceholderInset,
+  behind = false,
   topFadeEnabled = false,
   historyControls,
   loadEarlier = null,
@@ -1524,8 +1527,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
           ) : null}
           <div
             className={cn(
-              "h-full min-h-0",
+              "h-full min-h-0 transition-opacity delay-150",
               composerOverlayHeight > 0 && "virtualized-scroll-fade timeline-scroll-bottom-fade",
+              behind && "opacity-50",
             )}
             style={timelineMaskStyle}
           >

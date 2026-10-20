@@ -15,6 +15,7 @@ import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
 import {
   isPaintOnlyThreadTimeline,
   peekHeldThreadTimeline,
+  isRememberedThreadTimelineBehind,
   peekRememberedThreadTimeline,
   rememberReadyThreadTimeline,
   resolveExplicitDiffOpenOnActivate,
@@ -391,6 +392,7 @@ import {
   useProjects,
   useThreadProjection,
   useThreadStatus,
+  useThreadBehindShell,
   useThreadHistory,
   useQuietThreadShell,
   useThreadShell,
@@ -1207,6 +1209,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeProviderThread = serverProjection?.providerThreads.find(
     (thread) => thread.id === serverProjection.thread.activeProviderThreadId,
   );
+  const threadBehindShell = useThreadBehindShell(routeThreadDetailRef);
   const activeThreadLiveTokenUsage = latestProviderTurnTokenUsage(
     serverProjection?.providerTurns ?? [],
     serverProjection,
@@ -2893,11 +2896,16 @@ export default function ChatView(props: ChatViewProps) {
     loading: timelineEntries.length === 0 && threadSyncPhase !== null,
     activeThreadKey,
     nextEntries: timelineEntries,
-    rememberedForActive: peekRememberedThreadTimeline<typeof timelineEntries>(
-      activeThreadKey,
-      serverThread?.updatedAt,
-    ),
+    rememberedForActive: peekRememberedThreadTimeline<typeof timelineEntries>(activeThreadKey),
   });
+  // Old messages stay visible while the thread catches up, but faded so they
+  // do not read as the latest.
+  const timelineBehind =
+    threadSyncPhase !== null &&
+    (timelineEntries.length > 0
+      ? threadBehindShell
+      : displayedTimeline.entries.length > 0 &&
+        isRememberedThreadTimelineBehind(activeThreadKey, serverThread?.updatedAt));
   const displayedTimelineKey = displayedTimeline.displayThreadKey ?? routeThreadKey;
   const paintOnlyDisplayedTimeline = isPaintOnlyThreadTimeline(
     displayedTimeline.displayThreadKey,
@@ -8191,6 +8199,7 @@ export default function ChatView(props: ChatViewProps) {
             </div>
             <div className="relative flex min-h-0 flex-1 flex-col bg-background">
               <MessagesTimeline
+                behind={timelineBehind}
                 citationRequest={paintOnlyDisplayedTimeline ? null : citationRequest}
                 citationHistoryLoading={threadDetailLoading}
                 {...(!paintOnlyDisplayedTimeline
