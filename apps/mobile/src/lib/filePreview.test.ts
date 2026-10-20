@@ -21,7 +21,7 @@ const audio = vi.hoisted(() => ({
   },
   player: {
     play: vi.fn(),
-    pause: vi.fn(),
+    pause: vi.fn((_deactivateSession?: boolean) => {}),
     release: vi.fn(),
     replace: vi.fn(),
     seekTo: vi.fn(async () => {}),
@@ -120,6 +120,7 @@ vi.mock("../features/threads/ThreadMarkdownVideo", async () => {
 describe("ThreadInlineFilePreview playback", () => {
   let root: ReturnType<typeof createRoot> | undefined;
   beforeEach(() => {
+    audio.player.pause.mockReset();
     audio.enabled = true;
     audio.setActive.mockImplementation(async (enabled) => {
       audio.enabled = enabled;
@@ -188,6 +189,151 @@ describe("ThreadInlineFilePreview playback", () => {
       duration: 10,
       isBuffering: false,
     };
+  });
+
+  it.each([
+    ["inline", "video"],
+    ["viewer", "video"],
+    ["inline", "native video controls"],
+    ["viewer", "native video controls"],
+    ["inline", "recording"],
+    ["viewer", "recording"],
+  ])("keeps the shared session active when %s audio yields to %s", async (source, successor) => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    audio.status = { ...audio.status, isLoaded: true };
+    const container = document.createElement("div");
+    root = createRoot(container);
+    const render = (playVideo = false, showAudio = true) =>
+      root!.render(
+        createElement(
+          "div",
+          null,
+          showAudio
+            ? source === "inline"
+              ? createElement(ThreadInlineFilePreview, {
+                  source: {
+                    kind: "document",
+                    name: "sound.mp3",
+                    uri: "https://example.com/sound.mp3",
+                  },
+                  onOpen() {},
+                })
+              : createElement(AudioFilePreview, {
+                  uri: "https://example.com/sound.mp3",
+                  onRetry() {},
+                })
+            : null,
+          createElement(MediaVideoPlayer, {
+            uri: "https://example.com/clip.mp4",
+            name: "clip.mp4",
+            thumbnailKey: "clip",
+            expanded: true,
+            autoPlay: playVideo,
+          }),
+        ),
+      );
+    await act(async () => render());
+    await act(async () =>
+      [...container.querySelectorAll("button")]
+        .find(
+          (button) =>
+            button.getAttribute("aria-label") === "Play audio" || button.textContent === "Play",
+        )!
+        .click(),
+    );
+    expect(audio.played).toHaveBeenCalledOnce();
+    let sessionActive = true;
+    const deactivated = vi.fn();
+    // Match expo-audio iOS: pause releases the session after 100 ms unless disabled.
+    audio.player.pause.mockImplementation((deactivateSession) => {
+      if (deactivateSession !== false) {
+        setTimeout(() => {
+          sessionActive = false;
+          audio.video.playing = false;
+          deactivated();
+        }, 100);
+      }
+    });
+    vi.useFakeTimers();
+    let recording: ReturnType<typeof acquireAudioSession> | undefined;
+    try {
+      await act(async () => {
+        if (successor === "recording") {
+          recording = acquireAudioSession("recording");
+          await activateAudioSession(recording);
+        } else if (successor === "native video controls") audio.video.play();
+        else render(true);
+      });
+      if (successor !== "recording") expect(audio.video.playing).toBe(true);
+      expect(audio.player.pause).toHaveBeenCalled();
+      // Cleanup of the old native ref must not interrupt the successor either.
+      await act(async () => render(successor === "video", false));
+      await vi.advanceTimersByTimeAsync(200);
+      expect(sessionActive).toBe(true);
+      expect(deactivated).not.toHaveBeenCalled();
+      expect(audio.setActive).not.toHaveBeenCalledWith(false);
+      if (successor !== "recording") expect(audio.video.playing).toBe(true);
+      else
+        expect(audio.setAudioMode).toHaveBeenLastCalledWith(
+          expect.objectContaining({ allowsRecording: true }),
+        );
+    } finally {
+      if (recording) await releaseAudioSession(recording);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      audio.player.pause.mockReset();
+    }
+  });
+
+  it.each(["inline", "viewer"])("stops video before starting %s audio", async (source) => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    audio.status = { ...audio.status, isLoaded: true };
+    const container = document.createElement("div");
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        createElement(
+          "div",
+          null,
+          createElement(MediaVideoPlayer, {
+            uri: "https://example.com/clip.mp4",
+            name: "clip.mp4",
+            thumbnailKey: "clip",
+            expanded: true,
+            autoPlay: true,
+          }),
+          source === "inline"
+            ? createElement(ThreadInlineFilePreview, {
+                source: {
+                  kind: "document",
+                  name: "sound.mp3",
+                  uri: "https://example.com/sound.mp3",
+                },
+                onOpen() {},
+              })
+            : createElement(AudioFilePreview, {
+                uri: "https://example.com/sound.mp3",
+                onRetry() {},
+              }),
+        ),
+      ),
+    );
+    expect(audio.video.playing).toBe(true);
+    audio.video.pause.mockClear();
+    await act(async () =>
+      [...container.querySelectorAll("button")]
+        .find(
+          (button) =>
+            button.getAttribute("aria-label") === "Play audio" || button.textContent === "Play",
+        )!
+        .click(),
+    );
+    expect(audio.video.playing).toBe(false);
+    expect(audio.video.pause.mock.invocationCallOrder[0]).toBeLessThan(
+      audio.player.play.mock.invocationCallOrder[0]!,
+    );
+    expect(audio.played).toHaveBeenCalledOnce();
+    expect(audio.setActive).toHaveBeenLastCalledWith(true);
   });
 
   it("plays inline, opens the file viewer, and yields viewer playback to recording", async () => {
@@ -363,7 +509,7 @@ describe("ThreadInlineFilePreview playback", () => {
         if (action === "error") Object.assign(audio.status, { error: "Playback failed" });
         await act(async () => render());
       }
-      expect(audio.player.pause).toHaveBeenCalled();
+      expect(audio.player.pause).toHaveBeenLastCalledWith();
       audio.status = { ...audio.status, playing: false, isBuffering: false, isLoaded: true };
       await act(async () => render());
       expect(

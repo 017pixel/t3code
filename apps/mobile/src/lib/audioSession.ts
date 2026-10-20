@@ -21,10 +21,20 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
-export function disposeAudioPlayer(player: { pause(): void; release(): void }): void {
+export function pauseAudioPlayer(player: { pause(deactivateSession?: boolean): void }): void {
+  // Expo Audio otherwise deactivates iOS's shared session 100 ms after pause,
+  // even when a video or recorder has already taken ownership.
+  if (owner && !owner.released) player.pause(false);
+  else player.pause();
+}
+
+export function disposeAudioPlayer(player: {
+  pause(deactivateSession?: boolean): void;
+  release(): void;
+}): void {
   void enqueue(async () => {
     try {
-      player.pause();
+      pauseAudioPlayer(player);
     } finally {
       player.release();
     }
@@ -87,7 +97,7 @@ export function releaseAudioSession(token: AudioSessionToken): Promise<void> {
 }
 
 export function createAudioPlaybackSession(
-  player: { play(): void; pause(): void },
+  player: { play(): void; pause(deactivateSession?: boolean): void },
   nativePlayback = false,
   onRequestedChange?: (requested: boolean) => void,
 ) {
@@ -95,7 +105,8 @@ export function createAudioPlaybackSession(
   const stopPlayer = () => {
     // useAudioPlayer/useVideoPlayer may have disposed the native ref during unmount.
     try {
-      player.pause();
+      if (nativePlayback) player.pause();
+      else pauseAudioPlayer(player);
     } catch {}
   };
   const pause = () => {

@@ -15,6 +15,7 @@ import {
   acquireAudioSession,
   activateAudioSession,
   isAudioSessionOwner,
+  pauseAudioPlayer,
   releaseAudioSession,
 } from "../../lib/audioSession";
 import { usePlaybackAudioPlayer } from "../voice-input/usePlaybackAudioPlayer";
@@ -87,14 +88,14 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
       // oxlint-disable-next-line react/set-state-in-effect -- Native completion and fullscreen takeover invalidate the pending playback request.
       requestPlayback(false);
     }
-    if (fullscreenVideoOpen) player.pause();
+    if (fullscreenVideoOpen) pauseAudioPlayer(player);
   }, [fullscreenVideoOpen, status.didJustFinish, status.error, player, requestPlayback]);
   useEffect(() => {
     active.current = true;
     const subscription = AppState.addEventListener("change", (state) => {
       if (state !== "active") {
         requestPlayback(false);
-        player.pause();
+        pauseAudioPlayer(player);
       }
     });
     return () => {
@@ -111,17 +112,17 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
   const toggle = () => {
     if (status.playing || playRequested.current) {
       requestPlayback(false);
-      return player.pause();
+      return pauseAudioPlayer(player);
     }
     const token = acquireAudioSession(
       "playback",
       () => {
         requestPlayback(false);
-        player.pause();
+        pauseAudioPlayer(player);
       },
       () => {
         try {
-          player.pause();
+          pauseAudioPlayer(player);
         } catch {}
       },
     );
@@ -175,7 +176,7 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
         {...props}
         onOpen={() => {
           requestPlayback(false);
-          player.pause();
+          pauseAudioPlayer(player);
           props.onOpen();
         }}
       />
