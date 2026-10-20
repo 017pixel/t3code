@@ -2008,84 +2008,83 @@ const make = Effect.gen(function* () {
     }),
 
     capabilities: Effect.fn("OrchestratorMcpService.capabilities")(function* (scope, input = {}) {
-        const { parent, limits } = yield* loadCaller(scope);
-        const providers = yield* loadProviders;
-        const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
-        const settings = yield* serverSettings.getSettings.pipe(
-          Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
-        );
-        const modelPreferences = settings.providerModelPreferences ?? {};
-        const favorites = input.models === "all" ? null : settings.favorites;
-        const inherited = parent?.thread.modelSelection;
-        return {
-          parentThreadId: parent?.thread.id ?? null,
-          inheritedProviderInstanceId: inherited?.instanceId ?? null,
-          inheritedModel: inherited?.model ?? null,
-          inheritedOptions: inherited?.options ?? [],
-          runtimeMode: limits.runtimeMode,
-          interactionMode: limits.interactionMode,
-          providers: providers
-            .filter(
-              (provider) =>
-                input.providerInstanceId === undefined ||
-                provider.instanceId === input.providerInstanceId,
-            )
-            .map((provider) => {
-              const constraints = providerConstraints(
-                provider,
-                orchestrationCapableInstanceIds.has(provider.instanceId),
-              );
-              const visibleModels = provider.models.filter(
-                (model) =>
-                  model.isCustom ||
-                  !modelPreferences[provider.instanceId]?.hiddenModels.includes(model.slug),
-              );
-              const listedModels = visibleModels.filter(
-                (model) =>
-                  !favorites?.length ||
-                  (inherited?.instanceId === provider.instanceId &&
-                    inherited.model === model.slug) ||
-                  favorites.some(
-                    (favorite) =>
-                      favorite.provider === provider.instanceId && favorite.model === model.slug,
-                  ),
-              );
-              const omittedModels = visibleModels.length - listedModels.length;
-              return {
-                providerInstanceId: provider.instanceId,
-                driverKind: provider.driver,
-                displayName: provider.displayName ?? null,
-                models: listedModels.map((model) => ({
-                  id: model.slug,
-                  ...(model.name === undefined || model.name === model.slug
-                    ? {}
-                    : { label: model.name }),
-                  ...(model.capabilities?.optionDescriptors === undefined
-                    ? {}
-                    : { options: model.capabilities.optionDescriptors.map(compactModelOption) }),
-                })),
-                ...(omittedModels === 0 ? {} : { omittedModels }),
-                ...(provider.supportedRuntimeModes === undefined ||
-                provider.supportedRuntimeModes.length === 0
+      const { parent, limits } = yield* loadCaller(scope);
+      const providers = yield* loadProviders;
+      const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+      );
+      const modelPreferences = settings.providerModelPreferences ?? {};
+      const favorites = input.models === "all" ? null : settings.favorites;
+      const inherited = parent?.thread.modelSelection;
+      return {
+        parentThreadId: parent?.thread.id ?? null,
+        inheritedProviderInstanceId: inherited?.instanceId ?? null,
+        inheritedModel: inherited?.model ?? null,
+        inheritedOptions: inherited?.options ?? [],
+        runtimeMode: limits.runtimeMode,
+        interactionMode: limits.interactionMode,
+        providers: providers
+          .filter(
+            (provider) =>
+              input.providerInstanceId === undefined ||
+              provider.instanceId === input.providerInstanceId,
+          )
+          .map((provider) => {
+            const constraints = providerConstraints(
+              provider,
+              orchestrationCapableInstanceIds.has(provider.instanceId),
+            );
+            const visibleModels = provider.models.filter(
+              (model) =>
+                model.isCustom ||
+                !modelPreferences[provider.instanceId]?.hiddenModels.includes(model.slug),
+            );
+            const listedModels = visibleModels.filter(
+              (model) =>
+                !favorites?.length ||
+                (inherited?.instanceId === provider.instanceId && inherited.model === model.slug) ||
+                favorites.some(
+                  (favorite) =>
+                    favorite.provider === provider.instanceId && favorite.model === model.slug,
+                ),
+            );
+            const omittedModels = visibleModels.length - listedModels.length;
+            return {
+              providerInstanceId: provider.instanceId,
+              driverKind: provider.driver,
+              displayName: provider.displayName ?? null,
+              models: listedModels.map((model) => ({
+                id: model.slug,
+                ...(model.name === undefined || model.name === model.slug
                   ? {}
-                  : { runtimeModes: [...provider.supportedRuntimeModes] }),
-                canRunChildTask: constraints.length === 0,
-                canRunCrossProviderChildTask: constraints.length === 0,
-                constraints: [...constraints],
-              };
-            }),
-          features: {
-            appOwnedSubagents: true,
-            asyncPolling: true,
-            cancellation: true,
-            batchThreadCreation: true,
-            threadManagement: true,
-            incrementalThreadRead: true,
-            scheduledTasks: true,
-            maxBatchThreads: 20,
-          },
-        };
-      }),
+                  : { label: model.name }),
+                ...(model.capabilities?.optionDescriptors === undefined
+                  ? {}
+                  : { options: model.capabilities.optionDescriptors.map(compactModelOption) }),
+              })),
+              ...(omittedModels === 0 ? {} : { omittedModels }),
+              ...(provider.supportedRuntimeModes === undefined ||
+              provider.supportedRuntimeModes.length === 0
+                ? {}
+                : { runtimeModes: [...provider.supportedRuntimeModes] }),
+              canRunChildTask: constraints.length === 0,
+              canRunCrossProviderChildTask: constraints.length === 0,
+              constraints: [...constraints],
+            };
+          }),
+        features: {
+          appOwnedSubagents: true,
+          asyncPolling: true,
+          cancellation: true,
+          batchThreadCreation: true,
+          threadManagement: true,
+          incrementalThreadRead: true,
+          scheduledTasks: true,
+          maxBatchThreads: 20,
+        },
+      };
+    }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
       const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
       const parentRun = parent.runs
