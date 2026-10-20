@@ -34,26 +34,31 @@ export type FilePreviewKind =
   | "text"
   | "unsupported";
 
-export function filePreviewKind(file: {
-  readonly name: string;
-  readonly mimeType?: string;
-}): FilePreviewKind {
+export function filePreviewKind(
+  file: { readonly name: string; readonly mimeType?: string },
+  options?: { readonly richDocuments?: boolean },
+): FilePreviewKind {
   const mime = file.mimeType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
   const name = file.name.toLowerCase();
   const extension = name.slice(name.lastIndexOf("."));
   const generic = !mime || mime === "application/octet-stream" || mime === "text/plain";
-  const office = officePreviewKind(file);
+  const richDocuments = options?.richDocuments !== false;
+  const office = richDocuments ? officePreviewKind(file) : null;
   if (office) return office;
   if (mime === "application/pdf") return "pdf";
   if (mime === "text/html") return "html";
   if (mime === "text/markdown" || mime === "text/x-markdown") return "markdown";
-  if (mime === "text/vnd.mermaid") return "mermaid";
-  if (mime.startsWith("font/")) return "font";
+  if (richDocuments && mime === "text/vnd.mermaid") return "mermaid";
+  if (richDocuments && mime.startsWith("font/")) return "font";
   // Linux's MIME database also assigns .otf to OpenDocument formula templates.
   // FontFace validates the actual bytes before a specimen is shown.
-  if (extension === ".otf" && mime === "application/vnd.oasis.opendocument.formula-template")
+  if (
+    richDocuments &&
+    extension === ".otf" &&
+    mime === "application/vnd.oasis.opendocument.formula-template"
+  )
     return "font";
-  if (mime === "application/rtf") return "text";
+  if (richDocuments && mime === "application/rtf") return "text";
   if (mime.startsWith("image/")) return "image";
   if (mime.startsWith("video/")) return "video";
   if (mime.startsWith("audio/")) return "audio";
@@ -61,14 +66,15 @@ export function filePreviewKind(file: {
     if (extension === ".pdf") return "pdf";
     if (/^\.html?$/.test(extension)) return "html";
     if (/^\.(md|markdown|mdown|mkd|mdx)$/.test(extension)) return "markdown";
-    if (/^\.(mmd|mermaid)$/.test(extension)) return "mermaid";
-    if (isWorkspaceFontPreviewPath(name)) return "font";
+    if (richDocuments && /^\.(mmd|mermaid)$/.test(extension)) return "mermaid";
+    if (richDocuments && isWorkspaceFontPreviewPath(name)) return "font";
+    if (richDocuments && extension === ".rtf") return "text";
     const media = mediaMimeTypeFromExtension(extension);
     if (media?.startsWith("image/")) return "image";
     if (media?.startsWith("video/")) return "video";
     if (audioMimeTypeFromExtension(extension) !== null) return "audio";
     if (
-      /^\.(txt|rtf|log|json|jsonc|jsonl|ndjson|yaml|yml|toml|ini|conf|config|env|csv|tsv|xml|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|mts|cts|py|pyi|rb|go|rs|swift|kt|kts|java|c|h|cc|cpp|hpp|cs|php|sh|bash|zsh|fish|sql|graphql|gql|vue|svelte|r|lua|ex|exs|erl|hs|clj|dart|diff|patch|lock|properties|gradle)$/.test(
+      /^\.(txt|log|json|jsonc|jsonl|ndjson|yaml|yml|toml|ini|conf|config|env|csv|tsv|xml|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|mts|cts|py|pyi|rb|go|rs|swift|kt|kts|java|c|h|cc|cpp|hpp|cs|php|sh|bash|zsh|fish|sql|graphql|gql|vue|svelte|r|lua|ex|exs|erl|hs|clj|dart|diff|patch|lock|properties|gradle)$/.test(
         extension,
       ) ||
       /^(dockerfile|makefile|gemfile|rakefile|license|readme|\.gitignore|\.gitattributes|\.editorconfig|\.env)(\.|$)/i.test(

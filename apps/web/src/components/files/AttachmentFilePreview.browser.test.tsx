@@ -17,9 +17,10 @@ vi.mock(import("./ReadOnlySourcePreview"), () => ({
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { OfficeFilePreview } from "./OfficeFilePreview";
 import { MermaidFilePreview } from "./MermaidFilePreview";
+import type { OfficeWorkerResult } from "./officePreviewProtocol";
 
 it.each(["paragraphs", "runs", "tables", "auxiliary XML", "XML bytes", "renamed XML"])(
-  "rejects excessive Word %s in the worker before rendering DOM",
+  "bounds excessive Word %s before rendering DOM",
   async (scenario) => {
     const { default: JSZip } = await import("jszip");
     const archive = new JSZip();
@@ -45,21 +46,189 @@ it.each(["paragraphs", "runs", "tables", "auxiliary XML", "XML bytes", "renamed 
     const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
     const src = URL.createObjectURL(file);
     try {
-      await using screen = await render(
-        <OfficeFilePreview src={src} name="large.docx" kind="docx" sizeBytes={file.size} />,
-      );
-      await vi.waitFor(
-        () =>
-          expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(
-            "Preview limited",
-          ),
-        { timeout: 10_000 },
-      );
-      expect(screen.container.querySelector("iframe")).toBeNull();
+      const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+        type: "module",
+      });
+      try {
+        const result = await new Promise<OfficeWorkerResult>((resolve) => {
+          worker.addEventListener(
+            "message",
+            (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+            { once: true },
+          );
+          void file
+            .arrayBuffer()
+            .then((bytes) => worker.postMessage({ type: "open", kind: "docx", bytes }, [bytes]));
+        });
+        if (scenario === "auxiliary XML" || scenario === "renamed XML") {
+          expect(result).toMatchObject({
+            type: "error",
+            message: expect.stringContaining("Preview limited"),
+          });
+        } else {
+          expect(result.type).toBe("docx");
+          if (result.type !== "docx") throw new Error("Expected a Word prefix");
+          expect(result.truncated).toBe(true);
+          for (const xml of result.documents) {
+            const document = new DOMParser().parseFromString(xml, "application/xml");
+            expect(document.querySelector("parsererror")).toBeNull();
+            expect(document.getElementsByTagNameNS("*", "body")).toHaveLength(1);
+          }
+          expect(result.documents.join("").length).toBeLessThan(body.length);
+        }
+      } finally {
+        worker.terminate();
+      }
     } finally {
       URL.revokeObjectURL(src);
     }
   },
+);
+
+it.each(["XFD200", "XFD1048576", "AX500", "AZ9999999"])(
+  "bounds spreadsheet cells at %s before padding",
+  async (ref) => {
+    const { default: JSZip } = await import("jszip");
+    const archive = new JSZip();
+    archive.file(
+      "xl/workbook.xml",
+      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    );
+    // A nonstandard relationship target must get the same bounds.
+    archive.file(
+      "xl/_rels/workbook.xml.rels",
+      '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="custom.xml"/></Relationships>',
+    );
+    archive.file(
+      "xl/custom.xml",
+      `<worksheet><dimension ref="A1:${ref}"/><sheetData><row r="1"><c r="A1"><v>7</v></c></row><row r="${ref.replace(/\D/g, "")}"><c r="${ref}"><v>9</v></c></row></sheetData></worksheet>`,
+    );
+    const bytes = await archive.generateAsync({ type: "arraybuffer" });
+    const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    try {
+      const result = await new Promise<OfficeWorkerResult>((resolve) => {
+        worker.addEventListener(
+          "message",
+          (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+          { once: true },
+        );
+        worker.postMessage({ type: "open", kind: "xlsx", bytes }, [bytes]);
+      });
+      if (ref === "AZ9999999") {
+        expect(result).toMatchObject({
+          type: "error",
+          message: expect.stringContaining("invalid"),
+        });
+      } else {
+        expect(result.type).toBe("xlsx");
+        if (result.type !== "xlsx") throw new Error("Expected workbook values");
+        const sheet = result.sheets[0]!;
+        expect(sheet.rows[0]![0]).toBe("7");
+        expect(sheet.rows.length).toBeLessThanOrEqual(500);
+        expect(Math.max(...sheet.rows.map((row) => row.length))).toBeLessThanOrEqual(50);
+        expect(sheet.truncated).toBe(ref !== "AX500");
+        if (ref === "AX500") expect(sheet.rows[499]![49]).toBe("9");
+      }
+    } finally {
+      worker.terminate();
+    }
+  },
+);
+
+it("keeps spreadsheet dates on their calendar day west of UTC", async () => {
+  const { default: JSZip } = await import("jszip");
+  const archive = new JSZip();
+  archive.file(
+    "xl/workbook.xml",
+    '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Dates" sheetId="1" r:id="rId1"/></sheets></workbook>',
+  );
+  archive.file(
+    "xl/_rels/workbook.xml.rels",
+    '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+  );
+  archive.file(
+    "xl/styles.xml",
+    '<styleSheet><cellXfs><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>',
+  );
+  archive.file(
+    "xl/worksheets/sheet1.xml",
+    '<worksheet><sheetData><row r="1"><c r="A1" s="1"><v>46023</v></c></row></sheetData></worksheet>',
+  );
+  const bytes = await archive.generateAsync({ type: "arraybuffer" });
+  const workerModule = new URL("./officePreview.worker.ts?worker_file&type=module", import.meta.url)
+    .href;
+  // Give the worker a west-of-UTC default while preserving explicit format options.
+  const bootstrap = URL.createObjectURL(
+    new Blob(
+      [
+        `
+    const format = Date.prototype.toLocaleDateString;
+    Date.prototype.toLocaleDateString = function(locale, options) {
+      return format.call(this, "en-US", { timeZone: "America/Los_Angeles", ...options });
+    };
+    await import(${JSON.stringify(workerModule)});
+    postMessage({ type: "ready" });
+  `,
+      ],
+      { type: "text/javascript" },
+    ),
+  );
+  const worker = new Worker(bootstrap, { type: "module" });
+  try {
+    const result = await new Promise<OfficeWorkerResult>((resolve) => {
+      worker.addEventListener(
+        "message",
+        (event: MessageEvent<OfficeWorkerResult | { type: "ready" }>) => {
+          if (event.data.type === "ready")
+            worker.postMessage({ type: "open", kind: "xlsx", bytes }, [bytes]);
+          else resolve(event.data);
+        },
+      );
+    });
+    if (result.type === "error") throw new Error(result.message);
+    expect(result).toMatchObject({ type: "xlsx", sheets: [{ rows: [["1/1/2026"]] }] });
+  } finally {
+    worker.terminate();
+    URL.revokeObjectURL(bootstrap);
+  }
+});
+
+it.each([60, 100])(
+  "renders all %i pages of a table-heavy Word report",
+  async (pages) => {
+    const { default: JSZip } = await import("jszip");
+    const archive = new JSZip();
+    const paragraph = (text: string) =>
+      `<w:p><w:pPr><w:spacing w:after="120"/><w:jc w:val="left"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Calibri"/><w:sz w:val="22"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+    archive.file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${Array.from({ length: pages }, (_, page) => paragraph(`page ${page + 1}`) + `<w:tbl>${Array.from({ length: 10 }, () => `<w:tr>${Array.from({ length: 5 }, () => `<w:tc><w:tcPr><w:tcW w:w="1800"/></w:tcPr>${paragraph("report entry")}</w:tc>`).join("")}</w:tr>`).join("")}</w:tbl>`).join("")}</w:body></w:document>`,
+    );
+    archive.file(
+      "_rels/.rels",
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    );
+    // Binary media must not consume the document's markup budget.
+    archive.file("word/media/image.png", new Uint8Array(2_500_000));
+    const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+    const src = URL.createObjectURL(file);
+    try {
+      await using screen = await render(
+        <OfficeFilePreview src={src} name="report.docx" kind="docx" sizeBytes={file.size} />,
+      );
+      await vi.waitFor(
+        () => expect(screen.container.querySelector("iframe")?.srcdoc).toContain(`page ${pages}`),
+        { timeout: 30_000 },
+      );
+      expect(screen.container.textContent).not.toContain("Preview limited");
+      expect(screen.container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  },
+  35_000,
 );
 
 describe("standalone Mermaid previews", () => {

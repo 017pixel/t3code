@@ -1406,9 +1406,15 @@ export default function FilePreviewPanel({
               sizeBytes={0}
               asset={{
                 environmentId,
-                resource: draft
-                  ? { _tag: "draft-workspace-file", cwd, path: absolutePath }
-                  : { _tag: "media-file", threadId: threadRef.threadId, path: absolutePath },
+                resource:
+                  draft && isDocument
+                    ? { _tag: "draft-workspace-file", cwd, path: absolutePath }
+                    : {
+                        _tag: "media-file",
+                        threadId: threadRef.threadId,
+                        path: absolutePath,
+                        ...(isDocument ? {} : { disposition: "attachment" as const }),
+                      },
               }}
               origin="File"
             />

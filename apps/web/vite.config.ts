@@ -95,7 +95,7 @@ const browserTestApiPort = 61_000 + ((Hash.string(import.meta.dirname) >>> 0) % 
 const browserTestProject = {
   extends: true,
   // Pre-bundle lazy browser and worker dependencies to avoid mid-run reloads.
-  optimizeDeps: { include: ["vite-plus/test/browser", "read-excel-file/universal"] },
+  optimizeDeps: { include: ["vite-plus/test/browser", "read-excel-file/universal", "saxes"] },
   test: {
     name: "browser",
     include: ["src/**/*.browser.test.{ts,tsx}"],

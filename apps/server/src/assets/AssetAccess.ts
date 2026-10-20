@@ -101,6 +101,10 @@ const PREVIEW_ASSET_EXTENSIONS = new Set([
   ".css",
   ".js",
   ".mjs",
+  ".otf",
+  ".ttf",
+  ".woff",
+  ".woff2",
 ]);
 
 const AssetClaimsSchema = Schema.Union([
