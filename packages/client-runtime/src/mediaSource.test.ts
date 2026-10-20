@@ -61,6 +61,20 @@ describe("resolveMediaSource", () => {
   });
 
   describe("host paths", () => {
+    it.each(["tone.wav", "tone.mp3", "tone.oga", "tone.webm-audio"])(
+      "keeps workspace audio %s out of the image fallback",
+      (path) => {
+        expect(resolveMediaSource(path, { threadId, imageEmbed: true })).toBeNull();
+        expect(
+          resolveMediaSource("authored.wav", {
+            threadId,
+            imageEmbed: true,
+            resolvedFilePath: path,
+          }),
+        ).toBeNull();
+      },
+    );
+
     it.each([
       ["/tmp/frame%23one.png:12", "/tmp/frame#one.png"],
       ["/tmp/frame%3Fone.png:12:3", "/tmp/frame?one.png"],

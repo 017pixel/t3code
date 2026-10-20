@@ -8,16 +8,17 @@ export default function MermaidViewer(props: { readonly text: string }) {
   const { resolvedTheme } = useTheme();
   const [expanded, setExpanded] = useState<string | null>(null);
   // Mermaid lays out DOM before sanitizing its SVG. Refuse resource and config
-  // syntax before that pass so standalone files cannot initiate requests.
+  // syntax before that pass so standalone files cannot initiate requests. Node
+  // metadata is YAML, whose escaped/aliased image keys cannot be checked lexically.
   if (
-    /%%\s*\{|^\s*---|<|\b(?:img|image)\s*:|url\s*\(|@import|(?:https?|data|blob|file):/im.test(
+    /%%\s*\{|^\s*---|<\/?[A-Za-z]|<[!?]|@\s*\{|\b(?:img|image)\s*:|url\s*\(|@import|(?:https?|data|blob|file):/im.test(
       props.text,
     )
   )
     return (
       <div role="alert" className="p-6 text-xs text-muted-foreground">
-        This diagram contains resource URLs, markup, or custom configuration. Show Mermaid source to
-        inspect it safely.
+        This diagram contains resource URLs, markup, node metadata, or custom configuration. Show
+        Mermaid source to inspect it safely.
       </div>
     );
   return (
