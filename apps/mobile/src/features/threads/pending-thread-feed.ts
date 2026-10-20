@@ -40,3 +40,11 @@ export function appendPendingThreadMessages(
       })),
   ];
 }
+
+// The floating control already says Compacting; web hides this row too.
+export function hideThinkingWhileCompacting(
+  feed: ReadonlyArray<PendingThreadFeedEntry>,
+  isCompacting: boolean,
+): ReadonlyArray<PendingThreadFeedEntry> {
+  return isCompacting ? feed.filter((entry) => entry.type !== "thinking") : feed;
+}
