@@ -190,6 +190,19 @@ describe("question answer paths", () => {
           expected: ["## Sheet: Cargo", "Violet\t19"],
         },
         {
+          ext: "ods",
+          bounded: true,
+          parts: {
+            "content.xml": `<office:document><table:table table:name="Repeated"><table:table-row><table:table-cell table:number-columns-repeated="512"><text:p>Lead ${"a".repeat(600_000)} Tail</text:p></table:table-cell></table:table-row></table:table></office:document>`,
+          },
+          expected: [
+            "## Sheet: Repeated",
+            "Lead ",
+            " Tail\tLead ",
+            "[Extracted text truncated at 1,000,000 characters.]",
+          ],
+        },
+        {
           ext: "odp",
           parts: {
             "content.xml":

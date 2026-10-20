@@ -314,6 +314,7 @@ const resumed = (
     readonly supervised?: boolean;
     readonly replayGate?: ProviderReplayGate;
     readonly attachmentsDir?: string;
+    readonly resolveExtractedTextPath?: (path: string) => Effect.Effect<string | undefined>;
     readonly fileSystem?: FileSystem.FileSystem;
     readonly onPrompt?: (input: unknown) => void;
   },
@@ -343,6 +344,9 @@ const resumed = (
         ...(options?.attachmentsDir === undefined
           ? {}
           : { attachmentsDir: options.attachmentsDir }),
+        ...(options?.resolveExtractedTextPath === undefined
+          ? {}
+          : { resolveExtractedTextPath: options.resolveExtractedTextPath }),
       },
     );
     const thread = yield* runtime.resumeThread({
@@ -655,6 +659,65 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       yield* Fiber.join(started);
       assert.equal((yield* Fiber.join(terminal))?.status, "interrupted");
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("sends nothing for a turn stopped while extracting document text", () =>
+    Effect.gen(function* () {
+      const resolving = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const prompts: Array<unknown> = [];
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.instructions.entry.put", {
+            sessionID: SESSION,
+            key: "t3-code",
+            value: "<any>",
+          }),
+          reply("session.instructions.entry.put", null),
+          out("session.interrupt", { sessionID: SESSION }),
+          reply("session.interrupt", { interrupted: false }),
+        ],
+        {
+          attachmentsDir: "/attachments",
+          onPrompt: (input) => prompts.push(input),
+          resolveExtractedTextPath: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(resolving, undefined);
+              yield* Deferred.await(release);
+              return undefined;
+            }),
+        },
+      );
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      const started = yield* runtime
+        .startTurn({
+          ...turnInput(thread),
+          message: {
+            ...turnInput(thread).message,
+            attachments: [
+              ChatFileAttachment.make({
+                type: "file",
+                id: ChatAttachmentId.make(
+                  "thread-opencode2-adapter-12345678-1234-1234-1234-123456789abc",
+                ),
+                name: "report.rtf",
+                mimeType: "application/rtf",
+                sizeBytes: 4,
+              }),
+            ],
+          },
+        })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(resolving);
+      yield* runtime.interruptTurn({
+        providerThread: thread,
+        providerTurnId: yield* providerTurnId,
+      });
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(started);
+      assert.equal((yield* Fiber.join(terminal))?.status, "interrupted");
+      assert.lengthOf(prompts, 0);
+    }).pipe(Effect.scoped),
   );
 
   it.effect("ends a turn locally when a stuck server never answers Stop", () =>
@@ -3673,9 +3736,14 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer))),
   );
 
-  it.effect.each([false, true])(
-    "rejects an image steer stopped during attachment resolution (held end: %s)",
-    (heldEnd) =>
+  it.effect.each([
+    [false, "image"],
+    [true, "image"],
+    [false, "text"],
+    [true, "text"],
+  ] as const)(
+    "rejects a steer stopped during attachment resolution (held end: %s, lookup: %s)",
+    ([heldEnd, lookup]) =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
@@ -3728,10 +3796,20 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             attachmentsDir,
             replayGate: gate,
             onPrompt: (input) => prompts.push(input),
+            ...(lookup === "text"
+              ? {
+                  resolveExtractedTextPath: () =>
+                    Effect.gen(function* () {
+                      yield* Deferred.succeed(resolving, undefined);
+                      yield* Deferred.await(release);
+                      return undefined;
+                    }),
+                }
+              : {}),
             fileSystem: {
               ...fileSystem,
               exists: (file) =>
-                file === path
+                lookup === "image" && file === path
                   ? Effect.gen(function* () {
                       yield* Deferred.succeed(resolving, undefined);
                       yield* Deferred.await(release);

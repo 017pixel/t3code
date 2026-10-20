@@ -3417,12 +3417,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           )
         : [];
       const files = yield* promptFiles(turnInput.message.attachments);
+      const messageText = yield* promptText(turnInput);
       if (!sending()) return;
       return yield* client.session
         .prompt({
           sessionID,
           id,
-          text: yield* promptText(turnInput),
+          text: messageText,
           ...(files.length === 0 ? {} : { files }),
           ...(skills.length === 0
             ? {}
@@ -3755,6 +3756,12 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           turn.steers.add(inboxID);
           state.strandedSteers.delete(inboxID);
           const files = yield* promptFiles(steerInput.message.attachments);
+          const messageText = (yield* providerMessageTextWithAttachmentPaths({
+            text: steerInput.message.text,
+            attachments: steerInput.message.attachments,
+            resolveAttachmentPath: host.resolveAttachmentPath,
+            resolveExtractedTextPath: host.resolveExtractedTextPath,
+          })).trim();
           if (state.active !== turn || turn.interrupted) {
             yield* lock.withPermit(
               Effect.gen(function* () {
@@ -3778,12 +3785,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             .prompt({
               sessionID: Session.ID.make(sessionId),
               id: inboxID,
-              text: (yield* providerMessageTextWithAttachmentPaths({
-                text: steerInput.message.text,
-                attachments: steerInput.message.attachments,
-                resolveAttachmentPath: host.resolveAttachmentPath,
-                resolveExtractedTextPath: host.resolveExtractedTextPath,
-              })).trim(),
+              text: messageText,
               ...(files.length === 0 ? {} : { files }),
               delivery: "steer",
             })

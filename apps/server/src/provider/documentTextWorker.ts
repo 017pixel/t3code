@@ -90,15 +90,20 @@ function table(node: XmlNode): string {
       ["tc", "table-cell", "covered-table-cell", "td", "th"].includes(cell.name),
     );
     const values: string[] = [];
+    let length = 0;
+    const budget = MAX_OUTPUT + 1 - result.length;
     for (const cell of cells) {
       const count = Math.min(512, Number(cell.attrs["number-columns-repeated"]) || 1);
       if (values.length + count > 512) throw new Error("Column limit");
-      values.push(
-        ...Array.from(
-          { length: count },
-          () => paragraphs(cell).replaceAll(/\s+/g, " ").trim() || cell.attrs.value || "",
-        ),
-      );
+      const value = paragraphs(cell).replaceAll(/\s+/g, " ").trim() || cell.attrs.value || "";
+      for (let column = 0; column < count; column++) {
+        if (values.length > 0) length++;
+        const part = value.slice(0, Math.max(0, budget - length));
+        values.push(part);
+        length += part.length;
+        if (length >= budget) break;
+      }
+      if (length >= budget) break;
     }
     const line = values.join("\t");
     const repeat = Math.min(10_000, Number(row.attrs["number-rows-repeated"]) || 1);
