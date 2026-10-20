@@ -828,7 +828,7 @@ it.layer(
 
   it.effect("rechecks authority after waiting for a lock and orders parent before child", () =>
     Effect.gen(function* () {
-      const { state, script, handle, executor, processes } = yield* savedScriptFixture;
+      const { state, script, handle, manager, executor, processes } = yield* savedScriptFixture;
       const caller = state.caller,
         target = state.target;
       for (const changed of ["caller", "target"] as const) {
@@ -909,6 +909,54 @@ it.layer(
           code: "script_run_not_found",
         });
       }
+      state.caller = { ...caller, worktreePath: target.worktreePath };
+      const run = { threadId: target.id, scriptId: script.id, terminalId: "lease-stop" };
+      expect(yield* handle("t3_project_script_run", run)).toMatchObject({
+        outcome: "input_accepted",
+      });
+      const owned = processes.at(-1)!;
+      const opening = yield* Deferred.make<void>();
+      const stopping = yield* Deferred.make<void>();
+      state.beforeOpen = Deferred.succeed(opening, undefined).pipe(Effect.asVoid);
+      state.beforeLock = (id) =>
+        id === target.id ? Deferred.succeed(stopping, undefined).pipe(Effect.asVoid) : Effect.void;
+      const pending = yield* withWorkspaceLease(
+        target.worktreePath!,
+        Effect.gen(function* () {
+          const other = yield* manager
+            .open({
+              threadId: target.id,
+              terminalId: "other",
+              cwd: target.worktreePath!,
+              worktreePath: target.worktreePath,
+              providerInstanceId: target.modelSelection.instanceId,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(opening);
+          const stop = yield* handle("t3_project_script_stop", run).pipe(Effect.forkScoped);
+          yield* Deferred.await(stopping);
+          // Stop reaches the child lock under the parent lock; rollback shares their workspace.
+          yield* executor.withLock(caller.id, Effect.void).pipe(
+            Effect.timeoutOrElse({
+              duration: "2 seconds",
+              orElse: () =>
+                Effect.die(
+                  "Script stop held the executor lock while another terminal held the terminal lock waiting for the workspace lease",
+                ),
+            }),
+          );
+          expect(owned.killed).toBe(false);
+          expect(processes.at(-1)).toBe(owned);
+          return { other, stop };
+        }),
+      );
+      expect(yield* Fiber.join(pending.other)).toMatchObject({
+        terminalId: "other",
+        status: "running",
+      });
+      expect(yield* Fiber.join(pending.stop)).toMatchObject({ stopped: true });
+      expect(owned.killed).toBe(true);
+      expect(processes.at(-1)).toMatchObject({ writes: [], killed: false });
     }),
   );
 
