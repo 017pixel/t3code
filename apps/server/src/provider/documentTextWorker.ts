@@ -584,11 +584,12 @@ export async function extractDocumentText(path: string, extension: string): Prom
         if (cellDepth++ === 0) {
           started = false;
           space = false;
-        }
+        } else if (started) space = true;
         continue;
       }
       if (part === CELL_END) {
         cellDepth--;
+        if (cellDepth > 0 && started) space = true;
         continue;
       }
       if (typeof part !== "string" && started) continue;
