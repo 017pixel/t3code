@@ -275,7 +275,13 @@ export function AttachmentFilePreview(props: {
       <ReadOnlySourcePreview name={props.name} text={content.text} />
     )
   ) : kind === "archive" || kind === "sqlite" ? (
-    <BinaryFilePreview src={url} name={props.name} kind={kind} />
+    <BinaryFilePreview
+      key={revision}
+      src={url}
+      name={props.name}
+      kind={kind}
+      onRetry={() => setRevision((value) => value + 1)}
+    />
   ) : kind === "font" ? (
     <FontFilePreview src={url} name={props.name} />
   ) : officeKind ? (

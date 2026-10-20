@@ -2,6 +2,7 @@ import { act, render, stubGlobal, type Screen } from "../../../test/render";
 import "~/index.css";
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { page } from "vite-plus/test/browser";
 
 const { refresh } = vi.hoisted(() => ({ refresh: vi.fn<() => Promise<string | null>>() }));
 
@@ -214,7 +215,7 @@ describe("bounded binary previews", () => {
     const SQL = await initSqlJs({ locateFile: () => wasmUrl });
     const database = new SQL.Database();
     database.run(
-      "CREATE TABLE sqliteData (price INTEGER, quantity INTEGER, total INTEGER GENERATED ALWAYS AS (price * quantity) STORED, doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL); INSERT INTO sqliteData(price, quantity) VALUES (7, 3)",
+      "CREATE TABLE sqliteData (price INTEGER, quantity INTEGER, total INTEGER GENERATED ALWAYS AS (price * quantity) STORED, doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL); INSERT INTO sqliteData(price, quantity) VALUES (7, 3); CREATE TABLE zzInventory (stock INTEGER); INSERT INTO zzInventory VALUES(42)",
     );
     const src = URL.createObjectURL(new Blob([new Uint8Array(database.export())]));
     database.close();
@@ -238,6 +239,15 @@ describe("bounded binary previews", () => {
         "21",
         "14",
       ]);
+      await act(() =>
+        screen.container.querySelector<HTMLButtonElement>('[aria-label="Table"]')!.click(),
+      );
+      await page.getByRole("option", { name: "zzInventory (1 rows)" }).click();
+      await vi.waitFor(() =>
+        expect([...screen.container.querySelectorAll("td")].map((x) => x.textContent)).toEqual([
+          "42",
+        ]),
+      );
     } finally {
       URL.revokeObjectURL(src);
     }
@@ -294,6 +304,15 @@ describe("bounded binary previews", () => {
     expect(
       new TextDecoder().decode((await boundedZip(extended.buffer)).get("readme.txt")?.bytes),
     ).toBe("hello");
+
+    const redirected = new Uint8Array(extended.length + 56);
+    redirected.set(extended.subarray(0, end + 56));
+    redirected.set(extended.subarray(end + 56), end + 112);
+    const redirect = new DataView(redirected.buffer);
+    redirect.setUint32(end + 56, 0x06064b50, true);
+    redirect.setBigUint64(end + 60, 44n, true);
+    redirect.setBigUint64(end + 104, BigInt(end), true);
+    await expect(boundedZip(redirected.buffer)).rejects.toThrow("Unsupported ZIP64 directory");
 
     const many = new JSZip();
     for (let i = 0; i < 2049; i++) many.file(`file-${i}`, "");
@@ -932,3 +951,58 @@ it("copies every indexed line rather than the mounted preview rows", async () =>
   await vi.waitFor(() => expect(screen.container.textContent).toContain("line-0"));
   await vi.waitFor(async () => expect(await copyContents.current!()).toBe(text));
 });
+
+it.each(["archive", "sqlite"] as const)(
+  "reauthorizes and retries a failed %s attachment",
+  async (kind) => {
+    const bad = URL.createObjectURL(new Blob(["invalid"]));
+    let bytes: Uint8Array<ArrayBuffer>;
+    if (kind === "archive")
+      bytes = new Uint8Array(
+        await new JSZip().file("recovered.txt", "ok").generateAsync({ type: "uint8array" }),
+      );
+    else {
+      const [{ default: initSqlJs }, { default: wasmUrl }] = await Promise.all([
+        import("sql.js"),
+        import("sql.js/dist/sql-wasm.wasm?url"),
+      ]);
+      const SQL = await initSqlJs({ locateFile: () => wasmUrl });
+      const database = new SQL.Database();
+      database.run(
+        "CREATE TABLE recovered (value TEXT); INSERT INTO recovered VALUES('retry succeeded')",
+      );
+      bytes = new Uint8Array(database.export());
+      database.close();
+    }
+    const good = URL.createObjectURL(new Blob([bytes]));
+    refresh.mockReset().mockResolvedValueOnce(bad).mockResolvedValue(good);
+    try {
+      await using screen = await render(
+        <AttachmentFilePreview
+          name={kind === "archive" ? "retry.zip" : "retry.sqlite"}
+          mimeType="application/octet-stream"
+          sizeBytes={bytes.length}
+          asset={{ environmentId: EnvironmentId.make("test"), attachmentId: "retry" }}
+        />,
+      );
+      await vi.waitFor(
+        () => expect(screen.container.querySelector('[role="alert"] button')).not.toBeNull(),
+        10_000,
+      );
+      await act(() =>
+        screen.container.querySelector<HTMLButtonElement>('[role="alert"] button')!.click(),
+      );
+      await vi.waitFor(
+        () =>
+          expect(screen.container.textContent).toContain(
+            kind === "archive" ? "recovered.txt" : "retry succeeded",
+          ),
+        10_000,
+      );
+      expect(refresh).toHaveBeenCalledTimes(2);
+    } finally {
+      URL.revokeObjectURL(bad);
+      URL.revokeObjectURL(good);
+    }
+  },
+);

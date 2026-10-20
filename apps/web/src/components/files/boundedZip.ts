@@ -50,7 +50,7 @@ export async function boundedZip(
         view.getUint32(record + 20, true) !== 0 ||
         view.getUint32(locator + 4, true) !== 0 ||
         view.getUint32(locator + 16, true) !== 1 ||
-        view.getBigUint64(locator + 8, true) > BigInt(record)
+        view.getBigUint64(locator + 8, true) !== BigInt(record)
       )
         throw new Error("Unsupported ZIP64 directory.");
       const records = view.getBigUint64(record + 32, true);
