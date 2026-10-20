@@ -806,6 +806,33 @@ describe("AssetAccess", () => {
       expect(yield* resolveAsset(token, "../secret.txt")).toBeNull();
       expect(yield* resolveAsset(token, ".env")).toBeNull();
       expect(yield* resolveAsset(`${token}tampered`, "report.html")).toBeNull();
+      for (const extension of [
+        "docx",
+        "xlsx",
+        "pptx",
+        "ttf",
+        "otf",
+        "woff",
+        "woff2",
+        "bmp",
+        "heic",
+        "tif",
+        "tiff",
+        "weba",
+        "mmd",
+        "mermaid",
+      ]) {
+        const siblingName = `private.${extension}`;
+        yield* fileSystem.writeFileString(path.join(root, siblingName), "private sibling");
+        for (const resource of [
+          { _tag: "workspace-file" as const, threadId: ThreadId.make("thread-1"), path: htmlPath },
+          { _tag: "draft-workspace-file" as const, cwd: root, path: "report.html" },
+        ]) {
+          const url = yield* issueAssetUrl({ resource, workspaceRoot: root });
+          const suffix = url.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          expect(yield* resolveAsset(suffix.slice(0, suffix.indexOf("/")), siblingName)).toBeNull();
+        }
+      }
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -1005,7 +1032,7 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("issues exact workspace URLs for image and office previews", () =>
+  it.effect("issues exact workspace URLs for image, office, and font previews", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -1014,7 +1041,24 @@ describe("AssetAccess", () => {
       });
       const assetsDirectory = path.join(root, "assets");
       yield* fileSystem.makeDirectory(assetsDirectory, { recursive: true });
-      for (const extension of ["png", "docx", "xlsx", "pptx"]) {
+      yield* fileSystem.writeFileString(
+        path.join(assetsDirectory, "private.docx"),
+        "private document",
+      );
+      for (const extension of [
+        "png",
+        "bmp",
+        "heic",
+        "tif",
+        "tiff",
+        "docx",
+        "xlsx",
+        "pptx",
+        "ttf",
+        "otf",
+        "woff",
+        "woff2",
+      ]) {
         const name = `preview.${extension}`;
         const filePath = path.join(assetsDirectory, name);
         const siblingName = `other.${extension}`;
@@ -1033,6 +1077,7 @@ describe("AssetAccess", () => {
           const token = suffix.slice(0, suffix.indexOf("/"));
           expect(yield* resolveAsset(token, name)).toEqual({ kind: "file", path: canonicalPath });
           expect(yield* resolveAsset(token, siblingName)).toBeNull();
+          expect(yield* resolveAsset(token, "private.docx")).toBeNull();
           expect(yield* resolveAsset(token, `../${name}`)).toBeNull();
         }
       }

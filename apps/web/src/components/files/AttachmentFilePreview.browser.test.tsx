@@ -277,6 +277,49 @@ describe("large text preview recovery", () => {
     await vi.waitFor(() => expect(load).toHaveBeenCalledWith(0));
   });
 });
+it.each(["paragraphs", "runs", "tables", "auxiliary XML", "XML bytes", "renamed XML"])(
+  "rejects excessive Word %s in the worker before rendering DOM",
+  async (scenario) => {
+    const { default: JSZip } = await import("jszip");
+    const archive = new JSZip();
+    const body =
+      scenario === "paragraphs"
+        ? "<w:p><w:r><w:t>x</w:t></w:r></w:p>".repeat(200_000)
+        : scenario === "runs"
+          ? `<w:p>${"<w:r><w:t>x</w:t></w:r>".repeat(50_001)}</w:p>`
+          : scenario === "tables"
+            ? "<w:tbl/>".repeat(50_001)
+            : scenario === "XML bytes"
+              ? `<w:p><w:r><w:t>${"x".repeat(2 * 1024 * 1024)}</w:t></w:r></w:p>`
+              : "<w:p/>";
+    archive.file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
+    );
+    if (scenario === "auxiliary XML" || scenario === "renamed XML")
+      archive.file(
+        scenario === "renamed XML" ? "word/footnotes.dat" : "word/footnotes.xml",
+        `<w:footnotes>${"<w:p/>".repeat(50_001)}</w:footnotes>`,
+      );
+    const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+    const src = URL.createObjectURL(file);
+    try {
+      await using screen = await render(
+        <OfficeFilePreview src={src} name="large.docx" kind="docx" sizeBytes={file.size} />,
+      );
+      await vi.waitFor(
+        () =>
+          expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(
+            "Preview limited",
+          ),
+        { timeout: 10_000 },
+      );
+      expect(screen.container.querySelector("iframe")).toBeNull();
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  },
+);
 
 describe("standalone Mermaid previews", () => {
   it.each([

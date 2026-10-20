@@ -6,6 +6,13 @@ import { useEffect, useRef, useState } from "react";
 import VirtualTablePreview from "./VirtualTablePreview";
 
 import { useTheme } from "~/hooks/useTheme";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 
 import { FileSurfaceAction, FileSurfaceLoading, FileSurfaceNotice } from "./fileSurfaceChrome";
 import { OFFICE_PREVIEW_MAX_BYTES, type OfficeWorkerResult } from "./officePreviewProtocol";
@@ -295,18 +302,25 @@ export default function OfficeViewer(props: {
             <ChevronLeftIcon className="size-3.5" />
           </FileSurfaceAction>
           {workbook ? (
-            <select
-              aria-label="Sheet"
-              value={page}
-              onChange={(event) => selectPage(Number(event.target.value))}
-              className="min-w-0 flex-1 rounded border border-input bg-background px-2 py-1 text-foreground"
-            >
-              {workbook.sheets.map((item, index) => (
-                <option key={index} value={index}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
+            <div className="min-w-0 flex-1">
+              <Select
+                value={page}
+                onValueChange={(value) => {
+                  if (value !== null) selectPage(value);
+                }}
+              >
+                <SelectTrigger aria-label="Sheet" size="xs">
+                  <SelectValue>{sheet?.name}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {workbook.sheets.map((item, index) => (
+                    <SelectItem key={index} value={index}>
+                      {item.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
           ) : (
             <span className="flex-1 text-center tabular-nums" aria-live="polite">
               Slide {page + 1} of {count}
