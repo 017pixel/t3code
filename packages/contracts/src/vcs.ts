@@ -87,6 +87,43 @@ export interface VcsProcessExitFailure {
   readonly stderrTruncated: boolean;
 }
 
+// glab's stderr is the only clue to a self-hosted failure (a proxy 404, for
+// example). It can also echo tokens, so only a short redacted excerpt may
+// leave the process boundary. Other CLIs stay excerpt-free.
+const GLAB_STDERR_EXCERPT_MAX_CHARS = 200;
+
+const GLAB_STDERR_ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const GLAB_STDERR_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const GLAB_STDERR_USERINFO_PATTERN = /(https?:\/\/)[^\s/@]+:[^\s@]+@/gi;
+const GLAB_STDERR_QUERY_SECRET_PATTERN =
+  /([?&](?:access_token|private_token|job_token|token|password|secret)=)[^&\s]+/gi;
+const GLAB_STDERR_BEARER_PATTERN = /\bBearer\s+\S+/gi;
+const GLAB_STDERR_BASIC_PATTERN = /\bAuthorization:\s*Basic\s+\S+/gi;
+const GLAB_STDERR_HEADER_SECRET_PATTERN =
+  /\b(private-token|job-token|deploy-token|x-api-key|api-key)\s*[:=]\s*\S+/gi;
+const GLAB_STDERR_ASSIGNMENT_SECRET_PATTERN =
+  /\b(token|password|secret|passwd|access_token|private_token|job_token)\s*[:=]\s*\S+/gi;
+const GLAB_STDERR_PREFIXED_TOKEN_PATTERN =
+  /\b(?:glpat|gldt|glrt|glcbt|glsoat|gloas|glft|glagent|github_pat|ghp|gho|ghu|ghs|ghr)-[A-Za-z0-9_-]+|\bsk-[A-Za-z0-9][A-Za-z0-9-]{7,}|\bxox[baprs]-[A-Za-z0-9-]+/gi;
+
+export function glabStderrExcerpt(stderr: string): string | undefined {
+  const text = stderr
+    .replace(GLAB_STDERR_ANSI_PATTERN, "")
+    .replace(GLAB_STDERR_CONTROL_PATTERN, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(GLAB_STDERR_USERINFO_PATTERN, "$1[redacted]@")
+    .replace(GLAB_STDERR_QUERY_SECRET_PATTERN, "$1[redacted]")
+    .replace(GLAB_STDERR_BEARER_PATTERN, "Bearer [redacted]")
+    .replace(GLAB_STDERR_BASIC_PATTERN, "Authorization: Basic [redacted]")
+    .replace(GLAB_STDERR_HEADER_SECRET_PATTERN, "$1 [redacted]")
+    .replace(GLAB_STDERR_ASSIGNMENT_SECRET_PATTERN, "$1 [redacted]")
+    .replace(GLAB_STDERR_PREFIXED_TOKEN_PATTERN, "[redacted]");
+  if (text.length === 0) return undefined;
+  if (text.length <= GLAB_STDERR_EXCERPT_MAX_CHARS) return text;
+  return `${text.slice(0, GLAB_STDERR_EXCERPT_MAX_CHARS - 3).trimEnd()}...`;
+}
+
 export class VcsProcessSpawnError extends Schema.TaggedError<VcsProcessSpawnError>()(
   "VcsProcessSpawnError",
   {
@@ -122,6 +159,8 @@ export class VcsProcessExitError extends Schema.TaggedError<VcsProcessExitError>
     retryable: Schema.optional(Schema.Boolean),
     stderrLength: Schema.optional(NonNegativeInt),
     stderrTruncated: Schema.optional(Schema.Boolean),
+    // Set only for glab command failures. See glabStderrExcerpt.
+    stderrExcerpt: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
@@ -147,6 +186,14 @@ export class VcsProcessExitError extends Schema.TaggedError<VcsProcessExitError>
                 : "VCS resource not found."
             : "Process exited with a non-zero status.";
 
+    // Auth and rate-limit text is where glab quotes credentials, and those
+    // failures already have their own message. Keep their stderr off the error.
+    const stderrExcerpt =
+      context.command === "glab" &&
+      (failureKind === "command-failed" || failureKind === "not-found")
+        ? glabStderrExcerpt(error.stderr)
+        : undefined;
+
     return new VcsProcessExitError({
       ...context,
       exitCode: error.exitCode,
@@ -155,6 +202,7 @@ export class VcsProcessExitError extends Schema.TaggedError<VcsProcessExitError>
       ...(retryable === true ? { retryable: true } : {}),
       stderrLength: error.stderr.length,
       stderrTruncated: error.stderrTruncated,
+      ...(stderrExcerpt === undefined ? {} : { stderrExcerpt }),
     });
   }
 }

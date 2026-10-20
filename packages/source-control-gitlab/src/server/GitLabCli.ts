@@ -9,6 +9,8 @@ import type * as DateTime from "effect/DateTime";
 
 import {
   TrimmedNonEmptyString,
+  VcsProcessExitError,
+  glabStderrExcerpt,
   type SourceControlRepositoryVisibility,
   type VcsError,
 } from "@t3tools/contracts";
@@ -113,12 +115,25 @@ export class GitLabMergeRequestNotFoundError extends Schema.TaggedError<GitLabMe
   }
 }
 
+const isVcsProcessExitError = Schema.is(VcsProcessExitError);
+
+function gitlabCommandFailureDetail(cause: unknown): string {
+  const excerpt = isVcsProcessExitError(cause)
+    ? glabStderrExcerpt(cause.stderrExcerpt ?? "")
+    : undefined;
+  return excerpt === undefined
+    ? "GitLab CLI command failed."
+    : `GitLab CLI command failed: ${excerpt}`;
+}
+
 export class GitLabCliCommandError extends Schema.TaggedError<GitLabCliCommandError>()(
   "GitLabCliCommandError",
   gitLabCliExecutionErrorContext,
 ) {
   get detail(): string {
-    return "GitLab CLI command failed.";
+    // Run the excerpt through glabStderrExcerpt again so a stored value cannot
+    // skip redaction or the length cap on the way to the UI.
+    return gitlabCommandFailureDetail(this.cause);
   }
 
   override get message(): string {

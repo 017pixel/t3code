@@ -46,15 +46,28 @@ const baseInput = {
 
 const captureProcessResult = (
   result: Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError>,
+  input: VcsProcess.VcsProcessInput = baseInput,
 ) =>
   VcsProcess.make.pipe(
     Effect.provideService(
       ProcessRunner.ProcessRunner,
       ProcessRunner.ProcessRunner.of({ run: () => result }),
     ),
-    Effect.flatMap((service) => service.run(baseInput)),
+    Effect.flatMap((service) => service.run(input)),
     Effect.flip,
   );
+
+const exited = (stderr: string, code = 1) =>
+  Effect.succeed({
+    stdout: "",
+    stderr,
+    code: ChildProcessSpawner.ExitCode(code),
+    timedOut: false,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    stdoutInvalidUtf8: false,
+    stderrInvalidUtf8: false,
+  });
 
 describe("VcsProcess.run", () => {
   it.effect("explains a locked Git index and allows restore after the lock is released", () =>
@@ -525,7 +538,7 @@ describe("VcsProcess.run", () => {
         cwd: process.cwd(),
       }).pipe(Effect.flip);
 
-      expect(error).toBeInstanceOf(VcsProcessExitError);
+      assert.instanceOf(error, VcsProcessExitError);
       expect(error).toMatchObject({
         operation: "test.exit",
         command: "node",
@@ -538,7 +551,66 @@ describe("VcsProcess.run", () => {
       });
       expect(error.message).not.toContain(secretArgument);
       expect(error.message).not.toContain(secretStderr);
+      expect(error.stderrExcerpt).toBeUndefined();
     }).pipe(provideLive),
+  );
+
+  it.effect("keeps a redacted, truncated glab stderr excerpt", () =>
+    Effect.gen(function* () {
+      const secret = "glpat-supersecrettokenvalue";
+      const glabInput = {
+        ...baseInput,
+        operation: "GitLabCli.execute",
+        command: "glab",
+      } satisfies VcsProcess.VcsProcessInput;
+      const error = yield* captureProcessResult(
+        exited(
+          `\u001b[31mERROR\u001b[0m  404 Not Found. token=${secret}\nhttps://oauth2:${secret}@gitlab.example/group/proj.git`,
+        ),
+        glabInput,
+      );
+
+      assert.instanceOf(error, VcsProcessExitError);
+      expect(error.failureKind).toBe("not-found");
+      expect(error.detail).toBe("Merge request not found.");
+      expect(error.stderrExcerpt).toBe(
+        "ERROR 404 Not Found. token [redacted] https://[redacted]@gitlab.example/group/proj.git",
+      );
+      expect(error.message).not.toContain(secret);
+      expect(yield* encodeExitError(error)).not.toContain(secret);
+
+      const long = yield* captureProcessResult(exited(`ERROR ${"y".repeat(400)}`), glabInput);
+      assert.instanceOf(long, VcsProcessExitError);
+      expect(long.stderrExcerpt?.endsWith("...")).toBe(true);
+      expect(long.stderrExcerpt?.length).toBeLessThanOrEqual(200);
+      expect(long.stderrExcerpt?.startsWith("ERROR ")).toBe(true);
+
+      const blank = yield* captureProcessResult(exited(" \n"), glabInput);
+      assert.instanceOf(blank, VcsProcessExitError);
+      expect(blank.stderrExcerpt).toBeUndefined();
+      expect(blank.detail).toBe("Process exited with a non-zero status.");
+    }),
+  );
+
+  it.effect("does not keep glab stderr for authentication or rate limits", () =>
+    Effect.gen(function* () {
+      const secret = "glpat-supersecrettokenvalue";
+      const glabInput = {
+        ...baseInput,
+        operation: "GitLabCli.execute",
+        command: "glab",
+      } satisfies VcsProcess.VcsProcessInput;
+      for (const stderr of [
+        `authentication failed token=${secret}`,
+        `API rate limit exceeded for token=${secret}`,
+      ]) {
+        const error = yield* captureProcessResult(exited(stderr), glabInput);
+        assert.instanceOf(error, VcsProcessExitError);
+        expect(error.stderrExcerpt).toBeUndefined();
+        expect(error.message).not.toContain(secret);
+        expect(yield* encodeExitError(error)).not.toContain(secret);
+      }
+    }),
   );
 
   it.effect("classifies authentication failures without retaining stderr", () =>

@@ -312,6 +312,7 @@ layer("GitLabCli.layer", (it) => {
         exitCode: 1,
         detail: "GET 404 merge request not found",
         failureKind: "not-found",
+        stderrExcerpt: "ERROR 404 Not Found. token=glpat-supersecrettokenvalue",
       });
       mockedRun.mockReturnValueOnce(Effect.fail(cause));
 
@@ -329,6 +330,8 @@ layer("GitLabCli.layer", (it) => {
       assert.strictEqual(error.cwd, "/repo");
       assert.strictEqual(error.cause, cause);
       assert.equal(error.message.includes(cause.detail), false);
+      assert.equal(error.message.includes("glpat-"), false);
+      assert.equal(error.message.includes("ERROR 404"), false);
     }),
   );
 
@@ -354,6 +357,65 @@ layer("GitLabCli.layer", (it) => {
 
       assert.strictEqual(error._tag, "GitLabCliCommandError");
       assert.strictEqual(error.cause, cause);
+      assert.strictEqual(error.detail, "GitLab CLI command failed.");
+    }),
+  );
+
+  it.effect("includes trimmed glab stderr on command failures", () =>
+    Effect.gen(function* () {
+      const cause = new VcsProcessExitError({
+        operation: "GitLabCli.execute",
+        command: "glab",
+        cwd: "/repo",
+        exitCode: 1,
+        detail: "Merge request not found.",
+        failureKind: "not-found",
+        stderrExcerpt: "ERROR  404 Not Found.",
+      });
+      mockedRun.mockReturnValueOnce(Effect.fail(cause));
+
+      const error = yield* Effect.gen(function* () {
+        const glab = yield* GitLabCli.GitLabCli;
+        return yield* glab.getRepositoryCloneUrls({
+          cwd: "/repo",
+          repository: "group/project",
+        });
+      }).pipe(Effect.flip);
+
+      assert.strictEqual(error._tag, "GitLabCliCommandError");
+      assert.strictEqual(error.detail, "GitLab CLI command failed: ERROR 404 Not Found.");
+      assert.equal(error.message.includes("ERROR 404 Not Found."), true);
+    }),
+  );
+
+  it.effect("redacts and truncates glab stderr before the command error is shown", () =>
+    Effect.gen(function* () {
+      const secret = "glpat-supersecrettokenvalue";
+      const cause = new VcsProcessExitError({
+        operation: "GitLabCli.execute",
+        command: "glab",
+        cwd: "/repo",
+        exitCode: 1,
+        detail: "Process exited with a non-zero status.",
+        failureKind: "command-failed",
+        stderrExcerpt: `ERROR push rejected token=${secret} ${"y".repeat(400)}`,
+      });
+      mockedRun.mockReturnValueOnce(Effect.fail(cause));
+
+      const error = yield* Effect.gen(function* () {
+        const glab = yield* GitLabCli.GitLabCli;
+        return yield* glab.execute({ cwd: "/repo", args: ["mr", "list"] });
+      }).pipe(Effect.flip);
+
+      assert.strictEqual(error._tag, "GitLabCliCommandError");
+      assert.equal(error.detail.includes(secret), false);
+      assert.equal(error.message.includes(secret), false);
+      assert.equal(
+        error.detail.startsWith("GitLab CLI command failed: ERROR push rejected token [redacted] "),
+        true,
+      );
+      assert.equal(error.detail.endsWith("..."), true);
+      assert.equal(error.detail.length <= "GitLab CLI command failed: ".length + 200, true);
     }),
   );
 

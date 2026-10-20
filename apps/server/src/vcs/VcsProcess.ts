@@ -162,7 +162,8 @@ const classifyNonZeroExit = (command: string, stderr: string): VcsProcessExitFai
   return "command-failed";
 };
 
-// Classify before discarding stderr; keep paths and process output out of errors.
+// Classify before discarding stderr. glab command failures keep a redacted
+// excerpt; every other command keeps paths and process output off the error.
 const isTransientGitExit = (stderr: string) =>
   /unable to create [^\n]*\.lock['"]?: file exists/i.test(stderr) ||
   /(?:unable to stat|lstat\(|error: open\()[^\n]+: no such file or directory/i.test(stderr);
