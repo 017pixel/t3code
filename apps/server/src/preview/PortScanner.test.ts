@@ -1,4 +1,8 @@
+import * as NodeChildProcess from "node:child_process";
+import * as NodeNet from "node:net";
+
 import { it as effectIt } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS,
   PREVIEW_URL_MAX_LENGTH,
@@ -496,3 +500,229 @@ effectIt.effect("ignores a partial Windows netstat snapshot when one query exits
     expect(yield* scanner.scan()).toEqual([]);
   }).pipe(Effect.provide(layer));
 });
+
+const processOutput = (stdout: string): ProcessRunner.ProcessRunOutput => ({
+  stdout,
+  stderr: "",
+  code: ChildProcessSpawner.ExitCode(0),
+  timedOut: false,
+  stdoutTruncated: false,
+  stderrTruncated: false,
+  stdoutInvalidUtf8: false,
+  stderrInvalidUtf8: false,
+});
+
+effectIt.effect.each(["linux", "darwin"] as const)(
+  "attributes listeners to the agent thread in their environment on %s, after the agent exits",
+  (platform) => {
+    const agentPort = 43_124;
+    const otherPort = 43_125;
+    const agentListener = `p4242\ncnode\nn127.0.0.1:${agentPort}\n`;
+    const otherListener = `p5000\ncpostgres\nn127.0.0.1:${otherPort}\n`;
+    let lsofStdout = `${agentListener}${otherListener}`;
+    let lsofCalls = 0;
+    let environmentReads = 0;
+    const requests: string[] = [];
+    const missing = FileSystem.makeNoop({});
+    const procEnviron: Record<string, string> = {
+      "/proc/4242/environ": `PATH=/usr/bin\0${PortScanner.AGENT_THREAD_ENV}=thread-agent\0`,
+      "/proc/5000/environ": "PATH=/usr/bin\0",
+    };
+    const layer = PortScanner.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          FileSystem.layerNoop({
+            readFileString: (path) => {
+              const content = procEnviron[path];
+              if (content === undefined) return missing.readFileString(path);
+              environmentReads += 1;
+              return Effect.succeed(content);
+            },
+          }),
+          Layer.succeed(ProcessRunner.ProcessRunner, {
+            run: (input) => {
+              if (input.command === "lsof") {
+                lsofCalls += 1;
+                return Effect.succeed(processOutput(lsofStdout));
+              }
+              environmentReads += 1;
+              return Effect.succeed(
+                processOutput(
+                  `  4242 node server.js PATH=/usr/bin ${PortScanner.AGENT_THREAD_ENV}=thread-agent HOME=/Users/dev\n` +
+                    "  5000 postgres -D /data PATH=/usr/bin\n",
+                ),
+              );
+            },
+          }),
+          Layer.succeed(HostProcess.Platform, platform),
+          FetchHttpClient.layer.pipe(
+            Layer.provide(
+              Layer.succeed(FetchHttpClient.Fetch, (input) => {
+                requests.push(String(input));
+                return Promise.resolve(
+                  new Response("app", { headers: { "content-type": "text/html" } }),
+                );
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    return Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      expect(yield* scanner.scan()).toEqual([]);
+      expect(lsofCalls).toBe(0);
+
+      const release = scanner.trackAgent();
+      expect(yield* scanner.scan()).toMatchObject([
+        { port: agentPort, pid: 4242, terminal: null, agent: { threadId: "thread-agent" } },
+      ]);
+      expect(requests).toEqual([`http://localhost:${agentPort}/`]);
+
+      release();
+      expect(yield* scanner.scan()).toHaveLength(1);
+      expect(environmentReads).toBe(platform === "linux" ? 2 : 1);
+
+      lsofStdout = otherListener;
+      expect(yield* scanner.scan()).toEqual([]);
+      const lsofCallsAfterExit = lsofCalls;
+      expect(yield* scanner.scan()).toEqual([]);
+      expect(lsofCalls).toBe(lsofCallsAfterExit);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+effectIt.effect("stops only a job's own process group", () =>
+  Effect.sync(() => {
+    const serverPid = 100;
+    const rows = [
+      { pid: 10, ppid: 1, pgid: 10 }, // `vp run dev`, whose job holds this server
+      { pid: 20, ppid: 10, pgid: 10 }, // the web dev server in the same job
+      { pid: serverPid, ppid: 10, pgid: 10 },
+      { pid: 200, ppid: serverPid, pgid: 200 }, // agent CLI
+      { pid: 210, ppid: 200, pgid: 200 }, // a server it spawned without a group of its own
+      { pid: 300, ppid: 200, pgid: 300 }, // agent tool shell
+      { pid: 400, ppid: 300, pgid: 400 }, // `npm run dev &`
+      { pid: 401, ppid: 400, pgid: 400 },
+      { pid: 500, ppid: serverPid, pgid: 500 }, // terminal shell
+      { pid: 600, ppid: 500, pgid: 600 }, // terminal job
+    ];
+    const table = new Map(rows.map((row) => [row.pid, row]));
+    expect(PortScanner.stoppableProcessGroup(table, 401, serverPid)).toBe(400);
+    expect(PortScanner.stoppableProcessGroup(table, 600, serverPid)).toBe(600);
+    for (const pid of [20, 210, 500, 999]) {
+      expect(PortScanner.stoppableProcessGroup(table, pid, serverPid)).toBeNull();
+    }
+  }),
+);
+
+const AGENT_SERVER_SCRIPT = `
+const server = require("node:http").createServer((_, response) => {
+  response.writeHead(200, { "content-type": "text/html" });
+  response.end("<html></html>");
+});
+server.listen(0, "127.0.0.1", () => {
+  process.stdout.write(process.pid + " " + server.address().port + "\\n");
+});
+`;
+
+/**
+ * A real HTML server with an agent's environment. As a job it runs the way an agent's tool shell
+ * starts one: under a detached shell with job control, in a group of its own. Otherwise it runs
+ * directly under this process, in its group. Release kills only the pids it started.
+ */
+const agentServer = (options: { readonly job: boolean }) =>
+  Effect.acquireRelease(
+    Effect.callback<{
+      readonly child: NodeChildProcess.ChildProcess;
+      readonly pid: number;
+      readonly port: number;
+      readonly exited: Promise<void>;
+    }>((resume) => {
+      const env = { ...process.env, [PortScanner.AGENT_THREAD_ENV]: "thread-live" };
+      const child = options.job
+        ? // dash ignores `set -m` without a terminal; bash, like agent tool shells, honors it.
+          NodeChildProcess.spawn(
+            "bash",
+            ["-c", 'set -m; "$0" -e "$1" & wait', process.execPath, AGENT_SERVER_SCRIPT],
+            { detached: true, env, stdio: ["ignore", "pipe", "ignore"] },
+          )
+        : NodeChildProcess.spawn(process.execPath, ["-e", AGENT_SERVER_SCRIPT], {
+            env,
+            stdio: ["ignore", "pipe", "ignore"],
+          });
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.once("error", (error) => resume(Effect.die(error)));
+      child.stdout?.once("data", (chunk) => {
+        const [pid, port] = String(chunk).trim().split(" ").map(Number);
+        resume(Effect.succeed({ child, pid: pid!, port: port!, exited }));
+      });
+    }),
+    ({ child, pid }) =>
+      Effect.sync(() => {
+        for (const target of [pid, child.pid]) {
+          try {
+            if (target !== undefined) process.kill(target, "SIGKILL");
+          } catch {}
+        }
+      }),
+  );
+
+const isRunning = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+effectIt.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "stops an agent's server through its job's group and refuses a group shared with this server",
+  () =>
+    Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* Effect.acquireRelease(Effect.sync(scanner.trackAgent), (release) =>
+        Effect.sync(release),
+      );
+      const job = yield* agentServer({ job: true });
+      const shared = yield* agentServer({ job: false });
+
+      expect(yield* scanner.scan()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            pid: job.pid,
+            port: job.port,
+            agent: { threadId: "thread-live" },
+          }),
+          expect.objectContaining({
+            pid: shared.pid,
+            port: shared.port,
+            agent: { threadId: "thread-live" },
+          }),
+        ]),
+      );
+
+      const unlisted = yield* Effect.flip(scanner.stopServer({ pid: process.pid, port: job.port }));
+      expect(unlisted.reason).toBe("not-found");
+      const refused = yield* Effect.flip(
+        scanner.stopServer({ pid: shared.pid, port: shared.port }),
+      );
+      expect(refused.reason).toBe("shared-group");
+      expect(isRunning(shared.pid)).toBe(true);
+
+      yield* scanner.stopServer({ pid: job.pid, port: job.port });
+      // The shell waits on its job, so it exits once the job has.
+      yield* Effect.promise(() => job.exited);
+      expect(isRunning(job.pid)).toBe(false);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        PortScanner.layer.pipe(
+          Layer.provide(ProcessRunner.layer),
+          Layer.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
+        ),
+      ),
+    ),
+);
