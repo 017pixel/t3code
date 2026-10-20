@@ -19,12 +19,24 @@ function reply(result: OfficeWorkerResult) {
   self.postMessage(result, { transfer: [] });
 }
 
-async function boundedArchive(bytes: ArrayBuffer, spreadsheet: boolean) {
+async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open" }>) {
+  const { bytes } = input;
+  const spreadsheet = input.kind === "xlsx";
+  const word = input.kind === "docx";
   const files = await boundedZip(bytes, spreadsheet ? 128 * 1024 * 1024 : undefined, {
-    totalLimit: spreadsheet ? 128 * 1024 * 1024 : 50 * 1024 * 1024,
+    totalLimit: word ? 2 * 1024 * 1024 : spreadsheet ? 128 * 1024 * 1024 : 50 * 1024 * 1024,
     xmlLimit: spreadsheet ? 64 * 1024 * 1024 : 8 * 1024 * 1024,
     ratioFloor: 8 * 1024 * 1024,
+    ...(word ? { markupLimit: 50_000 } : {}),
   }).catch((error: unknown) => {
+    if (
+      word &&
+      error instanceof Error &&
+      error.message === "The expanded archive exceeds the preview size or compression ratio limit."
+    )
+      throw new Error(
+        "Preview limited: this Word document has too much expanded content or markup.",
+      );
     if (error instanceof Error && error.message === "This is not a readable ZIP archive.")
       throw new Error("This file is damaged, encrypted, or not a valid Office document.");
     throw error;
@@ -77,7 +89,7 @@ async function handle(input: OfficeWorkerRequest) {
     reply({ type: "slide", index: input.index, frame, images, text });
     return;
   }
-  const archive = await boundedArchive(input.bytes, input.kind === "xlsx");
+  const archive = await boundedArchive(input);
   const root =
     input.kind === "docx"
       ? "word/document.xml"

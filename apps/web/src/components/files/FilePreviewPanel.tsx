@@ -80,10 +80,7 @@ import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
-import { BinaryFilePreview } from "./BinaryFilePreview";
 import { PreviewImage } from "./PreviewImage";
-import { OfficeFilePreview } from "./OfficeFilePreview";
-import { FontFilePreview } from "./FontFilePreview";
 import { MermaidFilePreview } from "./MermaidFilePreview";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
@@ -258,26 +255,6 @@ function WorkspaceBrowserPreview(props: {
       </div>
     );
   }
-  const binaryKind = binaryPreviewKind({ name: props.absolutePath });
-  if (binaryKind)
-    return (
-      <BinaryFilePreview
-        src={`${assetUrl.url}${revisionSuffix}`}
-        name={props.title}
-        kind={binaryKind}
-      />
-    );
-  const officeKind = officePreviewKind({ name: props.absolutePath });
-  if (isWorkspaceFontPreviewPath(props.absolutePath))
-    return <FontFilePreview src={`${assetUrl.url}${revisionSuffix}`} name={props.title} />;
-  if (officeKind)
-    return (
-      <OfficeFilePreview
-        src={`${assetUrl.url}${revisionSuffix}`}
-        name={props.title}
-        kind={officeKind}
-      />
-    );
   return (
     <BrowserDocumentFrame
       src={`${assetUrl.url}${revisionSuffix}`}
@@ -1408,7 +1385,7 @@ export default function FilePreviewPanel({
               alt={relativePath}
               workspaceMutationId={workspaceMutationId}
             />
-          ) : relativePath && (renderBrowserFile || isDocument) && absolutePath ? (
+          ) : relativePath && renderBrowserFile && absolutePath ? (
             <WorkspaceBrowserPreview
               key={absolutePath}
               environmentId={environmentId}
@@ -1422,6 +1399,7 @@ export default function FilePreviewPanel({
           ) : relativePath &&
             absolutePath &&
             file.data?.truncated &&
+            !isDocument &&
             !draft &&
             !isMarkdown &&
             !isMermaid &&
@@ -1437,20 +1415,19 @@ export default function FilePreviewPanel({
               revealLine={revealLine}
               revealRequestId={revealRequestId}
             />
-          ) : relativePath && absolutePath && file.readError?.failure === "binary_file" ? (
+          ) : relativePath &&
+            absolutePath &&
+            (isDocument || file.readError?.failure === "binary_file") ? (
             <AttachmentFilePreview
-              key={`${environmentId}:${absolutePath}`}
+              key={`${environmentId}:${absolutePath}:${workspaceMutationId}`}
               name={relativePath.split(/[\\/]/).at(-1) || relativePath}
               mimeType="application/octet-stream"
               sizeBytes={0}
               asset={{
                 environmentId,
-                resource: {
-                  _tag: "media-file",
-                  threadId: threadRef.threadId,
-                  path: absolutePath,
-                  disposition: "attachment",
-                },
+                resource: draft
+                  ? { _tag: "draft-workspace-file", cwd, path: absolutePath }
+                  : { _tag: "media-file", threadId: threadRef.threadId, path: absolutePath },
               }}
               origin="File"
             />
