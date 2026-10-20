@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { inlineFilePreviewKind, isPdfFile } from "./filePreview";
 import { ThreadInlineFilePreview } from "../features/threads/ThreadInlineFilePreview";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
 
 const audio = vi.hoisted(() => ({
   status: {
@@ -18,10 +19,14 @@ const audio = vi.hoisted(() => ({
   },
   player: { play: vi.fn(), pause: vi.fn(), replace: vi.fn(), seekTo: vi.fn(async () => {}) },
   refresh: vi.fn<() => Promise<string | null>>(),
+  setAudioMode: vi.fn(async (_mode: unknown) => {}),
+  setActive: vi.fn(async (_active: boolean) => {}),
 }));
 vi.mock("expo-audio", () => ({
   useAudioPlayer: () => audio.player,
   useAudioPlayerStatus: () => audio.status,
+  setAudioModeAsync: audio.setAudioMode,
+  setIsAudioActiveAsync: audio.setActive,
 }));
 vi.mock("@react-navigation/native", () => ({ useIsFocused: () => true }));
 vi.mock("react-native", () => ({
@@ -60,6 +65,8 @@ describe("ThreadInlineFilePreview playback", () => {
     act(() => root?.unmount());
     root = undefined;
     vi.clearAllMocks();
+    audio.setAudioMode.mockReset();
+    audio.setActive.mockReset();
     audio.status = {
       playing: false,
       isLoaded: false,
@@ -70,6 +77,69 @@ describe("ThreadInlineFilePreview playback", () => {
       isBuffering: false,
     };
   });
+
+  it.each(["play", "cancel", "unmount", "mode failure", "activation failure"])(
+    "reactivates audio after voice release and honors %s during activation",
+    async (intent) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      // Voice release clears recording mode and deactivates Expo's global audio gate.
+      await setAudioModeAsync({ allowsRecording: false });
+      await setIsAudioActiveAsync(false);
+      let activate: () => void = () => {};
+      if (intent === "mode failure") {
+        audio.setAudioMode.mockRejectedValueOnce(new Error("Playback mode unavailable"));
+      } else if (intent === "activation failure") {
+        audio.setActive.mockRejectedValueOnce(new Error("Audio session unavailable"));
+      } else {
+        audio.setActive.mockImplementationOnce(
+          () => new Promise((resolve) => (activate = resolve)),
+        );
+      }
+      audio.status = { ...audio.status, isLoaded: true };
+      const container = document.createElement("div");
+      root = createRoot(container);
+      act(() =>
+        root!.render(
+          createElement(ThreadInlineFilePreview, {
+            source: { kind: "document", name: "sound.mp3", uri: "https://example.com/sound.mp3" },
+            onOpen() {},
+          }),
+        ),
+      );
+      const button = container.querySelector<HTMLButtonElement>('button[aria-label="Play audio"]')!;
+      await act(async () => button.click());
+      expect(audio.setAudioMode).toHaveBeenLastCalledWith({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        interruptionMode: "doNotMix",
+        shouldPlayInBackground: false,
+      });
+      expect(audio.player.play).not.toHaveBeenCalled();
+      if (intent.endsWith("failure")) {
+        expect(container.textContent).toContain("Unavailable · tap play to retry");
+        expect(button.getAttribute("aria-label")).toBe("Retry audio");
+        expect(audio.setActive).toHaveBeenCalledTimes(intent === "mode failure" ? 1 : 2);
+        return;
+      }
+      expect(audio.setActive).toHaveBeenLastCalledWith(true);
+      expect(audio.setAudioMode.mock.invocationCallOrder[1]).toBeLessThan(
+        audio.setActive.mock.invocationCallOrder[1]!,
+      );
+      if (intent === "cancel") await act(async () => button.click());
+      else if (intent === "unmount") {
+        act(() => root!.unmount());
+        root = undefined;
+      }
+      await act(async () => activate());
+      if (intent === "play") {
+        expect(audio.player.play).toHaveBeenCalledOnce();
+        expect(button.getAttribute("aria-label")).toBe("Pause audio");
+      } else {
+        expect(audio.player.play).not.toHaveBeenCalled();
+        if (intent === "cancel") expect(button.getAttribute("aria-label")).toBe("Play audio");
+      }
+    },
+  );
 
   it.each(["cancel", "unmount", "replay, stale first", "replay, latest first"])(
     "honors the latest audio intent after %s during URL resolution",

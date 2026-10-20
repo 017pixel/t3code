@@ -1,6 +1,11 @@
 import { useIsFocused } from "@react-navigation/native";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
-import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import {
+  setAudioModeAsync,
+  setIsAudioActiveAsync,
+  useAudioPlayer,
+  useAudioPlayerStatus,
+} from "expo-audio";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { AppState, Pressable, View } from "react-native";
 import type { FilePreviewSource } from "../../components/FilePreviewModal";
@@ -118,6 +123,15 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
         } else if (status.didJustFinish || status.currentTime >= status.duration) {
           await player.seekTo(0);
         }
+        if (!isCurrentRequest() || AppState.currentState !== "active") return;
+        await setAudioModeAsync({
+          allowsRecording: false,
+          playsInSilentMode: true,
+          interruptionMode: "doNotMix",
+          shouldPlayInBackground: false,
+        });
+        if (!isCurrentRequest() || AppState.currentState !== "active") return;
+        await setIsAudioActiveAsync(true);
         if (isCurrentRequest() && AppState.currentState === "active") player.play();
       })
       .catch(() => {
