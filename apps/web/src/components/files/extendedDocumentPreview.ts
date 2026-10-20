@@ -212,13 +212,15 @@ async function epubHtml(node: XmlNode, archive: JSZip, base: string): Promise<st
   }
   let children = "";
   for (const child of node.children) children += await epubHtml(child, archive, base);
-  return HTML_TAGS.has(tag) ? `<${tag}>${children}</${tag}>` : children;
+  if (!HTML_TAGS.has(tag)) return children;
+  reserveMarkup(tag.length * 2 + 5);
+  return `<${tag}>${children}</${tag}>`;
 }
 async function odfHtml(node: XmlNode, archive: JSZip): Promise<string> {
   if (node.name === "#text") return boundedMarkup(escape(text(node)));
-  if (node.name === "text:s") return " ".repeat(repeat(node.attrs["text:c"], 100));
-  if (node.name === "text:tab") return "&#9;";
-  if (node.name === "text:line-break") return "<br>";
+  if (node.name === "text:s") return boundedMarkup(" ".repeat(repeat(node.attrs["text:c"], 100)));
+  if (node.name === "text:tab") return boundedMarkup("&#9;");
+  if (node.name === "text:line-break") return boundedMarkup("<br>");
   if (node.name === "draw:image") {
     const src = await imageData(
       archive,
@@ -249,7 +251,9 @@ async function odfHtml(node: XmlNode, archive: JSZip): Promise<string> {
     "table:table-cell": "td",
   };
   const tag = tags[node.name];
-  return tag ? `<${tag}>${children}</${tag}>` : children;
+  if (!tag) return children;
+  reserveMarkup(tag.length * 2 + 5);
+  return `<${tag}>${children}</${tag}>`;
 }
 function repeat(value: string | undefined, max: number) {
   const count = Number(value ?? 1);
@@ -455,19 +459,18 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
     run = "";
   };
   const emit = (value: string) => {
-    if (state.skip) return;
     if (fallback > 0) {
       fallback--;
       return;
     }
+    if (state.skip) return;
     run += escape(value);
     if (html.length + run.length > 8 * 1024 * 1024)
       throw new Error("This rich text document has too much content to preview.");
   };
   const emitByte = (value: number) => {
-    if (state.skip) return;
     if (fallback > 0) fallback--;
-    else encoded[encodedLength++] = value;
+    else if (!state.skip) encoded[encodedLength++] = value;
   };
   for (let i = 0; i < source.length;) {
     const char = source[i++];

@@ -235,6 +235,31 @@ describe("workspaceAssetResource", () => {
 describe("document preview contents", () => {
   const bytes = (text: string) => new TextEncoder().encode(text).buffer;
 
+  it.each(["?", String.raw`\'3f`, String.raw`\\`])(
+    "consumes skipped rich text Unicode fallback %s",
+    (fallback) => {
+      const result = openRtf(bytes(String.raw`{\rtf1{\*\unknown\u945` + fallback + "}Hello}"));
+      if (result.type !== "document") throw new Error("Expected document");
+      expect(result.pages[0]!.html).toBe("<p>Hello</p>");
+    },
+  );
+
+  it("bounds EPUB markup made entirely of empty allowed elements", async () => {
+    const archive = new JSZip()
+      .file(
+        "META-INF/container.xml",
+        '<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>',
+      )
+      .file(
+        "book.opf",
+        '<package><manifest><item id="a" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine>' +
+          '<itemref idref="a"/>'.repeat(30) +
+          "</spine></package>",
+      )
+      .file("chapter.xhtml", "<html><body>" + "<figcaption/>".repeat(30_000) + "</body></html>");
+    await expect(openEpub(archive)).rejects.toThrow("too large");
+  });
+
   it("decodes rich text formatting and Unicode without showing hidden destinations", () => {
     const result = openRtf(
       bytes(
