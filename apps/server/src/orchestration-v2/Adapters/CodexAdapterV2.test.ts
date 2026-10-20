@@ -1292,6 +1292,43 @@ describe("CodexAdapterV2 native protocol logging", () => {
     }),
   );
 
+  it.effect("bounds visits to huge arrays at the redaction depth limit", () =>
+    Effect.gen(function* () {
+      const writes: Array<unknown> = [];
+      const protocolLogger = CodexAdapterV2.makeCodexAppServerProtocolLogger({
+        nativeEventLogger: {
+          filePath: "/tmp/events.log",
+          write: (event) => Effect.sync(() => void writes.push(event)),
+          close: () => Effect.void,
+        },
+        threadId: ThreadId.make("thread-1"),
+        providerSessionId: ProviderSessionId.make("provider-session-1"),
+      })!;
+      let visits = 0;
+      let result: unknown = new Proxy(Array.from({ length: 2_000_000 }), {
+        get(target, key, receiver) {
+          if (typeof key === "string" && /^\d+$/.test(key)) {
+            visits++;
+            return "secret-token";
+          }
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      // result starts at depth 3 in the protocol envelope.
+      for (let depth = 3; depth < 16; depth++) result = { nested: result };
+      yield* protocolLogger({
+        direction: "incoming",
+        stage: "decoded",
+        payload: { method: "item/completed", params: { result } },
+      });
+      assert.isAbove(visits, 0);
+      assert.isAtMost(visits, 1_024);
+      assert.lengthOf(writes, 1);
+      assert.isBelow(encodeUnknownJson(writes).length, 64 * 1_024);
+      assert.notInclude(encodeUnknownJson(writes), "secret-token");
+    }),
+  );
+
   it.effect.each(["completed", "failed"] as const)(
     "retains %s metadata after large item arrays",
     (status) =>
@@ -2265,10 +2302,21 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     "rejected",
     "steer",
     "mixed-media",
+    "frame-size-start",
+    "frame-size-steer",
   ])("delivers audio attachments with %s input", (scenario) =>
     Effect.gen(function* () {
       const nativeThreadId = `audio-${scenario}`;
-      const prompt = "Transcribe without tools";
+      const frameSizeEdge = scenario.startsWith("frame-size-");
+      const steering = scenario === "steer" || scenario === "frame-size-steer";
+      const prompt = frameSizeEdge ? "\0".repeat(120_000) : "Transcribe without tools";
+      const appContext =
+        scenario === "frame-size-start"
+          ? Array.from({ length: 80 }, (_, index) => ({
+              key: `app-${index}`,
+              text: "\0".repeat(16 * 1024),
+            }))
+          : undefined;
       const bytes = Buffer.from("current-audio-bytes");
       const extension =
         scenario === "uppercase"
@@ -2309,8 +2357,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       if (scenario === "empty") yield* fileSystem.truncate(storedPath, 0);
       const attachments: Array<ChatFileAttachment | ChatImageAttachment> = [attachment];
       const imageInput: Array<{ type: "image"; url: string }> = [];
+      const extraAudioInput: Array<{ type: "audio"; url: string }> = [];
       const paths = [`[Attached file "${attachment.name}" is saved at: ${storedPath}]`];
-      if (scenario === "mixed-media") {
+      if (scenario === "mixed-media" || frameSizeEdge) {
         const imageBytes = Buffer.alloc(10 * 1024 * 1024);
         const image = ChatImageAttachment.make({
           type: "image",
@@ -2322,7 +2371,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const largeAudio = {
           ...attachment,
           id: ChatAttachmentId.make("large-audio-wav"),
-          sizeBytes: 50 * 1024 * 1024,
+          sizeBytes:
+            scenario === "frame-size-steer"
+              ? 14 * 1024 * 1024
+              : frameSizeEdge
+                ? 10 * 1024 * 1024 - 256
+                : 50 * 1024 * 1024,
         };
         const largePath = resolveAttachmentPath({
           attachmentsDir: serverConfig.attachmentsDir,
@@ -2335,6 +2389,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* fileSystem.writeFile(imagePath, imageBytes);
         yield* fileSystem.writeFile(largePath, new Uint8Array());
         yield* fileSystem.truncate(largePath, largeAudio.sizeBytes);
+        if (scenario === "frame-size-steer")
+          extraAudioInput.push({
+            type: "audio",
+            url: `data:audio/wav;base64,${Buffer.alloc(largeAudio.sizeBytes).toString("base64")}`,
+          });
         attachments.unshift(largeAudio);
         paths.unshift(`[Attached file "${largeAudio.name}" is saved at: ${largePath}]`);
         for (let index = 0; index < 8; index++) {
@@ -2346,7 +2405,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           });
         }
       }
-      const text = `${prompt}\n\n${paths.join("\n\n")}`;
+      const text = frameSizeEdge ? prompt : `${prompt}\n\n${paths.join("\n\n")}`;
       const queryModel = !["unsupported", "video", "oversized"].includes(scenario);
       const nativeAudio = ![
         "unsupported",
@@ -2360,6 +2419,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const audioInput = [
         { type: "text", text },
         ...imageInput,
+        ...extraAudioInput,
         ...(nativeAudio
           ? [{ type: "audio", url: `data:${mime};base64,${bytes.toString("base64")}` }]
           : []),
@@ -2367,7 +2427,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId: "audio-turn", prompt });
       const entries = preamble.slice(0, -3);
       let requestId = 3;
-      if (scenario === "steer") {
+      if (steering) {
         entries.push(...preamble.slice(-3));
         requestId++;
       }
@@ -2408,7 +2468,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         requestId++;
       }
-      if (scenario === "steer") {
+      if (steering) {
         entries.push(
           {
             type: "expect_outbound",
@@ -2436,7 +2496,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const frame = {
           ...start.frame,
           id: requestId,
-          params: { ...start.frame.params, input: audioInput },
+          params: {
+            ...start.frame.params,
+            input: audioInput,
+            ...(appContext === undefined
+              ? {}
+              : {
+                  additionalContext: Object.fromEntries(
+                    appContext.map((entry) => [
+                      entry.key,
+                      { kind: "untrusted", value: entry.text },
+                    ]),
+                  ),
+                }),
+          },
         };
         entries.push({ ...start, frame });
         if (scenario === "rejected") {
@@ -2474,6 +2547,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             : Effect.void,
         (method, params) =>
           Effect.sync(() => {
+            if (frameSizeEdge && (method === "turn/start" || method === "turn/steer"))
+              assert.isBelow(
+                Buffer.byteLength(encodeUnknownJson({ id: 4, method, params })) + 1,
+                128 * 1024 * 1024,
+              );
             requests.push({ method, params });
           }),
         undefined,
@@ -2486,7 +2564,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         attemptId: RunAttemptId.make("audio-attempt"),
         text: prompt,
       });
-      if (scenario === "steer") {
+      if (steering) {
         yield* harness.runtime.startTurn(turn);
         const providerTurnId = yield* Deferred.await(turnStarted);
         yield* harness.runtime.steerTurn({
@@ -2500,6 +2578,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* harness.runtime.startTurn({
           ...turn,
           message: { ...turn.message, attachments },
+          ...(appContext === undefined ? {} : { appContext }),
         });
       }
       assert.equal(

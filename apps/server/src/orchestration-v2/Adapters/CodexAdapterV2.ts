@@ -151,6 +151,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const CODEX_PROVIDER = ProviderDriverKind.make("codex");
+const encodeCodexProtocolJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 export const CODEX_DRIVER_KIND = CODEX_PROVIDER;
 export const CODEX_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CODEX_DRIVER_KIND);
 
@@ -1487,8 +1488,8 @@ function redactCodexProtocolValue(
   depth = 0,
   budget = { remainingFields: 1_024 },
 ): unknown {
-  if (depth > 16) return "[TRUNCATED]";
   budget.remainingFields--;
+  if (depth > 16) return "[TRUNCATED]";
   if (Array.isArray(value)) {
     const redacted: Array<unknown> = [];
     for (const nested of value) {
@@ -3203,10 +3204,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               return yield* toProtocolError(`Invalid attachment id '${attachment.id}'`);
             }
             const prefix = `data:${attachment.mimeType};base64,`;
-            const maxBytes = Math.max(
-              0,
-              Math.floor((budget.remainingBytes - prefix.length) / 4) * 3,
-            );
+            const overhead =
+              Buffer.byteLength(encodeCodexProtocolJson({ type: "image", url: prefix })) + 1;
+            const maxBytes = Math.max(0, Math.floor((budget.remainingBytes - overhead) / 4) * 3);
             const stat = yield* fileSystem
               .stat(attachmentPath)
               .pipe(Effect.orElseSucceed(() => undefined));
@@ -3227,7 +3227,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
               );
             if (bytes.length === 0 || bytes.length > maxBytes) return;
-            budget.remainingBytes -= prefix.length + 4 * Math.ceil(bytes.length / 3);
+            budget.remainingBytes -= overhead + 4 * Math.ceil(bytes.length / 3);
             return {
               type: "image" as const,
               url: `${prefix}${bytes.toString("base64")}`,
@@ -3262,6 +3262,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             "message"
           >,
           modelSelection: ModelSelection,
+          request: {
+            readonly method: "turn/start" | "turn/steer";
+            readonly params: CodexSchema.V2TurnStartParams | CodexSchema.V2TurnSteerParams;
+          },
         ) {
           const inputItems: Array<CodexSchema.V2TurnStartParams__UserInput> = [];
           const text = providerMessageTextWithAttachmentPaths({
@@ -3276,8 +3280,22 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               text,
             });
           }
-          // Leave room for text and JSON framing below Codex's 128 MiB frame limit.
-          const mediaBudget = { remainingBytes: 120 * 1024 * 1024 };
+          if (inputItems.length > 0 && turnInput.message.attachments.length === 0)
+            return inputItems;
+          // Match the transport's escaping, reserving space for its request id and newline.
+          const mediaBudget = {
+            remainingBytes: Math.max(
+              0,
+              128 * 1024 * 1024 -
+                Buffer.byteLength(
+                  encodeCodexProtocolJson({
+                    ...request,
+                    params: { ...request.params, input: inputItems },
+                  }),
+                ) -
+                1024,
+            ),
+          };
           const attachmentItems = yield* Effect.forEach(
             turnInput.message.attachments.filter(isProviderNativeImageAttachment),
             (attachment) => resolveCodexAttachment(attachment, mediaBudget),
@@ -3310,11 +3328,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 if (path === null) return;
                 const mime = audioMimes[attachment.name.split(".").at(-1)!.toLowerCase()];
                 const prefix = `data:${mime};base64,`;
+                const overhead =
+                  Buffer.byteLength(encodeCodexProtocolJson({ type: "audio", url: prefix })) + 1;
                 const maxBytes = Math.max(
                   0,
                   Math.min(
                     remainingBytes,
-                    Math.floor((mediaBudget.remainingBytes - prefix.length) / 4) * 3,
+                    Math.floor((mediaBudget.remainingBytes - overhead) / 4) * 3,
                   ),
                 );
                 const stat = yield* fileSystem.stat(path);
@@ -3325,7 +3345,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 const bytes = Buffer.concat(chunks);
                 if (bytes.length === 0 || bytes.length > maxBytes) return;
                 remainingBytes -= bytes.length;
-                mediaBudget.remainingBytes -= prefix.length + 4 * Math.ceil(bytes.length / 3);
+                mediaBudget.remainingBytes -= overhead + 4 * Math.ceil(bytes.length / 3);
                 return {
                   type: "audio" as const,
                   url: `${prefix}${bytes.toString("base64")}`,
@@ -6436,13 +6456,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const startNativeTurn = Effect.fn("CodexAdapterV2.startNativeTurn")(
           function* (
             turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
-            codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>,
+            message: ProviderAdapter.ProviderAdapterV2TurnInput["message"] | undefined,
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
-            const turnStartParams = yield* buildCodexTurnStartParams({
+            const params = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
-              codexInput,
+              codexInput: [],
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,
               hasT3Mcp: mcpSession !== undefined,
@@ -6451,6 +6471,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
             });
+            const turnStartParams = {
+              ...params,
+              input:
+                message === undefined
+                  ? []
+                  : yield* toCodexInput({ message }, turnInput.modelSelection, {
+                      method: "turn/start",
+                      params,
+                    }),
+            };
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);
               updated.set(threadId, turnInput);
@@ -6564,14 +6594,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* startNativeTurn(
                 turnInput,
                 command.type === "set"
-                  ? yield* toCodexInput(
-                      {
-                        ...turnInput,
-                        message: { ...turnInput.message, text: command.objective },
-                      },
-                      turnInput.modelSelection,
-                    )
-                  : [],
+                  ? { ...turnInput.message, text: command.objective }
+                  : undefined,
               );
               if (activation.stopped) return;
               const { goal } = yield* client.request("thread/goal/set", {
@@ -6905,9 +6929,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             return Effect.gen(function* () {
               yield* startNativeTurn(
                 turnInput,
-                turnInput.restartContinuationOfRunId === undefined
-                  ? yield* toCodexInput(turnInput, turnInput.modelSelection)
-                  : [],
+                turnInput.restartContinuationOfRunId === undefined ? turnInput.message : undefined,
               );
             }).pipe(
               Effect.mapError(
@@ -6940,12 +6962,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 );
               }
 
-              const codexInput = yield* toCodexInput(turnInput, activeTurn.input.modelSelection);
+              const steerParams = {
+                expectedTurnId: activeTurn.nativeTurnId,
+                input: [],
+                threadId,
+              };
+              const codexInput = yield* toCodexInput(turnInput, activeTurn.input.modelSelection, {
+                method: "turn/steer",
+                params: steerParams,
+              });
               yield* client
                 .request("turn/steer", {
-                  expectedTurnId: activeTurn.nativeTurnId,
+                  ...steerParams,
                   input: codexInput,
-                  threadId,
                 })
                 .pipe(
                   Effect.catchTags({
