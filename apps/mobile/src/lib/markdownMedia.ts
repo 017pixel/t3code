@@ -61,7 +61,15 @@ export function resolveMarkdownMediaPreview(
     const name = reference && mediaReferenceFileName(reference);
     const extension = name?.slice(name.lastIndexOf(".")).toLowerCase() ?? "";
     const isFile = classified._tag === "WorkspaceFile" || /^\.[a-z0-9]+$/i.test(extension);
-    if (name && isFile && mediaMimeTypeFromExtension(extension) === null) {
+    if (
+      name &&
+      isFile &&
+      mediaMimeTypeFromExtension(extension) === null &&
+      (classified._tag !== "Direct" ||
+        input.imageEmbed ||
+        Object.hasOwn(DOCUMENT_MIME_TYPES, extension) ||
+        audioMimeTypeFromExtension(extension) !== null)
+    ) {
       const audioMimeType = audioMimeTypeFromExtension(extension);
       // Host assets only serve supported media; other files use ThreadFile.
       if (classified._tag === "WorkspaceFile" && !audioMimeType && extension !== ".pdf")

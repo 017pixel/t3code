@@ -174,6 +174,18 @@ describe("resolveMarkdownMediaPreview", () => {
   });
 
   it.each([
+    "https://docs.example.com/guide.html",
+    "https://example.com/index.php?topic=files",
+    "https://example.com/report.unknown",
+  ])("keeps ordinary remote links in the browser: %s", (href) => {
+    expect(resolveMarkdownMediaPreview(href, input)).toBeNull();
+    expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true })).toMatchObject({
+      kind: "document",
+      source: { uri: href },
+    });
+  });
+
+  it.each([
     "javascript:report.csv",
     "data:text/csv,a,b",
     "ftp://server/report.csv",
