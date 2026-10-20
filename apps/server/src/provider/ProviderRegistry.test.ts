@@ -53,6 +53,7 @@ import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
+import * as ProviderInstallLock from "./ProviderInstallLock.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { applyProviderCompatibility } from "./providerCompatibility.ts";
 import * as ResetCreditCoordinator from "./resetCreditCoordinator.ts";
@@ -2095,10 +2096,18 @@ it.layer(
             ProviderDriverKind.make("other"),
           ),
         ];
+        const lockHome = yield* FileSystem.FileSystem.use((fileSystem) =>
+          fileSystem.makeTempDirectoryScoped({ prefix: "t3-registry-install-lock-" }),
+        ).pipe(Effect.provide(NodeServices.layer));
         const scope = yield* Scope.make();
         yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
         const runtimeServices = yield* Layer.build(
           ProviderMaintenanceRunner.layer.pipe(
+            Layer.provideMerge(
+              ProviderInstallLock.layer.pipe(
+                Layer.provide(Layer.succeed(HostProcess.Environment, { XDG_CACHE_HOME: lockHome })),
+              ),
+            ),
             Layer.provideMerge(ProviderRegistry.layer),
             Layer.provideMerge(
               Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
@@ -2131,20 +2140,23 @@ it.layer(
             ),
             Layer.provideMerge(Layer.succeed(HostProcess.Platform, "linux")),
             Layer.provideMerge(
-              Layer.succeed(
-                ChildProcessSpawner.ChildProcessSpawner,
-                ChildProcessSpawner.make((command) =>
+              Layer.succeed(ProviderMaintenanceRunner.ProviderInstaller, {
+                run: (input) =>
                   Effect.sync(() => {
-                    assert.strictEqual(command._tag, "StandardCommand");
-                    if (command._tag !== "StandardCommand") throw new Error("Unexpected pipeline");
-                    assert.strictEqual(command.command, "/personal/agent");
-                    assert.deepStrictEqual(command.args, ["update"]);
-                    assert.strictEqual(command.options.env?.PROVIDER_HOME, "/personal");
+                    assert.strictEqual(input.command, "/personal/agent");
+                    assert.deepStrictEqual(input.args, ["update"]);
+                    assert.strictEqual(input.env?.PROVIDER_HOME, "/personal");
                     events.push("update");
-                    return mockHandle({ stdout: "updated", stderr: "", code: 0 });
+                    return {
+                      stdout: "updated",
+                      stderr: "",
+                      exitCode: 0,
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    };
                   }),
-                ),
-              ),
+              }),
             ),
             Layer.provideMerge(
               ServerConfig.layerTest(process.cwd(), {
