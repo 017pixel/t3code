@@ -132,10 +132,12 @@ class FakePtyAdapter {
   readonly spawnFailures: Error[] = [];
   private readonly mode: "sync" | "async";
   private nextPid = 9000;
+  private readonly fixedPid: number | undefined;
   exitOnSubscribe: PtyAdapter.PtyExitEvent | undefined;
 
-  constructor(mode: "sync" | "async" = "sync") {
+  constructor(mode: "sync" | "async" = "sync", fixedPid?: number) {
     this.mode = mode;
+    this.fixedPid = fixedPid;
   }
 
   spawn(
@@ -152,7 +154,7 @@ class FakePtyAdapter {
         }),
       );
     }
-    const process = new FakePtyProcess(this.nextPid++);
+    const process = new FakePtyProcess(this.fixedPid ?? this.nextPid++);
     process.exitOnSubscribe = this.exitOnSubscribe;
     this.processes.push(process);
     if (this.mode === "async") {
@@ -469,7 +471,8 @@ it.layer(
 
   it.effect("saved-script handles cannot write or close a replacement even with the same PID", () =>
     Effect.gen(function* () {
-      const { manager, ptyAdapter } = yield* createManager();
+      const ptyAdapter = new FakePtyAdapter("sync", 9000);
+      const { manager } = yield* createManager(5, { ptyAdapter });
       const invalidated: TerminalManager.TerminalSessionHandle[] = [];
       const { handle } = yield* manager.openFreshWithHandle(
         openInput(),
@@ -482,7 +485,7 @@ it.layer(
       expect(ptyAdapter.processes[0]!.writes).toEqual([" command\r"]);
       yield* manager.restart(restartInput());
       const replacement = ptyAdapter.processes[1]!;
-      Object.defineProperty(replacement, "pid", { value: ptyAdapter.processes[0]!.pid });
+      expect(replacement.pid).toBe(ptyAdapter.processes[0]!.pid);
       expect(invalidated).toEqual([handle]);
       expect(yield* manager.writeWithHandle({ ...openInput(), handle, data: "bad" })).toBe(false);
       expect(yield* manager.closeWithHandle(handle)).toBe(false);
