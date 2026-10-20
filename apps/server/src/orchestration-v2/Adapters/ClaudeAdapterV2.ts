@@ -479,7 +479,10 @@ export interface ClaudeAgentSdkQueryOpenInput {
 
 export interface ClaudeAgentSdkQuerySession {
   readonly messages: Stream.Stream<SDKMessage, ClaudeAgentSdkQueryRunnerError>;
-  readonly offer: (message: SDKUserMessage) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+  readonly offer: (
+    message: SDKUserMessage,
+    onQueued?: () => void,
+  ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly setModel: (model: string) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly applyFlagSettings: (
     settings: ClaudeFlagSettings,
@@ -1008,8 +1011,12 @@ export const layerQueryRunner: Layer.Layer<
               }),
             ),
           ),
-          offer: (message) =>
-            Queue.offer(promptQueue, message).pipe(
+          offer: (message, onQueued) =>
+            Effect.uninterruptibleMask((restore) =>
+              restore(Queue.offer(promptQueue, message)).pipe(
+                Effect.tap(() => Effect.sync(() => onQueued?.())),
+              ),
+            ).pipe(
               Effect.asVoid,
               Effect.tap(() =>
                 logProtocolEvent({
@@ -4171,7 +4178,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
         });
         const openedNativeThreads = yield* Ref.make(new Set<string>());
-        // Resumed history is owned by the SDK. Only spend a known retained PDF budget.
+        // The SDK owns prior resumed history. Account for bytes added here while
+        // keeping PDFs path-only when the prior page count is unknown.
         const pdfBudgets = new Map<string, { remainingPages: number; remainingBytes: number }>();
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         // Claude 5 task tools edit one list per native session, across turns.
@@ -9532,7 +9540,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 (yield* Ref.get(openedNativeThreads)).has(nativeThreadId);
               pdfBudgets.set(nativeThreadId, {
                 remainingPages: resumed ? 0 : 100,
-                remainingBytes: resumed ? 0 : 28 * 1024 * 1024,
+                remainingBytes: 28 * 1024 * 1024,
               });
             }
             const pdfReservation = yield* reserveClaudePdfBudget(pdfBudgets.get(nativeThreadId)!);
@@ -9663,7 +9671,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               yield* attachTurn;
               yield* startUserTurnForWakeReports(nativeThreadId);
               yield* Effect.uninterruptibleMask((restore) =>
-                restore(querySession.query.offer(userMessage)).pipe(
+                restore(
+                  querySession.query.offer(userMessage, () => {
+                    pdfReservation.delivered = true;
+                  }),
+                ).pipe(
                   Effect.tap(() =>
                     Effect.sync(() => {
                       pdfReservation.delivered = true;
@@ -10019,7 +10031,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               return next;
             });
             yield* Effect.uninterruptibleMask((restore) =>
-              restore(existing.query.offer(userMessage)).pipe(
+              restore(
+                existing.query.offer(userMessage, () => {
+                  pdfReservation.delivered = true;
+                }),
+              ).pipe(
                 Effect.tap(() =>
                   Effect.sync(() => {
                     pdfReservation.delivered = true;

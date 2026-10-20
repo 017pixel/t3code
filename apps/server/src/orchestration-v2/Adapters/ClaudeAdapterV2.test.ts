@@ -1835,6 +1835,8 @@ describe("ClaudeAdapterV2 attachments", () => {
       "retained-documents",
       "later-images",
       "partial-images",
+      "cancelled-send",
+      "cancelled-steer",
     ].map((budget) => ({
       name: budget,
       prompt: "Read this PDF.",
@@ -1908,6 +1910,8 @@ describe("ClaudeAdapterV2 attachments", () => {
           const offeredMessages: Array<SDKUserMessage> = [];
           let failOpen = false;
           let failOffer = false;
+          let cancelAfterQueue = false;
+          const queued = yield* Deferred.make<void>();
           const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
             instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
             settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: claudeHome },
@@ -1933,7 +1937,7 @@ describe("ClaudeAdapterV2 attachments", () => {
                   const messages = yield* Queue.unbounded<SDKMessage>();
                   return {
                     messages: Stream.fromQueue(messages),
-                    offer: (message) =>
+                    offer: (message, onQueued) =>
                       Effect.suspend(() => {
                         if (failOffer) {
                           failOffer = false;
@@ -1946,7 +1950,16 @@ describe("ClaudeAdapterV2 attachments", () => {
                         }
                         return Effect.sync(() => {
                           offeredMessages.push(message);
-                        });
+                          onQueued?.();
+                        }).pipe(
+                          Effect.andThen(() =>
+                            cancelAfterQueue
+                              ? Deferred.succeed(queued, undefined).pipe(
+                                  Effect.andThen(Effect.never),
+                                )
+                              : Effect.void,
+                          ),
+                        );
                       }),
                     setModel: () => Effect.void,
                     applyFlagSettings: () => Effect.void,
@@ -2015,10 +2028,63 @@ describe("ClaudeAdapterV2 attachments", () => {
               attemptId,
               modelSelection,
               text: prompt,
-              attachments: [attachment, document],
+              attachments: resumed ? [attachment] : [attachment, document],
             }),
             nativeThreadHasTurns: resumed,
           };
+          if (budget === "cancelled-send" || budget === "cancelled-steer") {
+            const documentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
+            const pages = Buffer.from(
+              `%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count 60 >> endobj\n${Array.from({ length: 60 }, (_, i) => `${i + 3} 0 obj << /Type /Page /Parent 2 0 R >> endobj`).join("\n")}\n`,
+            );
+            yield* fileSystem.writeFile(
+              documentPath,
+              Buffer.concat([
+                pages,
+                Buffer.alloc(19 * 1024 * 1024 - pages.length - 5, 32),
+                Buffer.from("%%EOF"),
+              ]),
+            );
+            const message = { ...turnInput.message, attachments: [document] };
+            if (budget === "cancelled-steer") {
+              yield* runtime.startTurn({ ...turnInput, message: { ...message, attachments: [] } });
+            }
+            const deliver =
+              budget === "cancelled-send"
+                ? runtime.startTurn({ ...turnInput, message })
+                : runtime.steerTurn({
+                    threadId,
+                    runId: turnInput.runId,
+                    providerThread,
+                    providerTurnId: idAllocator.derive.providerTurn({
+                      driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                      nativeTurnId: `turn:${attemptId}`,
+                    }),
+                    message,
+                  });
+            cancelAfterQueue = true;
+            const delivering = yield* deliver.pipe(Effect.forkChild);
+            yield* Deferred.await(queued);
+            yield* Fiber.interrupt(delivering);
+            const delivered = offeredMessages.at(-1)!.message.content;
+            assert.include(JSON.stringify(delivered), '"type":"document"');
+            cancelAfterQueue = false;
+            if (budget === "cancelled-send") {
+              yield* runtime.interruptTurn({
+                providerThread,
+                providerTurnId: idAllocator.derive.providerTurn({
+                  driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                  nativeTurnId: `turn:${attemptId}`,
+                }),
+              });
+            }
+            yield* deliver;
+            const retried = offeredMessages.at(-1)!.message.content;
+            assert.notInclude(JSON.stringify(retried), '"type":"document"');
+            assert.include(JSON.stringify(retried), documentPath);
+            assert.isBelow(Buffer.byteLength(JSON.stringify(offeredMessages)), 32_000_000);
+            return;
+          }
           if (budget !== "none") {
             const providerTurnId = idAllocator.derive.providerTurn({
               driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
@@ -2187,16 +2253,16 @@ describe("ClaudeAdapterV2 attachments", () => {
             attachmentRelativePath(attachment)!,
           );
           const expectedDocumentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
-          const attachmentNotes = `\n\n[Attached image "diagram.png" is saved at: ${expectedAttachmentPath}]\n\n[Attached file "requirements.pdf" is saved at: ${expectedDocumentPath}]`;
+          const attachmentNotes = `\n\n[Attached image "diagram.png" is saved at: ${expectedAttachmentPath}]${resumed ? "" : `\n\n[Attached file "requirements.pdf" is saved at: ${expectedDocumentPath}]`}`;
           const requestBlock = { type: "text" as const, text: expectedText + attachmentNotes };
           const expectedContent = command
             ? [
                 requestBlock,
-                ...(!resumed ? [expectedImageBlock] : []),
+                expectedImageBlock,
                 ...(!resumed ? [expectedDocumentBlock] : []),
                 { type: "text" as const, text: command + attachmentNotes },
               ]
-            : [...(!resumed ? [expectedImageBlock, expectedDocumentBlock] : []), requestBlock];
+            : [expectedImageBlock, ...(!resumed ? [expectedDocumentBlock] : []), requestBlock];
           assert.deepEqual(offeredMessages[0]?.message.content, expectedContent);
 
           const providerTurnId = idAllocator.derive.providerTurn({
@@ -2213,7 +2279,7 @@ describe("ClaudeAdapterV2 attachments", () => {
               creationSource: "web",
               messageId: MessageId.make("message-claude-attachments-steer"),
               text: prompt,
-              attachments: [attachment, document],
+              attachments: resumed ? [attachment] : [attachment, document],
             },
           });
 
@@ -2695,7 +2761,10 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
     url: "http://127.0.0.1:43123/mcp",
     headers: { Authorization: "Bearer dummy-mcp-credential" },
   };
-  const openWith = (cli: ReturnType<typeof makeFakeClaudeCli>) =>
+  const openWith = (
+    cli: ReturnType<typeof makeFakeClaudeCli>,
+    native?: ProviderEventLoggers.EventNdjsonLogger,
+  ) =>
     Effect.gen(function* () {
       const runner = yield* ClaudeAdapterV2.ClaudeAgentSdkQueryRunner;
       return yield* runner.open({
@@ -2716,12 +2785,38 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
       });
     }).pipe(
       Effect.provide(ClaudeAdapterV2.layerQueryRunner),
-      Effect.provideService(
-        ProviderEventLoggers.ProviderEventLoggers,
-        ProviderEventLoggers.NoOpProviderEventLoggers,
-      ),
+      Effect.provideService(ProviderEventLoggers.ProviderEventLoggers, {
+        ...ProviderEventLoggers.NoOpProviderEventLoggers,
+        native,
+      }),
       Effect.provide(NodeServices.layer),
     );
+
+  it.effect("commits queued delivery before interruptible protocol logging", () =>
+    Effect.gen(function* () {
+      const logging = yield* Deferred.make<void>();
+      let committed = false;
+      const cli = makeFakeClaudeCli();
+      const session = yield* openWith(cli, {
+        filePath: "/tmp/claude-queued-delivery.log",
+        write: () =>
+          committed
+            ? Deferred.succeed(logging, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.void,
+        close: () => Effect.void,
+      });
+      const offering = yield* session
+        .offer(ClaudeAdapterV2.makeClaudeUserMessage({ text: "Inspect the attachment." }), () => {
+          committed = true;
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(logging);
+      yield* Fiber.interrupt(offering);
+      assert.isTrue(committed);
+      committed = false;
+      yield* session.close;
+    }),
+  );
 
   it.effect("sends MCP servers over stdin, not argv or the environment", () =>
     Effect.gen(function* () {
