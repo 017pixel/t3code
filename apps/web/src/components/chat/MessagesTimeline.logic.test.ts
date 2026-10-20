@@ -691,7 +691,7 @@ describe("resolveAssistantMessageCopyState", () => {
     const input = Object.freeze({ text, showCopyButton: true, streaming: false });
 
     expect(resolveAssistantMessageCopyState(input)).toEqual({
-      text: `${before}\\[Source 1: \\_\\_opaque\\_id\\_\\_\\]${after}`,
+      text: `${before}[Source 1: \\_\\_opaque\\_id\\_\\_\\]${after}`,
       visible: true,
     });
     expect(input.text).toBe(text);
@@ -714,11 +714,11 @@ describe("resolveAssistantMessageCopyState", () => {
       text: [
         "🦊 Before.",
         "",
-        "-       First **evidence** \\[Source 1: turn0view0\\].",
+        "-       First **evidence** [Source 1: turn0view0\\].",
         "",
-        "        -       Second \\[Source 2: turn1view0\\].",
+        "        -       Second [Source 2: turn1view0\\].",
         "",
-        "After \\[Source 1: turn0view0\\].",
+        "After [Source 1: turn0view0\\].",
       ].join("\r\n"),
       visible: true,
     });
@@ -742,11 +742,11 @@ describe("resolveAssistantMessageCopyState", () => {
       text: [
         `Created [${literal}.txt](<outputs/${literal}.txt>).`,
         "",
-        "Before \\[Source 1: turn0view0\\].",
+        "Before [Source 1: turn0view0\\].",
         "",
         `${literal} (Document template)`,
         "",
-        "After \\[Source 2: turn1search2; Source 1: turn0view0; L8-L13\\].",
+        "After [Source 2: turn1search2; Source 1: turn0view0; L8-L13\\].",
       ].join("\n"),
       visible: true,
     });
@@ -761,7 +761,7 @@ describe("resolveAssistantMessageCopyState", () => {
     ).toEqual({ text, visible: false });
     expect(
       resolveAssistantMessageCopyState({ text, showCopyButton: true, streaming: false }),
-    ).toEqual({ text: `Evidence \\[Source 1: turn0view0\\] and ${tail}`, visible: true });
+    ).toEqual({ text: `Evidence [Source 1: turn0view0\\] and ${tail}`, visible: true });
   });
 });
 

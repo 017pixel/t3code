@@ -125,7 +125,7 @@ function codexCitationText(citation: CodexCitation): string {
 
 /** Keeps the opaque source IDs readable without inventing link destinations. */
 function codexCitationMarkdown(citation: CodexCitation): string {
-  return codexCitationText(citation).replace(/[\\[\]*_`<&]/g, "\\$&");
+  return codexCitationText(citation).replace(/[\\\]*_`<&]/g, "\\$&");
 }
 
 function updateHtmlContext(value: string, tags: string[]): void {

@@ -2,6 +2,8 @@ import { expect, it } from "vite-plus/test";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
+import { renderCodexCitationsAsMarkdown } from "./codexCitations.ts";
+import { parseMarkdownWithMath } from "./markdownMath.ts";
 import { searchableMessageSegments } from "./threadFindText.ts";
 import {
   CHAT_MARKDOWN_REHYPE_PLUGINS,
@@ -84,6 +86,11 @@ it("renders stable source numbers, grouped locators and opaque IDs through both 
   const tree = processor.runSync(processor.parse(markdown), { value: markdown });
   expect(markdownText(tree)).toBe(expected);
   expect(JSON.stringify(tree)).not.toContain('"href"');
+
+  const copiedTree = parseMarkdownWithMath(renderCodexCitationsAsMarkdown(markdown));
+  expect(copiedTree.children).toMatchObject([
+    { type: "paragraph", children: [{ type: "text", value: expected }] },
+  ]);
 
   const withBreaks = unified()
     .use(remarkParse)
