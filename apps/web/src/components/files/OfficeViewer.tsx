@@ -54,23 +54,6 @@ async function renderWord(
     import("dompurify"),
   ]);
   const archive = await JSZip.loadAsync(result.bytes);
-  // Even detached images can initiate requests. Remove external relationships
-  // before the renderer creates DOM, then restrict its output again in the frame.
-  for (const entry of Object.values(archive.files)) {
-    if (!entry.name.endsWith(".rels")) continue;
-    const xml = new DOMParser().parseFromString(await entry.async("string"), "application/xml");
-    if (xml.querySelector("parsererror") || xml.doctype)
-      throw new Error("This document contains invalid XML.");
-    for (const rel of Array.from(xml.getElementsByTagNameNS("*", "Relationship"))) {
-      const target = rel.getAttribute("Target") ?? "";
-      if (
-        rel.getAttribute("TargetMode")?.toLowerCase() === "external" ||
-        /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(target)
-      )
-        rel.remove();
-    }
-    archive.file(entry.name, new XMLSerializer().serializeToString(xml));
-  }
   const html: string[] = [];
   const css = new Set<string>();
   for (const document of result.documents) {
@@ -86,6 +69,15 @@ async function renderWord(
       ignoreFonts: true,
       useBase64URL: true,
       renderAltChunks: false,
+      // These parts can repeat once per reference or page. The worker removes
+      // their relationships too, so the main thread never parses their XML.
+      renderFootnotes: false,
+      renderEndnotes: false,
+      renderHeaders: false,
+      renderFooters: false,
+      renderComments: false,
+      renderChanges: false,
+      experimental: false,
     });
     const markup = DOMPurify.sanitize(body.innerHTML, {
       FORBID_TAGS: ["style", "a", "form", "input", "button", "video", "audio", "svg", "math"],

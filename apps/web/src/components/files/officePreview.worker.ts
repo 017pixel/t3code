@@ -327,6 +327,150 @@ async function boundWorkbook(archive: JSZip) {
   return sheetPaths.map((path) => limited.get(path) ?? false);
 }
 
+const WORD_RELATIONSHIP = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/";
+const WORD_DISABLED_PARTS = new Set([
+  "footnotes",
+  "endnotes",
+  "comments",
+  "commentsExtended",
+  "header",
+  "footer",
+  "fontTable",
+  "aFChunk",
+]);
+
+function wordPartTypes() {
+  const defaults = new Map<string, string>();
+  const overrides = new Map<string, string>();
+  const xmlParts = new Set([
+    "word/document.xml",
+    "docProps/app.xml",
+    "docProps/core.xml",
+    "docProps/custom.xml",
+  ]);
+  const roles = new Map<string, Set<string>>();
+  const images = new Map<string, string>();
+  let omitted = false;
+  return {
+    roles,
+    images,
+    get omitted() {
+      return omitted;
+    },
+    binary(path: string) {
+      const type = overrides.get(path) ?? defaults.get(path.split(".").at(-1) ?? "");
+      // An XML relationship always wins over a misleading media content type.
+      if (path === "[Content_Types].xml" || path.endsWith(".rels") || xmlParts.has(path))
+        return false;
+      return (
+        (roles.get(path)?.size === 1 && roles.get(path)?.has("font")) ||
+        /^image\/(?:png|jpeg|gif|webp|bmp|tiff)$/.test(type ?? "")
+      );
+    },
+    metadata(path: string, xml: string) {
+      const parser = xmlParser();
+      const removed: { start: number; end: number }[] = [];
+      let start = -1;
+      parser.on("opentag", (tag) => {
+        const attr = (name: string) => tag.attributes[name]?.value ?? "";
+        if (path === "[Content_Types].xml") {
+          if (tag.local === "Default") defaults.set(attr("Extension"), attr("ContentType"));
+          if (tag.local === "Override")
+            overrides.set(attr("PartName").replace(/^\//, ""), attr("ContentType"));
+        }
+        if (tag.local !== "Relationship" || !path.endsWith(".rels")) return;
+        const type = attr("Type");
+        const role = type.slice(type.lastIndexOf("/") + 1);
+        const external =
+          attr("TargetMode").toLowerCase() === "external" ||
+          /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(attr("Target"));
+        const folder = path === "_rels/.rels" ? "" : path.replace(/_rels\/[^/]+\.rels$/, "");
+        // Match docx-preview's URL resolution, including literal query/fragment
+        // characters in ZIP names rather than silently classifying another file.
+        const target = new URL(attr("Target"), `https://docx.invalid/${folder}`)
+          .toString()
+          .slice("https://docx.invalid/".length);
+        if (!external) {
+          if (role !== "image" && role !== "font" && role !== "hyperlink") xmlParts.add(target);
+          if (path === "_rels/.rels") xmlParts.add(attr("Target").replace(/^\//, ""));
+          const types = roles.get(target) ?? new Set<string>();
+          types.add(role);
+          roles.set(target, types);
+          if (path === "word/_rels/document.xml.rels" && !images.has(attr("Id")))
+            images.set(attr("Id"), target);
+          if (target === "word/document.xml" && role !== "officeDocument")
+            throw new Error("Preview limited: this Word document has an aliased document part.");
+          if (type === WORD_RELATIONSHIP + "officeDocument" && target !== "word/document.xml")
+            throw new Error(
+              "Preview limited: this Word document has an unsupported document relationship.",
+            );
+        }
+        if (external || WORD_DISABLED_PARTS.has(role)) {
+          start = xml.lastIndexOf("<", parser.position - 1);
+          if (!external) omitted = true;
+        }
+      });
+      parser.on("closetag", (tag) => {
+        if (tag.local === "Relationship" && start >= 0) {
+          removed.push({ start, end: parser.position });
+          start = -1;
+        }
+      });
+      parser.write(xml).close();
+      for (const range of removed.toReversed())
+        xml = xml.slice(0, range.start) + xml.slice(range.end);
+      return xml;
+    },
+  };
+}
+
+// Count CSS expansion before docx-preview copies inherited styles and expands
+// each numbering instance into all of its abstract levels. Picture bullets
+// would also duplicate base64 images inside CSS, so omit those definitions.
+function wordXmlCost(xml: string, roles: Set<string> | undefined) {
+  const parser = xmlParser();
+  let depth = 0;
+  let markup = 0;
+  let styles = 0;
+  let numbers = 0;
+  let numberIdLength = 16;
+  let pictures = false;
+  parser.on("opentag", (tag) => {
+    if (++depth > 64)
+      throw new Error("Preview limited: this Word document has excessive XML nesting.");
+    markup++;
+    if (tag.local === "style" || tag.local === "docDefaults") styles++;
+    if (tag.local === "num") {
+      numbers++;
+      numberIdLength = Math.max(
+        numberIdLength,
+        ...Object.values(tag.attributes)
+          .filter((attr) => attr.local === "numId")
+          .map((attr) => attr.value.length),
+      );
+    }
+    if (tag.local === "numPicBullet") pictures = true;
+  });
+  parser.on("closetag", () => depth--);
+  parser.write(xml).close();
+  const multiplier = Math.max(
+    1,
+    roles?.has("styles") ? styles * 2 : 1,
+    roles?.has("numbering") ? numbers : 1,
+  );
+  return {
+    bytes:
+      new TextEncoder().encode(xml).length *
+      (roles?.has("styles")
+        ? Math.max(multiplier, markup * 2)
+        : roles?.has("numbering")
+          ? Math.max(markup, numbers * numberIdLength) * 2
+          : 1),
+    markup: markup * multiplier,
+    pictures,
+  };
+}
+
 // Stream each entry before handing it to an engine. A tiny compressed archive
 // must not turn into an unbounded allocation on the UI thread.
 async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open" }>) {
@@ -339,14 +483,29 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
   const entries = Object.values(source.files).filter((entry) => !entry.dir);
   if (entries.length > 2048)
     throw new Error("This file contains too many archive entries to preview.");
+  if (
+    input.kind === "docx" &&
+    entries.some((entry) => entry.name.includes("\\") || entry.name.startsWith("/"))
+  )
+    throw new Error("Preview limited: this Word document has unsupported archive paths.");
   const archive = new JSZip();
+  const partTypes = wordPartTypes();
+  // Metadata must be bounded and classified before any payload gets a media exemption.
+  if (input.kind === "docx")
+    entries.sort(
+      (a, b) =>
+        Number(b.name === "[Content_Types].xml" || b.name.endsWith(".rels")) -
+        Number(a.name === "[Content_Types].xml" || a.name.endsWith(".rels")),
+    );
+  const costs = new Map<string, { bytes: number; markup: number }>();
+  const mediaSizes = new Map<string, number>();
   let total = 0;
   let wordAuxiliaryMarkup = 0;
   let wordInputTruncated = false;
   let word: ReturnType<typeof wordDocuments> | null = null;
   for (const entry of entries) {
     const document = input.kind === "docx" && entry.name === "word/document.xml";
-    const media = input.kind === "docx" && entry.name.startsWith("word/media/");
+    const media = input.kind === "docx" && partTypes.binary(entry.name);
     const chunks: Uint8Array[] = [];
     const sections = document ? wordSections() : null;
     const decoder = new TextDecoder();
@@ -420,9 +579,80 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
         sections!.finish(),
       );
       archive.file(entry.name, word.documents[0]!);
+    } else if (input.kind === "docx" && !media) {
+      let xml = new TextDecoder().decode(content);
+      if (entry.name === "[Content_Types].xml" || entry.name.endsWith(".rels"))
+        xml = partTypes.metadata(entry.name, xml);
+      const roles = partTypes.roles.get(entry.name);
+      const cost = wordXmlCost(xml, roles);
+      // The renderer parses related parts even when their render option is off.
+      if (roles && [...roles].every((role) => WORD_DISABLED_PARTS.has(role))) continue;
+      if (
+        (roles?.has("numbering") && cost.pictures) ||
+        ((roles?.has("styles") || roles?.has("numbering")) &&
+          (cost.bytes > 128 * 1024 || cost.markup > 2_000))
+      ) {
+        wordInputTruncated = true;
+        continue;
+      }
+      costs.set(entry.name, cost);
+      archive.file(entry.name, xml);
     } else {
+      if (input.kind === "docx" && partTypes.roles.get(entry.name)?.has("font")) {
+        wordInputTruncated = true;
+        continue;
+      }
+      if (media) mediaSizes.set(entry.name, Math.ceil((content.length * 4) / 3));
       archive.file(entry.name, content);
     }
+  }
+  if (word) {
+    let bytes = 0;
+    let markup = 0;
+    let mediaBytes = 0;
+    const usedImages = new Set<string>();
+    const auxiliary = [...costs.values()].reduce(
+      (sum, cost) => ({ bytes: sum.bytes + cost.bytes, markup: sum.markup + cost.markup }),
+      { bytes: 0, markup: 0 },
+    );
+    const documents: string[] = [];
+    for (const document of word.documents) {
+      const cost = wordXmlCost(document, undefined);
+      let images = 0;
+      const batchImages = new Set<string>();
+      const parser = xmlParser();
+      parser.on("opentag", (tag) => {
+        if (tag.local !== "blip" && tag.local !== "imagedata") return;
+        const id = Object.values(tag.attributes).find(
+          (attr) => attr.local === "embed" || attr.local === "id",
+        )?.value;
+        const path = partTypes.images.get(id ?? "");
+        // Account for repeated base64 media, including repeated references.
+        if (path) {
+          images += mediaSizes.get(path) ?? OFFICE_PREVIEW_MAX_BYTES + 1;
+          batchImages.add(path);
+        }
+      });
+      parser.write(document).close();
+      if (
+        bytes + cost.bytes + auxiliary.bytes > 3 * 1024 * 1024 ||
+        markup + cost.markup + auxiliary.markup > 100_000 ||
+        mediaBytes + images > OFFICE_PREVIEW_MAX_BYTES
+      )
+        break;
+      bytes += cost.bytes + auxiliary.bytes;
+      markup += cost.markup + auxiliary.markup;
+      mediaBytes += images;
+      for (const path of batchImages) usedImages.add(path);
+      documents.push(document);
+    }
+    if (documents.length === 0)
+      throw new Error("Preview limited: this Word document has too much expanded markup.");
+    word.truncated ||=
+      wordInputTruncated || partTypes.omitted || documents.length < word.documents.length;
+    word.documents = documents;
+    for (const path of mediaSizes.keys()) if (!usedImages.has(path)) archive.remove(path);
+    archive.file("word/document.xml", documents[0]!);
   }
   const truncatedSheets = input.kind === "xlsx" ? await boundWorkbook(archive) : [];
   return { archive, word, truncatedSheets };
