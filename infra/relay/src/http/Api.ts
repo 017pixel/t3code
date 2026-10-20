@@ -676,6 +676,7 @@ export const recoverEnvironmentTunnelRecord = Effect.fn(
     userId: input.userId,
     environmentId: input.environmentId,
     origin: input.origin,
+    reuseReadyTunnel: true,
   });
   const recoveredTunnelId = recovered.runtime.tunnelId;
   if (

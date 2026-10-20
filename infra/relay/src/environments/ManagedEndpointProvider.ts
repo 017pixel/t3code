@@ -1,9 +1,12 @@
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as CloudflareRetry from "@distilled.cloud/cloudflare/Retry";
 import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
@@ -144,10 +147,16 @@ export type ManagedEndpointDeprovisionTarget = ManagedEndpointAllocations.Manage
 export class ManagedEndpointProvider extends Context.Service<
   ManagedEndpointProvider,
   {
+    /**
+     * `reuseReadyTunnel` is for connector recovery: when the recorded tunnel
+     * still exists and serves the same origin, only a fresh token is fetched.
+     * Links leave it off so they also repair ingress and DNS.
+     */
     readonly provision: (input: {
       readonly userId: string;
       readonly environmentId: string;
       readonly origin: RelayManagedEndpointOrigin;
+      readonly reuseReadyTunnel?: boolean;
     }) => Effect.Effect<ManagedEndpointProvisioningResult, ManagedEndpointProviderError>;
     readonly reconcileOrigin: (input: {
       readonly userId: string;
@@ -387,6 +396,31 @@ export function isManagedEndpointNotFound(cause: unknown): boolean {
     return true;
   }
   return "cause" in cause && isManagedEndpointNotFound(cause.cause);
+}
+
+export class CloudflareApiThrottled extends Schema.TaggedError<CloudflareApiThrottled>()(
+  "CloudflareApiThrottled",
+  { retryAfterMillis: Schema.Number },
+) {
+  override get message(): string {
+    return `Cloudflare API calls are paused for ${this.retryAfterMillis}ms after a rate limit`;
+  }
+}
+
+export function isManagedEndpointRateLimited(cause: unknown): boolean {
+  if (typeof cause !== "object" || cause === null) {
+    return false;
+  }
+  if (
+    "_tag" in cause &&
+    (cause._tag === "TooManyRequests" || cause._tag === "CloudflareApiThrottled")
+  ) {
+    return true;
+  }
+  if ("status" in cause && cause.status === 429) {
+    return true;
+  }
+  return "cause" in cause && isManagedEndpointRateLimited(cause.cause);
 }
 
 /**
@@ -1039,6 +1073,69 @@ export const make = Effect.gen(function* () {
         );
       const { hostname, tunnelName } = allocation;
 
+      // Every Cloudflare call shares one account-wide rate limit, and
+      // recovery is the bulk of them. Reusing a ready tunnel costs a get and a
+      // token instead of a list, an ingress write, a DNS write, and a token.
+      const reusableTunnelId =
+        input.reuseReadyTunnel === true &&
+        allocation.readyAt !== null &&
+        allocation.dnsRecordId !== null &&
+        allocation.tunnelReleasedAt === null &&
+        allocation.origin?.localHttpHost === input.origin.localHttpHost &&
+        allocation.origin.localHttpPort === input.origin.localHttpPort
+          ? allocation.tunnelId
+          : null;
+      if (reusableTunnelId !== null) {
+        const recorded = yield* tunnels.get(reusableTunnelId).pipe(
+          Effect.asSome,
+          Effect.catchTags({
+            ManagedEndpointTunnelClientError: (cause) =>
+              isManagedEndpointNotFound(cause.cause)
+                ? Effect.succeedNone
+                : Effect.fail(
+                    new ManagedEndpointProvisioningFailed({
+                      userId: input.userId,
+                      environmentId: input.environmentId,
+                      stage: "verify-tunnel",
+                      hostname,
+                      tunnelName,
+                      tunnelId: reusableTunnelId,
+                      cause,
+                    }),
+                  ),
+          }),
+        );
+        if (
+          Option.isSome(recorded) &&
+          !recorded.value.deletedAt &&
+          recorded.value.name === tunnelName
+        ) {
+          const connectorToken = yield* tunnels.getToken(reusableTunnelId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ManagedEndpointProvisioningFailed({
+                  userId: input.userId,
+                  environmentId: input.environmentId,
+                  stage: "get-tunnel-token",
+                  hostname,
+                  tunnelName,
+                  tunnelId: reusableTunnelId,
+                  cause,
+                }),
+            ),
+          );
+          return {
+            endpoint: managedEndpointForHostname(hostname),
+            runtime: {
+              providerKind: "cloudflare_tunnel",
+              connectorToken,
+              tunnelId: reusableTunnelId,
+              tunnelName,
+            },
+          } satisfies ManagedEndpointProvisioningResult;
+        }
+      }
+
       const tunnelResponse = yield* tunnels.list({ name: tunnelName, isDeleted: false }).pipe(
         Effect.map((tunnels) => tunnels.result),
         Effect.map(Arr.findFirst((tunnel) => tunnel.name === tunnelName)),
@@ -1340,17 +1437,64 @@ export const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(ManagedEndpointProvider, make);
 
+const CLOUDFLARE_THROTTLE_DEFAULT = Duration.seconds(10);
+const CLOUDFLARE_THROTTLE_MAX = Duration.minutes(1);
+
+/**
+ * Cloudflare rate limits API calls per account, so every relay isolate draws
+ * from one budget. The SDK would sleep through a 429's retry hint until our
+ * request timeout, and each further call keeps the account throttled. The
+ * returned wrapper fails a 429 at once, then fails this isolate's calls with
+ * `CloudflareApiThrottled` until the hint passes so the budget can refill.
+ */
+export const makeCloudflareThrottle = () => {
+  let throttledUntilMillis = 0;
+  const failFastOnRateLimit = CloudflareRetry.policy((lastError) => {
+    const defaults = CloudflareRetry.makeDefault(lastError);
+    return {
+      ...defaults,
+      while: (error) => !isManagedEndpointRateLimited(error) && (defaults.while?.(error) ?? false),
+    };
+  });
+  return <A, E, R>(call: Effect.Effect<A, E, R>) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      if (now < throttledUntilMillis) {
+        return yield* new CloudflareApiThrottled({ retryAfterMillis: throttledUntilMillis - now });
+      }
+      return yield* call.pipe(
+        failFastOnRateLimit,
+        Effect.tapError((error) =>
+          isManagedEndpointRateLimited(error)
+            ? Effect.map(Clock.currentTimeMillis, (failedAt) => {
+                const hint =
+                  typeof error === "object" &&
+                  error !== null &&
+                  "retryAfter" in error &&
+                  Duration.isDuration(error.retryAfter)
+                    ? error.retryAfter
+                    : CLOUDFLARE_THROTTLE_DEFAULT;
+                throttledUntilMillis =
+                  failedAt + Duration.toMillis(Duration.min(hint, CLOUDFLARE_THROTTLE_MAX));
+              })
+            : Effect.void,
+        ),
+      );
+    });
+};
+
 export const layerCloudflareBindings = (
   tunnelClient: Cloudflare.Tunnel.ReadWriteTunnelClient,
   dnsClient: Cloudflare.DNS.ReadWriteDnsClient,
   alchemyRuntimeContext: Alchemy.BaseRuntimeContext,
-) =>
-  layer.pipe(
+) => {
+  const cloudflare = makeCloudflareThrottle();
+  return layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         layerTunnelClient({
           get: (tunnelId) =>
-            tunnelClient.get(tunnelId).pipe(
+            cloudflare(tunnelClient.get(tunnelId)).pipe(
               Effect.timeout("8 seconds"),
               Effect.mapError(
                 (cause) =>
@@ -1363,7 +1507,7 @@ export const layerCloudflareBindings = (
               Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
             ),
           list: (request) =>
-            tunnelClient.list(request).pipe(
+            cloudflare(tunnelClient.list(request)).pipe(
               Effect.timeout("8 seconds"),
               Effect.mapError(
                 (cause) =>
@@ -1376,7 +1520,7 @@ export const layerCloudflareBindings = (
               Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
             ),
           create: (request) =>
-            tunnelClient.create(request).pipe(
+            cloudflare(tunnelClient.create(request)).pipe(
               Effect.timeout("8 seconds"),
               Effect.mapError(
                 (cause) =>
@@ -1389,7 +1533,7 @@ export const layerCloudflareBindings = (
               Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
             ),
           putConfiguration: (tunnelId, config) =>
-            tunnelClient.putConfiguration(tunnelId, config).pipe(
+            cloudflare(tunnelClient.putConfiguration(tunnelId, config)).pipe(
               Effect.timeout("8 seconds"),
               Effect.mapError(
                 (cause) =>
@@ -1402,7 +1546,7 @@ export const layerCloudflareBindings = (
               Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
             ),
           getToken: (tunnelId) =>
-            tunnelClient.getToken(tunnelId).pipe(
+            cloudflare(tunnelClient.getToken(tunnelId)).pipe(
               Effect.timeout("8 seconds"),
               Effect.mapError(
                 (cause) =>
@@ -1415,7 +1559,7 @@ export const layerCloudflareBindings = (
               Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
             ),
           delete: (tunnelId) =>
-            tunnelClient.delete(tunnelId).pipe(
+            cloudflare(tunnelClient.delete(tunnelId)).pipe(
               Effect.timeout("8 seconds"),
               Effect.mapError(
                 (cause) =>
@@ -1430,7 +1574,7 @@ export const layerCloudflareBindings = (
         }),
         layerDnsClient({
           listRecords: (hostname) =>
-            dnsClient.listDnsRecords({ search: hostname }).pipe(
+            cloudflare(dnsClient.listDnsRecords({ search: hostname })).pipe(
               Effect.timeout("8 seconds"),
               Effect.map((response) =>
                 response.result.filter(
@@ -1450,7 +1594,7 @@ export const layerCloudflareBindings = (
               Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
             ),
           createRecord: (request) =>
-            dnsClient.createDnsRecord(request).pipe(
+            cloudflare(dnsClient.createDnsRecord(request)).pipe(
               Effect.timeout("8 seconds"),
               Effect.map((response) => ({ id: response.id })),
               Effect.mapError(
@@ -1464,7 +1608,7 @@ export const layerCloudflareBindings = (
               Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
             ),
           updateRecord: (dnsRecordId, request) =>
-            dnsClient.updateDnsRecord(dnsRecordId, request).pipe(
+            cloudflare(dnsClient.updateDnsRecord(dnsRecordId, request)).pipe(
               Effect.timeout("8 seconds"),
               Effect.mapError(
                 (cause) =>
@@ -1478,7 +1622,7 @@ export const layerCloudflareBindings = (
               Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
             ),
           deleteRecord: (dnsRecordId) =>
-            dnsClient.deleteDnsRecord(dnsRecordId).pipe(
+            cloudflare(dnsClient.deleteDnsRecord(dnsRecordId)).pipe(
               Effect.timeout("8 seconds"),
               Effect.mapError(
                 (cause) =>
@@ -1494,3 +1638,4 @@ export const layerCloudflareBindings = (
       ),
     ),
   );
+};

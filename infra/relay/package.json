@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@clerk/backend": "catalog:",
+    "@distilled.cloud/cloudflare": "1.0.0-rc.13",
     "@effect/sql-pg": "catalog:",
     "@effect/sql-sqlite-do": "catalog:",
     "@noble/curves": "catalog:",

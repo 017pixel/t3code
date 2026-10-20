@@ -3,9 +3,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as RelayConfiguration from "../Config.ts";
 import * as ManagedEndpointAllocations from "./ManagedEndpointAllocations.ts";
@@ -1914,4 +1916,103 @@ describe("ManagedEndpointProvider", () => {
       }
     }).pipe(Effect.provide(layerProvider(makeTunnelClient(), dnsClient)));
   });
+
+  it.effect("recovers a ready tunnel with only a tunnel check and a fresh token", () => {
+    const tunnelCalls: TunnelCall[] = [];
+    const dnsCalls: DnsCall[] = [];
+    const allocationCalls: AllocationCall[] = [];
+    const layer = layerProvider(
+      makePersistentTunnelClient(tunnelCalls),
+      makeDnsClient(dnsCalls),
+      makeAllocations(allocationCalls),
+    );
+
+    return Effect.gen(function* () {
+      const provider = yield* ManagedEndpointProvider.ManagedEndpointProvider;
+      const request = {
+        userId: "user_ABC",
+        environmentId: "env_ABC",
+        origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
+      } as const;
+      const linked = yield* provider.provision(request);
+      tunnelCalls.length = 0;
+      dnsCalls.length = 0;
+      allocationCalls.length = 0;
+
+      const recovered = yield* provider.provision({ ...request, reuseReadyTunnel: true });
+
+      expect(recovered).toEqual(linked);
+      expect(tunnelCalls.map((call) => call.operation)).toEqual(["get", "getToken"]);
+      expect(dnsCalls).toEqual([]);
+      expect(allocationCalls.map((call) => call.operation)).toEqual(["reserve"]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("fully re-provisions a recovery when the ready tunnel is gone or moved", () => {
+    const tunnelCalls: TunnelCall[] = [];
+    const tunnelClient = makePersistentTunnelClient(tunnelCalls);
+    const layer = layerProvider(tunnelClient);
+
+    return Effect.gen(function* () {
+      const provider = yield* ManagedEndpointProvider.ManagedEndpointProvider;
+      const request = {
+        userId: "user_ABC",
+        environmentId: "env_ABC",
+        origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
+      } as const;
+      yield* provider.provision(request);
+
+      tunnelCalls.length = 0;
+      const moved = {
+        ...request,
+        origin: { localHttpHost: "127.0.0.1", localHttpPort: 3774 },
+        reuseReadyTunnel: true,
+      } as const;
+      yield* provider.provision(moved);
+      expect(tunnelCalls.map((call) => call.operation)).toEqual([
+        "list",
+        "putConfiguration",
+        "getToken",
+      ]);
+
+      yield* tunnelClient.delete("tunnel-id");
+      tunnelCalls.length = 0;
+      yield* provider.provision(moved);
+      expect(tunnelCalls.map((call) => call.operation)).toEqual([
+        "get",
+        "list",
+        "create",
+        "putConfiguration",
+        "getToken",
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("stops calling Cloudflare until a rate limit's retry hint passes", () =>
+    Effect.gen(function* () {
+      const cloudflare = ManagedEndpointProvider.makeCloudflareThrottle();
+      let calls = 0;
+      let rateLimited = true;
+      const call = Effect.suspend(() => {
+        calls += 1;
+        return rateLimited
+          ? Effect.fail({ _tag: "TooManyRequests", retryAfter: Duration.seconds(5) } as const)
+          : Effect.succeed("ok");
+      });
+
+      expect(yield* Effect.flip(cloudflare(call))).toMatchObject({ _tag: "TooManyRequests" });
+      expect(calls).toBe(1);
+
+      rateLimited = false;
+      expect(yield* Effect.flip(cloudflare(call))).toMatchObject({
+        _tag: "CloudflareApiThrottled",
+        retryAfterMillis: 5_000,
+      });
+      expect(calls).toBe(1);
+
+      yield* TestClock.adjust("5 seconds");
+      expect(yield* cloudflare(call)).toBe("ok");
+      expect(calls).toBe(2);
+    }),
+  );
 });
