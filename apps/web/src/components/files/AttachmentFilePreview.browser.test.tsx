@@ -15,6 +15,32 @@ vi.mock(import("./ReadOnlySourcePreview"), () => ({
 }));
 
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
+import { OfficeFilePreview } from "./OfficeFilePreview";
+
+it("clears an Office metadata error when the same URL becomes previewable", async () => {
+  const src = "data:application/octet-stream,invalid-office-file";
+  let resolveResponse!: (response: Response) => void;
+  const response = new Promise<Response>((resolve) => {
+    resolveResponse = resolve;
+  });
+  using _fetch = stubGlobal(
+    "fetch",
+    vi.fn(() => response),
+  );
+  await using screen = await render(
+    <OfficeFilePreview src={src} name="report.docx" kind="docx" sizeBytes={51 * 1024 * 1024} />,
+  );
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("under 50 MB"));
+  await screen.rerender(
+    <OfficeFilePreview src={src} name="report.docx" kind="docx" sizeBytes={100} />,
+  );
+  await vi.waitFor(() =>
+    expect(screen.container.querySelector('[aria-label="Loading file"]')).not.toBeNull(),
+  );
+  expect(screen.container.textContent).not.toContain("under 50 MB");
+  resolveResponse(new Response("invalid-office-file"));
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("not a valid Office"));
+});
 
 describe("attachment HTML preview recovery", () => {
   const originalUrl = "data:text/html,original";

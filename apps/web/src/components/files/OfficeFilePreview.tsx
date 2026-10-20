@@ -13,7 +13,7 @@ export function OfficeFilePreview(props: {
 }) {
   return (
     <Suspense fallback={<FileSurfaceLoading />}>
-      <OfficeViewer key={props.src} {...props} />
+      <OfficeViewer key={JSON.stringify([props.src, props.kind, props.sizeBytes])} {...props} />
     </Suspense>
   );
 }
