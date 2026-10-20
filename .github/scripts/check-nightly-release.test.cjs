@@ -233,29 +233,39 @@ test("a manual nightly stands down for a healthy scheduled build of its commit",
   assert.deepEqual(canceled, []);
 });
 
-test("a manual nightly cancels scheduled builds of older commits or failed ones", async () => {
+test("a manual nightly cancels older, failed, and undecided scheduled runs", async () => {
   const { options, canceled } = takeOverFixture([
     { head_sha: "old", jobs: [job("Preflight"), job("Build", "queued")] },
     {
       head_sha: "new",
-      jobs: [job("Preflight", "completed", "success"), job("Build", "completed", "failure")],
+      jobs: [job("Preflight", "completed", "success"), job("Build", "completed", "timed_out")],
     },
+    { head_sha: "new", jobs: [job("Resolve release commit", "completed", "success")] },
   ]);
   assert.equal(await takeOverScheduledNightlies(options), true);
-  assert.deepEqual(canceled, [10, 11]);
+  assert.deepEqual(canceled, [10, 11, 12]);
 });
 
-test("a manual nightly never cancels a publishing or idle scheduled run", async () => {
+test("a manual nightly never cancels a publishing run or one that will not build", async () => {
   const { options, canceled } = takeOverFixture([
     {
       head_sha: "old",
       jobs: [job("Preflight", "completed", "success"), job("Publish GitHub Release")],
     },
-    { head_sha: "new", jobs: [job("Resolve release commit")] },
     { head_sha: "new", jobs: [job("Preflight", "completed", "skipped")] },
   ]);
   assert.equal(await takeOverScheduledNightlies(options), true);
   assert.deepEqual(canceled, []);
+});
+
+test("a manual nightly ignores a scheduled run that finished before the cancel", async () => {
+  const { options } = takeOverFixture([{ head_sha: "old", jobs: [job("Preflight")] }]);
+  options.github.rest.actions.cancelWorkflowRun = async () => {
+    throw Object.assign(new Error("Cannot cancel a workflow run that is completed."), {
+      status: 409,
+    });
+  };
+  assert.equal(await takeOverScheduledNightlies(options), true);
 });
 
 const { resolveLatestNightlyCommit } = require("./check-nightly-release.cjs");

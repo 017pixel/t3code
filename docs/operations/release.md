@@ -399,7 +399,7 @@ One-time Vercel dashboard setup:
   - scheduled check every 30 minutes
   - manual `workflow_dispatch` with `channel=nightly`
 - Automatic nightlies require new commits and at least six hours since the last nightly was published, including manual nightlies.
-- Manual nightlies bypass the time and change checks and never queue behind a scheduled nightly. A manual nightly cancels a scheduled nightly that is building, unless it is already publishing, or stands down when a healthy scheduled run already builds the same commit. Scheduled runs skip while any manual release run is active, then check the publication gap before building.
+- Manual nightlies bypass the time and change checks and never queue behind a scheduled nightly. A manual nightly cancels any active scheduled nightly unless it is already publishing or has decided not to build, and stands down when a healthy scheduled run already builds the same commit. Scheduled runs skip while any manual release run is active, then check the publication gap before building.
 - Runs the same desktop quality gates and artifact matrix as the tagged release flow.
 - Publishes a GitHub prerelease only:
   - current tag format: `vX.Y.Z-nightly.YYYYMMDD.<run_number>`

@@ -98,13 +98,15 @@ async function shouldReleaseNightly({ github, context, core, now = Date.now() })
 }
 
 const isStarted = (job) => job?.status === "in_progress" || job?.status === "completed";
-const hasFailed = (job) => job.conclusion === "failure" || job.conclusion === "cancelled";
+const hasFailed = (job) => ["failure", "cancelled", "timed_out"].includes(job.conclusion);
 
-// A manual nightly takes over from scheduled nightlies that are building, so it
-// never waits behind one. A healthy scheduled run on the same commit is left to
+// A manual nightly takes over from scheduled nightlies, so it never waits
+// behind one. A healthy scheduled run building the same commit is left to
 // finish and the manual run stands down. Any other is canceled, unless it is
 // already publishing: publishers are never interrupted, and a manual run needs
-// far longer to reach its own publish step. Returns whether to build.
+// far longer to reach its own publish step. That includes runs still deciding
+// whether to build, which may have checked for manual runs before this one
+// existed. Returns whether to build.
 async function takeOverScheduledNightlies({ github, context, core }) {
   for (const run of await listActiveReleaseRuns({ github, context, event: "schedule" })) {
     const { data } = await github.rest.actions.listJobsForWorkflowRun({
@@ -113,12 +115,10 @@ async function takeOverScheduledNightlies({ github, context, core }) {
       filter: "latest",
       per_page: 100,
     });
-    // A scheduled run without a live Preflight is still deciding or decided
-    // not to build. It sees this run and skips (see shouldReleaseNightly).
     const preflight = data.jobs.find((job) => job.name === "Preflight");
-    if (!preflight || preflight.conclusion === "skipped") continue;
+    if (preflight?.conclusion === "skipped") continue;
 
-    if (run.head_sha === context.sha && !data.jobs.some(hasFailed)) {
+    if (preflight && run.head_sha === context.sha && !data.jobs.some(hasFailed)) {
       core.notice(`Scheduled run ${run.html_url} already builds ${context.sha}. Skipping.`);
       return false;
     }
@@ -126,8 +126,13 @@ async function takeOverScheduledNightlies({ github, context, core }) {
       core.info(`Scheduled run ${run.html_url} is publishing. Leaving it to finish.`);
       continue;
     }
-    await github.rest.actions.cancelWorkflowRun({ ...context.repo, run_id: run.id });
-    core.notice(`Canceled scheduled run ${run.html_url} in favor of this one.`);
+    try {
+      await github.rest.actions.cancelWorkflowRun({ ...context.repo, run_id: run.id });
+      core.notice(`Canceled scheduled run ${run.html_url} in favor of this one.`);
+    } catch (error) {
+      // GitHub refuses to cancel a run that finished after it was listed.
+      if (error.status !== 409) throw error;
+    }
   }
   return true;
 }
