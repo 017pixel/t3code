@@ -534,11 +534,13 @@ it.layer(
             )
           : event.type === "exited"
             ? Effect.gen(function* () {
-                const stop = yield* manager.observeStream(openInput(), (event) =>
-                  Effect.sync(() => {
-                    observed.push(event);
-                  }),
-                );
+                const stop = yield* manager
+                  .observeStream(openInput(), (event) =>
+                    Effect.sync(() => {
+                      observed.push(event);
+                    }),
+                  )
+                  .pipe(Effect.orDie);
                 stop();
                 yield* Deferred.succeed(exited, undefined);
               })
