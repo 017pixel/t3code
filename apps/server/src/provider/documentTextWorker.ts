@@ -99,7 +99,7 @@ function table(node: XmlNode): string {
       values.push(
         ...Array.from(
           { length: count },
-          () => text(cell).replaceAll(/\s+/g, " ").trim() || cell.attrs.value || "",
+          () => paragraphs(cell).replaceAll(/\s+/g, " ").trim() || cell.attrs.value || "",
         ),
       );
     }
@@ -288,6 +288,7 @@ function rtf(source: string): string {
 export async function extractDocumentText(path: string, extension: string): Promise<string> {
   if ((await NodeFSP.stat(path)).size > MAX_INPUT) throw new Error("Input byte limit");
   let result: string;
+  let outputTruncated = false;
   if (extension === ".ipynb") result = notebook(await NodeFSP.readFile(path, "utf8"));
   else if (extension === ".rtf")
     result = rtf(new TextDecoder("windows-1252").decode(await NodeFSP.readFile(path)));
@@ -320,43 +321,50 @@ export async function extractDocumentText(path: string, extension: string): Prom
           .filter((rel) => rel.attrs.TargetMode !== "External")
           .map((rel) => [rel.attrs.Id, rel.attrs.Target]),
       );
-      result = all(read("xl/workbook.xml"), "sheet")
-        .map((sheet) => {
-          const target = relations.get(sheet.attrs["r:id"] ?? sheet.attrs.id);
-          if (!target) throw new Error("Missing sheet relationship");
-          const name = target.startsWith("/")
-            ? target.slice(1)
-            : NodePath.posix.normalize(`xl/${target}`);
-          const rows = all(read(name), "row");
-          if (rows.length > 10_000) throw new Error("Row limit");
-          return (
-            `## Sheet: ${sheet.attrs.name}\n` +
-            rows
-              .map((row) => {
-                const values: string[] = [];
-                for (const cell of children(row).filter((node) => node.name === "c")) {
-                  const letters = cell.attrs.r?.match(/^[A-Z]+/)?.[0];
-                  const column = letters
-                    ? [...letters].reduce((n, char) => n * 26 + char.charCodeAt(0) - 64, 0) - 1
-                    : values.length;
-                  if (column > 511) throw new Error("Column limit");
-                  while (values.length <= column) values.push("");
-                  const value = all(cell, "v")[0];
-                  const raw = value ? text(value) : "";
-                  values[column] = (
-                    cell.attrs.t === "s"
-                      ? (strings[Number(raw)] ?? "")
-                      : cell.attrs.t === "inlineStr"
-                        ? all(cell, "t").map(text).join("")
-                        : raw || all(cell, "f").map(text).join("")
-                  ).replaceAll(/[\t\r\n]+/g, " ");
-                }
-                return values.join("\t");
-              })
-              .join("\n")
-          );
-        })
-        .join("\n\n");
+      result = "";
+      for (const sheet of all(read("xl/workbook.xml"), "sheet")) {
+        if (result.length > MAX_OUTPUT) break;
+        const target = relations.get(sheet.attrs["r:id"] ?? sheet.attrs.id);
+        if (!target) throw new Error("Missing sheet relationship");
+        const name = target.startsWith("/")
+          ? target.slice(1)
+          : NodePath.posix.normalize(`xl/${target}`);
+        const rows = all(read(name), "row");
+        if (rows.length > 10_000) throw new Error("Row limit");
+        result += `${result ? "\n" : ""}## Sheet: ${sheet.attrs.name}\n`.slice(
+          0,
+          MAX_OUTPUT + 1 - result.length,
+        );
+        for (const row of rows) {
+          if (result.length > MAX_OUTPUT) break;
+          const values: string[] = [];
+          let rowLength = 0;
+          for (const cell of children(row).filter((node) => node.name === "c")) {
+            const letters = cell.attrs.r?.match(/^[A-Z]+/)?.[0];
+            const column = letters
+              ? [...letters].reduce((n, char) => n * 26 + char.charCodeAt(0) - 64, 0) - 1
+              : values.length;
+            if (column > 511) throw new Error("Column limit");
+            while (values.length <= column) values.push("");
+            const value = all(cell, "v")[0];
+            const raw = value ? text(value) : "";
+            rowLength -= values[column]!.length;
+            values[column] = (
+              cell.attrs.t === "s"
+                ? (strings[Number(raw)] ?? "")
+                : cell.attrs.t === "inlineStr"
+                  ? all(cell, "t").map(text).join("")
+                  : raw || all(cell, "f").map(text).join("")
+            )
+              .slice(0, MAX_OUTPUT + 1 - result.length - rowLength)
+              .replaceAll(/[\t\r\n]+/g, " ");
+            rowLength += values[column]!.length;
+            if (result.length + rowLength > MAX_OUTPUT) break;
+          }
+          result += `${values.join("\t")}\n`.slice(0, MAX_OUTPUT + 1 - result.length);
+        }
+      }
+      outputTruncated = result.length > MAX_OUTPUT;
     } else if (extension === ".pptx") {
       const relations = new Map(
         all(read("ppt/_rels/presentation.xml.rels"), "Relationship")
@@ -397,5 +405,7 @@ export async function extractDocumentText(path: string, extension: string): Prom
     .replaceAll(/\n(?:[ \t]*\n){2,}/g, "\n\n")
     .trim();
   if (!result) throw new Error("No text extracted");
-  return result.length > MAX_OUTPUT ? result.slice(0, MAX_OUTPUT) + TRUNCATED : result;
+  return outputTruncated || result.length > MAX_OUTPUT
+    ? result.slice(0, MAX_OUTPUT) + TRUNCATED
+    : result;
 }

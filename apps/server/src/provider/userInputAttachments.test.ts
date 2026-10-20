@@ -123,9 +123,9 @@ describe("question answer paths", () => {
           ext: "docx",
           parts: {
             "word/document.xml":
-              '<w:document xmlns:w="urn:w"><w:body><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Report &amp; totals</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>North</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>731</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>',
+              '<w:document xmlns:w="urn:w"><w:body><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Report &amp; totals</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>North</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>12</w:t></w:r></w:p><w:p><w:r><w:t>34</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>',
           },
-          expected: ["## Report & totals", "North\t731"],
+          expected: ["## Report & totals", "North\t12 34"],
         },
         {
           ext: "xlsx",
@@ -141,6 +141,23 @@ describe("question answer paths", () => {
               '<worksheet><sheetData><row><c t="inlineStr"><is><t>Ferry</t></is></c><c><v>628</v></c></row></sheetData></worksheet>',
           },
           expected: ["## Sheet: Inventory", "Lantern\t\t37", "## Sheet: Budget", "Ferry\t628"],
+        },
+        {
+          ext: "xlsx",
+          bounded: true,
+          parts: {
+            "xl/workbook.xml":
+              '<workbook><sheets><sheet name="Repeated" r:id="a"/><sheet name="Unneeded" r:id="missing"/></sheets></workbook>',
+            "xl/_rels/workbook.xml.rels":
+              '<Relationships><Relationship Id="a" Target="worksheets/repeated.xml"/></Relationships>',
+            "xl/sharedStrings.xml": `<sst><si><t>${"A".repeat(1_000_000 - "## Sheet: Repeated\n".length)}</t></si></sst>`,
+            "xl/worksheets/repeated.xml": `<worksheet><sheetData>${'<row><c t="s"><v>0</v></c><c t="s"><v>0</v></c></row>'.repeat(1_500)}</sheetData></worksheet>`,
+          },
+          expected: [
+            "## Sheet: Repeated",
+            "A".repeat(32),
+            "[Extracted text truncated at 1,000,000 characters.]",
+          ],
         },
         {
           ext: "pptx",
@@ -242,8 +259,16 @@ describe("question answer paths", () => {
         let previous = -1;
         for (const expected of item.expected) {
           const index = extracted.indexOf(expected);
-          expect(index, `${item.ext}: ${expected} in ${extracted}`).toBeGreaterThan(previous);
+          expect(index, `${item.ext}: ${expected} in ${extracted.slice(0, 500)}`).toBeGreaterThan(
+            previous,
+          );
           previous = index;
+        }
+        if ("bounded" in item && item.bounded) {
+          expect(extracted.length).toBeLessThan(1_000_100);
+          const documents = yield* DocumentText.DocumentText;
+          expect(yield* documents.ensure(path)).toBe(path + ".txt");
+          expect(NodeFS.readFileSync(path + ".txt", "utf8")).toBe(extracted);
         }
         if (item.ext === "docx") {
           end.writeUInt16LE(2049, 8);
