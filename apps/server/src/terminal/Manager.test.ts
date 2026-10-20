@@ -433,6 +433,177 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {
+  it.effect("saved-script terminals reject loaded, closed, persisted and legacy identities", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir } = yield* createManager();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const admitted: TerminalManager.TerminalSessionHandle[] = [];
+      const fresh = (terminalId: string) =>
+        manager.openFreshWithHandle(
+          openInput({ terminalId }),
+          (handle) => admitted.push(handle),
+          () => {},
+        );
+      yield* manager.open(openInput({ terminalId: "loaded" }));
+      yield* manager.open(openInput({ terminalId: "closed" }));
+      yield* manager.close({ threadId: "thread-1", terminalId: "closed" });
+      yield* fs.makeDirectory(logsDir, { recursive: true });
+      yield* fs.writeFileString(
+        yield* multiTerminalHistoryLogPath(logsDir, "thread-1", "persisted"),
+        "old",
+      );
+      yield* fs.writeFileString(path.join(logsDir, "thread-1.log"), "legacy");
+      for (const terminalId of ["loaded", "closed", "persisted", DEFAULT_TERMINAL_ID]) {
+        expect(yield* Effect.flip(fresh(terminalId))).toMatchObject({
+          _tag: "TerminalAlreadyExistsError",
+        });
+      }
+      expect(admitted).toEqual([]);
+      expect(ptyAdapter.processes).toHaveLength(2);
+      const opened = yield* fresh("new");
+      expect(admitted).toEqual([opened.handle]);
+      expect(yield* manager.closeWithHandle(opened.handle)).toBe(true);
+    }),
+  );
+
+  it.effect("saved-script handles cannot write or close a replacement even with the same PID", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const invalidated: TerminalManager.TerminalSessionHandle[] = [];
+      const { handle } = yield* manager.openFreshWithHandle(
+        openInput(),
+        () => {},
+        (handle) => invalidated.push(handle),
+      );
+      expect(yield* manager.writeWithHandle({ ...openInput(), handle, data: " command\r" })).toBe(
+        true,
+      );
+      expect(ptyAdapter.processes[0]!.writes).toEqual([" command\r"]);
+      yield* manager.restart(restartInput());
+      const replacement = ptyAdapter.processes[1]!;
+      Object.defineProperty(replacement, "pid", { value: ptyAdapter.processes[0]!.pid });
+      expect(invalidated).toEqual([handle]);
+      expect(yield* manager.writeWithHandle({ ...openInput(), handle, data: "bad" })).toBe(false);
+      expect(yield* manager.closeWithHandle(handle)).toBe(false);
+      expect(replacement.writes).toEqual([]);
+      expect(replacement.killed).toBe(false);
+      yield* manager.close({ threadId: "thread-1" });
+      expect(invalidated).toEqual([handle]);
+    }),
+  );
+
+  it.effect("saved-script admission refuses an exit already queued during startup", () =>
+    Effect.gen(function* () {
+      const ptyAdapter = new FakePtyAdapter();
+      ptyAdapter.exitOnSubscribe = { exitCode: 7, signal: null };
+      const { manager } = yield* createManager(5, { ptyAdapter });
+      const admitted: TerminalManager.TerminalSessionHandle[] = [];
+      expect(
+        yield* Effect.flip(
+          manager.openFreshWithHandle(
+            openInput(),
+            (handle) => admitted.push(handle),
+            () => {},
+          ),
+        ),
+      ).toMatchObject({ _tag: "TerminalNotRunningError" });
+      expect(admitted).toEqual([]);
+      expect(ptyAdapter.processes[0]!.writes).toEqual([]);
+      expect(yield* Effect.flip(manager.write({ ...openInput(), data: "bad" }))).toMatchObject({
+        _tag: "TerminalSessionLookupError",
+      });
+    }),
+  );
+
+  it.effect("saved-script ownership expires when clear precedes a queued exit drain", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      const outputEntered = yield* Deferred.make<void>();
+      const releaseOutput = yield* Deferred.make<void>();
+      const exited = yield* Deferred.make<void>();
+      const invalidated: TerminalManager.TerminalSessionHandle[] = [];
+      const unsubscribe = yield* manager.subscribe((event) =>
+        event.type === "started" && event.terminalId === "blocker"
+          ? Deferred.succeed(outputEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseOutput)),
+            )
+          : event.type === "exited"
+            ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      const { handle } = yield* manager.openFreshWithHandle(
+        openInput(),
+        () => {},
+        (handle) => invalidated.push(handle),
+      );
+      const blocker = yield* manager
+        .open(openInput({ terminalId: "blocker" }))
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(outputEntered);
+      // Another terminal startup holds the thread lock. Queue clear before the exit drain.
+      const clearing = yield* manager
+        .clear(openInput())
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      ptyAdapter.processes[0]!.emitExit({ exitCode: 7, signal: null });
+      yield* Deferred.succeed(releaseOutput, undefined);
+      yield* Fiber.join(blocker);
+      yield* Fiber.join(clearing);
+      yield* Deferred.await(exited);
+      expect(
+        (yield* getEvents)
+          .filter((event) => event.terminalId === DEFAULT_TERMINAL_ID)
+          .map((event) => event.type),
+      ).toEqual(["started", "cleared", "exited"]);
+      expect(invalidated).toEqual([handle]);
+      expect(yield* manager.closeWithHandle(handle)).toBe(false);
+      const observed: TerminalAttachStreamEvent[] = [];
+      const stop = yield* manager.observeStream(openInput(), (event) =>
+        Effect.sync(() => {
+          observed.push(event);
+        }),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(stop));
+      expect(observed[0]).toMatchObject({
+        type: "snapshot",
+        snapshot: { status: "exited", exitCode: 7, history: "" },
+      });
+    }),
+  );
+
+  it.effect("saved-script open interruption closes the admitted process before returning", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const unsubscribe = yield* manager.subscribe((event) =>
+        event.type === "started"
+          ? Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)))
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      const admitted: TerminalManager.TerminalSessionHandle[] = [];
+      const invalidated: TerminalManager.TerminalSessionHandle[] = [];
+      const opening = yield* manager
+        .openFreshWithHandle(
+          openInput(),
+          (handle) => admitted.push(handle),
+          (handle) => invalidated.push(handle),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(started);
+      opening.interruptUnsafe();
+      yield* Deferred.succeed(release, undefined);
+      expect(Exit.isFailure(yield* Fiber.await(opening))).toBe(true);
+      expect(yield* Effect.flip(manager.write({ ...openInput(), data: "bad" }))).toMatchObject({
+        _tag: "TerminalSessionLookupError",
+      });
+      expect(invalidated).toEqual(admitted);
+      expect(ptyAdapter.processes[0]!.killed).toBe(true);
+    }),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
