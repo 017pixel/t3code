@@ -374,14 +374,21 @@ it.layer(NodeServices.layer)("buildAntigravityPrompt", (it) => {
           name: "audio.wav",
           mimeType: "audio/wav",
         };
+        const gifAttachment = {
+          ...imageAttachment,
+          id: "unsupported-gif",
+          name: "animation.gif",
+          mimeType: "image/gif",
+        };
+        const gif = yield* fixture.write(gifAttachment, "GIF89a");
         const image = yield* fixture.write(imageAttachment, "pixels");
         const pdf = yield* fixture.write(pdfAttachment, "%PDF-1.7");
         const text = yield* fixture.write(textAttachment, "hello");
         const sound = yield* fixture.write(audio, "RIFF");
-        const input = `Read ${image.filePath}, ${pdf.filePath}, ${text.filePath}, and ${sound.filePath}`;
+        const input = `Read ${image.filePath}, ${gif.filePath}, ${pdf.filePath}, ${text.filePath}, and ${sound.filePath}`;
         const prompt = yield* buildAntigravityPrompt({
           input,
-          attachments: [imageAttachment, pdfAttachment, textAttachment, audio],
+          attachments: [imageAttachment, gifAttachment, pdfAttachment, textAttachment, audio],
           attachmentsDir: fixture.attachmentsDir,
           promptCapabilities,
         }).pipe(

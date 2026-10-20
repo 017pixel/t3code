@@ -18,19 +18,6 @@ export async function runClaudeHistoryWorker(
   sessionId: string | undefined,
   rawOptions: string | undefined,
 ): Promise<void> {
-  if (method === "pdfPageCount") {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const chunk of process.stdin) {
-      size += chunk.length;
-      if (size > 20 * 1024 * 1024) throw new Error("PDF byte limit");
-      chunks.push(chunk);
-    }
-    const { PDFDocument } = await import("pdf-lib");
-    const document = await PDFDocument.load(Buffer.concat(chunks));
-    process.stdout.write(JSON.stringify(document.getPageCount()));
-    return;
-  }
   const options = decodeHistoryOptions(rawOptions ?? "{}");
   if (!sessionId) throw new Error("Claude history session id is required.");
   const result =

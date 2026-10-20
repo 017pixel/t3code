@@ -270,7 +270,7 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
             : pdf || textFile
               ? input.promptCapabilities?.embeddedContext !== true
               : true)));
-    if (attachment.type === "image" && !image) {
+    if (!isPathOnly && attachment.type === "image" && !image) {
       return yield* EffectAcpErrors.AcpRequestError.invalidParams(
         `Antigravity does not support '${attachment.name}' (${attachment.mimeType}). Attach a BMP, JPEG, PNG, WebP, PDF, audio, or text file.`,
       );

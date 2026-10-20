@@ -798,7 +798,7 @@ export function makeClaudeAgentSdkProtocolLogger(input: {
   };
 }
 
-const encodeClaudeHistoryOptions = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const encodeClaudeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeClaudeHistoryFork = Schema.decodeUnknownEffect(
   Schema.fromJsonString(
     Schema.Struct({ sessionId: Schema.String, headMessageId: Schema.optionalKey(Schema.String) }),
@@ -814,11 +814,10 @@ const claudeConfigDirOf = (
 // The SDK reads CLAUDE_CONFIG_DIR from process.env. Isolate custom homes in a
 // worker so concurrent providers keep the server's environment.
 const runClaudeWorker = Effect.fn("runClaudeWorker")(function* (input: {
-  readonly method: "forkSession" | "pdfPageCount";
+  readonly method: "forkSession";
   readonly sessionId: string;
   readonly options?: ForkSessionOptions;
   readonly environment: NodeJS.ProcessEnv;
-  readonly bytes?: Uint8Array;
 }) {
   const path = yield* Path.Path;
   const fromSource = import.meta.url.endsWith(".ts");
@@ -839,24 +838,15 @@ const runClaudeWorker = Effect.fn("runClaudeWorker")(function* (input: {
     executablePath,
     ChildProcess.make(
       executablePath,
-      [
-        ...workerArguments,
-        input.method,
-        input.sessionId,
-        encodeClaudeHistoryOptions(input.options ?? {}),
-      ],
+      [...workerArguments, input.method, input.sessionId, encodeClaudeJson(input.options ?? {})],
       {
         env: {
           ...input.environment,
           ELECTRON_RUN_AS_NODE: "1",
-          ...(input.method === "pdfPageCount"
-            ? { NODE_OPTIONS: `${input.environment.NODE_OPTIONS ?? ""} --max-old-space-size=192` }
-            : {}),
         },
-        ...(input.bytes === undefined ? {} : { stdin: Stream.make(input.bytes) }),
       },
     ),
-  ).pipe(Effect.timeout(input.method === "pdfPageCount" ? "10 seconds" : "30 seconds"));
+  ).pipe(Effect.timeout("30 seconds"));
   if (result.code !== 0) {
     return yield* new ClaudeAgentSdkQueryRunnerError({
       method: input.method,
@@ -1839,6 +1829,78 @@ export function makeClaudeUserMessage(input: {
   };
 }
 
+// Never decode streams just to enforce a provider limit. Only accept an explicit,
+// uncompressed page tree whose /Count agrees with the visible page objects.
+const estimateClaudePdfPages = (bytes: Buffer): number | null => {
+  if (bytes.length > 20 * 1024 * 1024 || bytes.subarray(0, 5).toString() !== "%PDF-") return null;
+  if (!bytes.subarray(-1024).includes("%%EOF")) return null;
+  let pages = 0;
+  let count = 0;
+  let catalog = false;
+  let pageTree = false;
+  let previous = "";
+  const delimiter = (byte: number) =>
+    byte <= 32 || "()<>[]{}/%".includes(String.fromCharCode(byte));
+  for (let i = 0; i < bytes.length;) {
+    const byte = bytes[i]!;
+    if (byte === 37) {
+      while (i < bytes.length && bytes[i] !== 10 && bytes[i] !== 13) i++;
+      continue;
+    }
+    if (byte === 40) {
+      let depth = 1;
+      for (i++; i < bytes.length && depth > 0; i++) {
+        if (bytes[i] === 92) i++;
+        else if (bytes[i] === 40) depth++;
+        else if (bytes[i] === 41) depth--;
+      }
+      if (depth !== 0) return null;
+      previous = "";
+      continue;
+    }
+    if (byte === 60 && bytes[i + 1] !== 60) {
+      i = bytes.indexOf(62, i + 1);
+      if (i < 0) return null;
+      i++;
+      previous = "";
+      continue;
+    }
+    if (byte === 60 && bytes[i + 1] === 60) {
+      i += 2;
+      previous = "";
+      continue;
+    }
+    if (delimiter(byte) && byte !== 47) {
+      i++;
+      continue;
+    }
+    const start = i++;
+    while (i < bytes.length && !delimiter(bytes[i]!)) i++;
+    if (i - start > 64) return null;
+    const token = bytes.toString("latin1", start, i);
+    if (token.includes("#") || ["/ObjStm", "/XRef", "/Encrypt", "/Prev"].includes(token))
+      return null;
+    if (token === "stream") {
+      i = bytes.indexOf("endstream", i);
+      if (i < 0) return null;
+      i += 9;
+      previous = "";
+      continue;
+    }
+    if (previous === "/Type") {
+      if (token === "/Page") pages++;
+      if (token === "/Catalog") catalog = true;
+      if (token === "/Pages") pageTree = true;
+    }
+    if (previous === "/Count") {
+      if (!/^[1-9]\d{0,8}$/.test(token)) return null;
+      count = Math.max(count, Number(token));
+    }
+    previous = token;
+  }
+  return catalog && pageTree && pages > 0 && count === pages ? pages : null;
+};
+
 const reserveClaudePdfBudget = (budget: { remainingPages: number; remainingBytes: number }) =>
   Effect.acquireRelease(
     Effect.sync(() => ({ budget, pages: 0, bytes: 0, delivered: false })),
@@ -1861,12 +1923,16 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
   readonly skills?: ReadonlyMap<string, ClaudeSkillTarget>;
 }) {
   if (input.attachments.length === 0) {
-    return makeClaudeUserMessage({
+    const message = makeClaudeUserMessage({
       text: input.text,
       ...(input.skills === undefined ? {} : { skills: input.skills }),
       ...(input.priority === undefined ? {} : { priority: input.priority }),
       ...(input.uuid === undefined ? {} : { uuid: input.uuid }),
     });
+    const bytes = Buffer.byteLength(encodeClaudeJson(message.message.content));
+    input.pdfReservation.budget.remainingBytes -= bytes;
+    input.pdfReservation.bytes += bytes;
+    return message;
   }
 
   const textWithAttachmentPaths = providerMessageTextWithAttachmentPaths({
@@ -1885,16 +1951,67 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
   // request limit for text, instructions, and SDK framing. The SDK does not
   // expose document/context-window capabilities, so use the 100-page limit
   // that also applies to models with less than a 1M-token context window.
-  let nativeBytes = Buffer.byteLength(textWithAttachmentPaths);
-
-  const nativeByteBudget = Math.min(PROVIDER_SEND_TURN_MAX_FILE_BYTES, 20 * 1024 * 1024);
-  for (const attachment of input.attachments) {
-    if (attachment.type === "image") nativeBytes += attachment.sizeBytes;
-  }
   if (dispatch?.leadingText !== undefined) {
     content.push({ type: "text", text: dispatch.leadingText });
   }
 
+  // Reserve all text and actual image bytes before considering any document,
+  // including images that follow it in attachment order.
+  const images = new Map<ChatAttachment, ClaudeUserContentBlock>();
+  let retainedBytes = Buffer.byteLength(
+    encodeClaudeJson(
+      dispatch
+        ? [
+            ...(dispatch.leadingText === undefined
+              ? []
+              : [{ type: "text", text: dispatch.leadingText }]),
+            { type: "text", text: dispatch.commandText },
+          ]
+        : [{ type: "text", text: textWithAttachmentPaths }],
+    ),
+  );
+  for (const attachment of input.attachments) {
+    if (attachment.type !== "image") continue;
+    if (!isSupportedClaudeImageMimeType(attachment.mimeType)) {
+      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+        driver: CLAUDE_PROVIDER,
+        detail: `Unsupported Claude image attachment type '${attachment.mimeType}'`,
+      });
+    }
+    const attachmentPath = resolveAttachmentPath({
+      attachmentsDir: input.attachmentsDir,
+      attachment,
+    });
+    if (attachmentPath === null) {
+      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+        driver: CLAUDE_PROVIDER,
+        detail: `Invalid attachment id '${attachment.id}'`,
+      });
+    }
+    const bytes = yield* input.fileSystem.readFile(attachmentPath).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderAdapter.ProviderAdapterProtocolError({
+            driver: CLAUDE_PROVIDER,
+            detail: `Failed to read attachment '${attachment.id}'`,
+            reason: "attachment_unreadable",
+            payload: cause,
+          }),
+      ),
+    );
+    const block: ClaudeUserContentBlock = {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: attachment.mimeType,
+        data: Buffer.from(bytes).toString("base64"),
+      },
+    };
+    retainedBytes += 4 * Math.ceil(bytes.length / 3) + 128;
+    images.set(attachment, block);
+  }
+  input.pdfReservation.budget.remainingBytes -= retainedBytes;
+  input.pdfReservation.bytes += retainedBytes;
   for (const attachment of input.attachments) {
     if (attachment.type === "file") {
       if (
@@ -1909,8 +2026,9 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
       });
       if (attachmentPath === null) continue;
       const remainingBytes = Math.min(
-        nativeByteBudget - nativeBytes,
-        input.pdfReservation.budget.remainingBytes,
+        PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+        20 * 1024 * 1024,
+        Math.floor(((input.pdfReservation.budget.remainingBytes - 1024) * 3) / 4),
       );
       const info = yield* input.fileSystem
         .stat(attachmentPath)
@@ -1925,70 +2043,30 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
           Effect.orElseSucceed(() => null),
         );
       if (bytes === null || bytes.length > remainingBytes) continue;
-      const pageCount = yield* runClaudeWorker({
-        method: "pdfPageCount",
-        sessionId: "pdf",
-        environment: yield* HostProcess.Environment,
-        bytes,
-      }).pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Int))),
-        Effect.orElseSucceed(() => null),
-      );
+      const pageCount = estimateClaudePdfPages(bytes);
+      if (pageCount === null) {
+        yield* Effect.logDebug("Claude PDF page count is unknown; keeping attachment path-only.");
+        continue;
+      }
+      const retainedBytes = 4 * Math.ceil(bytes.length / 3) + 128;
       if (
-        pageCount === null ||
         pageCount <= 0 ||
         pageCount > input.pdfReservation.budget.remainingPages ||
-        bytes.length > input.pdfReservation.budget.remainingBytes
+        retainedBytes > input.pdfReservation.budget.remainingBytes
       )
         continue;
-      nativeBytes += bytes.length;
       input.pdfReservation.budget.remainingPages -= pageCount;
-      input.pdfReservation.budget.remainingBytes -= bytes.length;
       input.pdfReservation.pages += pageCount;
-      input.pdfReservation.bytes += bytes.length;
-      content.push({
+      const block: ClaudeUserContentBlock = {
         type: "document",
         source: { type: "base64", media_type: "application/pdf", data: bytes.toString("base64") },
-      });
+      };
+      input.pdfReservation.budget.remainingBytes -= retainedBytes;
+      input.pdfReservation.bytes += retainedBytes;
+      content.push(block);
       continue;
     }
-    if (!isSupportedClaudeImageMimeType(attachment.mimeType)) {
-      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-        driver: CLAUDE_PROVIDER,
-        detail: `Unsupported Claude image attachment type '${attachment.mimeType}'`,
-      });
-    }
-
-    const attachmentPath = resolveAttachmentPath({
-      attachmentsDir: input.attachmentsDir,
-      attachment,
-    });
-    if (attachmentPath === null) {
-      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-        driver: CLAUDE_PROVIDER,
-        detail: `Invalid attachment id '${attachment.id}'`,
-      });
-    }
-
-    const bytes = yield* input.fileSystem.readFile(attachmentPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderAdapter.ProviderAdapterProtocolError({
-            driver: CLAUDE_PROVIDER,
-            detail: `Failed to read attachment '${attachment.id}'`,
-            reason: "attachment_unreadable",
-            payload: cause,
-          }),
-      ),
-    );
-    content.push({
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: attachment.mimeType,
-        data: Buffer.from(bytes).toString("base64"),
-      },
-    });
+    content.push(images.get(attachment)!);
   }
 
   // Images go before the command block: a text block after them still
@@ -9432,7 +9510,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 (yield* Ref.get(openedNativeThreads)).has(nativeThreadId);
               pdfBudgets.set(nativeThreadId, {
                 remainingPages: resumed ? 0 : 100,
-                remainingBytes: resumed ? 0 : 20 * 1024 * 1024,
+                remainingBytes: resumed ? 0 : 28 * 1024 * 1024,
               });
             }
             const pdfReservation = yield* reserveClaudePdfBudget(pdfBudgets.get(nativeThreadId)!);

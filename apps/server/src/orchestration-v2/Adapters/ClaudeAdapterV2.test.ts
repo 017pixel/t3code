@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off -- workflow fixtures use files and the fake Claude CLI uses Node streams
-import { PDFDocument } from "pdf-lib";
 import * as NodeEvents from "node:events";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -1829,6 +1828,17 @@ describe("ClaudeAdapterV2 resume compaction", () => {
 
 describe("ClaudeAdapterV2 attachments", () => {
   it.effect.each([
+    ...["retained-images", "retained-text", "same-message-images", "retained-documents"].map(
+      (budget) => ({
+        name: budget,
+        prompt: "Read this PDF.",
+        expectedText: "Read this PDF.",
+        command: undefined,
+        ultrathink: false,
+        resumed: false,
+        budget,
+      }),
+    ),
     {
       name: "ordinary text",
       prompt: "What’s in this image?",
@@ -1836,6 +1846,7 @@ describe("ClaudeAdapterV2 attachments", () => {
       command: undefined,
       ultrathink: true,
       resumed: false,
+      budget: "none",
     },
     {
       name: "mid-sentence skill",
@@ -1844,6 +1855,7 @@ describe("ClaudeAdapterV2 attachments", () => {
       command: "/implement fixes\n\nThen report the result",
       ultrathink: true,
       resumed: false,
+      budget: "none",
     },
     {
       name: "prompt-leading skill",
@@ -1852,6 +1864,7 @@ describe("ClaudeAdapterV2 attachments", () => {
       command: undefined,
       ultrathink: false,
       resumed: false,
+      budget: "none",
     },
     {
       name: "resumed history with an unknown PDF budget",
@@ -1860,10 +1873,11 @@ describe("ClaudeAdapterV2 attachments", () => {
       command: undefined,
       ultrathink: true,
       resumed: true,
+      budget: "none",
     },
   ])(
     "preserves $name with native PDFs, images, and paths on sends and steering",
-    ({ prompt, expectedText, command, ultrathink, resumed }) =>
+    ({ prompt, expectedText, command, ultrathink, resumed, budget }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
@@ -1977,9 +1991,9 @@ describe("ClaudeAdapterV2 attachments", () => {
             path.join(attachmentsDir, attachmentRelativePath(attachment)!),
             Uint8Array.from([1, 2, 3, 4]),
           );
-          const pdf = yield* Effect.promise(() => PDFDocument.create());
-          pdf.addPage();
-          const pdfBytes = yield* Effect.promise(() => pdf.save());
+          const pdfBytes = Buffer.from(
+            "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R >> endobj\n%%EOF",
+          );
           yield* fileSystem.writeFile(
             path.join(attachmentsDir, attachmentRelativePath(document)!),
             pdfBytes,
@@ -1999,12 +2013,77 @@ describe("ClaudeAdapterV2 attachments", () => {
             }),
             nativeThreadHasTurns: resumed,
           };
+          if (budget !== "none") {
+            const providerTurnId = idAllocator.derive.providerTurn({
+              driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+              nativeTurnId: `turn:${attemptId}`,
+            });
+            const imagePath = path.join(attachmentsDir, attachmentRelativePath(attachment)!);
+            // The on-disk length deliberately disagrees with sizeBytes.
+            yield* fileSystem.writeFile(imagePath, Buffer.alloc(4 * 1024 * 1024));
+            if (budget === "retained-documents") {
+              yield* fileSystem.writeFile(
+                path.join(attachmentsDir, attachmentRelativePath(document)!),
+                Buffer.concat([
+                  pdfBytes.subarray(0, pdfBytes.length - 5),
+                  Buffer.alloc(10 * 1024 * 1024, 32),
+                  Buffer.from("%%EOF"),
+                ]),
+              );
+            }
+            yield* runtime.startTurn({
+              ...turnInput,
+              message: {
+                ...turnInput.message,
+                text: budget === "retained-text" ? "x".repeat(10 * 1024 * 1024) : prompt,
+                attachments:
+                  budget === "retained-text"
+                    ? []
+                    : budget === "retained-documents"
+                      ? [document]
+                      : [attachment, attachment],
+              },
+            });
+            const largePdf = Buffer.concat([
+              pdfBytes.subarray(0, pdfBytes.length - 5),
+              Buffer.alloc(
+                (budget === "retained-documents" ? 20 : 19) * 1024 * 1024 - pdfBytes.length,
+                32,
+              ),
+              Buffer.from("%%EOF"),
+            ]);
+            const documentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
+            yield* fileSystem.writeFile(documentPath, largePdf);
+            yield* runtime.steerTurn({
+              threadId,
+              runId: RunId.make("run-claude-attachments"),
+              providerThread,
+              providerTurnId,
+              message: {
+                ...turnInput.message,
+                attachments:
+                  budget === "same-message-images"
+                    ? [document, attachment, attachment]
+                    : [document],
+              },
+            });
+            const sent = offeredMessages.at(-1)!.message.content;
+            assert.isArray(sent);
+            assert.lengthOf(
+              typeof sent === "string" ? [] : sent.filter((block) => block.type === "document"),
+              0,
+              budget,
+            );
+            assert.include(JSON.stringify(sent), documentPath);
+            return;
+          }
           if (!resumed) {
-            const undelivered = yield* Effect.promise(() => PDFDocument.create());
-            for (let i = 0; i < 60; i++) undelivered.addPage();
+            const undelivered = Buffer.from(
+              `%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count 60 >> endobj\n${Array.from({ length: 60 }, (_, i) => `${i + 3} 0 obj << /Type /Page /Parent 2 0 R >> endobj`).join("\n")}\n%%EOF`,
+            );
             yield* fileSystem.writeFile(
               path.join(attachmentsDir, attachmentRelativePath(document)!),
-              yield* Effect.promise(() => undelivered.save()),
+              undelivered,
             );
             failOpen = true;
             assert.isTrue(Exit.isFailure(yield* runtime.startTurn(turnInput).pipe(Effect.exit)));
@@ -2075,6 +2154,14 @@ describe("ClaudeAdapterV2 attachments", () => {
             "bytes",
             "invalid",
             "invalid-page-tree",
+            "object-stream",
+            "encrypted",
+            "cyclic-tree",
+            "unterminated-string",
+            "missing-eof",
+            "escaped-name",
+            "incremental",
+            "compressed-bomb",
             "aggregate-pages",
             "retained-pages",
             "delivery-failure",
@@ -2085,14 +2172,11 @@ describe("ClaudeAdapterV2 attachments", () => {
             if (
               ["pages", "aggregate-pages", "retained-pages", "delivery-failure"].includes(scenario)
             ) {
-              const large = yield* Effect.promise(() => PDFDocument.create());
-              for (
-                let i = 0;
-                i < (scenario === "pages" ? 101 : scenario === "delivery-failure" ? 30 : 60);
-                i++
-              )
-                large.addPage();
-              yield* fileSystem.writeFile(documentPath, yield* Effect.promise(() => large.save()));
+              const pages = scenario === "pages" ? 101 : scenario === "delivery-failure" ? 30 : 60;
+              const large = Buffer.from(
+                `%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count ${pages} >> endobj\n${Array.from({ length: pages }, (_, i) => `${i + 3} 0 obj << /Type /Page /Parent 2 0 R >> endobj`).join("\n")}\n%%EOF`,
+              );
+              yield* fileSystem.writeFile(documentPath, large);
               if (scenario === "aggregate-pages") {
                 const second = {
                   ...document,
@@ -2113,9 +2197,40 @@ describe("ClaudeAdapterV2 attachments", () => {
               const malformedBytes = Buffer.from(
                 "%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 42 >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF",
               );
-              const malformed = yield* Effect.promise(() => PDFDocument.load(malformedBytes));
-              assert.throws(() => malformed.getPageCount());
               yield* fileSystem.writeFile(documentPath, malformedBytes);
+            } else if (
+              ["object-stream", "encrypted", "cyclic-tree", "compressed-bomb"].includes(scenario)
+            ) {
+              const suffix =
+                scenario === "encrypted"
+                  ? "/Encrypt 9 0 R"
+                  : scenario === "cyclic-tree"
+                    ? "/Count 0 /Kids [2 0 R]"
+                    : "/Type /ObjStm /Filter /FlateDecode /Length 1000000000";
+              yield* fileSystem.writeFile(
+                documentPath,
+                Buffer.concat([
+                  pdfBytes.subarray(0, pdfBytes.length - 5),
+                  Buffer.from(`\n4 0 obj << ${suffix} >> stream\nx\nendstream endobj\n%%EOF`),
+                ]),
+              );
+            } else if (
+              ["unterminated-string", "missing-eof", "escaped-name", "incremental"].includes(
+                scenario,
+              )
+            ) {
+              const raw = pdfBytes.toString();
+              yield* fileSystem.writeFileString(
+                documentPath,
+                scenario === "missing-eof"
+                  ? raw.slice(0, -5)
+                  : scenario === "escaped-name"
+                    ? raw.replace("/Type /Page ", "/Type /Pa#67e ")
+                    : raw.replace(
+                        "%%EOF",
+                        scenario === "incremental" ? "/Prev 42\n%%EOF" : "(unfinished\n%%EOF",
+                      ),
+              );
             } else if (scenario === "pasted-text") {
               yield* fileSystem.writeFile(documentPath, pdfBytes);
               attachments = [{ ...document, source: { _tag: "pasted-text" } }];
