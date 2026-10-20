@@ -2905,11 +2905,11 @@ export default function ChatView(props: ChatViewProps) {
   });
   // Old messages stay visible while the thread catches up, but faded so they
   // do not read as the latest.
+  // Remembered entries are only painted while the detail loads.
   const timelineBehind =
-    threadSyncPhase !== null &&
-    (timelineEntries.length > 0
+    timelineEntries.length > 0
       ? threadBehindShell
-      : displayedTimeline.entries.length > 0 && rememberedTimelineBehind);
+      : displayedTimeline.entries.length > 0 && rememberedTimelineBehind;
   const displayedTimelineKey = displayedTimeline.displayThreadKey ?? routeThreadKey;
   const paintOnlyDisplayedTimeline = isPaintOnlyThreadTimeline(
     displayedTimeline.displayThreadKey,
