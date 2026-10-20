@@ -219,6 +219,23 @@ describe("question answer paths", () => {
           expected: ["## Slide 1", "First", "## Slide 2", "Second"],
         },
         {
+          ext: "ods",
+          bounded: true,
+          parts: {
+            "content.xml": `<office:document>${Array.from(
+              { length: 256 },
+              (_, index) =>
+                `<table:table table:name="${index === 0 ? "Shared" : "Unneeded"}"><table:table-row><table:table-cell table:number-columns-repeated="512"><text:p>${"B".repeat(4096)}</text:p></table:table-cell></table:table-row></table:table>`,
+            ).join("")}</office:document>`,
+          },
+          expected: [
+            "## Sheet: Shared",
+            "B".repeat(32),
+            "[Extracted text truncated at 1,000,000 characters.]",
+          ],
+          absent: ["## Sheet: Unneeded"],
+        },
+        {
           ext: "epub",
           parts: {
             "META-INF/container.xml":
@@ -245,7 +262,7 @@ describe("question answer paths", () => {
           ],
         },
       ];
-      for (const item of cases) {
+      for (const [caseIndex, item] of cases.entries()) {
         const local: Buffer[] = [];
         const central: Buffer[] = [];
         let offset = 0;
@@ -278,7 +295,7 @@ describe("question answer paths", () => {
         end.writeUInt16LE(central.length / 2, 10);
         end.writeUInt32LE(Buffer.concat(central).length, 12);
         end.writeUInt32LE(offset, 16);
-        const path = NodePath.join(config.attachmentsDir, `structure.${item.ext}`);
+        const path = NodePath.join(config.attachmentsDir, `structure-${caseIndex}.${item.ext}`);
         NodeFS.writeFileSync(path, Buffer.concat([...local, ...central, end]));
         const extracted = yield* Effect.promise(() => extractDocumentText(path, `.${item.ext}`));
         let previous = -1;
@@ -289,6 +306,8 @@ describe("question answer paths", () => {
           );
           previous = index;
         }
+        if ("absent" in item)
+          for (const absent of item.absent) expect(extracted).not.toContain(absent);
         if (("bounded" in item && item.bounded) || item.ext === "epub") {
           expect(extracted.length).toBeLessThan(1_000_100);
           const documents = yield* DocumentText.DocumentText;

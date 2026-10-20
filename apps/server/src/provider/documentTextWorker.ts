@@ -82,7 +82,7 @@ function paragraphs(node: XmlNode): string {
     })
     .join("");
 }
-function table(node: XmlNode): string {
+function table(node: XmlNode, limit = MAX_OUTPUT + 1): string {
   const rows = [...all(node, "tr"), ...all(node, "table-row")];
   if (rows.length > 10_000) throw new Error("Row limit");
   let result = "";
@@ -93,7 +93,7 @@ function table(node: XmlNode): string {
     );
     const values: string[] = [];
     let length = 0;
-    const budget = MAX_OUTPUT + 1 - result.length;
+    const budget = limit - result.length;
     for (const cell of cells) {
       const count = Math.min(512, Number(cell.attrs["number-columns-repeated"]) || 1);
       if (values.length + count > 512) throw new Error("Column limit");
@@ -112,11 +112,11 @@ function table(node: XmlNode): string {
     if (!line.trim()) continue;
     rowCount += repeat;
     if (rowCount > 10_000) throw new Error("Repeated row limit");
-    const remaining = MAX_OUTPUT + 1 - result.length;
+    const remaining = limit - result.length;
     result += `${line}\n`
       .repeat(Math.min(repeat, Math.ceil(remaining / (line.length + 1))))
       .slice(0, remaining);
-    if (result.length > MAX_OUTPUT) break;
+    if (result.length >= limit) break;
   }
   return result;
 }
@@ -314,16 +314,25 @@ export async function extractDocumentText(path: string, extension: string): Prom
     if (extension === ".docx") result = paragraphs(read("word/document.xml"));
     else if ([".odt", ".ods", ".odp"].includes(extension)) {
       const content = read("content.xml");
-      result =
-        extension === ".ods"
-          ? all(content, "table")
-              .map((sheet) => `## Sheet: ${sheet.attrs.name ?? "Untitled"}\n${table(sheet)}`)
-              .join("\n\n")
-          : extension === ".odp"
+      if (extension === ".ods") {
+        result = "";
+        for (const sheet of all(content, "table")) {
+          result += `${result ? "\n\n" : ""}## Sheet: ${sheet.attrs.name ?? "Untitled"}\n`.slice(
+            0,
+            MAX_OUTPUT + 1 - result.length,
+          );
+          if (result.length > MAX_OUTPUT) break;
+          result += table(sheet, MAX_OUTPUT + 1 - result.length);
+          if (result.length > MAX_OUTPUT) break;
+        }
+      } else {
+        result =
+          extension === ".odp"
             ? all(content, "page")
                 .map((slide, i) => `## Slide ${i + 1}\n${paragraphs(slide)}`)
                 .join("\n\n")
             : paragraphs(content);
+      }
     } else if (extension === ".xlsx") {
       const strings = files.has("xl/sharedStrings.xml")
         ? all(read("xl/sharedStrings.xml"), "si").map(text)
