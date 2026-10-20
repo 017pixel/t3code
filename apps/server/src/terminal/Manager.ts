@@ -2055,102 +2055,113 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     expectedProcess: PtyAdapter.PtyProcess,
   ) {
     while (true) {
-      const action = yield* withThreadLock(
-        session.threadId,
-        Effect.gen(function* () {
-          const action: DrainProcessEventAction = yield* Effect.sync(() => {
-            // A delayed drain must not clear a replacement process's queue, even after PID reuse.
-            if (session.process !== expectedProcess) return { type: "idle" } as const;
-            if (!session.process || session.status !== "running") {
-              session.pendingProcessEvents = [];
-              session.pendingProcessEventIndex = 0;
-              session.processEventDrainRunning = false;
-              return { type: "idle" } as const;
-            }
+      let action = yield* Effect.sync<DrainProcessEventAction | { type: "pending-exit" }>(() => {
+        // A delayed drain must not clear a replacement process's queue, even after PID reuse.
+        if (session.process !== expectedProcess) return { type: "idle" };
+        if (session.status !== "running") {
+          session.pendingProcessEvents = [];
+          session.pendingProcessEventIndex = 0;
+          session.processEventDrainRunning = false;
+          return { type: "idle" };
+        }
 
-            const nextEvent = session.pendingProcessEvents[session.pendingProcessEventIndex];
-            if (!nextEvent) {
-              session.pendingProcessEvents = [];
-              session.pendingProcessEventIndex = 0;
-              session.processEventDrainRunning = false;
-              return { type: "idle" } as const;
-            }
+        const nextEvent = session.pendingProcessEvents[session.pendingProcessEventIndex];
+        if (!nextEvent) {
+          session.pendingProcessEvents = [];
+          session.pendingProcessEventIndex = 0;
+          session.processEventDrainRunning = false;
+          return { type: "idle" };
+        }
 
-            session.pendingProcessEventIndex += 1;
-            if (session.pendingProcessEventIndex >= session.pendingProcessEvents.length) {
-              session.pendingProcessEvents = [];
-              session.pendingProcessEventIndex = 0;
-            }
+        // Leave exits queued until the lifecycle lock is held so handle checks reject dead PTYs.
+        if (nextEvent.type === "exit") return { type: "pending-exit" };
 
-            if (nextEvent.type === "output") {
-              const sanitized = sanitizeTerminalHistoryChunk(
-                session.pendingHistoryControlSequence,
-                nextEvent.data,
-              );
-              session.pendingHistoryControlSequence = sanitized.pendingControlSequence;
-              if (sanitized.visibleText.length > 0) {
-                session.history.append(sanitized.visibleText);
+        session.pendingProcessEventIndex += 1;
+        if (session.pendingProcessEventIndex >= session.pendingProcessEvents.length) {
+          session.pendingProcessEvents = [];
+          session.pendingProcessEventIndex = 0;
+        }
+
+        const sanitized = sanitizeTerminalHistoryChunk(
+          session.pendingHistoryControlSequence,
+          nextEvent.data,
+        );
+        session.pendingHistoryControlSequence = sanitized.pendingControlSequence;
+        if (sanitized.visibleText.length > 0) {
+          session.history.append(sanitized.visibleText);
+        }
+        const eventStamp = advanceEventSequence(session);
+
+        return {
+          type: "output",
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          sequence: eventStamp.sequence,
+          history: sanitized.visibleText.length > 0 ? session.history : null,
+          data: nextEvent.data,
+        };
+      });
+
+      if (action.type === "pending-exit") {
+        action = yield* withThreadLock(
+          session.threadId,
+          Effect.gen(function* () {
+            const action: DrainProcessEventAction = yield* Effect.sync(() => {
+              if (session.process !== expectedProcess || session.status !== "running") {
+                return { type: "idle" } as const;
               }
+              const nextEvent = session.pendingProcessEvents[session.pendingProcessEventIndex];
+              if (nextEvent?.type !== "exit") return { type: "idle" } as const;
+
+              const process = session.process;
+              invalidateOwnership(session);
+              cleanupProcessHandles(session);
+              session.process = null;
+              session.pid = null;
+              session.hasRunningSubprocess = false;
+              session.childCommandLabel = null;
+              session.status = "exited";
+              session.pendingHistoryControlSequence = "";
+              session.pendingProcessEvents = [];
+              session.pendingProcessEventIndex = 0;
+              session.processEventDrainRunning = false;
+              session.exitCode = Number.isInteger(nextEvent.event.exitCode)
+                ? nextEvent.event.exitCode
+                : null;
+              session.exitSignal = Number.isInteger(nextEvent.event.signal)
+                ? nextEvent.event.signal
+                : null;
               const eventStamp = advanceEventSequence(session);
 
               return {
-                type: "output",
+                type: "exit",
+                process,
                 threadId: session.threadId,
                 terminalId: session.terminalId,
                 sequence: eventStamp.sequence,
-                history: sanitized.visibleText.length > 0 ? session.history : null,
-                data: nextEvent.data,
+                exitCode: session.exitCode,
+                exitSignal: session.exitSignal,
               } as const;
-            }
-
-            const process = session.process;
-            invalidateOwnership(session);
-            cleanupProcessHandles(session);
-            session.process = null;
-            session.pid = null;
-            session.hasRunningSubprocess = false;
-            session.childCommandLabel = null;
-            session.status = "exited";
-            session.pendingHistoryControlSequence = "";
-            session.pendingProcessEvents = [];
-            session.pendingProcessEventIndex = 0;
-            session.processEventDrainRunning = false;
-            session.exitCode = Number.isInteger(nextEvent.event.exitCode)
-              ? nextEvent.event.exitCode
-              : null;
-            session.exitSignal = Number.isInteger(nextEvent.event.signal)
-              ? nextEvent.event.signal
-              : null;
-            const eventStamp = advanceEventSequence(session);
-
-            return {
-              type: "exit",
-              process,
-              threadId: session.threadId,
-              terminalId: session.terminalId,
-              sequence: eventStamp.sequence,
-              exitCode: session.exitCode,
-              exitSignal: session.exitSignal,
-            } as const;
-          });
-          if (action.type === "output" && action.history !== null) {
-            yield* queuePersist(action.threadId, action.terminalId, action.history);
-          } else if (action.type === "exit") {
-            yield* clearKillFiber(action.process);
-            yield* unregisterTerminal({
-              threadId: action.threadId,
-              terminalId: action.terminalId,
             });
-          }
-          return action;
-        }),
-      );
-
+            if (action.type === "exit") {
+              yield* clearKillFiber(action.process);
+              yield* unregisterTerminal({
+                threadId: action.threadId,
+                terminalId: action.terminalId,
+              });
+            }
+            return action;
+          }),
+        );
+      }
       if (action.type === "idle") {
         return;
       }
 
       if (action.type === "output") {
+        if (action.history !== null) {
+          yield* queuePersist(action.threadId, action.terminalId, action.history);
+        }
         yield* publishEvent({
           type: "output",
           threadId: action.threadId,
