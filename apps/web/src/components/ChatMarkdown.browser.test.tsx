@@ -10,8 +10,9 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { filesystemEnvironment } from "../state/filesystem";
 import { useRightPanelStore } from "../rightPanelStore";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
+import { serializeTableElementToCsv } from "../markdown-clipboard";
 import { MarkdownFindContext } from "./chat/markdownFindContext";
-import { useThreadFindHighlights } from "./chat/threadFindHighlights";
+import { collectThreadFindRanges, useThreadFindHighlights } from "./chat/threadFindHighlights";
 import { setMarkdownTaskChecked } from "./files/filePreviewMode";
 
 const { workspaceSearch, filesystemMetadata } = vi.hoisted(() => ({
@@ -947,6 +948,13 @@ describe("ChatMarkdown source citations", () => {
     expect(single[0]!.textContent).toBe("1");
     expect(grouped[0]!.textContent).toBe("1, 2");
     window.getSelection()!.removeAllRanges();
+
+    const tableContainer = await renderText(
+      `| City | Evidence |\n| --- | --- |\n| Paris | Population ${marker("turn0view0", "opaque-id", "L8-L13")} |`,
+    );
+    expect(serializeTableElementToCsv(tableContainer.querySelector("table")!)).toBe(
+      "City,Evidence\nParis,Population [Source 1: turn0view0; Source 2: opaque-id; L8-L13]",
+    );
   });
 
   it("hides only unfinished streaming tails, restores them when stopped, and preserves literal examples", async () => {
@@ -1133,6 +1141,62 @@ describe("ChatMarkdown in-page links", () => {
 });
 
 describe("ChatMarkdown thread find", () => {
+  it("indexes the visible citation labels and literal examples as streaming messages stop", async () => {
+    const marker = (...parts: string[]) => `\uE200cite\uE202${parts.join("\uE202")}\uE201`;
+    const codeExample = marker("literal_code");
+    const linkExample = marker("literal_link");
+    const text = [
+      `First ${marker("opaque_alpha")}. Group ${marker("opaque_beta", "opaque_alpha", "opaque_beta", "L8-L13")}. Repeat ${marker("opaque_alpha")}.`,
+      `Literal \`${codeExample}\` and [${linkExample}](https://example.com).`,
+      "Tail \uE200cite\uE202partial_tail",
+    ].join("\n\n");
+    const { container, rerender } = await render(<div />);
+    for (const state of [
+      { role: "assistant", streaming: true },
+      { role: "assistant", streaming: false },
+      { role: "user", streaming: false },
+    ] as const) {
+      await rerender(
+        <div data-timeline-row-id="citation-row">
+          <div data-thread-find-text>
+            <ChatMarkdown
+              cwd={undefined}
+              text={text}
+              isStreaming={state.streaming}
+              parseRawHtml={state.role !== "user"}
+              lineBreaks={state.role === "user"}
+            />
+          </div>
+        </div>,
+      );
+      const segments = searchableMessageSegments({ ...state, text }) ?? [];
+      for (const [query, count] of [
+        ["1", 3],
+        ["2, 1", 1],
+        ["opaque_alpha", 0],
+        ["L8-L13", 0],
+        [codeExample, 1],
+        [linkExample, 1],
+        ["partial_tail", state.streaming ? 0 : 1],
+      ] as const) {
+        const context = `${state.role}, streaming=${state.streaming}, query=${query}`;
+        expect(
+          collectThreadFindRanges(container, query).map(({ range }) => range.toString()),
+          context,
+        ).toEqual(Array.from({ length: count }, () => query));
+        expect
+          .soft(
+            segments.reduce(
+              (sum, segment) => sum + countThreadSearchOccurrences(segment, query),
+              0,
+            ),
+            context,
+          )
+          .toBe(count);
+      }
+    }
+  });
+
   function FindProbe(props: {
     container: HTMLElement;
     query: string;

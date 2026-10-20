@@ -332,12 +332,17 @@ export function mathWrapperOf(element: Element | null): Element | null {
   return element?.closest(MATH_SELECTOR) ?? null;
 }
 
-/** A cell's text, with each formula as its TeX. */
+/** Copy formulas as TeX and citation labels as complete references. */
 function csvCellText(cell: Element): string {
-  if (!cell.querySelector(MATH_SELECTOR)) return cell.textContent ?? "";
+  if (!cell.querySelector(`${MATH_SELECTOR}, [data-markdown-copy-text]`)) {
+    return cell.textContent ?? "";
+  }
   const copy = cell.cloneNode(true) as Element;
   for (const wrapper of copy.querySelectorAll(MATH_SELECTOR)) {
     wrapper.replaceWith(wrapper.getAttribute("data-markdown-copy")?.trim() ?? "");
+  }
+  for (const node of copy.querySelectorAll("[data-markdown-copy-text]")) {
+    node.textContent = node.getAttribute("data-markdown-copy-text");
   }
   return copy.textContent ?? "";
 }

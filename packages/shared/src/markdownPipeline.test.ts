@@ -107,7 +107,7 @@ it("renders stable source numbers, grouped locators and opaque IDs through both 
   ).toBe("[Source 1: L42]");
   expect(
     searchableMessageSegments({ role: "assistant", text: markdown, streaming: false }),
-  ).toEqual([expected]);
+  ).toEqual(["First 1. Grouped 2, 1. Sole 33."]);
 });
 
 it("keeps citation examples literal without numbering them or suppressing later prose", () => {

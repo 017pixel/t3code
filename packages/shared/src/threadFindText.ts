@@ -8,6 +8,7 @@ import {
   renderCodexInlineDirectivesAsMarkdown,
 } from "./codexMarkdownDirectives.ts";
 import { codexArtifactTemplatePresentationLabel } from "./codexArtifactTemplates.ts";
+import { codexCitationFromHastProperties } from "./codexCitations.ts";
 import {
   buildFileLinkParentSuffixByPath,
   splitFilePathPosition,
@@ -30,8 +31,8 @@ import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
 import {
   shouldPreserveAssistantLineBreaks,
+  chatMarkdownRemarkPlugins,
   CHAT_MARKDOWN_REHYPE_PLUGINS,
-  CHAT_MARKDOWN_REMARK_PLUGINS,
   CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
 } from "./markdownPipeline.ts";
 
@@ -75,16 +76,18 @@ export const THREAD_FIND_BLOCK_TAGS = new Set([
   "ul",
 ]);
 
-const assistantProcessor = unified()
-  .use(remarkParse)
-  .use(CHAT_MARKDOWN_REMARK_PLUGINS)
-  .use(remarkRehype, { allowDangerousHtml: true })
-  .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
-const assistantBreaksProcessor = unified()
-  .use(remarkParse)
-  .use(CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS)
-  .use(remarkRehype, { allowDangerousHtml: true })
-  .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
+function createAssistantProcessor(isStreaming = false, lineBreaks = false) {
+  return unified()
+    .use(remarkParse)
+    .use(chatMarkdownRemarkPlugins({ isStreaming, lineBreaks }))
+    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
+}
+
+const assistantProcessor = createAssistantProcessor();
+const assistantBreaksProcessor = createAssistantProcessor(false, true);
+const streamingAssistantProcessor = createAssistantProcessor(true);
+const streamingAssistantBreaksProcessor = createAssistantProcessor(true, true);
 const userProcessor = unified()
   .use(remarkParse)
   .use(CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS)
@@ -98,6 +101,7 @@ interface TextTree {
     readonly href?: unknown;
     readonly src?: unknown;
     readonly dataInlineCode?: unknown;
+    readonly dataCodexCitation?: unknown;
   };
   readonly children?: ReadonlyArray<TextTree>;
 }
@@ -108,12 +112,17 @@ function markdownThreadFindText(
   cwd?: string,
   skills: readonly InlineSkill[] = [],
   lineBreaks = false,
+  isStreaming = false,
 ): string[] {
   const processor = userMessage
     ? userProcessor
-    : lineBreaks
-      ? assistantBreaksProcessor
-      : assistantProcessor;
+    : isStreaming
+      ? lineBreaks
+        ? streamingAssistantBreaksProcessor
+        : streamingAssistantProcessor
+      : lineBreaks
+        ? assistantBreaksProcessor
+        : assistantProcessor;
   const tree = processor.runSync(processor.parse(markdown), { value: markdown });
   const paths = [
     ...extractMarkdownLinkHrefs(renderCodexInlineDirectivesAsMarkdown(markdown)),
@@ -130,6 +139,12 @@ function markdownThreadFindText(
     text = "";
   };
   const visit = (node: TextTree, inPre = false, inlineSkills = false) => {
+    const codexCitation =
+      node.tagName === "span" ? codexCitationFromHastProperties(node.properties) : null;
+    if (codexCitation) {
+      text += codexCitation.sources.map((source) => source.number).join(", ");
+      return;
+    }
     const href = node.properties?.href ?? node.properties?.src;
     if (userMessage && typeof href === "string" && parseComposerContextHref(href)) {
       flush();
@@ -226,5 +241,6 @@ export function searchableMessageSegments(
     cwd,
     skills,
     shouldPreserveAssistantLineBreaks(message.text),
+    message.streaming,
   );
 }
