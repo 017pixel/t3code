@@ -334,6 +334,20 @@ export async function extractDocumentText(path: string, extension: string): Prom
             : paragraphs(content);
       }
     } else if (extension === ".xlsx") {
+      const workbook = read("xl/workbook.xml");
+      const dateSystem = ["1", "true"].includes(
+        all(workbook, "workbookPr")[0]?.attrs.date1904 ?? "",
+      )
+        ? "1904"
+        : "1900";
+      const styles = files.has("xl/styles.xml") ? read("xl/styles.xml") : undefined;
+      const customFormats = new Map(
+        styles
+          ? all(styles, "numFmt").map((node) => [node.attrs.numFmtId, node.attrs.formatCode])
+          : [],
+      );
+      const cellFormats = styles ? all(styles, "cellXfs")[0] : undefined;
+      const formats = cellFormats ? children(cellFormats) : [];
       const strings = files.has("xl/sharedStrings.xml")
         ? all(read("xl/sharedStrings.xml"), "si").map(text)
         : [];
@@ -343,7 +357,7 @@ export async function extractDocumentText(path: string, extension: string): Prom
           .map((rel) => [rel.attrs.Id, rel.attrs.Target]),
       );
       result = "";
-      for (const sheet of all(read("xl/workbook.xml"), "sheet")) {
+      for (const sheet of all(workbook, "sheet")) {
         if (result.length > MAX_OUTPUT) break;
         const target = relations.get(sheet.attrs["r:id"] ?? sheet.attrs.id);
         if (!target) throw new Error("Missing sheet relationship");
@@ -369,13 +383,20 @@ export async function extractDocumentText(path: string, extension: string): Prom
             while (values.length <= column) values.push("");
             const value = all(cell, "v")[0];
             const raw = value ? text(value) : "";
+            const formatId = formats[Number(cell.attrs.s ?? 0)]?.attrs.numFmtId;
+            const format = formatId ? customFormats.get(formatId) : undefined;
+            const numeric = cell.attrs.t === undefined || cell.attrs.t === "n";
+            const formatted =
+              numeric && raw && formatId && formatId !== "0"
+                ? `${raw} [Excel numFmtId=${formatId}${format ? `; format=${format}` : ""}; date system ${dateSystem}]`
+                : raw;
             rowLength -= values[column]!.length;
             values[column] = (
               cell.attrs.t === "s"
                 ? (strings[Number(raw)] ?? "")
                 : cell.attrs.t === "inlineStr"
                   ? all(cell, "t").map(text).join("")
-                  : raw || all(cell, "f").map(text).join("")
+                  : formatted || all(cell, "f").map(text).join("")
             )
               .slice(0, MAX_OUTPUT + 1 - result.length - rowLength)
               .replaceAll(/[\t\r\n]+/g, " ");

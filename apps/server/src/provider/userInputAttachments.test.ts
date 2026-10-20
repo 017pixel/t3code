@@ -145,12 +145,36 @@ describe("question answer paths", () => {
             "xl/_rels/workbook.xml.rels":
               '<Relationships><Relationship Id="a" Target="worksheets/second.xml"/><Relationship Id="b" Target="worksheets/first.xml"/></Relationships>',
             "xl/sharedStrings.xml": "<sst><si><t>Lantern</t></si></sst>",
+            "xl/styles.xml":
+              '<styleSheet><numFmts><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="9"/><xf numFmtId="164"/></cellXfs></styleSheet>',
             "xl/worksheets/second.xml":
               '<worksheet><sheetData><row><c r="A1" t="s"><v>0</v></c><c r="C1"><v>37</v></c></row></sheetData></worksheet>',
             "xl/worksheets/first.xml":
-              '<worksheet><sheetData><row><c t="inlineStr"><is><t>Ferry</t></is></c><c><v>628</v></c></row></sheetData></worksheet>',
+              '<worksheet><sheetData><row><c t="inlineStr"><is><t>Ferry</t></is></c><c><v>628</v></c><c s="1"><v>45292</v></c><c s="2"><v>0.25</v></c><c s="3"><v>45293</v></c></row></sheetData></worksheet>',
           },
-          expected: ["## Sheet: Inventory", "Lantern\t\t37", "## Sheet: Budget", "Ferry\t628"],
+          expected: [
+            "## Sheet: Inventory",
+            "Lantern\t\t37",
+            "## Sheet: Budget",
+            "Ferry\t628",
+            "45292 [Excel numFmtId=14; date system 1900]",
+            "0.25 [Excel numFmtId=9; date system 1900]",
+            "45293 [Excel numFmtId=164; format=yyyy-mm-dd; date system 1900]",
+          ],
+        },
+        {
+          ext: "xlsx",
+          bounded: true,
+          parts: {
+            "xl/workbook.xml":
+              '<workbook><workbookPr date1904="true"/><sheets><sheet name="Dates" r:id="a"/></sheets></workbook>',
+            "xl/_rels/workbook.xml.rels":
+              '<Relationships><Relationship Id="a" Target="worksheets/dates.xml"/></Relationships>',
+            "xl/styles.xml": '<styleSheet><cellXfs><xf numFmtId="14"/></cellXfs></styleSheet>',
+            "xl/worksheets/dates.xml":
+              "<worksheet><sheetData><row><c><v>1</v></c></row></sheetData></worksheet>",
+          },
+          expected: ["## Sheet: Dates", "1 [Excel numFmtId=14; date system 1904]"],
         },
         {
           ext: "xlsx",
