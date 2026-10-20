@@ -159,33 +159,33 @@ it.each([
   expect(status?.textContent).toBe(`Alpha ${text}`);
 });
 
-it("omits an empty reset plate but keeps countdowns and banked credits visible", async () => {
+it("shows a pooled window as one compact row with its countdown and banked credits", async () => {
   await page.viewport(1440, 900);
   const now = Date.parse("2026-09-03T11:00:00Z");
-  const segment = page.getByRole("button", { name: /^Alpha:/ });
-  // The empty plate has no accessible text; select its painted background inside the real bar.
-  const plate = () =>
-    segment.element().querySelector<HTMLSpanElement>('[class~="bg-background/85"]');
+  const rowText = () => container.textContent;
 
   await act(() =>
     root.render(<UsageLimitsPooled presentations={presentations(undefined, 0)} now={now} />),
   );
-  await expect.element(segment.getByText("100%", { exact: true })).toBeVisible();
-  expect(plate()).toBeNull();
+  await expect.element(page.getByText("Session", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("100% left", { exact: true })).toBeVisible();
+  expect(rowText()).not.toContain("resets in");
+  expect(rowText()).not.toContain("banked");
 
   await act(() =>
     root.render(
       <UsageLimitsPooled presentations={presentations("2026-09-03T14:00:00Z", 0)} now={now} />,
     ),
   );
-  await expect.element(plate()).toBeVisible();
-  expect(plate()?.textContent).toBe("↻ 3h 0m");
+  await expect.element(page.getByText("60% left", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("resets in 3h 0m", { exact: true })).toBeVisible();
+  expect(rowText()).not.toContain("banked");
 
   await act(() =>
     root.render(<UsageLimitsPooled presentations={presentations(undefined, 1)} now={now} />),
   );
-  await expect.element(plate()).toBeVisible();
-  expect(plate()?.textContent).toBe("1");
+  expect(rowText()).toContain("1 reset credit banked");
+  expect(rowText()).not.toContain("resets in");
 });
 
 it("moves the one limit popover between windows on hover", async () => {

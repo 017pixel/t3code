@@ -18,7 +18,7 @@ import {
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
 import { GaugeIcon, TrendingDownIcon, TrendingUpIcon } from "lucide-react";
-import { Fragment, type ReactNode, useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { environmentPresentations } from "../../state/presentation";
@@ -73,6 +73,51 @@ export function PaceIcon({ pace }: { readonly pace: LimitPace }) {
   );
 }
 
+/**
+ * The painted bar inside a `relative h-6` hit area. `refillPercent` hatches the empty end that a
+ * pending reset would restore.
+ */
+export function LimitBarFill({
+  color,
+  remaining,
+  timeLeft,
+  refillPercent = 0,
+}: {
+  readonly color: string;
+  readonly remaining: number;
+  readonly timeLeft: number | null;
+  readonly refillPercent?: number;
+}) {
+  return (
+    <>
+      <div className="absolute inset-x-0 inset-y-1.5 rounded-full bg-muted" />
+      {remaining > 0 ? (
+        <div
+          className="absolute inset-y-1.5 left-0 rounded-full"
+          style={{ width: `${remaining}%`, backgroundColor: color }}
+        />
+      ) : null}
+      {remaining < 100 && refillPercent > 0 ? (
+        <div
+          aria-hidden
+          className="absolute inset-y-1.5 right-0 rounded-e-full opacity-30"
+          style={{
+            width: `${Math.min(100 - remaining, refillPercent)}%`,
+            backgroundImage: `repeating-linear-gradient(135deg, ${color} 0 1px, transparent 1px 4px)`,
+          }}
+        />
+      ) : null}
+      {timeLeft !== null ? (
+        <span
+          aria-hidden
+          className="absolute inset-y-0.5 w-px -translate-x-1/2 bg-foreground/60"
+          style={{ left: `${timeLeft}%` }}
+        />
+      ) : null}
+    </>
+  );
+}
+
 function WindowBar({
   color,
   window,
@@ -105,20 +150,7 @@ function WindowBar({
           />
         }
       >
-        <div className="absolute inset-x-0 inset-y-1.5 rounded-full bg-muted" />
-        {remaining > 0 ? (
-          <div
-            className="absolute inset-y-1.5 left-0 rounded-full"
-            style={{ width: `${remaining}%`, backgroundColor: color }}
-          />
-        ) : null}
-        {timeLeft !== null ? (
-          <span
-            aria-hidden
-            className="absolute inset-y-0.5 w-px -translate-x-1/2 bg-foreground/60"
-            style={{ left: `${timeLeft}%` }}
-          />
-        ) : null}
+        <LimitBarFill color={color} remaining={remaining} timeLeft={timeLeft} />
       </TooltipTrigger>
       <TooltipPopup side="top">
         <div className="flex flex-col gap-0.5">
@@ -140,6 +172,57 @@ function WindowBar({
   );
 }
 
+export function LimitRows({
+  compact = false,
+  children,
+}: {
+  readonly compact?: boolean;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div
+      className={
+        compact
+          ? "grid grid-cols-[minmax(0,9rem)_minmax(3rem,1fr)_auto] gap-x-3 gap-y-0.5"
+          : "grid grid-cols-[minmax(0,11rem)_minmax(4rem,1fr)_minmax(7rem,auto)] gap-x-4 gap-y-1"
+      }
+    >
+      {children}
+    </div>
+  );
+}
+
+/** One window across the three `LimitRows` columns: label and percent, bar, pace and reset. */
+export function LimitRow({
+  label,
+  remaining,
+  bar,
+  pace,
+  trailing,
+}: {
+  readonly label: string;
+  readonly remaining: number;
+  readonly bar: ReactNode;
+  readonly pace: LimitPace | null;
+  readonly trailing: ReactNode;
+}) {
+  return (
+    <>
+      <span className="flex min-w-0 items-center gap-2 text-xs">
+        <span className="truncate text-muted-foreground">{label}</span>
+        <span className="ms-auto shrink-0 font-medium text-foreground tabular-nums">
+          {remaining}% left
+        </span>
+      </span>
+      {bar}
+      <span className="flex items-center gap-2 text-xs whitespace-nowrap text-muted-foreground tabular-nums">
+        {pace ? <PaceIcon pace={pace} /> : null}
+        <span className="ms-auto flex shrink-0 items-center gap-1.5">{trailing}</span>
+      </span>
+    </>
+  );
+}
+
 export function LimitWindows({
   driver,
   windows,
@@ -153,33 +236,18 @@ export function LimitWindows({
 }) {
   const color = barColor(driver);
   return (
-    <div
-      className={
-        compact
-          ? "grid grid-cols-[minmax(0,9rem)_minmax(3rem,1fr)_auto] gap-x-3 gap-y-0.5"
-          : "grid grid-cols-[11rem_minmax(0,1fr)_7rem] gap-x-4 gap-y-1"
-      }
-    >
-      {windows.map((window) => {
-        const pace = paceOf(window, now);
-        const resetsIn = formatResetsIn(window, now);
-        return (
-          <Fragment key={window.id}>
-            <span className="flex min-w-0 items-center gap-2 text-xs">
-              <span className="truncate text-muted-foreground">{window.label}</span>
-              <span className="ms-auto shrink-0 font-medium text-foreground tabular-nums">
-                {remainingPercent(window)}% left
-              </span>
-            </span>
-            <WindowBar color={color} window={window} now={now} />
-            <span className="flex items-center gap-2 text-xs whitespace-nowrap text-muted-foreground tabular-nums">
-              {pace ? <PaceIcon pace={pace} /> : null}
-              <span className="ms-auto shrink-0">{resetsIn ?? ""}</span>
-            </span>
-          </Fragment>
-        );
-      })}
-    </div>
+    <LimitRows compact={compact}>
+      {windows.map((window) => (
+        <LimitRow
+          key={window.id}
+          label={window.label}
+          remaining={remainingPercent(window)}
+          bar={<WindowBar color={color} window={window} now={now} />}
+          pace={paceOf(window, now)}
+          trailing={formatResetsIn(window, now) ?? ""}
+        />
+      ))}
+    </LimitRows>
   );
 }
 
