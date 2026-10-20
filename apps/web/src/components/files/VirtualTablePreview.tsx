@@ -12,6 +12,8 @@ export default function VirtualTablePreview(props: {
   readonly header?: readonly string[] | undefined;
   readonly source?: boolean;
   readonly wrap?: boolean;
+  readonly revealLine?: number | null;
+  readonly revealRequestId?: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [left, setLeft] = useState(0);
@@ -46,22 +48,26 @@ export default function VirtualTablePreview(props: {
     ? 0
     : Math.max(96, Math.min(320, width / Math.min(props.columns, 6)));
   const rowHeader = props.header ? 0 : 56;
-  const firstColumn = props.source
-    ? 0
-    : Math.max(0, Math.floor((left - rowHeader) / columnWidth) - 1);
-  const lastColumn = props.source
-    ? 1
-    : Math.min(props.columns, Math.ceil((left + width) / columnWidth) + 1);
-  const columns = Array.from(
-    { length: Math.max(0, lastColumn - firstColumn) },
-    (_, i) => firstColumn + i,
-  );
   const sizes = Array.from(
     { length: props.columns },
     (_, column) => measured?.[column] ?? columnWidth,
   );
-  const offset = (column: number) =>
-    sizes.slice(0, column).reduce((total, size) => total + size, 0);
+  const offsets = [0];
+  for (const size of sizes) offsets.push(offsets[offsets.length - 1]! + size);
+  const firstColumn = props.source
+    ? 0
+    : Math.max(0, sizes.findIndex((_, column) => offsets[column + 1]! > left - rowHeader) - 1);
+  const lastColumn = props.source
+    ? 1
+    : Math.min(
+        props.columns,
+        offsets.findIndex((offset) => offset >= left + width - rowHeader) + 1 || props.columns,
+      );
+  const columns = Array.from(
+    { length: Math.max(0, lastColumn - firstColumn) },
+    (_, i) => firstColumn + i,
+  );
+  const offset = (column: number) => offsets[column]!;
   const tableWidth = props.source ? "100%" : Math.max(width, offset(props.columns) + rowHeader);
   return (
     <div
@@ -195,8 +201,14 @@ function RowPage(
             aria-rowindex={props.source ? undefined : index + 1}
             className={
               props.source
-                ? "flex min-h-[29px] font-mono"
+                ? `flex min-h-[29px] font-mono ${props.revealLine != null && Math.min(props.count, Math.max(1, props.revealLine)) === index + 1 ? "bg-primary/10" : ""}`
                 : `flex min-h-[29px] border-b border-border/60 ${(index - (props.header ? 1 : 0)) % 2 ? "bg-muted/30" : ""}`
+            }
+            data-preview-reveal={
+              props.revealLine != null &&
+              Math.min(props.count, Math.max(1, props.revealLine)) === index + 1
+                ? "true"
+                : undefined
             }
           >
             {!props.header ? (
@@ -248,6 +260,8 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
   const contentRef = useRef<HTMLDivElement>(null);
   const [layout, setLayout] = useState({ offset: 0, height: 0, rowHeight: 29 });
   const [top, setTop] = useState(0);
+  const handledReveal = useRef<string | null>(null);
+  const pendingReveal = useRef<{ row: number; attempts: number } | null>(null);
   const position = { top, height: props.viewportHeight };
   const scrollHeight = Math.min(8_000_000, props.count * 29);
   // Chromium caps a scroll surface at 33 million pixels. Scale the track for
@@ -256,6 +270,21 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
   const maxFirst = Math.max(0, props.count - headerRows - Math.floor(position.height / 29));
   const scale = Math.max(1, scrollHeight - position.height) / Math.max(1, maxFirst * 29);
   const first = Math.min(maxFirst, Math.floor(position.top / scale / 29)) + headerRows;
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (props.revealLine == null) {
+      handledReveal.current = null;
+      pendingReveal.current = null;
+      return;
+    }
+    const key = `${props.revealRequestId}:${props.revealLine}`;
+    if (!node || !props.count || handledReveal.current === key) return;
+    const row = Math.min(props.count, Math.max(1, props.revealLine)) - 1;
+    node.scrollTop = Math.max(0, (row - headerRows) * 29) * scale;
+    setTop(node.scrollTop);
+    pendingReveal.current = { row, attempts: 0 };
+    handledReveal.current = key;
+  }, [props.revealLine, props.revealRequestId, props.count, headerRows, scale]);
   const atStart = position.top === 0;
   const rowHeight = () =>
     contentRef.current?.querySelector<HTMLElement>(`[data-preview-row="${first}"]`)?.offsetHeight ||
@@ -298,6 +327,39 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
     update();
     return observeResize(node, update);
   }, [first, atStart]);
+  useLayoutEffect(() => {
+    const pending = pendingReveal.current;
+    const node = ref.current;
+    const row =
+      pending &&
+      contentRef.current?.querySelector<HTMLElement>(`[data-preview-row="${pending.row}"]`);
+    if (!pending || !node || !row || !row.textContent) return;
+    const content = contentRef.current!;
+    const firstRow = content.querySelector<HTMLElement>(`[data-preview-row="${first}"]`);
+    if (
+      !atStart &&
+      (layout.height !== content.clientHeight ||
+        layout.offset !==
+          (firstRow
+            ? firstRow.getBoundingClientRect().top - content.getBoundingClientRect().top
+            : 0))
+    )
+      return;
+    const bounds = row.getBoundingClientRect();
+    const viewport = node.getBoundingClientRect();
+    const delta =
+      bounds.top < viewport.top
+        ? bounds.top - viewport.top
+        : Math.min(bounds.bottom, bounds.top + viewport.height) > viewport.bottom
+          ? Math.min(bounds.bottom, bounds.top + viewport.height) - viewport.bottom
+          : 0;
+    if (Math.abs(delta) < 1 || pending.attempts++ >= 8) {
+      pendingReveal.current = null;
+      return;
+    }
+    node.scrollTop += (delta * scale * 29) / Math.max(29, bounds.height);
+    setTop(node.scrollTop);
+  });
   return (
     <div
       ref={ref}
