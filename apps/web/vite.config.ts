@@ -95,7 +95,7 @@ const browserTestApiPort = 61_000 + ((Hash.string(import.meta.dirname) >>> 0) % 
 const browserTestProject = {
   extends: true,
   // Pre-bundled so the first test importing userEvent does not trigger a mid-run reload.
-  optimizeDeps: { include: ["vite-plus/test/browser"] },
+  optimizeDeps: { include: ["vite-plus/test/browser", "heic-to/next", "tiff"] },
   test: {
     name: "browser",
     include: ["src/**/*.browser.test.{ts,tsx}"],

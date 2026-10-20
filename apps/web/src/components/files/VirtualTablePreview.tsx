@@ -296,7 +296,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
       event.deltaY * (event.deltaMode === 1 ? 29 : event.deltaMode === 2 ? node.clientHeight : 1);
     if (!delta) return;
     event.preventDefault();
-    node.scrollTop += (delta * scale * 29) / rowHeight();
+    node.scrollTop += delta * (maxFirst === 0 ? 1 : (scale * 29) / rowHeight());
   });
   useEffect(() => {
     const node = ref.current;
@@ -357,7 +357,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
       pendingReveal.current = null;
       return;
     }
-    node.scrollTop += (delta * scale * 29) / Math.max(29, bounds.height);
+    node.scrollTop += delta * (maxFirst === 0 ? 1 : (scale * 29) / Math.max(29, bounds.height));
     setTop(node.scrollTop);
   });
   return (
@@ -379,10 +379,10 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
                   : null;
         if (delta !== null) {
           event.preventDefault();
-          node.scrollTop += (delta * scale * 29) / rowHeight();
+          node.scrollTop += delta * (maxFirst === 0 ? 1 : (scale * 29) / rowHeight());
         } else if (event.key === "Home" || event.key === "End") {
           event.preventDefault();
-          node.scrollTop = event.key === "Home" ? 0 : scrollHeight;
+          node.scrollTop = event.key === "Home" ? 0 : node.scrollHeight;
         }
       }}
       onScroll={(event) => setTop(event.currentTarget.scrollTop)}
@@ -393,14 +393,16 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
           className="absolute inset-x-0"
           style={{
             top:
-              position.top +
-              (scrollHeight > position.height &&
-              position.top > 0 &&
-              position.top >= scrollHeight - position.height - 1
-                ? position.height - layout.height
-                : atStart
-                  ? 0
-                  : -layout.offset - ((position.top / scale / 29) % 1) * layout.rowHeight),
+              maxFirst === 0
+                ? 0
+                : position.top +
+                  (scrollHeight > position.height &&
+                  position.top > 0 &&
+                  position.top >= scrollHeight - position.height - 1
+                    ? position.height - layout.height
+                    : atStart
+                      ? 0
+                      : -layout.offset - ((position.top / scale / 29) % 1) * layout.rowHeight),
           }}
         >
           {Array.from(

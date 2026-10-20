@@ -23,8 +23,89 @@ import JSZip from "jszip";
 import { boundedZip } from "./boundedZip";
 import BinaryViewer from "./BinaryViewer";
 import { decodeImagePreview } from "./decodeImagePreview";
+import type { BinaryWorkerResult } from "./binaryPreviewProtocol";
 
 describe("bounded binary previews", () => {
+  it("preserves length-delimited local and global PAX attributes", async () => {
+    const encode = (value: string) => new TextEncoder().encode(value);
+    const block = (name: string, content: Uint8Array, type = "0", size = content.length) => {
+      const bytes = new Uint8Array(512 + Math.ceil(content.length / 512) * 512);
+      const write = (offset: number, value: string) => bytes.set(encode(value), offset);
+      write(0, name);
+      write(124, size.toString(8).padStart(11, "0") + "\0");
+      bytes.fill(32, 148, 156);
+      write(156, type);
+      write(
+        148,
+        bytes
+          .subarray(0, 512)
+          .reduce((sum, byte) => sum + byte, 0)
+          .toString(8)
+          .padStart(6, "0") + "\0 ",
+      );
+      bytes.set(content, 512);
+      return bytes;
+    };
+    const attributes = (values: Record<string, string>) =>
+      encode(
+        Object.entries(values)
+          .map(([key, value]) => {
+            const payload = ` ${key}=${value}\n`;
+            let record = `${encode(payload).length + 1}${payload}`;
+            while (encode(record).length !== Number.parseInt(record, 10))
+              record = `${encode(record).length}${payload}`;
+            return record;
+          })
+          .join(""),
+      );
+    const chunks = [
+      block("Global", attributes({ size: "5", mtime: "-86400" }), "g"),
+      block("Local", attributes({ path: "café\n9 size=1\nname.txt" }), "x"),
+      block("first.txt", encode("hello"), "0", 0),
+      block("world.txt", encode("world"), "0", 0),
+      block("Local", attributes({ size: "3", mtime: "-172800" }), "x"),
+      block("short.txt", encode("bye"), "0", 0),
+      block("again.txt", encode("again"), "0", 0),
+      new Uint8Array(1024),
+    ];
+    const bytes = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    const worker = new Worker(new URL("./binaryPreview.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    const request = (input: object) =>
+      new Promise<BinaryWorkerResult>((resolve, reject) => {
+        worker.addEventListener("message", (event) => resolve(event.data), { once: true });
+        worker.addEventListener("error", reject, { once: true });
+        worker.postMessage(input, []);
+      });
+    try {
+      const result = await request({
+        type: "open",
+        kind: "archive",
+        name: "pax.tar",
+        bytes: bytes.buffer,
+      });
+      expect(result.type).toBe("archive");
+      if (result.type !== "archive") throw new Error("Expected archive");
+      expect(result.entries.map((entry) => [entry.path, entry.size, entry.modified])).toEqual([
+        ["café\n9 size=1\nname.txt", 5, "1969-12-31T00:00:00.000Z"],
+        ["world.txt", 5, "1969-12-31T00:00:00.000Z"],
+        ["short.txt", 3, "1969-12-30T00:00:00.000Z"],
+        ["again.txt", 5, "1969-12-31T00:00:00.000Z"],
+      ]);
+      const entry = await request({ type: "entry", path: "café\n9 size=1\nname.txt" });
+      if (entry.type !== "entry") throw new Error("Expected entry");
+      expect(new TextDecoder().decode(entry.bytes)).toBe("hello");
+    } finally {
+      worker.terminate();
+    }
+  });
+
   it("can leave an archive folder with a repeated separator", async () => {
     const bytes = new Uint8Array(2048);
     const write = (offset: number, value: string) =>
@@ -125,7 +206,7 @@ describe("bounded binary previews", () => {
     const SQL = await initSqlJs({ locateFile: () => wasmUrl });
     const database = new SQL.Database();
     database.run(
-      "CREATE TABLE orders (price INTEGER, quantity INTEGER, total INTEGER GENERATED ALWAYS AS (price * quantity) STORED, doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL); INSERT INTO orders(price, quantity) VALUES (7, 3)",
+      "CREATE TABLE sqliteData (price INTEGER, quantity INTEGER, total INTEGER GENERATED ALWAYS AS (price * quantity) STORED, doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL); INSERT INTO sqliteData(price, quantity) VALUES (7, 3)",
     );
     const src = URL.createObjectURL(new Blob([new Uint8Array(database.export())]));
     database.close();
@@ -311,6 +392,20 @@ describe("large text preview recovery", () => {
       expect(offset).toBeGreaterThan(50);
       expect(offset).toBeLessThan(300);
     });
+    await act(() =>
+      viewport().dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })),
+    );
+    await vi.waitFor(() =>
+      expect(
+        Math.abs(row().getBoundingClientRect().bottom - viewport().getBoundingClientRect().bottom),
+      ).toBeLessThan(2),
+    );
+    await act(() =>
+      viewport().dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })),
+    );
+    await vi.waitFor(() =>
+      expect(row().getBoundingClientRect().top).toBe(viewport().getBoundingClientRect().top),
+    );
   });
 
   it("rejects malformed UTF-8 bytes through the real text worker", async () => {
