@@ -1,6 +1,12 @@
-import { fullAccessOverrideLabel } from "@t3tools/client-runtime/state/thread-requests";
+import {
+  FULL_ACCESS_OVERRIDE_QUESTION,
+  fullAccessOverrideExplanation,
+} from "@t3tools/client-runtime/state/thread-requests";
 import { memo } from "react";
 import { type PendingApproval } from "../../session-logic";
+import { InlineButton } from "../ui/button";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { composerFloatingLayerProps } from "./composerEventScope";
 import { cn } from "~/lib/utils";
 
 interface ComposerPendingApprovalPanelProps {
@@ -46,9 +52,20 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
         <span className="shrink-0 font-medium text-warning">{fallbackLabel}</span>
         {approval.appName ? <span className="min-w-0 truncate">{approval.appName}</span> : null}
         {approval.fullAccessOverride ? (
-          <span className="min-w-0 truncate">
-            {fullAccessOverrideLabel(approval.fullAccessOverride)}
-          </span>
+          <Popover>
+            <PopoverTrigger openOnHover render={<InlineButton tone="muted" />}>
+              {FULL_ACCESS_OVERRIDE_QUESTION}
+            </PopoverTrigger>
+            <PopoverPopup
+              {...composerFloatingLayerProps}
+              aria-label={FULL_ACCESS_OVERRIDE_QUESTION}
+              tooltipStyle
+              side="top"
+              className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-normal"
+            >
+              {fullAccessOverrideExplanation(approval.fullAccessOverride)}
+            </PopoverPopup>
+          </Popover>
         ) : null}
         {pendingCount > 1 ? (
           <span className="ml-auto shrink-0 tabular-nums">1/{pendingCount}</span>
